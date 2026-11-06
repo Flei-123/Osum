@@ -16,7 +16,7 @@ HIER = os.path.dirname(os.path.abspath(__file__))
 NAME = sys.argv[1] if len(sys.argv) > 1 else "p1"
 WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
 HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 800
-D = os.path.join(HIER, "laeufe", NAME)
+D = os.path.join(HIER, "runs", NAME)
 SHOTS = os.path.join(HIER, "shots")
 os.makedirs(SHOTS, exist_ok=True)
 

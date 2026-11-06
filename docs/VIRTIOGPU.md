@@ -250,7 +250,7 @@ nicht", sondern "hier wird das falsche Geraet fotografiert".
 
     alt.ppm gegen neu.ppm: 0 von 480 000 Bildpunkten verschieden
 
-`pruef/bildpruef.py` auf beide: dieselben 61 Farben, dieselben Anteile,
+`pruef/imagecheck.py` auf beide: dieselben 61 Farben, dieselben Anteile,
 dieselben zwei einfarbigen Bloecke. Die Bilder liegen in
 `docs/shots/vgpu/`.
 
@@ -330,7 +330,7 @@ VGPU_KERNEL=/tmp/k.mb bash tools/vgpu/paar.sh 4 wmruhe
 
 # die Bilder aus 7
 VGPU_KERNEL=/tmp/k.mb bash tools/vgpu/bilder.sh /tmp/bilder
-python3 pruef/bildpruef.py /tmp/bilder/alt.ppm
+python3 pruef/imagecheck.py /tmp/bilder/alt.ppm
 
 # die Zerreissprobe aus 5 (zwei Kerne!)
 qemu-system-x86_64 -smp 2 -kernel /tmp/k.mb -m 256 \

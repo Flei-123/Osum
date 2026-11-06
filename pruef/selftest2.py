@@ -39,7 +39,7 @@ def bau_abbild():
 
 
 def lauf(name, root, script, deadline=400):
-    d = os.path.join(HIER, "laeufe", name)
+    d = os.path.join(HIER, "runs", name)
     subprocess.run(["rm", "-rf", d], check=False)
     os.makedirs(d, exist_ok=True)
     ser = os.path.join(d, "serial.txt")

@@ -17,7 +17,7 @@ NAME = sys.argv[1] if len(sys.argv) > 1 else "p4"
 WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
 HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 800
 ROW = int(sys.argv[4]) if len(sys.argv) > 4 else 0
-D = os.path.join(HIER, "laeufe", NAME)
+D = os.path.join(HIER, "runs", NAME)
 SHOTS = os.path.join(HIER, "shots")
 os.makedirs(SHOTS, exist_ok=True)
 
@@ -122,7 +122,7 @@ def main():
 
     # Bildpunkt-Unterschied: ist wirklich ein Fenster aufgegangen?
     try:
-        r = subprocess.run(["python3", os.path.join(HIER, "sicht.py"),
+        r = subprocess.run(["python3", os.path.join(HIER, "visibility.py"),
                             "vergleiche", before_image, after_image],
                            capture_output=True, text=True, timeout=120)
         print("BILD:", r.stdout.strip().splitlines()[-1] if r.stdout.strip() else r.stderr[:200])

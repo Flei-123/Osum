@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 """Usage:
-    durchklick2.py -- der ganze Durchgang der Runde DURCHKLICK, noch
-    python3 durchklick2.py <name> <width> <height>
+    walkthrough2.py -- der ganze Durchgang der Runde DURCHKLICK, noch
+    python3 walkthrough2.py <name> <width> <height>
 """
 import json
 import os
@@ -19,7 +19,7 @@ import read_all
 NAME = sys.argv[1] if len(sys.argv) > 1 else "d2"
 WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
 HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 800
-D = os.path.join(HIER, "laeufe", NAME)
+D = os.path.join(HIER, "runs", NAME)
 SHOTS = os.path.join(HIER, "shots", NAME)
 os.makedirs(SHOTS, exist_ok=True)
 SER = os.path.join(D, "serial.txt")
@@ -52,9 +52,9 @@ def suchtext(image, text, x, base, height=None):
 
 
 def diff(a, b):
-    """Bildpunkt-Unterschied in Prozent (sicht.py vergleiche)."""
+    """Bildpunkt-Unterschied in Prozent (visibility.py vergleiche)."""
     try:
-        r = subprocess.run(["python3", os.path.join(HIER, "sicht.py"),
+        r = subprocess.run(["python3", os.path.join(HIER, "visibility.py"),
                             "vergleiche", a, b],
                            capture_output=True, text=True, timeout=180)
         m = re.findall(r"(\d+(?:[.,]\d+)?)\s*%", r.stdout)
@@ -178,7 +178,7 @@ def main():
     # 2.6 wird in einem EIGENEN Lauf gemessen (netz.py): mit DHCP im
     # Hauptlauf ist keine Zeile des Starters mehr sicher zu lesen.
     merke("2.6", "Netzanzeige / DHCP", "EIGENER LAUF",
-          "siehe laeufe/netz -- hier aus, weil der Dienst in die "
+          "siehe runs/netz -- hier aus, weil der Dienst in die "
           "Zeilen des Starters schreibt")
     merke("2.7", "Uhr mit Datum", "GEHT" if uhr2 else "GEHT NICHT",
           uhr2[-1] if uhr2 else "-")

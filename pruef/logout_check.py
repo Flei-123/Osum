@@ -232,8 +232,8 @@ try:
     machine.klick_auf(button_x, button_y)
     time.sleep(4)
     machine.photo(os.path.join(OUT, "k-40-power-menu.png"))
-    if re.search(r"launcher: energie auf", read_text()):
-        ok("the power menu opened ('launcher: energie auf')")
+    if re.search(r"launcher: power open", read_text()):
+        ok("the power menu opened ('launcher: power open')")
     else:
         bad("the power menu did not open")
         raise SystemExit(1)
@@ -251,10 +251,10 @@ try:
     machine.klick_auf(px, py)
     time.sleep(6)
 
-    chosen = re.search(r"launcher: energie wahl=(\d+)", read_text())
+    chosen = re.search(r"launcher: power pick=(\d+)", read_text())
     if chosen and int(chosen.group(1)) != SIGN_OUT_ROW:
         bad("the launcher reported the wrong choice (%s)" % chosen.group(1))
-    elif re.search(r"launcher: energie wahl", read_text()):
+    elif re.search(r"launcher: power pick", read_text()):
         ok("the launcher reported the choice from the power menu")
     else:
         bad("the launcher reports no choice")
@@ -270,7 +270,7 @@ try:
     else:
         bad("'logout: session' missing -- the wish did not arrive")
         say("       " + " / ".join(re.findall(
-            r"(?:launcher: energie|logout:)[^\n]{0,50}", text)[-5:]))
+            r"(?:launcher: power|logout:)[^\n]{0,50}", text)[-5:]))
     killed = re.findall(r"signal: pid=(\d+) SIGKIL", text)
     counted = re.findall(r"logout: killed n=(\d+)", text)
     if killed:
@@ -304,7 +304,7 @@ try:
     else:
         bad("the sign-in screen did not return ('rect id=12' %dx, ready %dx)"
             % (last_rect, ready))
-    signed_in = len(re.findall(r"glogin: angemeldet als", text))
+    signed_in = len(re.findall(r"glogin: signed in as", text))
     if signed_in <= 1:
         ok("CONTROL: nobody is signed in after the sign-out (%dx)" % signed_in)
     else:

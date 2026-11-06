@@ -15,7 +15,7 @@ BREITE=${2:-1280}
 HOEHE=${3:-800}
 EXTRA=${4:-}
 
-D=$(pwd)/laeufe/$NAME
+D=$(pwd)/runs/$NAME
 rm -rf "$D"; mkdir -p "$D"
 
 # Die Kommandozeile des Schreibtisch-Eintrags aus limine.conf, woertlich.

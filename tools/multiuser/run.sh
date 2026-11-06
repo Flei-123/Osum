@@ -479,14 +479,14 @@ B="$TMPD/loginbad.txt"
 BADDAUER=$DAUER
 has "$B" "Anmeldung falsch" "das FALSCHE Passwort wird abgewiesen"
 hasnot "$B" "willkommen justin" "und niemand kommt herein"
-w1=$(grep -aoE 'login: warte [0-9]+ ms' "$B" | sed -n 1p | grep -oE '[0-9]+')
-w2=$(grep -aoE 'login: warte [0-9]+ ms' "$B" | sed -n 2p | grep -oE '[0-9]+')
-w3=$(grep -aoE 'login: warte [0-9]+ ms' "$B" | sed -n 3p | grep -oE '[0-9]+')
+w1=$(grep -aoE 'login: wait [0-9]+ ms' "$B" | sed -n 1p | grep -oE '[0-9]+')
+w2=$(grep -aoE 'login: wait [0-9]+ ms' "$B" | sed -n 2p | grep -oE '[0-9]+')
+w3=$(grep -aoE 'login: wait [0-9]+ ms' "$B" | sed -n 3p | grep -oE '[0-9]+')
 is "nach dem ersten Fehlversuch wartet login" "${w1:-fehlt}" "1000"
 is "nach dem zweiten doppelt so lang" "${w2:-fehlt}" "2000"
 is "nach dem dritten wieder doppelt" "${w3:-fehlt}" "4000"
-g1=$(grep -aoE 'login: gewartet [0-9]+ ms' "$B" | sed -n 1p | grep -oE '[0-9]+')
-g3=$(grep -aoE 'login: gewartet [0-9]+ ms' "$B" | sed -n 3p | grep -oE '[0-9]+')
+g1=$(grep -aoE 'login: waited [0-9]+ ms' "$B" | sed -n 1p | grep -oE '[0-9]+')
+g3=$(grep -aoE 'login: waited [0-9]+ ms' "$B" | sed -n 3p | grep -oE '[0-9]+')
 if [ -n "${g1:-}" ] && [ "${g1:-0}" -ge 900 ]; then
     ok "and the clock OF THE MACHINE confirms it: requested 1000 ms, actually waited ${g1} ms (lower bound -- under KVM it also counts the time the vCPU did not run)"
 else
@@ -509,12 +509,12 @@ run_case loginfast "$TMPD/df.img" \
 rc=$RC
 S="$TMPD/loginfast.txt"
 FASTDAUER=$DAUER
-f1=$(grep -aoE 'login: warte [0-9]+ ms' "$S" | sed -n 1p | grep -oE '[0-9]+')
-f3=$(grep -aoE 'login: warte [0-9]+ ms' "$S" | sed -n 3p | grep -oE '[0-9]+')
+f1=$(grep -aoE 'login: wait [0-9]+ ms' "$S" | sed -n 1p | grep -oE '[0-9]+')
+f3=$(grep -aoE 'login: wait [0-9]+ ms' "$S" | sed -n 3p | grep -oE '[0-9]+')
 is "mit verzoegerung_ms=200 in /etc/login.conf wartet login 200 ms" "${f1:-fehlt}" "200"
 is "und beim dritten Mal 800 -- dieselbe Verdopplung, andere Basis" "${f3:-fehlt}" "800"
 #
-h1=$(grep -aoE 'login: gewartet [0-9]+ ms' "$S" | sed -n 1p | grep -oE '[0-9]+')
+h1=$(grep -aoE 'login: waited [0-9]+ ms' "$S" | sed -n 1p | grep -oE '[0-9]+')
 if [ -n "${h1:-}" ] && [ "${h1:-0}" -ge 180 ]; then
     ok "and the clock of the machine confirms: requested 200 ms, actually waited ${h1} ms"
 else

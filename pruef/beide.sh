@@ -14,7 +14,7 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
-python3 durchklick3.py dk1280 1280 800  > /tmp/ts-d1280.log 2>&1
+python3 walkthrough3.py dk1280 1280 800  > /tmp/ts-d1280.log 2>&1
 echo "1280x800 fertig"
-python3 durchklick3.py dk1920 1920 1080 > /tmp/ts-d1920.log 2>&1
+python3 walkthrough3.py dk1920 1920 1080 > /tmp/ts-d1920.log 2>&1
 echo "1920x1080 fertig"

@@ -8,7 +8,7 @@
 # Cause: kgui.shell_start() started /bin/sh for the window console, and since LCSH /bin/sh is busybox in the
 # personal image -- busybox ash on the console tty froze the sign-in input. The window console shell is now
 # /bin/osh when it exists (wm: console sh: line on the serial).
-#   A  PS/2 keyboard + mouse, machine pc (PIIX3), 3 CPUs, BIOS        -> `glogin: angemeldet als`
+#   A  PS/2 keyboard + mouse, machine pc (PIIX3), 3 CPUs, BIOS        -> `glogin: signed in as`
 #   B  usb-kbd + usb-tablet on xhci, machine pc, 3 CPUs               -> the same
 #   C  usb-kbd + usb-tablet on xhci, machine q35                      -> the same
 #   D  A: serial has `wm: console sh: /bin/osh`

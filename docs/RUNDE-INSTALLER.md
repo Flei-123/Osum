@@ -111,7 +111,7 @@ die eigentliche Arbeit dieser Runde sind.
 
 Die erste Fassung setzte vier Schachteln mit selbst ausgerechneten
 Y-Werten nebeneinander. Ergebnis: **94,6 % einfarbige Fläche**, gemessen
-mit `pruef/bildpruef.py` — nur der Titelbalken war da.
+mit `pruef/imagecheck.py` — nur der Titelbalken war da.
 
 Richtig ist das Muster des Aufgabenverwalters: **ein** `box_v` über das
 ganze Fenster, die Widgets der Reihe nach hinein, die Knopfreihe als

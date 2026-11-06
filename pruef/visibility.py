@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 """Usage:
-    sicht.py -- EIN image IN numbers BESCHREIBEN.
-    sicht.py beschreibe <png>              Farben, Flaechen, rows mit Inhalt
-    sicht.py vergleiche <a.png> <b.png>    was hat sich geaendert (Kaesten)
-    sicht.py text <png> <word> [px]        steht <word> im image? (searchtext.py)
+    visibility.py -- EIN image IN numbers BESCHREIBEN.
+    visibility.py beschreibe <png>              Farben, Flaechen, rows mit Inhalt
+    visibility.py vergleiche <a.png> <b.png>    was hat sich geaendert (Kaesten)
+    visibility.py text <png> <word> [px]        steht <word> im image? (searchtext.py)
 """
 import subprocess
 import sys

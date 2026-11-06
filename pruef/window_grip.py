@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 """Usage:
-    fenstergriff.py -- 4.1 VERSCHIEBEN und 4.2 SIZE, gegen TWO Abbilder.
-    python3 fenstergriff.py <name> <osum.mb> <root.img> [width] [height]
+    window_grip.py -- 4.1 VERSCHIEBEN und 4.2 SIZE, gegen TWO Abbilder.
+    python3 window_grip.py <name> <osum.mb> <root.img> [width] [height]
     local_y < 0                              -> Titelleiste, ZIEHEN
 """
 import os
@@ -20,7 +20,7 @@ MB = sys.argv[2] if len(sys.argv) > 2 else os.path.join(HIER, "osum.mb")
 IMG = sys.argv[3] if len(sys.argv) > 3 else os.path.join(HIER, "root.img")
 WIDTH = int(sys.argv[4]) if len(sys.argv) > 4 else 1280
 HEIGHT = int(sys.argv[5]) if len(sys.argv) > 5 else 800
-D = os.path.join(HIER, "laeufe", NAME)
+D = os.path.join(HIER, "runs", NAME)
 SER = os.path.join(D, "serial.txt")
 
 # Die Masse des Schmucks aus kernel/wm.fi (uisc == 1 bei diesen
@@ -47,7 +47,7 @@ def start():
     Kommandozeile (die ist Wort fuer Wort dieselbe), sondern das
     Zeitlimit und die Umgebung drumherum. Zwei Wege, dieselbe Maschine
     zu starten, sind einer zu viel: hier wird derselbe genommen, den
-    auch durchklick3.py nimmt, und die Abbilder werden vorher an die
+    auch walkthrough3.py nimmt, und die Abbilder werden vorher an die
     Stelle gelegt, von der er liest.
     """
     os.makedirs(D, exist_ok=True)

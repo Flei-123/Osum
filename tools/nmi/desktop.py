@@ -66,7 +66,7 @@ def main():
     for c in PASSWORD:
         q.key(c)
     q.key("ret", 0.3)
-    ok = wait_for("glogin: angemeldet als", 90)
+    ok = wait_for("glogin: signed in as", 90)
     print("logged-in", 1 if ok else 0)
     if not ok:
         return

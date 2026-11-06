@@ -145,7 +145,7 @@ def main(out):
     check("launcher: start /apps/settings.osp/start" in t, "a tile click starts the programme")
     check(re.search(r"launcher: rec k=0 name=\[Settings\]", t) is not None,
           "the next opening lists it under Recommended (the recent one first)")
-    check("launcher: energie auf" in t, "the power button opens its menu")
+    check("launcher: power open" in t, "the power button opens its menu")
 
 
 if __name__ == "__main__":

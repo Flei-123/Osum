@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 """Usage:
-    schuss.py <monitor-socket> <target.ppm> [wartesekunden] [device]
+    shot.py <monitor-socket> <target.ppm> [wartesekunden] [device]
 """
 import os
 import socket

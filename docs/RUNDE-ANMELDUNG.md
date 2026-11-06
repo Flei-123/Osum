@@ -81,7 +81,7 @@ Ein Lauf, ein Abbild, vier Fotos. Kernelzeile:
 | Leerlauf (`leerlauf=25`, nichts angefasst) | `99-leerlauf-b-selbst-gesperrt.png` | `sperrwache: an, Leerlauf ab 25 s` · `idle=3018 … 24619` · `Leerlauf abgelaufen, sperre` |
 
 **Die Fotos gegeneinander gerechnet** (Stichproben, 64000 Punkte je
-Bild, `pruef/bildpruef.py` und ein Punktvergleich):
+Bild, `pruef/imagecheck.py` und ein Punktvergleich):
 
     Schreibtisch vs gesperrt : 60596   (die Sperre deckt den Schreibtisch zu)
     gesperrt vs entsperrt    : 60610   (sie geht wieder weg)

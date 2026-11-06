@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 """Usage:
-    schuss.py -- EIN run: Schreibtisch hochfahren, bedienen, fotografieren.
+    shot.py -- EIN run: Schreibtisch hochfahren, bedienen, fotografieren.
     python3 check/schuss.py <name> [drehbuch.py]
 """
 import os
@@ -31,7 +31,7 @@ class Lauf:
 
     def __init__(self, name):
         self.name = name
-        self.d = os.path.join(HIER, "laeufe", name)
+        self.d = os.path.join(HIER, "runs", name)
         self.s = os.path.join(HIER, "shots", name)
         subprocess.run(["rm", "-rf", self.d, self.s])
         os.makedirs(self.d)

@@ -8,7 +8,7 @@ os.chdir(HIER)
 from click_driver import Maschine
 MODE = sys.argv[1] if len(sys.argv) > 1 else "aus"
 NAME = "one-" + MODE
-D = os.path.join(HIER, "laeufe", NAME); S = os.path.join(HIER, "shots", NAME)
+D = os.path.join(HIER, "runs", NAME); S = os.path.join(HIER, "shots", NAME)
 subprocess.run(["rm", "-rf", D, S]); os.makedirs(D); os.makedirs(S)
 SER = os.path.join(D, "serial.txt"); SOCK = "/tmp/one-%s.sock" % MODE
 if os.path.exists(SOCK): os.unlink(SOCK)
@@ -62,8 +62,8 @@ say("Energieknopf bei %d,%d (Fenster %d,%d)" % (cx,cy,gx,gy))
 vor=set(wins())
 m.klick_auf(cx,cy); time.sleep(3)
 m.photo(S+"/20-energiemenue.ppm")
-auf=len(re.findall(r"energie auf", read_text()))
-say("  -> energie auf:", auf)
+auf=len(re.findall(r"power open", read_text()))
+say("  -> power open:", auf)
 renewed=[x for x in wins() if x not in vor]
 say("  -> neue Fenster:", renewed[-2:] if renewed else "keine")
 if not renewed: say("ABBRUCH: Menue ging nicht auf"); p.kill(); sys.exit(1)
@@ -74,8 +74,8 @@ say("Menue %d,%d %dx%d -> Punkt %d bei %d,%d" % (mx,my,mw,mh,target,px,py))
 vor2=set(wins())
 m.klick_auf(px,py); time.sleep(3)
 m.photo(S+"/30-abfrage.ppm")
-say("  -> wahl:", re.findall(r"energie wahl=(\d+)", read_text()))
-say("  -> frage:", re.findall(r"energie frage=(\d+)", read_text()))
+say("  -> wahl:", re.findall(r"power pick=(\d+)", read_text()))
+say("  -> frage:", re.findall(r"power ask=(\d+)", read_text()))
 dlg=[x for x in wins() if x not in vor2]
 say("  -> Dialog:", dlg[-1] if dlg else "keiner")
 if not dlg: say("ABBRUCH: keine Rueckfrage"); p.kill(); sys.exit(1)
@@ -84,8 +84,8 @@ if MODE=="nein":
     say("ABBRECHEN mit Flucht")
     m.key_press("esc"); time.sleep(3)
     m.photo(S+"/40-abgebrochen.ppm")
-    say("  -> abbruch:", len(re.findall(r"energie abbruch", read_text())))
-    say("  -> tat:", re.findall(r"energie tat (\d+)", read_text()))
+    say("  -> abbruch:", len(re.findall(r"power cancel", read_text())))
+    say("  -> tat:", re.findall(r"power did (\d+)", read_text()))
 else:
     # Die TAT steht RECHTS. Mehrere Punkte der Knopfzeile probieren --
     # die genaue Knopfbreite rechnet wlib selbst aus dem Text.
@@ -96,15 +96,15 @@ else:
     for bx in (dx+dw-150, dx+dw-170, dx+dw-130, dx+dw-190, dx+dw-110):
         for by in (dy+dh-26, dy+dh-30, dy+dh-20):
             m.klick_auf(bx,by); time.sleep(2)
-            if re.findall(r"energie tat (\d+)", read_text()):
+            if re.findall(r"power did (\d+)", read_text()):
                 say("  TAT ausgeloest mit Klick auf %d,%d" % (bx,by)); ok=True; break
-            if len(re.findall(r"energie abbruch", read_text())):
+            if len(re.findall(r"power cancel", read_text())):
                 say("  (Abbrechen getroffen bei %d,%d)" % (bx,by)); break
         if ok: break
     if not ok:
         say("  Knopf nicht getroffen -- Tastatur: tab, tab, enter")
         m.key_press("tab"); time.sleep(0.5); m.key_press("ret"); time.sleep(2)
-    say("  -> tat:", re.findall(r"energie tat (\d+)", read_text()))
+    say("  -> tat:", re.findall(r"power did (\d+)", read_text()))
     try:
         m.photo(S+"/40-danach.ppm")
     except Exception as e:
@@ -118,11 +118,11 @@ for i in range(12):
 t=read_text()
 say("\n=== BEFUND (%s) ===" % MODE)
 say("QEMU beendet:", "ja, rc=%s" % ende if ende is not None else "NEIN, laeuft noch")
-for pat,was in ((r"energie auf","Menue aufgeklappt"),
-                (r"energie wahl=(\d+)","Punkt gewaehlt"),
-                (r"energie frage=(\d+)","Rueckfrage"),
-                (r"energie tat (\d+)","Tat"),
-                (r"energie abbruch","Abbruch"),
+for pat,was in ((r"power open","Menue aufgeklappt"),
+                (r"power pick=(\d+)","Punkt gewaehlt"),
+                (r"power ask=(\d+)","Rueckfrage"),
+                (r"power did (\d+)","Tat"),
+                (r"power cancel","Abbruch"),
                 (r"energie selbst aus","Notweg ohne init"),
                 (r"init: herunterfahren","init faehrt herunter"),
                 (r"init: umounts=(\d+)","init hat ausgehaengt"),

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 """Usage:
-    aus3.py -- `shutdown` without Oberflaeche verify: der kuerzeste gone zur
-    python3 aus3.py
+    shutdown3.py -- `shutdown` without Oberflaeche verify: der kuerzeste gone zur
+    python3 shutdown3.py
 """
 import os
 import re
@@ -11,11 +11,11 @@ import sys
 import time
 
 HIER = os.path.dirname(os.path.abspath(__file__))
-D = os.path.join(HIER, "laeufe", "aus3")
+D = os.path.join(HIER, "runs", "aus3")
 
 
 def lauf(name, script, deadline=90):
-    d = os.path.join(HIER, "laeufe", name)
+    d = os.path.join(HIER, "runs", name)
     subprocess.run(["rm", "-rf", d], check=False)
     os.makedirs(d, exist_ok=True)
     ser = os.path.join(d, "serial.txt")

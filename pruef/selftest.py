@@ -14,7 +14,7 @@ HIER = os.path.dirname(os.path.abspath(__file__))
 
 
 def lauf(name, script, deadline=240, mem="2048"):
-    d = os.path.join(HIER, "laeufe", name)
+    d = os.path.join(HIER, "runs", name)
     subprocess.run(["rm", "-rf", d], check=False)
     os.makedirs(d, exist_ok=True)
     ser = os.path.join(d, "serial.txt")

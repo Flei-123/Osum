@@ -19,7 +19,7 @@ WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 2560
 HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 1440
 SCALE = int(sys.argv[4]) if len(sys.argv) > 4 else 2
 
-D = os.path.join(HIER, "laeufe", NAME)
+D = os.path.join(HIER, "runs", NAME)
 SHOTS = os.path.join(HIER, "shots", NAME)
 os.makedirs(SHOTS, exist_ok=True)
 SER = os.path.join(D, "serial.txt")

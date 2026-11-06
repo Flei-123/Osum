@@ -92,7 +92,7 @@ def main():
     for c in "startkennwort":
         mon.cmd("sendkey " + c, 0.12)
     mon.cmd("sendkey ret", 0.3)
-    ok = wait_for(lambda t: "glogin: angemeldet als" in t or "glogin: autostart" in t or "glogin: uid=" in t, 60)
+    ok = wait_for(lambda t: "glogin: signed in as" in t or "glogin: autostart" in t or "glogin: uid=" in t, 60)
     open(base + ".login", "w").write("1" if ok else "0")
     if not ok:
         mon.quit()

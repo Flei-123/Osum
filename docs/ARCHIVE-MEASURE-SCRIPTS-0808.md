@@ -8,7 +8,7 @@
 - `pruef/db-ziehen-pruef.py`
 - `pruef/hoverprobe.py`
 - `pruef/montage2.py`
-- `pruef/schuss-konsole.py`
+- `pruef/shot-konsole.py`
 - `pruef/syncbeleg.py`
 - `pruef/zieh-ab.sh`
 - `tools/codec/fixstr.py`

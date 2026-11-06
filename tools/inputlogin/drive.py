@@ -58,9 +58,9 @@ if ready:
     cmd("sendkey ret")
     t1 = time.time()
     while time.time() - t1 < 40:
-        if "glogin: angemeldet als" in read():
+        if "glogin: signed in as" in read():
             break
         time.sleep(1)
 txt = read()
 print("RESULT login=%d keys=%d ready=%d" % (
-    1 if "glogin: angemeldet als" in txt else 0, txt.count("\nkey: "), ready))
+    1 if "glogin: signed in as" in txt else 0, txt.count("\nkey: "), ready))

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 """Usage:
-    durchklick3.py -- DER GANZE DURCHGANG DER RUNDE DURCHKLICK, NOCH EINMAL.
-    python3 durchklick3.py <name> <width> <height>
+    walkthrough3.py -- DER GANZE DURCHGANG DER RUNDE DURCHKLICK, NOCH EINMAL.
+    python3 walkthrough3.py <name> <width> <height>
     `<ppm> <ttf> <px> <text>` (tools/usbimg/searchtext.py, row 165).
 """
 import json
@@ -21,7 +21,7 @@ import read_all
 NAME = sys.argv[1] if len(sys.argv) > 1 else "d2"
 WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
 HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 800
-D = os.path.join(HIER, "laeufe", NAME)
+D = os.path.join(HIER, "runs", NAME)
 SHOTS = os.path.join(HIER, "shots", NAME)
 os.makedirs(SHOTS, exist_ok=True)
 SER = os.path.join(D, "serial.txt")
@@ -118,7 +118,7 @@ def diff(a, b):
     if a is None or b is None:
         return None
     try:
-        r = subprocess.run(["python3", os.path.join(HIER, "sicht.py"),
+        r = subprocess.run(["python3", os.path.join(HIER, "visibility.py"),
                             "vergleiche", a, b],
                            capture_output=True, text=True, timeout=300)
         m = re.search(r"\(([\d.]+) %\)", r.stdout)
@@ -574,7 +574,7 @@ def main():
         # DIE LAGE WIRD NACH JEDEM ZUG FRISCH GELESEN, und der Griff
         # wird aus DIESER Lage gerechnet.
         #
-        # Zwei Fehler steckten hier, beide gemessen (pruef/fenstergriff.py):
+        # Zwei Fehler steckten hier, beide gemessen (pruef/window_grip.py):
         #   1. Nach `m.ziehe(...)` wurde nach zwei Sekunden nachgesehen.
         #      `wm: fen` haengt aber am Puls, und der kommt nicht im
         #      Sekundentakt -- in einem Lauf standen drei Zeilen im
@@ -805,7 +805,7 @@ def main():
           % (hat_firnc, hat_fas))
     merke("8.2", "Firn-Programm auf Osum uebersetzen und ausfuehren",
           "GEHT",
-          "eigener Lauf pruef/selbst3.py: firnc /beispiel/hallo.fi > "
+          "eigener Lauf pruef/selftest3.py: firnc /beispiel/hallo.fi > "
           "/hallo.s -> 0, fas -> 0, /hallo -> 42")
     merke("8.3", "tools/k16/run.sh gruen", "SIEHE BERICHT",
           "eigener Lauf, Zahlen im Befund")

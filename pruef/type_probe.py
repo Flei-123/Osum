@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 """Usage:
-    tippprobe.py -- WARUM STEHT DER GETIPPTE TEXT only ZU 77 % IM image?
-    python3 tippprobe.py [name] [width] [height]
+    type_probe.py -- WARUM STEHT DER GETIPPTE TEXT only ZU 77 % IM image?
+    python3 type_probe.py [name] [width] [height]
 """
 import os
 import re
@@ -18,7 +18,7 @@ from click_driver import Maschine
 NAME = sys.argv[1] if len(sys.argv) > 1 else "tp"
 WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
 HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 800
-D = os.path.join(HIER, "laeufe", NAME)
+D = os.path.join(HIER, "runs", NAME)
 SHOTS = os.path.join(HIER, "shots", NAME)
 os.makedirs(SHOTS, exist_ok=True)
 SER = os.path.join(D, "serial.txt")

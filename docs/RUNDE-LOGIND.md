@@ -405,7 +405,7 @@ Kennwort wurde getippt und nie abgeschickt. Die Abnahme meldete völlig
 zu Recht „`glogin: angemeldet` fehlt": es hatte sich niemand angemeldet.
 
 Die übrigen Läufer dieses Baums nehmen überall `ret`
-(`pruef/abnahme2.py`, `pruef/ausschalten.py`).
+(`pruef/acceptance2.py`, `pruef/shutdown.py`).
 
 ### 4.3 `/etc/uitrace` — ohne diese leere Datei ist die Oberfläche stumm
 

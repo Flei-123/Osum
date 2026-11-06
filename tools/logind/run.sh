@@ -133,9 +133,9 @@ if [ -f "$T3" ]; then
     grep -qaE 'glogin: ready' "$T3" \
         && ok "the login screen is ready" \
         || bad "'glogin: ready' missing"
-    grep -qa 'glogin: angemeldet als justin' "$T3" \
-        && ok "angemeldet als justin" \
-        || bad "'glogin: angemeldet als justin' missing"
+    grep -qa 'glogin: anin as justin' "$T3" \
+        && ok "anin as justin" \
+        || bad "'glogin: anin as justin' missing"
     if grep -qa 'glogin: uid=1000' "$T3"; then
         ok "the desktop runs under uid=1000 and NOT as root"
     else
@@ -172,13 +172,13 @@ if [ -f "$T4" ]; then
     grep -qa 'glogin: rejected' "$T4" \
         && ok "the wrong password was rejected" \
         || bad "'glogin: rejected' missing"
-    W=$(sed -n 's/.*glogin: gewartet \([0-9]*\) ms.*/\1/p' "$T4" | head -1)
+    W=$(sed -n 's/.*glogin: waited \([0-9]*\) ms.*/\1/p' "$T4" | head -1)
     if [ -n "$W" ] && [ "$W" -ge 1000 ]; then
         ok "and then waited at least 1000 ms (measured: $W ms)"
     else
         bad "the delay is missing or too short (measured: '${W:-none}')"
     fi
-    if grep -qa 'glogin: angemeldet' "$T4"; then
+    if grep -qa 'glogin: signed in' "$T4"; then
         bad "after a wrong password the login happened anyway"
     else
         ok "NEGATIVE CONTROL: no 'angemeldet' -- no way around the login"

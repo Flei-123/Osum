@@ -438,10 +438,10 @@ info "Anmelden now at y=$BY2 ($BN / $PN)"
 zeig $(( $(fld "$BN" x) + $(fld "$BN" w) / 2 )) "$(( BY2 + $(fld "$BN" h) / 2 ))"
 klick
 sleep 12
-if grep -aq 'glogin: angemeldet als justin' "$D/serial.txt"; then
+if grep -aq 'glogin: anin as justin' "$D/serial.txt"; then
     ok "name typed, password typed, MOUSE click on Anmelden: logged in as justin"
 else
-    bad "'glogin: angemeldet als justin' missing (button at y=${BXY:-?})"
+    bad "'glogin: anin as justin' missing (button at y=${BXY:-?})"
     info "$(grep -a 'glogin: ab\|glogin: angem' "$D/serial.txt" | tail -2)"
 fi
 if grep -aq 'glogin: rejected' "$D/serial.txt"; then

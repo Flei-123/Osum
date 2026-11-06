@@ -56,7 +56,7 @@ def f12():
 
 
 READY_MARKS = ("glogin: ready", "ready n=")
-LOGIN_MARKS = ("angemeldet als", "gemeldet als justin", "glogin: autostart", "glogin: desktop pid", "glogin: uid=")
+LOGIN_MARKS = ("signed in as", "in as justin", "glogin: autostart", "glogin: desktop pid", "glogin: uid=")
 
 
 def seen(marks):

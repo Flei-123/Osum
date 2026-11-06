@@ -14,7 +14,7 @@ SOURCE = "/tmp/usbimg-ts/root.img"
 
 
 def lauf(name, root, script, deadline=600):
-    d = os.path.join(HIER, "laeufe", name)
+    d = os.path.join(HIER, "runs", name)
     subprocess.run(["rm", "-rf", d], check=False)
     os.makedirs(d, exist_ok=True)
     ser = os.path.join(d, "serial.txt")

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 """Usage:
-    symmass.py -- WIE large EIN SYMBOL WIRKLICH AUF DEM SCREEN IST.
-    python3 symmass.py <image.png> <x> <y> <w> <h>
+    symbol_scale.py -- WIE large EIN SYMBOL WIRKLICH AUF DEM SCREEN IST.
+    python3 symbol_scale.py <image.png> <x> <y> <w> <h>
 """
 import sys
 from collections import Counter

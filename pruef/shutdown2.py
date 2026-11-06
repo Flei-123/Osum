@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 """Usage:
-    aus2.py -- warum `shutdown` nicht ausschaltet: NACHSEHEN, was die
+    shutdown2.py -- warum `shutdown` nicht ausschaltet: NACHSEHEN, was die
 """
 import os
 import re
@@ -16,7 +16,7 @@ import read_all
 
 NAME = sys.argv[1] if len(sys.argv) > 1 else "aus2"
 WIDTH, HEIGHT = 1280, 800
-D = os.path.join(HIER, "laeufe", NAME)
+D = os.path.join(HIER, "runs", NAME)
 SHOTS = os.path.join(HIER, "shots", NAME)
 os.makedirs(SHOTS, exist_ok=True)
 SER = os.path.join(D, "serial.txt")

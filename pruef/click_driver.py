@@ -68,7 +68,7 @@ class Maschine:
         stimmt ab dem zweiten Sprung nichts mehr.
 
         GEMESSEN, derselbe Zug auf derselben Maschine
-        (pruef/mausquelle.py):
+        (pruef/mouse_source.py):
 
             tablet (absolut)  kl 0 -> 0   Fenster (24,40) -> (24,40)
             ps2    (relativ)  kl 0 -> 0   Fenster (24,40) -> (204,170)

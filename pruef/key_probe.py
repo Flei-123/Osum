@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 """Usage:
-    tastprobe.py -- KOMMT UEBERHAUPT EINE key AN?
-    python3 tastprobe.py [name] [width] [height]
+    key_probe.py -- KOMMT UEBERHAUPT EINE key AN?
+    python3 key_probe.py [name] [width] [height]
 """
 import os
 import re
@@ -17,7 +17,7 @@ from click_driver import Maschine
 NAME = sys.argv[1] if len(sys.argv) > 1 else "tast"
 WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
 HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 800
-D = os.path.join(HIER, "laeufe", NAME)
+D = os.path.join(HIER, "runs", NAME)
 SER = os.path.join(D, "serial.txt")
 
 

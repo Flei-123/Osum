@@ -83,7 +83,7 @@ if only g1; then
 echo "== sign-in: /etc/shadow is a directory, the right password is typed =="
 run g1 glogin dir g e h e i m 1 2 ret "warte 3"
 S=$OUT/g1/serial.txt
-hasnot "$S" "glogin: angemeldet" "nobody is signed in"
+hasnot "$S" "glogin: signed in" "nobody is signed in"
 if [ "$EXPECT" = new ]; then
     has "$S" "account files unreadable" "sign-in reports the account files as unreadable"
     hasnot "$S" "glogin: rejected" "and does not call it a wrong password"
@@ -95,7 +95,7 @@ fi
 if only g2; then
 echo "== sign-in: readable shadow still signs in =="
 run g2 glogin ok g e h e i m 1 2 ret
-has "$OUT/g2/serial.txt" "glogin: angemeldet als justin" "right password: signed in"
+has "$OUT/g2/serial.txt" "glogin: anin as justin" "right password: signed in"
 fi
 
 echo

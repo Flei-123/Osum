@@ -339,7 +339,7 @@ steht `[?25l[1;1H[7m` als Text. **Vorbestehend, nicht aus dieser Runde:**
 `git diff --name-only main..HEAD` nennt unter `kernel/` genau drei
 Dateien — `explorer.fi`, `exporte.fi` und `wlib.fi` (letztere nur über
 den Merge). Der Editor wird deshalb auf der Konsole gemessen
-(`pruef/schuss-konsole.py`), wie k11 es auch tut.
+(`pruef/shot-konsole.py`), wie k11 es auch tut.
 
 **Weitere Fallen:**
 
@@ -361,8 +361,8 @@ den Merge). Der Editor wird deshalb auf der Konsole gemessen
 
 | Datei | Was |
 |---|---|
-| `pruef/schuss.py` | hält die Maschine **offen**, ein Drehbuch klickt und fotografiert Schritt für Schritt |
-| `pruef/schuss-konsole.py` | dasselbe **ohne** Fensterserver, für Terminalprogramme |
+| `pruef/shot.py` | hält die Maschine **offen**, ein Drehbuch klickt und fotografiert Schritt für Schritt |
+| `pruef/shot-konsole.py` | dasselbe **ohne** Fensterserver, für Terminalprogramme |
 | `pruef/db-energie.py` | (a) der Weg zum Ausschalten |
 | `pruef/db-ziehen-pruef.py` | (b) drei Züge, mit `ls` vorher und nachher |
 | `pruef/db-tabs.py` | (c) Strg+T, Klick, Ziehen, Strg+W, Gegenprobe |

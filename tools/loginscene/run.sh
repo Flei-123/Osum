@@ -65,26 +65,26 @@ esac
 echo "== the eye =="
 run g3 10 tab ret
 hat "$OUT/g3/serial.txt" "eye id=7 shown=1 len=0" "Tab+Enter on the eye shows the text"
-hatnicht "$OUT/g3/serial.txt" "glogin: angemeldet" "and does not sign anybody in"
+hatnicht "$OUT/g3/serial.txt" "glogin: signed in" "and does not sign anybody in"
 
 echo "== wrong password, then the right one =="
 run g4 10 x y z ret "warte 4" g e h e i m 1 2 ret
 S=$OUT/g4/serial.txt
 hat "$S" "glogin: rejected, name=justin" "wrong password: refused"
-hat "$S" "glogin: angemeldet als justin" "right password: signed in as justin"
+hat "$S" "glogin: anin as justin" "right password: signed in as justin"
 hat "$S" "glogin: uid=1000" "and the session runs as uid 1000"
 
 echo "== counter-proof: only wrong passwords =="
 run g5 10 x y z ret "warte 4" a b c ret
 S=$OUT/g5/serial.txt
 hat "$S" "glogin: rejected" "wrong passwords are refused"
-hatnicht "$S" "glogin: angemeldet" "COUNTER-PROOF: nobody is signed in"
+hatnicht "$S" "glogin: signed in" "COUNTER-PROOF: nobody is signed in"
 
 echo "== another user =="
 run g6 10 tab tab tab ret j u s t i n ret g e h e i m 1 2 ret
 S=$OUT/g6/serial.txt
 hat "$S" "glogin: anderer benutzer" "Anderer Benutzer: the name field comes out"
-hat "$S" "glogin: angemeldet als justin" "name typed, password typed: signed in"
+hat "$S" "glogin: anin as justin" "name typed, password typed: signed in"
 
 echo "== quick access =="
 run g7 10 tab tab tab tab ret ret

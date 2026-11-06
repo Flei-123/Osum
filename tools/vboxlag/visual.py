@@ -80,7 +80,7 @@ def try_login():
     cmd("sendkey ret")
     t1 = time.time()
     while time.time() - t1 < 15:
-        if "glogin: angemeldet als" in read():
+        if "glogin: signed in as" in read():
             return True
         time.sleep(1)
     return False

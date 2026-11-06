@@ -268,7 +268,7 @@ dasselbe `/bin/auswerfen`, derselbe Aufruf 1704, dieselbe Tafel des
 Kerns, die auch die Seitenleiste liest.
 
 **Der Unterschied ist die Zusage, nicht das einzelne Bild.** In Zahlen,
-gemessen mit `pruef/bildpruef.py` und einem Punktvergleich über den
+gemessen mit `pruef/imagecheck.py` und einem Punktvergleich über den
 Fensterinhalt (x 27..560, y 63..425):
 
 ```
