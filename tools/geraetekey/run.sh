@@ -148,7 +148,7 @@ echo "== 5. CONTROL RUN: a root that does NOT survive =="
 if [ -z "${GK_WEGWERF:-}" ]; then
     GK_WEGWERF=1 OSUM_GK_TMP="$TMPD/gegen" OSUM_GK_KEEP=1 \
         bash "$0" > "$TMPD/gegen.txt" 2>&1
-    if grep -qa 'der Schluessel hat den Neustart nicht ueberlebt' "$TMPD/gegen.txt"; then
+    if grep -qa 'the key did not survive the restart' "$TMPD/gegen.txt"; then
         ok "with a throwaway root O-009 fails -- the acceptance really measures survival"
     else
         bad "even with a throwaway root everything stays green -- then this acceptance measures nothing"
