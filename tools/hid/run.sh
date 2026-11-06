@@ -28,7 +28,7 @@ gleich() { # name erwartet bekommen
     fi
 }
 
-echo "== 0a. no mode word is newly contained in another"
+echo "== 0a. every mode word is matched as a whole word"
 python3 tools/hid/worte.py kernel
 zusage "die Moduswoerter des ganzen Baums sind eindeutig" $?
 
