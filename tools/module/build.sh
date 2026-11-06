@@ -51,10 +51,12 @@ done
 cp -f "$(such arch.fi)" "$(such machine.fi)" "$(such cpu.fi)" "$TMP/k/arch/" || exit 1
 cp -f "$(such gfx-aus.fi)" "$TMP/k/gfx/gfx.fi" || exit 1
 mkdir -p "$TMP/k/drv/hid" "$TMP/k/fs"
-for f in ptrcfg.fi tpcfg.fi; do
+for f in ptrcfg.fi tpcfg.fi inputclass.fi; do
     cp -f "$(such $f)" "$TMP/k/drv/hid/$f" || exit 1
 done
 cp -f "$(such fs-off.fi)" "$TMP/k/fs/fs.fi" || exit 1
+mkdir -p "$TMP/k/bus"
+cp -f "$(such drvnull.fi)" "$TMP/k/bus/drvnull.fi" || exit 1
 
 export FIRNLIB="$ROOT/lib"
 BASENAME=$(basename "$QUELLE")
