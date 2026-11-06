@@ -19,6 +19,12 @@
 #          (an unfinished line must not freeze the others)
 # The host counts intact lines (tools/serline/check.py); torn must be 0.
 # Counter-proof: kernel word `noserline` (old behaviour): MULTI must tear.
+#
+# HOLD section (one core): kernel word `serhold` starts a kernel task that holds
+# the line with serial.line_at() across two timer ticks while a user task writes
+# whole lines on the same core. The held line must stay whole. Counter-proof:
+# word `serholdsti` (interrupts back on inside the hold = the behaviour before
+# line_at() disabled them) must tear the held line.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -27,11 +33,15 @@ WORKERS=${1:-4}
 LINES=${2:-60}
 CORES=${3:-4}
 BOOTS=${4:-3}
+. tools/lib/summary.sh; summary_begin SERLINE
+trap 'summary_guard; [ -z "${SERLINE_KEEP:-}" ] && rm -rf "${TMPD:-}"; summary_exit_status || exit 1' EXIT
+trap 'exit 1' HUP INT TERM
+HOLD_LINES=${HOLD_LINES:-300}
+HOLD_BOOTS=${HOLD_BOOTS:-3}
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 TMPD=${SERLINE_DIR:-$(mktemp -d)}; mkdir -p "$TMPD"
-[ -n "${SERLINE_KEEP:-}" ] || trap 'rm -rf "$TMPD"' EXIT
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
 PROGS="sh echo serline"
@@ -43,7 +53,7 @@ if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then
     ok "programs build"
 else
     sed 's/^/        /' "$TMPD/b.txt" | head -20; bad "programs do not build"
-    echo "SERLINE: $pass passed, $fail failed"; exit 1
+    summary_emit "$pass" "$fail" 0; exit 1
 fi
 KIMG=${SERLINE_KERNEL:-}
 if [ -z "$KIMG" ]; then
@@ -52,7 +62,7 @@ if [ -z "$KIMG" ]; then
         ok "kernel builds"
     else
         tail -8 "$TMPD/k.txt" | sed 's/^/        /'; bad "kernel does not build"
-        echo "SERLINE: $pass passed, $fail failed"; exit 1
+        summary_emit "$pass" "$fail" 0; exit 1
     fi
 else
     ok "kernel given: $KIMG"
@@ -67,17 +77,22 @@ fi
     echo "serline $WORKERS $LINES multi open"
     echo "echo ==END=="
 } > "$TMPD/s.sh"
+{
+    echo "echo ==HOLD=="
+    echo "serline 1 $HOLD_LINES one"
+    echo "echo ==END=="
+} > "$TMPD/h.sh"
 A=(build "$TMPD/d.img" 20000 /bin/ /t/ /tmp/ /proc/ /dev/ /etc/)
 for p in $PROGS; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
-A+=("/t/s.sh=$TMPD/s.sh")
-bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 || { tail -3 "$TMPD/mkfs.txt"; bad "mkfs"; exit 1; }
+A+=("/t/s.sh=$TMPD/s.sh" "/t/h.sh=$TMPD/h.sh")
+bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 || { tail -3 "$TMPD/mkfs.txt"; bad "mkfs"; summary_emit "$pass" "$fail" 0; exit 1; }
 
-run() { # <name> <extra kernel words>
-    local nm=$1 extra=$2
+run() { # <name> <extra kernel words> [cores] [script]
+    local nm=$1 extra=$2 cores=${3:-$CORES} script=${4:-/t/s.sh}
     cp -f "$TMPD/d.img" "$TMPD/$nm.img"
-    timeout 600 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp "$CORES" \
+    timeout 600 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp "$cores" \
         -kernel "$KIMG" -m 512 \
-        -append "osum vfs nokbd $extra script=sh /t/s.sh;exit" \
+        -append "osum vfs nokbd $extra script=sh $script;exit" \
         -serial "file:$TMPD/$nm.txt" -display none -no-reboot \
         -drive "file=$TMPD/$nm.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
@@ -137,5 +152,31 @@ overlap wcn "serwiden nowirelock"
     && ok "without the wire lock writers overlap ($OVL markers)" \
     || bad "without the wire lock nothing overlapped -- the gate measures nothing"
 
-echo; echo "SERLINE: $pass passed, $fail failed"
-[ "$fail" -eq 0 ]
+hold() {
+    HKT=0; HTORN=0; HSL=0; HMISS=0
+    for n in $(seq 1 "$HOLD_BOOTS"); do
+        run "$1$n" "$2" 1 /t/h.sh
+        local line k t s d
+        line=$(python3 -I tools/serline/holdcheck.py "$TMPD/$1$n.txt" HOLD)
+        echo "        boot $n: $line"
+        k=$(val "$line" kt_intact); t=$(val "$line" kt_torn); s=$(val "$line" sl); d=$(val "$line" done)
+        HKT=$((HKT+${k:-0})); HTORN=$((HTORN+${t:-0})); HSL=$((HSL+${s:-0}))
+        [ "$d" = 1 ] || HMISS=$((HMISS+1))
+    done
+}
+
+echo "== hold: kernel task keeps a line across timer ticks, user task writes on the same core =="
+hold hld "serhold"
+[ "$HMISS" -eq 0 ] && ok "hold: the user task finished every boot" || bad "hold: user task unfinished in $HMISS boots"
+[ "$HKT" -ge $((HOLD_BOOTS * 3)) ] && ok "hold: kernel task lines were written ($HKT whole)" || bad "hold: only $HKT kernel task lines -- the test measures nothing"
+[ "$HTORN" -eq 0 ] && ok "hold: kernel task line stays whole" || bad "hold: $HTORN kernel task lines torn"
+[ "$HSL" -eq $((HOLD_BOOTS * HOLD_LINES)) ] && ok "hold: all user lines intact ($HSL)" || bad "hold: $HSL of $((HOLD_BOOTS * HOLD_LINES)) user lines intact"
+
+echo "== hold counter-proof: word serholdsti (interrupts on inside the hold) =="
+hold hcn "serholdsti"
+[ "$HTORN" -gt 0 ] \
+    && ok "with interrupts on inside the hold the line is torn ($HTORN torn)" \
+    || bad "interrupts on inside the hold tore nothing -- the test measures nothing"
+
+echo
+summary_emit "$pass" "$fail" 14

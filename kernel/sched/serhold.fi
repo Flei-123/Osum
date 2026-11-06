@@ -1,0 +1,64 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import sched.sched
+import arch.arch
+import arch.x86_64.apic
+
+export { stage, task_body, ROUNDS, HOLD_MS }
+
+const ROUNDS: u64 = 600
+const HOLD_MS: u64 = 25
+const IF_BIT: u64 = 0x200
+
+fn stage(state: u64) {
+    let on: bool = kstate.mode_on(state, kstate.M_SERHOLD)
+    let sti: bool = kstate.mode_on(state, kstate.M_SERHOLDSTI)
+    if !on && !sti {
+        return
+    }
+    let t: u64 = sched.create(state, sched.K_SERHOLD, 1, 0, 0)
+    if t == 0 {
+        return
+    }
+    sched.start(state, t)
+}
+
+fn hold_line(state: u64, round: u64, sti: bool, cycles: u64) {
+    var s_kt: [u8; 4] = "KT:\0"
+    var s_c: [u8; 2] = ":\0"
+    var s_pad: [u8; 13] = "kkkkkkkkkkkk\0"
+    var s_e: [u8; 3] = ":E\0"
+    let z: u64 = serial.line_at()
+    serial.puts((&s_kt[0]) as u64)
+    serial.dec(round)
+    serial.puts((&s_c[0]) as u64)
+    if sti {
+        arch.irq_restore(IF_BIT)
+    }
+    let until: u64 = apic.tsc() + cycles
+    while apic.tsc() < until {
+        arch.pause()
+    }
+    serial.puts((&s_pad[0]) as u64)
+    serial.puts((&s_e[0]) as u64)
+    serial.nl()
+    serial.line_clear(z)
+}
+
+fn task_body(state: u64, index: u64) {
+    var s_done: [u8; 21] = "serhold: done rounds\0"
+    let sti: bool = kstate.mode_on(state, kstate.M_SERHOLDSTI)
+    let cycles: u64 = apic.tsc_hz(state) / 1000 * HOLD_MS
+    var r: u64 = 0
+    while r < ROUNDS {
+        hold_line(state, r, sti, cycles)
+        sched.yield_now(state)
+        r = r + 1
+    }
+    serial.puts((&s_done[0]) as u64)
+    serial.nl()
+    sched.exit_task(state, 0)
+}
