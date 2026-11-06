@@ -11,6 +11,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import listdoc   # noqa: E402
 import plattform as PLT   # noqa: E402
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
@@ -98,7 +99,7 @@ def main():
     if not dateien:
         raise SystemExit("verzeichnis: %s hat keine .opk-Datei" % source)
 
-    rows = ["OTA2", "fassung\t%d" % revision, "schluesselgen\t0"]
+    packages = []
     for d in dateien:
         p = os.path.join(source, d)
         roh = open(p, "rb").read()
@@ -107,29 +108,33 @@ def main():
             h = ("%x" % (int(h, 16) ^ 1)).rjust(64, "0")
         name, pf = meta_aus_opk(p)
         plattform = PLT.plattform_von_roh(roh, d)
-        rows.append("paket\t%s\t%s\t%s\t%d\t%s\t%s"
-                      % (name, pf, h, len(roh), d, plattform))
-    text = "\n".join(rows) + "\n"
-    roh = text.encode("ascii")
+        packages.append((name, pf, h, len(roh), d, plattform))
 
     m = load_opk()
     sk = open(key, "rb").read()
     pk = m.ed25519_public(sk)
-    sig = m.ed25519_sign(sk, roh)
-    if not m.ed25519_verify(pk, roh, sig):
-        raise SystemExit("verzeichnis: die eigene Signatur gilt nicht")
-    changed = foreign_prueft(pk, roh, sig)
-    if changed is False:
-        raise SystemExit("verzeichnis: eine FREMDE Umsetzung erkennt die "
-                         "Signatur nicht an")
+    second_opinion = [True]
 
-    with open(os.path.join(source, "VERZEICHNIS"), "wb") as f:
-        f.write(roh)
-    with open(os.path.join(source, "VERZEICHNIS.sig"), "wb") as f:
-        f.write(sig)
-    print("   VERZEICHNIS  fassung %d, %d Paket(e), %d Oktette, sig %s...%s"
-          % (revision, len(dateien), len(roh), sig.hex()[:12],
-             "" if changed else " (KEINE zweite Meinung verfuegbar)"))
+    def sign(doc, sig_path):
+        roh = open(doc, "rb").read()
+        sig = m.ed25519_sign(sk, roh)
+        if not m.ed25519_verify(pk, roh, sig):
+            raise SystemExit("verzeichnis: die eigene Signatur gilt nicht")
+        changed = foreign_prueft(pk, roh, sig)
+        if changed is False:
+            raise SystemExit("verzeichnis: eine FREMDE Umsetzung erkennt die "
+                             "Signatur nicht an")
+        if not changed:
+            second_opinion[0] = False
+        with open(sig_path, "wb") as f:
+            f.write(sig)
+
+    written = listdoc.write_signed(source, sign, revision, 0, packages=packages)
+    first = next(iter(written.values()))
+    size = os.path.getsize(first)
+    print("   listing  revision %d, %d Paket(e), %d Oktette, styles %s%s"
+          % (revision, len(dateien), size, ",".join(written),
+             "" if second_opinion[0] else " (KEINE zweite Meinung verfuegbar)"))
     return 0
 
 

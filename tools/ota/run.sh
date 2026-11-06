@@ -131,7 +131,7 @@ python3 tools/ota/mkcerts.py "$OUT/certs" ota.test 10.0.2.2 \
 bash tools/ota/pakete.sh "$OUT" > "$OUT/pak3.log" 2>&1 \
     && ok "sechs Quellen fuers Netz: $(grep -c '^   netz' "$OUT/pak3.log") Stueck" \
     || { cat "$OUT/pak3.log"; bad "ota/pakete.sh"; }
-grep -qa "VERZEICHNIS  fassung" "$OUT/pak3.log" \
+grep -qa "listing  revision" "$OUT/pak3.log" \
     && ok "every signature was re-checked by a FOREIGN implementation (libsodium/cryptography)" \
     || bad "listing.py did not sign"
 grep -qa "KEINE zweite Meinung" "$OUT/pak3.log" \

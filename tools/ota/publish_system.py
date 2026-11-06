@@ -55,6 +55,7 @@ import gzip, hashlib, io, os, re, shutil, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import listdoc  # noqa: E402
 import publish as vf  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import brand
@@ -250,32 +251,37 @@ def main():
     if os.path.isfile(rimg):
         lines.append("sysfile\troot\t%s\t%d\t%s" % (vf.sha256d(rimg),
                                                     os.path.getsize(rimg), "root.img"))
-    vz = os.path.join(out, "VERZEICHNIS")
     if opt["--key"]:
         import listing  # noqa: E402  (test signer, same module the package feed tests use)
-        roh = ("OTA2\nfassung\t%d\nschluesselgen\t0\n" % count + "\n".join(lines) + "\n").encode("ascii")
         m = listing.load_opk()
         sk = open(opt["--key"], "rb").read()
-        sig = m.ed25519_sign(sk, roh)
-        if not m.ed25519_verify(m.ed25519_public(sk), roh, sig):
-            raise SystemExit("own signature does not verify")
-        open(vz, "wb").write(roh)
-        open(vz + ".sig", "wb").write(sig)
         pub = m.ed25519_public(sk)
+
+        def sign(doc, sig_path):
+            raw = open(doc, "rb").read()
+            sig = m.ed25519_sign(sk, raw)
+            if not m.ed25519_verify(pub, raw, sig):
+                raise SystemExit("own signature does not verify")
+            open(sig_path, "wb").write(sig)
+        chain_links = []
     else:
         b = vf.bund_read(opt["--bund"])
-        roh = vf.dir_text(count, b["haupt"]["gen"], [dict(k) for k in b["kette"]],
-                                  [], []).decode()
-        roh += "\n".join(lines) + "\n"
-        open(vz, "wb").write(roh.encode("ascii"))
-        vf.signieren(opt["--bund"], vz, os.path.join(out, "VERZEICHNIS.sig"))
         pub = bytes.fromhex(b["haupt"]["pub"])
+
+        def sign(doc, sig_path):
+            vf.signieren(opt["--bund"], doc, sig_path)
+        chain_links = [dict(k) for k in b["kette"]]
+    key_gen = 0 if opt["--key"] else b["haupt"]["gen"]
+    written = listdoc.write_signed(out, sign, count, key_gen, chain=chain_links, extra_lines=lines)
     if "--no-size-check" not in flags:
-        check_list_size(vz)
+        for doc_path in written.values():
+            check_list_size(doc_path)
     if "--bad-sig" in flags:
-        sg = bytearray(open(vz + ".sig", "rb").read())
-        sg[0] ^= 1
-        open(vz + ".sig", "wb").write(bytes(sg))
+        for style in listdoc.active_styles():
+            sig_path = os.path.join(out, listdoc.STYLES[style]["files"][1])
+            sg = bytearray(open(sig_path, "rb").read())
+            sg[0] ^= 1
+            open(sig_path, "wb").write(bytes(sg))
     open(os.path.join(out, "schluessel.pub"), "wb").write(pub)
     print("system stand %d (%s) -> %s  [%s]" % (count, commit, out, chan))
 

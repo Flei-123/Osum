@@ -22,6 +22,7 @@ import time
 
 HIER = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HIER)
+import listdoc   # noqa: E402
 import plattform as PLT   # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import opkpfad
@@ -121,18 +122,6 @@ def locked_write(aus, list_2):
 
 
 
-def dir_text(revision, gen, chain, locked, pakete):
-    z = ["OTA2", "fassung\t%d" % revision, "schluesselgen\t%d" % gen]
-    for k in chain:
-        z.append("kette\t%d\t%s\t%s" % (k["gen"], k["pub"], k["sig"]))
-    for g in locked:
-        z.append("gesperrt\t%d" % g)
-    for name, pf, h, n, file_2, plattform in pakete:
-        z.append("paket\t%s\t%s\t%s\t%d\t%s\t%s"
-                 % (name, pf, h, n, file_2, plattform))
-    return ("\n".join(z) + "\n").encode("ascii")
-
-
 def verknuepfen(source, target):
     if os.path.exists(target):
         os.remove(target)
@@ -216,12 +205,9 @@ def build(aus, stand, bund, notiz, lock_down, feste_version=None,
         sig = bytearray(bytes.fromhex(chain[-1]["sig"]))
         sig[0] ^= 1
         chain[-1]["sig"] = bytes(sig).hex()
-    roh = dir_text(revision, b["haupt"]["gen"], chain,
-                           sperrliste, pakete)
-    with open(os.path.join(zv, "VERZEICHNIS"), "wb") as f:
-        f.write(roh)
-    signieren(bund, os.path.join(zv, "VERZEICHNIS"),
-              os.path.join(zv, "VERZEICHNIS.sig"), signierer)
+    listdoc.write_signed(zv, lambda doc, sig: signieren(bund, doc, sig, signierer),
+                         revision, b["haupt"]["gen"], chain=chain,
+                         blocked=sperrliste, packages=pakete)
 
     with open(os.path.join(zv, "schluessel.pub"), "wb") as f:
         f.write(bytes.fromhex(b["haupt"]["pub"]))
