@@ -54,12 +54,12 @@ def main():
         return got
 
     cells = last("qs: kachel n=")
-    plates = last("qs: platte n=")
+    plates = last("qs: plate n=")
     labels = last("qs: label n=")
     reg = {}
     for l in lines:
-        for nm in ("hell", "vol"):
-            if l.startswith("qs: regler " + nm):
+        for nm in ("light", "vol"):
+            if l.startswith("qs: slider " + nm):
                 if kv(l):
                     reg[nm] = kv(l)
     med = [d for d in (kv(l) for l in lines if l.startswith("qs: medien ")) if d][-1:]

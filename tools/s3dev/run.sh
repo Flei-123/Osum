@@ -96,7 +96,7 @@ lauf() {
     local pid=$! c i st n
     for c in $(seq 1 "$cyc"); do
         for i in $(seq 1 900); do
-            n=$(grep -ac 's3: schlafe' "$L" 2>/dev/null)
+            n=$(grep -ac 's3: sleep cycle' "$L" 2>/dev/null)
             [ "${n:-0}" -ge "$c" ] && break
             kill -0 "$pid" 2>/dev/null || break
             sleep 0.2

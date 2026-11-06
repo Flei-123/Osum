@@ -527,7 +527,7 @@ class Fahrer:
                     int(m.group(3)), int(m.group(4)))
         if name in ("qstm", "qsset"):
             word_2 = "tm" if name == "qstm" else "set"
-            m = last_2(r"qs: zeile %s y=(\d+) h=(\d+)" % word_2)
+            m = last_2(r"qs: row %s y=(\d+) h=(\d+)" % word_2)
             g = last_2(r"qs: geo x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None or g is None:
                 return None
@@ -658,7 +658,7 @@ class Fahrer:
             zh = int(m.group(4)) if m.group(4) else 20
             return (int(m.group(1)) + 8, int(m.group(2)) + 4 + n * zh, 90, zh)
         if name == "qsalle":
-            g = last_2(r"qs: zeile set y=(\d+) x=(\d+) h=(\d+)")
+            g = last_2(r"qs: row set y=(\d+) x=(\d+) h=(\d+)")
             if g is not None:
                 return (int(g.group(2)), int(g.group(1)), int(g.group(3)), int(g.group(3)))
             m = last_2(r"qs: open x=(\d+) y=(\d+) w=(\d+) h=(\d+)")

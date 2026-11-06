@@ -59,7 +59,7 @@ lauf() {
     local pid=$! c i st n
     for c in $(seq 1 "$cyc"); do
         for i in $(seq 1 600); do
-            n=$(grep -ac 's3: schlafe' "$L" 2>/dev/null)
+            n=$(grep -ac 's3: sleep cycle' "$L" 2>/dev/null)
             [ "${n:-0}" -ge "$c" ] && break
             kill -0 "$pid" 2>/dev/null || break
             sleep 0.2
@@ -91,9 +91,9 @@ for smp in 2 4; do
     lauf "smp$smp" "$TMPD/a.img" "$smp"
     L="$TMPD/l-smp$smp.txt"
     num "the VM really slept (monitor: suspended)" "$(echo "$STATES" | tr '|' '\n' | grep -ac suspended)" eq "$CYCLES"
-    num "kernel parked the other cores (online=1)" "$(grep -ac 's3: kerne geparkt online=1' "$L")" eq "$CYCLES"
-    num "kernel brought them back (online=$smp)" "$(grep -ac "s3: kerne wieder online=$smp\$" "$L")" eq "$CYCLES"
-    num "no refusal (kerne nicht geparkt)" "$(grep -ac 's3: kerne nicht geparkt' "$L")" eq 0
+    num "kernel parked the other cores (online=1)" "$(grep -ac 's3: cores parked online=1' "$L")" eq "$CYCLES"
+    num "kernel brought them back (online=$smp)" "$(grep -ac "s3: cores back online=$smp\$" "$L")" eq "$CYCLES"
+    num "no refusal (cores not parked)" "$(grep -ac 's3: cores not parked' "$L")" eq 0
     num "every sleep returned rc=0" "$(grep -ac 's3: smp zyklus=[0-9] rc=0' "$L")" eq "$CYCLES"
     allgrow=1; detail=""
     for c in $(seq 1 "$CYCLES"); do
@@ -114,7 +114,7 @@ for smp in 2 4; do
     [ "$allgrow" = 1 ] && ok "every core: timer ticks AND idle turns grew by at least 10 ticks within 300 ms after each wake-up, all online" \
         || bad "cores did not all run again:$detail"
     # the clock: the wall clock advanced by roughly the time the host kept the VM asleep (>= 2 s)
-    slept=$(tr -d '\r' < "$L" | grep -a 's3: uhr schlaf=' | sed 's/.*schlaf=\([0-9]*\) s.*/\1/' | awk '{s+=$1; n++} END {print (n==3 && s>=6) ? 1 : 0}')
+    slept=$(tr -d '\r' < "$L" | grep -a 's3: clock sleep=' | sed 's/.*sleep=\([0-9]*\) s.*/\1/' | awk '{s+=$1; n++} END {print (n==3 && s>=6) ? 1 : 0}')
     num "the wall clock caught up (3 sleeps of >= 2 s each, summed >= 6 s)" "$slept" eq 1
     has "$L" "kernel: done" "the kernel ran on to its end after the last wake-up"
     num "return code of the machine (isa-debug-exit)" "$RC" eq 21

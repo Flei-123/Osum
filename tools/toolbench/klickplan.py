@@ -31,7 +31,7 @@ TBFELD = re.compile(r"taskbar: field net x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 QSOPEN = re.compile(r"qs: open x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 QSSYM = re.compile(r"qs: sym n=(\d+) x=(\d+) y=(\d+)")
 QSKACHEL = re.compile(r"qs: kachel n=(\d+) platz=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
-QSPLATTE = re.compile(r"qs: platte n=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+QSPLATTE = re.compile(r"qs: plate n=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 DLG = re.compile(r"wlib: text win=(\d+) kind=2 x=(\d+) base=(\d+) fg=(\d+) "
                  r"bg=(\d+) tw=(\d+)(?: ax=\d+ ay=\d+)? t=(.*)$")
 
