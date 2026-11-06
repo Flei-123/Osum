@@ -164,7 +164,7 @@ if [ "${cs:-0}" = 100 ] && [ "${cg:-0}" = 100 ]; then
 else
     bad "clipsets=$cs clipgets=$cg"
 fi
-hist=$(wert "$A" 'bus: verlauf=')
+hist=$(wert "$A" 'bus: history=')
 [ "${hist:-0}" = 20 ] && ok "the history stands at twenty and does not overflow" \
                       || bad "the history shows '${hist:-nichts}' statt 20"
 

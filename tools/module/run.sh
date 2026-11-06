@@ -172,7 +172,7 @@ num "ELF-Abschnitte" "$(zwert "$TMPD/l-gut.txt" 'secs=[0-9]+')" ge 8
 num "aufgeloeste Relokationen" "$(zwert "$TMPD/l-gut.txt" 'rel=[0-9]+')" ge 500
 num "Namen, die aus dem KERN kamen" "$(zwert "$TMPD/l-gut.txt" 'ext=[0-9]+')" ge 6
 num "Rahmen fuer das Abbild" "$(zwert "$TMPD/l-gut.txt" 'rahmen=[0-9]+')" ge 1
-num "belegte Plaetze in der Treibertafel" "$(zwert "$TMPD/l-gut.txt" 'plaetze=[0-9]+')" eq 37
+num "belegte Plaetze in der Treibertafel" "$(zwert "$TMPD/l-gut.txt" 'slots=[0-9]+')" eq 37
 num "Rueckgabe von module_init" "$(zwert "$TMPD/l-gut.txt" 'initrc=[0-9]+')" eq 0
 num "Geraetekennung vom 8042" "$(nwert "$TMPD/l-gut.txt" 'id=[0-9]+')" eq 3
 PKT=$(grep -a 'modul: pkt=' "$TMPD/l-gut.txt" | head -1 | grep -oE 'pkt=[0-9]+' | grep -oE '[0-9]+')
@@ -213,7 +213,7 @@ pruefe_abweisung kenn  kennung
 pruefe_abweisung fremd symbol
 num "fremd: die Signatur war gueltig" "$(zwert "$TMPD/l-fremd.txt" 'sigok=[0-9]+')" eq 1
 num "fremd: es wurden schon Relokationen angewandt" "$(zwert "$TMPD/l-fremd.txt" 'rel=[0-9]+')" ge 1
-num "fremd: aber KEIN Platz in der Treibertafel" "$(zwert "$TMPD/l-fremd.txt" 'plaetze=[0-9]+')" eq 0
+num "fremd: aber KEIN Platz in der Treibertafel" "$(zwert "$TMPD/l-fremd.txt" 'slots=[0-9]+')" eq 0
 
 # ---------------------------------------------------- 7. die Grenze
 echo "== 7. the measured LIMIT: a signed, broken module in ring 0 =="

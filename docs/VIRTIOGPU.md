@@ -287,7 +287,7 @@ wuerde.
 ankommt. Unter `-display none` setzt QEMU `EVENT_DISPLAY` nie. Belegt
 ist nur der **Abfrageweg** (`vgpuereig`):
 
-    vgpu: ... ereig=1  neu=1280x800  umst=0
+    vgpu: ... events=1  new=1280x800  umst=0
 
 1280x800 ist, was das Geraet wirklich als seine Groesse meldet -- die
 Antwort wird also richtig gelesen. Dass der Wirt das Bit setzt, zeigt

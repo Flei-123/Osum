@@ -398,7 +398,7 @@ POW=$(rect_after 12 "$RC")
 zeig $(( $(fld "$POW" x) + 16 )) $(( $(fld "$POW" y) + 16 )); klick
 seen 'glogin: schnell=0' && ok "a second click closes it again (nothing is switched off)" \
     || bad "'glogin: schnell=0' missing"
-grep -aq 'glogin: energie' "$D/serial.txt" && bad "GEGENPROBE: the power icon alone switched something" \
+grep -aq 'glogin: power' "$D/serial.txt" && bad "GEGENPROBE: the power icon alone switched something" \
     || ok "GEGENPROBE: the icon alone switches nothing off"
 
 # NO COPYING OUT: Ctrl+A, Ctrl+C in the password field ...

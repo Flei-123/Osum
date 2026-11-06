@@ -91,7 +91,7 @@ run g7 10 tab tab tab tab ret ret
 S=$OUT/g7/serial.txt
 hat "$S" "glogin: schnell=1" "the network icon opens the network text"
 hat "$S" "glogin: schnell=0" "a second Enter closes it again"
-hatnicht "$S" "glogin: energie" "COUNTER-PROOF: nothing was switched off"
+hatnicht "$S" "glogin: power" "COUNTER-PROOF: nothing was switched off"
 
 echo "== debug address under the network text =="
 printf 'http://10.0.2.15:8765/\n' > "$OUT/dbgurl"
