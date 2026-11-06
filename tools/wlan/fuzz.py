@@ -135,7 +135,7 @@ def wohlgeformt(command, response):
         return True
     if command == "ies":
         for part in response.split(" "):
-            if part in ("KAPUTT", "LEER"):
+            if part in ("BROKEN", "EMPTY"):
                 continue
             if ":" not in part:
                 return False

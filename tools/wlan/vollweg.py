@@ -118,7 +118,7 @@ def main():
     else:
         bad("scan does not find the access point: %s" % a)
 
-    if a.get('wahl') == '1' and a.get('kanal') == '6':
+    if a.get('chosen') == '1' and a.get('channel') == '6':
         ok("STEP 2 -- network choice: the network is chosen and the device "
            "set to channel 6 (the channel from the beacon)")
     else:
@@ -137,7 +137,7 @@ def main():
     else:
         bad("message 3 or the keys do not match: %s" % a)
 
-    if a.get('darf') == '1':
+    if a.get('allowed') == '1':
         ok("STEP 5 -- the state machine is CONNECTED and allows "
            "data (may_pass_data)")
     else:
@@ -170,15 +170,15 @@ def main():
     else:
         bad("Maske oder Tor fehlen: %s" % a)
 
-    if a.get('http') == '200' and int(a.get('rumpf', '-1')) > 0:
+    if a.get('http') == '200' and int(a.get('body', '-1')) > 0:
         ok("STEP 9 -- HTTP: a request is answered with 200, the "
-           "body starts at octet %s" % a['rumpf'])
+           "body starts at octet %s" % a['body'])
     else:
         bad("HTTP does not arrive: %s" % a)
 
-    if a.get('grund') == '0':
+    if a.get('reason') == '0':
         ok("the whole path runs through WITHOUT a single failure reason "
-           "(grund=0)")
+           "(reason=0)")
     else:
         bad("a failure reason remains: %s" % a)
 
@@ -189,7 +189,7 @@ def main():
 
     a = lauf(pw=b'daspasswortistfalsch')
     if a.get('m3') == '0' and a.get('skeys') == '0' \
-            and a.get('darf') == '0' and a.get('dhcp') == '0' \
+            and a.get('allowed') == '0' and a.get('dhcp') == '0' \
             and a.get('http') == '0':
         ok("WRONG PASSWORD: the handshake fails at message 3, "
            "NO key in the device, no data packet, no DHCP, "
@@ -199,7 +199,7 @@ def main():
 
     a = lauf(broken='mic')
     if a.get('m1') == '1' and a.get('m3') == '0' \
-            and a.get('skeys') == '0' and a.get('darf') == '0':
+            and a.get('skeys') == '0' and a.get('allowed') == '0':
         ok("DAMAGED HANDSHAKE (message 3 without a valid "
            "check value): clean abort, no key, no crash")
     else:
@@ -215,8 +215,8 @@ def main():
         bad("an aborted handshake gets too far: %s" % a)
 
     a = lauf(beacon=build_beacon(SSID, rsn=False))
-    if a.get('netze') == '1' and a.get('wahl') == '0' \
-            and a.get('skeys') == '0' and a.get('darf') == '0':
+    if a.get('netze') == '1' and a.get('chosen') == '0' \
+            and a.get('skeys') == '0' and a.get('allowed') == '0':
         ok("OPEN NETWORK: it is found and NAMED, but not "
            "gewaehlt -- und nichts geht darueber")
     else:

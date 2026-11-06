@@ -465,7 +465,7 @@ def part_capture():
         if i == 0:
             equal("Beacon 1: SSID", bytes.fromhex(felder["ssid"]).decode(),
                    "Coherer")
-            equal("Beacon 1: channel", felder["kanal"], "1")
+            equal("Beacon 1: channel", felder["channel"], "1")
             equal("Beacon 1: band (derived from the channel number)",
                    felder["band"], "1")
             equal("Beacon 1: Sicherheitsart WPA2", felder["sich"], "3")
@@ -478,7 +478,7 @@ def part_capture():
             equal("Beacon 1: BSSID", felder["bssid"], "000c4182b255")
             equal("Beacon 1: SSID not hidden", felder["verbrg"], "0")
         else:
-            if felder["ssid"] == b"Coherer".hex() and felder["kanal"] == "1":
+            if felder["ssid"] == b"Coherer".hex() and felder["channel"] == "1":
                 ok("Beacon %d of the same network: SSID and channel equal" % (i + 1))
             else:
                 bad("Beacon %d weicht ab: %s" % (i + 1, response))
@@ -619,39 +619,39 @@ def part_channel():
                        (5500, 100, 2), (5745, 149, 2), (5955, 1, 3),
                        (6175, 45, 3)]:
         equal("%d MHz is channel %d in band %d" % (f, k, band),
-               eins("kanal %d" % f), "%d %d" % (k, band))
+               eins("channel %d" % f), "%d %d" % (k, band))
         equal("and back: channel %d in band %d is %d MHz" % (k, band, f),
                eins("freq %d %d" % (k, band)), str(f))
     for f in [2413, 2500, 5181, 1000, 9999]:
-        equal("%d MHz is not a channel" % f, eins("kanal %d" % f), "FAIL")
+        equal("%d MHz is not a channel" % f, eins("channel %d" % f), "FAIL")
     equal("channel 2 in the 6 GHz band is the outlier 5935 MHz",
            eins("freq 2 3"), "5935")
     equal("channel 2 in the 2.4 GHz band is 2417 MHz", eins("freq 2 1"), "2417")
 
     faelle = [
-        (1, 1, "erlaubt=1 dbm=20 dfs=0 innen=0 passiv=0 senden=1 aktiv=1",
+        (1, 1, "erlaubt=1 dbm=20 dfs=0 innen=0 passiv=0 tx=1 active=1",
          "channel 1, 2.4 GHz: 20 dBm, no radar, indoor and outdoor"),
-        (1, 13, "erlaubt=1 dbm=20 dfs=0 innen=0 passiv=0 senden=1 aktiv=1",
+        (1, 13, "erlaubt=1 dbm=20 dfs=0 innen=0 passiv=0 tx=1 active=1",
          "channel 13 is allowed in Europe (not in the USA)"),
-        (1, 14, "erlaubt=0 dbm=0 dfs=0 innen=0 passiv=0 senden=0 aktiv=0",
+        (1, 14, "erlaubt=0 dbm=0 dfs=0 innen=0 passiv=0 tx=0 active=0",
          "channel 14 is NOT allocated in Europe"),
-        (2, 36, "erlaubt=1 dbm=23 dfs=0 innen=1 passiv=0 senden=1 aktiv=1",
+        (2, 36, "erlaubt=1 dbm=23 dfs=0 innen=1 passiv=0 tx=1 active=1",
          "channel 36: 23 dBm, indoor only, no radar"),
-        (2, 52, "erlaubt=1 dbm=23 dfs=1 innen=1 passiv=1 senden=0 aktiv=0",
+        (2, 52, "erlaubt=1 dbm=23 dfs=1 innen=1 passiv=1 tx=0 active=0",
          "channel 52: radar required -> without DFS NO transmission"),
-        (2, 100, "erlaubt=1 dbm=30 dfs=1 innen=0 passiv=1 senden=0 aktiv=0",
+        (2, 100, "erlaubt=1 dbm=30 dfs=1 innen=0 passiv=1 tx=0 active=0",
          "channel 100: 30 dBm, radar required -> without DFS NO transmission"),
-        (2, 144, "erlaubt=0 dbm=0 dfs=0 innen=0 passiv=0 senden=0 aktiv=0",
+        (2, 144, "erlaubt=0 dbm=0 dfs=0 innen=0 passiv=0 tx=0 active=0",
          "channel 144 extends past the band edge 5725 -> not allocated"),
-        (2, 149, "erlaubt=0 dbm=0 dfs=0 innen=0 passiv=0 senden=0 aktiv=0",
+        (2, 149, "erlaubt=0 dbm=0 dfs=0 innen=0 passiv=0 tx=0 active=0",
          "channel 149 is not part of the WLAN range in Europe"),
-        (2, 165, "erlaubt=0 dbm=0 dfs=0 innen=0 passiv=0 senden=0 aktiv=0",
+        (2, 165, "erlaubt=0 dbm=0 dfs=0 innen=0 passiv=0 tx=0 active=0",
          "channel 165 likewise"),
-        (3, 1, "erlaubt=1 dbm=23 dfs=0 innen=1 passiv=0 senden=1 aktiv=1",
+        (3, 1, "erlaubt=1 dbm=23 dfs=0 innen=1 passiv=0 tx=1 active=1",
          "channel 1 in the 6 GHz band: 23 dBm, indoor only"),
-        (3, 93, "erlaubt=1 dbm=23 dfs=0 innen=1 passiv=0 senden=1 aktiv=1",
+        (3, 93, "erlaubt=1 dbm=23 dfs=0 innen=1 passiv=0 tx=1 active=1",
          "channel 93 is the last in the European 6 GHz range"),
-        (3, 97, "erlaubt=0 dbm=0 dfs=0 innen=0 passiv=0 senden=0 aktiv=0",
+        (3, 97, "erlaubt=0 dbm=0 dfs=0 innen=0 passiv=0 tx=0 active=0",
          "channel 97 is above 6425 MHz -> not allocated"),
     ]
     for band, k, soll, name in faelle:
@@ -664,9 +664,9 @@ def part_channel():
     verstoss = []
     for row in antworten:
         f = dict(x.split("=", 1) for x in row.split(" "))
-        if f["senden"] == "1" and (f["erlaubt"] == "0" or f["dfs"] == "1"):
+        if f["tx"] == "1" and (f["erlaubt"] == "0" or f["dfs"] == "1"):
             verstoss.append(row)
-        if f["aktiv"] == "1" and (f["erlaubt"] == "0" or f["passiv"] == "1"):
+        if f["active"] == "1" and (f["erlaubt"] == "0" or f["passiv"] == "1"):
             verstoss.append(row)
     if not verstoss:
         ok("over ALL %d channels in three bands: never transmit without allocation, "
@@ -693,7 +693,7 @@ def part_state_machine():
     f = zerlege_automat(eins("automat " + RICHTIG))
     equal("the correct sequence '%s' leads to CONNECTED" % RICHTIG,
            f["z"], "8")
-    equal("and may send data", f["daten"], "1")
+    equal("and may send data", f["data"], "1")
     equal("and installed the key EXACTLY ONCE", f["inst"], "1")
 
     faelle = []
@@ -717,7 +717,7 @@ def part_state_machine():
     for (name, sequence), row in zip(faelle, antworten):
         f = zerlege_automat(row)
         erlaubt = is_valid_sequence(sequence)
-        if (f["daten"] == "1") != erlaubt:
+        if (f["data"] == "1") != erlaubt:
             defective.append((name, sequence, row))
         if int(f["inst"]) > 1:
             defective.append(("MEHRFACHE Installation", sequence, row))
@@ -738,8 +738,8 @@ def part_state_machine():
         ("sbac123x", "6", "message 3 with wrong check value -> reason 6"),
     ]:
         f = zerlege_automat(eins("automat " + sequence))
-        equal(name, "%s/%s" % (f["z"], f["grund"]), "9/%s" % why)
-        if f["daten"] != "0":
+        equal(name, "%s/%s" % (f["z"], f["reason"]), "9/%s" % why)
+        if f["data"] != "0":
             bad("'%s' ends in error and may still send data" % sequence)
 
     tiefe = 3 if QUICK else 4
@@ -752,7 +752,7 @@ def part_state_machine():
     defective = []
     for sequence, row in zip(every_item, antworten):
         f = zerlege_automat(row)
-        if f["daten"] != "0" or f["inst"] != "0" or f["verbund"] != "0":
+        if f["data"] != "0" or f["inst"] != "0" or f["verbund"] != "0":
             defective.append((sequence, row))
     if not defective:
         ok("EXHAUSTIVE: all %d event sequences up to length %d over an "
@@ -767,7 +767,7 @@ def part_state_machine():
         for anhang in ["", "s", "sbac1234", "1234", "tttt"]:
             queries.append("automat " + sequence + anhang)
     antworten = orakel(queries)
-    if all(zerlege_automat(a)["z"] == "9" and zerlege_automat(a)["daten"] == "0"
+    if all(zerlege_automat(a)["z"] == "9" and zerlege_automat(a)["data"] == "0"
            for a in antworten):
         ok("the error state is a dead end: %d sequences that were aborted once "
            "do not come out again with any suffix"
@@ -827,7 +827,7 @@ def part_limits():
         queries.append("beacon " + bytes(v).hex())
         queries.append("ies " + bytes(v).hex())
     antworten = orakel(queries)
-    if all(a == "FAIL" or "KAPUTT" in a for a in antworten):
+    if all(a == "FAIL" or "BROKEN" in a for a in antworten):
         ok("a length field pointing past the end of the frame "
            "is detected and not read")
     else:

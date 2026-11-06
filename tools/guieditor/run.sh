@@ -111,7 +111,7 @@ fi
 echo "== 3. a file with 5000 lines =="
 lauf gross /gross.fi "$GROSS" ",rollnur=2000,messen=5000"
 S="$OUT/gross/serial.txt"
-zeilen=$(grep -aoE 'nedit: reiter [0-9]+ zeilen [0-9]+' "$S" | head -1 | grep -oE '[0-9]+$')
+zeilen=$(grep -aoE 'nedit: tab [0-9]+ lines [0-9]+' "$S" | head -1 | grep -oE '[0-9]+$')
 num "die Datei ist ganz da (Zeilen)" "${zeilen:-0}" -eq 5001
 tipp=$(grep -aoE 'tippen n[0-9]+ ticks [0-9]+ us_je [0-9]+' "$S" | head -1 | grep -oE '[0-9]+$')
 roll=$(grep -aoE 'rollen n[0-9]+ ticks [0-9]+ us_je [0-9]+' "$S" | head -1 | grep -oE '[0-9]+$')
@@ -145,7 +145,7 @@ bash tools/alltag/build.sh "$d" \
     "xfile=/probe.fi=$KLEIN" "xfile=/zwei.sh=$ZWEI" \
     extra="wigapp=/bin/nedit,/probe.fi,/zwei.sh" > "$d.log" 2>&1
 S3="$d/serial.txt"
-rt=$(grep -aoE 'nedit: reiter [0-9]+' "$S3" | head -1 | grep -oE '[0-9]+$')
+rt=$(grep -aoE 'nedit: tab [0-9]+' "$S3" | head -1 | grep -oE '[0-9]+$')
 num "zwei Reiter offen" "${rt:-0}" -eq 2
 [ -s "$d/desktop.png" ] && cp "$d/desktop.png" "$SHOTS/ab-reiter.png"
 [ -s "$SHOTS/ab-reiter.png" ] && ok "Image: two tabs" || bad "Image: two tabs missing"
@@ -157,12 +157,12 @@ for z in 1 2 3; do
         progs="desktop taskbar nedit sh echo ls cat" accel="${OSUM_ACCEL:-kvm}" \
         shot=yes desk=no kbd=yes warten=4 bloecke=32768 \
         "xfile=/probe.fi=$KLEIN" \
-        extra="wigapp=/bin/nedit,/probe.fi,zeig=$z" > "$d.log" 2>&1
+        extra="wigapp=/bin/nedit,/probe.fi,show=$z" > "$d.log" 2>&1
     [ -s "$d/desktop.png" ] && cp "$d/desktop.png" "$SHOTS/ab-zeig$z.png"
 done
-z1=$(grep -aoE 'nedit: reiter [0-9]+ zeilen [0-9]+ zeile [0-9]+ spalte [0-9]+' \
+z1=$(grep -aoE 'nedit: tab [0-9]+ lines [0-9]+ line [0-9]+ col [0-9]+' \
      "$OUT/zeig1/serial.txt" | tail -1)
-z2=$(grep -aoE 'zeile [0-9]+ spalte [0-9]+' "$OUT/zeig2/serial.txt" | tail -1)
+z2=$(grep -aoE 'line [0-9]+ col [0-9]+' "$OUT/zeig2/serial.txt" | tail -1)
 z3=$(grep -aoE 'modif [0-9]+' "$OUT/zeig3/serial.txt" | tail -1 | grep -oE '[0-9]+$')
 echo "        selection ends at: $z1"
 echo "        search hit is at: $z2"
@@ -192,7 +192,7 @@ bash tools/alltag/build.sh "$d" \
     progs="desktop taskbar nedit sh echo ls cat" accel="${OSUM_ACCEL:-kvm}" \
     shot=no desk=no kbd=yes warten=5 bloecke=32768 keep=yes \
     "xfile=/probe.fi=$KLEIN" \
-    extra="wigapp=/bin/nedit,/probe.fi,zeig=5" > "$d.log" 2>&1
+    extra="wigapp=/bin/nedit,/probe.fi,show=5" > "$d.log" 2>&1
 grep -qa 'nedit: gesichert' "$d/serial.txt" \
     && ok "the editor reports that it saved" \
     || bad "the editor reports no save"

@@ -69,7 +69,7 @@ echo "== 4. the seam to the hardware =="
 # =====================================================================
 #
 
-R=$(printf 'geraet 08413a01aabbccddeeff112233445566778899aa0000cafebabe\n' \
+R=$(printf 'device 08413a01aabbccddeeff112233445566778899aa0000cafebabe\n' \
     | ./.probe/worakel)
 case "$R" in
   "vorher=1 gesd=26 empf=26 same=1 ztx=1 zrx=1")
