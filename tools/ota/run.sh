@@ -630,7 +630,7 @@ rc=$(lauf kan2 "ota set kanal test;ota apply;cat /system/ota.stand;exit")
 hat "$OUT/kan2.txt" "ota: version there 4" "(b) auf test liegt Fassung 4"
 hat "$OUT/kan2.txt" "opk: installed hallo" "(b) die Fassung vom Testkanal wird installiert"
 hat "$OUT/kan2.txt" "ota: READY FOR RESTART" "(b) und zum Neustart angeboten"
-hat "$OUT/kan2.txt" "phase=bereit" "(b) /system/ota.stand: phase=bereit"
+hat "$OUT/kan2.txt" "phase=ready" "(b) /system/ota.stand: phase=bereit"
 rc=$(lauf kan3 "sh /start.sh;ota show;cat /system/ota.stand;exit")
 gleich "(b) der Neustart" "$rc" "21"
 hat "$OUT/kan3.txt" "paket-hallo fassung 2" "(b) die neue Generation laeuft"
@@ -699,7 +699,7 @@ cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf kan16 "ota set auto ja;ota service 1;cat /system/ota.stand;exit")
 hat "$OUT/kan16.txt" "opk: installed hallo" "(h) mit auto=ja holt und installiert der Dienst von selbst"
 hat "$OUT/kan16.txt" "ota: READY FOR RESTART" "(h) ohne Neustart -- er wird nur angeboten"
-hat "$OUT/kan16.txt" "phase=bereit" "(h) die Anzeige sagt phase=bereit"
+hat "$OUT/kan16.txt" "phase=ready" "(h) die Anzeige sagt phase=bereit"
 hatnicht "$OUT/kan16.txt" "power: init sagt ab" "(h) und es wird NICHT neu gestartet"
 # DEFAULT ON (owner decision 02.10.2026): no `auto=` key at all -> the service runs
 cp -f "$OUT/basis.img" "$OUT/ziel.img"

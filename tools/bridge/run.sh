@@ -279,9 +279,9 @@ laenge_von() { antwort "$1" | awk '{print $5}'; }
 
 [ "$(status_von 1)" = ok ] && ok "system: beantwortet" || bad "system: $(antwort 1)"
 grep -qa "^fassung " "$G.1.bin" 2>/dev/null || true
-hat "$G.1.bin" "fassung" "system nennt die Fassung des Kerns"
-hat "$G.1.bin" "speicher_alle" "system nennt den Speicher"
-hat "$G.1.bin" "platte_bloecke" "system nennt die Platte"
+hat "$G.1.bin" "version" "system nennt die Fassung des Kerns"
+hat "$G.1.bin" "memory_total" "system nennt den Speicher"
+hat "$G.1.bin" "disk_blocks" "system nennt die Platte"
 
 [ "$(status_von 2)" = ok ] && ok "write: the file was created" || bad "schreib: $(antwort 2)"
 [ "$(status_von 3)" = ok ] && ok "read: and read again" || bad "lies: $(antwort 3)"
