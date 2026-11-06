@@ -18,6 +18,7 @@ cleanup() { [ -n "$QPID" ] && kill "$QPID" 2>/dev/null; rm -f "$SOCK"; }
 trap cleanup EXIT
 
 echo "== 1. das Abbild =="
+bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 if [ ! -f "$OUT/disk.img" ]; then
     bash tools/look/shot.sh "$OUT" keep=yes >"$OUT/bau.log" 2>&1 || {
         echo "the build failed"; tail -6 "$OUT/bau.log"; exit 1; }
@@ -31,8 +32,8 @@ ok "Abbild und Kern stehen"
 echo "== 2. start Osum and open settings =="
 rm -f "$OUT/serial.txt" "$SOCK"
 cp "$OUT/disk.img" "$OUT/lauf.img"
-timeout 420 qemu-system-x86_64 -kernel "$BUILDD/k0.mb" -m 512 \
-    -append "gfx wm wig wigicons desk wmhold wiglong nokbd nosched noproc nofs fbres=1280x800" \
+timeout "${TABS_QEMU_TIMEOUT:-1200}" qemu-system-x86_64 -kernel "$BUILDD/k0.mb" -m 512 \
+    -append "gfx wm wig wigicons desk wmhold wiglong wighalt=${TABS_HALT:-600} nokbd nosched noproc nofs fbres=1280x800" \
     -serial "file:$OUT/serial.txt" -display none -no-reboot -vga std \
     -monitor "unix:$SOCK,server,nowait" \
     -drive "file=$OUT/lauf.img,format=raw,if=ide,index=0" \
@@ -54,7 +55,8 @@ else
 fi
 
 klick() {
-    python3 tools/themestore/click.py "$1" > "$OUT/k.txt" 2>/dev/null || return 1
+    kill -0 "$QPID" 2>/dev/null || return 1
+    python3 tools/themestore/click.py "$1>$1" > "$OUT/k.txt" 2>/dev/null || return 1
     python3 tools/wm/monitor.py "$SOCK" "$OUT/k.txt" >/dev/null 2>&1 || return 1
     sleep "${2:-2}"
     return 0
@@ -77,18 +79,62 @@ else
     grep -aE 'launcher:|settings:' "$OUT/serial.txt" | tail -6 | sed 's/^/        /'
 fi
 
-echo "== 3. click the bridge tab =="
-STAND_VOR=$(grep -a 'settings: stand' "$OUT/serial.txt" | tail -1)
-klick 700,150 2
-STAND_NACH=$(grep -a 'settings: stand' "$OUT/serial.txt" | tail -1)
-note "vorher: $STAND_VOR"
-note "nachher: $STAND_NACH"
+echo "== 3. switch the settings tab =="
+DEAD_X=700
+DEAD_Y=150
+TAB_X=74
+TAB_Y=266
+TAB_EXPECTED=1
+
+take_screen() {
+    local target=$1 n=0
+    rm -f "$target"
+    python3 tools/wm/monitor.py "$SOCK" /dev/stdin >/dev/null 2>&1 <<CMD
+screendump $target
+CMD
+    while [ "$n" -lt 60 ]; do
+        sleep 0.5
+        [ -s "$target" ] && { sleep 1; return 0; }
+        n=$((n+1))
+    done
+    return 1
+}
+
+current_tab() {
+    grep -a 'settings: stand reiter=' "$OUT/serial.txt" | tail -1 | sed -n 's/.*reiter=\([0-9]*\).*/\1/p'
+}
+
+wait_for_tab() {
+    local want=$1 n=0
+    while [ "$n" -lt 40 ]; do
+        [ "$(current_tab)" = "$want" ] && return 0
+        sleep 0.5; n=$((n+1))
+    done
+    return 1
+}
+
+TAB_BEFORE=$(current_tab)
+note "tab before: $TAB_BEFORE"
+klick "$DEAD_X,$DEAD_Y" 3
+if [ "$(current_tab)" = "$TAB_BEFORE" ]; then
+    ok "control: click on empty page area keeps tab $TAB_BEFORE"
+else
+    bad "control: click on empty page area changed the tab to $(current_tab)"
+fi
+klick "$TAB_X,$TAB_Y" 1
+if wait_for_tab "$TAB_EXPECTED"; then
+    ok "sidebar click switched to tab $TAB_EXPECTED"
+else
+    bad "sidebar click did not switch to tab $TAB_EXPECTED (now: $(current_tab))"
+fi
+take_screen "$OUT/reiter.ppm"
+if [ "$(grep -ac 'start /apps/editor' "$OUT/serial.txt")" = 0 ]; then
+    ok "no stray editor start"
+else
+    bad "editor was started during the run"
+fi
 
 echo "== 4. das Bild =="
-python3 tools/wm/monitor.py "$SOCK" /dev/stdin >/dev/null 2>&1 <<CMD
-screendump $OUT/reiter.ppm
-CMD
-sleep 2
 if [ -s "$OUT/reiter.ppm" ]; then
     python3 - "$OUT/reiter.ppm" "$OUT/reiter.png" <<'PYEOF'
 import sys, zlib, struct
