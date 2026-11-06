@@ -144,6 +144,12 @@ PYEOF
     else
         bad "gegen.py vectors fails"
     fi
+    kk=$(grep -oE '^argon2keyed [0-9]+/[0-9]+' "$TMPD/vec.txt" | cut -d' ' -f2)
+    if [[ -n $kk && ${kk%/*} == ${kk#*/} && ${kk#*/} -ge 15 ]]; then
+        ok "Argon2d/i/id with secret and associated data against OpenSSL: $kk"
+    else
+        bad "Argon2 with secret and associated data deviates: ${kk:-none}"
+    fi
 else
     bad "argon2-cffi missing or oracle not built: section 3 cannot run (no skip allowed)"
     info "  python3 -m venv /root/.krypto-venv"
