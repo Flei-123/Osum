@@ -374,9 +374,9 @@ else
         tail -5 "$TMPD/kr.txt"
     fi
     if bash tools/aesni/run.sh >"$TMPD/ae.txt" 2>&1; then
-        z=$(grep -oE 'AESNI: [0-9]+ bestanden, [0-9]+ gescheitert' "$TMPD/ae.txt" | tail -1)
+        z=$(grep -oE 'AESNI: [0-9]+ passed, [0-9]+ failed' "$TMPD/ae.txt" | tail -1)
         info "$z"
-        echo "$z" | grep -q ', 0 gescheitert' \
+        echo "$z" | grep -q ', 0 failed' \
             && ok "the acceptance of round AESNI is still green ($z)" \
             || bad "AESNI is red: $z"
     else

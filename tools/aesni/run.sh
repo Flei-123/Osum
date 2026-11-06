@@ -336,5 +336,5 @@ else
 fi
 
 echo
-echo "AESNI: $pass bestanden, $fail gescheitert"
+echo "AESNI: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]
