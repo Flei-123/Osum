@@ -277,7 +277,7 @@ def struktur(image):
             continue
         bit = image.bit(b)
         if bit and not seen[b]:
-            z["verloren"] += 1
+            z["lost"] += 1
         if not bit and seen[b]:
             z["fehlend"] += 1
     besucht = set()
@@ -294,7 +294,7 @@ def struktur(image):
                     stack.append(kind)
                 elif name not in (".", ".."):
                     z["kreise"] += 1
-    for k in ("ausser", "doppelt", "badtype", "verloren", "fehlend",
+    for k in ("ausser", "doppelt", "badtype", "lost", "fehlend",
               "totlinks", "kreise"):
         if z[k]:
             befunde.append("%s=%d" % (k, z[k]))

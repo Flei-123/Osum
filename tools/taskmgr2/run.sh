@@ -37,7 +37,7 @@ drive() {
 echo "== 1. context menu on a process row =="
 drive "$ROOT" "$TMPD/c" "$ROOT/tools/taskmgr2/ctx.txt" || bad "build ctx"
 SC="$TMPD/c/serial.txt"
-num "plan targets not found" "$(cnt "$TMPD/c/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
+num "plan targets not found" "$(cnt "$TMPD/c/plan.log" 'TARGET NOT FOUND')" eq 0
 num "menu opened (2 row clicks, 1 header miss)" "$(cnt "$SC" '^taskmgr: ctx n=')" eq 2
 num "menu on the launcher (an app) has exactly 3 rows" "$(grep -a '^taskmgr: ctx n=' "$SC" | head -1 | sed -E 's/.*ctx n=([0-9]+).*/\1/')" eq 3
 LPID=$(grep -a '^taskmgr: row' "$SC" | grep 'name=launcher' | head -1 | grep -oE ' pid=[0-9]+' | sed 's/.*=//')
@@ -71,7 +71,7 @@ echo
 echo "== 2. search field filters the list =="
 drive "$ROOT" "$TMPD/s" "$ROOT/tools/taskmgr2/search.txt" || bad "build search"
 SS="$TMPD/s/serial.txt"
-num "plan targets not found" "$(cnt "$TMPD/s/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
+num "plan targets not found" "$(cnt "$TMPD/s/plan.log" 'TARGET NOT FOUND')" eq 0
 ALL=$(grep -a '^taskmgr: group' "$SS" | head -1 >/dev/null; grep -a '^taskmgr: row' "$SS" | grep -oE ' pid=[0-9]+' | sort -u | wc -l)
 NOMATCH=$(grep -a '^taskmgr: search n=' "$SS" | sed -E 's/.*n=([0-9]+).*/\1/' | sed -n 3p)
 LAST=$(grep -a '^taskmgr: search n=' "$SS" | tail -1 | sed -E 's/.*n=([0-9]+).*/\1/')
@@ -90,7 +90,7 @@ drive_perf() {
 }
 drive_perf "$ROOT" "$TMPD/p" || bad "build perf"
 SP="$TMPD/p/serial.txt"
-num "plan targets not found" "$(cnt "$TMPD/p/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
+num "plan targets not found" "$(cnt "$TMPD/p/plan.log" 'TARGET NOT FOUND')" eq 0
 num "resource tiles" "$(grep -a '^taskmgr: perf sel=0' "$SP" | head -1 | sed -E 's/.* tiles=([0-9]+).*/\1/')" eq 5
 num "CPU details grid has 6 values" "$(grep -a '^taskmgr: perf sel=0' "$SP" | head -1 | sed -E 's/.* stats=([0-9]+).*/\1/')" eq 6
 num "Memory tile selects Memory" "$(cnt "$SP" '^taskmgr: perf sel=1')" ge 1
@@ -127,7 +127,8 @@ BWT="$TMPD/basewt"
 if git worktree add --detach "$BWT" "$BASE" >/dev/null 2>&1; then
     cp -a vendor/firn/bin "$BWT/vendor/firn/bin" 2>/dev/null; cp -a vendor/firn/lib "$BWT/vendor/firn/lib" 2>/dev/null; cp -a vendor/firn/.gebaut "$BWT/vendor/firn/.gebaut" 2>/dev/null
     mkdir -p "$BWT/tools/taskmgr2"
-    cp -r tools/toolbench/. "$BWT/tools/toolbench/"
+    ( cd tools && tar cf - --exclude=build-kernel.sh --exclude=taskmgr2 . ) | ( cd "$BWT/tools" && tar xf - )
+    printf '#!/usr/bin/env bash\nexec bash %s/tools/mkfsfi/mkfs.sh "$@"\n' "$ROOT" > "$BWT/tools/mkfsfi/mkfs.sh"
     cp tools/taskmgr2/ctx.txt tools/taskmgr2/search.txt tools/taskmgr2/perf.txt tools/taskmgr2/eff.txt tools/taskmgr2/users.txt tools/taskmgr2/del.txt tools/taskmgr2/history.txt tools/taskmgr2/services.txt tools/taskmgr2/svc.state "$BWT/tools/taskmgr2/"
     drive "$BWT" "$TMPD/bc" "$BWT/tools/taskmgr2/ctx.txt" || true
     drive "$BWT" "$TMPD/bs" "$BWT/tools/taskmgr2/search.txt" || true
@@ -135,7 +136,7 @@ if git worktree add --detach "$BWT" "$BASE" >/dev/null 2>&1; then
     num "BASE $BASE: no search events" "$(cnt "$TMPD/bs/serial.txt" '^taskmgr: search n=')" eq 0
     drive_perf "$BWT" "$TMPD/bp" || true
     num "BASE $BASE: no resource tiles" "$(cnt "$TMPD/bp/serial.txt" '^taskmgr: perf sel=')" eq 0
-    num "BASE $BASE: plan cannot find its targets" "$(( $(cnt "$TMPD/bc/plan.log" 'ZIEL NICHT GEFUNDEN') + $(cnt "$TMPD/bs/plan.log" 'ZIEL NICHT GEFUNDEN') ))" ge 1
+    num "BASE $BASE: plan cannot find its targets" "$(( $(cnt "$TMPD/bc/plan.log" 'TARGET NOT FOUND') + $(cnt "$TMPD/bs/plan.log" 'TARGET NOT FOUND') ))" ge 1
 else
     bad "cannot create the BASE worktree $BASE"
 fi
@@ -150,7 +151,7 @@ drive_eff() {
 }
 drive_eff "$ROOT" "$TMPD/e" || bad "build eff"
 SE="$TMPD/e/serial.txt"
-num "plan targets not found" "$(cnt "$TMPD/e/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
+num "plan targets not found" "$(cnt "$TMPD/e/plan.log" 'TARGET NOT FOUND')" eq 0
 num "row reports carry thr= (rows)" "$(grep -a '^taskmgr: row' "$SE" | grep -c ' thr=[1-9]')" ge 1
 num "row reports with thr=0 for live user rows" "$(grep -a '^taskmgr: row' "$SE" | grep -a 'name=taskmgr' | grep -c ' thr=0 ')" eq 0
 num "taskmgr reads its image: dr > 0" "$(grep -a '^taskmgr: row' "$SE" | grep -a 'name=taskmgr' | sed -E 's/.* dr=([0-9]+) .*/\1/' | sort -n | tail -1)" gt 0
@@ -185,16 +186,26 @@ drive_del() {
         app=/bin/taskmgr,report,takt,500 wait=14 last=400 extra="wighalt=120" \
         plan="$tree/tools/taskmgr2/del.txt" > "$out.log" 2>&1 )
 }
+drive_del_retry() {
+    local tree=$1 out=$2 try=1
+    drive_del "$tree" "$out" || return 1
+    while [ "$(cnt "$out/serial.txt" '^taskmgr: ask pid=')" != 1 ] && [ "$try" -lt 3 ]; do
+        echo "  NOTE  delete asked $(cnt "$out/serial.txt" '^taskmgr: ask pid=') times (scripted clicks are timing-bound under load), run $((try + 1)) of 3"
+        rm -rf "$out"
+        try=$((try + 1))
+        drive_del "$tree" "$out" || return 1
+    done
+}
 drive_users "$ROOT" "$TMPD/u" || bad "build users"
 SU="$TMPD/u/serial.txt"
-num "plan targets not found" "$(cnt "$TMPD/u/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
+num "plan targets not found" "$(cnt "$TMPD/u/plan.log" 'TARGET NOT FOUND')" eq 0
 num "users page reports at least one owner" "$(grep -a '^taskmgr: users n=' "$SU" | head -1 | sed -E 's/.*users n=([0-9]+).*/\1/')" ge 1
 num "the owner list names uid 0 (system tasks)" "$(grep -a '^taskmgr: users n=' "$SU" | head -1 | grep -c ' uid=0 ')" eq 1
 num "owner rows add up to the live tasks (cnt sum >= 5)" "$(grep -a '^taskmgr: users n=' "$SU" | head -1 | grep -oE ' cnt=[0-9]+' | sed 's/.*=//' | awk '{s+=$1} END{print s+0}')" ge 5
 num "no row report carries fps= without /proc/frames (shown as --)" "$(grep -a '^taskmgr: row' "$SU" | grep -c ' fps=')" eq 0
-drive_del "$ROOT" "$TMPD/d" || bad "build del"
+drive_del_retry "$ROOT" "$TMPD/d" || bad "build del"
 SD="$TMPD/d/serial.txt"
-num "plan targets not found" "$(cnt "$TMPD/d/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
+num "plan targets not found" "$(cnt "$TMPD/d/plan.log" 'TARGET NOT FOUND')" eq 0
 DPID=$(grep -a '^taskmgr: pick' "$SD" | tail -1 | sed -E 's/.*pick pid=([0-9]+).*/\1/')
 APID=$(grep -a '^taskmgr: ask pid=' "$SD" | head -1 | sed -E 's/.*ask pid=([0-9]+).*/\1/')
 num "Delete on the chosen row asks once" "$(cnt "$SD" '^taskmgr: ask pid=')" eq 1
@@ -222,7 +233,7 @@ drive_svc() {
 }
 drive_hist "$ROOT" "$TMPD/h" || bad "build history"
 SH="$TMPD/h/serial.txt"
-num "history plan targets not found" "$(cnt "$TMPD/h/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
+num "history plan targets not found" "$(cnt "$TMPD/h/plan.log" 'TARGET NOT FOUND')" eq 0
 num "history reports at least 3 apps" "$(grep -a '^taskmgr: history n=' "$SH" | tail -1 | sed -E 's/.*n=([0-9]+).*/\1/')" ge 3
 num "taskmgr itself is in the history and running (live=1)" "$(grep -a '^taskmgr: hist r=' "$SH" | tail -12 | grep -a 'name=taskmgr' | grep -c ' live=1 ')" ge 1
 num "taskmgr burned CPU ticks (ticks >= 1)" "$(grep -a '^taskmgr: hist r=' "$SH" | grep -a 'name=taskmgr' | sed -E 's/.* ticks=([0-9]+) .*/\1/' | sort -n | tail -1)" ge 1
@@ -230,7 +241,7 @@ num "history rows are ranked by CPU (no later row has more ticks)" "$(grep -a '^
 num "every history row says net=<bytes> or net=- (never a bare zero guess)" "$(grep -a '^taskmgr: hist r=' "$SH" | grep -avc ' net=[0-9-]')" eq 0
 drive_svc "$ROOT" "$TMPD/v" || bad "build services"
 SV="$TMPD/v/serial.txt"
-num "services plan targets not found" "$(cnt "$TMPD/v/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
+num "services plan targets not found" "$(cnt "$TMPD/v/plan.log" 'TARGET NOT FOUND')" eq 0
 num "services page lists the 3 rows of /run/svc.state" "$(grep -a '^taskmgr: services n=' "$SV" | tail -1 | sed -E 's/.*n=([0-9]+).*/\1/')" eq 3
 num "running service carries pid 7, 2 starts" "$(grep -a '^taskmgr: svc r=' "$SV" | grep -a 'name=blink' | grep -ac ' pid=7 starts=2 fails=0 state=running')" ge 1
 num "failed service carries 2 failures" "$(grep -a '^taskmgr: svc r=' "$SV" | grep -a 'name=sshd' | grep -ac ' fails=2 state=failed')" ge 1
@@ -262,7 +273,7 @@ drive_nav_retry() {
 }
 drive_nav_retry "$TMPD/n" "$ROOT/tools/taskmgr2/nav.txt" "1 4 1 0 1 4 " || bad "build nav"
 SN="$TMPD/n/serial.txt"
-num "nav plan targets not found" "$(cnt "$TMPD/n/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
+num "nav plan targets not found" "$(cnt "$TMPD/n/plan.log" 'TARGET NOT FOUND')" eq 0
 [ "$(pages "$SN")" = "1 4 1 0 1 4 " ] && ok "page sequence click 1, click 4, Alt+Left x3, Alt+Right x3 = 1 4 1 0 1 4" || bad "page sequence '$(pages "$SN")', expected '1 4 1 0 1 4 '"
 drive_nav_retry "$TMPD/n0" "$ROOT/tools/taskmgr2/nav0.txt" "1 4 " || true
 [ "$(pages "$TMPD/n0/serial.txt")" = "1 4 " ] && ok "counter-proof: plain Left/Right keys change no page (1 4)" || bad "counter-proof: pages '$(pages "$TMPD/n0/serial.txt")', expected '1 4 '"

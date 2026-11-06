@@ -148,7 +148,7 @@ Fl=$(grep -aoE 'kbdconft: pass=[0-9]+ fail=[0-9]+' "$D/serial.txt" | tail -1 | s
 [ "${P:-0}" -ge 8 ] && [ "${Fl:-9}" = 0 ] && ok "kbdconft: $P checks, 0 failed" || { bad "kbdconft: pass=${P:-?} fail=${Fl:-?}"; grep -a "kbdconft:" "$D/serial.txt" | head -12; tail -n 8 "$D.log"; }
 
 echo "== 5. COUNTER-PROOF: the tree before this round"
-BASE=${KEYMAP_BASE:-b461592675ffeb5e9cc83ab8898ae7fda9d9d39a}
+BASE=${KEYMAP_BASE:-6bb02de6efba1b543b13ba77d6071e3370c3be4f}
 if [ -n "$BASE" ] && git rev-parse -q --verify "$BASE^{commit}" >/dev/null 2>&1; then
     OLDWT="$T/basetree"
     git worktree add -q --detach "$OLDWT" "$BASE" 2>/dev/null
