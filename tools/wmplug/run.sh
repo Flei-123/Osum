@@ -298,7 +298,7 @@ hasnotre "$G" 'plugboese-lese' \
     "es legt KEIN verborgenes Hilfsfenster mehr an (der Titel kommt nicht vor)"
 hasre "$G" 'plugboese: vorher id=[0-9]+ x=[0-9]+ y=[0-9]+' \
     "es hat den Ort des fremden Fensters VORHER gelesen"
-hasre "$G" 'plugboese: griff nach fremdem id=[0-9]+ fehler=2' \
+hasre "$G" 'plugboese: griff nach fremdem id=[0-9]+ errors=2' \
     "der Griff wird mit -E_RIGHTS (cap.E_RIGHTS = 2) abgewiesen"
 hasre "$G" 'plugboese: griff .* deny=1' \
     "und der Kern zaehlt die Abweisung mit (PL_DENY + 1)"
@@ -405,7 +405,7 @@ if [ -n "${tv_f:-}" ] && [ -n "${tn_f:-}" ] && [ "${tv_f:-0}" -gt 0 ] 2>/dev/nul
 fi
 
 echo "== 7c. wmplug enable an einem LAUFENDEN Plugin =="
-lauf spaet "wigapp=/bin/uhrspaet,uhrspaet,wartems=3000,runden=40" \
+lauf spaet "wigapp=/bin/uhrspaet,uhrspaet,wartems=3000,rounds=40" \
     'uhrspaet: before enable' 'taskbar: text plug '
 SP=$TMPD/spaet.clean
 sauber spaet
@@ -493,7 +493,7 @@ fi
 
 # ===================================================== 8. die Verwaltung
 echo "== 8. /bin/wmplug: list, info, disable, list =="
-abbild verw 'uhr runden=40' || bad "revoke: the image is not built"
+abbild verw 'uhr rounds=40' || bad "revoke: the image is not built"
 lauf verw "wigapp=/bin/wmplug,probe,uhr" '^wm: hold'
 V=$TMPD/verw.clean
 sauber verw
@@ -524,7 +524,7 @@ n_hold=$(grep -ca '^wm: hold' "$V")
     || bad "'wm: hold' steht ${n_hold}x da -- da ist etwas neu gestartet"
 
 echo "== 8b. two plugins, two deadlines, one run =="
-abbild frist 'regel demo laut' 'uhr runden=40' || bad "deadline: the image is not built"
+abbild frist 'regel demo laut' 'uhr rounds=40' || bad "deadline: the image is not built"
 lauf frist "" '^wm: hold'
 F=$TMPD/frist.clean
 sauber frist

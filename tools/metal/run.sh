@@ -189,8 +189,8 @@ hat "$TMPD/5.txt" "handoff=1" \
 hat "$TMPD/5.txt" "speed=2" "an Anschluss 0 haengt ein Hochgeschwindigkeitsgeraet"
 hat "$TMPD/5.txt" "msc blocks=2048  bsize=512" \
     "READ CAPACITY (10): 2048 Bloecke zu 512 Oktett -- die Groesse des Abbilds"
-e=$(wert "$TMPD/5.txt" 'fehler=[0-9]+')
-[ "${e:-9}" -eq 0 ] && ok "no transfer failed (fehler=0)" \
+e=$(wert "$TMPD/5.txt" 'errors=[0-9]+')
+[ "${e:-9}" -eq 0 ] && ok "no transfer failed (errors=0)" \
                     || bad "fehlgeschlagene Uebertragungen: ${e:-?}"
 while read -r lba summe erstes; do
     if grep -qa "selftest lba=$lba  ok=1  sum=$summe  first=$erstes" "$TMPD/5.txt"; then

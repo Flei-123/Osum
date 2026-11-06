@@ -136,7 +136,7 @@ has "$TMPD/ohne.klar" "plugregel: WITHOUT R_ACT_WIN -- watching only" \
     "und sagt selbst, dass es nichts anfassen darf"
 has "$TMPD/ohne.klar" "app=rechner" "dieselbe Regel trifft dasselbe Fenster"
 has "$TMPD/ohne.klar" "rejected action=6 id=" "PA_DESK wird abgewiesen"
-has "$TMPD/ohne.klar" "fehler=2" "mit -E_RIGHTS (cap.E_RIGHTS = 2)"
+has "$TMPD/ohne.klar" "errors=2" "mit -E_RIGHTS (cap.E_RIGHTS = 2)"
 has "$TMPD/ohne.klar" "plugregel: puls" "das Plugin lebt weiter, statt zu sterben"
 hasnot "$TMPD/ohne.klar" "wmplug: unreg regel" "und bleibt angemeldet"
 if grep -a 'wm: win ' "$TMPD/ohne.klar" | grep -qE 'x=80 y=60 .*t=\[(Rechner|calc.title)\]'; then

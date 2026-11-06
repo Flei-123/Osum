@@ -77,19 +77,19 @@ foto() {
 BASE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs"
 echo "== fotografieren =="
 foto start          "$BASE plugaus"                            'wm: hold'
-foto uhr            "$BASE wmplug wigapp=/bin/wmplug,enable,uhr,runden=12" \
+foto uhr            "$BASE wmplug wigapp=/bin/wmplug,enable,uhr,rounds=12" \
                     'taskbar: text plug ' 'pluguhr: end'
-foto verwaltung     "$BASE wmplug wigapp=/bin/wmplug,probe,uhr,runden=30" \
+foto verwaltung     "$BASE wmplug wigapp=/bin/wmplug,probe,uhr,rounds=30" \
                     'Plugins '
 VOR='nachgemessen id=' foto regel "$BASE nostart wmplug wigapp=/bin/plugregel,recht,demo" \
                     'rechner: ready'
 VOR='nachgemessen id=' foto regel-ohne "$BASE nostart wmplug wigapp=/bin/plugregel,demo" \
                     'rechner: ready'
-foto breit          "$BASE fbres=1440x900 wmplug wigapp=/bin/wmplug,enable,uhr,runden=25" \
+foto breit          "$BASE fbres=1440x900 wmplug wigapp=/bin/wmplug,enable,uhr,rounds=25" \
                     'taskbar: text plug '
-foto eng            "$BASE fbres=800x600 wmplug wigapp=/bin/wmplug,enable,uhr,runden=25" \
+foto eng            "$BASE fbres=800x600 wmplug wigapp=/bin/wmplug,enable,uhr,rounds=25" \
                     'taskbar: text plug '
-foto sehr-eng       "$BASE fbres=640x480 wmplug wigapp=/bin/wmplug,enable,uhr,runden=25" \
+foto sehr-eng       "$BASE fbres=640x480 wmplug wigapp=/bin/wmplug,enable,uhr,rounds=25" \
                     'taskbar: text plug '
 
 echo "== wandeln =="

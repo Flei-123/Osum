@@ -232,7 +232,7 @@ hat "$S" 'explorer: paste n=[0-9]+' "Punkt 1: Strg+V hat eingefuegt"
 hat "$S" 'explorer: dlgrect' "Punkt 2: F2 macht den Umbenennen-Dialog auf"
 
 # --- Punkt 4: Eigenschaften.
-hat "$S" 'explorer: (props zeilen=[0-9]+|taste 288)' \
+hat "$S" 'explorer: (props lines=[0-9]+|taste 288)' \
     "Punkt 4: Alt+Eingabe oeffnet die Eigenschaften"
 
 # --- Punkt 7: die Kuerzel.

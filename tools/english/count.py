@@ -64,6 +64,7 @@ STOP = {"der", "die", "das", "und", "nicht", "ist", "ein", "eine", "einen", "ein
         "ueber", "unter", "weil", "damit", "dann", "oben", "unten", "alle", "jede", "jeder", "jedes", "gibt",
         "bleibt", "steht", "liegt", "dieser", "diese", "dieses", "man", "zwei", "drei", "vier", "ohne",
         "gegen", "durch", "schon", "mehr", "bis", "seit", "dort", "hier", "doch", "aber", "also"}
+KEY_WORDS = {"gesamt", "runden", "laeuft"}
 UMLAUT = re.compile("[äöüßÄÖÜ]")
 
 CODE_EXT = {".fi", ".s", ".S", ".c", ".h", ".py", ".sh", ".js", ".ld", ".json", ".conf", ".txt", ".tsv",
@@ -118,6 +119,15 @@ def catalog_like(s):
     return bool(re.fullmatch(r"[A-Za-z0-9_.\-/:%=\\ ]*", s)) and (" " not in s.strip() or "." in s)
 
 
+def german_key(body):
+    t = body.replace("\\0", "").strip()
+    if not t or t.startswith("/") or "." in t or len(t) > 40:
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9_:= \-]+", t):
+        return False
+    return any(w.lower() in GERMAN or w.lower() in KEY_WORDS for w in WORD.findall(t))
+
+
 def scan_fi(text, names=None):
     ident = 0
     comment = 0
@@ -136,7 +146,7 @@ def scan_fi(text, names=None):
                     comment += 1
         elif kind == "str":
             body = seg[1:-1]
-            if " " in body and german_text(body) and not catalog_like(body):
+            if (" " in body and german_text(body) and not catalog_like(body)) or german_key(body):
                 logtext += 1
     return ident, comment, logtext
 
@@ -158,7 +168,7 @@ def where_fi(text):
                 off += len(ln)
         elif kind == "str":
             body = seg[1:-1]
-            if " " in body and german_text(body) and not catalog_like(body):
+            if (" " in body and german_text(body) and not catalog_like(body)) or german_key(body):
                 rows.append((line_of(a), "logtext", body[:100]))
     return rows
 
