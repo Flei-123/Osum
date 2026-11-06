@@ -23,6 +23,13 @@ check() {
     grep -q "^const HEALTH_NO_GATEWAY: u64 = $nogw$" "$f" || n=$((n+1))
     grep -q "^const HEALTH_NO_INTERNET: u64 = $noinet$" "$f" || n=$((n+1))
     grep -q "ulib.sys(setbase.SYS_NETGET, NG_HEALTH, 0, 0)" "$f" || n=$((n+1))
+    nodns=$(sed -n 's/^const H_NODNS: u64 = \([0-9]*\)$/\1/p' "$HEALTH")
+    grep -q "^const HEALTH_NO_DNS: u64 = $nodns$" "$f" || n=$((n+1))
+    grep -q "health == HEALTH_NO_GATEWAY" "$f" || n=$((n+1))
+    grep -q "health == HEALTH_NO_DNS" "$f" || n=$((n+1))
+    grep -q "return (&k_nogw\[0 as usize\]) as u64" "$f" || n=$((n+1))
+    grep -q "return (&k_nodns\[0 as usize\]) as u64" "$f" || n=$((n+1))
+    grep -q "key = trouble_key()" "$f" || n=$((n+1))
     grep -q "^            if no_internet() {$" "$f" || n=$((n+1))
     echo "$n"
 }
@@ -40,11 +47,30 @@ mut() {
 mut old-arp-only 'if no_internet() {' 'if nv.link_state() < NET_ONLINE {'
 mut wrong-range-low 'HEALTH_NO_GATEWAY: u64 = 2' 'HEALTH_NO_GATEWAY: u64 = 3'
 mut wrong-range-high 'HEALTH_NO_INTERNET: u64 = 4' 'HEALTH_NO_INTERNET: u64 = 5'
+mut no-gateway-text 'health == HEALTH_NO_GATEWAY' 'health == HEALTH_NO_INTERNET'
+mut no-dns-text 'health == HEALTH_NO_DNS' 'health == HEALTH_NO_INTERNET'
+mut no-stage-key 'key = trouble_key()' 'key = (\&k_noinet[0 as usize]) as u64'
 mut wrong-call 'NG_HEALTH, 0, 0)' 'NG_STATE, 0, 0)'
+
+echo "== 2b. every stage has its own plain text in both languages =="
+for lang in en de; do
+    M=locale/$lang/messages
+    for k in nogw nodns noinet; do
+        v=$(sed -n "s/^settings\.wifi\.st\.$k = //p" $M)
+        [ -n "$v" ] && ok "$lang text for $k present" || bad "$lang text for $k missing"
+    done
+    a=$(sed -n 's/^settings\.wifi\.st\.nogw = //p' $M); b=$(sed -n 's/^settings\.wifi\.st\.nodns = //p' $M); c=$(sed -n 's/^settings\.wifi\.st\.noinet = //p' $M)
+    [ "$a" != "$b" ] && [ "$b" != "$c" ] && [ "$a" != "$c" ] && ok "$lang texts differ per stage" || bad "$lang texts are not distinct"
+done
+for k in nogw nodns; do
+    len=$(sed -n "s/^static mut k_$k: \[u8; \([0-9]*\)\].*/\1/p" $SRC)
+    want=$(( $(printf 'settings.wifi.st.%s' $k | wc -c) + 1 ))
+    [ "$len" = "$want" ] && ok "k_$k static size $len" || bad "k_$k static size $len want $want"
+done
 
 echo "== 3. the settings program builds =="
 mkdir -p "$T/bin"
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 if bash tools/sync/build.sh "$T/bin" 0 settings > "$T/b.txt" 2>&1 && [ -s "$T/bin/settings.elf" ]; then ok "settings builds with the new status check"; else bad "settings build failed"; tail -8 "$T/b.txt"; fi
 
-summary_emit "$pass" "$fail" 6
+summary_emit "$pass" "$fail" 19
