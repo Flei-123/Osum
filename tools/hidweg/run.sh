@@ -59,7 +59,7 @@ done
 python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
     && ok "the directory tree is up" || bad "tools/k15/tree.py faellt"
 printf '# taskbar.conf\nedge=0\nheight=28\nwidth=100\nautohide=0\nontop=1\n' > "$TMPD/tb.conf"
-ARGS=(build "$TMPD/root.img" 32768 /lib/
+ARGS=(build "$TMPD/root.img" 65536 /lib/
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer" /etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$TMPD/tb.conf")
@@ -112,10 +112,10 @@ lauf() { # name kommandozeile marke sek [mit-eingabe]
 }
 
 feld() { # datei name
-    grep -a '^eingabe:' "$1" | tail -1 | sed -n "s/.*[ :]$2=\([0-9]*\).*/\1/p"
+    grep -a 'eingabe: ' "$1" | tail -1 | sed -n "s/.*[ :]$2=\([0-9]*\).*/\1/p"
 }
 feld1() { # datei name -- aus der ersten VOLLSTAENDIGEN Pulszeile
-    grep -a '^eingabe:' "$1" | grep -a 'sh=' | head -1 \
+    grep -a 'eingabe: ' "$1" | grep -a 'sh=' | head -1 \
         | sed -n "s/.*[ :]$2=\([0-9]*\).*/\1/p"
 }
 
@@ -135,11 +135,11 @@ echo "       (lifetime until giving up: $(( (t1-t0)/1000000000 )) s)"
 echo
 echo "== 3. WITH wmdauer it keeps running, and the reports arrive =="
 #
-lauf neu "$BASE wmdauer" '^eingabe:' 45
+lauf neu "$BASE wmdauer" 'eingabe: ' 45
 hatnicht "$TMPD/neu.txt" 'wm: sh exit' "mit wmdauer gibt der Schreibtisch NICHT auf"
 is "die Maschine lief noch, als der Laeufer sie abraeumte" "$RC" 124
 hat "$TMPD/neu.txt" 'wm: dauer' "der Dauerbetrieb steht im Mitschnitt"
-N=$(grep -ac '^eingabe:' "$TMPD/neu.txt")
+N=$(grep -ac 'eingabe: ' "$TMPD/neu.txt")
 gt "Pulszeilen im Mitschnitt" "$N" 2
 is "die Unterbrechungen sind AN (if)" "$(feld "$TMPD/neu.txt" if)" 1
 gt "der Zeitgeber schlaegt (mk)" "$(feld "$TMPD/neu.txt" mk)" "$(feld1 "$TMPD/neu.txt" mk)"
@@ -152,8 +152,8 @@ gt "Mausbewegungen aus den Berichten (bew)" "$(feld "$TMPD/neu.txt" bew)" 0
 gt "Pakete beim Zeiger (pk)" "$(feld "$TMPD/neu.txt" pk)" 0
 gt "vom Fensterserver abgeholt (wm)" "$(feld "$TMPD/neu.txt" wm)" 1
 gt "Klicks im Fensterserver (kl)" "$(feld "$TMPD/neu.txt" kl)" 0
-A=$(grep -a '^eingabe:' "$TMPD/neu.txt" | head -1 | sed -n 's/.* xy=\([0-9,]*\).*/\1/p')
-B=$(grep -a '^eingabe:' "$TMPD/neu.txt" | tail -1 | sed -n 's/.* xy=\([0-9,]*\).*/\1/p')
+A=$(grep -a 'eingabe: ' "$TMPD/neu.txt" | head -1 | sed -n 's/.* xy=\([0-9,]*\).*/\1/p')
+B=$(grep -a 'eingabe: ' "$TMPD/neu.txt" | tail -1 | sed -n 's/.* xy=\([0-9,]*\).*/\1/p')
 if [ -n "$A" ] && [ "$A" != "$B" ]; then ok "the pointer moved: $A -> $B"
 else bad "the pointer stands still: $A -> $B"; fi
 

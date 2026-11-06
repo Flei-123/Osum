@@ -11,7 +11,7 @@ declare -A FULL_KINDS=(
 
 for machine in hp-827d surface-laptop-4 amd-server; do
     corpus_tables "$machine"
-    ACPI_TIMEOUT=300 ACPI_MEM=4096 qrun "$K" "real-$machine" "osum acpiev amlsweep ecsim noring3 nofs" "${TABLE_ARGS[@]}"
+    ACPI_TIMEOUT=300 ACPI_MEM=4096 qrun "$K" "real-$machine" "osum acpiev aml amlsweep ecsim noring3 nofs" "${TABLE_ARGS[@]}"
     hold=$(line "real-$machine" '^amlhold: ')
     chk "$machine: loader reports no error" 0 "$(val "$hold" e)"
     chk "$machine: no table counted bad" 0 "$(val "$hold" bad)"

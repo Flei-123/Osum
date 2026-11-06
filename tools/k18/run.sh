@@ -93,12 +93,12 @@ done
 
 for n in P_PWR:45 P_PWRIDLE:46 P_PWRLOAD:47; do
     nm=${n%%:*}; soll_v=${n##*:}
-    v=$(number_in kernel/uprog.fi "$nm")
+    v=$(number_in kernel/uprog/upmisc.fi "$nm")
     gleich "die Ring-3-Programmnummer $nm" "$soll_v" "${v:-fehlt}"
 done
 
 foreign=$(grep -ran --include='*.fi' --include='*.s' -E '^const SYS_[A-Za-z0-9_]+: u64 = 17(5[0-9]|[6-9][0-9])' kernel/ \
-    | grep -v -e '^kernel/sys/sys.fi' -e '^kernel/uprog.fi' -e '^kernel/user/power.fi' \
+    | grep -v -e '^kernel/sys/sys.fi' -e '^kernel/uprog.fi' -e '^kernel/uprog/upmisc.fi' -e '^kernel/user/power.fi' \
               -e '^kernel/user/powermon.fi' -e '^kernel/user/taskbar.fi' -e '^kernel/user/taskbar/' \
               -e '^kernel/user/qs.fi' -e '^kernel/user/modeapply.fi' -e '^kernel/user/launcher.fi' -e '^kernel/user/powerd.fi' || true)
 #
