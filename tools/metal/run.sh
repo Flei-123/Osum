@@ -39,7 +39,8 @@ bash tools/build-kernel.sh "$TMPD/neu.mb" --stufe 0 >"$TMPD/b1.txt" 2>&1 \
     && ok "the kernel of this round is built ($(stat -c%s "$TMPD/neu.mb") Oktette)" \
     || { bad "the kernel could not be built"; sed 's/^/        /' "$TMPD/b1.txt" | head -5; }
 
-VOR=$(git merge-base HEAD main 2>/dev/null || echo "")
+VOR=${METAL_OLD_REF:-62ee0ccb5be06c12862eb3e1d9ecd43b18dd4eec}
+git cat-file -e "$VOR^{commit}" 2>/dev/null || VOR=""
 ALT=""
 if [ -n "$VOR" ]; then
     ALTD="$TMPD/alt"
@@ -50,7 +51,7 @@ if [ -n "$VOR" ]; then
         if ( cd "$ALTD" && bash tools/build-kernel.sh "$TMPD/alt.mb" --stufe 0 ) \
                 >"$TMPD/b0.txt" 2>&1; then
             ALT="$TMPD/alt.mb"
-            ok "the kernel of the branch point is built ($(stat -c%s "$ALT") Oktette, ${VOR:0:8})"
+            ok "the pinned old kernel is built ($(stat -c%s "$ALT") Oktette, ${VOR:0:8})"
         else
             hin "der alte Kern liess sich nicht bauen -- der Vergleich faellt aus"
         fi
