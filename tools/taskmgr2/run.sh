@@ -30,7 +30,7 @@ command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "TASKMGR2: skipped, no q
 drive() {
     local tree=$1 out=$2 plan=$3
     ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
-        app=/bin/taskmgr,melde,takt,500 wait=14 last=400 extra="wighalt=120" \
+        app=/bin/taskmgr,report,takt,500 wait=14 last=400 extra="wighalt=120" \
         plan="$plan" > "$out.log" 2>&1 )
 }
 
@@ -40,12 +40,12 @@ SC="$TMPD/c/serial.txt"
 num "plan targets not found" "$(cnt "$TMPD/c/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
 num "menu opened (2 row clicks, 1 header miss)" "$(cnt "$SC" '^taskmgr: ctx n=')" eq 2
 num "menu on the launcher (an app) has exactly 3 rows" "$(grep -a '^taskmgr: ctx n=' "$SC" | head -1 | sed -E 's/.*ctx n=([0-9]+).*/\1/')" eq 3
-LPID=$(grep -a '^taskmgr: zeile' "$SC" | grep 'name=launcher' | head -1 | grep -oE ' pid=[0-9]+' | sed 's/.*=//')
+LPID=$(grep -a '^taskmgr: row' "$SC" | grep 'name=launcher' | head -1 | grep -oE ' pid=[0-9]+' | sed 's/.*=//')
 CPID=$(grep -a '^taskmgr: ctx n=' "$SC" | head -1 | sed -E 's/.* pid=([0-9]+).*/\1/')
 [ -n "${LPID:-}" ] && [ "${LPID:-x}" = "${CPID:-y}" ] && ok "menu belongs to the clicked row (pid $CPID)" || bad "menu pid ${CPID:-?}, row pid ${LPID:-?}"
-num "exactly one pick (Escape picks nothing)" "$(cnt "$SC" '^taskmgr: ctx wahl act=')" eq 1
-num "picked action is details (2)" "$(grep -a '^taskmgr: ctx wahl act=' "$SC" | head -1 | sed -E 's/.*act=([0-9]+).*/\1/')" eq 2
-num "no end-task question asked" "$(cnt "$SC" '^taskmgr: frage pid=')" eq 0
+num "exactly one pick (Escape picks nothing)" "$(cnt "$SC" '^taskmgr: ctx pick act=')" eq 1
+num "picked action is details (2)" "$(grep -a '^taskmgr: ctx pick act=' "$SC" | head -1 | sed -E 's/.*act=([0-9]+).*/\1/')" eq 2
+num "no end-task question asked" "$(cnt "$SC" '^taskmgr: ask pid=')" eq 0
 BOX=$(python3 -I tools/toolbench/klickplan.py "$SC" ctxbox 2>/dev/null)
 if [ -n "$BOX" ] && [ -s "$TMPD/c/c00_before.ppm" ] && [ -s "$TMPD/c/c01_open.ppm" ] && [ -s "$TMPD/c/c02_closed.ppm" ]; then
     python3 -I - "$TMPD/c" "$BOX" > "$TMPD/ctxpix.txt" 2>&1 <<'PY'
@@ -72,7 +72,7 @@ echo "== 2. search field filters the list =="
 drive "$ROOT" "$TMPD/s" "$ROOT/tools/taskmgr2/search.txt" || bad "build search"
 SS="$TMPD/s/serial.txt"
 num "plan targets not found" "$(cnt "$TMPD/s/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
-ALL=$(grep -a '^taskmgr: group' "$SS" | head -1 >/dev/null; grep -a '^taskmgr: zeile' "$SS" | grep -oE ' pid=[0-9]+' | sort -u | wc -l)
+ALL=$(grep -a '^taskmgr: group' "$SS" | head -1 >/dev/null; grep -a '^taskmgr: row' "$SS" | grep -oE ' pid=[0-9]+' | sort -u | wc -l)
 NOMATCH=$(grep -a '^taskmgr: search n=' "$SS" | sed -E 's/.*n=([0-9]+).*/\1/' | sed -n 3p)
 LAST=$(grep -a '^taskmgr: search n=' "$SS" | tail -1 | sed -E 's/.*n=([0-9]+).*/\1/')
 echo "        search values: $(grep -a '^taskmgr: search n=' "$SS" | sed -E 's/.*n=([0-9]+).*/\1/' | tr '\n' ' ') (processes: $ALL)"
@@ -85,7 +85,7 @@ echo "== 3. performance page: five resource tiles, details grid =="
 drive_perf() {
     local tree=$1 out=$2
     ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
-        app=/bin/taskmgr,melde,takt,500,performance wait=14 last=400 extra="wighalt=120" \
+        app=/bin/taskmgr,report,takt,500,performance wait=14 last=400 extra="wighalt=120" \
         plan="$tree/tools/taskmgr2/perf.txt" > "$out.log" 2>&1 )
 }
 drive_perf "$ROOT" "$TMPD/p" || bad "build perf"
@@ -144,29 +144,29 @@ echo "== 5. S5: thread/disk counters, Efficiency mode =="
 drive_eff() {
     local tree=$1 out=$2
     ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
-        app=/bin/taskmgr,melde,takt,500 wait=14 last=400 extra="wighalt=120" \
+        app=/bin/taskmgr,report,takt,500 wait=14 last=400 extra="wighalt=120" \
         plan="$tree/tools/taskmgr2/eff.txt" > "$out.log" 2>&1 )
 }
 drive_eff "$ROOT" "$TMPD/e" || bad "build eff"
 SE="$TMPD/e/serial.txt"
 num "plan targets not found" "$(cnt "$TMPD/e/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
-num "row reports carry thr= (rows)" "$(grep -a '^taskmgr: zeile' "$SE" | grep -c ' thr=[1-9]')" ge 1
-num "row reports with thr=0 for live user rows" "$(grep -a '^taskmgr: zeile' "$SE" | grep -a 'name=taskmgr' | grep -c ' thr=0 ')" eq 0
-num "taskmgr reads its image: dr > 0" "$(grep -a '^taskmgr: zeile' "$SE" | grep -a 'name=taskmgr' | sed -E 's/.* dr=([0-9]+) .*/\1/' | sort -n | tail -1)" gt 0
+num "row reports carry thr= (rows)" "$(grep -a '^taskmgr: row' "$SE" | grep -c ' thr=[1-9]')" ge 1
+num "row reports with thr=0 for live user rows" "$(grep -a '^taskmgr: row' "$SE" | grep -a 'name=taskmgr' | grep -c ' thr=0 ')" eq 0
+num "taskmgr reads its image: dr > 0" "$(grep -a '^taskmgr: row' "$SE" | grep -a 'name=taskmgr' | sed -E 's/.* dr=([0-9]+) .*/\1/' | sort -n | tail -1)" gt 0
 num "menu on an app row has 3 rows" "$(grep -a '^taskmgr: ctx n=' "$SE" | head -1 | sed -E 's/.*ctx n=([0-9]+).*/\1/')" eq 3
 num "menu on a system row has exactly 2 rows (no Efficiency mode)" "$(grep -a '^taskmgr: ctx n=' "$SE" | sed -n 2p | sed -E 's/.*ctx n=([0-9]+).*/\1/')" eq 2
-num "exactly one Efficiency pick (act 3)" "$(cnt "$SE" '^taskmgr: ctx wahl act=3')" eq 1
+num "exactly one Efficiency pick (act 3)" "$(cnt "$SE" '^taskmgr: ctx pick act=3')" eq 1
 EPID=$(grep -a '^taskmgr: prio pid=' "$SE" | head -1 | sed -E 's/.*pid=([0-9]+).*/\1/')
 CPID=$(grep -a '^taskmgr: ctx n=' "$SE" | head -1 | sed -E 's/.* pid=([0-9]+).*/\1/')
 [ -n "${EPID:-}" ] && [ "$EPID" = "$CPID" ] && ok "priority change targets the clicked row (pid $EPID)" || bad "prio pid ${EPID:-?}, clicked pid ${CPID:-?}"
 num "SETPRIO accepted (rc 0)" "$(grep -a '^taskmgr: prio pid=' "$SE" | head -1 | sed -E 's/.* rc=([0-9]+).*/\1/')" eq 0
 num "priority went normal -> efficiency (new=1)" "$(grep -a '^taskmgr: prio pid=' "$SE" | head -1 | sed -E 's/.* new=([0-9]+).*/\1/')" eq 1
 num "old priority was normal (2)" "$(grep -a '^taskmgr: prio pid=' "$SE" | head -1 | sed -E 's/.* old=([0-9]+).*/\1/')" eq 2
-num "the row reports prio=1 after the pick" "$(grep -a '^taskmgr: zeile' "$SE" | grep -a " pid=$EPID " | grep -c ' prio=1 ')" ge 1
-num "the row reported prio=2 before the pick" "$(grep -a '^taskmgr: zeile' "$SE" | grep -a " pid=$EPID " | grep -c ' prio=2 ')" ge 1
+num "the row reports prio=1 after the pick" "$(grep -a '^taskmgr: row' "$SE" | grep -a " pid=$EPID " | grep -c ' prio=1 ')" ge 1
+num "the row reported prio=2 before the pick" "$(grep -a '^taskmgr: row' "$SE" | grep -a " pid=$EPID " | grep -c ' prio=2 ')" ge 1
 if [ -n "$BWT" ] && [ -d "$BWT" ]; then
     drive_eff "$BWT" "$TMPD/be" || true
-    num "BASE $BASE: rows carry no thr=" "$(grep -a '^taskmgr: zeile' "$TMPD/be/serial.txt" | grep -c ' thr=')" eq 0
+    num "BASE $BASE: rows carry no thr=" "$(grep -a '^taskmgr: row' "$TMPD/be/serial.txt" | grep -c ' thr=')" eq 0
     num "BASE $BASE: no priority change" "$(cnt "$TMPD/be/serial.txt" '^taskmgr: prio pid=')" eq 0
 fi
 
@@ -175,13 +175,13 @@ echo "== 6. S3/S6: Users page, Delete = End task, FPS only from /proc/frames =="
 drive_users() {
     local tree=$1 out=$2
     ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
-        app=/bin/taskmgr,melde,takt,500,users wait=14 last=400 extra="wighalt=120" \
+        app=/bin/taskmgr,report,takt,500,users wait=14 last=400 extra="wighalt=120" \
         plan="$tree/tools/taskmgr2/users.txt" > "$out.log" 2>&1 )
 }
 drive_del() {
     local tree=$1 out=$2
     ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
-        app=/bin/taskmgr,melde,takt,500 wait=14 last=400 extra="wighalt=120" \
+        app=/bin/taskmgr,report,takt,500 wait=14 last=400 extra="wighalt=120" \
         plan="$tree/tools/taskmgr2/del.txt" > "$out.log" 2>&1 )
 }
 drive_users "$ROOT" "$TMPD/u" || bad "build users"
@@ -190,17 +190,17 @@ num "plan targets not found" "$(cnt "$TMPD/u/plan.log" 'ZIEL NICHT GEFUNDEN')" e
 num "users page reports at least one owner" "$(grep -a '^taskmgr: users n=' "$SU" | head -1 | sed -E 's/.*users n=([0-9]+).*/\1/')" ge 1
 num "the owner list names uid 0 (system tasks)" "$(grep -a '^taskmgr: users n=' "$SU" | head -1 | grep -c ' uid=0 ')" eq 1
 num "owner rows add up to the live tasks (cnt sum >= 5)" "$(grep -a '^taskmgr: users n=' "$SU" | head -1 | grep -oE ' cnt=[0-9]+' | sed 's/.*=//' | awk '{s+=$1} END{print s+0}')" ge 5
-num "no row report carries fps= without /proc/frames (shown as --)" "$(grep -a '^taskmgr: zeile' "$SU" | grep -c ' fps=')" eq 0
+num "no row report carries fps= without /proc/frames (shown as --)" "$(grep -a '^taskmgr: row' "$SU" | grep -c ' fps=')" eq 0
 drive_del "$ROOT" "$TMPD/d" || bad "build del"
 SD="$TMPD/d/serial.txt"
 num "plan targets not found" "$(cnt "$TMPD/d/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
-DPID=$(grep -a '^taskmgr: wahl' "$SD" | tail -1 | sed -E 's/.*wahl pid=([0-9]+).*/\1/')
-APID=$(grep -a '^taskmgr: frage pid=' "$SD" | head -1 | sed -E 's/.*frage pid=([0-9]+).*/\1/')
-num "Delete on the chosen row asks once" "$(cnt "$SD" '^taskmgr: frage pid=')" eq 1
+DPID=$(grep -a '^taskmgr: pick' "$SD" | tail -1 | sed -E 's/.*wahl pid=([0-9]+).*/\1/')
+APID=$(grep -a '^taskmgr: ask pid=' "$SD" | head -1 | sed -E 's/.*frage pid=([0-9]+).*/\1/')
+num "Delete on the chosen row asks once" "$(cnt "$SD" '^taskmgr: ask pid=')" eq 1
 [ -n "${APID:-}" ] && [ "${APID:-x}" = "${DPID:-y}" ] && ok "the question is about the chosen row (pid $APID)" || bad "question pid ${APID:-?}, chosen pid ${DPID:-?}"
 if [ -n "$BWT" ] && [ -d "$BWT" ]; then
     drive_del "$BWT" "$TMPD/bd" || true
-    num "BASE $BASE: Delete asks nothing" "$(cnt "$TMPD/bd/serial.txt" '^taskmgr: frage pid=')" eq 0
+    num "BASE $BASE: Delete asks nothing" "$(cnt "$TMPD/bd/serial.txt" '^taskmgr: ask pid=')" eq 0
     drive_users "$BWT" "$TMPD/bu" || true
     num "BASE $BASE: no users page report" "$(cnt "$TMPD/bu/serial.txt" '^taskmgr: users n=')" eq 0
 fi
@@ -210,13 +210,13 @@ echo "== 7. r1600: App history + Services pages from real sources =="
 drive_hist() {
     local tree=$1 out=$2
     ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
-        app=/bin/taskmgr,melde,takt,500,history wait=14 last=400 extra="wighalt=120" \
+        app=/bin/taskmgr,report,takt,500,history wait=14 last=400 extra="wighalt=120" \
         plan="$tree/tools/taskmgr2/history.txt" > "$out.log" 2>&1 )
 }
 drive_svc() {
     local tree=$1 out=$2
     ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes svcstate="$tree/tools/taskmgr2/svc.state" \
-        app=/bin/taskmgr,melde,takt,500,services wait=14 last=400 extra="wighalt=120" \
+        app=/bin/taskmgr,report,takt,500,services wait=14 last=400 extra="wighalt=120" \
         plan="$tree/tools/taskmgr2/services.txt" > "$out.log" 2>&1 )
 }
 drive_hist "$ROOT" "$TMPD/h" || bad "build history"
@@ -245,10 +245,10 @@ echo "== 8. r1618: Alt+Left / Alt+Right walk the visited pages =="
 drive_nav() {
     local tree=$1 out=$2 plan=$3
     ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
-        app=/bin/taskmgr,melde,takt,500 wait=14 last=400 extra="wighalt=120" \
+        app=/bin/taskmgr,report,takt,500 wait=14 last=400 extra="wighalt=120" \
         plan="$plan" > "$out.log" 2>&1 )
 }
-pages() { grep -a '^taskmgr: seite=' "$1" | sed -E 's/^taskmgr: seite=([0-9]+).*/\1/' | tr '\n' ' '; }
+pages() { grep -a '^taskmgr: page=' "$1" | sed -E 's/^taskmgr: page=([0-9]+).*/\1/' | tr '\n' ' '; }
 drive_nav_retry() {
     local out=$1 plan=$2 want=$3 try=1
     drive_nav "$ROOT" "$out" "$plan" || return 1

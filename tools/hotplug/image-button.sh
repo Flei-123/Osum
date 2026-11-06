@@ -85,7 +85,7 @@ RC=$?
 
 echo
 echo "== what the machine reported =="
-grep -aE 'wechsel:|explorer: orte |explorer: eject|explorer: ausknopf' \
+grep -aE 'wechsel:|explorer: places |explorer: eject|explorer: ausknopf' \
     "$ARB/knopf-seriell.txt" 2>/dev/null | sed 's/^/  /' | head -14
 echo "  (Arbeitsverzeichnis: $ARB)"
 exit $RC

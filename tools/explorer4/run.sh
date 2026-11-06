@@ -9,7 +9,7 @@
 #  2. sort menu opened by a click on the Sort button; the rows drive `explorer: sort spalte= rev=` (size 1, type 4, reversed)
 #  3. Alt+P toggles the preview pane: `explorer: preview on=1`, again on=0
 #  4. a drag on the right edge of the header cell of column 0 widens it: `explorer: colresize a=` and the
-#     text start of column 1 (`explorer: spalten`) moves right by about the drag
+#     text start of column 1 (`explorer: columns`) moves right by about the drag
 #  5. catalog keys (de + en) of the new words
 #  3c. X5 picture preview: a PNG (red | blue) and a binary PPM (green | yellow) in /users/justin; the pane shows them
 #      (`explorer: preview img state=1 w= h=`, plus the pure colours in the screen dump; the text-only dump has none)
@@ -179,12 +179,12 @@ wh=$(grep -aoE 'explorer: menurect wx=[0-9]+ wy=[0-9]+ wh=[0-9]+' "$S" | head -1
 [ "${wh:-0}" -ge 100 ] 2>/dev/null && ok "the context menu has ${wh} px of rows" || bad "context menu height ${wh:-none}"
 
 echo "== 4. column resize by header drag =="
-# before the drag: `explorer: rect id=26 kind=6 x=` (table) and `explorer: spalten x0 x1 ..` (x1 - 10 = right edge of column 0)
+# before the drag: `explorer: rect id=26 kind=6 x=` (table) and `explorer: columns x0 x1 ..` (x1 - 10 = right edge of column 0)
 w0=$(python3 - "$S" <<'PY'
 import re, sys
 t = open(sys.argv[1], 'rb').read().decode('latin1')
 r = re.findall(r'explorer: rect id=26 kind=6 x=(\d+) ', t)
-sp = re.findall(r'explorer: spalten (\d+) (\d+) (\d+) (\d+)', t)
+sp = re.findall(r'explorer: columns (\d+) (\d+) (\d+) (\d+)', t)
 print(int(sp[0][1]) - 10 - int(r[0]) if sp and r else 0)
 PY
 )
@@ -233,7 +233,7 @@ hat "$S" 'explorer: viewsize 2 rh=48' "its Large icons line sets the row height 
 python3 - "$S" <<'PY' && ok "the list reports 4 columns (Name, Date, Type, Size) in increasing x" || bad "columns: fewer than 4 or not increasing"
 import re, sys
 t = open(sys.argv[1], encoding="latin1").read()
-m = re.search(r"explorer: spalten (\d+) (\d+) (\d+) (\d+)", t)
+m = re.search(r"explorer: columns (\d+) (\d+) (\d+) (\d+)", t)
 v = [int(x) for x in m.groups()] if m else []
 sys.exit(0 if len(v) == 4 and v[0] < v[1] < v[2] < v[3] else 1)
 PY

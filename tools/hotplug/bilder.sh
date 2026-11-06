@@ -100,7 +100,7 @@ kill "$QP" 2>/dev/null; wait "$QP" 2>/dev/null
 
 echo
 echo "== what the machine reported =="
-grep -aE 'wechsel:|explorer: orte|explorer: ready|usb: msc' "$ARB/seriell.txt" \
+grep -aE 'wechsel:|explorer: places|explorer: ready|usb: msc' "$ARB/seriell.txt" \
     | sed 's/^/  /' | head -12
 
 echo

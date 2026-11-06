@@ -185,16 +185,16 @@ taste ctrl-v
 warteauf expsmb: copy-up rc=0 octets=5 || 120
 warte 4
 foto 16-pasted-remote
-marke explorer: konflikt smb://10.9.0.1/data/sub/alpha.txt
+marke explorer: conflict smb://10.9.0.1/data/sub/alpha.txt
 taste ctrl-v
-warteneu explorer: konflikt smb://10.9.0.1/data/sub/alpha.txt || 120
+warteneu explorer: conflict smb://10.9.0.1/data/sub/alpha.txt || 120
 warte 3
 foto 17-conflict
 taste esc
 warte 4
-marke explorer: konflikt smb://10.9.0.1/data/sub/alpha.txt
+marke explorer: conflict smb://10.9.0.1/data/sub/alpha.txt
 taste ctrl-v
-warteneu explorer: konflikt smb://10.9.0.1/data/sub/alpha.txt || 120
+warteneu explorer: conflict smb://10.9.0.1/data/sub/alpha.txt || 120
 warte 3
 marke expsmb: copy-up rc=0 octets=5
 taste ret
@@ -262,7 +262,7 @@ has "$W" 'explorer: cd smb://10.9.0.1/data/sub n=1$' "browse smb://10.9.0.1/data
 has "$W" 'expsmb: copy-up rc=0 octets=5$' "copy a local file and paste into smb://.../sub: 5 octets"
 has "$W" 'expsmb: stat rc=5$' "paste target is probed first: new name does not exist (stat exit 5)"
 has "$W" 'expsmb: stat rc=0$' "paste target is probed: existing name found (stat exit 0)"
-[ "$(grep -ac 'explorer: konflikt smb://10.9.0.1/data/sub/alpha.txt' "$W")" -eq 2 ] && ok "pasting onto an existing remote name asks (conflict dialog), twice for two pastes" || bad "conflict dialog count"
+[ "$(grep -ac 'explorer: conflict smb://10.9.0.1/data/sub/alpha.txt' "$W")" -eq 2 ] && ok "pasting onto an existing remote name asks (conflict dialog), twice for two pastes" || bad "conflict dialog count"
 [ "$(grep -ac 'expsmb: copy-up rc=0 octets=5' "$W")" -eq 2 ] && ok "Esc cancelled (no third upload), Enter replaced (second upload)" || bad "copy-up count after Esc/Enter"
 [ -f "$SHARE/sub/alpha.txt" ] && [ "$(cat "$SHARE/sub/alpha.txt")" = "eins" ] && ok "the pasted file is on the share with the right content" || bad "alpha.txt did not land on the share"
 has "$W" 'expsmb: rm rc=0$' "cut from smb:// removes the remote source after the copy"

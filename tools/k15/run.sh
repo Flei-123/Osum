@@ -584,9 +584,9 @@ TSFG=$(frgb "$TMPD/files.txt" "explorer: rows" selfg)
 TDIM=$(frgb "$TMPD/files.txt" "explorer: rows" dim)
 THBG=$(frgb "$TMPD/files.txt" "explorer: rows" headbg)
 ETOL=1
-SP=($(grep -a '^explorer: spalten' "$TMPD/files.txt" | tail -1 | sed 's/^explorer: spalten //'))
+SP=($(grep -a '^explorer: columns' "$TMPD/files.txt" | tail -1 | sed 's/^explorer: columns //'))
 if [ "${#SP[@]}" -lt 4 ]; then
-    bad "explorer does not name its columns (explorer: spalten is missing) -- the column assertions below cannot measure"
+    bad "explorer does not name its columns (explorer: columns is missing) -- the column assertions below cannot measure"
     SP=(0 0 0 0)
 fi
 schau "the header row: the first column is called 'Name'" \
