@@ -57,6 +57,20 @@ fi
 ( cd "$OLD" && bash tools/build-kernel.sh "$TMPD/old.mb" > "$TMPD/oldbuild.log" 2>&1 ) \
     && ok "old-kernel variant builds" || { bad "old-kernel variant build"; tail -8 "$TMPD/oldbuild.log"; }
 
+OLD_UNLINK="$TMPD/oldunlink"
+mkdir -p "$OLD_UNLINK"
+for e in $(ls -A | grep -v '^\.git$'); do cp -al "$e" "$OLD_UNLINK/"; done
+DETACH='if detach && node_detach(state, node) {'
+DETACH_OFF='if false && node_detach(state, node) {'
+fat_src=$(cat "$OLD_UNLINK/kernel/fs/fat.fi")
+printf '%s\n' "${fat_src//"$DETACH"/"$DETACH_OFF"}" > "$TMPD/fat.unlink.patched"
+rm -f "$OLD_UNLINK/kernel/fs/fat.fi"
+cp "$TMPD/fat.unlink.patched" "$OLD_UNLINK/kernel/fs/fat.fi"
+grep -qF "$DETACH_OFF" "$OLD_UNLINK/kernel/fs/fat.fi" && ok "unlink-old variant: detach of held nodes disabled" \
+    || bad "unlink-old variant: detach patch did not apply"
+( cd "$OLD_UNLINK" && bash tools/build-kernel.sh "$TMPD/oldunlink.mb" > "$TMPD/oldunlinkbuild.log" 2>&1 ) \
+    && ok "unlink-old variant builds" || { bad "unlink-old variant build"; tail -8 "$TMPD/oldunlinkbuild.log"; }
+
 MKARGS=""
 for p in $PROGS; do
     if "$FIRNC" "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/e$p" 2>&1 \
@@ -105,6 +119,19 @@ mkfs.fat -F 32 -s 1 "$IMG/fat.fs" >/dev/null 2>&1 \
     && mcopy -i "$IMG/fat.fs" -s "$TREE/d" ::/d >/dev/null 2>&1 \
     && ok "FAT32 image filled with mtools" || bad "FAT32 image"
 mkdisk "$IMG/fat.fs" "$IMG/fat.disk" 0c
+
+HELD_SIZE=777
+mkdir -p "$TREE/h"
+python3 -I - "$TREE/h/held.bin" "$HELD_SIZE" <<'PYEOF'
+import random, sys
+open(sys.argv[1], "wb").write(bytes(random.Random(77).randrange(256) for _ in range(int(sys.argv[2]))))
+PYEOF
+dd if=/dev/null of="$IMG/fath.fs" bs=1M seek=40 2>/dev/null
+mkfs.fat -F 32 -s 1 "$IMG/fath.fs" >/dev/null 2>&1 \
+    && mcopy -i "$IMG/fath.fs" -s "$TREE/d" ::/d >/dev/null 2>&1 \
+    && mcopy -i "$IMG/fath.fs" -s "$TREE/h" ::/h >/dev/null 2>&1 \
+    && ok "FAT32 image with a file to hold open" || bad "FAT32 held image"
+mkdisk "$IMG/fath.fs" "$IMG/fath.disk" 0c
 
 dd if=/dev/null of="$IMG/exfat.fs" bs=1M seek=24 2>/dev/null
 mkfs.exfat -c 512 "$IMG/exfat.fs" >/dev/null 2>&1 \
@@ -197,6 +224,68 @@ runfs() {
     tr -d '\r\000' < "$TMPD/$name.txt" > "$TMPD/$name.out"
 }
 
+run_held() {
+    local kern=$1 tag=$2 name="$2-held"
+    local S="$TMPD/$name.sh" H="$TMPD/held.sh"
+    printf 'echo @@held-start\nsleep 4\nwc -c\necho @@held-end\n' > "$H"
+    {
+        echo 'echo @@mount'
+        echo 'umount /mnt'
+        echo 'mount /dev/hdb1 /mnt vfat'
+        echo 'echo "@@mount-rc=$?"'
+        echo 'sh /t/held.sh < /mnt/h/held.bin &'
+        echo 'sleep 1'
+        echo 'rm /mnt/h/held.bin'
+        echo 'echo "@@rm-rc=$?"'
+        echo 'echo @@scan'
+        local paths k=0 line=""
+        for paths in $(cut -d' ' -f2 "$IMG/fat.want"); do
+            line="$line \"/mnt/$paths\""
+            k=$((k + 1))
+            if [ $((k % 3)) = 0 ]; then echo "shasum$line"; line=""; fi
+        done
+        [ -z "$line" ] || echo "shasum$line"
+        echo 'sleep 6'
+        echo 'echo @@end'
+        echo 'umount /mnt'
+        echo 'sleep 2'
+    } > "$S"
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/root-$name.img" 20000 /bin/ /proc/ /dev/ /mnt/ /t/ $MKARGS \
+        "/t/s.sh=$S" "/t/held.sh=$H" > "$TMPD/mkfs-$name.log" 2>&1 \
+        || { bad "[$name] mkfs"; tail -3 "$TMPD/mkfs-$name.log"; return 1; }
+    cp --sparse=always "$IMG/fath.disk" "$TMPD/live2-$name.img"
+    local acc=""
+    [ "$OSUM_QEMU_ACCEL" = kvm ] && acc="-cpu host"
+    timeout 600 $QEMU_X86 $acc -kernel "$kern" -m 512 \
+        -append "osum nokbd vfs script=sh /t/s.sh;exit" \
+        -serial "file:$TMPD/$name.txt" -display none -no-reboot \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -drive "file=$TMPD/root-$name.img,format=raw,if=ide,index=0" \
+        -drive "file=$TMPD/live2-$name.img,format=raw,if=ide,index=1" >/dev/null 2>&1
+    tr -d '\r\000' < "$TMPD/$name.txt" > "$TMPD/$name.out"
+}
+
+held_value() {
+    awk '/^@@held-start/{on=1; next} /^@@held-end/{on=0} on && /^ *[0-9]+ *$/{gsub(/ /,""); print; exit}' "$1"
+}
+
+check_held() {
+    local kern=$1 tag=$2 expect=$3
+    run_held "$kern" "$tag" || return
+    local name="$tag-held" out="$TMPD/$tag-held.out" v
+    grep -aq '^@@end' "$out" && ok "[$name] script reached the end" || bad "[$name] script did not reach @@end"
+    grep -aq '^@@rm-rc=0' "$out" && ok "[$name] unlink of the open file succeeded" || bad "[$name] unlink of the open file failed"
+    grep -aq '^@@held-end' "$out" && ok "[$name] the holder finished" || bad "[$name] the holder never finished"
+    v=$(held_value "$out")
+    if [ "$expect" = green ]; then
+        if [ "$v" = 0 ] || [ "$v" = "$HELD_SIZE" ]; then ok "[$name] the held descriptor still reads its own file or nothing ($v bytes)"
+        else bad "[$name] the held descriptor reads another file ($v bytes, expected 0 or $HELD_SIZE)"; fi
+    else
+        if [ -n "$v" ] && [ "$v" != 0 ] && [ "$v" != "$HELD_SIZE" ]; then ok "[$name] NEGATIVE: the held descriptor reads a foreign file ($v bytes)"
+        else bad "[$name] NEGATIVE: old kernel stays correct ($v bytes), probe is blind"; fi
+    fi
+}
+
 count_bad() {
     python3 -I - "$@" <<'PYEOF'
 import re, sys
@@ -250,4 +339,8 @@ for k in ${FSSLOTS_KINDS:-ofs fat ext4 ntfs exfat}; do check_kind "$TMPD/new.mb"
 echo "== 4. negative controls: kernel without the recycle-time drop =="
 for k in ${FSSLOTS_OLD_KINDS:-fat ext4 ntfs exfat}; do check_kind "$TMPD/old.mb" "$k" old red; done
 
-summary_emit "$pass" "$fail" 30
+echo "== 5. unlink of an open FAT file: its slot must not be recycled under the descriptor =="
+check_held "$TMPD/new.mb" new green
+check_held "$TMPD/oldunlink.mb" oldunlink red
+
+summary_emit "$pass" "$fail" 36

@@ -22,6 +22,9 @@ done
 [ -x "$LIMINE/limine" ] || { echo "S3SMP: skipped, Limine missing"; exit 0; }
 
 CYCLES=3
+AP_MIN_TICKS=2
+BSP_MIN_TICKS=10
+AP_TOTAL_PER_CYCLE=3
 
 mkimg() { # kernel img cmdline
     local t="$TMPD/esp.img"
@@ -104,14 +107,19 @@ for smp in 2 4; do
             on=$(core_val "$L" nach "$c" "$k" online)
             # the boot core's idle counter stays 0 (it runs the kernel, not an idle loop) -- its ticks must grow
             idleok=1; [ "$k" != 0 ] && { [ -z "$iv" ] || [ -z "$in_" ] || [ "$in_" -le "$iv" ]; } && idleok=0
-            if [ -z "$tv" ] || [ -z "$tn" ] || [ "$tn" -lt $((tv + 10)) ] || [ "$idleok" != 1 ] || [ "$on" != 1 ]; then
+            minup=$AP_MIN_TICKS; [ "$k" = 0 ] && minup=$BSP_MIN_TICKS
+            if [ -z "$tv" ] || [ -z "$tn" ] || [ "$tn" -lt $((tv + minup)) ] || [ "$idleok" != 1 ] || [ "$on" != 1 ]; then
                 allgrow=0; detail="$detail [cycle $c core $k ticks $tv->$tn idle $iv->$in_ online=$on]"
             fi
             # a core that runs again does at least one context switch (idle <-> task or a tick)
             [ "$sn" -ge "$sv" ] 2>/dev/null || { allgrow=0; detail="$detail [cycle $c core $k sw $sv->$sn]"; }
         done
     done
-    [ "$allgrow" = 1 ] && ok "every core: timer ticks AND idle turns grew by at least 10 ticks within 300 ms after each wake-up, all online" \
+    for k in $(seq 1 $((smp-1))); do
+        t1=$(core_val "$L" vor 1 "$k" ticks); t3=$(core_val "$L" nach "$CYCLES" "$k" ticks)
+        { [ -n "$t1" ] && [ -n "$t3" ] && [ "$t3" -ge $((t1 + AP_TOTAL_PER_CYCLE * CYCLES)) ]; } || { allgrow=0; detail="$detail [core $k total ticks $t1->$t3]"; }
+    done
+    [ "$allgrow" = 1 ] && ok "every core runs after each wake-up (boot core >= $BSP_MIN_TICKS ticks, idle cores >= $AP_MIN_TICKS ticks at their 10 Hz halted rate, idle turns grew, all online, total growth over all cycles)" \
         || bad "cores did not all run again:$detail"
     # the clock: the wall clock advanced by roughly the time the host kept the VM asleep (>= 2 s)
     slept=$(tr -d '\r' < "$L" | grep -a 's3: clock sleep=' | sed 's/.*sleep=\([0-9]*\) s.*/\1/' | awk '{s+=$1; n++} END {print (n==3 && s>=6) ? 1 : 0}')
@@ -125,9 +133,7 @@ lauf "nostart" "$TMPD/n.img" 2 1
 L="$TMPD/l-nostart.txt"
 num "slept" "$(echo "$STATES" | tr '|' '\n' | grep -ac suspended)" ge 1
 tv=$(core_val "$L" vor 1 1 ticks); tn=$(core_val "$L" nach 1 1 ticks)
-# 300 ms of a running core are ~30 timer ticks at 100 Hz; a parked one may take one or two
-# more before it halts, never ten
-if [ -n "$tn" ] && [ -n "$tv" ] && [ "$tn" -lt $((tv + 10)) ]; then ok "the check catches it: core 1 did not tick ($tv -> $tn)"
+if [ -n "$tn" ] && [ -n "$tv" ] && [ "$tn" -lt $((tv + AP_MIN_TICKS + 1)) ]; then ok "the check catches it: core 1 did not tick ($tv -> $tn)"
 else bad "counter-check: core 1 ticks $tv -> $tn (expected no growth)"; fi
 on=$(core_val "$L" nach 1 1 online)
 [ "$on" = 0 ] && ok "and it is still reported offline" || bad "core 1 online=$on after s3nostart (expected 0)"

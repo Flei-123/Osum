@@ -65,6 +65,7 @@ const N_DLBA: u64 = 32
 const N_DOFF: u64 = 40
 const DOFF_MASK: u64 = 0xFFFF
 const USE_SHIFT: u64 = 16
+const DOFF_DEAD: u64 = 0x8000
 
 const A_RDONLY: u64 = 0x01
 const A_HIDDEN: u64 = 0x02
@@ -460,9 +461,31 @@ fn node_drop(state: u64, node: u64) {
         return
     }
     let w: u64 = nget(state, node, N_DOFF)
-    if (w >> USE_SHIFT) != 0 {
-        nset(state, node, N_DOFF, w - (1 << USE_SHIFT))
+    if (w >> USE_SHIFT) == 0 {
+        return
     }
+    let left: u64 = w - (1 << USE_SHIFT)
+    if (left >> USE_SHIFT) == 0 && (left & DOFF_DEAD) != 0 {
+        pcache.drop_node(state, nget(state, node, N_MNT) - 1, node)
+        dcache.bump(state)
+        octets.zero(nd(state, node), NODE_BYTES)
+        return
+    }
+    nset(state, node, N_DOFF, left)
+}
+
+fn node_detach(state: u64, node: u64) -> bool {
+    let w: u64 = nget(state, node, N_DOFF)
+    if (w >> USE_SHIFT) == 0 {
+        return false
+    }
+    pcache.drop_node(state, nget(state, node, N_MNT) - 1, node)
+    dcache.bump(state)
+    nset(state, node, N_DOFF, (w - (w & DOFF_MASK)) + DOFF_DEAD)
+    nset(state, node, N_DLBA, 0)
+    nset(state, node, N_CLUS, 0)
+    nset(state, node, N_SIZE, 0)
+    return true
 }
 
 fn sync(state: u64, m: u64) -> u64 {
@@ -1051,7 +1074,7 @@ fn f_write__body(state: u64, m: u64, node: u64, off: u64, src: u64,
     if node == 0 || sget(state, m, S_VALID) == 0 {
         return 0
     }
-    if (nget(state, node, N_ATTR) & A_DIR) != 0 {
+    if (nget(state, node, N_ATTR) & A_DIR) != 0 || (nget(state, node, N_DOFF) & DOFF_DEAD) != 0 {
         return 0
     }
     var first: u64 = nget(state, node, N_CLUS)
@@ -1699,7 +1722,7 @@ fn f_create__inner(state: u64, m: u64, path: u64, art: u64) -> u64 {
     return dir_add(state, m, dir_clus, (&name[0]) as u64, 0, 0x20, 0)
 }
 
-fn dir_remove(state: u64, m: u64, dir_clus: u64, name: u64) -> bool {
+fn dir_remove(state: u64, m: u64, dir_clus: u64, name: u64, detach: bool) -> bool {
     var found: [u8; 72] = [0 as u8; 72]
     var lba: u64 = 0
     var off: u64 = 0
@@ -1740,6 +1763,9 @@ fn dir_remove(state: u64, m: u64, dir_clus: u64, name: u64) -> bool {
                 }
             }
         }
+    }
+    if detach && node_detach(state, node) {
+        return true
     }
     octets.zero(nd(state, node), NODE_BYTES)
     return true
@@ -1814,7 +1840,7 @@ fn f_unlink__inner(state: u64, m: u64, path: u64) -> u64 {
             return 39 // ENOTEMPTY
         }
     }
-    if !dir_remove(state, m, dir_clus, (&name[0]) as u64) {
+    if !dir_remove(state, m, dir_clus, (&name[0]) as u64, true) {
         return 2
     }
     if clus >= 2 {
@@ -1861,7 +1887,7 @@ fn f_rename__inner(state: u64, m: u64, from: u64, to: u64) -> u64 {
     if dir_add(state, m, cb, (&b[0]) as u64, clus, attr, size) == 0 {
         return 28
     }
-    if !dir_remove(state, m, ca, (&a[0]) as u64) {
+    if !dir_remove(state, m, ca, (&a[0]) as u64, false) {
         return 5
     }
     return 0
