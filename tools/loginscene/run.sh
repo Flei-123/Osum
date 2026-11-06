@@ -83,7 +83,7 @@ hatnicht "$S" "glogin: signed in" "COUNTER-PROOF: nobody is signed in"
 echo "== another user =="
 run g6 10 tab tab tab ret j u s t i n ret g e h e i m 1 2 ret
 S=$OUT/g6/serial.txt
-hat "$S" "glogin: anderer benutzer" "Anderer Benutzer: the name field comes out"
+hat "$S" "glogin: other user" "Anderer Benutzer: the name field comes out"
 hat "$S" "glogin: signed in as justin" "name typed, password typed: signed in"
 
 echo "== quick access =="
@@ -104,10 +104,10 @@ runip() { # name url-file-or-empty
 }
 runip g9 "$OUT/dbgurl"
 S=$OUT/g9/serial.txt
-hat "$S" "glogin: netzadr=10.0.2.15:8765" "with /run/dbgsrv.url the network card shows ip:port"
+hat "$S" "glogin: netaddr=10.0.2.15:8765" "with /run/dbgsrv.url the network card shows ip:port"
 runip g10 ""
 S=$OUT/g10/serial.txt
-hat "$S" "glogin: netzadr=10.0.2.15" "COUNTER-PROOF: without the file the address is still shown"
+hat "$S" "glogin: netaddr=10.0.2.15" "COUNTER-PROOF: without the file the address is still shown"
 hatnicht "$S" ":8765" "COUNTER-PROOF: no port shown without the file"
 
 echo "== Shift+Tab goes back =="

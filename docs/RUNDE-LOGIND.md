@@ -248,7 +248,7 @@ desk: start /bin/launcher  pid=5
 glogin: angemeldet als justin
 glogin: uid=1000                          <- P-002: NICHT root
 glogin: desktop pid=16
-glogin: waechconf -- 17                   ("waechter pid=17", verschraenkt)
+glogin: waechconf -- 17                   ("guard pid=17", verschraenkt)
 launcher: energie auf                     <- Klick auf den Energieknopf
 launcher: energie wahl=2                  <- "Abmelden" gewaehlt
 abmelden: Sitzung uliadu=n1c0h0e0r        ("Sitzung uid=1000", verschraenkt)
@@ -260,7 +260,7 @@ glogin: rect id=0 … id=6                  <- ZWEITER Aufbau, der Schirm ist zu
 ```
 
 Zwei Zeilen dieses Laufs sind zeichenweise verschränkt (`waechconf --
-17` statt `waechter pid=17`, `uliadu=n1c0h0e0r` statt `uid=1000`) —
+17` statt `guard pid=17`, `uliadu=n1c0h0e0r` statt `uid=1000`) —
 siehe Abschnitt 4.5. **Genau deshalb hängt keine Zusage an ihnen.**
 
 **Zwei unabhängige Quellen sagen dasselbe.** Der Kern zählt selbst

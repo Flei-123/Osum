@@ -411,9 +411,9 @@ klick
 # `seen` and not a bare grep: the click travels mouse -> window server ->
 # glogin -> serial line, and a grep right after `klick` raced it (one
 # red run in two on 27.09.2026, the next run of the same tree green).
-seen 'glogin: anderer benutzer' \
+seen 'glogin: other user' \
     && ok "a MOUSE click on 'Anderer Benutzer' is taken" \
-    || bad "'glogin: anderer benutzer' missing -- the click did not arrive"
+    || bad "'glogin: other user' missing -- the click did not arrive"
 LAST=$(foci | tail -1 | grep -oE 'kind=[0-9]+')
 [ "$LAST" = "kind=4" ] && ok "the name field has the focus now" || bad "focus after 'other user': $LAST"
 # ... and Ctrl+V in the name field: if the password had been copied, the
