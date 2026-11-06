@@ -560,7 +560,7 @@ timeout 200 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \
 QB=$!
 w=0
 # the last run of the bar (the one that stays): its chat is open when this
-# line comes -- 'quelle=bus' alone now comes from the first, short runs
+# line comes -- 'source=bus' alone now comes from the first, short runs
 while [ $w -lt 170 ] && ! grep -qa 'freunde: sent=' "$TMPD/b.txt" 2>/dev/null; do sleep 1; w=$((w+1)); done
 sleep 6
 if [ -S "$TMPD/mon" ] && command -v socat >/dev/null 2>&1; then
@@ -570,7 +570,7 @@ fi
 kill -9 "$QB" 2>/dev/null; wait "$QB" 2>/dev/null
 tr -cd '\11\12\15\40-\176' < "$TMPD/b.txt" > "$TMPD/b.klar"
 B="$TMPD/b.klar"
-has "$B" "quelle=bus" "the bar found orient-bus and the social service"
+has "$B" "source=bus" "the bar found orient-bus and the social service"
 EIN=$(grep -a 'freunde: eintraege=.*angemeldet=' "$B" | tail -1 | sed 's/.*eintraege=\([0-9]*\).*/\1/')
 # as many as justin has friends at fleikontakte right now, plus peter
 # (local) and zoe (lan2) on the device
@@ -583,10 +583,10 @@ PY
 [ "${EIN:-x}" = "$WANT" ] && ok "the bar shows justin's $WANT friends (fleitec + the device's own), from the service" \
     || { bad "the bar shows ${EIN:-no} entries instead of $WANT"; grep -a "freunde:\|social:" "$B" | head -5 | sed 's/^/        /'; }
 # r38: the tabs like Discord's friends view
-grep -aq "freunde: tab=2 liste=[0-9]* ausstehend=2 ein=2 " "$B" \
+grep -aq "freunde: tab=2 list=[0-9]* ausstehend=2 ein=2 " "$B" \
     && ok "tab Ausstehend: two incoming from two providers (fleitec:dora, local:oma)" || bad "Ausstehend: $(grep -a 'freunde: tab=' "$B" | head -2)"
 grep -aq "freunde: accept fleitec:u_DORA ok" "$B" && ok "Annehmen: social.contacts.accept for dora" || bad "accept: $(grep -a 'freunde: accept' "$B" | head -2)"
-grep -aq "freunde: tab=3 liste=[0-9]* ausstehend=[0-9]* ein=[0-9]* treffer=[1-9]" "$B" \
+grep -aq "freunde: tab=3 list=[0-9]* ausstehend=[0-9]* ein=[0-9]* treffer=[1-9]" "$B" \
     && ok "tab Hinzufuegen: the search finds people at the providers" || bad "Hinzufuegen: $(grep -a 'freunde: tab=3' "$B" | head -2)"
 DREL=$(python3 - "$PORT" "$SECRET" <<'PY'
 import sys; sys.path.insert(0, 'tools/social'); import host

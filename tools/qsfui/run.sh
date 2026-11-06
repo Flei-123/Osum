@@ -91,7 +91,7 @@ check_scale() {
     rects=()
     while read -r kx ky kw kh; do
         rects+=("$((qx + kx)),$((qy + ky)),$kw,$kh")
-    done < <(grep -aoE 'qs: kachel n=[0-9]+ platz=[0-9]+ x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+' "$S" \
+    done < <(grep -aoE 'qs: kachel n=[0-9]+ slot=[0-9]+ x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+' "$S" \
         | head -8 | sed -E 's/.* x=([0-9]+) y=([0-9]+) w=([0-9]+) h=([0-9]+)/\1 \2 \3 \4/')
     if [ "${#rects[@]}" -ne 8 ]; then bad "scale $sc: the panel reported ${#rects[@]} tiles, not 8"; return 0; fi
     r=$(python3 -I tools/qsfui/check.py "$S" "$D/01-open.ppm" "$sc" 2>&1)

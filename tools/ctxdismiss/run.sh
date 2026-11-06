@@ -8,7 +8,7 @@
 #   1. rklick on the bare desktop -> menu; left click elsewhere -> the menu is GONE (picture as before)
 #   2. rklick -> menu; rklick ELSEWHERE -> the old menu is gone and a new one stands at the new place (closes and opens in one press)
 #   3. five times: rklick, click outside -> five more menus, all closed again (no menu survives)
-#   4. bare task bar: rklick -> menu, click outside -> gone, rklick again -> menu again (`taskbar: kontext leer` twice)
+#   4. bare task bar: rklick -> menu, click outside -> gone, rklick again -> menu again (`taskbar: context empty` twice)
 #   5. start menu: open, click outside -> closed (no regression of the existing dismissal)
 #   6. Esc closes the menu, no ghost at 0,0; a focus change (start menu by the Windows key) closes the menu
 # COUNTER-PROOF: the tree before the fix (BASE, default HEAD~1): the menu survives the outside click, no second menu ever opens.
@@ -167,7 +167,7 @@ check_tree() { # <dir> <label> <expect: 1 = fixed tree, 0 = old tree>
             [ "$d" -gt 5000 ] && [ "$e" -le 400 ] && ok "$lab: repeat $n opened ($d px) and closed ($e px)" || bad "$lab: repeat $n open=$d closed=$e"
         done
         d=$(shows "$dir" c5 t1 400 730 600 70); e=$(gone "$dir" c5 t2 400 730 600 70)
-        local tn; tn=$(grep -ac 'taskbar: kontext leer x=' "$dir/serial.txt")
+        local tn; tn=$(grep -ac 'taskbar: context empty x=' "$dir/serial.txt")
         [ "$tn" = 2 ] && ok "$lab: bar menu opened twice ($tn lines) after an outside click in between" || bad "$lab: bar menu lines=$tn (want 2)"
         d=$(shows "$dir" a0 e1 $D1); e=$(gone "$dir" a0 e2 $D1); g=$(gone "$dir" a0 e2 0 0 167 124)
         [ "$d" -gt 5000 ] && [ "$e" -le 400 ] && ok "$lab: Esc closes the menu (open $d px, closed $e px)" || bad "$lab: Esc: open=$d closed=$e"

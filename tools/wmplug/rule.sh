@@ -116,7 +116,7 @@ has "$TMPD/mit.klar" "plugregel: regeln aus /etc/wmregeln.conf: 2" \
 has "$TMPD/mit.klar" "wmplug: reg regel" "es hat einen Tafelplatz bekommen"
 has "$TMPD/mit.klar" "rechte=0x103" "mit R_ACT_WIN (0x103 = EV_WIN|EV_FOCUS|ACT_WIN)"
 has "$TMPD/mit.klar" "app=rechner" "die Regel hat auf den Buendelnamen getroffen"
-has "$TMPD/mit.klar" "x=212 y=70 w=376 h=430 flaeche=2 sichtbar=1" \
+has "$TMPD/mit.klar" "x=212 y=70 w=376 h=430 desk=2 sichtbar=1" \
     "nachgemessen: zentriert (212,70) auf Flaeche 2 und sichtbar"
 hasnot "$TMPD/mit.klar" "plugregel: rejected" "keine Handlung wurde abgewiesen"
 hasnot "$TMPD/mit.klar" "wmplug: unreg regel" "das Plugin wurde nicht hinausgeworfen"
@@ -151,7 +151,7 @@ lauf kurz "recht,demo" "plugfrist"
 [ "$RC" = 21 ] && ok "the kernel exits cleanly (21)" || bad "Exitcode $RC statt 21"
 has "$TMPD/kurz.klar" "frist=3" "die Frist steht auf 3 Ticks (30 ms)"
 hasnot "$TMPD/kurz.klar" "wmplug: unreg regel"     "und das Plugin wird trotzdem nicht wegen Frist hinausgeworfen"
-has "$TMPD/kurz.klar" "x=212 y=70 w=376 h=430 flaeche=2 sichtbar=1"     "die Regel greift auch unter der kurzen Frist"
+has "$TMPD/kurz.klar" "x=212 y=70 w=376 h=430 desk=2 sichtbar=1"     "die Regel greift auch unter der kurzen Frist"
 
 echo "== 6. the two photos, told apart by machine =="
 for f in mit ohne; do
