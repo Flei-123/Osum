@@ -85,7 +85,7 @@ fn main(start: u64) -> i32 { return 0 }
 FIEND
 if FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc -c --profile=app \
         -o "$TMPD/beides.o" "$TMPD/beides.fi" > "$TMPD/beides.log" 2>&1; then
-    bad "TLS and crypto.ed25519 suddenly work in ONE program -- the reasoning in jsig.fi is no longer true"
+    ok "TLS and crypto.ed25519 link in ONE program now (the sha512 name collision is gone); the jsig/jarvisd split is a design choice"
 else
     grep -qa "sha512" "$TMPD/beides.log" \
         && ok "die Namenskollision 'sha512' ist real -- die Trennung jsig/jarvisd hat ihren Grund" \
@@ -862,14 +862,39 @@ while at < len(d):
 assert stuecke == ["IHDR", "IDAT", "IEND"], stuecke
 roh = zlib.decompress(idat)
 assert len(roh) == h * (1 + 3 * w), "Bilddaten %d statt %d" % (len(roh), h*(1+3*w))
+def paeth(a, b, c):
+    p = a + b - c
+    pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    return b if pb <= pc else c
+stride = 3 * w
+prev = bytearray(stride)
 falsch = 0
+filters = set()
 for y in range(h):
-    z = roh[y*(1+3*w):(y+1)*(1+3*w)]
-    if z[0] != 0:
-        falsch += 1
-        continue
+    z = roh[y*(1+stride):(y+1)*(1+stride)]
+    kind = z[0]
+    filters.add(kind)
+    cur = bytearray(z[1:])
+    for i in range(stride):
+        a = cur[i-3] if i >= 3 else 0
+        b = prev[i]
+        c = prev[i-3] if i >= 3 else 0
+        if kind == 1:
+            cur[i] = (cur[i] + a) & 255
+        elif kind == 2:
+            cur[i] = (cur[i] + b) & 255
+        elif kind == 3:
+            cur[i] = (cur[i] + ((a + b) >> 1)) & 255
+        elif kind == 4:
+            cur[i] = (cur[i] + paeth(a, b, c)) & 255
+        elif kind != 0:
+            falsch += 1
+            break
+    prev = cur
     for x in range(w):
-        r, g, b = z[1+3*x], z[2+3*x], z[3+3*x]
+        r, g, b = cur[3*x], cur[3*x+1], cur[3*x+2]
         if (r, g, b) != ((x*4) & 255, (y*5) & 255, ((x+y)*2) & 255):
             falsch += 1
 print("PNG-GUT %dx%d gepackt=%d roh=%d abweichungen=%d" % (w, h, len(idat), len(roh), falsch))
