@@ -63,7 +63,7 @@ export {
     rx_errors, oversize, rx_overflow,
     unsupported_count, unsupported_vendor, unsupported_device,
     unsupported_reason,
-    init, present, ready, up, mac_at, bdf, idx,
+    init, present, ready, up, mac_at, bdf, idx, admin_up, admin_set,
     rx_take, rx_recycle, tx_frame, tx_room, poll,
     irq, irqs, rx_frames, tx_frames, tx_drops, rx_octets, tx_octets,
     features, queue_size, msix, notified, link_up, shut_down,
@@ -122,6 +122,7 @@ const CLASS_NET: u64 = 0x02
 const SUB_ETHERNET: u64 = 0x00
 
 static mut nd_uplink_kind: u64 = 0
+static mut nd_admin_down: bool = false
 static mut nd_uplink_card: u64 = 0
 static mut nd_uplink_gen: u64 = 0
 static mut nd_usb_slot: u64 = 0
@@ -977,9 +978,23 @@ fn mac_at_on(state: u64, c: u64, i: u64) -> u64 {
     return eo.mac_at(state, unit_of(state, c), i)
 }
 
+fn admin_up() -> bool { return !nd_admin_down }
+
+fn admin_set(up: bool) { nd_admin_down = !up }
+
 fn rx_take_on(state: u64, c: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     let eo: netclass.EthOps = ethreg.ops_for(state, kind_on(state, c))
-    return eo.rx_take(state, unit_of(state, c), frame, slot)
+    var n: u64 = eo.rx_take(state, unit_of(state, c), frame, slot)
+    var spent: u64 = 0
+    while n != 0 && nd_admin_down && spent < 32 {
+        eo.rx_recycle(state, unit_of(state, c), *slot)
+        n = eo.rx_take(state, unit_of(state, c), frame, slot)
+        spent = spent + 1
+    }
+    if nd_admin_down {
+        return 0
+    }
+    return n
 }
 
 fn rx_recycle_on(state: u64, c: u64, id: u64) {
@@ -993,6 +1008,9 @@ fn tx_room_on(state: u64, c: u64) -> u64 {
 }
 
 fn tx_frame_on(state: u64, c: u64, src: u64, n: u64) -> bool {
+    if nd_admin_down {
+        return false
+    }
     let eo: netclass.EthOps = ethreg.ops_for(state, kind_on(state, c))
     return eo.tx_frame(state, unit_of(state, c), src, n)
 }
