@@ -16,50 +16,50 @@ fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
-num() { # name wert op soll
+num() { # name value op want
     if [ -z "${2:-}" ]; then bad "$1: no number found (expected $3 $4)"; return; fi
     if [ "$2" -"$3" "$4" ] 2>/dev/null; then ok "$1: $2"
-    else bad "$1: $2, erwartet $3 $4"; fi
+    else bad "$1: $2, expected $3 $4"; fi
 }
-gleich() { # name soll ist
+same() { # name want got
     if [ "$2" = "$3" ]; then ok "$1"
     else
         bad "$1"
-        printf '        soll: %s\n' "$(printf '%s' "$2" | head -c 200)"
-        printf '        ist : %s\n' "$(printf '%s' "$3" | head -c 200)"
+        printf '        want: %s\n' "$(printf '%s' "$2" | head -c 200)"
+        printf '        got : %s\n' "$(printf '%s' "$3" | head -c 200)"
     fi
 }
-hat() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
-hat_nicht() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da" || ok "$3"; }
+has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
+has_not() { grep -qaF "$2" "$1" && bad "$3 -- '$2' present" || ok "$3"; }
 
-kwert() { # datei name
+kvalue() { # file name
     grep -a -m1 -oE "$2=[0-9]+" "$1" 2>/dev/null | head -1 | cut -d= -f2
 }
-ksagt() { # datei name soll beschreibung
-    local got; got=$(kwert "$1" "$2")
-    if [ -z "$got" ]; then bad "$4 -- keine Zeile '$2='"; return; fi
+ksays() { # file name want description
+    local got; got=$(kvalue "$1" "$2")
+    if [ -z "$got" ]; then bad "$4 -- no line '$2='"; return; fi
     if [ "$got" = "$3" ]; then ok "$4 ($2=$got)"
-    else bad "$4 -- $2=$got, erwartet $3"; fi
+    else bad "$4 -- $2=$got, expected $3"; fi
 }
 
-echo "== 0. die Vorbedingungen =="
+echo "== 0. preconditions =="
 command -v qemu-system-x86_64 >/dev/null 2>&1 || {
     echo "KRYPTO: FAILED, qemu-system-x86_64 is missing (a skip would be a silent green)"; exit 1; }
 command -v python3 >/dev/null 2>&1 || {
     echo "KRYPTO: FAILED, python3 is missing (a skip would be a silent green)"; exit 1; }
 
 PY=python3
-for kandidat in "${OSUM_KRYPTO_PY:-}" /root/.krypto-venv/bin/python python3; do
-    [ -n "$kandidat" ] || continue
-    command -v "$kandidat" >/dev/null 2>&1 || [ -x "$kandidat" ] || continue
-    if "$kandidat" -c 'import argon2.low_level, cryptography' 2>/dev/null; then
-        PY=$kandidat; break
+for candidate in "${OSUM_KRYPTO_PY:-}" /root/.krypto-venv/bin/python python3; do
+    [ -n "$candidate" ] || continue
+    command -v "$candidate" >/dev/null 2>&1 || [ -x "$candidate" ] || continue
+    if "$candidate" -c 'import argon2.low_level, cryptography' 2>/dev/null; then
+        PY=$candidate; break
     fi
 done
 if ! "$PY" -c 'import argon2.low_level, cryptography' 2>/dev/null; then
     echo "KRYPTO: FAILED -- argon2-cffi and/or cryptography are missing."
     echo "  Without an INDEPENDENT implementation this acceptance would be a"
-    echo "  Selbstgespraech. Abhilfe:"
+    echo "  soliloquy. Remedy:"
     echo "    python3 -m venv /root/.krypto-venv"
     echo "    /root/.krypto-venv/bin/pip install argon2-cffi cryptography"
     exit 1
@@ -69,16 +69,14 @@ if command -v argon2 >/dev/null 2>&1; then
     ok "plus the argon2 command of the distribution (second foreign implementation)"
 fi
 
-# ---------------------------------------------------- 1. die Speicherkarte
-
 echo "== 1. the kdata memory map =="
-if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
-    ok "the map: $(tail -1 "$TMPD/karte.txt")"
+if python3 tools/kernel/memmap.py kernel > "$TMPD/map.txt" 2>&1; then
+    ok "the map: $(tail -1 "$TMPD/map.txt")"
 else
-    bad "tools/kernel/memmap.py meldet Kollisionen"
-    sed 's/^/        /' "$TMPD/karte.txt" | head -10
+    bad "tools/kernel/memmap.py reports collisions"
+    sed 's/^/        /' "$TMPD/map.txt" | head -10
 fi
-hat "$TMPD/karte.txt" "0 collisions" "keine zwei Bereiche ueberschneiden sich"
+has "$TMPD/map.txt" "0 collisions" "no two ranges overlap"
 
 v=$(grep -aE "^const CRYPT_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')
@@ -90,61 +88,59 @@ fi
 m=$(grep -aE "^const CRYPT_MAX: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')
 if [ "$(( v + m ))" -le "$(( 0x118000 ))" ]; then
-    ok "and ends at $(printf '0x%X' $(( v + m ))), also nicht hinter 0x118000"
+    ok "and ends at $(printf '0x%X' $(( v + m ))), so not beyond 0x118000"
 else
     bad "the range extends beyond 0x118000"
 fi
 
-mkdir -p "$TMPD/koll"
-( cd kernel && find . -name '*.fi' -exec cp --parents {} "$TMPD/koll/" \; )
+mkdir -p "$TMPD/kcopy"
+( cd kernel && find . -name '*.fi' -exec cp --parents {} "$TMPD/kcopy/" \; )
 sed -i 's/^const CRYPT_OFF: u64 = 0x113000$/const CRYPT_OFF: u64 = 0x108000/' \
-    "$TMPD/koll/lib/kstate.fi"
-if python3 tools/kernel/memmap.py "$TMPD/koll" > "$TMPD/karte2.txt" 2>&1; then
+    "$TMPD/kcopy/lib/kstate.fi"
+if python3 tools/kernel/memmap.py "$TMPD/kcopy" > "$TMPD/map2.txt" 2>&1; then
     bad "CONTROL RUN: CRYPT_OFF placed on WMP_OFF and the checker stays silent"
 else
     ok "CONTROL RUN: CRYPT_OFF placed on WMP_OFF -- the map checker raises the alarm"
 fi
 
-# --------------------------------------------------------------- 2. bauen
-
-echo "== 2. bauen =="
-if bash tools/build-kernel.sh "$TMPD/k0.mb" > "$TMPD/bau.log" 2>&1; then
-    ok "der Kern baut ($(stat -c %s "$TMPD/k0.mb") Oktette)"
+echo "== 2. build =="
+if bash tools/build-kernel.sh "$TMPD/k0.mb" > "$TMPD/build.log" 2>&1; then
+    ok "the kernel builds ($(stat -c %s "$TMPD/k0.mb") bytes)"
 else
     bad "the kernel cannot be built"
-    sed 's/^/        /' "$TMPD/bau.log" | tail -12
-    echo "KRYPTO: $pass bestanden, $fail gescheitert"; exit 1
+    sed 's/^/        /' "$TMPD/build.log" | tail -12
+    echo "KRYPTO: $pass passed, $fail failed"; exit 1
 fi
 
 mkdir -p .probe
-if $FIRNC tools/krypto/orakel.fi -o .probe/korakel 2> "$TMPD/orakel.err"; then
+if $FIRNC tools/krypto/orakel.fi -o .probe/koracle 2> "$TMPD/oracle.err"; then
     ok "tools/krypto/orakel.fi builds against lib/crypto/ (the same files as the kernel)"
 else
     bad "tools/krypto/orakel.fi cannot be built"
-    sed 's/^/        /' "$TMPD/orakel.err" | head -20
-    echo "KRYPTO: $pass bestanden, $fail gescheitert"; exit 1
+    sed 's/^/        /' "$TMPD/oracle.err" | head -20
+    echo "KRYPTO: $pass passed, $fail failed"; exit 1
 fi
-if [ "$(echo 'quatsch' | ./.probe/korakel)" = "FAIL" ]; then
-    ok "das Orakel lehnt Unsinn ab (sagt FAIL)"
+if [ "$(echo 'nonsense' | ./.probe/koracle)" = "FAIL" ]; then
+    ok "the oracle rejects nonsense (says FAIL)"
 else
-    bad "the oracle says about 'quatsch' nicht FAIL"
+    bad "the oracle does not say FAIL about 'nonsense'"
 fi
 
 echo "== 3. the computation against the standards and against OpenSSL =="
-if [ "${OSUM_KRYPTO_SCHNELL:-0}" = 1 ]; then
-    echo "  (uebersprungen, OSUM_KRYPTO_SCHNELL=1)"
+if [ "${OSUM_KRYPTO_FAST:-0}" = 1 ]; then
+    echo "  (skipped, OSUM_KRYPTO_FAST=1)"
 else
-    "$PY" tools/krypto/gegen.py vektoren ./.probe/korakel \
-        > "$TMPD/vekt.txt" 2>&1
-    for gruppe in blake2b argon2 xts negativ; do
-        z=$(grep -a -m1 "^$gruppe " "$TMPD/vekt.txt")
+    "$PY" tools/krypto/gegen.py vectors ./.probe/koracle \
+        > "$TMPD/vec.txt" 2>&1
+    for group in blake2b argon2 argon2keyed xts negative; do
+        z=$(grep -a -m1 "^$group " "$TMPD/vec.txt")
         g=$(echo "$z" | grep -oE '[0-9]+/[0-9]+' | cut -d/ -f1)
         n=$(echo "$z" | grep -oE '[0-9]+/[0-9]+' | cut -d/ -f2)
         if [ -n "$g" ] && [ "$g" = "$n" ]; then
-            ok "$gruppe: $g/$n against the foreign implementation"
+            ok "$group: $g/$n against the foreign implementation"
         else
-            bad "$gruppe: ${g:-?}/${n:-?}"
-            grep -a "$gruppe" "$TMPD/vekt.txt" | head -3 | sed 's/^/        /'
+            bad "$group: ${g:-?}/${n:-?}"
+            grep -a "$group" "$TMPD/vec.txt" | head -3 | sed 's/^/        /'
         fi
     done
 fi
@@ -153,22 +149,22 @@ if command -v argon2 >/dev/null 2>&1; then
     soll=$(printf 'password' | argon2 somesaltsomesalt -id -t 3 -m 5 -p 4 \
         -l 32 -v 13 -r 2>/dev/null)
     ist=$(echo "argon2id 70617373776f7264 736f6d6573616c74736f6d6573616c74 3 32 4 32" \
-        | ./.probe/korakel)
-    gleich "Argon2id t=3 m=32 p=4 gegen den argon2-Befehl" "$soll" "$ist"
+        | ./.probe/koracle)
+    same "Argon2id t=3 m=32 p=4 against the argon2 command" "$soll" "$ist"
 fi
 
-echo "== 4. anlegen, schreiben, NEUSTART, entsperren, nachrechnen =="
+echo "== 4. create, write, REBOOT, unlock, recompute =="
 BLOCKS=8192
 bash tools/mkfsfi/mkfs.sh build "$TMPD/root.img" "$BLOCKS" \
     /bin/ /proc/ /dev/ > "$TMPD/mkfs.log" 2>&1 \
     && ok "the root disk is up" \
-    || bad "mkfs.py scheitert"
+    || bad "mkfs fails"
 
 KP="kryptot=1 kryptom=64 kryptop=1"
 
-lauf() { # name abbild kommandozeile [zeitlimit]
-    local name=$1 img=$2 app=$3 t=${4:-300}
-    timeout "$t" $QEMU_X86 -kernel "$TMPD/k0.mb" -m 512 \
+run_vm() { # name image cmdline [time limit]
+    local name=$1 img=$2 app=$3 limit=${4:-300}
+    timeout "$limit" $QEMU_X86 -kernel "$TMPD/k0.mb" -m 512 \
         -append "$app" -serial "file:$TMPD/$name.txt" -display none \
         -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive "file=$img,format=raw,if=ide,index=0" > /dev/null 2>&1
@@ -176,18 +172,18 @@ lauf() { # name abbild kommandozeile [zeitlimit]
 }
 
 cp --sparse=always "$TMPD/root.img" "$TMPD/a.img"
-lauf a1 "$TMPD/a.img" "osum nopwr kryptoneu kryptotest kryptobaum kryptopw=geheim $KP"
-ksagt "$TMPD/a1.txt" "neu"      1 "die Platte wird angelegt"
-ksagt "$TMPD/a1.txt" "selbst"   1 "der Selbsttest der Rechnung"
-ksagt "$TMPD/a1.txt" "fsformat" 1 "das Dateisystem darauf"
-ksagt "$TMPD/a1.txt" "kopfda"   1 "der Kopfsatz steht nach dem Formatieren noch"
-ksagt "$TMPD/a1.txt" "mount"    1 "eingehaengt"
-ksagt "$TMPD/a1.txt" "baum"     4 "vier Dateien geschrieben"
+run_vm a1 "$TMPD/a.img" "osum nopwr kryptoneu kryptotest kryptobaum kryptopw=secret $KP"
+ksays "$TMPD/a1.txt" "neu"      1 "the disk is created"
+ksays "$TMPD/a1.txt" "selbst"   1 "the self-test of the computation"
+ksays "$TMPD/a1.txt" "fsformat" 1 "the file system on it"
+ksays "$TMPD/a1.txt" "kopfda"   1 "the header is still there after formatting"
+ksays "$TMPD/a1.txt" "mount"    1 "mounted"
+ksays "$TMPD/a1.txt" "baum"     4 "four files written"
 
-lauf a2 "$TMPD/a.img" "osum nopwr kryptoauf kryptopruef kryptopw=geheim $KP"
-ksagt "$TMPD/a2.txt" "auf"    1 "nach dem Neustart mit der Passphrase aufgemacht"
-ksagt "$TMPD/a2.txt" "fehler" 0 "ohne Fehlversuch"
-ksagt "$TMPD/a2.txt" "mount"  1 "und eingehaengt"
+run_vm a2 "$TMPD/a.img" "osum nopwr kryptoauf kryptopruef kryptopw=secret $KP"
+ksays "$TMPD/a2.txt" "auf"    1 "opened with the passphrase after the reboot"
+ksays "$TMPD/a2.txt" "fehler" 0 "without a failed attempt"
+ksays "$TMPD/a2.txt" "mount"  1 "and mounted"
 
 python3 - "$TMPD/soll.txt" <<'PYEOF'
 import hashlib, sys
@@ -203,128 +199,130 @@ while read -r nm soll; do
         | tr -d '\r\000')
     if [ "$ist" = "$soll" ]; then gut=$((gut+1)); fi
 done < "$TMPD/soll.txt"
-num "SHA-256 der Dateien stimmen (gegen hashlib auf dem Wirt)" "$gut" eq 4
+num "SHA-256 of the files match (against hashlib on the host)" "$gut" eq 4
 
 # ------------------------------------------------- 5. die Gegenproben
 
-echo "== 5. die Gegenproben =="
+echo "== 5. the control runs =="
 cp --sparse=always "$TMPD/a.img" "$TMPD/b.img"
-lauf b1 "$TMPD/b.img" "osum nopwr kryptoauf kryptofalsch kryptopruef kryptopw=geheim $KP"
-ksagt "$TMPD/b1.txt" "auf"    0 "die FALSCHE Passphrase macht nicht auf"
-ksagt "$TMPD/b1.txt" "fehler" 1 "und wird gezaehlt"
-ksagt "$TMPD/b1.txt" "mount"  0 "ohne Schluessel laesst sich nichts einhaengen"
+run_vm b1 "$TMPD/b.img" "osum nopwr kryptoauf kryptofalsch kryptopruef kryptopw=secret $KP"
+ksays "$TMPD/b1.txt" "auf"    0 "the WRONG passphrase does not open"
+ksays "$TMPD/b1.txt" "fehler" 1 "and is counted"
+ksays "$TMPD/b1.txt" "mount"  0 "nothing can be mounted without the key"
 
 cp --sparse=always "$TMPD/a.img" "$TMPD/c.img"
 python3 - "$TMPD/c.img" <<'PYEOF'
 import sys
-# 16 Oktette mitten in den Schluesselplatz 0 kippen.
+
 with open(sys.argv[1], "r+b") as f:
     f.seek(0x140)
     f.write(b"\xff" * 16)
 PYEOF
-lauf c1 "$TMPD/c.img" "osum nopwr kryptoauf kryptopruef kryptopw=geheim $KP"
-ksagt "$TMPD/c1.txt" "auf"    0 "ein beschaedigter Kopfsatz wird abgewiesen"
-ksagt "$TMPD/c1.txt" "fehler" 1 "sauber, nicht mit Muell"
+run_vm c1 "$TMPD/c.img" "osum nopwr kryptoauf kryptopruef kryptopw=secret $KP"
+ksays "$TMPD/c1.txt" "auf"    0 "a damaged header is rejected"
+ksays "$TMPD/c1.txt" "fehler" 1 "cleanly, not with garbage"
 zb=$(grep -a -m1 'krypto: auf=' "$TMPD/b1.txt" | tr -d '\r\000')
 zc=$(grep -a -m1 'krypto: auf=' "$TMPD/c1.txt" | tr -d '\r\000')
-gleich "falsche Passphrase und kaputter Kopf geben DIESELBE Zeile" "$zb" "$zc"
+same "wrong passphrase and broken header give the SAME line" "$zb" "$zc"
 
 cp --sparse=always "$TMPD/a.img" "$TMPD/d.img"
-lauf d1 "$TMPD/d.img" "osum nopwr kryptoroh kryptopruef"
-ksagt "$TMPD/d1.txt" "roh"   1 "der Kopfsatz wird gefunden"
-ksagt "$TMPD/d1.txt" "mount" 0 "aber ohne Passphrase haengt nichts ein"
-
-# --------------------------------------------------- 6. das Rohgeraet
+run_vm d1 "$TMPD/d.img" "osum nopwr kryptoroh kryptopruef"
+ksays "$TMPD/d1.txt" "roh"   1 "the header is found"
+ksays "$TMPD/d1.txt" "mount" 0 "but without a passphrase nothing mounts"
 
 echo "== 6. the raw device: what can be seen without a passphrase? =="
-"$PY" tools/krypto/gegen.py roh "$TMPD/a.img" > "$TMPD/roh.txt" 2>&1
-sed 's/^/        /' "$TMPD/roh.txt"
-for s in "OFS-Superblock" "OFS-Kennung gedreht" "NTFS" "FAT"; do
-    w=$(grep -a -m1 "roh: sig $s = " "$TMPD/roh.txt" | sed 's/.*= //')
-    num "keine $s-Signatur im Datenbereich" "${w:-99}" eq 0
+"$PY" tools/krypto/gegen.py raw "$TMPD/a.img" > "$TMPD/raw.txt" 2>&1
+sed 's/^/        /' "$TMPD/raw.txt"
+for s in "OFS superblock" "OFS magic reversed" "NTFS" "FAT"; do
+    w=$(grep -a -m1 "raw: sig $s = " "$TMPD/raw.txt" | sed 's/.*= //')
+    num "no $s signature in the data area" "${w:-99}" eq 0
 done
-below7=$(grep -a -m1 'below7=' "$TMPD/roh.txt" | grep -oE 'below7=[0-9]+' | cut -d= -f2)
-num "kein beschriebener Sektor mit Entropie unter 7.0 Bit/Oktett" "${below7:-99}" eq 0
-txt=$(grep -a -m1 'textfolgen16=' "$TMPD/roh.txt" | cut -d= -f2)
-num "keine lesbare Zeichenkette ab 16 Zeichen" "${txt:-99}" eq 0
-
-# ------------------------------------------ 7. der Schluesselplatz-Wechsel
+below7=$(grep -a -m1 'below7=' "$TMPD/raw.txt" | grep -oE 'below7=[0-9]+' | cut -d= -f2)
+num "no written sector with entropy below 7.0 bits/byte" "${below7:-99}" eq 0
+txt=$(grep -a -m1 'text_runs16=' "$TMPD/raw.txt" | cut -d= -f2)
+num "no readable string of 16 or more characters" "${txt:-99}" eq 0
 
 echo "== 7. change the passphrase without touching the data =="
 cp --sparse=always "$TMPD/root.img" "$TMPD/e.img"
-lauf e1 "$TMPD/e.img" "osum nopwr kryptoneu kryptobaum kryptopw=alt $KP"
-ksagt "$TMPD/e1.txt" "baum" 4 "der Baum steht (Passphrase 'alt')"
-lauf e2 "$TMPD/e.img" "osum nopwr kryptoauf kryptowechs kryptokill kryptopw=alt kryptopw2=neu $KP"
-ksagt "$TMPD/e2.txt" "wechsel" 1 "Platz 1 bekommt die neue Passphrase"
-ksagt "$TMPD/e2.txt" "kill"    1 "Platz 0 wird geloescht"
-ksagt "$TMPD/e2.txt" "plaetze" 1 "danach ist genau ein Platz belegt"
-lauf e3 "$TMPD/e.img" "osum nopwr kryptoauf kryptopruef kryptopw=alt $KP"
-ksagt "$TMPD/e3.txt" "auf" 0 "die ALTE Passphrase oeffnet nichts mehr"
-lauf e4 "$TMPD/e.img" "osum nopwr kryptoauf kryptopruef kryptopw=neu $KP"
-ksagt "$TMPD/e4.txt" "auf"   1 "die NEUE oeffnet dieselbe Platte"
-ksagt "$TMPD/e4.txt" "platz" 1 "und zwar ueber Platz 1"
-ksagt "$TMPD/e4.txt" "mount" 1 "eingehaengt"
+run_vm e1 "$TMPD/e.img" "osum nopwr kryptoneu kryptobaum kryptopw=alt $KP"
+ksays "$TMPD/e1.txt" "baum" 4 "the tree stands (passphrase 'alt')"
+run_vm e2 "$TMPD/e.img" "osum nopwr kryptoauf kryptowechs kryptokill kryptopw=alt kryptopw2=neu $KP"
+ksays "$TMPD/e2.txt" "wechsel" 1 "slot 1 gets the new passphrase"
+ksays "$TMPD/e2.txt" "kill"    1 "slot 0 is erased"
+ksays "$TMPD/e2.txt" "plaetze" 1 "afterwards exactly one slot is used"
+run_vm e3 "$TMPD/e.img" "osum nopwr kryptoauf kryptopruef kryptopw=alt $KP"
+ksays "$TMPD/e3.txt" "auf" 0 "the OLD passphrase opens nothing any more"
+run_vm e4 "$TMPD/e.img" "osum nopwr kryptoauf kryptopruef kryptopw=neu $KP"
+ksays "$TMPD/e4.txt" "auf"   1 "the NEW one opens the same disk"
+ksays "$TMPD/e4.txt" "platz" 1 "via slot 1"
+ksays "$TMPD/e4.txt" "mount" 1 "mounted"
 gut=0
 while read -r nm soll; do
     ist=$(grep -a -m1 "krypto: sha ${nm#k} = " "$TMPD/e4.txt" | sed 's/.*= //' \
         | tr -d '\r\000')
     if [ "$ist" = "$soll" ]; then gut=$((gut+1)); fi
 done < "$TMPD/soll.txt"
-num "die Daten sind nach dem Wechsel unveraendert (kein Sektor neu verschluesselt)" \
+num "the data is unchanged after the change (no sector re-encrypted)" \
     "$gut" eq 4
-python3 - "$TMPD/e.img" > "$TMPD/platz0.txt" <<'PYEOF'
+python3 - "$TMPD/e.img" > "$TMPD/slot0.txt" <<'PYEOF'
 import sys
 d = open(sys.argv[1], "rb").read(4096)
 sl = d[0x100:0x200]
 print("null=%d" % (1 if sl == b"\0" * 256 else 0))
 PYEOF
-ksagt "$TMPD/platz0.txt" "null" 1 "der geloeschte Platz ist genullt, nicht nur leer gemeldet"
+ksays "$TMPD/slot0.txt" "null" 1 "the erased slot is zeroed, not just reported empty"
 
 echo "== 8. the control run with foreign eyes, BOTH directions =="
 
-"$PY" tools/krypto/gegen.py lies "$TMPD/a.img" geheim > "$TMPD/g1.txt" 2>&1
+"$PY" tools/krypto/gegen.py read "$TMPD/a.img" secret > "$TMPD/g1.txt" 2>&1
 sed 's/^/        /' "$TMPD/g1.txt"
-ksagt "$TMPD/g1.txt" "summe" 1 "der Wirt haelt die Pruefsumme des Kopfes fuer richtig"
-auf=$(grep -a -m1 '^up: ' "$TMPD/g1.txt" | awk '{print $2}')
-num "der Wirt macht den Schluesselplatz mit Argon2id+XTS auf" "${auf:-0}" eq 1
-hat "$TMPD/g1.txt" "SFO-MUSO" \
-    "und findet darunter den OFS-Superblock (die Sektorrechnung stimmt)"
+ksays "$TMPD/g1.txt" "sum" 1 "the host considers the header checksum correct"
+auf=$(grep -a -m1 '^unlocked: ' "$TMPD/g1.txt" | awk '{print $2}')
+num "the host opens the key slot with Argon2id+XTS" "${auf:-0}" eq 1
+has "$TMPD/g1.txt" "SFO-MUSO" \
+    "and finds the OFS superblock below it (the sector arithmetic is right)"
 
-"$PY" tools/krypto/gegen.py baum "$TMPD/a.img" geheim > "$TMPD/g2.txt" 2>&1
+"$PY" tools/krypto/gegen.py tree "$TMPD/a.img" secret > "$TMPD/g2.txt" 2>&1
 sed 's/^/        /' "$TMPD/g2.txt"
 g=$(grep -a -m1 'tree: good=' "$TMPD/g2.txt" | grep -oE 'good=[0-9]+' | cut -d= -f2)
-num "der Wirt liest ALLE vier Dateien aus dem Geheimtext" "${g:-0}" eq 4
+num "the host reads ALL four files from the ciphertext" "${g:-0}" eq 4
 
-"$PY" tools/krypto/gegen.py schreib "$TMPD/f.img" fremdpw 1 64 1 "$BLOCKS" \
+"$PY" tools/krypto/gegen.py write "$TMPD/f.img" fremdpw 1 64 1 "$BLOCKS" \
     > "$TMPD/g3.txt" 2>&1
-hat "$TMPD/g3.txt" "schrieb:" "der Wirt legt einen eigenen Traeger an"
-lauf f1 "$TMPD/f.img" "osum nopwr kryptoauf kryptofs kryptobaum kryptopw=fremdpw $KP"
-ksagt "$TMPD/f1.txt" "auf"      1 "${MARKE_PRODUKT} macht den FREMDEN Kopfsatz auf"
-ksagt "$TMPD/f1.txt" "fsformat" 1 "und legt sein Dateisystem darauf an"
-ksagt "$TMPD/f1.txt" "baum"     4 "und schreibt die vier Dateien"
-"$PY" tools/krypto/gegen.py baum "$TMPD/f.img" fremdpw > "$TMPD/g4.txt" 2>&1
+has "$TMPD/g3.txt" "wrote:" "the host creates its own carrier"
+run_vm f1 "$TMPD/f.img" "osum nopwr kryptoauf kryptofs kryptobaum kryptopw=fremdpw $KP"
+ksays "$TMPD/f1.txt" "auf"      1 "${MARKE_PRODUKT} opens the FOREIGN header"
+ksays "$TMPD/f1.txt" "fsformat" 1 "and creates its file system on it"
+ksays "$TMPD/f1.txt" "baum"     4 "and writes the four files"
+"$PY" tools/krypto/gegen.py tree "$TMPD/f.img" fremdpw > "$TMPD/g4.txt" 2>&1
 sed 's/^/        /' "$TMPD/g4.txt"
 g=$(grep -a -m1 'tree: good=' "$TMPD/g4.txt" | grep -oE 'good=[0-9]+' | cut -d= -f2)
-num "der Wirt liest zurueck, was ${MARKE_PRODUKT} auf SEINEN Traeger schrieb" \
+num "the host reads back what ${MARKE_PRODUKT} wrote to ITS carrier" \
     "${g:-0}" eq 4
 
-if "$PY" tools/krypto/gegen.py lies "$TMPD/a.img" falschefalsche \
+if "$PY" tools/krypto/gegen.py read "$TMPD/a.img" falschefalsche \
         > "$TMPD/g5.txt" 2>&1; then
     bad "CONTROL RUN: the host opens with the wrong passphrase"
 else
     ok "CONTROL RUN: the host does not open with the wrong passphrase either"
 fi
 
-# ------------------------------------------------------- 9. die Oberflaeche
+echo "== 8b. control run in the kernel: a flipped ciphertext bit must turn the gate red =="
+if bash tools/krypto/tamper.sh > "$TMPD/tamper.txt" 2>&1; then
+    ok "$(grep -a '^TAMPER:' "$TMPD/tamper.txt" | tail -1)"
+else
+    bad "kernel tamper control run"
+    tail -8 "$TMPD/tamper.txt" | sed 's/^/        /'
+fi
 
-echo "== 9. die Oberflaeche =="
+echo "== 9. the user interface =="
 if bash tools/check-ui.sh > "$TMPD/ui.txt" 2>&1; then
     ok "check-ui.sh PASSED"
 else
-    bad "check-ui.sh faellt"
+    bad "check-ui.sh fails"
     tail -5 "$TMPD/ui.txt" | sed 's/^/        /'
 fi
 
 echo
-echo "KRYPTO: $pass bestanden, $fail gescheitert"
+echo "KRYPTO: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1

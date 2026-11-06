@@ -65,7 +65,7 @@ case "$TUNNEL" in on|off) ;; *) echo "tunnel takes on or off, not '$TUNNEL'" >&2
 OHNE_TUNNEL=0
 [[ $TUNNEL == off ]] && OHNE_TUNNEL=1
 
-export FIRNLIB="$ROOT/lib"
+export FIRNLIB="${KERNEL_FIRNLIB:-$ROOT/lib}"
 bash vendor/firn/fetch-firnc.sh >/dev/null || {
     echo "vendor/firn/fetch-firnc.sh fehlgeschlagen" >&2; exit 1; }
 

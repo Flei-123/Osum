@@ -33,6 +33,19 @@ ARGON_VECTORS = [
      "955e5d5b163a1b60bba35fc36d0496474fba4f6b59ad53628666f07fb2f93eaf"),
 ]
 
+RFC9106_PASSWORD = "01" * 32
+RFC9106_SALT = "02" * 16
+RFC9106_SECRET = "03" * 8
+RFC9106_AD = "04" * 12
+RFC9106_VECTORS = [
+    ("RFC 9106 5.1 argon2d K+X", "argon2xd",
+     "512b391b6f1162975371d30919734294f868e3be3984f3c1a13a4db9fabe4acb"),
+    ("RFC 9106 5.2 argon2i K+X", "argon2xi",
+     "c814d9d1dc7f37aa13f0d77f2494bda1c8de6b016dd388d29952a4c4672b6ce8"),
+    ("RFC 9106 5.3 argon2id K+X", "argon2xid",
+     "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659"),
+]
+
 XTS_KEY = ("2718281828459045235360287471352662497757247093699959574966967627"
            "3141592653589793238462643383279502884197169399375105820974944592")
 XTS_TWEAK = "ff" + "00" * 15
@@ -79,6 +92,15 @@ def run_argon(binary, tally):
         tally.check(name, want, got[0])
 
 
+def run_argon_rfc9106(binary, tally):
+    for name, word, want in RFC9106_VECTORS:
+        got = oracle(binary, [
+            "%s %s %s %s %s 3 32 4 32" % (
+                word, RFC9106_PASSWORD, RFC9106_SALT, RFC9106_SECRET,
+                RFC9106_AD)])
+        tally.check(name, want, got[0])
+
+
 def run_xts(binary, tally):
     for mode, label in (("noaesni", "table"), ("aesni", "aesni")):
         got = oracle(binary, [
@@ -101,6 +123,7 @@ def main():
     tally = Tally()
     run_aes(sys.argv[1], tally)
     run_argon(sys.argv[1], tally)
+    run_argon_rfc9106(sys.argv[1], tally)
     run_xts(sys.argv[1], tally)
     print("kat total %d/%d" % (tally.good, tally.total))
     return 0 if tally.good == tally.total and tally.total > 0 else 1

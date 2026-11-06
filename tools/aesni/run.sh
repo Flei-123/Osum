@@ -308,7 +308,7 @@ else
     if timeout 2400 bash tools/krypto/run.sh >"$TMPD/kr.log" 2>&1; then
         kl=$(grep -E '^KRYPTO: ' "$TMPD/kr.log" | tail -1)
         info "$kl"
-        [[ $kl == *" 0 gescheitert"* ]] \
+        [[ $kl == *" 0 failed"* ]] \
             && ok "the disk encryption acceptance stays green" \
             || bad "the crypto acceptance is red: $kl"
     else

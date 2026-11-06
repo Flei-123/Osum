@@ -5,9 +5,9 @@
 import crypto.blake2b
 import libc.octets
 
-export { argon2id, argon2_any, ARGON2_BLOCK, TYPE_ID, TYPE_I, TYPE_D,
+export { argon2id, argon2_any, argon2_ext, ARGON2_BLOCK, TYPE_ID, TYPE_I, TYPE_D,
     fill_segment, SYNC_POINTS, passes,
-    prepare, finish, geometrie_seglen, geometrie_ok }
+    prepare, prepare_ext, finish, geometrie_seglen, geometrie_ok }
 
 const ARGON2_BLOCK: usize = 1024
 const QWORDS: usize = 128 // 1024 / 8
@@ -332,6 +332,14 @@ fn argon2id(pwd: u64, pwdlen: usize, salt: u64, saltlen: usize,
 fn prepare(pwd: u64, pwdlen: usize, salt: u64, saltlen: usize,
     t_cost: u64, m_cost: u64, lanes: u64,
     mem: u64, outlen: usize, atype: u64) -> bool {
+    return prepare_ext(pwd, pwdlen, salt, saltlen, 0, 0, 0, 0,
+        t_cost, m_cost, lanes, mem, outlen, atype)
+}
+
+fn prepare_ext(pwd: u64, pwdlen: usize, salt: u64, saltlen: usize,
+    secret: u64, secretlen: usize, ad: u64, adlen: usize,
+    t_cost: u64, m_cost: u64, lanes: u64,
+    mem: u64, outlen: usize, atype: u64) -> bool {
     if t_cost < 1 || lanes < 1 { return false }
     if saltlen < 8 { return false }
     if outlen < 4 { return false }
@@ -365,10 +373,12 @@ fn prepare(pwd: u64, pwdlen: usize, salt: u64, saltlen: usize,
     put_le32(np, 0, saltlen as u64)
     blake2b.blake2b_update(&s, np, 4)
     blake2b.blake2b_update(&s, salt, saltlen)
-    put_le32(np, 0, 0)
+    put_le32(np, 0, secretlen as u64)
     blake2b.blake2b_update(&s, np, 4)
-    put_le32(np, 0, 0)
+    if secretlen > 0 { blake2b.blake2b_update(&s, secret, secretlen) }
+    put_le32(np, 0, adlen as u64)
     blake2b.blake2b_update(&s, np, 4)
+    if adlen > 0 { blake2b.blake2b_update(&s, ad, adlen) }
     if !blake2b.blake2b_final(&s, (&h0[0]) as u64) { return false }
 
     var l: u64 = 0
@@ -420,14 +430,22 @@ fn finish(mem: u64, lanes: u64, lane_len: u64, out: u64,
 fn argon2_any(pwd: u64, pwdlen: usize, salt: u64, saltlen: usize,
     t_cost: u64, m_cost: u64, lanes: u64,
     mem: u64, out: u64, outlen: usize, atype: u64) -> bool {
+    return argon2_ext(pwd, pwdlen, salt, saltlen, 0, 0, 0, 0,
+        t_cost, m_cost, lanes, mem, out, outlen, atype)
+}
+
+fn argon2_ext(pwd: u64, pwdlen: usize, salt: u64, saltlen: usize,
+    secret: u64, secretlen: usize, ad: u64, adlen: usize,
+    t_cost: u64, m_cost: u64, lanes: u64,
+    mem: u64, out: u64, outlen: usize, atype: u64) -> bool {
     if !geometrie_ok(t_cost, m_cost, lanes, saltlen, outlen) {
         return false
     }
     let seg_len: u64 = geometrie_seglen(m_cost, lanes)
     let lane_len: u64 = seg_len * SYNC_POINTS
     let blocks: u64 = lane_len * lanes
-    if !prepare(pwd, pwdlen, salt, saltlen, t_cost, m_cost, lanes,
-        mem, outlen, atype) {
+    if !prepare_ext(pwd, pwdlen, salt, saltlen, secret, secretlen, ad, adlen,
+        t_cost, m_cost, lanes, mem, outlen, atype) {
         return false
     }
     if !passes(mem, t_cost, lanes, lane_len, seg_len, blocks, atype) {

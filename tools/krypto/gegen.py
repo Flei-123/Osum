@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 """Usage:
-    tools/krypto/gegen.py lies <abbild> <passphrase>
-    tools/krypto/gegen.py schreib <abbild> <passphrase> [t] [m] [p]
-    tools/krypto/gegen.py baum <abbild> <passphrase>
-    tools/krypto/gegen.py roh <abbild>
-    tools/krypto/gegen.py vektoren <orakel>
+    tools/krypto/gegen.py read <image> <passphrase>
+    tools/krypto/gegen.py write <image> <passphrase> [t] [m] [p]
+    tools/krypto/gegen.py tree <image> <passphrase>
+    tools/krypto/gegen.py raw <image>
+    tools/krypto/gegen.py vectors <oracle>
 """
 import hashlib
 import hmac
@@ -21,8 +21,10 @@ except ImportError:
 try:
     from cryptography.hazmat.primitives.ciphers import (
         Cipher, algorithms, modes)
+    from cryptography.hazmat.primitives.kdf import argon2 as argon2kdf
 except ImportError:
     Cipher = None
+    argon2kdf = None
 
 SECTOR = 512
 HDR_SECTORS = 8
@@ -39,12 +41,12 @@ SALT_LEN, KEY_LEN, WRAP_LEN = 32, 64, 96
 
 
 def missing():
-    was = []
+    absent = []
     if argon2ll is None:
-        was.append("argon2-cffi")
-    if Cipher is None:
-        was.append("cryptography")
-    return was
+        absent.append("argon2-cffi")
+    if Cipher is None or argon2kdf is None:
+        absent.append("cryptography")
+    return absent
 
 
 def kdf(pw, salt, t, m, p, n=WRAP_LEN):
@@ -71,7 +73,7 @@ def header_sum(hdr):
 
 def header_read(hdr):
     if hdr[:len(MAGIC)] != MAGIC:
-        raise ValueError("keine OSUMCRYPT-Kennung")
+        raise ValueError("missing OSUMCRYPT magic")
     k = {
         "version": struct.unpack_from("<I", hdr, H_VERSION)[0],
         "cipher": struct.unpack_from("<I", hdr, H_CIPHER)[0],
@@ -85,7 +87,7 @@ def header_read(hdr):
     for i in range(SLOTS):
         s = hdr[SLOT_BASE + i * SLOT_SIZE:SLOT_BASE + (i + 1) * SLOT_SIZE]
         k["slots"].append({
-            "i": i,
+            "index": i,
             "used": struct.unpack_from("<I", s, S_USED)[0],
             "t": struct.unpack_from("<I", s, S_TCOST)[0],
             "m": struct.unpack_from("<I", s, S_MCOST)[0],
@@ -97,7 +99,7 @@ def header_read(hdr):
     return k
 
 
-def space_auf(sl, pw):
+def unlock_slot(sl, pw):
     if not sl["used"]:
         return None
     wrap = kdf(pw, sl["salt"], sl["t"], sl["m"], sl["p"])
@@ -107,12 +109,12 @@ def space_auf(sl, pw):
     return xts(wrap[:64], b"\0" * 16, sl["wrapped"], True)
 
 
-def hauptschluessel(hdr, pw):
+def master_key(hdr, pw):
     k = header_read(hdr)
     for sl in k["slots"]:
-        mk = space_auf(sl, pw)
+        mk = unlock_slot(sl, pw)
         if mk is not None:
-            return k, mk, sl["i"]
+            return k, mk, sl["index"]
     return k, None, -1
 
 
@@ -120,29 +122,29 @@ def hauptschluessel(hdr, pw):
 def cmd_read(path, pw):
     d = open(path, "rb").read()
     hdr = d[:HDR_SECTORS * SECTOR]
-    k, mk, wo = hauptschluessel(hdr, pw)
-    print("kopf: kennung=1 fassung=%d chiffre=%d kdf=%d sektor=%d"
+    k, mk, where = master_key(hdr, pw)
+    print("header: magic=1 version=%d cipher=%d kdf=%d sector=%d"
           % (k["version"], k["cipher"], k["kdf"], k["secsize"]))
-    print("kopf: summe=%d erster=%d anzahl=%d"
+    print("header: sum=%d first=%d count=%d"
           % (1 if k["sum_ok"] else 0, k["first"], k["count"]))
-    belegt = [s["i"] for s in k["slots"] if s["used"]]
-    print("kopf: plaetze=%d belegt=%s" % (len(belegt), ",".join(
-        str(i) for i in belegt) or "-"))
+    used = [s["index"] for s in k["slots"] if s["used"]]
+    print("header: slots=%d used=%s" % (len(used), ",".join(
+        str(i) for i in used) or "-"))
     if mk is None:
-        print("up: 0")
+        print("unlocked: 0")
         return 1
-    print("up: 1 slot=%d" % wo)
-    print("schluessel: haelften_ungleich=%d"
+    print("unlocked: 1 slot=%d" % where)
+    print("key: halves_differ=%d"
           % (1 if mk[:32] != mk[32:] else 0))
-    erst = k["first"]
-    sb = xts(mk, tweak_of(0), d[erst * SECTOR:(erst + 1) * SECTOR], True)
-    print("fs: magie=%s" % sb[:8].hex())
+    first = k["first"]
+    sb = xts(mk, tweak_of(0), d[first * SECTOR:(first + 1) * SECTOR], True)
+    print("fs: magic=%s" % sb[:8].hex())
     print("fs: text=%s" % sb[:8].decode("latin1"))
     return 0
 
 
 
-def cmd_write(path, pw, t=1, m=64, p=1, bloecke=8192):
+def cmd_write(path, pw, t=1, m=64, p=1, blocks=8192):
     mk = os.urandom(KEY_LEN)
     while mk[:32] == mk[32:]:
         mk = os.urandom(KEY_LEN)
@@ -158,7 +160,7 @@ def cmd_write(path, pw, t=1, m=64, p=1, bloecke=8192):
     struct.pack_into("<I", hdr, H_KDF, 1)
     struct.pack_into("<I", hdr, H_SECSIZE, SECTOR)
     struct.pack_into("<Q", hdr, H_FIRST, HDR_SECTORS)
-    struct.pack_into("<Q", hdr, H_COUNT, bloecke - HDR_SECTORS)
+    struct.pack_into("<Q", hdr, H_COUNT, blocks - HDR_SECTORS)
     sl = SLOT_BASE
     struct.pack_into("<I", hdr, sl + S_USED, 1)
     struct.pack_into("<I", hdr, sl + S_TCOST, t)
@@ -171,14 +173,14 @@ def cmd_write(path, pw, t=1, m=64, p=1, bloecke=8192):
 
     with open(path, "wb") as f:
         f.write(bytes(hdr))
-        f.truncate(bloecke * SECTOR)
-    print("schrieb: %s bloecke=%d t=%d m=%d p=%d" % (path, bloecke, t, m, p))
-    print("schluessel: %s" % mk.hex())
+        f.truncate(blocks * SECTOR)
+    print("wrote: %s blocks=%d t=%d m=%d p=%d" % (path, blocks, t, m, p))
+    print("key: %s" % mk.hex())
     return 0
 
 
 
-def cmd_roh(path):
+def cmd_raw(path):
     import collections
     import math
     import re
@@ -187,15 +189,15 @@ def cmd_roh(path):
     n = len(data) // SECTOR
 
     sig = {
-        b"OSUM-OFS": "OFS-Superblock",
-        b"SFO-MUSO": "OFS-Kennung gedreht",
+        b"OSUM-OFS": "OFS superblock",
+        b"SFO-MUSO": "OFS magic reversed",
         b"NTFS": "NTFS",
         b"\x53\xef": "ext2/3/4",
         b"FAT1": "FAT",
     }
-    print("roh: sektoren=%d" % n)
+    print("raw: sectors=%d" % n)
     for pat, name in sig.items():
-        print("roh: sig %s = %d" % (name, data.count(pat)))
+        print("raw: sig %s = %d" % (name, data.count(pat)))
 
     empty = 0
     ents = []
@@ -207,123 +209,150 @@ def cmd_roh(path):
         c = collections.Counter(s)
         ln = len(s)
         ents.append(-sum(v / ln * math.log2(v / ln) for v in c.values()))
-    print("roh: leer=%d beschrieben=%d" % (empty, len(ents)))
+    print("raw: empty=%d written=%d" % (empty, len(ents)))
     if ents:
         print("raw: entropy_min=%.3f mean=%.3f below7=%d"
               % (min(ents), sum(ents) / len(ents),
                  sum(1 for e in ents if e < 7.0)))
-    lang = [r for r in re.findall(rb"[ -~]{16,}", data)]
-    print("roh: textfolgen16=%d" % len(lang))
+    long_runs = [r for r in re.findall(rb"[ -~]{16,}", data)]
+    print("raw: text_runs16=%d" % len(long_runs))
     return 0
 
 
 
-def cmd_vektoren(orakel):
-    def frag(lines):
-        r = subprocess.run([orakel], input="\n".join(lines) + "\n",
+def cmd_vectors(oracle):
+    def query(lines):
+        r = subprocess.run([oracle], input="\n".join(lines) + "\n",
                            capture_output=True, text=True, timeout=1800)
         return r.stdout.strip().split("\n")
 
-    gesamt_gut = 0
-    gesamt_all = 0
+    total_good = 0
+    total_all = 0
 
-    fr, soll = [], []
+    lines, want = [], []
     for mlen in (0, 1, 2, 63, 64, 65, 127, 128, 129, 200, 1000):
         msg = bytes((i * 7 + 3) & 255 for i in range(mlen))
         for ol in (1, 16, 32, 48, 64):
-            fr.append("b2b %s %d" % (msg.hex() if msg else "-", ol))
-            soll.append(hashlib.blake2b(msg, digest_size=ol).hexdigest())
+            lines.append("b2b %s %d" % (msg.hex() if msg else "-", ol))
+            want.append(hashlib.blake2b(msg, digest_size=ol).hexdigest())
     for klen in (1, 16, 32, 64):
         for mlen in (0, 1, 64, 129):
             key = bytes((i * 11 + 5) & 255 for i in range(klen))
             msg = bytes((i * 3 + 1) & 255 for i in range(mlen))
-            fr.append("b2bkey %s %s 64"
+            lines.append("b2bkey %s %s 64"
                       % (key.hex(), msg.hex() if msg else "-"))
-            soll.append(hashlib.blake2b(msg, key=key,
+            want.append(hashlib.blake2b(msg, key=key,
                                         digest_size=64).hexdigest())
-    ist = frag(fr)
-    gut = sum(1 for a, b in zip(ist, soll) if a == b)
-    print("blake2b %d/%d" % (gut, len(soll)))
-    gesamt_gut += gut
-    gesamt_all += len(soll)
+    got = query(lines)
+    good = sum(1 for a, b in zip(got, want) if a == b)
+    print("blake2b %d/%d" % (good, len(want)))
+    total_good += good
+    total_all += len(want)
 
-    fr, soll = [], []
-    faelle = []
+    lines, want = [], []
+    cases = []
     for t in (1, 2, 3):
         for m in (8, 16, 32, 64, 128, 256):
             for p in (1, 2, 4):
                 if m < 8 * p:
                     continue
-                faelle.append((b"password", b"somesaltsomesalt",
+                cases.append((b"password", b"somesaltsomesalt",
                                t, m, p, 32, "ID"))
-    faelle += [
+    cases += [
         (b"", b"12345678", 1, 8, 1, 32, "ID"),
         (b"x" * 100, b"s" * 32, 2, 64, 2, 128, "ID"),
         (b"pw", b"saltsalt", 2, 32, 2, 32, "I"),
         (b"pw", b"saltsalt", 3, 64, 4, 32, "D"),
     ]
-    word = {"ID": "argon2id", "I": "argon2i", "D": "argon2d"}
-    for pw, salt, t, m, p, n, ty in faelle:
-        fr.append("%s %s %s %d %d %d %d"
-                  % (word[ty], pw.hex() if pw else "-", salt.hex(),
+    names = {"ID": "argon2id", "I": "argon2i", "D": "argon2d"}
+    for pw, salt, t, m, p, n, ty in cases:
+        lines.append("%s %s %s %d %d %d %d"
+                  % (names[ty], pw.hex() if pw else "-", salt.hex(),
                      t, m, p, n))
-        soll.append(argon2ll.hash_secret_raw(
+        want.append(argon2ll.hash_secret_raw(
             secret=pw, salt=salt, time_cost=t, memory_cost=m,
             parallelism=p, hash_len=n,
             type=getattr(argon2ll.Type, ty), version=19).hex())
-    ist = frag(fr)
-    gut = sum(1 for a, b in zip(ist, soll) if a == b)
-    print("argon2 %d/%d" % (gut, len(soll)))
-    gesamt_gut += gut
-    gesamt_all += len(soll)
+    got = query(lines)
+    good = sum(1 for a, b in zip(got, want) if a == b)
+    print("argon2 %d/%d" % (good, len(want)))
+    total_good += good
+    total_all += len(want)
 
-    fr, soll = [], []
+    lines, want = [], []
+    kdf_class = {"ID": argon2kdf.Argon2id, "I": argon2kdf.Argon2i,
+                 "D": argon2kdf.Argon2d}
+    oracle_word = {"ID": "argon2xid", "I": "argon2xi", "D": "argon2xd"}
+    keyed = [
+        (b"\x01" * 32, b"\x02" * 16, b"\x03" * 8, b"\x04" * 12, 3, 32, 4, 32),
+        (b"", b"saltsalt", b"k", b"", 1, 8, 1, 16),
+        (b"pw", b"saltsalt", b"", b"ad", 2, 16, 2, 32),
+        (b"pw" * 20, b"s" * 24, b"x" * 100, b"y" * 200, 2, 64, 4, 64),
+        (b"a", b"saltsalt", b"secret", b"assoc", 3, 128, 8, 48),
+    ]
+    for ty in ("ID", "I", "D"):
+        for pw, salt, sec, ad, t, m, p, n in keyed:
+            lines.append("%s %s %s %s %s %d %d %d %d" % (
+                oracle_word[ty], pw.hex() or "-", salt.hex(),
+                sec.hex() or "-", ad.hex() or "-", t, m, p, n))
+            want.append(kdf_class[ty](
+                salt=salt, length=n, iterations=t, lanes=p, memory_cost=m,
+                ad=ad or None, secret=sec or None).derive(pw).hex())
+    got = query(lines)
+    good = sum(1 for a, b in zip(got, want) if a == b)
+    print("argon2keyed %d/%d" % (good, len(want)))
+    total_good += good
+    total_all += len(want)
+
+    lines, want = [], []
     for n in (16, 32, 48, 512, 4096):
         for kn in range(3):
             key = bytes((i * 17 + kn * 5 + 1) & 255 for i in range(64))
             pt = bytes((i * 13 + 7 + kn) & 255 for i in range(n))
             tw = bytes((i * 5 + 2 + kn) & 255 for i in range(16))
             ct = xts(key, tw, pt, False)
-            fr.append("xtsenc %s %s %s" % (key.hex(), tw.hex(), pt.hex()))
-            soll.append(ct.hex())
-            fr.append("xtsdec %s %s %s" % (key.hex(), tw.hex(), ct.hex()))
-            soll.append(pt.hex())
+            lines.append("xtsenc %s %s %s" % (key.hex(), tw.hex(), pt.hex()))
+            want.append(ct.hex())
+            lines.append("xtsdec %s %s %s" % (key.hex(), tw.hex(), ct.hex()))
+            want.append(pt.hex())
     for lba in (0, 1, 2, 63, 1000, 123456):
         key = bytes((i * 3 + 9) & 255 for i in range(64))
         pt = bytes((i * 11 + lba) & 255 for i in range(512))
         ct = xts(key, tweak_of(lba), pt, False)
-        fr.append("xtssec %s %d %s" % (key.hex(), lba, pt.hex()))
-        soll.append(ct.hex())
-        fr.append("xtssecd %s %d %s" % (key.hex(), lba, ct.hex()))
-        soll.append(pt.hex())
-    ist = frag(fr)
-    gut = sum(1 for a, b in zip(ist, soll) if a == b)
-    print("xts %d/%d" % (gut, len(soll)))
-    gesamt_gut += gut
-    gesamt_all += len(soll)
+        lines.append("xtssec %s %d %s" % (key.hex(), lba, pt.hex()))
+        want.append(ct.hex())
+        lines.append("xtssecd %s %d %s" % (key.hex(), lba, ct.hex()))
+        want.append(pt.hex())
+    got = query(lines)
+    good = sum(1 for a, b in zip(got, want) if a == b)
+    print("xts %d/%d" % (good, len(want)))
+    total_good += good
+    total_all += len(want)
 
-    bad = [
+    invalid = [
         "xtsenc %s %s %s" % (("11" * 32 + "11" * 32), "00" * 16, "00" * 16),
         "xtsenc %s %s %s" % ("00" * 32 + "11" * 32, "00" * 16, "00" * 8),
         "xtsenc %s %s %s" % ("00" * 32, "00" * 16, "00" * 16),
         "argon2id 4142 4142 1 8 1 32",
+        "argon2xid 4142 %s 41 - 1 8 1 32" % ("41" * 7),
+        "argon2xid 4142 %s zz - 1 8 1 32" % ("41" * 8),
         "argon2id 4142 %s 1 8 4 32" % ("41" * 16),
-        "quatsch 00",
+        "nonsense 00",
     ]
-    ist = frag(bad)
-    gut = sum(1 for z in ist if z.strip() == "FAIL")
-    print("negativ %d/%d" % (gut, len(bad)))
-    gesamt_gut += gut
-    gesamt_all += len(bad)
+    got = query(invalid)
+    good = sum(1 for z in got if z.strip() == "FAIL")
+    print("negative %d/%d" % (good, len(invalid)))
+    total_good += good
+    total_all += len(invalid)
 
-    print("gesamt %d/%d" % (gesamt_gut, gesamt_all))
-    return 0 if gesamt_gut == gesamt_all else 1
+    print("total %d/%d" % (total_good, total_all))
+    return 0 if total_good == total_all else 1
 
 
 PER_BLOCK = SECTOR // 8
 
 
-def _ofs_leser(blk):
+def _ofs_reader(blk):
     sb = blk(0)
     g = lambda o: struct.unpack_from("<Q", sb, o)[0]
     itable = g(40)
@@ -397,64 +426,68 @@ def _ofs_leser(blk):
 
 def cmd_tree(path, pw):
     d = open(path, "rb").read()
-    k, mk, wo = hauptschluessel(d[:HDR_SECTORS * SECTOR], pw)
+    k, mk, where = master_key(d[:HDR_SECTORS * SECTOR], pw)
     if mk is None:
-        print("tree: up=0")
+        print("tree: unlocked=0")
         return 1
-    erst = k["first"]
+    first = k["first"]
 
     def blk(i):
         return xts(mk, tweak_of(i),
-                   d[(erst + i) * SECTOR:(erst + i + 1) * SECTOR], True)
+                   d[(first + i) * SECTOR:(first + i + 1) * SECTOR], True)
 
-    root, file = _ofs_leser(blk)
-    laengen = [100, 700, 5000, 40000]
-    eintraege = sorted(root(), key=lambda x: x[1])
-    print("tree: up=1 slot=%d files=%d" % (wo, len(eintraege)))
-    gut = 0
-    for n, nm in eintraege:
+    root, file = _ofs_reader(blk)
+    lengths = [100, 700, 5000, 40000]
+    try:
+        entries = sorted(root(), key=lambda x: x[1])
+    except (ZeroDivisionError, struct.error, IndexError, ValueError):
+        print("tree: unlocked=1 slot=%d unreadable=1" % where)
+        return 1
+    print("tree: unlocked=1 slot=%d files=%d" % (where, len(entries)))
+    good = 0
+    for n, nm in entries:
         if len(nm) != 2 or nm[0] != "k" or not nm[1].isdigit():
             continue
         i = int(nm[1])
-        if i >= len(laengen):
+        if i >= len(lengths):
             continue
-        ln = laengen[i]
-        soll = hashlib.sha256(
-            bytes(((i * 37 + q * 7 + 3) & 255) for q in range(ln))).hexdigest()
-        ist = hashlib.sha256(file(n)).hexdigest()
-        if soll == ist:
-            gut += 1
-        print("baum: sha %s = %s %s" % (nm, ist, "OK" if soll == ist else
-                                        "FALSCH(soll %s)" % soll))
-    print("tree: good=%d of=%d" % (gut, len(laengen)))
-    return 0 if gut == len(laengen) else 1
+        length = lengths[i]
+        want = hashlib.sha256(
+            bytes(((i * 37 + q * 7 + 3) & 255) for q in range(length))).hexdigest()
+        got = hashlib.sha256(file(n)).hexdigest()
+        if want == got:
+            good += 1
+        print("tree: sha %s = %s %s" % (nm, got, "OK" if want == got else
+                                        "WRONG(want %s)" % want))
+    print("tree: good=%d of=%d" % (good, len(lengths)))
+    return 0 if good == len(lengths) else 1
 
 
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
-    was = missing()
-    if was:
-        print("gegen.py: missing: %s" % ", ".join(was))
+    absent = missing()
+    if absent:
+        print("gegen.py: missing: %s" % ", ".join(absent))
         return 3
     b = sys.argv[1]
-    if b == "lies":
+    if b == "read":
         return cmd_read(sys.argv[2], sys.argv[3].encode())
-    if b == "schreib":
+    if b == "write":
         a = sys.argv[4:]
         return cmd_write(sys.argv[2], sys.argv[3].encode(),
                            int(a[0]) if len(a) > 0 else 1,
                            int(a[1]) if len(a) > 1 else 64,
                            int(a[2]) if len(a) > 2 else 1,
                            int(a[3]) if len(a) > 3 else 8192)
-    if b == "baum":
+    if b == "tree":
         return cmd_tree(sys.argv[2], sys.argv[3].encode())
-    if b == "roh":
-        return cmd_roh(sys.argv[2])
-    if b == "vektoren":
-        return cmd_vektoren(sys.argv[2])
-    print("unbekannt: %s" % b)
+    if b == "raw":
+        return cmd_raw(sys.argv[2])
+    if b == "vectors":
+        return cmd_vectors(sys.argv[2])
+    print("unknown: %s" % b)
     return 2
 
 
