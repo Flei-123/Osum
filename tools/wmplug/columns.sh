@@ -50,8 +50,9 @@ ARGS=(build "$TMPD/disk.img" 32768 /lib/
 for p in $PROGS; do
     ARGS+=("/bin/$p=$TMPD/$p.elf")
 done
+printf 'titel=no-such-window-title kacheln\n' > "$TMPD/wmregeln.conf"
 ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme"
-    "/etc/wmplug.conf=etc/wmplug.conf" "/etc/wmregeln.conf=etc/wmregeln.conf")
+    "/etc/wmplug.conf=etc/wmplug.conf" "/etc/wmregeln.conf=$TMPD/wmregeln.conf")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "the image is built" \
@@ -80,7 +81,7 @@ lauf() { # name zusatz marke
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$TMPD/$name.qemu" 2>&1 &
     local pid=$!
     warte "$out" "$marke" "$pid"
-    sleep 2
+    sleep "${SHOT_DELAY:-0.4}"
     python3 tools/gfx/screenshot.py "$sock" "$TMPD/$name.ppm" 25 \
         > "$TMPD/$name.shot" 2>&1
     wait "$pid"; echo "$?" > "$TMPD/$name.rc"
@@ -127,8 +128,8 @@ echo "== 4. the column position, recomputed from the photo =="
 WIN=$(grep -aE '^wm: win .* t=\[Terminal' "$P" | tail -1)
 WX=$(printf '%s' "$WIN" | grep -oE ' x=[0-9]+' | head -1 | grep -oE '[0-9]+')
 WY=$(printf '%s' "$WIN" | grep -oE ' y=[0-9]+' | head -1 | grep -oE '[0-9]+')
-RAND=$(grep -aoE '^const BORDER0: u64 = [0-9]+' kernel/ui/wm.fi | grep -oE '[0-9]+$')
-TITEL=$(grep -aoE '^const TITLE_H0: u64 = [0-9]+' kernel/ui/wm.fi | grep -oE '[0-9]+$')
+RAND=$(grep -aoE '^const BORDER0: u64 = [0-9]+' kernel/ui/wm/wmgeom.fi | grep -oE '[0-9]+$')
+TITEL=$(grep -aoE '^const TITLE_H0: u64 = [0-9]+' kernel/ui/wm/wmgeom.fi | grep -oE '[0-9]+$')
 if [ -n "$WX" ] && [ -n "$WY" ] && [ -n "$RAND" ] && [ -n "$TITEL" ]; then
     GX=$((WX + RAND)); GY=$((WY + TITEL))
     ok "the terminal is at $WX,$WY according to the window server -- grid from $GX,$GY"
@@ -137,7 +138,7 @@ else
     bad "no window position of the terminal in the capture (x='$WX' y='$WY' Rand='$RAND' Titel='$TITEL')"
 fi
 GRID=(assets/osum-mono.ttf 16 "$GX" "$GY" 10 19)
-VG=(248 250 252); HG=(18 24 32)
+VG=(232 234 237); HG=(18 24 32)
 tgrid() { # ppm zeile spalte text
     python3 tools/gfx/checkshot.py tgrid "$1" "${GRID[@]}" "$2" "$3" \
         "${VG[@]}" "${HG[@]}" "$4" 2>&1
