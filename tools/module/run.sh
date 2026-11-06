@@ -185,7 +185,7 @@ echo "== 5. unloaded, and the frames come back =="
 has "$TMPD/l-gut.txt" "ps2maus: entladen" "module_exit lief"
 has "$TMPD/l-gut.txt" "module: unloaded=1 present=0" "nach dem Entladen: wieder kein Zeigegeraet"
 FREI=$(grep -a 'module: free=' "$TMPD/l-gut.txt" | head -1)
-A=$(echo "$FREI" | grep -oE 'frei=[0-9]+' | grep -oE '[0-9]+')
+A=$(echo "$FREI" | grep -oE 'free=[0-9]+' | grep -oE '[0-9]+')
 B=$(echo "$FREI" | sed 's/.*=//')
 if [ -n "$A" ] && [ "$A" = "$B" ]; then
     ok "free frames afterwards = before ($A) -- the loader loses none"
