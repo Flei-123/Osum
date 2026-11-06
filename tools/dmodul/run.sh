@@ -53,13 +53,14 @@ for p in $PROGS; do
         > "$BUILDD/l-$p" 2>&1 \
         || { head -20 "$BUILDD/l-$p"; fehler "$p bindet nicht"; }
 done
+for p in $PROGS; do strip --strip-all "$BUILDD/$p.elf"; done
 sagen programme "$(echo $PROGS | wc -w)"
 
 # ------------------------------------------------------------ 2. Platte
 platte_bauen() {
     local ziel=$1
     local mitconf=$2
-    local ARGS=(build "$ziel" 32768 /lib/)
+    local ARGS=(build "$ziel" 65536 --v3 /lib/)
     ARGS+=("/lib/sans.ttf=$WURZEL/assets/osum-sans.ttf"
            "/lib/mono.ttf=$WURZEL/assets/osum-mono.ttf"
            "/lib/icons.ttf=$WURZEL/assets/osum-icons.ttf")
@@ -110,7 +111,7 @@ booten() {
     if [ "$accel" = kvm ] && [ -e /dev/kvm ]; then ACC=(-accel kvm); fi
     timeout 420 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" \
         -m 512 \
-        -append "gfx wm wig wigicons desk wmhold wiglong nokbd nosched noproc nofs" \
+        -append "gfx wm wig wigicons desk wmhold wiglong wighalt=60 nokbd nosched noproc nofs" \
         -serial "file:$seriell" -display none -no-reboot -vga std \
         -monitor "unix:$SOCK,server,nowait" \
         -drive "file=$disk,format=raw,if=ide,index=0" \

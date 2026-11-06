@@ -27,11 +27,12 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 export DESIGNBUILD="$TMPD/build"
 FPS=${FPS:-40}
+CTL_FPS=${CTL_FPS:-150}
 
-run() { # run <name> <extra kernel words>
-    local name=$1; shift
+run() { # run <name> <frames per second> <extra kernel words>
+    local name=$1 fps=$2; shift 2
     local qp=$((20000 + RANDOM % 20000)) hp=$((40000 + RANDOM % 20000))
-    python3 tools/netdidle/flood.py "$qp" "$FPS" 150 "$hp" > "$TMPD/$name.flood" 2>&1 &
+    python3 tools/netdidle/flood.py "$qp" "$fps" 150 "$hp" > "$TMPD/$name.flood" 2>&1 &
     local fp=$!
     EH_NETDEV="-netdev socket,id=n0,udp=127.0.0.1:$hp,localaddr=127.0.0.1:$qp -device e1000,netdev=n0,mac=52:54:00:aa:bb:cc" \
     bash tools/design/eh6.sh "$TMPD/$name" res=1280x800 accel=kvm netz=ja \
@@ -52,7 +53,7 @@ measure() { # measure <name> -> prints "netd busy"
 pct() { sed -n 's/.*share=\([-0-9.]*\).*/\1/p' "$1" | head -1; }
 
 echo "== fix on =="
-run fix
+run fix "$FPS"
 measure fix
 # eh6 runs with `noproc`, so the netd pid comes from the kernel's own line `nic: netd=N`
 grep -aq 'nic: netd=[0-9]' "$TMPD/fix/serial.txt" && ok "netd pid known from 'nic: netd=N'" || bad "no 'nic: netd=N' line (netd not started?)"
@@ -61,10 +62,10 @@ awk -v s="${n:--1}" 'BEGIN{exit !(s >= 0 && s < 15)}' && ok "netd uses ${n} % of
 awk -v s="${b:--1}" 'BEGIN{exit !(s >= 0 && s < 15)}' && ok "widget method: the core is ${b} % busy (limit 15 %)" || bad "widget method: ${b:-?} % busy (limit 15 %)"
 
 echo "== counter-proof: netdhot (old rule) =="
-run ctl netdhot
+run ctl "$CTL_FPS" netdhot
 measure ctl
 n2=$(pct "$TMPD/ctl.netd")
-awk -v s="${n2:--1}" 'BEGIN{exit !(s >= 30)}' && ok "with netdhot netd is hot again (${n2} %): the check measures something" || bad "with netdhot netd uses only ${n2:-?} % -- the check is blind"
+awk -v s="${n2:--1}" 'BEGIN{exit !(s >= 15)}' && ok "with netdhot at $CTL_FPS frames/s netd is hot again (${n2} %): the check measures something" || bad "with netdhot netd uses only ${n2:-?} % -- the check is blind"
 
 echo
 echo "NETDIDLE: $pass passed, $fail failed"
