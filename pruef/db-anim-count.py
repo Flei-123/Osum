@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# pruef/db-anim-zahl.py -- PUNKT 3, DER ZAHLENBELEG.
+# pruef/db-anim-count.py -- PUNKT 3, DER ZAHLENBELEG.
 #
 # `wmanim` ist eine VORFUEHRUNG: der Kern laesst dort selbst ein Fenster
 # auf- und zugehen und ruft dafuer `open_anim`/`close_anim` direkt. Die

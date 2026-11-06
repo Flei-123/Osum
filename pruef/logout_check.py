@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 """Usage:
-    abmelden.py <build_dir> [output_dir] -- sign out with real clicks (P-002).
+    logout_check.py <build_dir> [output_dir] -- sign out with real clicks (P-002).
 """
 import os
 import re
@@ -19,7 +19,7 @@ OUT = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 \
     else os.path.join(ROOT, "belege", "logind")
 os.makedirs(OUT, exist_ok=True)
 SERIAL = os.path.join(OUT, "logout-click.txt")
-SOCK = "/tmp/logind-abmelden.sock"
+SOCK = "/tmp/logind-logout.sock"
 for path in (SERIAL, SOCK):
     if os.path.exists(path):
         os.unlink(path)
@@ -123,7 +123,7 @@ qemu_cmd = (["qemu-system-x86_64"] + accel +
              "-monitor", "unix:%s,server,nowait" % SOCK,
              "-display", "none", "-no-reboot"])
 proc = subprocess.Popen(qemu_cmd,
-                        stdout=open(os.path.join(OUT, "abmelden-qemu.txt"), "w"),
+                        stdout=open(os.path.join(OUT, "logout-qemu.txt"), "w"),
                         stderr=subprocess.STDOUT)
 say("== QEMU pid %d, image %s" % (proc.pid, BUILD))
 
@@ -261,18 +261,18 @@ try:
 
     start = time.time()
     while time.time() - start < 60:
-        if "abmelden: Anmeldung neu" in read_text():
+        if "logout: login restarted" in read_text():
             break
         time.sleep(0.5)
     text = read_text()
-    if "bmelden: Sitzung" in text:
-        ok("the kernel got the sign-out wish ('abmelden: Sitzung')")
+    if "logout: session" in text:
+        ok("the kernel got the sign-out wish ('logout: session')")
     else:
-        bad("'abmelden: Sitzung' missing -- the wish did not arrive")
+        bad("'logout: session' missing -- the wish did not arrive")
         say("       " + " / ".join(re.findall(
-            r"(?:launcher: energie|abmelden:)[^\n]{0,50}", text)[-5:]))
+            r"(?:launcher: energie|logout:)[^\n]{0,50}", text)[-5:]))
     killed = re.findall(r"signal: pid=(\d+) SIGKIL", text)
-    counted = re.findall(r"abmelden: beendet n=(\d+)", text)
+    counted = re.findall(r"logout: killed n=(\d+)", text)
     if killed:
         ok("the session ended -- %d SIGKILL in the capture (pids %s)"
            % (len(killed), ", ".join(killed)))
@@ -283,19 +283,19 @@ try:
     else:
         bad("no task of the session was ended")
 
-    restarted = re.findall(r"abmelden: Anmeldung neu pid=(\d+)", text)
+    restarted = re.findall(r"logout: login restarted pid=(\d+)", text)
     starts = len(re.findall(r"start /bin/glogin", text))
     last_rect = len(re.findall(r"glogin: rect id=12", text))
     if restarted:
         ok("the sign-in screen was restarted (pid=%s)" % restarted[-1])
-    elif "abmelden: An" in text and starts >= 2:
-        ok("the sign-in screen was restarted ('abmelden: An' + "
+    elif "logout: login" in text and starts >= 2:
+        ok("the sign-in screen was restarted ('logout: login' + "
            "'start /bin/glogin' %dx)" % starts)
     elif last_rect >= 2:
         ok("the sign-in screen was restarted ('glogin: rect id=12' %dx, "
            "'start /bin/glogin' %dx)" % (last_rect, starts))
     else:
-        bad("'abmelden: Anmeldung neu' missing ('start /bin/glogin' %dx, "
+        bad("'logout: login restarted' missing ('start /bin/glogin' %dx, "
             "'rect id=12' %dx)" % (starts, last_rect))
     ready = len(re.findall(r"glogin: ready", text))
     if last_rect >= 2:

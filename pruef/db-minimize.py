@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# pruef/db-minimieren.py -- PUNKT 3: DAS MINIMIEREN, MITTEN IN DER
+# pruef/db-minimize.py -- PUNKT 3: DAS MINIMIEREN, MITTEN IN DER
 # BEWEGUNG FOTOGRAFIERT.
 #
 # Der vorige Versuch hat die Bewegung verfehlt, und zwar aus einem

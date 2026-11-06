@@ -38,7 +38,7 @@ def window():
 
 def reiterstand():
     # Ohne Praefix gesucht: die serielle Leitung traegt mehrere
-    # Schreiber und zerschneidet Zeilenanfaenge (siehe db-reiter.py --
+    # Schreiber und zerschneidet Zeilenanfaenge (siehe db-tabs.py --
     # und siehe der Lauf dieser Runde, in dem k15 mitten in nedits
     # Zeile geschrieben hat).
     r = re.findall(r"reiter (\d+) a=(\d+)", lauf.read_text())

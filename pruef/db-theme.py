@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# pruef/db-thema.py -- PUNKT 2: ERREICHT EIN THEMENWECHSEL WIRKLICH JEDES
+# pruef/db-theme.py -- PUNKT 2: ERREICHT EIN THEMENWECHSEL WIRKLICH JEDES
 # PROGRAMM?
 #
 # Die Frage aus Justins Liste ist nicht "wie viele harte Farben stehen

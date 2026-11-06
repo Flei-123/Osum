@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# pruef/db-ziehen.py -- DREHBUCH (b): Ziehen und Ablegen im Dateimanager.
+# pruef/db-drag.py -- DREHBUCH (b): Ziehen und Ablegen im Dateimanager.
 #
 # Gemessen wird der Weg eines Menschen: eine Datei in der Tabelle
 # anfassen, mit gedrueckter Taste fahren, ueber dem Ziel loslassen.

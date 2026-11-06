@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# pruef/db-schreib.py -- DIE ENGE GEGENPROBE zum Absturz.
+# pruef/db-write.py -- DIE ENGE GEGENPROBE zum Absturz.
 #
 # Befund bis hierher: `echo eins > /data/t1.txt` laeuft durch (rc=0),
 # und das darauffolgende `cat /data/t1.txt` bringt den Kern mit

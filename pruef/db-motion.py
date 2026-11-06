@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# pruef/db-bewegung.py -- PUNKT 3: DIE TOTEN ANIMATIONEN, JETZT LEBENDIG.
+# pruef/db-motion.py -- PUNKT 3: DIE TOTEN ANIMATIONEN, JETZT LEBENDIG.
 #
 # WAS HIER GEMESSEN WIRD, und warum es nicht "sieht man doch" heisst:
 # eine Bewegung, die 160 ms dauert, ist auf einem Bild entweder da oder

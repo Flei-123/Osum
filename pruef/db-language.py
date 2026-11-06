@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# pruef/db-sprache.py -- PUNKT 1: IST DIE OBERFLAECHE DEUTSCH?
+# pruef/db-language.py -- PUNKT 1: IST DIE OBERFLAECHE DEUTSCH?
 #
 # Justin sieht im Startmenue "Write and change text", "View files and
 # folders", "Find and start programs and files" -- also die ENGLISCHEN

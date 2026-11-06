@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# pruef/db-zugbild.py -- RUNDE DESIGN-3: das Zugbild am Zeiger.
+# pruef/db-dragframe.py -- RUNDE DESIGN-3: das Zugbild am Zeiger.
 #
 # GEMESSEN WIRD NICHT "sieht huebsch aus", sondern zwei Dinge, die
 # nachpruefbar sind:

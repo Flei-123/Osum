@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# pruef/db-taste.py -- WELCHE QEMU-TASTE GIBT AUF DIESEM SYSTEM EIN ">"?
+# pruef/db-key.py -- WELCHE QEMU-TASTE GIBT AUF DIESEM SYSTEM EIN ">"?
 #
 # Zweimal geraten, zweimal falsch (`less` und `0x56` kamen beide als
 # Leerzeichen an). Also nicht ein drittes Mal raten, sondern MESSEN:

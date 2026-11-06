@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# pruef/db-reiter.py -- DREHBUCH (c): Reiter im Dateimanager.
+# pruef/db-tabs.py -- DREHBUCH (c): Reiter im Dateimanager.
 #
 # Gemessen wird, was Justin verlangt hat:
 #   * Strg+T oeffnet einen neuen Reiter

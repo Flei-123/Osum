@@ -29,7 +29,7 @@ def command(row, wait=3.0):
 # DIE DATEIEN LIEGEN SCHON IM ABBILD (tools/k15/lokal/build-gross.sh).
 # Sie hier mit `echo > datei` anzulegen ist NICHT moeglich: das Zeichen
 # `>` kommt ueber den QEMU-Monitor auf dieser Tastatur gar nicht an
-# (gemessen, pruef/db-taste.py) -- eine Umlenkung laesst sich nicht
+# (gemessen, pruef/db-key.py) -- eine Umlenkung laesst sich nicht
 # tippen. tools/k11/run.sh:168 macht es aus demselben Grund genauso.
 lauf.say("--- was im Abbild liegt ---")
 for z in command("cat /data/t1.txt").splitlines():

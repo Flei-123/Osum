@@ -318,7 +318,7 @@ shift-dot      ->  :            shift-comma -> ;     backslash -> #
 In `pruef/click_driver.py` steht jetzt die deutsche Belegung (`/` = `shift-7`).
 
 **Das Zeichen `>` ist über den Monitor gar nicht erreichbar.** Gemessen
-mit `pruef/db-taste.py`, das jeden Kandidaten einzeln schickt und auf der
+mit `pruef/db-key.py`, das jeden Kandidaten einzeln schickt und auf der
 Leitung nachliest:
 
 ```
@@ -365,8 +365,8 @@ den Merge). Der Editor wird deshalb auf der Konsole gemessen
 | `pruef/schuss-konsole.py` | dasselbe **ohne** Fensterserver, für Terminalprogramme |
 | `pruef/db-energie.py` | (a) der Weg zum Ausschalten |
 | `pruef/db-ziehen-pruef.py` | (b) drei Züge, mit `ls` vorher und nachher |
-| `pruef/db-reiter.py` | (c) Strg+T, Klick, Ziehen, Strg+W, Gegenprobe |
-| `pruef/db-taste.py` | welche QEMU-Taste gibt welches Zeichen |
+| `pruef/db-tabs.py` | (c) Strg+T, Klick, Ziehen, Strg+W, Gegenprobe |
+| `pruef/db-key.py` | welche QEMU-Taste gibt welches Zeichen |
 
 `pruef/oneshot.py` fuhr genau einen Ablauf und beendete die Maschine
 danach; für eine Runde mit mehreren Schritten je Boot reichte das nicht.
