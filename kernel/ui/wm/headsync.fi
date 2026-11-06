@@ -37,12 +37,69 @@ fn hd_scale(state: u64, hd: u64) -> u64 {
     return vgpu.head_scale(state, hd)
 }
 
-fn win_scale_pct(state: u64, i: u64) -> u64 {
-    let hd: u64 = wmhead.win_head(state, i)
+fn head_pct(state: u64, hd: u64) -> u64 {
     if vgpu.head_scale_user(state, hd) {
         return vgpu.head_scale(state, hd)
     }
     return fb.uiscale(state) * 100
+}
+
+fn win_scale_pct(state: u64, i: u64) -> u64 {
+    return head_pct(state, wmhead.win_head(state, i))
+}
+
+fn active_win(state: u64, i: u64) -> bool {
+    return wmlayout.gs(state, wmlayout.S_DRAG) == i + 1 || wmlayout.gs(state, wmlayout.S_SIZING) == i + 1
+}
+
+fn sticky_pct(state: u64, i: u64) -> u64 {
+    let cur: u64 = wmgeom.fpct(state, i)
+    let best: u64 = wmhead.win_head(state, i)
+    if head_pct(state, best) == cur {
+        return cur
+    }
+    let x0: i64 = wmbase.win_x(state, i)
+    let y0: i64 = wmbase.win_y(state, i)
+    let x1: i64 = x0 + wmbase.outer_w(state, i) as i64
+    let y1: i64 = y0 + wmbase.outer_h(state, i) as i64
+    let best_ov: u64 = wmhead.hd_overlap(state, best, x0, y0, x1, y1)
+    var hd: u64 = 0
+    while hd < wmhead.HD_MAX {
+        if head_pct(state, hd) == cur {
+            if wmhead.hd_overlap(state, hd, x0, y0, x1, y1) * 8 >= best_ov * 7 {
+                return cur
+            }
+        }
+        hd = hd + 1
+    }
+    return head_pct(state, best)
+}
+
+fn rescale_signed(v: u64, from_pct: u64, to_pct: u64) -> u64 {
+    let n: i64 = v as i64
+    return ((n * (to_pct as i64)) / (from_pct as i64)) as u64
+}
+
+fn rescale_grab(state: u64, i: u64, border_old: u64, title_old: u64, from_pct: u64, to_pct: u64) {
+    if wmlayout.gs(state, wmlayout.S_DRAG) == i + 1 {
+        var gx: i64 = wmlayout.gs(state, wmlayout.S_DRAGX) as i64 - border_old as i64 + wmgeom.border(state, i) as i64
+        let gy_old: u64 = wmlayout.gs(state, wmlayout.S_DRAGY)
+        var gy: i64 = 0
+        if gy_old < title_old {
+            gy = (gy_old * wmgeom.title_h(state, i) / title_old) as i64
+        } else {
+            gy = gy_old as i64 - title_old as i64 + wmgeom.title_h(state, i) as i64
+        }
+        if gx < 0 {
+            gx = 0
+        }
+        wmlayout.ss(state, wmlayout.S_DRAGX, gx as u64)
+        wmlayout.ss(state, wmlayout.S_DRAGY, gy as u64)
+    }
+    if wmlayout.gs(state, wmlayout.S_SIZING) == i + 1 {
+        wmlayout.ss(state, wmlayout.S_SZOFFX, rescale_signed(wmlayout.gs(state, wmlayout.S_SZOFFX), from_pct, to_pct))
+        wmlayout.ss(state, wmlayout.S_SZOFFY, rescale_signed(wmlayout.gs(state, wmlayout.S_SZOFFY), from_pct, to_pct))
+    }
 }
 
 fn fscale_say(i: u64, pct: u64) {
@@ -59,18 +116,28 @@ fn frame_scale_sync_win(state: u64, i: u64) -> bool {
     if !wmbase.valid(state, i) || !wmbase.deko(state, i) {
         return false
     }
-    if wmlayout.gs(state, wmlayout.S_DRAG) != 0 || wmlayout.gs(state, wmlayout.S_SIZING) != 0 {
+    let active: bool = active_win(state, i)
+    if active && ((wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED) != 0 || wmlayout.wg(state, i, wmlayout.W_NODE) != 0) {
         return false
     }
-    let pct: u64 = win_scale_pct(state, i)
-    if pct == wmgeom.fpct(state, i) {
+    var pct: u64 = win_scale_pct(state, i)
+    if active {
+        pct = sticky_pct(state, i)
+    }
+    let old_pct: u64 = wmgeom.fpct(state, i)
+    if pct == old_pct {
         return false
     }
+    let border_old: u64 = wmgeom.border(state, i)
+    let title_old: u64 = wmgeom.title_h(state, i)
     wmdamage.damage_win(state, i)
     if !wmgeom.set_fpct(state, i, pct) {
         return false
     }
     fscale_say(i, pct)
+    if active {
+        rescale_grab(state, i, border_old, title_old, old_pct, pct)
+    }
     if (wmlayout.wg(state, i, wmlayout.W_FLAGS) & wmlayout.F_MAXIMIZED) != 0 {
         let _f: bool = wmworkarea.fit_work(state, i)
     }

@@ -101,9 +101,9 @@ num "die Stromkennung auf dem Link (1..15)" "$(val "$TMPD/hup.txt" hda_tag)" ge 
 num "Abtastrate" "$(val "$TMPD/hup.txt" rate)" eq 48000
 num "Kanaele" "$(val "$TMPD/hup.txt" channels)" eq 2
 num "Bits" "$(val "$TMPD/hup.txt" bits)" eq 16
-num "Rahmen im Ring" "$(val "$TMPD/hup.txt" ringframes)" eq 4096
+num "Rahmen im Ring" "$(val "$TMPD/hup.txt" ringframes)" eq 8192
 num "Ausgabelatenz in Mikrosekunden (der ganze Ring)" \
-    "$(val "$TMPD/hup.txt" latencyus)" eq 85333
+    "$(val "$TMPD/hup.txt" latencyus)" eq 170666
 has "$TMPD/hup.txt" "kernel: done" "der Kern laeuft nach dem Aufsetzen normal weiter"
 
 echo "== 2. CONTROLS: without the word, without device, without codec =="
@@ -127,7 +127,9 @@ has "$TMPD/nodev.txt" "kernel: done" "das System laeuft danach ganz normal weite
 echo "== 3. PROMISE (a): THE SINE IS RECOMPUTED =="
 rc=$(lauf sine "osum nokbd nosched noproc nofs audio audsine audsay" "$HDADEV")
 same "der Lauf endet sauber" 21 "$rc"
-num "geschriebene Rahmen" "$(val "$TMPD/sine.txt" written)" eq 48000
+EF=$(val "$TMPD/hup.txt" hda_entryframes)
+WANT48=$(( (48000 + EF - 1) / EF * EF ))
+num "geschriebene Rahmen (auf ganze Eintraege aufgefuellt)" "$(val "$TMPD/sine.txt" written)" eq "$WANT48"
 num "Aussetzer im Regellauf" "$(val "$TMPD/sine.txt" underruns)" eq 0
 num "Rueckschritte der Position" "$(val "$TMPD/sine.txt" backsteps)" eq 0
 num "aufgegebene Rahmen nach Aussetzern" "$(val "$TMPD/sine.txt" giveup)" eq 0
@@ -249,7 +251,7 @@ num "ZUSAGE (e): und die Position auch" "$(val "$TMPD/close.txt" cls_npos)" eq 0
 echo "== 8. GEGENPROBEN: Lautstaerke, Vektor, der andere Treiber =="
 rc=$(lauf nomix "osum nokbd nosched noproc nofs audio audnomix audsine audsay" "$HDADEV")
 same "GEGENPROBE audnomix endet sauber" 21 "$rc"
-num "geschrieben wurde trotzdem" "$(val "$TMPD/nomix.txt" written)" eq 48000
+num "geschrieben wurde trotzdem" "$(val "$TMPD/nomix.txt" written)" eq "$WANT48"
 python3 tools/hda/wavcheck.py "$TMPD/nomix.wav" --hz 440 --rate 48000 --only-rms \
     > "$TMPD/nomix.chk" 2>&1
 r0=$(grep -oE 'rms=[0-9]+' "$TMPD/nomix.chk" | grep -oE '[0-9]+$')
@@ -415,8 +417,8 @@ echo "    Zeilen je Datei:"
 for f in kernel/drv/snd/hda.fi kernel/drv/snd/ac97.fi kernel/drv/snd/audio.fi kernel/drv/snd/mix.fi kernel/user/play.fi; do
     printf '      %-24s %5d\n' "$f" "$(grep -c '' "$f")"
 done
-echo "    Ausgabelatenz:      $(val "$TMPD/hup.txt" latencyus) us (ganzer Ring, 4096 Rahmen)"
-echo "    one entry:        $(val "$TMPD/hup.txt" entryus) us (128 Rahmen)"
+echo "    Ausgabelatenz:      $(val "$TMPD/hup.txt" latencyus) us (ganzer Ring, 8192 Rahmen)"
+echo "    one entry:        $(val "$TMPD/hup.txt" entryus) us (256 Rahmen)"
 echo "    dropouts/minute:   see section 4 (10 s with and without load)"
 
 for n in 1850 1851 1852 1853 1854; do
