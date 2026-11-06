@@ -5,7 +5,7 @@
 #   bash tools/lockscene/run.sh [<out dir>]
 #
 # Measures (guest: /bin/lock on a tiny disk, one user with a password):
-#   tree      the program reports "fUi Szenenbaum" and its rectangles come
+#   tree      the program reports "fUi scene tree" and its rectangles come
 #             from the host's tree (entry, eye, main button = 3 widgets)
 #   raster    the 4-pixel grid of the layout (tools/design/messen.py) >= 92 %
 #   wrong     a wrong password: "falsches Kennwort", the lock stays
@@ -49,7 +49,7 @@ run() { # name wigapp keys...
 echo "== tree + raster =="
 run t1 /bin/lock
 S=$OUT/t1/serial.txt
-hat "$S" "sperre: fUi Szenenbaum" "the lock screen is a scene tree"
+hat "$S" "sperre: fUi scene tree" "the lock screen is a scene tree"
 hat "$S" "sperre: bereit" "and it is ready"
 N=$(grep -ac 'lock: rect id=' "$S")
 [ "$N" -ge 3 ] && ok "the host reports its widgets ($N rectangles)" || bad "rectangles: $N, expected >= 3"

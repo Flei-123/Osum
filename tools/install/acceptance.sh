@@ -430,7 +430,7 @@ login_lauf() { # name keys...
     done
     w=0
     while [ $w -lt 40 ]; do
-        grep -qa 'glogin: angemeldet als\|glogin: abgewiesen' "$ser" 2>/dev/null && break
+        grep -qa 'glogin: angemeldet als\|glogin: rejected' "$ser" 2>/dev/null && break
         sleep 1; w=$((w+1))
     done
     sleep 2
@@ -442,7 +442,7 @@ if command -v socat >/dev/null 2>&1; then
     grep -aq 'glogin: angemeldet als abnahme' "$OUT/login-ok.txt" && ok "login with the new account and the chosen password works" || bad "login with the new account: $(grep -a 'glogin:' "$OUT/login-ok.txt" | tail -3 | tr '\n' '|')"
     grep -aq 'glogin: uid=1000' "$OUT/login-ok.txt" && ok "the session runs as uid 1000" || bad "uid 1000 fehlt"
     login_lauf login-bad f a l s c h 9 9 9 ret
-    grep -aq 'glogin: abgewiesen' "$OUT/login-bad.txt" && ok "CONTROL: a wrong password is rejected" || bad "wrong password not rejected"
+    grep -aq 'glogin: rejected' "$OUT/login-bad.txt" && ok "CONTROL: a wrong password is rejected" || bad "wrong password not rejected"
     grep -aq 'glogin: angemeldet als' "$OUT/login-bad.txt" && bad "GEGENPROBE: trotzdem angemeldet" || ok "GEGENPROBE: niemand angemeldet"
 else
     echo "   (socat fehlt: 7c uebersprungen)"

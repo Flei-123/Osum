@@ -517,7 +517,7 @@ if [ "${v1:-x}" = 1 ] && [ "${v2:-x}" = 0 ]; then
 else
     bad "the table counts '$v1' vorher und '$v2' nachher (erwartet 1 und 0)"
 fi
-has "$V" "pluguhr: ende" "und das Widget selbst ist wirklich gegangen"
+has "$V" "pluguhr: end" "und das Widget selbst ist wirklich gegangen"
 n_hold=$(grep -ca '^wm: hold' "$V")
 [ "${n_hold:-0}" = 1 ] \
     && ok "the window server was NOT restarted in the process (exactly one 'wm: hold')" \

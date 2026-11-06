@@ -169,9 +169,9 @@ kopf "4. ein falsches Kennwort wird abgewiesen -- und verzoegert"
 T4=$(lauf falsch 55 "anmeldung" \
      f a l s c h ret @30 '#foto:abgewiesen')
 if [ -f "$T4" ]; then
-    grep -qa 'glogin: abgewiesen' "$T4" \
+    grep -qa 'glogin: rejected' "$T4" \
         && ok "the wrong password was rejected" \
-        || bad "'glogin: abgewiesen' fehlt"
+        || bad "'glogin: rejected' fehlt"
     W=$(sed -n 's/.*glogin: gewartet \([0-9]*\) ms.*/\1/p' "$T4" | head -1)
     if [ -n "$W" ] && [ "$W" -ge 1000 ]; then
         ok "und danach mindestens 1000 ms gewartet (gemessen: $W ms)"

@@ -86,9 +86,9 @@ S=$OUT/g1/serial.txt
 hasnot "$S" "glogin: angemeldet" "nobody is signed in"
 if [ "$EXPECT" = new ]; then
     has "$S" "account files unreadable" "sign-in reports the account files as unreadable"
-    hasnot "$S" "glogin: abgewiesen" "and does not call it a wrong password"
+    hasnot "$S" "glogin: rejected" "and does not call it a wrong password"
 else
-    has "$S" "glogin: abgewiesen" "COUNTER-PROOF old glogin: calls it a wrong password"
+    has "$S" "glogin: rejected" "COUNTER-PROOF old glogin: calls it a wrong password"
 fi
 fi
 

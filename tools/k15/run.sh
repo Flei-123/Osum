@@ -1142,11 +1142,11 @@ num "although it looked at all $Q_G names" "$Q_G" eq "$GB_N"
 echo "== 15b. the journal: create, rename, delete -- without a rebuild =="
 gross gjrnl "locate -j kupfer"
 num "the kernel exits cleanly" "$RC" eq 21
-has "$TMPD/gjrnl.txt" "step=1  zwiebel=1  apfel=0" \
+has "$TMPD/gjrnl.txt" "step=1  onion=1  apple=0" \
     "after creating, the index finds the new file"
-has "$TMPD/gjrnl.txt" "step=3  zwiebel=0  apfel=1" \
+has "$TMPD/gjrnl.txt" "step=3  onion=0  apple=1" \
     "after renaming the NEW name and no longer the old one"
-has "$TMPD/gjrnl.txt" "step=4  zwiebel=0  apfel=0" \
+has "$TMPD/gjrnl.txt" "step=4  onion=0  apple=0" \
     "and after deleting neither of them"
 J_N1=$(grep -a 'step=1 ' "$TMPD/gjrnl.txt" | grep -oE 'names=[0-9]+' | sed 's/.*=//')
 J_N4=$(grep -a 'step=4 ' "$TMPD/gjrnl.txt" | grep -oE 'names=[0-9]+' | sed 's/.*=//')
@@ -1157,9 +1157,9 @@ nb=$(grep -ac 'locate: build' "$TMPD/gjrnl.txt")
 num "exactly ONE build in the whole run, and only the journal after that" "$nb" eq 1
 
 gross gnojrnl "locate -n kupfer"
-has "$TMPD/gnojrnl.txt" "step=1  zwiebel=0  apfel=0" \
+has "$TMPD/gnojrnl.txt" "step=1  onion=0  apple=0" \
     "WITHOUT the journal the index knows nothing of the new file"
-has "$TMPD/gnojrnl.txt" "step=4  zwiebel=0  apfel=0" \
+has "$TMPD/gnojrnl.txt" "step=4  onion=0  apple=0" \
     "nor of the other two steps"
 N_N4=$(grep -a 'step=4 ' "$TMPD/gnojrnl.txt" | grep -oE 'names=[0-9]+' | sed 's/.*=//')
 num "its name list never changed" "$N_N4" eq "$GB_N"

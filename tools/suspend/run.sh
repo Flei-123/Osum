@@ -402,7 +402,7 @@ else
     grep -a 'schlaf: gleich' "$B" | sed 's/^/        /' | head -2
 fi
 
-FR=$(grep -a 'schlaf: gesichert' "$A" | sed -n '1s/.*rahmen=\([0-9]*\).*/\1/p')
+FR=$(grep -a 'schlaf: gesichert' "$A" | sed -n '1s/.*frames=\([0-9]*\).*/\1/p')
 FB=$(grep -a 'schlaf: start' "$B" | sed -n '1s/.* zurueck=\([0-9]*\).*/\1/p')
 if [ -n "$FR" ] && [ "$FR" -gt 0 ]; then
     ok "PUNKT 4: $FR frames of main memory go into the image (not just a pattern)"

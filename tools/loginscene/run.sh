@@ -40,7 +40,7 @@ foc() { grep -aoE 'focus id=[0-9]+ kind=[0-9]+' "$1" | sed 's/focus id=//; s/ ki
 echo "== tree + grid =="
 run g1 12
 S=$OUT/g1/serial.txt
-hat "$S" "glogin: fUi Szenenbaum" "the sign-in screen is a scene tree"
+hat "$S" "glogin: fUi scene tree" "the sign-in screen is a scene tree"
 hat "$S" "glogin: ready n=1" "and it is ready (one account)"
 num "password fields" "$(grep -aoE 'glogin: rect id=[0-9]+ kind=4 ' "$S" | sort -u | wc -l)" eq 1
 num "buttons (Anmelden, Anderer Benutzer, network, power)" "$(grep -aoE 'glogin: rect id=[0-9]+ kind=2 ' "$S" | sort -u | wc -l)" eq 4
@@ -70,14 +70,14 @@ hatnicht "$OUT/g3/serial.txt" "glogin: angemeldet" "and does not sign anybody in
 echo "== wrong password, then the right one =="
 run g4 10 x y z ret "warte 4" g e h e i m 1 2 ret
 S=$OUT/g4/serial.txt
-hat "$S" "glogin: abgewiesen, name=justin" "wrong password: refused"
+hat "$S" "glogin: rejected, name=justin" "wrong password: refused"
 hat "$S" "glogin: angemeldet als justin" "right password: signed in as justin"
 hat "$S" "glogin: uid=1000" "and the session runs as uid 1000"
 
 echo "== counter-proof: only wrong passwords =="
 run g5 10 x y z ret "warte 4" a b c ret
 S=$OUT/g5/serial.txt
-hat "$S" "glogin: abgewiesen" "wrong passwords are refused"
+hat "$S" "glogin: rejected" "wrong passwords are refused"
 hatnicht "$S" "glogin: angemeldet" "COUNTER-PROOF: nobody is signed in"
 
 echo "== another user =="

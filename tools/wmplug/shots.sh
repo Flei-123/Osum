@@ -78,7 +78,7 @@ BASE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs"
 echo "== fotografieren =="
 foto start          "$BASE plugaus"                            'wm: hold'
 foto uhr            "$BASE wmplug wigapp=/bin/wmplug,enable,uhr,runden=12" \
-                    'taskbar: text plug ' 'pluguhr: ende'
+                    'taskbar: text plug ' 'pluguhr: end'
 foto verwaltung     "$BASE wmplug wigapp=/bin/wmplug,probe,uhr,runden=30" \
                     'Plugins '
 VOR='nachgemessen id=' foto regel "$BASE nostart wmplug wigapp=/bin/plugregel,recht,demo" \

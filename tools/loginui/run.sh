@@ -444,7 +444,7 @@ else
     bad "'glogin: angemeldet als justin' missing (button at y=${BXY:-?})"
     info "$(grep -a 'glogin: ab\|glogin: angem' "$D/serial.txt" | tail -2)"
 fi
-if grep -aq 'glogin: abgewiesen' "$D/serial.txt"; then
+if grep -aq 'glogin: rejected' "$D/serial.txt"; then
     bad "GEGENPROBE: an attempt was rejected -- the password was pasted into the name?"
 else
     ok "GEGENPROBE: nothing was pasted into the name field (no rejected attempt)"

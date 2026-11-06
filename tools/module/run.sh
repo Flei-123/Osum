@@ -157,7 +157,7 @@ grep -q ABWEICHUNG "$TMPD/nm.txt" && sed 's/^/        /' "$TMPD/nm.txt" | head -
 echo "== 3. without the module the device is missing =="
 lauf "$TMPD/k-modul" "$TMPD/d-leer.img" "modul $QUIET" "$TMPD/l-leer.txt"
 num "der Lauf endet sauber" "$RC" eq 21
-has "$TMPD/l-leer.txt" "module: load=datei-fehlt" "keine Moduldatei -> Grund 'datei-fehlt'"
+has "$TMPD/l-leer.txt" "module: load=file-missing" "keine Moduldatei -> reason 'file-missing'"
 has "$TMPD/l-leer.txt" "module: before init=0 present=0" "vor dem Laden: kein Zeigegeraet"
 has "$TMPD/l-leer.txt" "module: after init=0 present=0" "und danach immer noch keins"
 has "$TMPD/l-leer.txt" "module: end" "der Kern lebt und kommt bis ans Ende des Abschnitts"
