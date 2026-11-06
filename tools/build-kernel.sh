@@ -204,7 +204,9 @@ UPROG=$(find "$KDIR" -name uprog.fi -type f | head -1)
 # relative root paths, so the objects do not contain the random mktemp name (reproducible).
 # Details, env switches (OSUM_BUILD_CACHE=off) and the proof: tools/kernel/buildcache.sh, docs/DEVLOOP.md.
 BC_KEY=$(bc_common_key "$FIRNC" "$TMP" "$STUFE")
-echo "build: key=${BC_KEY:0:12} ext4=$([[ $OHNE_EXT4 == 1 ]] && echo off || echo on) ntfs=$([[ $OHNE_NTFS == 1 ]] && echo off || echo on)" >&2
+EXT4_STATE=$([[ $OHNE_EXT4 == 1 ]] && echo off || echo on)
+NTFS_STATE=$([[ $OHNE_NTFS == 1 ]] && echo off || echo on)
+echo "build: key=${BC_KEY:0:12} ext4=$EXT4_STATE ntfs=$NTFS_STATE" >&2
 bc_compile "$FIRNC" "$TMP" "$BC_KEY" "${KMAIN#$TMP/}" "$TMP/k.o" &
 BC_P1=$!
 bc_compile "$FIRNC" "$TMP" "$BC_KEY" "${UPROG#$TMP/}" "$TMP/uprog.o" &

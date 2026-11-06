@@ -169,10 +169,10 @@ echo
 echo "== 3. was der Haken kostet =="
 # =====================================================================
 
-BL=$(grep -aoE 'leer=[0-9]+' "$R" | tail -1 | grep -oE '[0-9]+$')
-BK=$(grep -aoE 'klein=[0-9]+' "$R" | tail -1 | grep -oE '[0-9]+$')
-BG=$(grep -aoE 'gross=[0-9]+' "$R" | tail -1 | grep -oE '[0-9]+$')
-note "Takte je Rahmen: leer=${BL:-?} klein=${BK:-?} gross=${BG:-?}"
+BL=$(grep -aoE 'empty=[0-9]+' "$R" | tail -1 | grep -oE '[0-9]+$')
+BK=$(grep -aoE 'small=[0-9]+' "$R" | tail -1 | grep -oE '[0-9]+$')
+BG=$(grep -aoE 'large=[0-9]+' "$R" | tail -1 | grep -oE '[0-9]+$')
+note "Takte je Rahmen: empty=${BL:-?} small=${BK:-?} large=${BG:-?}"
 if [ -n "${BL:-}" ]; then
     num "leerer Haken, Takte je Rahmen (eine Ladung + ein Vergleich)" \
         "$BL" lt 400
@@ -199,7 +199,7 @@ timeout 120 $QEMU_X86 -kernel "$KERN" -m 512 \
     -append "osum nopwr nokbd ebpfdrop" \
     -serial "file:$R3" -display none -no-reboot \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
-has "$R3" "drop-icmp pruef0" "4a der Pruefer nimmt das Filterprogramm an"
+has "$R3" "drop-icmp check0" "4a der Pruefer nimmt das Filterprogramm an"
 DI=$(grep -aoE 'probe icmp verwerf=[0-9]+' "$R3" | tail -1 | grep -oE '[0-9]+$')
 DT=$(grep -aoE 'probe tcp +durch=[0-9]+' "$R3" | tail -1 | grep -oE '[0-9]+$')
 num "4a ein ICMP-Rahmen wird VERWORFEN" "${DI:-0}" eq 1
@@ -334,7 +334,7 @@ if [ "$NETOK" = 1 ]; then
     if [ "$GRUND" = 1 ]; then
         lauf "ebpfdrop" "$TMPD/netz-mit.txt" "$SKRIPT_F"
         RM="$TMPD/netz-mit.txt"
-        has "$RM" "drop-icmp pruef0" \
+        has "$RM" "drop-icmp check0" \
             "5b der Pruefer hat das Filterprogramm ANGENOMMEN (Befund 0)"
         HG=$(grep -aoE 'haengt=[0-9]+' "$RM" | tail -1 | grep -oE '[0-9]+$')
         num "5b es haengt am Haken (Platznummer)" "${HG:-9}" eq 1
@@ -343,9 +343,9 @@ if [ "$NETOK" = 1 ]; then
             "5b MIT Filter: /bin/wget holt die Datei TROTZDEM"
         note "    ein Filter, der alles wegwirft, waere an dieser Zeile aufgefallen."
 
-        SEH=$(grep -aoE 'rahmen gesehen +=[0-9 ]+' "$RM" | tail -1 \
+        SEH=$(grep -aoE 'frames seen +=[0-9 ]+' "$RM" | tail -1 \
               | grep -oE '[0-9]+$')
-        DR=$(grep -aoE 'davon verworfen =[0-9 ]+' "$RM" | tail -1 \
+        DR=$(grep -aoE 'dropped +=[0-9 ]+' "$RM" | tail -1 \
              | grep -oE '[0-9]+$')
         PA=$(grep -aoE 'durchgelassen +=[0-9 ]+' "$RM" | tail -1 \
              | grep -oE '[0-9]+$')
