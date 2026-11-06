@@ -127,9 +127,9 @@ T3=$(lauf anmelden 100 "anmeldung" \
      '#foto:anmeldeschirm' \
      s t a r t k e n n w o r t ret @45 '#foto:desktop' meta_l @60 '#foto:menu')
 if [ -f "$T3" ]; then
-    grep -qa 'anmeldung vor schreibtisch' "$T3" \
+    grep -qa 'sign-in before desktop' "$T3" \
         && ok "the kernel starts the login before the desktop" \
-        || bad "'anmeldung vor schreibtisch' steht nicht im Bericht"
+        || bad "'sign-in before desktop' steht nicht im Bericht"
     grep -qaE 'glogin: ready' "$T3" \
         && ok "the login screen is ready" \
         || bad "'glogin: ready' fehlt"
