@@ -25,7 +25,7 @@
 #      c) UNPLUG THE ADAPTER. `ac=` from 1 to 0, and `ev=` rises.
 #      d) PLUG THE ADAPTER IN. `ac=` back to 1.
 #      e) PRESS THE POWER BUTTON SHORTLY (do not hold!).
-#                             `acpiev: ev taste`, `irqs=` rises,
+#                             `acpiev: ev key`, `irqs=` rises,
 #                             `sts=` has bit 8 (0x0100).
 #                             The energy menu must open.
 #      f) LET IT RUN FOR A QUARTER OF AN HOUR, do nothing.

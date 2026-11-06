@@ -56,11 +56,11 @@ eq "descriptor parse line (pad slot 3)" 1 "$(grep -ac '^hidrep: .*dev=3' "$S" | 
 R=$(grep -a '^i2csim: reports=' "$S")
 eq "8 reports delivered by poll()" 8 "$(echo "$R" | sed 's/.*reports=\([0-9]*\) .*/\1/')"
 eq "no read timeouts" 0 "$(echo "$R" | sed 's/.*timeouts=\([0-9]*\).*/\1/')"
-grep -aq '^hidev: maus 0x0 x=0x64 y=0x0 r=0x0' "$S"; yes_ "+300 units x -> 100 px through I2C" $?
-grep -aq '^hidev: maus 0x0 x=0x0 y=0xb5 r=0x0' "$S"; yes_ "+150 units y -> 75 px (0xb5)" $?
-grep -aq '^hidev: maus 0x1 x=0x0 y=0x0 r=0x0' "$S"; yes_ "pad button = left click" $?
-grep -aq '^hidev: maus 0x0 x=0x0 y=0x0 r=0x1' "$S"; yes_ "two fingers -> one wheel notch" $?
-eq "exactly 5 mouse events (4 + button release; empty poll adds none)" 5 "$(grep -ac '^hidev: maus' "$S")"
+grep -aq '^hidev: mouse 0x0 x=0x64 y=0x0 r=0x0' "$S"; yes_ "+300 units x -> 100 px through I2C" $?
+grep -aq '^hidev: mouse 0x0 x=0x0 y=0xb5 r=0x0' "$S"; yes_ "+150 units y -> 75 px (0xb5)" $?
+grep -aq '^hidev: mouse 0x1 x=0x0 y=0x0 r=0x0' "$S"; yes_ "pad button = left click" $?
+grep -aq '^hidev: mouse 0x0 x=0x0 y=0x0 r=0x1' "$S"; yes_ "two fingers -> one wheel notch" $?
+eq "exactly 5 mouse events (4 + button release; empty poll adds none)" 5 "$(grep -ac '^hidev: mouse' "$S")"
 echo "== 2. counter-check noi2c"
 RC=$(run off "i2chid noi2c nokbd noring3 nofs")
 eq "run ends cleanly" 21 "$RC"

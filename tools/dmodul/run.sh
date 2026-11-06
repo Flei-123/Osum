@@ -163,7 +163,7 @@ booten() {
 sagen lauf1 "ohne /etc/module.conf -- die Vorgabe"
 platte_bauen "$OUT/disk.img" nein
 booten "$OUT/disk.img" "$OUT/1-vorgabe.png" "$OUT/s1.txt" ""
-grep -a 'desktop: modul ' "$OUT/s1.txt" > "$OUT/1-modul.txt" || true
+grep -a 'desktop: module ' "$OUT/s1.txt" > "$OUT/1-modul.txt" || true
 sagen "  module" "$(wc -l < "$OUT/1-modul.txt") Zeilen gemeldet"
 
 # ================================================== LAUF 2: ziehen
@@ -175,7 +175,7 @@ gy=${GRIFF#* }
 sagen "  griff" "Uhr-Mitte bei $gx,$gy"
 sagen lauf2 "F9, dann Uhr nach links unten ziehen"
 booten "$OUT/disk.img" "$OUT/2-gezogen.png" "$OUT/s2.txt" "$gx,$gy>300,600>40,700"
-grep -a 'desktop: modul' "$OUT/s2.txt" > "$OUT/2-modul.txt" || true
+grep -a 'desktop: module' "$OUT/s2.txt" > "$OUT/2-modul.txt" || true
 
 bash "$WURZEL"/tools/mkfsfi/mkfs.sh cat "$OUT/disk.img" /etc/module.conf \
     > "$OUT/2-module.conf" 2>/dev/null || true
@@ -189,7 +189,7 @@ fi
 #
 sagen lauf3 "Neustart auf DERSELBEN Platte"
 booten "$OUT/disk.img" "$OUT/3-neustart.png" "$OUT/s3.txt" ""
-grep -a 'desktop: modul ' "$OUT/s3.txt" > "$OUT/3-modul.txt" || true
+grep -a 'desktop: module ' "$OUT/s3.txt" > "$OUT/3-modul.txt" || true
 
 # ================================================== DIE ZUSAGEN
 feld() {

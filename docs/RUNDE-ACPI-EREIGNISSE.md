@@ -192,7 +192,7 @@ blieb 0, weil der **Nenner** fehlte. Die Spezifikation sagt, `_BIF` sei bei
 ### 5.5 Die Taste, die jemand anders abholte
 
 Zuletzt, im vollen Schreibtisch: `irqs=1 stsor=0x0101` — der Behandler ist
-gelaufen und **hat** das Tastenbit gelesen — und trotzdem kein `ev taste`. Die
+gelaufen und **hat** das Tastenbit gelesen — und trotzdem kein `ev key`. Die
 Meldung hing an `E_BTN`, also an genau dem Wort, das `button_take` beim Abholen
 **löscht**. Die Leiste fragt jede Runde, der Starter auch; die Taste war weg,
 bevor die Meldezeile sie sehen konnte. Gezählt wird jetzt mit `E_BTNN`.
@@ -215,7 +215,7 @@ sondern weil niemand die Kurbel drehte. `pump` steht jetzt auch in
 `PWRBTN_STS` und zieht den SCI.
 
 ```
-acpiev: ev taste
+acpiev: ev key
 acpiev: ready=1 why=0 sci=9 gpearm=5 meth=5 lid=1 batt=1 pct=77 ac=0
         irqs=1 sts=0x0101 pm1en=0x0100 ioapic=0x0000a025 mode=3
         pumpn=704 ev=1 pwrb=1

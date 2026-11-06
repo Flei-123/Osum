@@ -97,13 +97,13 @@ zusage "der Lauf endet sauber (Code 21, bekommen $RC)" \
     "$([ "$RC" = 21 ] && echo 0 || echo 1)"
 B="$TMPD/berichte.txt"
 
-ACHT=$(sed -n '/^hidb: nr=0 /q;p' "$B" | grep -ac '^hidev: druck ')
+ACHT=$(sed -n '/^hidb: nr=0 /q;p' "$B" | grep -ac '^hidev: press ')
 gleich "acht Tasten aus EINEM Bericht" "8" "$ACHT"
 for u in 0x4 0x5 0x6 0x7 0x8 0x9 0xa 0xb; do
-    grep -aq "^hidev: druck $u " "$B" || { FAIL=$((FAIL+1)); echo "  FALL  Taste $u fehlt"; }
+    grep -aq "^hidev: press $u " "$B" || { FAIL=$((FAIL+1)); echo "  FALL  Taste $u fehlt"; }
 done
 OK=$((OK+1)); echo "  ok    all eight usages 0x4..0xb are present individually"
-grep -aq '^hidev: druck 0xe1 code=0x2a' "$B"
+grep -aq '^hidev: press 0xe1 code=0x2a' "$B"
 zusage "Umschalt kommt als eigener Abtastcode 0x2a" $?
 ZEICHEN=$(grep -ao 'key: .' "$B" | sed 's/key: //' | tr -d '\n')
 gleich "die Zeichen, die in der Zeilendisziplin ankommen" "abcdefghIJaxzy^" "$ZEICHEN"
@@ -111,7 +111,7 @@ gleich "die Zeichen, die in der Zeilendisziplin ankommen" "abcdefghIJaxzy^" "$ZE
 ev_order() { # report name -> usages of the "druck" events of that report
     local n v
     n=$(python3 tools/hid/descs.py nr "$1"); v=$((n-1))
-    sed -n "/^hidb: nr=$v /,/^hidb: nr=$n /p" "$B" | grep -a '^hidev: druck ' \
+    sed -n "/^hidb: nr=$v /,/^hidb: nr=$n /p" "$B" | grep -a '^hidev: press ' \
         | awk '{printf "%s ", $3}'
 }
 gleich "r157: Boot-Tastatur: Tasten in Berichtsreihenfolge (x z y)" \
@@ -123,15 +123,15 @@ zusage "es gibt ueberhaupt ein Loslassen ($LOS Ereignisse)" \
     "$([ "$LOS" -ge 14 ] && echo 0 || echo 1)"
 
 gleich "Super wird zu 0xE0 0x5B, wie kbd.fi es seit NETVIEW kennt" \
-    "hidev: druck 0xe3 code=0x5b" \
-    "$(grep -am1 '^hidev: druck 0xe3' "$B")"
+    "hidev: press 0xe3 code=0x5b" \
+    "$(grep -am1 '^hidev: press 0xe3' "$B")"
 HK=$(grep -ac '^hk: super+a' "$B")
 gleich "Super+A wird GELATCHT (genau eine hk-Zeile)" "1" "$HK"
 AS=$(grep -ao 'key: a' "$B" | wc -l)
 gleich "das a unter Super gibt KEIN zusaetzliches Zeichen" "2" "$AS"
 
-gleich "Boot-Maus: dy=-6 wird zu PS/2 +6" "hidev: maus 0x1 x=0xa y=0x6 r=0x0" \
-    "$(grep -am1 '^hidev: maus 0x1 x=0xa' "$B")"
+gleich "Boot-Maus: dy=-6 wird zu PS/2 +6" "hidev: mouse 0x1 x=0xa y=0x6 r=0x0" \
+    "$(grep -am1 '^hidev: mouse 0x1 x=0xa' "$B")"
 
 # ----------------------------------------------------------------------
 echo
@@ -141,16 +141,16 @@ NX=$(python3 tools/hid/descs.py nr "pad: +300x -> +100px")
 gleich "erster Bericht: aufgesetzt, aber NICHT gesprungen" \
     "hidb: nr=$NAUF desc=3 ok=1" "$(grep -a "^hidb: nr=$NAUF " "$B")"
 VOR=$((NAUF-1))
-ZW=$(sed -n "/^hidb: nr=$VOR /,/^hidb: nr=$NAUF /p" "$B" | grep -ac '^hidev: maus')
+ZW=$(sed -n "/^hidb: nr=$VOR /,/^hidb: nr=$NAUF /p" "$B" | grep -ac '^hidev: mouse')
 gleich "beim Aufsetzen wird kein Paket erzeugt" "0" "$ZW"
 gleich "+300 Geraeteeinheiten in x werden 100 Bildpunkte" \
-    "hidev: maus 0x0 x=0x64 y=0x0 r=0x0" \
-    "$(sed -n "/^hidb: nr=$NX /q;p" "$B" | grep -a '^hidev: maus' | tail -1)"
-grep -aq '^hidev: maus 0x0 x=0x0 y=0xb5 r=0x0' "$B"
+    "hidev: mouse 0x0 x=0x64 y=0x0 r=0x0" \
+    "$(sed -n "/^hidb: nr=$NX /q;p" "$B" | grep -a '^hidev: mouse' | tail -1)"
+grep -aq '^hidev: mouse 0x0 x=0x0 y=0xb5 r=0x0' "$B"
 zusage "+150 in y werden 75 Bildpunkte, Vorzeichen gedreht (0xb5)" $?
-grep -aq '^hidev: maus 0x1 x=0x0 y=0x0 r=0x0' "$B"
+grep -aq '^hidev: mouse 0x1 x=0x0 y=0x0 r=0x0' "$B"
 zusage "der Knopf des Touchpads kommt als Linksklick" $?
-grep -aq '^hidev: maus 0x0 x=0x0 y=0x0 r=0x1' "$B"
+grep -aq '^hidev: mouse 0x0 x=0x0 y=0x0 r=0x1' "$B"
 zusage "zwei Finger, 120 Einheiten: genau EINE Radrastung" $?
 ROLL=$(grep -a 'hidin: ta=' "$B" | sed 's/.*rollen=\([0-9]*\).*/\1/')
 gleich "und nur eine" "1" "$ROLL"
@@ -183,21 +183,21 @@ seg() { # events (hidev lines) of the reports [from, to)
     a=$(python3 tools/hid/descs.py nr "$1"); b=$(python3 tools/hid/descs.py nr "$2")
     sed -n "/^hidb: nr=$((a-1)) /,/^hidb: nr=$((b-1)) /p" "$G" | grep -a '^hidev: '
 }
-CL0='hidev: maus 0x0 x=0x0 y=0x0 r=0x0'
+CL0='hidev: mouse 0x0 x=0x0 y=0x0 r=0x0'
 gleich "Tipp mit einem Finger: Linksklick (druecken + loslassen)" \
-    "hidev: maus 0x1 x=0x0 y=0x0 r=0x0|$CL0" \
+    "hidev: mouse 0x1 x=0x0 y=0x0 r=0x0|$CL0" \
     "$(seg "gest: tap aufsetzen" "gest: zwei tap aufsetzen" | tr '\n' '|' | sed 's/|$//')"
 gleich "Tipp mit zwei Fingern: Rechtsklick" \
-    "hidev: maus 0x2 x=0x0 y=0x0 r=0x0|$CL0" \
+    "hidev: mouse 0x2 x=0x0 y=0x0 r=0x0|$CL0" \
     "$(seg "gest: zwei tap aufsetzen" "gest: drei tap aufsetzen" | tr '\n' '|' | sed 's/|$//')"
 gleich "Tipp mit drei Fingern: Mittelklick" \
-    "hidev: maus 0x4 x=0x0 y=0x0 r=0x0|$CL0" \
+    "hidev: mouse 0x4 x=0x0 y=0x0 r=0x0|$CL0" \
     "$(seg "gest: drei tap aufsetzen" "gest: rand aufsetzen" | tr '\n' '|' | sed 's/|$//')"
 gleich "Randstreifen rechts: +300 Einheiten = genau eine Radrastung" \
-    "hidev: maus 0x0 x=0x0 y=0x0 r=0x1" \
+    "hidev: mouse 0x0 x=0x0 y=0x0 r=0x1" \
     "$(seg "gest: rand aufsetzen" "gest: rollen aufsetzen" | tr '\n' '|' | sed 's/|$//')"
 gleich "zwei Finger rollen: genau eine Radrastung (nicht beim Entscheiden)" \
-    "hidev: maus 0x0 x=0x0 y=0x0 r=0x1" \
+    "hidev: mouse 0x0 x=0x0 y=0x0 r=0x1" \
     "$(seg "gest: rollen aufsetzen" "gest: seit aufsetzen" | tr '\n' '|' | sed 's/|$//')"
 gleich "zwei Finger seitwaerts: genau eine waagrechte Radrastung nach rechts, kein Zeigerpaket" \
     "hidev: geste seitwaerts dx=0xc8|hidev: hrad 0x1" \
@@ -211,7 +211,7 @@ gleich "Drei-Finger-Wisch nach links: Aktion 1 (naechstes Fenster, wm.gest_actio
 gleich "Handballen allein (Zuversicht 0): kein Klick, keine Bewegung" "0" \
     "$(seg "gest: handballen aufsetzen" "gest: ballen+finger aufsetzen" | wc -l)"
 gleich "Handballen + Finger: der Finger tippt, der Ballen zaehlt nicht" \
-    "hidev: maus 0x1 x=0x0 y=0x0 r=0x0|$CL0" \
+    "hidev: mouse 0x1 x=0x0 y=0x0 r=0x0|$CL0" \
     "$(seg "gest: ballen+finger aufsetzen" "gest: ende" | tr '\n' '|' | sed 's/|$//')"
 GL=$(grep -a '^hidin: geste an=1' "$G")
 gleich "Zaehler: 5 Tipps (4 + der Tipp vor dem Ziehen)" "5" "$(echo "$GL" | sed 's/.* tipp=\([0-9]*\).*/\1/')"
@@ -233,10 +233,10 @@ echo "== 4c. multi-finger (W-TPSET4): drag, pinch, swipe, corner, option switch 
 # button, a pinch is a virtual Ctrl + one wheel step, a 3-finger swipe reaches wm.gest_action, the corner press is a
 # right click, and the option change in the middle of the script (corner / pinch / swipe3 off) changes all three.
 mseg() { seg "$1" "$2" | tr '\n' '|' | sed 's/|$//'; }
-gleich "Ziehen: Tipp = Linksklick" "hidev: maus 0x1 x=0x0 y=0x0 r=0x0|$CL0" \
+gleich "Ziehen: Tipp = Linksklick" "hidev: mouse 0x1 x=0x0 y=0x0 r=0x0|$CL0" \
     "$(mseg "mf: drag tap aufsetzen" "mf: drag aufsetzen")"
 gleich "Ziehen: zweites Aufsetzen haelt die linke Taste, Bewegung bei gedrueckter Taste, Loslassen gibt sie frei" \
-    "hidev: maus 0x1 x=0x0 y=0x0 r=0x0|hidev: maus 0x1 x=0x64 y=0x0 r=0x0|$CL0" \
+    "hidev: mouse 0x1 x=0x0 y=0x0 r=0x0|hidev: mouse 0x1 x=0x64 y=0x0 r=0x0|$CL0" \
     "$(mseg "mf: drag aufsetzen" "mf: zu aufsetzen")"
 gleich "Zuziehen (-200): Strg runter, EIN Radschritt zur Gegenseite (0x1), Strg hoch beim Abheben" \
     "hidev: strg 1|hidev: zoomrad 0x1|hidev: geste zoom d=0xffffffffffffff38|hidev: strg 0" \
@@ -248,11 +248,11 @@ gleich "Wisch hoch: Aktion 3 (Aufgabenansicht)" "hidev: aktion 0x3|hidev: geste 
 gleich "Wisch runter: Aktion 4 (Desktop zeigen)" "hidev: aktion 0x4|hidev: geste wisch 4 n=3" \
     "$(mseg "mf: runter aufsetzen" "mf: ecke aufsetzen")"
 gleich "Druck mit dem Finger in der Ecke unten rechts: RECHTE Taste, Loslassen gibt sie frei" \
-    "hidev: maus 0x2 x=0x0 y=0x0 r=0x0|$CL0" "$(mseg "mf: ecke aufsetzen" "mf: mitte aufsetzen")"
-gleich "Druck in der Mitte: LINKE Taste" "hidev: maus 0x1 x=0x0 y=0x0 r=0x0|$CL0" \
+    "hidev: mouse 0x2 x=0x0 y=0x0 r=0x0|$CL0" "$(mseg "mf: ecke aufsetzen" "mf: mitte aufsetzen")"
+gleich "Druck in der Mitte: LINKE Taste" "hidev: mouse 0x1 x=0x0 y=0x0 r=0x0|$CL0" \
     "$(mseg "mf: mitte aufsetzen" "mf: optionen aus")"
 gleich "Optionswechsel (Ecke aus): derselbe Druck in der Ecke ist jetzt LINKS" \
-    "hidev: maus 0x1 x=0x0 y=0x0 r=0x0|$CL0" "$(mseg "mf: optionen aus" "mf: aus zu aufsetzen")"
+    "hidev: mouse 0x1 x=0x0 y=0x0 r=0x0|$CL0" "$(mseg "mf: optionen aus" "mf: aus zu aufsetzen")"
 gleich "Optionswechsel (Kneifen aus): kein Strg, kein Rad, kein Zoomereignis" "0" \
     "$(mseg "mf: aus zu aufsetzen" "mf: aus wisch aufsetzen" | tr '|' '\n' | grep -c .)"
 gleich "Optionswechsel (Wisch-Aktion aus): der Wisch wird gezaehlt, die Aktion ist 0" \
@@ -263,7 +263,7 @@ gleich "Strg wird nach dem Optionswechsel nie mehr gedrueckt" "0" \
 # legacy path (no hidgest): the corner box also works without the gesture machine
 LC=$(python3 tools/hid/descs.py nr "pad: ecke aufsetzen"); LE=$(python3 tools/hid/descs.py nr "pad: ecke abheben")
 gleich "Altpfad (ohne hidgest): Druck in der Ecke = rechte Taste, Loslassen gibt sie frei" \
-    "hidev: maus 0x2 x=0x0 y=0x0 r=0x0|$CL0" \
+    "hidev: mouse 0x2 x=0x0 y=0x0 r=0x0|$CL0" \
     "$(sed -n "/^hidb: nr=$((LC-1)) /,/^hidb: nr=$LE /p" "$B" | grep -a '^hidev: ' | tr '\n' '|' | sed 's/|$//')"
 MF0=$(python3 tools/hid/descs.py nr "mf: drag tap aufsetzen")
 # counter-proof: WITHOUT hidgest none of the gesture output exists
