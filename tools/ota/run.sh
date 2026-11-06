@@ -165,9 +165,9 @@ fi
 cat > "$OUT/ota.conf" <<EOF
 source=https://10.0.2.2:$PORT
 name=ota.test
-abstand=3600
+interval=3600
 auto=nein
-frist=15
+timeout=15
 EOF
 #
 printf 'opk rebuild\nif /apps/hallo.osp/start\nthen\nota confirm\nfi\nopk trial\n' \
@@ -680,7 +680,7 @@ hat "$OUT/kan10e.txt" "keepme" "(f3) a 404 does not overwrite the target file"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf kan11 "ota apply;exit")
 hat "$OUT/kan11.txt" "ota: READY FOR RESTART" "(g) Ausgangslage: Fassung 2 steht in Erprobung"
-rc=$(lauf kan12 "opk rebuild;ota set gesund 3;ota boot sh;ota show;cat /system/ota.stand;exit" 300)
+rc=$(lauf kan12 "opk rebuild;ota set healthy 3;ota boot sh;ota show;cat /system/ota.stand;exit" 300)
 hat "$OUT/kan12.txt" "ota: start healthy, trial confirmed" "(g) ein gesunder Start wird von selbst bestaetigt"
 hat "$OUT/kan12.txt" "ota: nothing in trial" "(g) danach steht nichts mehr in Erprobung"
 hat "$OUT/kan12.txt" "phase=ruhe" "(g) und die Anzeige sagt phase=ruhe"
