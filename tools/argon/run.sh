@@ -257,8 +257,8 @@ grep -q 'krypto: open=0' "$TMPD/fal.txt" \
 
 echo "== 5. do the lanes really run on several cores? =="
 
-cores_of() { grep -oE 'argon: par=[0-9]+ +spur=[0-9]+ +kerne=[0-9]+' "$1" \
-    | grep -oE 'kerne=[0-9]+' | cut -d= -f2 | tail -1; }
+cores_of() { grep -oE 'argon: par=[0-9]+ +lanes=[0-9]+ +cores=[0-9]+' "$1" \
+    | grep -oE 'cores=[0-9]+' | cut -d= -f2 | tail -1; }
 par_of() { grep -oE 'argon: par=[0-9]+' "$1" | cut -d= -f2 | tail -1; }
 
 p4=$(par_of "$TMPD/alt2.txt")
@@ -335,14 +335,14 @@ grep -q 'krypto: open=1' "$TMPD/sh_q.txt" \
 
 echo "== 7. the speed, serial against parallel, on the SAME machine =="
 
-takte_von() { grep -oE 'takte=[0-9]+' "$1" | cut -d= -f2 | tail -1; }
+cycles_of() { grep -oE 'cycles=[0-9]+' "$1" | cut -d= -f2 | tail -1; }
 
 cp --sparse=always "$TMPD/root.img" "$TMPD/t.img"
 run_vm tneu "$TMPD/t.img" "osum nopwr kryptoneu noargonpar kryptopw=secret kryptot=2 kryptom=32768 kryptop=4" 1 600
 run_vm tser "$TMPD/t.img" "osum nopwr kryptoauf noargonpar kryptopw=secret" 4 600
 run_vm tpar "$TMPD/t.img" "osum nopwr kryptoauf kryptopw=secret" 4 600
-ts=$(takte_von "$TMPD/tser.txt")
-tp=$(takte_von "$TMPD/tpar.txt")
+ts=$(cycles_of "$TMPD/tser.txt")
+tp=$(cycles_of "$TMPD/tpar.txt")
 kp=$(cores_of "$TMPD/tpar.txt")
 if [[ -n $ts && -n $tp && $tp -gt 0 ]]; then
     fak=$(( ts * 100 / tp ))

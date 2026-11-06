@@ -12,7 +12,9 @@ ULD=kernel/user/user.ld
 PROGS="sh cat echo h264t"
 
 TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+. tools/lib/summary.sh; summary_begin CODEC
+trap 'summary_guard; rm -rf "$TMPD"; summary_exit_status || exit 1' EXIT
+trap 'exit 1' HUP INT TERM
 
 pass=0
 fail=0
@@ -36,14 +38,14 @@ echo "== 0. die Vorbedingungen =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 \
     || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 command -v qemu-system-x86_64 >/dev/null 2>&1 || {
-    echo "CODEC: uebersprungen, qemu-system-x86_64 fehlt"; exit 0; }
+    summary_note "skipped, qemu-system-x86_64 is missing"; exit 0; }
 for w in ffmpeg python3 sha256sum; do
     command -v "$w" >/dev/null 2>&1 || {
-        echo "CODEC: uebersprungen, $w fehlt"; exit 0; }
+        summary_note "skipped, $w is missing"; exit 0; }
 done
 ffmpeg -hide_banner -encoders > "$TMPD/enc.txt" 2>/dev/null || true
 grep -q libx264 "$TMPD/enc.txt" || {
-    echo "CODEC: skipped, ffmpeg has no libx264"; exit 0; }
+    summary_note "skipped, ffmpeg has no libx264"; exit 0; }
 ok "host tools are present (ffmpeg with libx264, qemu, python3)"
 
 # ------------------------------------------------- 1. die Speicherkarte
@@ -130,7 +132,7 @@ baue_stufe() { # 0 | 1
     done
     return $rc
 }
-baue_stufe 0 || { echo "== CODEC: $pass bestanden, $((fail+1)) gescheitert =="; exit 1; }
+baue_stufe 0 || { summary_emit "$pass" "$((fail+1))" 0; exit 1; }
 ok "firnc0: the kernel and $(echo $PROGS | wc -w) programs are built"
 if baue_stufe 1; then
     ok "firnc1: the same from the compiler written in Firn"
@@ -159,7 +161,7 @@ if bash tools/codec/mkmedia.sh "$MED" > "$TMPD/med.log" 2>&1; then
 else
     bad "tools/codec/mkmedia.sh scheitert"
     tail -10 "$TMPD/med.log" | sed 's/^/        /'
-    echo "== CODEC: $pass bestanden, $fail gescheitert =="
+    summary_emit "$pass" "$fail" 0
     exit 1
 fi
 
@@ -417,6 +419,6 @@ else
 fi
 
 echo
-echo "== CODEC: $pass bestanden, $fail gescheitert =="
+summary_emit "$pass" "$fail" 60 || exit 1
 [ "$fail" = 0 ] || exit 1
 exit 0

@@ -7,7 +7,9 @@ set -u
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+. tools/lib/summary.sh; summary_begin OOM
+trap 'summary_guard; rm -rf "$TMPD"; summary_exit_status || exit 1' EXIT
+trap 'exit 1' HUP INT TERM
 
 SHOTS="docs/shots/oom"
 while [ $# -gt 0 ]; do
@@ -31,7 +33,7 @@ has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "OOM: skipped, qemu-system-x86_64 is not there"
+    summary_note "skipped, qemu-system-x86_64 is not there"
     exit 0
 fi
 bash vendor/firn/fetch-firnc.sh >/dev/null || {
@@ -44,7 +46,7 @@ echo "== 1. der Kern baut =="
 bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/b.log" 2>&1 \
     && ok "Kern gebaut ($(stat -c%s "$TMPD/k.mb") Oktette)" \
     || { bad "the kernel does not build"; sed 's/^/        /' "$TMPD/b.log" | head -12
-         echo "OOM: $pass bestanden, $fail gescheitert"; exit 1; }
+         summary_emit "$pass" "$fail" 0; exit 1; }
 
 run() { # name ram worte
     local name=$1 ram=$2 worte=$3
@@ -294,5 +296,5 @@ Image.open('$SHOTS/oom-desktop.ppm').save('$SHOTS/oom-desktop.png', optimize=Tru
 fi
 
 echo
-echo "OOM: $pass bestanden, $fail gescheitert"
+summary_emit "$pass" "$fail" 20 || exit 1
 [ "$fail" -eq 0 ] || exit 1

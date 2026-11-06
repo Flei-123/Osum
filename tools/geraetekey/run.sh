@@ -8,7 +8,9 @@ ROOT=$(pwd)
 TMPD=${OSUM_GK_TMP:-$(mktemp -d)}
 mkdir -p "$TMPD"
 KEEP=${OSUM_GK_KEEP:-}
-trap '[ -n "$KEEP" ] || rm -rf "$TMPD"' EXIT
+. tools/lib/summary.sh; summary_begin GERAETEKEY
+trap 'summary_guard; [ -n "$KEEP" ] || rm -rf "$TMPD"; summary_exit_status || exit 1' EXIT
+trap 'exit 1' HUP INT TERM
 
 pass=0
 fail=0
@@ -25,7 +27,7 @@ if bash tools/bridge/build.sh "$TMPD/w0" 0 > "$TMPD/build.txt" 2>&1; then
 else
     bad "the build failed"
     tail -15 "$TMPD/build.txt" | sed 's/^/        /'
-    echo "GERAETEKEY: $pass bestanden, $fail gescheitert"; exit 1
+    summary_emit "$pass" "$fail" 0; exit 1
 fi
 K="$TMPD/w0/k.mb"
 [ -f "$TMPD/w0/jsig.elf" ] && ok "/bin/jsig is present ($(stat -c%s "$TMPD/w0/jsig.elf") Oktette)" \
@@ -155,6 +157,6 @@ if [ -z "${GK_WEGWERF:-}" ]; then
     rm -rf "$TMPD/gegen"
 fi
 
-echo "GERAETEKEY: $pass bestanden, $fail gescheitert"
+summary_emit "$pass" "$fail" 10 || exit 1
 [ "$fail" = 0 ] || exit 1
 exit 0

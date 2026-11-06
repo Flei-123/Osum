@@ -6,7 +6,9 @@ export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 
 TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"; cp -f "$TMPD.xts" lib/crypto/xts.fi 2>/dev/null || true' EXIT
+. tools/lib/summary.sh; summary_begin XTSTAFEL
+trap 'summary_guard; rm -rf "$TMPD"; cp -f "$TMPD.xts" lib/crypto/xts.fi 2>/dev/null || true; summary_exit_status || exit 1' EXIT
+trap 'exit 1' HUP INT TERM
 
 pass=0
 fail=0
@@ -19,7 +21,7 @@ if $FIRNC tools/xtstafel/board.fi -o "$TMPD/tafel" 2>"$TMPD/t.err"; then
 else
     bad "board.fi cannot be compiled"
     sed 's/^/        /' "$TMPD/t.err" | head -20
-    echo "XTSTAFEL: $pass bestanden, $fail gescheitert"; exit 1
+    summary_emit "$pass" "$fail" 0; exit 1
 fi
 "$TMPD/tafel" > "$TMPD/tafel.txt" 2>&1
 rc=$?
@@ -101,5 +103,5 @@ else
     bad "lib/crypto/xts.fi in the tree was changed"
 fi
 
-echo "XTSTAFEL: $pass bestanden, $fail gescheitert"
+summary_emit "$pass" "$fail" 6 || exit 1
 [ "$fail" = 0 ] || exit 1

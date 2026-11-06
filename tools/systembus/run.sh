@@ -7,7 +7,9 @@
 set -u
 cd "$(dirname "$0")/../.."
 TMPD=${SYSBUS_TMPD:-$(mktemp -d)}
-[ -n "${SYSBUS_KEEP:-}" ] || trap 'rm -rf "$TMPD"' EXIT
+. tools/lib/summary.sh; summary_begin SYSTEMBUS
+trap 'summary_guard; [ -n "${SYSBUS_KEEP:-}" ] || rm -rf "$TMPD"; summary_exit_status || exit 1' EXIT
+trap 'exit 1' HUP INT TERM
 pass=0; fail=0
 ok()  { echo "  OK   $*"; pass=$((pass + 1)); }
 bad() { echo "  FAIL $*"; fail=$((fail + 1)); }
@@ -91,7 +93,7 @@ echo "== 3. the kernel and the programs =="
 bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/k.log" 2>&1 \
     && ok "der Kern baut ($(stat -c%s "$TMPD/k.mb") Oktette)" \
     || { bad "the kernel does not build"; tail -12 "$TMPD/k.log" | sed 's/^/        /'
-         echo "SYSTEMBUS: $pass bestanden, $fail gescheitert"; exit 1; }
+         summary_emit "$pass" "$fail" 0; exit 1; }
 
 PROGS="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
@@ -361,5 +363,5 @@ bild 05-terminal-clip
 bild 06-terminal-verlauf
 
 echo
-echo "SYSTEMBUS: $pass bestanden, $fail gescheitert"
+summary_emit "$pass" "$fail" 30 || exit 1
 [ "$fail" = 0 ]
