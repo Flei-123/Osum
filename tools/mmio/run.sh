@@ -59,6 +59,19 @@ mk
 sed -i '/^fn get8/,/^}/c\fn get8(p: u64) -> u64 {\n    return (*(p as *mut u8)) as u64\n}' "$D/t/kernel/lib/kstate.fi"
 expect "kstate.get8 inlined to plain is caught" fail "kstate.fi:get8"
 
+mk
+sed -i 's/(v \& 0xFF) as u8/v as u8/' "$D/t/lib/libc/regio.fi"
+expect "regio.write8 without mask is caught" fail "regio.fi:write8"
+mk
+sed -i 's/(v \& 0xFFFF) as u16/v as u16/' "$D/t/lib/libc/regio.fi"
+expect "regio.write16 without mask is caught" fail "regio.fi:write16"
+mk
+sed -i 's/(v \& 0xFFFFFFFF) as u32/v as u32/' "$D/t/lib/libc/regio.fi"
+expect "regio.write32 without mask is caught" fail "regio.fi:write32"
+mk
+sed -i 's/(v \& 255) as u8/v as u8/' "$D/t/lib/libc/regio.fi"
+expect "regio.write8_at without mask is caught" fail "regio.fi:write8_at"
+
 echo
 echo "$pass passed, $fail failed"
 [ $fail -eq 0 ]

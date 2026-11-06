@@ -13,6 +13,7 @@ VOLATILE_FUNCS = {
     "kernel/lib/kstate.fi": ["get8", "set8", "get", "set"],
 }
 ALL_VOLATILE_FILES = ["lib/libc/regio.fi"]
+UNMASKED_NARROWING_RE = re.compile(r"\bv as u(?:8|16|32)\b")
 
 
 def parse(path):
@@ -117,6 +118,8 @@ def check_wrappers(root, problems):
         for n, body in funcs.items():
             if not is_volatile(body):
                 problems.append(f"volatile wrapper inlined to plain: {rel}:{n}")
+            if UNMASKED_NARROWING_RE.search(body):
+                problems.append(f"unmasked narrowing of write value: {rel}:{n}")
 
 
 def main():
