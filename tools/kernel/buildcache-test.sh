@@ -9,7 +9,7 @@
 # Prints timings (wall seconds per build).  Heavy: 3-4 kernel builds -- run via heavy.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-T=$(mktemp -d); trap 'git checkout -q -- kernel/klog.fi 2>/dev/null; rm -rf "$T"' EXIT
+T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  ok    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
@@ -17,7 +17,7 @@ export OSUM_BUILD_CACHE="$T/cache"
 now() { date +%s.%N; }
 build() { # name [env...]  -> $T/name.mb, $T/name.log, $T/name.s
     local n=$1; shift; local a b; a=$(now)
-    env "$@" bash tools/build-kernel.sh "$T/$n.mb" > "$T/$n.log" 2>&1; local rc=$?
+    (cd "${BUILD_DIR:-.}" && env "$@" bash tools/build-kernel.sh "$T/$n.mb" > "$T/$n.log" 2>&1); local rc=$?
     b=$(now); awk -v a="$a" -v b="$b" 'BEGIN{printf "%.1f", b-a}' > "$T/$n.s"; return $rc
 }
 secs() { cat "$T/$1.s"; }
@@ -38,11 +38,17 @@ build plain OSUM_BUILD_CACHE=off && ok "uncached build ok ($(secs plain) s)" || 
 cmp -s "$T/cold.mb" "$T/plain.mb" && ok "uncached image byte-identical to cached" || bad "uncached image differs from cached"
 cmp -s "$T/cold.mb.elf" "$T/plain.mb.elf" && ok "uncached ELF byte-identical to cached" || bad "uncached ELF differs from cached"
 echo "== 4. counter-proof: source change =="
-echo "// buildcache-test marker" >> kernel/klog.fi
+COPY=$T/tree
+mkdir -p "$COPY" && cp -al . "$COPY" || bad "private tree copy failed"
+export BUILD_DIR=$COPY
+build ctl X=1 && ok "private-tree control build ok ($(secs ctl) s)" || bad "private-tree control build failed"
+cp --remove-destination kernel/klog.fi "$COPY/kernel/klog.fi"
+echo "// buildcache-test marker" >> "$COPY/kernel/klog.fi"
 build chg X=1 && ok "changed-source build ok ($(secs chg) s)" || bad "changed-source build failed"
 [[ $(miss chg) -eq 2 ]] && ok "changed source: 2 misses (key follows the content)" || bad "changed source: miss=$(miss chg) hit=$(hits chg)"
-cmp -s "$T/cold.mb" "$T/chg.mb" && bad "changed source gave the SAME image (cache or build blind)" || ok "changed source gives a different image"
-git checkout -q -- kernel/klog.fi
+cmp -s "$T/ctl.mb" "$T/chg.mb" && bad "changed source gave the SAME image (cache or build blind)" || ok "changed source gives a different image"
+unset BUILD_DIR
+git diff --quiet -- kernel/klog.fi && ok "the shared worktree stayed untouched" || bad "kernel/klog.fi in the shared worktree changed"
 echo "== 5. verify mode =="
 build ver OSUM_BUILD_CACHE_VERIFY=1 && ok "verify build ok ($(secs ver) s)" || bad "verify build failed: $(tail -2 "$T/ver.log")"
 [[ $(hits ver) -eq 2 ]] && ok "verify: hits accepted" || bad "verify: hit=$(hits ver)"

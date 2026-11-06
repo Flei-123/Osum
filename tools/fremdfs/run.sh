@@ -433,11 +433,22 @@ baue_variante() { # name optionen...
     fi
 }
 
-gr_voll=$(baue_variante voll)
+gr_voll=$(OSUM_BUILD_CACHE_VERIFY=1 baue_variante voll)
 gr_oe=$(baue_variante ohne-ext4 --ohne-ext4)
 gr_on=$(baue_variante ohne-ntfs --ohne-ntfs)
 gr_ob=$(baue_variante ohne-beide --ohne-fremdfs)
 
+if grep -aq 'ext4=an, ntfs=an' "$TMPD/v-voll.log"; then
+    ok "the full image is built with ext4 and ntfs"
+else
+    bad "the full image build line does not say ext4=an, ntfs=an"
+fi
+variant_diag() {
+    local n
+    for n in voll ohne-ext4 ohne-ntfs ohne-beide; do
+        printf '        %s: %s\n' "$n" "$(grep -a 'build: key=\|Oktette' "$TMPD/v-$n.log" | tr '\n' ' ')"
+    done
+}
 num "das volle Abbild ist gebaut" "${gr_voll:-0}" gt 1000000
 num "das Abbild ohne ext4 ist gebaut" "${gr_oe:-0}" gt 1000000
 num "das Abbild ohne NTFS ist gebaut" "${gr_on:-0}" gt 1000000
@@ -447,16 +458,19 @@ if [ "${gr_oe:-0}" -lt "${gr_voll:-0}" ] 2>/dev/null; then
     ok "the no-ext4 switch saves $(( gr_voll - gr_oe )) octets ($(( (gr_voll - gr_oe) / 1024 )) KiB)"
 else
     bad "the no-ext4 switch does NOT make the image smaller"
+    variant_diag
 fi
 if [ "${gr_on:-0}" -lt "${gr_voll:-0}" ] 2>/dev/null; then
     ok "the no-ntfs switch saves $(( gr_voll - gr_on )) octets ($(( (gr_voll - gr_on) / 1024 )) KiB)"
 else
     bad "the no-ntfs switch does NOT make the image smaller"
+    variant_diag
 fi
 if [ "${gr_ob:-0}" -lt "${gr_oe:-0}" ] && [ "${gr_ob:-0}" -lt "${gr_on:-0}" ] 2>/dev/null; then
     ok "the no-foreignfs switch saves $(( gr_voll - gr_ob )) octets ($(( (gr_voll - gr_ob) / 1024 )) KiB), more than either alone"
 else
     bad "the no-foreignfs switch saves no more than the single switches"
+    variant_diag
 fi
 printf 'voll %s\nohne-ext4 %s\nohne-ntfs %s\nohne-beide %s\n' \
     "$gr_voll" "$gr_oe" "$gr_on" "$gr_ob" > "$TMPD/groessen.txt"

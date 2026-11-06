@@ -17,7 +17,8 @@ fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
-LIMIT=${BOOTWORDS_LIMIT:-9}
+LIMIT=${BOOTWORDS_LIMIT:-0}
+JOBS=${BOOTWORDS_JOBS:-4}
 BASE_WORDS="osum modedump nokbd noproc nofs noring3"
 
 boot_bits() {
@@ -43,19 +44,22 @@ has_bit() {
     return 1
 }
 
-run_pairs() {
-    local kernel=$1 tag=$2 a b bit_a bit_b kind base got bad_before=$fail
-    base=$(boot_bits "$kernel" "$tag-base" "$BASE_WORDS") || { bad "$tag: baseline boot printed no mode vector"; return; }
-    while read -r a b bit_a bit_b kind; do
-        [ -n "$a" ] || continue
+check_group() {
+    local tag=$1 base=$2 b=$3 bit_b=$4 specs=$5 got spec a bit_a kind
+    got=$(cat "$TMPD/bits-$tag-$b" 2>/dev/null)
+    if [ ! -s "$TMPD/bits-$tag-$b" ]; then
+        bad "$tag: boot with '$b' printed no mode vector"
+        return
+    fi
+    if has_bit "$got" "$bit_b"; then
+        ok "$tag: '$b' alone sets its own mode (bit $bit_b)"
+    else
+        bad "$tag: '$b' alone does not set its own mode (bit $bit_b)"
+    fi
+    for spec in $specs; do
+        IFS=, read -r a bit_a kind <<< "$spec"
         if has_bit "$base" "$bit_a"; then
             continue
-        fi
-        got=$(boot_bits "$kernel" "$tag-$b" "$BASE_WORDS $b") || { bad "$tag: boot with '$b' printed no mode vector"; continue; }
-        if has_bit "$got" "$bit_b"; then
-            ok "$tag: '$b' alone sets its own mode (bit $bit_b)"
-        else
-            bad "$tag: '$b' alone does not set its own mode (bit $bit_b)"
         fi
         if [ "$kind" = find_lead ]; then
             if has_bit "$got" "$bit_a"; then
@@ -68,7 +72,30 @@ run_pairs() {
         else
             ok "$tag: '$b' alone leaves '$a' off (bit $bit_a)"
         fi
-    done < <(python3 tools/bootwords/plan.py plan . "$LIMIT")
+    done
+}
+
+run_pairs() {
+    local kernel=$1 tag=$2 b bit_b specs base bad_before=$fail running=0 plan_file
+    plan_file="$TMPD/plan-$tag.txt"
+    base=$(boot_bits "$kernel" "$tag-base" "$BASE_WORDS") || { bad "$tag: baseline boot printed no mode vector"; return; }
+    python3 tools/bootwords/plan.py plan . "$LIMIT" > "$plan_file"
+    while read -r b bit_b specs; do
+        [ -n "$b" ] || continue
+        has_bit "$base" "$bit_b" && continue
+        boot_bits "$kernel" "$tag-$b" "$BASE_WORDS $b" > "$TMPD/bits-$tag-$b" 2>/dev/null &
+        running=$((running + 1))
+        if [ "$running" -ge "$JOBS" ]; then
+            wait -n
+            running=$((running - 1))
+        fi
+    done < "$plan_file"
+    wait
+    while read -r b bit_b specs; do
+        [ -n "$b" ] || continue
+        has_bit "$base" "$bit_b" && continue
+        check_group "$tag" "$base" "$b" "$bit_b" "$specs"
+    done < "$plan_file"
     FAILED_IN_RUN=$((fail - bad_before))
 }
 
@@ -115,4 +142,4 @@ else
     tail -8 "$TMPD/oldb.log" | sed 's/^/        /'
 fi
 
-summary_emit "$pass" "$fail" 10
+summary_emit "$pass" "$fail" 150

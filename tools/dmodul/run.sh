@@ -16,7 +16,8 @@ for a in "${@:2}"; do
     esac
 done
 mkdir -p "$OUT"
-BUILDD=${LOOKBUILD:-/tmp/osum-dmodul-build}
+. tools/lib/treekey.sh
+BUILDD=${LOOKBUILD:-$(osum_keyed_builddir /tmp/osum-dmodul-build "$WURZEL")}
 mkdir -p "$BUILDD"
 export FIRNLIB="$(pwd)/lib"
 
@@ -24,19 +25,15 @@ sagen() { printf '%-12s %s\n' "$1" "$2"; }
 fehler() { echo "FEHLGESCHLAGEN: $*" >&2; exit 1; }
 
 # ------------------------------------------------------------ 1. bauen
-newer=$(find "$WURZEL/kernel" "$WURZEL/tools/build-kernel.sh" -newer "$BUILDD/k0.mb" -print -quit 2>/dev/null || true)
-if [ ! -s "$BUILDD/k0.mb" ] || [ -n "$newer" ]; then
+if [ ! -s "$BUILDD/k0.mb" ]; then
     "$WURZEL/tools/build-kernel.sh" "$BUILDD/k0.mb" > "$BUILDD/k.log" 2>&1 \
         || { tail -20 "$BUILDD/k.log"; fehler "der Kern baut nicht"; }
 fi
 sagen kern "$(stat -c%s "$BUILDD/k0.mb") Oktette"
 
 PROGS="desktop taskbar settings launcher explorer sh echo ls cat"
-USERNEW=$(ls -t "$WURZEL"/kernel/user/*.fi 2>/dev/null | head -1)
 for p in $PROGS; do
-    if [ -s "$BUILDD/$p.elf" ] \
-       && [ "$BUILDD/$p.elf" -nt "$WURZEL/kernel/user/$p.fi" ] \
-       && [ -n "$USERNEW" ] && [ "$BUILDD/$p.elf" -nt "$USERNEW" ]; then
+    if [ -s "$BUILDD/$p.elf" ]; then
         continue
     fi
     "$WURZEL/vendor/firn/bin/firnc" -c "$WURZEL/kernel/user/$p.fi" -o "$BUILDD/$p.o" \

@@ -36,8 +36,8 @@ fi
 [[ -n ${OSUM_TUNNEL:-} ]] && TUNNEL=$OSUM_TUNNEL
 MODULE_KEYS=${MODULE_KEYS:-}
 BAN_FLOOR=${BAN_FLOOR:-}
-OHNE_EXT4=${OHNE_EXT4:-0}
-OHNE_NTFS=${OHNE_NTFS:-0}
+OHNE_EXT4=0
+OHNE_NTFS=0
 [[ -n ${OSUM_EXT4:-} ]] && [[ $OSUM_EXT4 == off ]] && OHNE_EXT4=1
 [[ -n ${OSUM_NTFS:-} ]] && [[ $OSUM_NTFS == off ]] && OHNE_NTFS=1
 
@@ -83,7 +83,21 @@ for f in boot isr switch smp hv; do
     as --64 -o "$TMP/$f.o" "kernel/arch/x86_64/$f.s" || exit 1
 done
 
-cp -a kernel "$TMP/kernel" || exit 1
+. "$(dirname "$0")/kernel/buildcache.sh"
+snapshot_kernel() {
+    local attempt before after
+    for attempt in 1 2 3 4 5; do
+        rm -rf "$TMP/kernel"
+        before=$(bc_tree_hash kernel)
+        cp -a kernel "$TMP/kernel" || return 1
+        after=$(bc_tree_hash kernel)
+        [[ $before == "$after" ]] && return 0
+        sleep 1
+    done
+    echo "build: the kernel tree kept changing during the snapshot" >&2
+    return 1
+}
+snapshot_kernel || exit 1
 
 FASSUNG_HASH=$(git rev-parse --short=8 HEAD 2>/dev/null || echo "unbekant")
 if git status --porcelain 2>/dev/null | grep -q .; then
@@ -189,8 +203,8 @@ UPROG=$(find "$KDIR" -name uprog.fi -type f | head -1)
 # parallel (they are independent; before: 2 x serial).  Compile with cwd = the kernel copy and
 # relative root paths, so the objects do not contain the random mktemp name (reproducible).
 # Details, env switches (OSUM_BUILD_CACHE=off) and the proof: tools/kernel/buildcache.sh, docs/DEVLOOP.md.
-. "$(dirname "$0")/kernel/buildcache.sh"
 BC_KEY=$(bc_common_key "$FIRNC" "$TMP" "$STUFE")
+echo "build: key=${BC_KEY:0:12} ext4=$([[ $OHNE_EXT4 == 1 ]] && echo off || echo on) ntfs=$([[ $OHNE_NTFS == 1 ]] && echo off || echo on)" >&2
 bc_compile "$FIRNC" "$TMP" "$BC_KEY" "${KMAIN#$TMP/}" "$TMP/k.o" &
 BC_P1=$!
 bc_compile "$FIRNC" "$TMP" "$BC_KEY" "${UPROG#$TMP/}" "$TMP/uprog.o" &

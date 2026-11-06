@@ -63,8 +63,8 @@ bc_compile() {
     t0=$(date +%s%N)
     if dir=$(bc_dir) && [[ -n $ck ]]; then
         key=$(printf '%s %s' "$ck" "$rel" | sha256sum | cut -c1-64)
-        if [[ -f $dir/$key.o ]]; then
-            cp -f "$dir/$key.o" "$out" && touch "$dir/$key.o"
+        if [[ -f $dir/$key.o ]] && cp -f "$dir/$key.o" "$out" 2>/dev/null; then
+            touch "$dir/$key.o"
             if [[ ${OSUM_BUILD_CACHE_VERIFY:-0} == 1 ]]; then
                 (cd "$work" && "$firnc" -o "$out.verify" "$rel") || return 1
                 cmp -s "$out" "$out.verify" || { echo "buildcache: VERIFY FAILED for $rel (cached object differs from fresh compile)" >&2; return 1; }

@@ -8,8 +8,7 @@ FIND_IF = re.compile(
     r"if cmdword\.(find|find_lead)\(cmd, \(&(\w+)\[0\]\) as u64, (\d+)\) != 0 \{\s*\n\s*kstate\.mode_add\(state, kstate\.(M_\w+)\)")
 WORD_DECL = re.compile(r'var (\w+): \[u8; \d+\] = "([a-z0-9._=/-]+)\\0')
 MODE_CONST = re.compile(r"^const (M_\w+): u64 = (\d+)", re.M)
-SLEEPERS = ("s3",)
-NAMED = [("usb", "usbpoll"), ("wm", "wmplug"), ("a11y", "a11ymag"), ("wig", "wigfiles"), ("aml", "noaml")]
+HOLDERS = ("s3", "schlafarm", "usbstop", "serholdsti")
 
 
 def read(path):
@@ -32,32 +31,31 @@ def word_map(root):
             decl = dict(WORD_DECL.findall(text))
             for kind, var, length, const in FIND_IF.findall(text):
                 word = decl.get(var)
-                if word and const in bits and len(word) == int(length) and not word.startswith(SLEEPERS):
+                if word and const in bits and len(word) == int(length) and not word.startswith(HOLDERS):
                     words.setdefault(word, (kind, bits[const]))
     return words
 
 
+def kind_of(words, short, longer):
+    if words[short][0] == "find_lead" and longer.startswith(short):
+        return "find_lead"
+    return "find"
+
+
 def plan(root, limit):
     words = word_map(root)
-    chosen = []
-    seen = set()
-
-    def add(a, b):
-        if a in words and b in words and (a, b) not in seen and words[a][1] != words[b][1]:
-            seen.add((a, b))
-            chosen.append((a, b))
-
-    for a, b in NAMED:
-        add(a, b)
-    shorts = sorted((w for w in words if any(w != o and w in o for o in words)), key=lambda w: (len(w), w))
-    for a in shorts:
-        if len(chosen) >= limit:
-            break
-        longer = sorted((o for o in words if o != a and a in o), key=lambda o: (len(o), o))
-        if longer and not any(p[0] == a for p in chosen):
-            add(a, longer[0])
-    for a, b in chosen:
-        print("%s %s %d %d %s" % (a, b, words[a][1], words[b][1], words[a][0]))
+    groups = []
+    for longer in sorted(words, key=lambda w: (len(w), w)):
+        shorts = sorted(
+            (w for w in words if w != longer and w in longer and words[w][1] != words[longer][1]),
+            key=lambda w: (len(w), w))
+        if shorts:
+            groups.append((longer, shorts))
+    if limit > 0:
+        groups = groups[:limit]
+    for longer, shorts in groups:
+        specs = " ".join("%s,%d,%s" % (w, words[w][1], kind_of(words, w, longer)) for w in shorts)
+        print("%s %d %s" % (longer, words[longer][1], specs))
 
 
 def bits(path):
