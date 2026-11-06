@@ -8,6 +8,8 @@ import fs.pathseg
 import serial
 import block.blk
 import fs.mnt
+import fs.pcache
+import fs.dcache
 import fs.vfsops
 import sched.time
 import sched.sched
@@ -16,7 +18,7 @@ import arch.cpu
 import libc.ascii
 import libc.octets
 
-export { ops, mount_probe, release, sync, MAX_NODES }
+export { ops, mount_probe, release, sync, node_hold, node_drop, MAX_NODES }
 
 const BS: u64 = 512
 
@@ -35,6 +37,7 @@ const CMPBUF: u64 = 0xE00
 const CACHE_OFF: u64 = 0xF00
 const CACHE_RR: u64 = 0xF80
 const CACHE_SLOTS: u64 = 4
+const NODE_RR: u64 = 0xF88
 
 // die Felder je Einhaengung
 const S_VALID: u64 = 0
@@ -60,6 +63,8 @@ const N_SIZE: u64 = 16
 const N_ATTR: u64 = 24
 const N_DLBA: u64 = 32
 const N_DOFF: u64 = 40
+const DOFF_MASK: u64 = 0xFFFF
+const USE_SHIFT: u64 = 16
 
 const A_RDONLY: u64 = 0x01
 const A_HIDDEN: u64 = 0x02
@@ -391,7 +396,7 @@ fn node_find(state: u64, m: u64, dlba: u64, doff: u64, clus: u64) -> u64 {
     var i: u64 = 1
     while i <= MAX_NODES {
         if nget(state, i, N_MNT) == m + 1 {
-            if nget(state, i, N_DLBA) == dlba && nget(state, i, N_DOFF) == doff
+            if nget(state, i, N_DLBA) == dlba && (nget(state, i, N_DOFF) & DOFF_MASK) == doff
                 && nget(state, i, N_CLUS) == clus {
                 return i
             }
@@ -422,7 +427,42 @@ fn node_get(state: u64, m: u64, clus: u64, size: u64, attr: u64,
         }
         i = i + 1
     }
+    let rr: u64 = __mmio_read64((state + kstate.FAT_OFF + NODE_RR) as *mut u64)
+    var n: u64 = 0
+    while n < MAX_NODES {
+        let k: u64 = ((rr + n) % MAX_NODES) + 1
+        if (nget(state, k, N_DOFF) >> USE_SHIFT) == 0 {
+            __mmio_write64((state + kstate.FAT_OFF + NODE_RR) as *mut u64, k % MAX_NODES)
+            pcache.drop_node(state, nget(state, k, N_MNT) - 1, k)
+            dcache.bump(state)
+            nset(state, k, N_MNT, m + 1)
+            nset(state, k, N_CLUS, clus)
+            nset(state, k, N_SIZE, size)
+            nset(state, k, N_ATTR, attr)
+            nset(state, k, N_DLBA, dlba)
+            nset(state, k, N_DOFF, doff)
+            return k
+        }
+        n = n + 1
+    }
     return 0
+}
+
+fn node_hold(state: u64, node: u64) {
+    if node == 0 || node > MAX_NODES {
+        return
+    }
+    nset(state, node, N_DOFF, nget(state, node, N_DOFF) + (1 << USE_SHIFT))
+}
+
+fn node_drop(state: u64, node: u64) {
+    if node == 0 || node > MAX_NODES {
+        return
+    }
+    let w: u64 = nget(state, node, N_DOFF)
+    if (w >> USE_SHIFT) != 0 {
+        nset(state, node, N_DOFF, w - (1 << USE_SHIFT))
+    }
 }
 
 fn sync(state: u64, m: u64) -> u64 {
@@ -978,7 +1018,7 @@ fn entry_update(state: u64, m: u64, node: u64) -> bool {
     if !blk.read_mounted(state, m, lba, buf(state, DIRBUF)) {
         return false
     }
-    let e: u64 = buf(state, DIRBUF) + nget(state, node, N_DOFF)
+    let e: u64 = buf(state, DIRBUF) + (nget(state, node, N_DOFF) & DOFF_MASK)
     let c: u64 = nget(state, node, N_CLUS)
     octets.put16(e + 22, fat_time(state))
     octets.put16(e + 24, fat_date(state))
