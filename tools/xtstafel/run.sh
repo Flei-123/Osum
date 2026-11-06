@@ -83,12 +83,13 @@ s=s.replace("""fn forget() {
     while s < SLOTS {""","""fn forget() {
     var s: usize = 0
     while s < 1 {""",1)
+s=s.replace("    octets.zero(table_start(), table_length())\n","",1)
 open(p,"w",encoding="utf-8").write(s)
 PYEOF
 if FIRNLIB="$GLIB" $FIRNC tools/xtstafel/delete.fi -o "$TMPD/g2" 2>/dev/null; then
     "$TMPD/g2" > "$TMPD/g2.txt" 2>&1
     if [ $? != 0 ]; then
-        R=$(grep -oE 'Oktette ungleich 0 nach forget\(\): [0-9]+' "$TMPD/g2.txt" | grep -oE '[0-9]+$')
+        R=$(grep -oE 'non-zero octets after forget\(\): [0-9]+' "$TMPD/g2.txt" | grep -oE '[0-9]+$')
         ok "a half forget() is CAUGHT (remainder: ${R:-?} octets) -- the delete test bites"
     else
         bad "a half forget() gets through -- the delete test is no good"
