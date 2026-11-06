@@ -61,7 +61,7 @@ def main(argv):
             continue
         x, y = (int(v) for v in p.split(","))
         lines += go(x, y)
-        lines += ["warte 1", "mouse_button 1", "mouse_button 0", "warte 2"]
+        lines += ["warte 1", "mouse_button 1", "warte 1", "mouse_button 0", "warte 2"]
     print("\n".join(lines))
     return 0
 

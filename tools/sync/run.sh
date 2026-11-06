@@ -365,6 +365,10 @@ grep -qa '^==END==' "$TMPD/Fv.log" \
 [ "$F_VOLL" -lt 1500 ] && F_VOLL=1500
 rm -f "$TMPD/Fv.img"
 
+root_whole() {
+    [ -f "$1" ] && grep -qaE '^osumwurzel1 [0-9]+ [0-9a-f]{64} [0-9a-f]{64}$' "$1"
+}
+
 kills=0
 gefunden=0
 konten=0
@@ -400,10 +404,9 @@ while [ $n -lt 30 ]; do
     rm -rf "$TMPD/fk-$n"
     if [ -f "$TMPD/fs-$n/ROOT" ]; then
         gefunden=$((gefunden+1))
-        if ! grep -qaE '^osumwurzel1 [0-9]+ [0-9a-f]{64} [0-9a-f]{64}$' \
-                "$TMPD/fs-$n/ROOT"; then
+        if ! root_whole "$TMPD/fs-$n/ROOT" && ! root_whole "$TMPD/fs-$n/ROOT.T"; then
             halbe=$((halbe+1))
-            note "Lauf $n: ROOT ist nicht ganz: $(head -c 120 "$TMPD/fs-$n/ROOT" | tr -d '\n')"
+            note "Lauf $n: ROOT is not whole and ROOT.T is no fallback: $(head -c 120 "$TMPD/fs-$n/ROOT" | tr -d '\n') | $(head -c 120 "$TMPD/fs-$n/ROOT.T" 2>/dev/null | tr -d '\n')"
         fi
     fi
     n=$((n+1))
@@ -416,7 +419,7 @@ note "$num_ge davon hatten schon eine Wurzel auf der Platte, $konten ein Konto"
 [ "$num_ge" -ge 1 ] \
     && ok "(f) $num_ge aborts came AFTER writing the root" \
     || bad "(f) no single abort hit the root -- (f) measures the wrong spot"
-is "(f) KEINE halbe Wurzel, in keinem der 30 Faelle" "$halbe" "0"
+is "(f) a ROOT that is not whole always has a whole ROOT.T next to it, in all 30 cases" "$halbe" "0"
 [ "$kills" -ge 15 ] \
     && ok "(f) the aborts really hit the middle: $kills von 30" \
     || bad "(f) only $kills of 30 runs were still running at all -- the window does not fit"
@@ -728,14 +731,15 @@ assert t.count(auf_mit) == 1
 t = t.replace(auf_mit, auf_ohne)
 open(d + "/kaputt/kette-ohneaad.fi", "w").write(t)
 
-alt_k = """    block_schluessel(inhaltkey, name, (&kb[0]) as u64)
+alt_k = """    block_key(inhaltkey, name, (&kb[0]) as u64)
     block_nonce(inhaltkey, name, (&nc[0]) as u64)"""
 neu_k = """    var fest: [u8; 33] = "osum-sync-block-ohne-namensbindg\\0"
-    block_schluessel(inhaltkey, (&fest[0]) as u64, (&kb[0]) as u64)
+    block_key(inhaltkey, (&fest[0]) as u64, (&kb[0]) as u64)
     block_nonce(inhaltkey, (&fest[0]) as u64, (&nc[0]) as u64)"""
 assert t.count(alt_k) == 2, t.count(alt_k)
 open(d + "/kaputt/kette-losgeloest.fi", "w").write(t.replace(alt_k, neu_k))
 PYX
+[ $? -eq 0 ] || bad "(j2) the patch script for the broken chain versions failed"
 if cmp -s "$TMPD/kaputt/kette-ohneaad.fi" lib/sync/chain.fi; then
     bad "(j2) the broken version is identical to the original -- it measures nothing"
 else
