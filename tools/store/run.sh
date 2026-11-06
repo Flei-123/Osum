@@ -153,9 +153,9 @@ echo "== 3. the good way, over the bus, from the signed-in person =="
 cat > "$TMPD/sA.sh" <<'EOS'
 mkdir /users/justin
 opk install /quelle1/hallo-1.opk
-orientbus serve 600000 &
+orientbus serve 24000 &
 sleep -m 300
-stored serve 600000 &
+stored serve 24000 &
 sleep 1
 setsess 1000
 echo ==A-L0==
@@ -292,9 +292,9 @@ for v in flip:1 hash:2 foreign:3; do
     name=${v%%:*}; off=${v##*:}
     cat > "$TMPD/s$name.sh" <<'EOS'
 mkdir /users/justin
-orientbus serve 600000 &
+orientbus serve 15000 &
 sleep -m 300
-stored serve 600000 &
+stored serve 15000 &
 sleep 1
 setsess 1000
 echo ==B-REF==
