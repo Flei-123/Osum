@@ -764,7 +764,7 @@ hasnot "$TMPD/ohne.txt" "k15: start" "without the word 'wig' no application is s
 hasnot "$TMPD/ohne.txt" "widgetdemo:" "and none reports"
 has "$TMPD/ohne.txt" "wclick: passed 10 / 10" "instead the application of round K10 runs as before"
 wz=$(zahl "$TMPD/ohne.txt" 'wm: selftest [0-9]+')
-num "and the window server says the same as before" "$wz" eq 30
+num "and the window server says the same as before" "$wz" eq 31
 ob=$(feld "$TMPD/ohne.txt" "wig: blits" blits)
 num "the seam pushed nothing across in this run" "$ob" eq 0
 
