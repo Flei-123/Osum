@@ -611,9 +611,9 @@ if grep -aq 'sleep: frames equal' "$WB"; then
     ok "no lost frame -- also with kernel stacks and page tables"
 else
     bad "the frame accounting does not add up in the awake cycle"
-    grep -a 'RAHMEN VERLOREN\|rahmen gleich' "$WB" | sed 's/^/        /' | head -2
+    grep -a 'sleep: FRAMES LOST\|sleep: frames equal' "$WB" | sed 's/^/        /' | head -2
 fi
-WWACH=$(grep -a 'rahmen gleich\|RAHMEN VERLOREN' "$WB" | sed -n '1s/.*wach=\([0-9]*\).*/\1/p')
+WWACH=$(grep -a 'sleep: frames equal\|sleep: FRAMES LOST' "$WB" | sed -n '1s/.*wach=\([0-9]*\).*/\1/p')
 if [ -n "$WWACH" ] && [ "$WWACH" -gt 0 ]; then
     ok "and the restart names its own $WWACH frames (instead of hiding them)"
 else
