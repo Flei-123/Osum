@@ -297,13 +297,13 @@ schau "Zeile 1 des Terminalfensters" \
 schau "der Titel des Fensters aus Ring 3, mit Unterschneidung" \
     tchain "$TMPD/w.ppm" assets/osum-sans.ttf 15 432 348 255 255 255 \
     28 78 126 "Klick mich"
-schau "der Titel des Terminalfensters, unbeleuchtet" \
-    tchain "$TMPD/w.ppm" assets/osum-sans.ttf 15 36 58 144 156 168 \
-    44 56 72 "Terminal -- sh"
+schau "the active tab label of the terminal window (title strip)" \
+    tchain "$TMPD/w.ppm" assets/osum-sans.ttf 15 44 58 224 230 236 \
+    16 20 26 "Terminal 1" 0 58
 # ... and it IS fUi's ink: the kernel's old 4x4 samples do NOT match.
-schau_nicht "GEGENPROBE: der Titel ist NICHT mehr die alte Kern-Tinte" \
-    tchain "$TMPD/w.ppm" kern:assets/osum-sans.ttf 15 36 55 144 156 168 \
-    44 56 72 "Terminal -- sh"
+schau_nicht "COUNTER-PROOF: the tab label is NOT the old kernel ink" \
+    tchain "$TMPD/w.ppm" kern:assets/osum-sans.ttf 15 44 58 224 230 236 \
+    16 20 26 "Terminal 1" 0 58
 schau "der Text ist wirklich kantengeglaettet" \
     smooth "$TMPD/w.ppm" 26 62 280 20 224 230 236 16 20 26 100
 schau_nicht "wo kein Text steht, geht dieselbe Rechnung NICHT auf" \
