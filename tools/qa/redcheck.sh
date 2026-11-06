@@ -13,6 +13,7 @@
 # Exit code: 0 = green or only expected red, 1 = at least one NEW red,
 #            2 = usage error.
 # Env: EXPECTED_RED = baseline file (default: next to this script).
+#      SUMMARY_REQUIRED = file of 'gate | regex' summary lines a green log must contain.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 BASE=${EXPECTED_RED:-$HERE/expected-red.txt}
@@ -59,6 +60,14 @@ for line in "${FAILS[@]}"; do
         new=$((new + 1)); printf 'NEW red      : %s\n' "$line"
     fi
 done
+
+REQ_FILE=${SUMMARY_REQUIRED:-$HERE/summary-required.txt}
+if [[ $RC -eq 0 && -f $REQ_FILE ]]; then
+    req=$(awk -F' [|] ' -v g="$GATE" '/^[[:space:]]*#/ || NF < 2 {next} $1 == g {print $2; exit}' "$REQ_FILE")
+    if [[ -n $req ]] && ! sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -aqE -- "$req"; then
+        new=$((new + 1)); printf 'NEW red      : exit code 0 but the summary line /%s/ is missing from the log\n' "$req"
+    fi
+fi
 
 # exit code without any FAIL line (crash, timeout, gate without FAIL lines)
 if [[ $RC -ne 0 && ${#FAILS[@]} -eq 0 ]]; then
