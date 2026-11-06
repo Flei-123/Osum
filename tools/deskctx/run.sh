@@ -77,7 +77,7 @@ PY
 }
 
 mkdir -p "$TMPD/new" "$TMPD/old"
-git worktree add --detach "$BT" "${BASE:-HEAD~1}" >/dev/null 2>&1 || { echo "base worktree failed"; exit 1; }
+git worktree add --detach "$BT" "${BASE:-3f8b8bff9}" >/dev/null 2>&1 || { echo "base worktree failed"; exit 1; }
 # the old tree needs the drive.py of this tree (the `dmenue` name) -- the picture and the trace lines are what differ
 cp -f tools/design/drive.py "$BT/tools/design/drive.py"
 run_tree "$ROOT" "$TMPD/new" &

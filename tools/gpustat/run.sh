@@ -74,7 +74,7 @@ done
 # kernel of origin/main without /proc/gpu (counter-proof)
 if [ ! -f "$B/kold.mb" ]; then
     mkdir -p "$TMPD/old"
-    git archive "${GPUSTAT_OLD_REF:-origin/main}" kernel lib 2>/dev/null | tar -x -C "$TMPD/old" 2>/dev/null
+    git archive "${GPUSTAT_OLD_REF:-386703691}" kernel lib 2>/dev/null | tar -x -C "$TMPD/old" 2>/dev/null
     build_kernel "$TMPD/old" "$B/kold.mb" >"$TMPD/old.err" 2>&1 || { bad "old kernel does not compile"; head -5 "$TMPD/old.err"; }
 fi
 ok "built (kernel $(stat -c%s "$B/k0.mb") octets)"

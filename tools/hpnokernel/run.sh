@@ -58,7 +58,7 @@ OLD=${OLD:-$OUT/old}
 if [ ! -f "$NEW/osum.mb" ]; then build "$PWD" "$NEW" || { echo "HPNOKERNEL: build failed"; tail -n 5 "$NEW.log"; exit 1; }; fi
 if [ ! -f "$OLD/osum.mb" ]; then
     mkdir -p "$OUT/oldsrc"
-    git archive origin/main | tar -x -C "$OUT/oldsrc"
+    git archive "${HPNOKERNEL_OLD_REF:-b8ce8691e}" | tar -x -C "$OUT/oldsrc"
     cp -r vendor/firn/bin vendor/firn/lib "$OUT/oldsrc/vendor/firn/" 2>/dev/null
     build "$OUT/oldsrc" "$OLD" || { echo "HPNOKERNEL: old build failed"; tail -n 5 "$OLD.log"; exit 1; }
 fi

@@ -22,7 +22,7 @@ field() { printf '%s' "$1" | grep -oE "$2=[0-9]+" | head -1 | cut -d= -f2; }
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc failed"; exit 1; }
 # default base = the commit before the one that gave fUi labels the ink plate (fn plate_ink in fuiapp.fi): the old full-rectangle plate
 FIX=$(git log -S'fn plate_ink' --format=%H --reverse HEAD -- kernel/user/fuiapp.fi | head -1)
-[ -n "${BASE:-}" ] || BASE="${FIX:+$FIX~1}"; BASE=${BASE:-HEAD~1}
+[ -n "${BASE:-}" ] || BASE="${FIX:+$FIX~1}"; BASE=${BASE:-6e2930572}
 git worktree add --detach "$BT" "$BASE" >/dev/null 2>&1 || { echo "base worktree failed"; exit 1; }
 ( cd "$BT" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 )
 common=(extra=einst wallpaper=hell uitrace=yes keep=yes)

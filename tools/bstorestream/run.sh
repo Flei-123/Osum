@@ -24,7 +24,7 @@ command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "bstorestream: skipped, 
 
 if [ "${BSTORE_OLD:-}" = "1" ]; then
     mkdir -p "$TMPD/oldtree"
-    git archive "${BSTORE_OLD_REV:-HEAD~1}" kernel | tar -x -C "$TMPD/oldtree"
+    git archive "${BSTORE_OLD_REV:-3d1de1197}" kernel | tar -x -C "$TMPD/oldtree"
     cp "$TMPD/oldtree/kernel/user/bstore.fi" "$TMPD/bstore.fi.old"
     cp kernel/user/bstore.fi "$TMPD/bstore.fi.new"
     cp "$TMPD/bstore.fi.old" kernel/user/bstore.fi
