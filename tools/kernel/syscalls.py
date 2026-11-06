@@ -27,6 +27,19 @@ NO_NUMBER = {
 MUSTER = re.compile(
     r"^[ \t]*const[ \t]+(SYS_[A-Z0-9_]+)[ \t]*:[ \t]*u64[ \t]*=[ \t]*(\d+)",
     re.M)
+ALIAS_MUSTER = re.compile(
+    r"^[ \t]*const[ \t]+UB_([A-Z0-9_]+)[ \t]*:[ \t]*u64[ \t]*=[ \t]*(\d+)",
+    re.M)
+
+
+def read_aliases(path_2):
+    with open(path_2, "rb") as f:
+        roh = f.read().decode("latin1")
+    aus = {}
+    for m in ALIAS_MUSTER.finditer(roh):
+        line = roh.count("\n", 0, m.start()) + 1
+        aus["SYS_" + m.group(1)] = (int(m.group(2)), line)
+    return aus
 
 
 def read_text(path_2):
@@ -54,6 +67,10 @@ def check_2(root):
         return error, {}, {}
     kern = read_text(kp)
     libc = read_text(lp)
+    aliases = read_aliases(kp)
+    for name in libc:
+        if name not in kern and name in aliases:
+            kern[name] = aliases[name]
 
     for name, tab, file in (("kernel", kern, KERN), ("libc", libc, LIBC)):
         echt = without_exceptions(tab)
