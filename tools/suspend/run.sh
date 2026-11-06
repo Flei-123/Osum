@@ -710,5 +710,47 @@ else
 fi
 
 echo
+echo "== 16. FREEZE on 4 cores: CPU-bound tasks are stopped before the copy =="
+fzrun() { # name extra-words
+    local name=$1 extra=$2
+    rm -f "$TMPD/$name.img"
+    qemu-img create -f raw "$TMPD/$name.img" 64M >/dev/null 2>&1
+    timeout 300 $QEMU_X86 -kernel "$TMPD/k.elf" -m 512 -smp 4 \
+        -append "osum wacharm schlafarm wachburn smpfrueh $extra acpiev" \
+        -serial "file:$TMPD/$name-a.txt" -display none -no-reboot \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -drive "file=$TMPD/$name.img,format=raw,if=ide,index=0" > /dev/null 2>&1
+    timeout 300 $QEMU_X86 -kernel "$TMPD/k.elf" -m 512 -smp 4 \
+        -append "osum wachpruef schlafpruef wachburn smpfrueh $extra acpiev" \
+        -serial "file:$TMPD/$name-b.txt" -display none -no-reboot \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -drive "file=$TMPD/$name.img,format=raw,if=ide,index=0" > /dev/null 2>&1
+}
+fzfield() { grep -a '^wake: freeze' "$1" | sed -n "1s/.* $2=\([0-9]*\).*/\1/p"; }
+fzrun fz1 ""
+F1="$TMPD/fz1-a.txt"
+hat_nicht "$F1" 'EXCEPTION' "no CPU exception in the freeze save run"
+if [ "$(fzfield "$F1" cores)" = "4" ]; then ok "four cores online when the tasks are frozen"; else bad "cores=$(fzfield "$F1" cores), expected 4"; fi
+if [ "${F1RUN:=$(fzfield "$F1" running)}" -ge 1 ] 2>/dev/null; then ok "$F1RUN marked tasks were running on other cores at the moment of marking"; else bad "no marked task was running on another core: the probe measures nothing (running=${F1RUN:-?})"; fi
+if [ "$(fzfield "$F1" stray)" = "0" ] && [ "$(fzfield "$F1" timeout)" = "0" ]; then ok "freeze waited until every marked task left its core (stray=0)"; else bad "stray tasks after freeze: $(grep -a '^wake: freeze' "$F1" | head -1)"; fi
+if [ "$(fzfield "$F1" marked)" -ge 3 ] 2>/dev/null && [ "$(fzfield "$F1" marked)" -le "$(fzfield "$F1" limit)" ] 2>/dev/null; then ok "marked=$(fzfield "$F1" marked) within the capacity limit=$(fzfield "$F1" limit)"; else bad "marking outside the capacity: $(grep -a '^wake: freeze' "$F1" | head -1)"; fi
+hat "$F1" 'wake: image written=1' "the task image is written completely with burners (disk capacity respected)"
+hat "$TMPD/fz1-b.txt" 'wake: back .*why=ok' "the frozen burners come back on restart"
+FB=$(grep -a 'wake: burners' "$TMPD/fz1-b.txt" | sed -n '1s/.*found=\([0-9]*\).*/\1/p')
+FR=$(grep -a 'wake: burners' "$TMPD/fz1-b.txt" | sed -n '1s/.*rising=\([0-9]*\).*/\1/p')
+if [ -n "$FB" ] && [ "$FB" -ge 1 ] && [ "$FB" = "$FR" ]; then ok "all $FB restored burners keep computing"; else bad "burners found=${FB:-0} rising=${FR:-0}"; fi
+
+fzrun fz2 "nofreezewait"
+F2="$TMPD/fz2-a.txt"
+if [ "$(fzfield "$F2" stray)" -ge 1 ] 2>/dev/null; then ok "control 'nofreezewait': stray=$(fzfield "$F2" stray) -- the check goes RED without the wait"; else bad "control 'nofreezewait' stays quiet, the stray check is blind: $(grep -a '^wake: freeze' "$F2" | head -1)"; fi
+
+fzrun fz3 "freezetmo"
+F3="$TMPD/fz3-a.txt"
+if [ "$(fzfield "$F3" timeout)" = "1" ] && [ "$(fzfield "$F3" orphans)" = "0" ] && [ "$(fzfield "$F3" restored)" -ge 1 ] 2>/dev/null; then ok "timeout path: thaw restores $(fzfield "$F3" restored) tasks, no task left running without a core"; else bad "timeout path wrong: $(grep -a '^wake: freeze' "$F3" | head -1)"; fi
+fzrun fz4 "freezetmo oldthaw"
+F4="$TMPD/fz4-a.txt"
+if [ "$(fzfield "$F4" orphans)" -ge 1 ] 2>/dev/null; then ok "control 'oldthaw': orphans=$(fzfield "$F4" orphans) -- the old restore strands tasks"; else bad "control 'oldthaw' shows no stranded task: $(grep -a '^wake: freeze' "$F4" | head -1)"; fi
+
+echo
 echo "== SUSPEND+SLEEP+WAKE: $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]
