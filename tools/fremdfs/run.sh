@@ -257,7 +257,7 @@ durchgang() { # name abbild art erwartet_verweise(0/1)
     soll_wurzel=$(grep -a '^\. ' "$BILD/baum.liste" | awk '{print $2}')
     soll_viele=$(grep -a '^viele ' "$BILD/baum.liste" | awk '{print $2}')
     local ist_wurzel
-    ist_wurzel=$(wert "$D" wurzel)
+    ist_wurzel=$(wert "$D" root)
     #
     if [ "$art" = ext4 ]; then
         num "[$name] die Wurzel hat alle Eintraege" "${ist_wurzel:-0}" ge \
@@ -271,8 +271,8 @@ durchgang() { # name abbild art erwartet_verweise(0/1)
     sagt "$D" a 1 "[$name] /a hat einen Eintrag"
 
     # DIE GROESSEN.
-    sagt "$D" gr-gross 6291456 "[$name] gross.bin ist 6 MiB gross"
-    sagt "$D" gr-leer 0 "[$name] leer.bin hat NULL Oktette"
+    sagt "$D" gr-big 6291456 "[$name] gross.bin ist 6 MiB gross"
+    sagt "$D" gr-empty 0 "[$name] leer.bin hat NULL Oktette"
     sagt "$D" gr-mittel 204800 "[$name] mittel.bin ist 200 KiB gross"
     sagt "$D" art-dir 16384 "[$name] /viele meldet sich als Verzeichnis"
 
@@ -327,9 +327,9 @@ PY
     if [ "$mit_verweisen" = 1 ]; then
         sagt "$D" art-lnk 40960 "[$name] verweis.txt meldet sich als VERWEIS"
         local zk zl
-        zk=$(grep -a -m1 '^ff: ziel /mnt/verweis.txt = ' "$D" \
+        zk=$(grep -a -m1 '^ff: target /mnt/verweis.txt = ' "$D" \
             | sed 's/.* = //' | tr -d '\r\000')
-        zl=$(grep -a -m1 '^ff: ziel /mnt/langverweis.txt = ' "$D" \
+        zl=$(grep -a -m1 '^ff: target /mnt/langverweis.txt = ' "$D" \
             | sed 's/.* = //' | tr -d '\r\000')
         gleich "[$name] das KURZE Verweisziel (steht im Inode)" \
             "$(cat "$BILD/verweis-kurz.txt")" "$zk"
@@ -337,7 +337,7 @@ PY
             "$(cat "$BILD/verweis-lang.txt")" "$zl"
     fi
 
-    sagt "$D" schreib 0 "[$name] SCHREIBEN scheitert (nur lesend)"
+    sagt "$D" write 0 "[$name] SCHREIBEN scheitert (nur lesend)"
     sagt "$D" umount 1 "[$name] aushaengen geht sauber"
 }
 

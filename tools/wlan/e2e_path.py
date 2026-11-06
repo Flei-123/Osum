@@ -96,12 +96,12 @@ def main():
     print("== the believing path: it MUST go all the way through ==")
     m1, m3, ptk, gtk = build_handshake(pmk, aa, spa, snonce)
     bk = build_beacon(ssid, rsn=True)
-    a = felder(orakel("weg %s %s %s %s %s %s %s"
+    a = felder(orakel("path %s %s %s %s %s %s %s"
                       % (h(bk), h(pmk), h(spa), h(aa), h(m1),
                          h(snonce), h(m3))))
-    if a.get('netze') == '1' and a.get('wahl') == '1' \
+    if a.get('netze') == '1' and a.get('chosen') == '1' \
             and a.get('m1') == '1' and a.get('m3') == '1' \
-            and a.get('daten') == '1' and a.get('skeys') == '2':
+            and a.get('data') == '1' and a.get('skeys') == '2':
         ok("scan finds the network, choice works, messages 1 and 3 pass, "
            "and afterwards EXACTLY TWO keys are in the device (PTK and GTK)")
     else:
@@ -110,10 +110,10 @@ def main():
     print("== and now it lies (T4) ==")
 
     bo = build_beacon(ssid, rsn=False)
-    a = felder(orakel("weg %s %s %s %s %s %s %s"
+    a = felder(orakel("path %s %s %s %s %s %s %s"
                       % (h(bo), h(pmk), h(spa), h(aa), h(m1),
                          h(snonce), h(m3))))
-    if a.get('netze') == '1' and a.get('wahl') == '0' \
+    if a.get('netze') == '1' and a.get('chosen') == '0' \
             and a.get('skeys') == '0':
         ok("an OPEN network is found and NAMED, but not "
            "chosen -- and no key goes into the device")
@@ -121,21 +121,21 @@ def main():
         bad("an open network gets too far: %s" % a)
 
     m1b, m3b, _, _ = build_handshake(pmk, aa, spa, snonce, broken='mic')
-    a = felder(orakel("weg %s %s %s %s %s %s %s"
+    a = felder(orakel("path %s %s %s %s %s %s %s"
                       % (h(bk), h(pmk), h(spa), h(aa), h(m1b),
                          h(snonce), h(m3b))))
     if a.get('m1') == '1' and a.get('m3') == '0' \
-            and a.get('daten') == '0' and a.get('skeys') == '0':
+            and a.get('data') == '0' and a.get('skeys') == '0':
         ok("message 3 with wrong check value: no key in the device, "
            "no data allowed")
     else:
         bad("a message 3 with wrong MIC gets too far: %s" % a)
 
     incorrect = pmk_aus_psk(b'daspasswortistfalsch', ssid)
-    a = felder(orakel("weg %s %s %s %s %s %s %s"
+    a = felder(orakel("path %s %s %s %s %s %s %s"
                       % (h(bk), h(incorrect), h(spa), h(aa), h(m1),
                          h(snonce), h(m3))))
-    if a.get('m3') == '0' and a.get('daten') == '0' \
+    if a.get('m3') == '0' and a.get('data') == '0' \
             and a.get('skeys') == '0':
         ok("the wrong password: the handshake fails at message 3, "
            "no key in the device")
@@ -143,20 +143,20 @@ def main():
         bad("a wrong password still leads to a key: %s" % a)
 
     # --- 4. Gar keine Nachricht 3.
-    a = felder(orakel("weg %s %s %s %s %s %s -"
+    a = felder(orakel("path %s %s %s %s %s %s -"
                       % (h(bk), h(pmk), h(spa), h(aa), h(m1), h(snonce))))
     if a.get('m1') == '1' and a.get('m3') == '0' \
-            and a.get('daten') == '0' and a.get('skeys') == '0':
+            and a.get('data') == '0' and a.get('skeys') == '0':
         ok("handshake aborts after message 1: no key, "
            "no data -- there is no half connection")
     else:
         bad("an aborted handshake leaves something behind: %s" % a)
 
     kein = u('08413a01') + aa + spa + aa + u('0000') + b'\xaa' * 20
-    a = felder(orakel("weg %s %s %s %s %s %s %s"
+    a = felder(orakel("path %s %s %s %s %s %s %s"
                       % (h(kein), h(pmk), h(spa), h(aa), h(m1),
                          h(snonce), h(m3))))
-    if a.get('netze') == '0' and a.get('wahl') == '0' \
+    if a.get('netze') == '0' and a.get('chosen') == '0' \
             and a.get('skeys') == '0':
         ok("a data frame as beacon: no network in the list, no choice")
     else:
@@ -164,7 +164,7 @@ def main():
 
     # --- 6. Ein abgeschnittenes Beacon.
     for schnitt in (10, 20, 30, 40):
-        a = felder(orakel("weg %s %s %s %s %s %s %s"
+        a = felder(orakel("path %s %s %s %s %s %s %s"
                           % (h(bk[:schnitt]), h(pmk), h(spa), h(aa),
                              h(m1), h(snonce), h(m3))))
         if a.get('skeys', 'x') != '0':
