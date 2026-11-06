@@ -8,8 +8,8 @@ import re
 import sys
 
 TILE = re.compile(
-    r"speicher: kachel i=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) "
-    r"farbe=(\d+) name=(\S+)")
+    r"storage: tile i=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) "
+    r"color=(\d+) name=(\S+)")
 
 VERSAETZE = [(x, y) for x in (40, 41, 42, 43) for y in
              (40, 42, 60, 61, 62, 63, 64, 65, 66)]
@@ -19,7 +19,7 @@ def ppm(path_2):
     with open(path_2, "rb") as f:
         roh = f.read()
     if not roh.startswith(b"P6"):
-        raise SystemExit("kachelprobe: kein P6-PPM")
+        raise SystemExit("tile probe: not a P6 PPM")
     at, felder = 2, []
     while len(felder) < 3:
         while roh[at:at + 1].isspace():
@@ -53,7 +53,7 @@ def main(argv):
                 int(m.group(4)), int(m.group(5)), int(m.group(6)),
                 m.group(7)) for m in TILE.finditer(txt)]
     if not kacheln:
-        print("kachelprobe: keine einzige Kachel gemeldet")
+        print("tile probe: not a single tile reported")
         return 1
 
     treffer = None
@@ -64,7 +64,7 @@ def main(argv):
             break
     if treffer is None:
         print("tile probe: NO offset at which all %d tiles have their "
-              "Farbe haben" % len(kacheln))
+              "colour" % len(kacheln))
         for _i, x, y, w, h, f, n in kacheln:
             print("  %-10s reported %06X, in image %06X"
                   % (n, f, color(x + w // 2 + 42, y + h // 2 + 62)))
@@ -94,17 +94,17 @@ def main(argv):
         if not gut:
             bad_2 += 1
         print("  %-10s reported w=%-5d in image %-5d %s"
-              % (n, w, gemessen, "" if gut else "<-- ABWEICHUNG"))
+              % (n, w, gemessen, "" if gut else "<-- MISMATCH"))
 
     fallend = all(breiten[k][2] >= breiten[k + 1][2] - 4
                   for k in range(len(breiten) - 1))
     print("tile probe: the widths fall with the share: %s"
-          % ("ja" if fallend else "NEIN"))
+          % ("yes" if fallend else "NO"))
     if bad_2 or not fallend:
-        print("kachelprobe: %d Kacheln stimmen nicht" % bad_2)
+        print("tile probe: %d tiles do not match" % bad_2)
         return 1
     print("tile probe: all tiles have in the image the width that the "
-          "Programm gemeldet hat")
+          "program reported")
     return 0
 
 

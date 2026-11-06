@@ -12,13 +12,13 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
-from klick import Maschine
+from click_driver import Maschine
 
 BUILD = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "/root/lg-img"
 OUT = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 \
     else os.path.join(ROOT, "belege", "logind")
 os.makedirs(OUT, exist_ok=True)
-SERIAL = os.path.join(OUT, "abmelden-klick.txt")
+SERIAL = os.path.join(OUT, "logout-click.txt")
 SOCK = "/tmp/logind-abmelden.sock"
 for path in (SERIAL, SOCK):
     if os.path.exists(path):
@@ -181,7 +181,7 @@ try:
         raise SystemExit(1)
     time.sleep(3)
     machine = Maschine(SOCK, 1280, 800)
-    machine.photo(os.path.join(OUT, "k-10-anmeldeschirm.png"))
+    machine.photo(os.path.join(OUT, "k-10-login-screen.png"))
 
     attempt = sign_in(machine)
     if attempt:
@@ -194,20 +194,20 @@ try:
             re.findall(r"glogin: [^\n]{0,60}", read_text())[-4:]))
         raise SystemExit(1)
     time.sleep(12)
-    machine.photo(os.path.join(OUT, "k-20-schreibtisch.png"))
+    machine.photo(os.path.join(OUT, "k-20-desktop.png"))
 
     pos = len(read_text())
     machine.key_press("meta_l")
     opened = menu_toggled_open(pos, MENU_WINDOW_SECONDS)
     time.sleep(3)
-    menu_photo = os.path.join(OUT, "k-30-startmenue.png")
+    menu_photo = os.path.join(OUT, "k-30-start-menu.png")
     machine.photo(menu_photo)
     geom = menu_geometry()
     if geom is None:
         bad("the start menu window is not in the report")
         raise SystemExit(1)
     gx, gy, gw, gh = geom
-    shown = sample_diff(os.path.join(OUT, "k-20-schreibtisch.png"), menu_photo,
+    shown = sample_diff(os.path.join(OUT, "k-20-desktop.png"), menu_photo,
                         (gx, gy, gx + gw, gy + gh))
     if opened and shown is not None and shown[0] >= MENU_PIXELS_MIN:
         ok("the start menu is open ('taskbar: startmenue auf', %d of %d "
@@ -231,7 +231,7 @@ try:
     say("== power button at %d,%d (window %d,%d)" % (button_x, button_y, gx, gy))
     machine.klick_auf(button_x, button_y)
     time.sleep(4)
-    machine.photo(os.path.join(OUT, "k-40-energiemenue.png"))
+    machine.photo(os.path.join(OUT, "k-40-power-menu.png"))
     if re.search(r"launcher: energie auf", read_text()):
         ok("the power menu opened ('launcher: energie auf')")
     else:
@@ -310,12 +310,12 @@ try:
     else:
         bad("somebody was signed in again after the sign-out (%dx)" % signed_in)
     time.sleep(3)
-    machine.photo(os.path.join(OUT, "k-50-wieder-anmeldung.png"))
+    machine.photo(os.path.join(OUT, "k-50-relogin.png"))
 
     try:
-        desk = os.path.join(OUT, "k-20-schreibtisch.png")
-        after = os.path.join(OUT, "k-50-wieder-anmeldung.png")
-        first = os.path.join(OUT, "k-10-anmeldeschirm.png")
+        desk = os.path.join(OUT, "k-20-desktop.png")
+        after = os.path.join(OUT, "k-50-relogin.png")
+        first = os.path.join(OUT, "k-10-login-screen.png")
         if os.path.exists(desk) and os.path.exists(after):
             result = sample_diff(desk, after)
             if result is None:
@@ -357,7 +357,7 @@ finally:
                 os.unlink(os.path.join(OUT, name))
             except OSError:
                 pass
-    open(os.path.join(OUT, "abmelden-klick-befund.txt"), "w").write(
+    open(os.path.join(OUT, "logout-click-findings.txt"), "w").write(
         "\n".join(ROWS) + "\n")
 
 say("")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 """Usage:
-    klick.py -- das System wie ein Mensch bedienen (Runde DURCHKLICK).
+    click_driver.py -- das System wie ein Mensch bedienen (Runde DURCHKLICK).
 """
 import os
 import socket

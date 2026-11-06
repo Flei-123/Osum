@@ -196,13 +196,13 @@ kopf "5. ABMELDEN beendet die Sitzung und holt den Anmeldeschirm"
 #
 if grep -qE "(^|[[:space:]])/etc/uitrace([[:space:]]|\$)" "$LISTE"; then
     AB="$WURZEL/.logind-mess/abmelden.log"
-    if python3 pruef/abmelden.py "$BUILD" "$WURZEL/belege/logind" > "$AB" 2>&1; then
+    if python3 pruef/logout_check.py "$BUILD" "$WURZEL/belege/logind" > "$AB" 2>&1; then
         while IFS= read -r z; do
             ok "${z#  OK    }"
         done < <(grep '^  OK    ' "$AB")
         grep -E '^LOGOUT:' "$AB" | sed 's/^/        /'
     else
-        bad "pruef/abmelden.py failed"
+        bad "pruef/logout_check.py failed"
         grep -E '^  (OK|FAIL)|^ABMELDEN:' "$AB" | tail -16 | sed 's/^/        /'
     fi
 else

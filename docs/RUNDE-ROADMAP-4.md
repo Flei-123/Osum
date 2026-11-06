@@ -79,7 +79,7 @@ Die zehn roten Zusagen hatten vier Ursachen:
 - `wighalt=240` fuer das Foto: die Gegenprobe des Programms ist ein
   echter Durchlauf ueber 4000 Dateien (Abschnitt 1 misst ~60 s) und
   dauerte laenger als `wiglong` (20 s) -- danach war QEMU schon weg.
-- `kachelprobe.py` misst auf vier Bildzeilen und nimmt die breiteste:
+- `tileprobe.py` misst auf vier Bildzeilen und nimmt die breiteste:
   der Mauszeiger steht in der Bildmitte und kuerzte die Kachel "chrom"
   auf 54 statt 62. Gegenprobe: eine gemeldete Breite von 80 wird rot.
 

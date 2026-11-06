@@ -9,7 +9,7 @@ import time
 HIER = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HIER))
 sys.path.insert(0, os.path.join(ROOT, "pruef"))
-from klick import Maschine  # noqa: E402
+from click_driver import Maschine  # noqa: E402
 
 ARB = sys.argv[1]
 AUS = sys.argv[2]

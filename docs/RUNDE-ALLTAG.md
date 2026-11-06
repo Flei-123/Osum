@@ -315,7 +315,7 @@ sendkey minus  ->  ß            und das listete die Wurzel
 shift-dot      ->  :            shift-comma -> ;     backslash -> #
 ```
 
-In `pruef/klick.py` steht jetzt die deutsche Belegung (`/` = `shift-7`).
+In `pruef/click_driver.py` steht jetzt die deutsche Belegung (`/` = `shift-7`).
 
 **Das Zeichen `>` ist über den Monitor gar nicht erreichbar.** Gemessen
 mit `pruef/db-taste.py`, das jeden Kandidaten einzeln schickt und auf der

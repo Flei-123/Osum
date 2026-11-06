@@ -192,7 +192,7 @@ der Bau, wenn sie einmal nicht mehr ankommen.
 Der Volllauf der Runde, `RC=0`, alle sieben Abschnitte grün (die
 Abschnitte 1/2/3/4/6/7 unten in 3.3, Abschnitt 5 in 3.1).
 
-### 3.1 `pruef/abmelden.py` — **13 bestanden, 0 gescheitert**
+### 3.1 `pruef/logout_check.py` — **13 bestanden, 0 gescheitert**
 
 Echte Mausklicks, `usb-mouse` + `usb-kbd`, Lage der Bedienelemente aus
 dem Bericht der Programme selbst.
@@ -293,9 +293,9 @@ den Schreibtisch neu malt, käme auf 98 % Unterschied zum Anmeldeschirm.
 
 Farben: Anmeldeschirm 53, Schreibtisch 71 (der malt einen Verlauf).
 
-Belege: `belege/logind/k-10-anmeldeschirm.png`,
-`k-20-schreibtisch.png`, `k-30-startmenue.png`,
-`k-40-energiemenue.png`, `k-50-wieder-anmeldung.png` — alle fünf mit
+Belege: `belege/logind/k-10-login-screen.png`,
+`k-20-desktop.png`, `k-30-start-menu.png`,
+`k-40-power-menu.png`, `k-50-relogin.png` — alle fünf mit
 0 % schwarzer Fläche, also wirklich gemalt.
 
 ### 3.3 Die übrigen Abschnitte des Volllaufs
@@ -443,7 +443,7 @@ Eingabetaste startet den ersten Treffer der Liste.
 
 Eine Abnahme, die diese Reihenfolge mitzählt, misst die nächste
 Umstellung des Startmenüs und nicht das Abmelden. Deshalb klickt
-`pruef/abmelden.py` auf die **gemeldeten Koordinaten** — derselbe Weg
+`pruef/logout_check.py` auf die **gemeldeten Koordinaten** — derselbe Weg
 wie `pruef/oneshot.py` in der Runde ENERGIE.
 
 ### 4.5 Zwei Prozesse auf einer seriellen Leitung, zeichenweise verschränkt
@@ -604,7 +604,7 @@ die Kernel-Kommandozeile gebraucht, sie benutzt das vorhandene
 | `kernel/user/launcher.fi` | `pw_abmelden` geht über den Kern |
 | `tools/usbimg/build.sh` | `/users/justin/` + `config/` mit 0700:1000:1000, 2 neue Pflichtpfade |
 | `tools/logind/run.sh` | die Abnahme der Runde (neu) |
-| `pruef/abmelden.py` | Abmelden mit echten Mausklicks (neu) |
+| `pruef/logout_check.py` | Abmelden mit echten Mausklicks (neu) |
 | `belege/logind/` | Bilder, Mitschnitte, Befunde |
 
 ---

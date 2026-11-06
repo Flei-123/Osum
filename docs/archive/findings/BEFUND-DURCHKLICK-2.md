@@ -53,7 +53,7 @@ Alt+Tab, Tippen, AltGr — hat den Schalter gemessen und nicht das System.
 | Maschine | `qemu-system-x86_64 -accel kvm -cpu host -m 2048 -smp 4 -vga std`, **`-device qemu-xhci`** + `usb-tablet` + `usb-kbd`, virtio-net, Monitor auf Unix-Socket |
 | Kommandozeile | `pruef/start.sh` — wörtlich der Schreibtisch-Eintrag aus `limine.conf`, ohne `tafel` und ohne `dhcp` (Begründung dort im Kopf) |
 | Auflösungen | **1280x800 und 1920x1080**, beide vollständig |
-| Werkzeuge | `pruef/durchklick3.py` (41 Punkte), `pruef/klick.py`, `pruef/sicht.py`, `pruef/start.sh`, `pruef/montage2.py` — die Vorbilder aus `/root/osum-durchklick/` sind übernommen und im Kopf jeder Datei begründet, wo sie abweichen |
+| Werkzeuge | `pruef/durchklick3.py` (41 Punkte), `pruef/click_driver.py`, `pruef/sicht.py`, `pruef/start.sh`, `pruef/montage2.py` — die Vorbilder aus `/root/osum-durchklick/` sind übernommen und im Kopf jeder Datei begründet, wo sie abweichen |
 | Fotos | `pruef/shots/dk1280/`, `pruef/shots/dk1920/`, Übersicht `pruef/uebersicht-2.png` |
 | Rohdaten | `pruef/laeufe/dk1280/befund.json`, `pruef/laeufe/dk1920/befund.json`, serielle Mitschnitte daneben |
 
@@ -264,7 +264,7 @@ bedient von sich aus das Tablet:
 * Mouse #3: QEMU HID Tablet (absolute)
 ```
 
-Ein Tablet ist **absolut**; `klick.py` rechnet **relativ** (in die Ecke fahren,
+Ein Tablet ist **absolut**; `click_driver.py` rechnet **relativ** (in die Ecke fahren,
 Anschlag, von dort zählen). Für ein absolutes Gerät ist `mouse_move dx dy` kein
 Schritt, sondern ein Ort. Gemessen mit `pruef/ziehprobe.py`, vier Fassungen
 desselben Zuges auf der Titelleiste:
@@ -292,7 +292,7 @@ behoben:
 * Der Griff wurde aus der **alten** Lage gerechnet. Nach dem Verschieben liegt
   die Ecke woanders; der Klick landete mitten in der Fensterfläche.
 
-`klick.py` schaltet jetzt **nur für die Dauer eines Zuges** auf die PS/2-Maus
+`click_driver.py` schaltet jetzt **nur für die Dauer eines Zuges** auf die PS/2-Maus
 und danach zurück aufs Tablet — beides ist nötig: mit dauerhaft `mouse_set 2`
 blieb der Zeiger über den ganzen Lauf auf `xy=639,399` stehen und **kein
 einziger** `taskbar: click` kam an, weil der Kern in diesem Aufbau nur die

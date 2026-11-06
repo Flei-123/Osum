@@ -305,7 +305,7 @@ fi
 echo
 echo "-- 10. the storage dialog and its columns"
 if foto speicher "append=gfx wm wig wigspeicher wmhold wiglong nokbd nosched noproc nofs"; then
-    hat "$TMPD/speicher/serial.txt" "speicher: ready" \
+    hat "$TMPD/speicher/serial.txt" "storage: ready" \
         "der Speicher-Dialog ist oben"
     glyphen speicher "Speicher" "Größe" 3
     glyphen speicher "Speicher" "Größte Dateien" 3

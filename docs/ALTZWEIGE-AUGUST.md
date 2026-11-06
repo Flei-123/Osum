@@ -480,7 +480,7 @@ Bedienelemente"*, *"die Installation meldet sich fertig"*, *"der Kern
 findet seine Wurzel auf der Platte"* und beiden Gegenproben.
 
 **`logind` 37/0 statt 49/0.** Hier ist die Rechnung sauber aufgegangen:
-Abschnitt 5 zählt die Zusagen von `pruef/abmelden.py` **einzeln** mit
+Abschnitt 5 zählt die Zusagen von `pruef/logout_check.py` **einzeln** mit
 (so steht es im Läufer, damit keine Sammelzeile entsteht). Dieses
 Skript liefert 13 Zusagen; fällt es aus, fehlen zwölf:
 

@@ -13,7 +13,7 @@ import time
 HIER = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HIER)
 os.chdir(HIER)
-from klick import Maschine
+from click_driver import Maschine
 
 # Die Kommandozeile des Kerns. WORTGLEICH aus pruef/oneshot.py, damit
 # beide Laeufe denselben Rechner meinen. `fbres` setzt die Aufloesung;
@@ -72,7 +72,7 @@ class Lauf:
               "-initrd", os.path.join(HIER, "root.img"),
               "-append", CL, "-vga", "std",
               "-device", "qemu-xhci,id=xhci",
-              # RELATIVE Maus: klick.py rechnet relativ (siehe dort).
+              # RELATIVE Maus: click_driver.py rechnet relativ (siehe dort).
               # Ein Tablet waere absolut und die Rechnung ginge schief.
               "-device", "usb-mouse", "-device", "usb-kbd",
               "-serial", "file:" + self.ser,

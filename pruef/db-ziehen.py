@@ -77,7 +77,7 @@ else:
         rel = lambda dx, dy: (wx + dx, wy + dy)
 
         def zug(von, nach, was):
-            """Druecken, fahren, loslassen -- mit klick.py's `ziehe`.
+            """Druecken, fahren, loslassen -- mit click_driver.py's `ziehe`.
 
             NICHT selbst gebaut: `Maschine.ziehe` schaltet auf die
             RELATIVE Maus um, teilt die Strecke ohne Rest auf und

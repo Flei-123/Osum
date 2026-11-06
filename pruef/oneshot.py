@@ -5,7 +5,7 @@
 import os, re, subprocess, sys, time
 HIER = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HIER)
 os.chdir(HIER)
-from klick import Maschine
+from click_driver import Maschine
 MODE = sys.argv[1] if len(sys.argv) > 1 else "aus"
 NAME = "one-" + MODE
 D = os.path.join(HIER, "laeufe", NAME); S = os.path.join(HIER, "shots", NAME)

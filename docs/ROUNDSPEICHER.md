@@ -193,17 +193,17 @@ und wie der Wirt. Die Promilleangaben ergeben zusammen 994 ‰ (der Rest
 sind die Rundungen nach unten).
 
 **Die Kacheln werden im Bild nachgemessen**, nicht im Quelltext geglaubt
-(`tools/storage/kachelprobe.py`). Das ist die Lehre aus Runde K7B: ein
+(`tools/storage/tileprobe.py`). Das ist die Lehre aus Runde K7B: ein
 Programm, das die Flaechen falsch aufteilt, meldet die falschen Flaechen
 genauso zuversichtlich.
 
 ```
-kachelprobe: 8 Kacheln, Versatz des Fensterinhalts 40,60
+tileprobe: 8 Kacheln, Versatz des Fensterinhalts 40,60
   messing    gemeldet w=130   im Bild 128
   nickel     gemeldet w=115   im Bild 113
   ...
   blei       gemeldet w=56    im Bild 54
-kachelprobe: die Breiten fallen mit dem Anteil: ja
+tileprobe: die Breiten fallen mit dem Anteil: ja
 ```
 
 Jede Kachel ist im Bild genau zwei Bildpunkte schmaler als gemeldet —
@@ -373,5 +373,5 @@ Das ist der wichtigste Abschnitt, und er ist absichtlich lang.
 | `tools/storage/run.sh` | der Laeufer mit den Messungen |
 | `tools/storage/tree.py` | das Abbild mit Inhalt **und** die Wahrheit dazu |
 | `tools/storage/check.py` | die drei Zahlen nebeneinander |
-| `tools/storage/kachelprobe.py` | die Treemap im Bild nachgemessen |
+| `tools/storage/tileprobe.py` | die Treemap im Bild nachgemessen |
 | `tools/gfx/ppm2png.py` | PPM → PNG, nur mit `zlib` |
