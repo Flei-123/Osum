@@ -206,9 +206,9 @@ pruefe_abweisung() { # name grund
     has "$TMPD/l-$n.txt" "module: after init=0 present=0" "$n: kein Geraet danach"
     hasnot "$TMPD/l-$n.txt" "ps2maus: eingetragen" "$n: module_init ist NICHT gelaufen"
 }
-pruefe_abweisung abi   fassung
-pruefe_abweisung sig   signatur
-pruefe_abweisung nutz  signatur
+pruefe_abweisung abi   version
+pruefe_abweisung sig   signature
+pruefe_abweisung nutz  signature
 pruefe_abweisung kenn  magic
 pruefe_abweisung fremd symbol
 num "fremd: die Signatur war gueltig" "$(zwert "$TMPD/l-fremd.txt" 'sigok=[0-9]+')" eq 1
@@ -327,7 +327,7 @@ num "fremd: der Lauf endet sauber" "$RC" eq 21
 has "$TMPD/l-sp-fremd.txt" "module: load=ok" "die Sperrliste sperrt nur, was draufsteht: das gute Modul laedt"
 num "fremd: Eintraege in der gueltigen Liste" "$(zwert "$TMPD/l-sp-fremd.txt" 'ban=[0-9]+')" eq 1
 has "$TMPD/l-sp-fremd.txt" "module: after init=1 present=1" "fremd: das Geraet ist da"
-for f in drin:gesperrt dreh:sperrliste zahl:sperrliste; do
+for f in drin:revoked dreh:banlist zahl:banlist; do
     n=${f%%:*}; g=${f#*:}
     lauf "$TMPD/k-modul" "$TMPD/d-sp-$n.img" "modul $QUIET" "$TMPD/l-sp-$n.txt"
     if [ "$RC" != 21 ]; then bad "sp-$n: rc=$RC statt 21"; continue; fi

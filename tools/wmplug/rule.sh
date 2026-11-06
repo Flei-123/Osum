@@ -120,7 +120,7 @@ has "$TMPD/mit.klar" "x=212 y=70 w=376 h=430 flaeche=2 sichtbar=1" \
     "nachgemessen: zentriert (212,70) auf Flaeche 2 und sichtbar"
 hasnot "$TMPD/mit.klar" "plugregel: rejected" "keine Handlung wurde abgewiesen"
 hasnot "$TMPD/mit.klar" "wmplug: unreg regel" "das Plugin wurde nicht hinausgeworfen"
-has "$TMPD/mit.klar" "plugregel: puls" "und es lebte nach der Regel weiter"
+has "$TMPD/mit.klar" "plugregel: pulse" "und es lebte nach der Regel weiter"
 if grep -a 'wm: win ' "$TMPD/mit.klar" | grep -qE 'x=212 y=70 .*t=\[(Rechner|calc.title)\]'; then
     ok "the window table of the server shows the calculator at (212,70)"
 else
@@ -137,7 +137,7 @@ has "$TMPD/ohne.klar" "plugregel: WITHOUT R_ACT_WIN -- watching only" \
 has "$TMPD/ohne.klar" "app=rechner" "dieselbe Regel trifft dasselbe Fenster"
 has "$TMPD/ohne.klar" "rejected action=6 id=" "PA_DESK wird abgewiesen"
 has "$TMPD/ohne.klar" "errors=2" "mit -E_RIGHTS (cap.E_RIGHTS = 2)"
-has "$TMPD/ohne.klar" "plugregel: puls" "das Plugin lebt weiter, statt zu sterben"
+has "$TMPD/ohne.klar" "plugregel: pulse" "das Plugin lebt weiter, statt zu sterben"
 hasnot "$TMPD/ohne.klar" "wmplug: unreg regel" "und bleibt angemeldet"
 if grep -a 'wm: win ' "$TMPD/ohne.klar" | grep -qE 'x=80 y=60 .*t=\[(Rechner|calc.title)\]'; then
     ok "THE WINDOW STAYS UNCHANGED at (80,60) -- measured by state"

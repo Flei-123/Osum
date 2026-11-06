@@ -123,7 +123,7 @@ hasnot "$D/foreign.klar" "auxdemo: ready" "counter-proof unknown module name: ne
 has "$D/busy.klar" "drvstore: bind auxpkg -> " "slot busy: package bound first"
 has "$D/busy.klar" "drvstore: loose auxdemo slot busy app=lo.osp" "slot busy: loose module refused, slot already owned"
 has "$D/busy.klar" "slots mouse=none aux=auxpkg" "slot busy: package keeps the slot"
-has "$D/floor.klar" "drvstore: loose auxdemo fail: gesperrt app=lo.osp" "floor kernel: revoked loose module refused without any list file"
+has "$D/floor.klar" "drvstore: loose auxdemo fail: revoked app=lo.osp" "floor kernel: revoked loose module refused without any list file"
 hasnot "$D/floor.klar" "auxdemo: ready" "counter-proof floor kernel: module never ran"
 has "$D/mouse.klar" "drvstore: loose mousedemo ok app=lo.osp" "mouse: loose module loaded into the mouse slot"
 has "$D/mouse.klar" "slots mouse=mousedemo aux=none" "mouse: slot owner is the loose module"

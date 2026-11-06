@@ -105,7 +105,7 @@ lang=$(grep -aoE 'wmplug: abi=[0-9]+  Plugins [0-9]+ von [0-9]+' "$P" | tail -1)
 [ -n "$lang" ] && [ "${#lang}" -le 40 ] \
     && ok "erste Statuszeile '$lang' ist ${#lang} Zeichen lang (<= 40)" \
     || bad "first status line does not fit in 40 characters ('$lang')"
-zwei=$(grep -aoE '  Frist [0-9]+ Ticks  Area [0-9]+' "$P" | tail -1)
+zwei=$(grep -aoE '  Timeout [0-9]+ Ticks  Area [0-9]+' "$P" | tail -1)
 [ -n "$zwei" ] && [ "${#zwei}" -le 40 ] \
     && ok "zweite Statuszeile '$zwei' ist ${#zwei} Zeichen lang (<= 40)" \
     || bad "the status line is not wrapped ('$zwei')"
@@ -114,7 +114,7 @@ echo "== 3. the labels of 'info' =="
 grep -qaE '  Leistentext +[0-9]+' "$P" \
     && ok "bei 'info' there is a separator between bar text and number" \
     || bad "'Leistentext' und die Zahl kleben wieder zusammen"
-spalten=$(grep -aoE '^  (Name|Platz|Rechte|Maske|liegt|verloren|eingelegt|abgeholt|Grund|Leistentext) +[^ ]' "$P" \
+spalten=$(grep -aoE '^  (Name|Slot|Rechte|Maske|liegt|rejected|eingelegt|abgeholt|Reason|Leistentext) +[^ ]' "$P" \
     | sed 's/.$//' | awk '{ print length($0) }' | sort -u | tr '\n' ' ')
 if [ "$(echo $spalten | wc -w)" = 1 ]; then
     ok "all labels of 'info' are ${spalten% } characters wide -- one column"
@@ -186,7 +186,7 @@ if [ -n "$kopf" ]; then
         paar_probe "$kopf" "$d1" 20 "Maske" 20 "$m0" "Maske"
         paar_probe "$kopf" "$d1" 5 "Name" 5 "$n0" "Name"
         paar_probe "$kopf" "$d1" 26 "liegt" 30 "0" "liegt"
-        paar_probe "$kopf" "$d1" 32 "verloren" 39 "0" "verloren"
+        paar_probe "$kopf" "$d1" 32 "rejected" 39 "0" "rejected"
         zeile1=$(grep -aoE '^ +1 [a-z]+ +0x[0-9A-F]+ 0x[0-9A-F]+' "$P" | tail -1)
         n1=$(echo "$zeile1" | awk '{print $2}')
         r1=$(echo "$zeile1" | awk '{print $3}')

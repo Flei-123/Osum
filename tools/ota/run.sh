@@ -415,9 +415,9 @@ delta_test
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf ein1 "ota settings;ota set abstand 900;ota set auto ja;ota settings;exit")
 hat "$OUT/ein1.txt" "ota: settings (/etc/ota.conf)" "die Einstellungsseite zeigt, wie das Geraet eingestellt ist"
-hat "$OUT/ein1.txt" "quelle   https://10.0.2.2:$PORT" "mit der Quelle"
+hat "$OUT/ein1.txt" "source   https://10.0.2.2:$PORT" "mit der Quelle"
 hat "$OUT/ein1.txt" "ota: set abstand is now 900" "und sie laesst sich umstellen"
-hat "$OUT/ein1.txt" "abstand  900" "die neue Zahl steht danach wirklich da"
+hat "$OUT/ein1.txt" "interval 900" "die neue Zahl steht danach wirklich da"
 hat "$OUT/ein1.txt" "auto     ja" "und der Schalter fuer die automatische Suche auch"
 # ota service never returns (rounds == 0), the VM is killed by the limit; boot under load needs headroom
 rc=$(lauf ein2 "ota set unsinn 5;ota service;exit" 420)
@@ -647,7 +647,7 @@ cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf kan5 "ota set kanal stable;ota set kanal beta;ota set kanal ../x;ota settings;exit")
 n=$(grep -ca "channel must be stable or test" "$OUT/kan5.txt")
 zahl "(d) ungueltige Kanalnamen abgelehnt (beta, ../x)" "$n" ge 2
-hat "$OUT/kan5.txt" "kanal    stable" "(d) die Einstellung blieb auf stable"
+hat "$OUT/kan5.txt" "channel  stable" "(d) die Einstellung blieb auf stable"
 
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf kan6 "ota set kanal test;ota apply;exit")

@@ -117,7 +117,7 @@ hasnot "$D/test-dev.klar" "edudemo: ven" "counter-proof: development-signed modu
 has "$D/both-dev.klar" "drv=edudemo src=store bind=bound" "two-key kernel: first key works"
 has "$D/both-tst.klar" "drv=edudemo src=store bind=bound" "two-key kernel: second key works"
 has "$D/floor-dev.klar" "drvstore: pkg edudemo ok" "floor kernel: package itself is valid"
-has "$D/floor-dev.klar" "fail: gesperrt" "floor kernel: revoked module refused without any list file on disk"
+has "$D/floor-dev.klar" "fail: revoked" "floor kernel: revoked module refused without any list file on disk"
 hasnot "$D/floor-dev.klar" "edudemo: ven" "floor kernel: revoked module never ran"
 has "$D/floor-dev.klar" "bound=0 failed=1" "floor kernel: bind counted as failed"
 has "$D/floor-tst.klar" "drv=edudemo src=store bind=bound" "floor kernel: a different signed file is not affected"
