@@ -64,15 +64,6 @@ def fc(*args):
     except Exception as e:
         return 1, str(e)
 
-def poll_seen(port, t, ready, tries=25, delay=1.0):
-    p = justin_seen_by_anna(port, t)
-    for _ in range(tries):
-        if ready(p):
-            break
-        time.sleep(delay)
-        p = justin_seen_by_anna(port, t)
-    return p
-
 def watch(port, secret, serial, out):
     t = people(secret)
     done = set()
@@ -88,7 +79,7 @@ def watch(port, secret, serial, out):
             s = ""
         if "==CHECK1==" in s and "c1" not in done:
             done.add("c1")
-            p = poll_seen(port, t, lambda q: (q.get("aktivitaet") or {}).get("name") == "Counter-Strike 2" and q.get("praesenz") == "dnd")
+            p = justin_seen_by_anna(port, t)
             say(p.get("praesenz") == "dnd" and p.get("status_text") == "Im Spiel",
                 f"anna sees justin 'do not disturb' with 'Im Spiel' (set on {brand.PRODUKT}): {p.get('praesenz')!r} {p.get('status_text')!r}")
             say((p.get("aktivitaet") or {}).get("name") == "Counter-Strike 2",
