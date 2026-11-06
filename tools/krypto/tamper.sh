@@ -62,7 +62,7 @@ else
     bad "mkfs fails"
 fi
 timeout 300 $QEMU_X86 -kernel "$TMPD/kt.mb" -m 512 \
-    -append "osum nopwr kryptoneu kryptotest kryptobaum kryptopw=secret kryptot=1 kryptom=64 kryptop=1" \
+    -append "osum nopwr kryptonew kryptotest kryptotree kryptopw=secret kryptot=1 kryptom=64 kryptop=1" \
     -serial "file:$TMPD/t1.txt" -display none -no-reboot \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -drive "file=$TMPD/root.img,format=raw,if=ide,index=0" > /dev/null 2>&1

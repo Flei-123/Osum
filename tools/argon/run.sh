@@ -230,12 +230,12 @@ run_vm() { # name image cmdline [smp] [time limit]
 
 cp --sparse=always "$TMPD/root.img" "$TMPD/alt.img"
 KP="kryptot=1 kryptom=64 kryptop=4"
-run_vm alt1 "$TMPD/alt.img" "osum nopwr kryptoneu noargonpar kryptopw=secret $KP" 1
+run_vm alt1 "$TMPD/alt.img" "osum nopwr kryptonew noargonpar kryptopw=secret $KP" 1
 grep -q 'krypto: new=1' "$TMPD/alt1.txt" \
     && ok "the disk is created with the SERIAL path (noargonpar, one core)" \
     || bad "creating with the serial path fails"
 
-run_vm alt2 "$TMPD/alt.img" "osum nopwr kryptoauf kryptopw=secret" 4
+run_vm alt2 "$TMPD/alt.img" "osum nopwr kryptoopen kryptopw=secret" 4
 grep -q 'krypto: open=1' "$TMPD/alt2.txt" \
     && ok "and the PARALLEL path opens it again -- the promise of this round" \
     || bad "the existing disk does NOT open with the parallel path"
@@ -244,13 +244,13 @@ grep -q 'osum: mount=1' "$TMPD/alt2.txt" \
     || bad "mount fails"
 
 cp --sparse=always "$TMPD/root.img" "$TMPD/par.img"
-run_vm par1 "$TMPD/par.img" "osum nopwr kryptoneu kryptopw=secret $KP" 4
-run_vm par2 "$TMPD/par.img" "osum nopwr kryptoauf noargonpar kryptopw=secret" 1
+run_vm par1 "$TMPD/par.img" "osum nopwr kryptonew kryptopw=secret $KP" 4
+run_vm par2 "$TMPD/par.img" "osum nopwr kryptoopen noargonpar kryptopw=secret" 1
 grep -q 'krypto: open=1' "$TMPD/par2.txt" \
     && ok "and the other way round: created in parallel, opened serially" \
     || bad "the reverse direction fails"
 
-run_vm fal "$TMPD/alt.img" "osum nopwr kryptoauf kryptofalsch kryptopw=secret" 4
+run_vm fal "$TMPD/alt.img" "osum nopwr kryptoopen kryptowrong kryptopw=secret" 4
 grep -q 'krypto: open=0' "$TMPD/fal.txt" \
     && ok "the wrong passphrase is still rejected (open=0)" \
     || bad "a wrong passphrase gets through"
@@ -291,7 +291,7 @@ fi
 
 shani_lauf() { # name cpu extra
     timeout 300 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 512 -smp 4 -cpu "$2" \
-        -append "osum nopwr shatest kryptoauf kryptopw=secret $3" \
+        -append "osum nopwr shatest kryptoopen kryptopw=secret $3" \
         -serial "file:$TMPD/$1.txt" -display none -no-reboot \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive "file=$TMPD/alt.img,format=raw,if=ide,index=0" >/dev/null 2>&1
@@ -338,9 +338,9 @@ echo "== 7. the speed, serial against parallel, on the SAME machine =="
 cycles_of() { grep -oE 'cycles=[0-9]+' "$1" | cut -d= -f2 | tail -1; }
 
 cp --sparse=always "$TMPD/root.img" "$TMPD/t.img"
-run_vm tneu "$TMPD/t.img" "osum nopwr kryptoneu noargonpar kryptopw=secret kryptot=2 kryptom=32768 kryptop=4" 1 600
-run_vm tser "$TMPD/t.img" "osum nopwr kryptoauf noargonpar kryptopw=secret" 4 600
-run_vm tpar "$TMPD/t.img" "osum nopwr kryptoauf kryptopw=secret" 4 600
+run_vm tneu "$TMPD/t.img" "osum nopwr kryptonew noargonpar kryptopw=secret kryptot=2 kryptom=32768 kryptop=4" 1 600
+run_vm tser "$TMPD/t.img" "osum nopwr kryptoopen noargonpar kryptopw=secret" 4 600
+run_vm tpar "$TMPD/t.img" "osum nopwr kryptoopen kryptopw=secret" 4 600
 ts=$(cycles_of "$TMPD/tser.txt")
 tp=$(cycles_of "$TMPD/tpar.txt")
 kp=$(cores_of "$TMPD/tpar.txt")
