@@ -325,7 +325,7 @@ if [ -s "$TMPD/panic.ppm" ]; then
         chain=$(awk '/-- RUECKSPUR/ { an = 1; next } /^-- / { an = 0 } an { print $1 }' \
             "$TMPD/screen.txt" | sed 's/+.*//' | tr '\n' ' ')
         same "(b) the backtrace on the screen is exactly the call chain" \
-            "crash.knall_b crash.knall_a crash.knall KERNEL_MAIN long_mode " "$chain"
+            "crash.knall_b crash.knall_a crash.knall stage_late.crash_knall initstage.run initstage.run_all stages.run KERNEL_MAIN long_mode " "$chain"
         n=$(grep -ac '?' "$TMPD/screen.txt")
         num "(b) lines with unreadable cells (the glyphs must match exactly)" \
             "${n:-0}" le 1
@@ -345,7 +345,7 @@ trace_names() { # file -> the names of the kspur lines, one per line
 has "$TMPD/panic.txt" "kspur: rahmenkette" "(b) the backtrace walks the frame pointers, not the stack"
 chain=$(trace_names "$TMPD/panic.txt" | tr '\n' ' ')
 same "(b) the serial backtrace is exactly the call chain up to the start" \
-    "crash.knall_b crash.knall_a crash.knall KERNEL_MAIN long_mode " "$chain"
+    "crash.knall_b crash.knall_a crash.knall stage_late.crash_knall initstage.run initstage.run_all stages.run KERNEL_MAIN long_mode " "$chain"
 n=$(grep -acE '^ +[a-z_0-9]+\.[a-z_0-9]+\+0x[0-9a-f]+ \([a-z_0-9]+\.fi:[0-9]+\)$' \
     "$TMPD/panic.txt")
 num "(b) resolved symbols with file:line in the serial backtrace" "${n:-0}" ge 3
