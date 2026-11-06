@@ -124,7 +124,7 @@ lauf schreib 'du -w'
 has "$TMPD/schreib.txt" "du: write" "die Schreibprobe ist gelaufen"
 num "kein Satz ist verlorengegangen" "$(feld "$TMPD/schreib.txt" 'du: write synced' lost)" eq 0
 num "die Summe wurde nachgezogen, ohne neu zu bauen" \
-    "$(feld "$TMPD/schreib.txt" 'du: write rebuilds' bauten)" eq 1
+    "$(feld "$TMPD/schreib.txt" 'du: write rebuilds' rebuilds)" eq 1
 num "die nachgezogene Summe stimmt" \
     "$(feld "$TMPD/schreib.txt" 'du: write synced' ok)" eq 1
 num "und nach dem Loeschen steht wieder der alte Stand da" \
