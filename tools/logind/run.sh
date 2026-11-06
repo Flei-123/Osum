@@ -133,9 +133,9 @@ if [ -f "$T3" ]; then
     grep -qaE 'glogin: ready' "$T3" \
         && ok "the login screen is ready" \
         || bad "'glogin: ready' missing"
-    grep -qa 'glogin: anin as justin' "$T3" \
-        && ok "anin as justin" \
-        || bad "'glogin: anin as justin' missing"
+    grep -qa 'glogin: signed in as justin' "$T3" \
+        && ok "signed in as justin" \
+        || bad "'glogin: signed in as justin' missing"
     if grep -qa 'glogin: uid=1000' "$T3"; then
         ok "the desktop runs under uid=1000 and NOT as root"
     else

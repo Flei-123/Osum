@@ -71,7 +71,7 @@ echo "== wrong password, then the right one =="
 run g4 10 x y z ret "warte 4" g e h e i m 1 2 ret
 S=$OUT/g4/serial.txt
 hat "$S" "glogin: rejected, name=justin" "wrong password: refused"
-hat "$S" "glogin: anin as justin" "right password: signed in as justin"
+hat "$S" "glogin: signed in as justin" "right password: signed in as justin"
 hat "$S" "glogin: uid=1000" "and the session runs as uid 1000"
 
 echo "== counter-proof: only wrong passwords =="
@@ -84,7 +84,7 @@ echo "== another user =="
 run g6 10 tab tab tab ret j u s t i n ret g e h e i m 1 2 ret
 S=$OUT/g6/serial.txt
 hat "$S" "glogin: anderer benutzer" "Anderer Benutzer: the name field comes out"
-hat "$S" "glogin: anin as justin" "name typed, password typed: signed in"
+hat "$S" "glogin: signed in as justin" "name typed, password typed: signed in"
 
 echo "== quick access =="
 run g7 10 tab tab tab tab ret ret

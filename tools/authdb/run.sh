@@ -95,7 +95,7 @@ fi
 if only g2; then
 echo "== sign-in: readable shadow still signs in =="
 run g2 glogin ok g e h e i m 1 2 ret
-has "$OUT/g2/serial.txt" "glogin: anin as justin" "right password: signed in"
+has "$OUT/g2/serial.txt" "glogin: signed in as justin" "right password: signed in"
 fi
 
 echo
