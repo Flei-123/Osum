@@ -250,8 +250,8 @@ fsrace() { # name  smp  extra
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
     return 0
 }
-w_fehl() { grep -a '^smp: fsrace kerne=' "$1" | tail -1 \
-    | sed -n 's/.*fehler=\([0-9]*\).*/\1/p'; }
+w_fehl() { grep -a '^smp: fsrace cores=' "$1" | tail -1 \
+    | sed -n 's/.*errors=\([0-9]*\).*/\1/p'; }
 w_inos() { grep -a '^smp: fsrace   c0' "$1" | tail -1 \
     | grep -oE 'inode=[0-9]+' | sed 's/.*=//' | sort -un | wc -l; }
 

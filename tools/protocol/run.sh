@@ -119,12 +119,12 @@ echo "== 2. (a) four cores, ten thousand lines each, one ring =="
 run_vm "$K0" "nokbd nosched noproc nofs noring3 logall lograce" \
     "$TMPD/race.txt" -smp 4
 if grep -qa 'smp: lograce' "$TMPD/race.txt"; then
-    z=$(value "$TMPD/race.txt" 'zeilen=[0-9]+')
-    g=$(value "$TMPD/race.txt" 'gesamt=[0-9]+')
+    z=$(value "$TMPD/race.txt" 'lines=[0-9]+')
+    g=$(value "$TMPD/race.txt" 'total=[0-9]+')
     r=$(value "$TMPD/race.txt" 'ring=[0-9]+')
-    ro=$(value "$TMPD/race.txt" 'rotiert=[0-9]+')
-    kp=$(value "$TMPD/race.txt" 'kaputt=[0-9]+')
-    ke=$(value "$TMPD/race.txt" 'kerne=[0-9]+')
+    ro=$(value "$TMPD/race.txt" 'rotated=[0-9]+')
+    kp=$(value "$TMPD/race.txt" 'broken=[0-9]+')
+    ke=$(value "$TMPD/race.txt" 'cores=[0-9]+')
     num "cores that wrote" "$ke" eq 4
     num "lines the cores wrote" "$z" eq 40000
     num "lines the ring counted (none may be lost)" "$g" eq 40000
@@ -137,7 +137,7 @@ else
 fi
 
 echo "== 3. (e) what a filtered-out call costs =="
-ms=$(value "$TMPD/race.txt" 'logbank aufrufe=1000000  ns=[0-9]+  ms=[0-9]+')
+ms=$(value "$TMPD/race.txt" 'logbank calls=1000000  ns=[0-9]+  ms=[0-9]+')
 je=$(value "$TMPD/race.txt" 'ns_je_10=[0-9]+')
 if [ -n "$ms" ]; then
     echo "        1 M calls at level debug (filtered out): $ms ms, $je ns per 10 calls, $ACCELNAME"
