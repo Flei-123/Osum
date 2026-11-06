@@ -419,7 +419,7 @@ for e in bottom top left right; do
     if [ $? -eq 0 ]; then ok "[$e] the rectangles: $aus"
     else bad "[$e] the rectangles do not add up"; printf '%s\n' "$aus"; fi
     ws=$(grep -a 'wm: selftest' "$L" | tail -1 | grep -oE '[0-9]+ / [0-9]+')
-    same "[$e] the window server's claims about itself" "30 / 30" "$ws"
+    same "[$e] the window server's claims about itself" "31 / 31" "$ws"
     # the text, per character
     check_text "$L" "$P" "start"
     check_text "$L" "$P" "clock"

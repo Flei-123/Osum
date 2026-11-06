@@ -252,7 +252,7 @@ foto "$K0" "gfx wm wmhold $GRUND" "$TMPD/w.txt" "$TMPD/w.ppm"
 num "der Kern beendet sich sauber" "$RC" eq 21
 has "$TMPD/w.txt" "wm: hold" "der Kern haelt fuer das Foto still"
 ws=$(zahl "$TMPD/w.txt" 'wm: .*selftest [0-9]+')
-num "die Zusagen des Fensterservers ueber sich selbst" "$ws" eq 30
+num "die Zusagen des Fensterservers ueber sich selbst" "$ws" eq 31
 # r400: the VT subset of the terminal (cursor position, erase, reverse video, swallowed private
 # sequences, a sequence cut in two writes, an unknown sequence dropped whole)
 has "$TMPD/w.txt" "wm: vttest 7 / 7" "das Terminal versteht die VT-Teilmenge (7 von 7)"
