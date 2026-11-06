@@ -23,7 +23,8 @@ if [ ! -f "$OUT/disk.img" ]; then
         echo "the build failed"; tail -6 "$OUT/bau.log"; exit 1; }
 fi
 [ -f "$OUT/disk.img" ] || { echo "kein disk.img"; exit 1; }
-BUILDD=${LOOKBUILD:-/tmp/osum-lookbuild-$(pwd | md5sum | cut -c1-12)}
+. tools/lib/treekey.sh
+BUILDD=${LOOKBUILD:-$(osum_keyed_builddir /tmp/osum-lookbuild .)}
 [ -f "$BUILDD/k0.mb" ] || { echo "kein Kern in $BUILDD"; exit 1; }
 ok "Abbild und Kern stehen"
 

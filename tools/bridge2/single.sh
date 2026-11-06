@@ -31,16 +31,18 @@ for p in sh ls cat echo sleep ps; do
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" -o "$W/$p.elf" "$W/crt.o" "$W/$p.o" 2>"$W/ld-$p" || exit 1
     strip --strip-all "$W/$p.elf"
 done
-buildj() { # <source> <out elf>
-    FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc -c --profile=app -o "$W/j.o" "$1" > "$W/e-j" 2>&1 || { echo "jarvisd does not build"; head -20 "$W/e-j"; exit 1; }
+buildj() {
+    (cd "${BUILD_ROOT:-.}" && FIRNLIB="$ROOT/lib" "$ROOT/vendor/firn/bin/firnc" -c --profile=app -o "$W/j.o" "$1") > "$W/e-j" 2>&1 || { echo "jarvisd does not build"; head -20 "$W/e-j"; exit 1; }
     ld -T kernel/user/user.ld -o "$2" "$W/j.o" 2> "$W/ld-j" || exit 1
     strip --strip-all "$2"
 }
 buildj kernel/app/jarvisd.fi "$W/jarvisd-new.elf"
 # the base: the jarvisd BEFORE this change (f30c2b78 = main of 08.10.2026), or $BASE_REF
-git show "${BASE_REF:-f30c2b78}:kernel/app/jarvisd.fi" > kernel/app/jarvisd_base.fi || exit 1
-trap 'rm -f kernel/app/jarvisd_base.fi; [ -n "${CLEAN:-}" ] && rm -rf "$W"' EXIT
-buildj kernel/app/jarvisd_base.fi "$W/jarvisd-base.elf"
+BASE_TREE=$W/base-tree
+mkdir -p "$BASE_TREE" && cp -al kernel lib vendor "$BASE_TREE"/ || exit 1
+git show "${BASE_REF:-f30c2b78}:kernel/app/jarvisd.fi" > "$BASE_TREE/kernel/app/jarvisd_base.fi" || exit 1
+trap '[ -n "${CLEAN:-}" ] && rm -rf "$W"' EXIT
+BUILD_ROOT=$BASE_TREE buildj kernel/app/jarvisd_base.fi "$W/jarvisd-base.elf"
 
 cat > "$W/rechte.conf" <<'CONF'
 transport            = https

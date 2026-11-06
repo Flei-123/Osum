@@ -154,7 +154,8 @@ ICONF=assets/osum-icons.ttf
 #
 # Keyed on the absolute path of the tree, outside the repository so
 # that no build output can land in a commit.
-BUILDD=${LOOKBUILD:-/tmp/osum-lookbuild-$(pwd | md5sum | cut -c1-12)}
+. tools/lib/treekey.sh
+BUILDD=${LOOKBUILD:-$(osum_keyed_builddir /tmp/osum-lookbuild .)}
 mkdir -p "$BUILDD" "$OUT"
 
 # ---------------------------------------------------------- 1. kernel
@@ -165,8 +166,7 @@ mkdir -p "$BUILDD" "$OUT"
 # kernel starting the OLD programs. `desk: start /bin/schreibtisch
 # pid=0` was the only sign, and pid=0 is not an error anybody reads.
 # Same rule for both now: newer source, new build.
-newer=$(find kernel tools/build-kernel.sh -newer "$BUILDD/k0.mb" -print -quit 2>/dev/null || true)
-if [ ! -s "$BUILDD/k0.mb" ] || [ -n "$newer" ] || [ -n "${LOOKREBUILD:-}" ]; then
+if [ ! -s "$BUILDD/k0.mb" ] || [ -n "${LOOKREBUILD:-}" ]; then
     ./tools/build-kernel.sh "$BUILDD/k0.mb" > "$BUILDD/k.log" 2>&1 \
         || { echo "FAILED: the kernel does not build"; tail -20 "$BUILDD/k.log"; exit 1; }
 fi
