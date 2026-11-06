@@ -165,16 +165,16 @@ K17_STUECKE = [
     ("xhci.fi", "EVT_OFF",    0x1000),
     ("xhci.fi", "INCTX_OFF",  0x1000),
     ("xhci.fi", "SPARE_OFF",  0x1000),
-    ("usb.fi",  "USCAL_OFF",  0x180),
-    ("usb.fi",  "UDEV_OFF",   0x400),
-    ("usb.fi",  "FUND_OFF",   0x280),
-    ("usb.fi",  "DESC_OFF",   0x200),
-    ("usb.fi",  "REPORT_OFF", 0x100),
-    ("usb.fi",  "CBW_OFF",    0x40),
-    ("usb.fi",  "CSW_OFF",    0x40),
-    ("usb.fi",  "BLK_OFF",    0x200),
-    ("usb.fi",  "HUB_OFF",    0x100),
-    ("usb.fi",  "ISO_BUF_OFF", 0x600),
+    ("usbbase.fi",  "USCAL_OFF",  0x180),
+    ("usbbase.fi",  "UDEV_OFF",   0x400),
+    ("usbbind.fi",  "FUND_OFF",   0x280),
+    ("usbbase.fi",  "DESC_OFF",   0x200),
+    ("usbdev.fi",  "REPORT_OFF", 0x100),
+    ("usbbind.fi",  "CBW_OFF",    0x40),
+    ("usbbind.fi",  "CSW_OFF",    0x40),
+    ("usbbind.fi",  "BLK_OFF",    0x200),
+    ("usbbase.fi",  "HUB_OFF",    0x100),
+    ("usbdev.fi",  "ISO_BUF_OFF", 0x600),
 ]
 
 EXT4_STUECKE = [
@@ -334,7 +334,7 @@ def main():
     for d in ("kstate.fi", "pci.fi", "nvme.fi", "fb.fi", "inet.fi",
               "ahci.fi",
               "virtio.fi", "hv.fi",
-              "xhci.fi", "usb.fi",
+              "xhci.fi", "usbbase.fi", "usbbind.fi", "usbdev.fi",
               "vfs.fi", "mnt.fi", "fat.fi", "procfs.fi", "devfs.fi",
               "ext4.fi", "ntfs.fi", "exfat.fi",
               "part.fi", "ofs.fi",
@@ -438,7 +438,7 @@ def main():
                     "COLLISION IN EHCI: %s:%s 0x%X..0x%X overlaps "
                     "%s:%s 0x%X..0x%X" % (d1, k1, a1, e1, d2, k2, a2, e2))
 
-    if "xhci.fi" in dateien and "usb.fi" in dateien:
+    if "xhci.fi" in dateien and "usbbase.fi" in dateien:
         a0 = value(dateien["kstate.fi"], "K17_OFF")
         e0 = a0 + value(dateien["kstate.fi"], "K17_MAX")
         k17 = []

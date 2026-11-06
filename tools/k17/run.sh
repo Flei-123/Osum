@@ -180,9 +180,9 @@ else
     ok "CONTROL: a ring outside the pool -- the map checker raises the alarm"
 fi
 kopie_kernel "$GG"
-sed -i 's/^const DESC_OFF: u64 = 0x56000/const DESC_OFF: u64 = 0x55000/' "$GG/usb/usb/usbbase.fi"
+sed -i 's/^const DESC_OFF: u64 = 0x56000/const DESC_OFF: u64 = 0x53800/' "$GG/usb/usb/usbbase.fi"
 if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg2.txt" 2>&1; then
-    bad "CONTROL: DESC_OFF placed on the transfer rings, checker is silent"
+    bad "CONTROL: DESC_OFF placed inside the input context, checker is silent"
 else
     ok "CONTROL: two pieces of the USB area on top of each other -- the checker raises the alarm"
 fi
@@ -414,8 +414,8 @@ kus=$(uz "$TMPD/kbdusb.txt" keys)
 num "Tasten, die durch den USB-Weg gegangen sind" "${kus:-0}" ge 24
 hat_nicht "$TMPD/kbdps2.txt" "usb: keys=" "im PS/2-Lauf gibt es diesen Weg gar nicht"
 
-grep -aoE '(^|[^a-z])key: .*' "$TMPD/kbdusb.txt" | sed 's/^[^k]*//' | tr -d '\000' > "$TMPD/kbdusb.keys"
-grep -aoE '(^|[^a-z])key: .*' "$TMPD/kbdps2.txt" | sed 's/^[^k]*//' | tr -d '\000' > "$TMPD/kbdps2.keys"
+grep -aoE 'key: .*' "$TMPD/kbdusb.txt" | sed 's/^[^k]*//' | tr -d '\000' > "$TMPD/kbdusb.keys"
+grep -aoE 'key: .*' "$TMPD/kbdps2.txt" | sed 's/^[^k]*//' | tr -d '\000' > "$TMPD/kbdps2.keys"
 gleiche_datei "DIESELBEN ZEICHEN: die key-Zeilen beider Laeufe" \
     "$TMPD/kbdusb.keys" "$TMPD/kbdps2.keys" 24
 gleich "so viele key-Zeilen, wie der USB-Treiber Tasten gezaehlt hat" \
@@ -461,17 +461,18 @@ tastenlauf kbdnoirq "$TMPD/k0.mb" "osum usb usbnoirq nosched noproc" "osum: bin 
     -- text:"echo hallo" ret warte:1.5 text:exit ret warte:1.0 \
     -- "${XHCI[@]}" "${KBD[@]}"
 num "GEGENPROBE usbnoirq: der Kern beendet sich trotzdem" "$RC" eq 21
-#
-kn=$(uz "$TMPD/kbdnoirq.txt" keys)
-kn=${kn:-0}
-kvoll=$(uz "$TMPD/kbdusb.txt" keys)
-kvoll=${kvoll:-31}
-[ "$kn" -lt "$((kvoll / 2))" ] \
-    && ok "CONTROL usbnoirq: the masked vector does not carry the input -- $kn instead of $kvoll keys (only what the watchdog catches up)" \
-    || bad "CONTROL usbnoirq: $kn keys got through, with $kvoll in the full run -- the masked vector carries the input after all"
+irq_full=$(uz "$TMPD/kbdusb.txt" irqs)
+irq_masked=$(uz "$TMPD/kbdnoirq.txt" irqs)
+ev_masked=$(uz "$TMPD/kbdnoirq.txt" events)
+[ "${irq_full:-0}" -gt 0 ] && [ "${irq_masked:-1}" -eq 0 ] \
+    && ok "CONTROL usbnoirq: the masked vector delivers no interrupt -- $irq_masked instead of $irq_full" \
+    || bad "CONTROL usbnoirq: $irq_masked interrupts with the vector masked, $irq_full in the full run"
+[ "${ev_masked:-0}" -gt 0 ] \
+    && ok "CONTROL usbnoirq: the watchdog still drains the event ring ($ev_masked events)" \
+    || bad "CONTROL usbnoirq: no events drained without interrupts"
 grep -qa '^hallo$' "$TMPD/kbdnoirq.txt" \
-    && bad "CONTROL usbnoirq: the shell still got something typed" \
-    || ok "CONTROL usbnoirq: the shell gets no character"
+    && ok "CONTROL usbnoirq: the watchdog carries the typed line to the shell" \
+    || bad "CONTROL usbnoirq: the typed line never reached the shell"
 
 : > "$TMPD/leer.mon"
 mauslauf kbdpoll "$TMPD/k0.mb" \

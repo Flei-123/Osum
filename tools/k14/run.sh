@@ -461,8 +461,22 @@ dateien_gleich "dieselbe Arbeit auf OFS, beide Wege, Oktett fuer Oktett" \
     "$TMPD/a.out" "$TMPD/b.out"
 n=$(wc -l < "$TMPD/a.out")
 num "und es war wirklich Arbeit (Zeilen im Vergleich)" "$n" ge 10
-dateien_gleich "und die Wurzelplatte danach, Oktett fuer Oktett" \
-    "$TMPD/live-ofsdirekt.img" "$TMPD/live-ofsvfs.img"
+mask_seed() {
+    python3 -I -c '
+import sys
+data = bytearray(open(sys.argv[1], "rb").read())
+magic = b"OSRNDSD1"
+at = data.find(magic)
+while at >= 0:
+    data[at:at + 112] = bytes(112)
+    at = data.find(magic, at + 1)
+open(sys.argv[2], "wb").write(data)
+' "$1" "$2"
+}
+mask_seed "$TMPD/live-ofsdirekt.img" "$TMPD/masked-direct.img"
+mask_seed "$TMPD/live-ofsvfs.img" "$TMPD/masked-vfs.img"
+dateien_gleich "und die Wurzelplatte danach, Oktett fuer Oktett (random seed masked)" \
+    "$TMPD/masked-direct.img" "$TMPD/masked-vfs.img"
 o1=$(grep -a -m1 '^k14: mounts=' "$TMPD/ofsdirekt.txt" | grep -oE 'ops=[0-9]+' | grep -oE '[0-9]+')
 o2=$(grep -a -m1 '^k14: mounts=' "$TMPD/ofsvfs.txt" | grep -oE 'ops=[0-9]+' | grep -oE '[0-9]+')
 if [ "${o2:-0}" -gt "${o1:-0}" ]; then
