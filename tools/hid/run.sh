@@ -154,9 +154,9 @@ grep -aq '^hidev: mouse 0x0 x=0x0 y=0x0 r=0x1' "$B"
 zusage "zwei Finger, 120 Einheiten: genau EINE Radrastung" $?
 ROLL=$(grep -a 'hidin: ta=' "$B" | sed 's/.*rollen=\([0-9]*\).*/\1/')
 gleich "und nur eine" "1" "$ROLL"
-UEBER=$(grep -a 'hidin: ta=' "$B" | sed 's/.*ueber=\([0-9]*\).*/\1/')
+UEBER=$(grep -a 'hidin: ta=' "$B" | sed 's/.*over=\([0-9]*\).*/\1/')
 gleich "der Ueberlaufbericht (sechs mal 0x01) wird erkannt" "1" "$UEBER"
-WEG=$(grep -a 'hidin: ta=' "$B" | sed 's/.*weg=\([0-9]*\).*/\1/')
+WEG=$(grep -a 'hidin: ta=' "$B" | sed 's/.*away=\([0-9]*\).*/\1/')
 gleich "kein Bericht ging verloren" "0" "$WEG"
 
 # ----------------------------------------------------------------------
@@ -223,7 +223,7 @@ gleich "Zaehler: 5 Wische, 2 Kneifen (links/rechts/hoch/runter + links bei ausge
 gleich "Zaehler: letzter Wisch = Richtung 1, 3 Finger (259)" "259" \
     "$(echo "$GL" | sed 's/.* letzt=\([0-9]*\).*/\1/')"
 gleich "hidgest: kein Bericht ging verloren" "0" \
-    "$(grep -a 'hidin: ta=' "$G" | sed 's/.*weg=\([0-9]*\).*/\1/')"
+    "$(grep -a 'hidin: ta=' "$G" | sed 's/.*away=\([0-9]*\).*/\1/')"
 
 # ----------------------------------------------------------------------
 echo
