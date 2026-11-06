@@ -9,7 +9,7 @@ summary_begin FSSLOTS
 export FIRNLIB="$(pwd)/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 ULD=kernel/user/user.ld
-PROGS="sh cat echo ls shasum mount umount sleep"
+PROGS="sh cat echo ls shasum mount umount sleep rm wc"
 TMPD=$(mktemp -d)
 osum_tmp_guard "${1:-}" "$TMPD"
 trap 'summary_guard; [ -z "${FSSLOTS_OUT:-}" ] || { mkdir -p "$FSSLOTS_OUT"; cp "$TMPD"/*.out "$TMPD"/*.sh "$FSSLOTS_OUT"/ 2>/dev/null; }; rm -rf "$TMPD"; summary_exit_status || exit 1' EXIT
@@ -230,6 +230,7 @@ run_held() {
     printf 'echo @@held-start\nsleep 4\nwc -c\necho @@held-end\n' > "$H"
     {
         echo 'echo @@mount'
+        echo 'echo "unlock hdb" > /dev/wlock'
         echo 'umount /mnt'
         echo 'mount /dev/hdb1 /mnt vfat'
         echo 'echo "@@mount-rc=$?"'
