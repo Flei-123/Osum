@@ -1421,9 +1421,11 @@ num "und es ist wirklich angehoben (Regler 40)" "${SIST:-0}" gt 40
 cp "$TMPD/dunkelsett/desktop.png" "$SHOTS/glas-dunkel-alpha-40.png" 2>/dev/null
 
 RR=$(grep -ac '^fn fill_round(' kernel/ui/wm/wmdraw.fi)
-BL=$(grep -ac '^fn blend(' kernel/ui/wm/wmdraw.fi)
+BL=$(grep -ac '^fn blend(' lib/fui/comp.fi)
+BL2=$(grep -ac '^fn blend(' kernel/ui/wm/wmdraw.fi)
 num "genau eine Stelle im Fensterserver malt ein rundes Rechteck" "$RR" eq 1
-num "und genau eine mischt" "$BL" eq 1
+num "und genau eine mischt (lib/fui/comp.fi, vom Fensterserver und von wmd geteilt)" "$BL" eq 1
+num "und der Fensterserver hat keinen eigenen Mischer daneben" "$BL2" eq 0
 GM=$(grep -ac '^fn glass_mix(' kernel/ui/wm/wmglass.fi)
 num "und genau eine entscheidet, wie deckend ein Punkt ist" "$GM" eq 1
 #
@@ -1619,15 +1621,8 @@ done
 
 bash tools/themestore/build.sh "$TMPD/rvor" extra='einst' uitrace=yes \
     keep=yes radius=4 > "$TMPD/rvor.log" 2>&1
-TABL=$(grep -a 'wlib: tab i=21 ' "$TMPD/rvor/serial.txt" | tail -1)
-TABX=$(printf '%s' "$TABL" | grep -oE ' ax=[0-9]+' | grep -oE '[0-9]+')
-TABY=$(printf '%s' "$TABL" | grep -oE ' ay=[0-9]+' | grep -oE '[0-9]+')
-TABW=$(printf '%s' "$TABL" | grep -oE ' w=[0-9]+' | grep -oE '[0-9]+')
-TABH=$(printf '%s' "$TABL" | grep -oE ' h=[0-9]+' | grep -oE '[0-9]+')
-TCX=$(( ${TABX:-30} + ${TABW:-232} / 2 ))
-TCY=$(( ${TABY:-191} + ${TABH:-30} / 2 ))
 bash tools/themestore/build.sh "$TMPD/rtab" extra='einst' uitrace=yes \
-    keep=yes radius=4 click="$TCX,$TCY" click="$TCX,$TCY" \
+    keep=yes radius=4 click="522,48" click="type:ecken" click="148,86" \
     > "$TMPD/rtab.log" 2>&1
 SL=$(grep -ao 'settings: rect name=[a-z]* x=[0-9]* y=[0-9]* w=160 h=[0-9]*' \
      "$TMPD/rtab/serial.txt" | tail -2 | head -1)
@@ -1638,7 +1633,7 @@ CX=$(( ${SLX:-747} + 22 + (${SLW:-160} * 2 / 3) ))
 SLH=$(printf '%s' "$SL" | grep -oE ' h=[0-9]+' | grep -oE '[0-9]+')
 CY=$(( ${SLY:-202} + 25 + ${SLH:-20} / 2 ))
 bash tools/themestore/build.sh "$TMPD/rklick" extra='einst' uitrace=yes \
-    keep=yes radius=4 click="$TCX,$TCY" click="$TCX,$TCY" click="$CX,$CY" click="$CX,$CY" \
+    keep=yes radius=4 click="522,48" click="type:ecken" click="148,86" click="$CX,$CY" click="$CX,$CY" \
     > "$TMPD/rklick.log" 2>&1
 RNEU=$(grep -a 'settings: glas radius=' "$TMPD/rklick/serial.txt" | tail -1 \
        | grep -oE 'radius=[0-9]+' | cut -d= -f2)

@@ -37,12 +37,24 @@ def drag(points):
     return out
 
 
+def typed(text):
+    out = []
+    for ch in text:
+        key = "spc" if ch == " " else ch
+        out += ["sendkey " + key, "warte 1"]
+    out.append("warte 2")
+    return out
+
+
 def main(argv):
     if len(argv) < 2:
         print(__doc__)
         return 2
     lines = []
     for p in argv[1:]:
+        if p.startswith("type:"):
+            lines += typed(p[5:])
+            continue
         if ">" in p:
             lines += drag([tuple(int(v) for v in t.split(","))
                            for t in p.split(">")])
