@@ -20,7 +20,7 @@ def read_text():
     except OSError: return ""
 def wins():
     return re.findall(r"wlib: win id=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", read_text())
-CL = ("modfs osum gfx wm wig desk wmshell wmdauer herz absturzhalt nopuls "
+CL = ("modfs osum gfx wm wig desk wmshell wmdauer herz crashhalt nopuls "
       "tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 "
       "nosched noproc nofs fbres=1280x800")
 kvm = ["-accel","kvm","-cpu","host"] if os.access("/dev/kvm", os.W_OK) else ["-accel","tcg"]

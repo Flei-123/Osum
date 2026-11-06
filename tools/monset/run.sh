@@ -116,7 +116,7 @@ if ev[:3] != ["shown", "hidden", "shown"]:
     sys.exit(1)
 PY
 grep -aq 'klickauf srectmmon -> KEIN' "$TMPD/c/o.log" && bad "C: click on mmon had no target" || ok "C: every click found its widget"
-n=$(grep -ac 'ABSTURZ\|EXCEPTION\|panic' "$SA" "$SB" "$SC" | awk -F: '{s+=$2} END{print s+0}')
+n=$(grep -ac 'CRASH\|EXCEPTION\|panic' "$SA" "$SB" "$SC" | awk -F: '{s+=$2} END{print s+0}')
 [ "$n" = 0 ] && ok "no crash or panic" || bad "crash lines: $n"
 echo; echo "MONSET: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

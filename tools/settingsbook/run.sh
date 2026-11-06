@@ -96,7 +96,7 @@ case "$LAST" in *ABCD-EFGH*) bad "the code is still shown after the final answer
 BK=$(tail -1 "$OUT.book")
 WANT="$(msg konto.ui.book.state)$(msg konto.ui.book.off)"
 [ "$BK" = "$WANT" ] && ok "the address-book line says: $BK" || bad "book line '$BK', expected '$WANT'"
-c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null; true)
+c=$(grep -acE 'CRASH|EXCEPTION' "$S" 2>/dev/null; true)
 [ "$c" = 0 ] && ok "no crash" || bad "crash lines: $c"
 ls "$OUT"/*.ppm >/dev/null 2>&1 && ok "pictures taken: $(ls "$OUT"/*.ppm | wc -l)" || bad "no pictures"
 echo "SETTINGSBOOK: $pass passed, $fail failed"

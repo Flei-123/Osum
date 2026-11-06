@@ -66,7 +66,7 @@ rc=$(run_case off "$NEW" "$BASE script=echo ==BEGIN==;shutdown -f;echo ==END==")
 F="$TMPD/off.txt"
 has "$F" "==BEGIN==" "script ran"
 hasnot "$F" "EXCEPTION" "poweroff does not fault"
-hasnot "$F" "ABSTURZBERICHT" "poweroff leaves no crash report"
+hasnot "$F" "CRASH REPORT" "poweroff leaves no crash report"
 has "$F" "power: acpi" "poweroff reached the ACPI path"
 is "machine powered off through ACPI" "$rc" "0"
 
@@ -75,7 +75,7 @@ rc=$(run_case reboot "$NEW" "$BASE script=echo ==BEGIN==;reboot -f;echo ==END=="
 F="$TMPD/reboot.txt"
 has "$F" "==BEGIN==" "script ran"
 hasnot "$F" "EXCEPTION" "reboot does not fault"
-hasnot "$F" "ABSTURZBERICHT" "reboot leaves no crash report"
+hasnot "$F" "CRASH REPORT" "reboot leaves no crash report"
 hasnot "$F" "power: acpi pm1a" "reboot never writes the S5 sleep type"
 has "$F" "power: reset" "reboot went through the reset chain"
 is "machine reset (QEMU exits on reset with -no-reboot)" "$rc" "0"
@@ -84,12 +84,12 @@ if [ -n "$OLD" ]; then
     echo "== 4. counter-check: the old kernel faults =="
     rc=$(run_case oldoff "$OLD" "$BASE script=echo ==BEGIN==;shutdown -f;echo ==END==")
     F="$TMPD/oldoff.txt"
-    if grep -aqE "EXCEPTION|ABSTURZBERICHT|vektor 14" "$F" || [ "$rc" != "0" ]; then
+    if grep -aqE "EXCEPTION|CRASH REPORT|vector 14" "$F" || [ "$rc" != "0" ]; then
         ok "old kernel does not power off cleanly (rc=$rc)"
     else
         bad "old kernel powered off cleanly -- the gate does not reproduce the bug"
     fi
-    grep -aqE "EXCEPTION|ABSTURZBERICHT|vektor 14" "$F" \
+    grep -aqE "EXCEPTION|CRASH REPORT|vector 14" "$F" \
         && ok "old kernel faults on poweroff" \
         || bad "old kernel did not fault (rc=$rc)"
 fi

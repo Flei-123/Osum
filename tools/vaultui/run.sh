@@ -192,7 +192,7 @@ cwin w2 tab tab ret
 has "$TMPD/w2/serial.txt" "vaultui: cancel" "Tab to Cancel, Enter: cancel"
 hasnot "$TMPD/w2/serial.txt" "vaultui: unlock ok" "COUNTER-PROOF: cancel never unlocks"
 for d in w1 w2; do
-    c=$(grep -acE 'ABSTURZ|EXCEPTION' "$TMPD/$d/serial.txt" 2>/dev/null; true)
+    c=$(grep -acE 'CRASH|EXCEPTION' "$TMPD/$d/serial.txt" 2>/dev/null; true)
     [ "$c" = 0 ] || bad "crash lines in $d: $c"
 done
 if command -v swtpm >/dev/null 2>&1; then

@@ -392,7 +392,7 @@ lauf "39. was man mit dem Stick TUN kann: dhcp, host, fetch, ota und die Bruecke
      tools/stick/run.sh stick '^STICK: |^  ok   |^       (SHA-256|/bin traegt|kern|programme|apps|wurzeln|ota.conf|schluessel)'
 
 lauf "40. Ring 3 auf ALLEN Kernen, und der Riegel davor -- der Fehler der Runde BLECHKERN, auf Bestellung (tools/multicore/run.sh, Runde VIELKERN)" \
-     tools/multicore/run.sh vielkern '^VIELKERN: |^  OK   |^  FAIL |^        (r3:|tafel:|absturz:)'
+     tools/multicore/run.sh vielkern '^VIELKERN: |^  OK   |^  FAIL |^        (r3:|tafel:|crash:)'
 
 lauf "41. der Aufgabenverwalter und das Kontrollzentrum (tools/toolbench/run.sh, Runde WERKZEUGE)" \
      tools/toolbench/run.sh werkzeug '^WERKZEUGE: |^  OK    |^        '

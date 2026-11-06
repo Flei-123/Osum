@@ -42,7 +42,7 @@ def judge(txt):
     ok(r and all(o == 1 for _, _, o in r), "every change stored (ok=1: bus or file)")
     ok(r and all(len(v) == 13 and all(x >= 0 for x in v) for v, _, _ in r), "thirteen sane values per line")
     ok(r and all(x in (0, 1) for v, _, _ in r for x in v[:8]), "toggles are 0 or 1")
-    ok(not re.search(r"ABSTURZ|EXCEPTION", txt), "no crash lines")
+    ok(not re.search(r"CRASH|EXCEPTION", txt), "no crash lines")
     return res
 
 

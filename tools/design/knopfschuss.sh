@@ -15,7 +15,7 @@ rm -rf "$W"; mkdir -p "$W"
 cp "$PLATTE" "$W/disk.img"
 
 qemu-system-x86_64 -kernel "$KERN" -m 2048 \
-  -append "osum gfx disp fbres=3440x1440 wm wig desk wmshell wmdauer herz absturzhalt nopuls tz=120 lang=en usb hidgen modfs nosched noproc nofs wigapp=/bin/settings" \
+  -append "osum gfx disp fbres=3440x1440 wm wig desk wmshell wmdauer herz crashhalt nopuls tz=120 lang=en usb hidgen modfs nosched noproc nofs wigapp=/bin/settings" \
   -serial "file:$W/serial.txt" -display none -no-reboot \
   -device "VGA,edid=on,xres=3440,yres=1440,vgamem_mb=128" \
   -drive "file=$W/disk.img,format=raw,if=ide,index=0" \
@@ -38,6 +38,6 @@ kill "$QP" 2>/dev/null; wait "$QP" 2>/dev/null
 echo "== Start =="
 grep -a 'desk: start' "$W/serial.txt" | sed 's/^/   /'
 echo "== Abstuerze =="
-n=$(grep -acE 'ABSTURZ|EXCEPTION' "$W/serial.txt" 2>/dev/null || echo 0)
+n=$(grep -acE 'CRASH|EXCEPTION' "$W/serial.txt" 2>/dev/null || echo 0)
 echo "   $n"
 ls -la "$W"/*.ppm 2>/dev/null || echo "   KEIN Abzug"

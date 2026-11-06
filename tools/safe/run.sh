@@ -5,7 +5,7 @@
 #   /root/jarvis/bin/heavy bash tools/safe/run.sh
 #
 # A  `safe` strips network / driver words (e1000 attached: no net lines); counter-proof `nosafefilter` brings the lines back.
-# B  `safeauto` + forced kernel panic + `absturzneustart`: ONE QEMU process reboots; boot 2 reports "previous boot did not finish"
+# B  `safeauto` + forced kernel panic + `crashrestart`: ONE QEMU process reboots; boot 2 reports "previous boot did not finish"
 #    and runs in safe mode, boot 4 (3 failed boots) gives up without reset; /var/jarvis/panic-N.txt on the disk.
 # B2 counter-proof: same command line without `safeauto` -> no fallback line, no loop guard.
 # The desktop part (good-boot mark, hang watchdog, no false positive) is tools/safe/desktop.sh.
@@ -68,7 +68,7 @@ if [ -n "${SAFE_OUT:-}" ]; then mkdir -p "$SAFE_OUT"; cp "$TMPD"/a?.txt "$SAFE_O
 
 echo "== B. forced panic chain in ONE qemu: fallback, filter, loop guard =="
 mkdisk "$TMPD/dB.img"
-PANIC="krach safeauto absturzneustart script=krach kern;exit"
+PANIC="krach safeauto crashrestart script=krach kern;exit"
 run "$TMPD/b.txt" 170 "$TMPD/dB.img" "$BASE $NETW $PANIC" $NETDEV
 nb=$(grep -ac 'safe: previous boot did not finish' "$TMPD/b.txt")
 num "B boots that saw a failed predecessor" "$nb" ge 3
@@ -88,13 +88,13 @@ if [ -n "${SAFE_OUT:-}" ]; then cp "$TMPD/b.txt" "$SAFE_OUT/" 2>/dev/null; fi
 runq "$TMPD/b2.txt" 90 "$TMPD/dB.img" "$BASE script=ls /var/jarvis;cat /var/jarvis/panic-1.txt;exit"
 grep -aq 'panic-1.txt' "$TMPD/b2.txt" && ok "B /var/jarvis/panic-1.txt on the disk" || bad "B panic-1.txt missing"
 grep -aq 'panic-4.txt' "$TMPD/b2.txt" && ok "B /var/jarvis/panic-4.txt on the disk" || bad "B panic-4.txt missing"
-grep -aq 'ABSTURZBERICHT' "$TMPD/b2.txt" && ok "B panic-1.txt holds the report" || bad "B report text missing"
+grep -aq 'CRASH REPORT' "$TMPD/b2.txt" && ok "B panic-1.txt holds the report" || bad "B report text missing"
 grep -aq 'safe-state: fails=' "$TMPD/b2.txt" && ok "B panic-1.txt carries the safe-state line" || bad "B safe-state line missing"
 if [ -n "${SAFE_OUT:-}" ]; then cp "$TMPD/b2.txt" "$SAFE_OUT/" 2>/dev/null; fi
 
 echo "== B2. counter-proof: no safeauto -> no fallback, no loop guard =="
 mkdisk "$TMPD/dB2.img"
-run "$TMPD/c.txt" 75 "$TMPD/dB2.img" "$BASE $NETW krach absturzneustart script=krach kern;exit" $NETDEV
+run "$TMPD/c.txt" 75 "$TMPD/dB2.img" "$BASE $NETW krach crashrestart script=krach kern;exit" $NETDEV
 num "B2 safe lines without safeauto" "$(grep -ac '^safe: ' "$TMPD/c.txt")" eq 0
 num "B2 panics happened (reset loop)" "$(grep -ac '^\*\*\* EXCEPTION' "$TMPD/c.txt")" ge 2
 num "B2 no loop guard without safeauto" "$(grep -ac 'no reset: failed boots' "$TMPD/c.txt")" eq 0

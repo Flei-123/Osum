@@ -6,7 +6,7 @@
 #      ends with fb.flush) and stops: VRAM is right, but in VirtualBox (TRACES=0: the host does not watch VRAM) nobody ever sent the
 #      UPDATE, so the Laptop kept showing the last desktop picture. Fix: trap.fi -> gfx.panik_present -> vmsvga.panic_present (after
 #      the other cores are stopped: locks opened, one whole-picture UPDATE).
-# WHAT (QEMU `-vga vmware -vnc`; words `krach krachjetzt` force a kernel exception, `absturzhalt` keeps the screen up):
+# WHAT (QEMU `-vga vmware -vnc`; words `krach krachjetzt` force a kernel exception, `crashhalt` keeps the screen up):
 #   1. the kernel reports the exception, the driver says "vmsvga: panic picture sent ok=1"
 #   2. the screendump (VRAM direct) is the red panic screen (panic-red pixels > 30 %)
 #   3. a VNC client that applies ONLY the UPDATE rectangles equals the screendump pixel for pixel (diff 0)
@@ -39,7 +39,7 @@ run_case() {
     cp -f "$T/d.img" "$T/$tag.img"
     local S="$T/$tag.sock" V="$T/$tag.vnc"
     timeout 150 $QEMU_X86 -S -kernel "$kern" -m 256 \
-        -append "gfx nokbd nosched noproc noring3 logall absturzhalt krach krachjetzt" \
+        -append "gfx nokbd nosched noproc noring3 logall crashhalt krach krachjetzt" \
         -serial "file:$T/$tag.txt" -display none -no-reboot \
         -vga vmware -vnc "unix:$V" \
         -monitor "unix:$S,server,nowait" \

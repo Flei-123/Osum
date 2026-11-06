@@ -32,5 +32,5 @@ for i in range(60):
 for d in [b'', b'\x00\x00\x01', b'\x00\x00\x01\x67', b'\xff'*100,
           b'\x00\x00\x01\x67\xff\xff\xff\xff', b'\x00'*1000]:
     run(d, "sonder")
-print("durchgelaufen %d, sauber abgewiesen %d, ABSTURZ %d"%(n_ok,n_exc,n_crash))
+print("durchgelaufen %d, sauber abgewiesen %d, CRASH %d"%(n_ok,n_exc,n_crash))
 print("Ausnahmearten:",arten)

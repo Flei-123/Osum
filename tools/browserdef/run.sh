@@ -114,7 +114,7 @@ fi
 
 echo "== 3. guests did not crash =="
 for d in r1 r2; do
-    c=$(grep -acE 'ABSTURZ|EXCEPTION' "$TMPD/$d/serial.txt" 2>/dev/null; true)
+    c=$(grep -acE 'CRASH|EXCEPTION' "$TMPD/$d/serial.txt" 2>/dev/null; true)
     [ "$c" = 0 ] || bad "crash lines in $d: $c"
 done
 echo "BROWSERDEF: $pass passed, $fail failed"

@@ -290,6 +290,21 @@ hat kernel/tasks.fi "gfx.disp_poll" "the way back is polled in the idle task (ta
 hat kernel/gfx/gfx.fi "vmode.poll(state)" "and gfx.disp_poll calls vmode.poll"
 hat_nicht kernel/user/sleep.fi "DISPSET" "und /bin/sleep ruft keinen Bildschirmaufruf"
 
+echo "== 5b. English command names reach the same code =="
+cp -f "$TMPD/root.img" "$TMPD/back.img"
+rc=$(lauf_platte back \
+    "osum gfx disp nokbd nosched noproc script=dispctl custom 1400 1050;dispctl back;dispctl raw" \
+    "$TMPD/back.img")
+num "the 'back' run ends cleanly" "$rc" eq 21
+gleich "'dispctl back' returns to the old panel" "800" "$(uwl "$TMPD/back.txt" panelw)"
+gleich "'dispctl back' counts one revert" "1" "$(uwl "$TMPD/back.txt" reverts)"
+cp -f "$TMPD/root.img" "$TMPD/light.img"
+rc=$(lauf_platte light \
+    "osum gfx disp nokbd nosched noproc script=dispctl light 70;dispctl raw" \
+    "$TMPD/light.img")
+num "the 'light' run ends cleanly" "$rc" eq 21
+gleich "'dispctl light 70' sets brightness 70" "70" "$(uwl "$TMPD/light.txt" bright)"
+
 foto zurueck "gfx disp dispeigenfrist nocursor fbtest fbhold $GRUND"
 num "der Lauf endet sauber" "$RC" eq 21
 Z="$TMPD/zurueck.txt"

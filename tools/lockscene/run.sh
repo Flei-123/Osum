@@ -11,7 +11,7 @@
 #   wrong     a wrong password: "falsches Kennwort", the lock stays
 #   right     the right one: "aufgesperrt", the window is gone
 #   eye       Tab, Enter on the eye toggles the field without unlocking
-#   crash     an absturz leaves the lock standing (kernel restarts the locker)
+#   crash     a crash leaves the lock standing (kernel restarts the locker)
 #   counter   the same run with a WRONG password only must NOT unlock
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -84,7 +84,7 @@ hat "$S" "lock: wrong password, stays shut" "burst: the first attempt is refused
 hat "$S" "lock: unlocked" "burst: the second attempt (typed behind the first Enter) opens it"
 
 echo "== a crash locks, never unlocks =="
-bash "$B" "$OUT/t5" warten=10 extra="wigapp=/bin/lock,-absturz" progs="$PROGS" \
+bash "$B" "$OUT/t5" warten=10 extra="wigapp=/bin/lock,-crash" progs="$PROGS" \
     xfile=/etc/shadow="$OUT/shadow" xfile=/etc/wallpaper=assets/wallpaper-sea.osym > "$OUT/t5.log" 2>&1
 S=$OUT/t5/serial.txt
 hat "$S" "lock: locker restarted, pid=" "the kernel restarts the locker"

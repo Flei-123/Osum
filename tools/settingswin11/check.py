@@ -39,7 +39,7 @@ def ppm(n):
 
 
 check(len(reports) > 0, "rect reports present (%d)" % len(reports))
-check(not re.search(r"ABSTURZ|EXCEPTION|^panic", txt, re.M), "no crash lines")
+check(not re.search(r"CRASH|EXCEPTION|^panic", txt, re.M), "no crash lines")
 check(os.path.exists(os.path.join(outdir, "00-start.ppm")), "start picture taken")
 first = reports[0] if reports else {}
 check("wdu" in first, "search field reported")

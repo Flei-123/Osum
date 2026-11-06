@@ -103,7 +103,7 @@ geom() { grep -aoE '^launcher: geom x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+' "$1" | 
 chk() { # chk <file> <xmin> <xmax> <label>
     local by; by=$(grep -aoE '^taskbar: geom edge=0 x=0 y=[0-9]+' "$1" | tail -1 | sed 's/.* y=//'); by=${by:-440}
     local g x y w h; g=$(geom "$1")
-    if [ -z "$g" ]; then bad "$4 -- no 'launcher: geom' line"; grep -a "^launcher\|^taskbar: head\|EXCEPTION\|ABSTURZ" "$1" | head -6 | sed 's/^/        /'; tail -n 3 "$1" | sed 's/^/        | /'; return; fi
+    if [ -z "$g" ]; then bad "$4 -- no 'launcher: geom' line"; grep -a "^launcher\|^taskbar: head\|EXCEPTION\|CRASH" "$1" | head -6 | sed 's/^/        /'; tail -n 3 "$1" | sed 's/^/        | /'; return; fi
     eval "$g"; x=$x; y=$y; w=$w; h=$h
     if [ "$x" -ge "$2" ] && [ $((x + w)) -le "$3" ] && [ $((y + h)) -le "$by" ]; then ok "$4 (x=$x y=$y w=$w h=$h)"; else bad "$4 (x=$x y=$y w=$w h=$h, wanted x in [$2,$3), bottom <= $by)"; fi
 }

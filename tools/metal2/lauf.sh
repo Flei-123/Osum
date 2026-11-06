@@ -14,7 +14,7 @@ MAUSOPT="$*"
 mkdir -p "$AUS"
 rm -f "$AUS/serial.txt" "$AUS/qmp.sock" "$AUS/shot.ppm" "$AUS/rc"
 
-BASE="modfs osum gfx fbres=3440x1440 fbpad=16 wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=120 usb hidgen nosched noproc nofs"
+BASE="modfs osum gfx fbres=3440x1440 fbpad=16 wm wig desk wmshell wmdauer tafel herz crashhalt nopuls tz=120 usb hidgen nosched noproc nofs"
 CMD="$BASE $ZUSATZ"
 GESAMT=$(( SEK + 150 ))
 

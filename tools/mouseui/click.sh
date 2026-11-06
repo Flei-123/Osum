@@ -53,7 +53,7 @@ if [s[3] for s in L] != [1, 0, 1, 1]:
 if L[3][2] != 1 or L[2][2] != L[0][2]:
     sys.exit(1)
 PY
-c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null; true)
+c=$(grep -acE 'CRASH|EXCEPTION' "$S" 2>/dev/null; true)
 [ "$c" = 0 ] && ok "no crash" || bad "crash lines: $c"
 echo "MOUSEUI-CLICK: $pass passed, $fail failed"
 [ "$fail" = 0 ]

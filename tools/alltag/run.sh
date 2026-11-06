@@ -274,7 +274,7 @@ S=$OUT/sp1/serial.txt
 hat "$S" "lock: wrong password, stays shut" \
     "falsches Kennwort: die Sperre bleibt stehen"
 hat "$S" "lock: unlocked" "richtiges Kennwort: sie geht auf"
-bash "$B" "$OUT/sp2" warten=10 extra="wigapp=/bin/lock,-absturz" \
+bash "$B" "$OUT/sp2" warten=10 extra="wigapp=/bin/lock,-crash" \
     progs="lock desktop taskbar launcher theme sh echo ls cat" \
     xfile=/etc/shadow="$OUT/shadow" > "$OUT/sp2.log" 2>&1
 S2=$OUT/sp2/serial.txt

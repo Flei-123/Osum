@@ -62,7 +62,7 @@ rc=$(run_case new "$NEW")
 F="$D/new.txt"; clean "$F"
 hasnot "$F.clean" "mem: process context reaches" "kernel does not confine frames"
 hasnot "$F.clean" "EXCEPTION" "no kernel page fault"
-hasnot "$F.clean" "ABSTURZBERICHT" "no crash report"
+hasnot "$F.clean" "CRASH REPORT" "no crash report"
 is "kernel finished" "$rc" "21"
 is "400 MiB touched" "$(part "$F" SMALL BIG | grep -ac '^hifr: touched 102400$')" "1"
 is "write from a user page reads right" "$(part "$F" SMALL BIG | grep -ac '^HIFR-WRITE-OK$')" "1"

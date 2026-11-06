@@ -58,7 +58,7 @@ if L[1]["lida"] == L[0]["lida"] or L[2]["prfb"] == L[1]["prfb"]:
 if L[1]["lidb"] != L[0]["lidb"] or L[2]["lidb"] != L[1]["lidb"] or L[2]["lida"] != L[1]["lida"]:
     sys.exit(1)
 PY
-c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null; true)
+c=$(grep -acE 'CRASH|EXCEPTION' "$S" 2>/dev/null; true)
 [ "$c" = 0 ] && ok "no crash" || bad "crash lines: $c"
 echo "POWERUI-CLICK: $pass passed, $fail failed"
 [ "$fail" = 0 ]

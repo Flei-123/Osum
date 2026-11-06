@@ -22,7 +22,7 @@ note "kernel $(stat -c%s "$W/k0.mb") Oktette"
 [ -s "$W/disk.img" ] || { echo "no disk -- run tools/design/eh5.sh first"; exit 1; }
 
 APPEND="osum gfx fbres=1280x800 wm wig desk wmshell wmdauer tafel herz"
-APPEND="$APPEND absturzhalt nopuls tz=120 lang=en"
+APPEND="$APPEND crashhalt nopuls tz=120 lang=en"
 APPEND="$APPEND nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis"
 APPEND="$APPEND nosched noproc nofs"
 note "append $APPEND"

@@ -9,7 +9,7 @@ Hardware -- und vier Meldungen dazu.
 1. **Absturzanzeige im Band** (`kgui.absturz`, `trap.report`). Vektor,
    Name, RIP, CR2, Fehlercode, CS, RSP und die Stufe in grosser roter
    Schrift im reservierten Band, eigener unbedingter `flush_rect`, dann
-   `halt_forever` statt `power.shutdown` -- mit `absturzhalt`, damit die
+   `halt_forever` statt `power.shutdown` -- mit `crashhalt`, damit die
    Regressionslaeufe ihren EXIT_TRAP behalten.
    Gegenprobe `knall`: Seitenfehler auf Bestellung.
    GEMESSEN: `EXCEPTION 14 #PF err=0x2 cr2=0x7fffffff0000 rip=0x2c300d`,

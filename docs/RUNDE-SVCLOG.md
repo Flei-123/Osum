@@ -20,13 +20,13 @@ Not done: `ota`/`fetch` text is not written to a file yet (the serial line is no
 ## C. Dell offline
 
 Evidence (files in /srv/bruecke):
-- `geraete/osum-a4206b26eb96/154531-170.txt` (read from the Dell, 08.10. 15:45 UTC) is the STICK menu: `default_entry: 1`, `timeout: 20`, entry 1 `/OrientOS` has `dhcp jarvis ... anmeldung absturzneustart`. So the default entry DOES start `jarvisd`.
+- `geraete/osum-a4206b26eb96/154531-170.txt` (read from the Dell, 08.10. 15:45 UTC) is the STICK menu: `default_entry: 1`, `timeout: 20`, entry 1 `/OrientOS` has `dhcp jarvis ... anmeldung crashrestart`. So the default entry DOES start `jarvisd`.
 - `154535-171.txt` (`ps`, 08.10. 15:45 UTC): `jarvisd` pid 27 with parent 1 (the autostart supervisor) and its worker pid 115 were running when the Boss started `jarvisd` by hand (pid 157 under `sh` pid 152, worker 158). The autostart was NOT missing.
 - `status.json` events from 17:14 UTC on show the consequence: sessions of 29..30 s ending "without goodbye" (two helpers fighting for the same key), then `KLOPFT NUR AN` (greeting, never `ich`; the sign-in did not work on the device), 21+ times until 18:25 UTC.
 - Between 07.10. 22:59 and 08.10. 15:45 UTC no file exists because files only appear when somebody sends a command; the bridge keeps only the last session (`status.json` ring of 80 events starting 08.10. 17:14), so the reason for the silence in that gap is NOT provable from the files. Not claimed.
 
 Changes:
-- The installer wrote an entry WITHOUT `absturzneustart` (`kernel/user/installer.fi`, `lim_text`, `lim_dual1`): after a kernel panic an installed disk would stay on the panic screen (`absturzhalt`) forever. Both now carry `absturzneustart` like the stick menu.
+- The installer wrote an entry WITHOUT `crashrestart` (`kernel/user/installer.fi`, `lim_text`, `lim_dual1`): after a kernel panic an installed disk would stay on the panic screen (`crashhalt`) forever. Both now carry `crashrestart` like the stick menu.
 - `kgui.jarvis_watch`: the desktop loop watches the process the boot word `jarvis` started. Gone or zombie -> restart after 5 s, doubling up to 60 s; a run of >= 2 min resets the back-off. (`jarvisd` already restarts its worker with the same back-off; nothing watched the supervisor itself.)
 - Test: `tools/svclog/respawn.sh`.
 

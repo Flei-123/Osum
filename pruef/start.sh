@@ -46,7 +46,7 @@ NETZ=""
 # Fuer die Tafel selbst gibt es MITTAFEL=1.
 TAFEL=""
 [ "${MITTAFEL:-0}" = "1" ] && TAFEL="tafel"
-CMD="modfs osum gfx ${FBMODE:-} wm wig desk wmshell wmdauer $TAFEL herz absturzhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 $NETZ ${PROCMODE:-nosched noproc nofs} fbres=${BREITE}x${HOEHE} $EXTRA"
+CMD="modfs osum gfx ${FBMODE:-} wm wig desk wmshell wmdauer $TAFEL herz crashhalt nopuls tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 $NETZ ${PROCMODE:-nosched noproc nofs} fbres=${BREITE}x${HOEHE} $EXTRA"
 
 # ===================================================== RUNDE TUERSCHLOSS
 #

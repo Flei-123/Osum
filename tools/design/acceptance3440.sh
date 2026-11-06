@@ -19,7 +19,7 @@ ok(){ pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad(){ fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 APPEND="osum gfx disp fbres=3440x1440 wm wig desk wmshell wmdauer tafel herz"
-APPEND="$APPEND absturzhalt nopuls tz=120 lang=en usb hidgen modfs"
+APPEND="$APPEND crashhalt nopuls tz=120 lang=en usb hidgen modfs"
 APPEND="$APPEND nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis"
 APPEND="$APPEND nosched noproc nofs"
 echo "append: $APPEND"
@@ -51,7 +51,7 @@ echo "== jarvisd =="
 grep -a 'jarvisd:' "$W/serial.txt" | head -6 | sed 's/^/   /'
 echo
 
-n=$(grep -acE "ABSTURZ|EXCEPTION" "$W/serial.txt" 2>/dev/null | head -1); n=${n:-0}
+n=$(grep -acE "CRASH|EXCEPTION" "$W/serial.txt" 2>/dev/null | head -1); n=${n:-0}
 [ "$n" -eq 0 ] && ok "no crash at 3440x1440" || bad "$n Absturzzeilen"
 grep -qa 'huge=10' "$W/serial.txt" \
     && ok "all ten tiles rendered (no strip mode)" \

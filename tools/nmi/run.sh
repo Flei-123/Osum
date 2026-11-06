@@ -71,7 +71,7 @@ hhas() { grep -qa -- "$2" "$D/$1.hang"; }
 cpu0() { awk '/^cpu 0: task=/{f=1} /^cpu [1-9]: task=|^-- /{f=0} f' "$D/$1.hang"; }
 report_checks() {
     local n=$1 reason=$2 sym=$3
-    [ -s "$D/$n.hang" ] && ok "$n: /var/crash/*-hang.txt written on the next boot" || { bad "$n: no hang file ($(boots $n) boots; $(grep -a '^hang:\|absturz' "$D/$n.klar" | head -4 | tr '\n' '|'))"; return; }
+    [ -s "$D/$n.hang" ] && ok "$n: /var/crash/*-hang.txt written on the next boot" || { bad "$n: no hang file ($(boots $n) boots; $(grep -a '^hang:\|crash:' "$D/$n.klar" | head -4 | tr '\n' '|'))"; return; }
     hhas "$n" "=== OSUM HANG REPORT ===" && ok "$n: report header" || bad "$n: header missing"
     hhas "$n" "reason: $reason" && ok "$n: reason $reason" || bad "$n: reason $(grep -a '^reason' "$D/$n.hang")"
     cpu0 "$n" | grep -qa "[ .]$sym+0x" && ok "$n: cpu 0 stopped in $sym ($(cpu0 "$n" | grep -a -m1 'rip:' | tr -s ' '))" || bad "$n: cpu 0 not in $sym ($(cpu0 "$n" | grep -a -m1 'rip:'))"
@@ -131,7 +131,7 @@ else
     has desk "^hang: on .* pmu=[1-9]" && ok "desk: logger on with PMU" || bad "desk: $(grep -a -m1 '^hang:' "$D/desk.klar")"
     grep -q '^logged-in 1' "$D/desk.klar.steps" && ok "desk: logged in" || bad "desk: login failed ($(tr '\n' ' ' < "$D/desk.klar.steps"))"
     grep -q '^settled 1' "$D/desk.klar.steps" && ok "desk: desktop survived the settle time" || bad "desk: did not settle"
-    n=$(grep -ac 'EXCEPTION\|ABSTURZ' "$D/desk.klar"); [ "$n" = 0 ] && ok "desk: no crash" || bad "desk: $n crash lines ($(grep -a -m1 'EXCEPTION' "$D/desk.klar"))"
+    n=$(grep -ac 'EXCEPTION\|CRASH' "$D/desk.klar"); [ "$n" = 0 ] && ok "desk: no crash" || bad "desk: $n crash lines ($(grep -a -m1 'EXCEPTION' "$D/desk.klar"))"
     has desk "^hang: detected" && bad "desk: false alarm $(grep -a -m1 '^hang: detected' "$D/desk.klar")" || ok "desk: no false alarm"
     [ "$(boots desk)" = 1 ] && ok "desk: one boot" || bad "desk: $(boots desk) boots"
 fi

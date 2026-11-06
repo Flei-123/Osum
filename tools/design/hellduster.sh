@@ -45,7 +45,7 @@ foto 14-taskleiste
 DREH
 
     qemu-system-x86_64 -kernel "$KERN" -m 2048 \
-      -append "osum gfx disp fbres=3440x1440 wm wig desk wmshell wmdauer herz absturzhalt nopuls tz=120 lang=en usb hidgen modfs nosched noproc nofs" \
+      -append "osum gfx disp fbres=3440x1440 wm wig desk wmshell wmdauer herz crashhalt nopuls tz=120 lang=en usb hidgen modfs nosched noproc nofs" \
       -serial "file:$W/serial.txt" -display none -no-reboot \
       -device "VGA,edid=on,xres=3440,yres=1440,vgamem_mb=128" \
       -drive "file=$W/disk.img,format=raw,if=ide,index=0" \

@@ -9,8 +9,8 @@ QEMU_X86=${QEMU_X86:-qemu-system-x86_64}
 export FIRNLIB="$(pwd)/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 ULD=kernel/user/user.ld
-PROGS="sh ls cat echo log absturz krach"
-source_of() { case $1 in absturz) echo crash ;; krach) echo noise ;; *) echo "$1" ;; esac; }
+PROGS="sh ls cat echo log crash krach"
+source_of() { case $1 in krach) echo noise ;; *) echo "$1" ;; esac; }
 BLOCKS=4096
 
 TMPD=$(mktemp -d)
@@ -90,7 +90,7 @@ for p in $PROGS; do
         -o "$TMPD/$p.elf" "$TMPD/crt.o" "$TMPD/$p.o" 2>/dev/null \
         || bad "$p cannot be linked"
 done
-[ -f "$TMPD/log.elf" ] && ok "/bin/log, /bin/absturz and /bin/krach built" \
+[ -f "$TMPD/log.elf" ] && ok "/bin/log, /bin/crash and /bin/krach built" \
                        || bad "the new programs are missing"
 
 kn=$(grep -aoE 'const SYS_OSUM_KLOG: u64 = [0-9]+' kernel/sys/sys.fi | grep -oE '[0-9]+$')
@@ -184,7 +184,7 @@ has "$TMPD/r3.txt" "WEITERLAEUFT" "(d) the system keeps running afterwards"
 report_path=$(grep -aoE '/var/crash/[0-9]+\.txt' "$TMPD/r3.txt" | head -1)
 [ -n "$report_path" ] && ok "(d) a report was stored: $report_path" \
                  || bad "(d) no report was stored"
-grep -qa 'absturz: bericht' "$TMPD/r3.txt" \
+grep -qa 'crash: report' "$TMPD/r3.txt" \
     && ok "(d) the kernel says what became of the report" \
     || bad "(d) the kernel is silent about the report"
 
@@ -195,16 +195,16 @@ report_path=$(grep -aoE '/var/crash/[0-9]+\.txt' "$TMPD/panicdisk.txt" | tail -1
 [ -n "$report_path" ] && ok "(c) the kernel stored a report despite the panic: $report_path" \
                  || bad "(c) no report was stored on the panic"
 
-run_vm_disk "$K0" "osum $QUIET script=absturz;exit" \
+run_vm_disk "$K0" "osum $QUIET script=crash;exit" \
     "$TMPD/after.txt" "$TMPD/disk.img"
 has "$TMPD/after.txt" "crash: a report from the last boot is present" \
     "(c) the kernel finds the mark of the last run again"
 has "$TMPD/after.txt" "A REPORT FROM THE LAST START" \
-    "(c) /bin/absturz reports it to the user"
-has "$TMPD/after.txt" "ABSTURZBERICHT" "(c) the report itself is shown"
-has "$TMPD/after.txt" "-- rueckspur" "(c) the report contains the backtrace"
-has "$TMPD/after.txt" "-- protokoll" "(c) the report contains the last log lines"
-has "$TMPD/after.txt" "ABSTURZBERICHT (KERN)" "(c) it is the report of the kernel panic"
+    "(c) /bin/crash reports it to the user"
+has "$TMPD/after.txt" "CRASH REPORT" "(c) the report itself is shown"
+has "$TMPD/after.txt" "-- backtrace" "(c) the report contains the backtrace"
+has "$TMPD/after.txt" "-- log" "(c) the report contains the last log lines"
+has "$TMPD/after.txt" "CRASH REPORT (KERNEL)" "(c) it is the report of the kernel panic"
 n=$(grep -acE '^  #[0-9]+ [a-z]+\.[a-z_0-9]+\+0x' "$TMPD/after.txt")
 num "(c) resolved symbols in the report" "${n:-0}" ge 1
 
@@ -235,9 +235,9 @@ echo "== 5b. K-011: the report survives the warm restart in memory =="
 run_vm_disk "$K0" "osum $QUIET logall krach script=krach kernfs;exit" \
     "$TMPD/cold1.txt" "$TMPD/disk.img"
 has "$TMPD/cold1.txt" "on request, kind 2" "K-011: the panic with the lock held took place"
-has "$TMPD/cold1.txt" "absturz: filesystem locked, no report" \
+has "$TMPD/cold1.txt" "crash: filesystem locked, no report" \
     "K-011: the latch forbids the disk (as intended)"
-run_vm_disk "$K0" "osum $QUIET logall script=absturz;exit" \
+run_vm_disk "$K0" "osum $QUIET logall script=crash;exit" \
     "$TMPD/cold2.txt" "$TMPD/disk.img"
 n=$(grep -ac 'aus dem speicher gerettet' "$TMPD/cold2.txt")
 num "COUNTER-PROOF cold: nothing is rescued after a cold start" "${n:-0}" eq 0
@@ -247,7 +247,7 @@ num "COUNTER-PROOF cold: no report of the kind-2 panic on the disk" "${n:-0}" eq
 wsock="$TMPD/warm.sock"
 rm -f "$wsock" "$TMPD/warm.txt"
 timeout 240 $QEMU_X86 $ACCEL -kernel "$K0" -m 256 \
-    -append "osum $QUIET logall krach absturzhalt script=absturz;krach kernfs;exit" \
+    -append "osum $QUIET logall krach crashhalt script=crash;krach kernfs;exit" \
     -serial "file:$TMPD/warm.txt" -display none \
     -drive "file=$TMPD/disk.img,format=raw,if=ide,index=0" \
     -monitor "unix:$wsock,server,nowait" \
@@ -276,19 +276,19 @@ else
 fi
 kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null; rm -f "$wsock"
 awk '/kernel halted/ { n++; next } n == 1' "$TMPD/warm.txt" > "$TMPD/warm2.txt"
-has "$TMPD/warm2.txt" "absturz: report rescued from memory" \
+has "$TMPD/warm2.txt" "crash: report rescued from memory" \
     "K-011 warm: the second start finds the report in memory"
-grep -qaE 'absturz: bericht +/var/crash/[0-9]+\.txt +geschrieben' "$TMPD/warm2.txt" \
+grep -qaE 'crash: report +/var/crash/[0-9]+\.txt +written' "$TMPD/warm2.txt" \
     && ok "K-011 warm: and stores it as a file under /var/crash" \
     || bad "K-011 warm: the rescued report was not stored"
-has "$TMPD/warm2.txt" "ABSTURZBERICHT (KERN)" "K-011 warm: /bin/absturz shows it as the kernel report"
+has "$TMPD/warm2.txt" "CRASH REPORT (KERNEL)" "K-011 warm: /bin/crash shows it as the kernel report"
 has "$TMPD/warm2.txt" "on request, kind 2" "K-011 warm: and it is the report of THIS panic (kind 2 in the log part)"
 
 echo "== 6. (b) the panic screen, really read =="
 sock="$TMPD/mon.sock"
 rm -f "$sock" "$TMPD/panic.ppm" "$TMPD/panic.txt"
 timeout 240 $QEMU_X86 $ACCEL -kernel "$K0" -m 256 \
-    -append "nokbd nosched noproc noring3 gfx logall absturzhalt krach krachjetzt" \
+    -append "nokbd nosched noproc noring3 gfx logall crashhalt krach krachjetzt" \
     -serial "file:$TMPD/panic.txt" -display none -no-reboot \
     -vga std -global VGA.edid=off \
     -monitor "unix:$sock,server,nowait" >/dev/null 2>&1 &

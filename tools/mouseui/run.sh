@@ -35,7 +35,7 @@ if not (r["mspeed"][1] < r["maccel"][1] < r["mnat"][1] < r["mges"][1]):
     print("rows out of order"); sys.exit(1)
 PY
 [ -s "$TMPD/o/mouse.ppm" ] && ok "the picture was taken" || bad "no picture"
-c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null; true)
+c=$(grep -acE 'CRASH|EXCEPTION' "$S" 2>/dev/null; true)
 [ "$c" = 0 ] && ok "no crash" || bad "crash lines: $c"
 mkdir -p docs/shots/mouse
 [ -s "$TMPD/o/mouse.ppm" ] && python3 tools/design/ppm2png.py "$TMPD/o/mouse.ppm" docs/shots/mouse/mouse.png > /dev/null 2>&1

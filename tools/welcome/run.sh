@@ -113,7 +113,7 @@ has "$S" "welcome: ready" "audit machine: the desktop started the welcome wizard
 has "$S" "welcome: page 0 of 3" "wizard opens on page 0"
 n=$(rects_of "$S")
 [ "$n" -ge 4 ] && ok "page 0 reports $n controls (field, chevron, dots, next)" || bad "page 0 controls: $n"
-c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null; true)
+c=$(grep -acE 'CRASH|EXCEPTION' "$S" 2>/dev/null; true)
 [ "$c" = 0 ] && ok "no crash" || bad "crash lines: $c"
 # ---- part C: each page opens directly (conf p=) and fits small windows
 page_check() { # tag page extra-conf w h expected-min-rects
@@ -125,7 +125,7 @@ page_check() { # tag page extra-conf w h expected-min-rects
     [ "$r" -ge "$6" ] && ok "page $2 at $4x$5: $r controls (>= $6)" || bad "page $2 at $4x$5: $r controls (< $6)"
     local bottom; bottom=$(grep -a '^welcome: rect ' "$SS" | sed -n 's/.* y=\([0-9]*\) w=[0-9]* h=\([0-9]*\)$/\1 \2/p' | awk '{b=$1+$2; if(b>m)m=b} END{print m+0}')
     [ "$bottom" -le "$5" ] 2>/dev/null && ok "page $2 at $4x$5: all controls end inside the window ($bottom <= $5)" || bad "page $2 at $4x$5: controls end at $bottom > $5"
-    local cc; cc=$(grep -acE 'ABSTURZ|EXCEPTION' "$SS" 2>/dev/null; true)
+    local cc; cc=$(grep -acE 'CRASH|EXCEPTION' "$SS" 2>/dev/null; true)
     [ "$cc" = 0 ] && ok "page $2 at $4x$5: no crash" || bad "page $2 at $4x$5: crash lines $cc"
 }
 page_check pg0 0 '' 520 420 4
@@ -156,7 +156,7 @@ S="$W/walk/serial.txt"
 has "$S" "welcome: page 1 of 3" "click next: Wi-Fi page"
 has "$S" "welcome: page 2 of 3" "click next: done page"
 has "$S" "settings: ready" "click on a done row opens Settings"
-c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null; true)
+c=$(grep -acE 'CRASH|EXCEPTION' "$S" 2>/dev/null; true)
 [ "$c" = 0 ] && ok "no crash after the clicks" || bad "crash lines after the clicks: $c"
 mkdir -p /tmp/welcome-last; cp "$W/walk/"0?-*.ppm /tmp/welcome-last/ 2>/dev/null
 echo "WELCOME: $pass passed, $fail failed"

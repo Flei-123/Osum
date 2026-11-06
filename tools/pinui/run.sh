@@ -55,7 +55,7 @@ mapfile -t got < "$OUT.seq"
 for i in 0 1 2 3 4; do
   if [[ "${got[$i]:-}" =~ ^(${want[$i]}) ]]; then ok "${names[$i]}"; else bad "${names[$i]} (got: ${got[$i]:-none})"; fi
 done
-c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null; true)
+c=$(grep -acE 'CRASH|EXCEPTION' "$S" 2>/dev/null; true)
 [ "$c" = 0 ] && ok "no crash" || bad "crash lines: $c"
 echo "PINUI: $pass passed, $fail failed"
 [ "$fail" = 0 ]

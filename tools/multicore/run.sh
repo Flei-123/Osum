@@ -157,7 +157,7 @@ lauf() { # name smp extra [limit]
     #
     while [ $i -lt 800 ]; do
         [ "$(grep -ac '^tafel: 23 [A-Z]' "$out" 2>/dev/null)" -ge 5 ] && break
-        grep -qa '^absturz:  0\|^\*\*\* EXCEPTION' "$out" 2>/dev/null && break
+        grep -qa '^crash:  0\|^\*\*\* EXCEPTION' "$out" 2>/dev/null && break
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.2; i=$((i + 1))
     done
@@ -173,7 +173,7 @@ w_abw()  { grep -a '^r3: syscalls' "$1" | tail -1 | sed -n 's/.*diff=\([0-9]*\).
 w_kerne(){ grep -a '^r3: procs' "$1" | tail -1 | sed -n 's/.* n=\([0-9]*\).*/\1/p'; }
 w_scpu() { grep -a '^r3: syscalls' "$1" | tail -1 \
     | grep -oE 'c[0-9]+=[0-9]+' | grep -vE '=0$' | wc -l; }
-w_exc()  { grep -ac '^\*\*\* EXCEPTION\|^absturz:  0' "$1"; }
+w_exc()  { grep -ac '^\*\*\* EXCEPTION\|^crash:  0' "$1"; }
 w_pid0() { grep -ac '^desk: start .* pid=0' "$1"; }
 
 echo
@@ -231,7 +231,7 @@ lauf b4 4 "r3alle gsluege r3blind" 200
 L=$TMPD/b4.txt
 if [ "$(w_exc $L)" -ge 1 ]; then
     ok "without the latch the machine breaks again -- it is what holds it"
-    grep -a '^absturz:  [0-6] ' $L | head -7 | sed 's/^/        /'
+    grep -a '^crash:  [0-6] ' $L | head -7 | sed 's/^/        /'
 else
     bad "without the latch NOTHING happens -- then section 8 does not measure the latch"
 fi

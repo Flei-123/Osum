@@ -48,7 +48,7 @@ boot() { # <tag> <extra words>
 echo "== A. panic on NVMe root: report flushed =="
 boot a ""
 grep -aq 'rootsel: .*nvme' "$TMPD/a.ser" && ok "A root picked on nvme" || bad "A rootsel nvme line missing"
-grep -aq 'absturz: bericht .* geschrieben' "$TMPD/a.ser" && ok "A report written" || bad "A report written line missing"
+grep -aq 'crash: report .* written' "$TMPD/a.ser" && ok "A report written" || bad "A report written line missing"
 grep -aq 'crash: report flushed, device +1' "$TMPD/a.ser" && ok "A report flushed, device +1" || bad "A flush line: $(grep -a 'report flushed' "$TMPD/a.ser" | head -1)"
 na=$(grep -c pci_nvme_flush_ns "$TMPD/a.trace")
 [ "$na" -gt 0 ] && ok "A qemu saw NVMe flush commands: $na" || bad "A qemu saw no NVMe flush"

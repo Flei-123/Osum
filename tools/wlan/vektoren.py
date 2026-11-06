@@ -44,7 +44,7 @@ def orakel(rows):
                        stderr=subprocess.PIPE)
     if p.returncode != 0:
         bad("the oracle exited with code %d" % p.returncode)
-        return ["ABSTURZ"] * len(rows)
+        return ["CRASH"] * len(rows)
     aus = p.stdout.decode(errors="replace").split("\n")
     while aus and aus[-1] == "":
         aus.pop()

@@ -37,7 +37,7 @@ if not (r["plidb"][1] < r["pscrb"][1] < r["psbyb"][1] < r["pprofb"][1] < r["plid
     print("rows out of order"); sys.exit(1)
 PY
 [ -s "$TMPD/o/power.ppm" ] && ok "the picture was taken" || bad "no picture"
-c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null; true)
+c=$(grep -acE 'CRASH|EXCEPTION' "$S" 2>/dev/null; true)
 [ "$c" = 0 ] && ok "no crash" || bad "crash lines: $c"
 mkdir -p docs/shots/power
 [ -s "$TMPD/o/power.ppm" ] && python3 tools/design/ppm2png.py "$TMPD/o/power.ppm" docs/shots/power/power.png > /dev/null 2>&1

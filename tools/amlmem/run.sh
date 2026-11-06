@@ -64,7 +64,7 @@ rc=$(run_case new "$NEW" "${PRELOAD[@]}")
 F="$D/new.txt"; clean "$F"
 has "$F.clean" "==READ==" "script ran"
 hasnot "$F.clean" "EXCEPTION" "no page fault"
-hasnot "$F.clean" "ABSTURZBERICHT" "no crash report"
+hasnot "$F.clean" "CRASH REPORT" "no crash report"
 is "kernel finished after the read" "$rc" "21"
 has "$F.clean" "acpibl: levels=11 min=0 max=100 cur=50" "boot-time read sees the preloaded byte"
 is "ring-3 read through the window equals it" "$(read_part "$F" | grep -ac '^dispctl: bright=100$')" "1"

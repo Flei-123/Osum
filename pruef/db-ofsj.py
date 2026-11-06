@@ -43,6 +43,6 @@ lauf.image("nach-dem-schreiben")
 
 t = lauf.read_text()
 lauf.say("--- Befund ---")
-for muster in ("ABSTURZ", "ofsj", "#UD", "kernel halted"):
+for muster in ("CRASH", "ofsj", "#UD", "kernel halted"):
     lauf.say("  %-16s %dx" % (muster, t.count(muster)))
 lauf.say("== Ende Gegenprobe ==")

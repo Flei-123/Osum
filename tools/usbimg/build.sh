@@ -1044,25 +1044,25 @@ interface_branding: @MARKE_PRODUKT@ - Secure Boot must be OFF
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell nobootterm wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell nobootterm wmdauer crashhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
 
 /@MARKE_PRODUKT@ (safe graphics)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx fbflush wm wig desk wmshell nobootterm wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx fbflush wm wig desk wmshell nobootterm wmdauer crashhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
 
 /@MARKE_PRODUKT@ (no network)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell nobootterm wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell nobootterm wmdauer crashhalt nopuls tz=60 tzrule=eu usb hidgen nosched noproc nofs anmeldung
 
 /@MARKE_PRODUKT@ (safe mode)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx wm wig desk wmshell nobootterm wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen safe nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx wm wig desk wmshell nobootterm wmdauer crashhalt nopuls tz=60 tzrule=eu usb hidgen safe nosched noproc nofs anmeldung
 
 /Command line
     protocol: multiboot1
@@ -1082,55 +1082,55 @@ interface_branding: @MARKE_PRODUKT@ - Secure Boot must be OFF
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell nobootterm wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs lang=en anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell nobootterm wmdauer crashhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs lang=en anmeldung
 
 //@MARKE_PRODUKT@ (measuring board)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen tafel herz nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer crashhalt nopuls tz=60 tzrule=eu usb hidgen tafel herz nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
 
 //@MARKE_PRODUKT@ (network: interrupt pin)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen tafel herz nic nip=169.254.10.1/16 nsvc=0 nwait=0 nicintx dhcp jarvis nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer crashhalt nopuls tz=60 tzrule=eu usb hidgen tafel herz nic nip=169.254.10.1/16 nsvc=0 nwait=0 nicintx dhcp jarvis nosched noproc nofs anmeldung
 
 //@MARKE_PRODUKT@ (network: polled)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer absturzhalt nopuls tz=60 tzrule=eu usb hidgen tafel herz nic nip=169.254.10.1/16 nsvc=0 nwait=0 nicnoirq dhcp jarvis nosched noproc nofs anmeldung
+    cmdline: modfs osum gfx disp audio wm wig desk wmshell wmdauer crashhalt nopuls tz=60 tzrule=eu usb hidgen tafel herz nic nip=169.254.10.1/16 nsvc=0 nwait=0 nicnoirq dhcp jarvis nosched noproc nofs anmeldung
 
 //@MARKE_PRODUKT@ (framebuffer uncached)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx fbuc wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum gfx fbuc wm wig desk wmshell wmdauer tafel herz crashhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 //@MARKE_PRODUKT@ (framebuffer write-back)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx fbwb wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum gfx fbwb wm wig desk wmshell wmdauer tafel herz crashhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 //@MARKE_PRODUKT@ (status lamp, blink fields)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz pulsled absturzhalt tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum gfx wm wig desk wmshell wmdauer tafel herz pulsled crashhalt tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 //@MARKE_PRODUKT@ (apps on core 0 only)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum r3eins gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs
+    cmdline: modfs osum r3eins gfx wm wig desk wmshell wmdauer tafel herz crashhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs
 
 //@MARKE_PRODUKT@ (check: wrong GS base)
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum r3alle gsluege gfx wm wig desk wmshell wmdauer tafel herz absturzhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
+    cmdline: modfs osum r3alle gsluege gfx wm wig desk wmshell wmdauer tafel herz crashhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 nosched noproc nofs
 
 //@MARKE_PRODUKT@ (2560x1440)
     protocol: multiboot1
@@ -1184,12 +1184,12 @@ if grep -q '@MARKE_PRODUKT@' "$OUT/limine.conf"; then
 fi
 # PERSONAL STICK (27.09.2026, Dell 9020 as an unattended test device).
 # Entry 1 is the boot the Dell ran all night without a single panic: no
-# `vfs`, no AHCI bring-up -- plus `absturzneustart`, so a kernel panic
+# `vfs`, no AHCI bring-up -- plus `crashrestart`, so a kernel panic
 # resets the box after 20 s instead of leaving it dead until somebody
 # presses the button. The image with `vfs` + AHCI at boot in entry 1
 # panicked in two of four starts on the Dell.
 # Entry 2 (new) is the installer boot: `vfs` for /dev and `sata` for the
-# AHCI disk (/dev/sda), also with `absturzneustart`.
+# AHCI disk (/dev/sda), also with `crashrestart`.
 if [ "$IMAGE_PROFILE" = personal ]; then
     python3 - "$OUT/limine.conf" "$MARKE_PRODUKT" <<'PYVFS' || fehler "the personal boot menu could not be written"
 import sys
@@ -1198,8 +1198,8 @@ lines = open(path).read().split('\n')
 i = lines.index('/' + prod)
 j = i + 1
 while j < len(lines) and lines[j].startswith(' '):
-    if lines[j].strip().startswith('cmdline:') and ' absturzneustart' not in lines[j]:
-        lines[j] = lines[j] + ' absturzneustart'
+    if lines[j].strip().startswith('cmdline:') and ' crashrestart' not in lines[j]:
+        lines[j] = lines[j] + ' crashrestart'
     if lines[j].strip().startswith('cmdline:') and ' safeauto' not in lines[j]:
         lines[j] = lines[j] + ' safeauto'
     # r343: /dev in entry 1 too (installer from the desktop); the SATA disk

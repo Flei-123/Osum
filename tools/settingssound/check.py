@@ -40,7 +40,7 @@ def judge(txt):
         ok(top == SOUND_PAGE, "top result of 'sound' is the Sound page (top=%d)" % top)
         ok(" r0=%d" % SOUND_PAGE in rest, "first row of the result list is the Sound page (%s)" % rest.strip())
         ok(n <= 12, "result list within its cap (%d)" % n)
-    ok(not re.search(r"ABSTURZ|EXCEPTION", txt), "no crash lines")
+    ok(not re.search(r"CRASH|EXCEPTION", txt), "no crash lines")
     ok("settings: sound none" not in txt, "no info bar message when the sound card is present")
     return res
 
@@ -55,7 +55,7 @@ def judge_nodev(txt):
     ok(ctl, "Sound page built without a card (page=29)")
     ok(ctl and max(ctl) == 1, "only the info bar without a card, no volume/mute controls (%s)" % ctl)
     ok(re.search(r"^settings: sound none$", txt, re.M), "info bar branch taken (settings: sound none)")
-    ok(not re.search(r"ABSTURZ|EXCEPTION", txt), "no crash lines without a card")
+    ok(not re.search(r"CRASH|EXCEPTION", txt), "no crash lines without a card")
     return res
 
 

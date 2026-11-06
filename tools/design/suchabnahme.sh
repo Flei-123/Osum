@@ -23,7 +23,7 @@ mon(){ printf '%s\n' "$1" | socat - "UNIX-CONNECT:$W/mon" >/dev/null 2>&1; sleep
 schuss(){ mon "screendump $W/$1.ppm" 2; }
 
 APPEND="osum gfx disp fbres=3440x1440 wm wig desk wmshell wmdauer herz"
-APPEND="$APPEND absturzhalt nopuls tz=120 lang=en usb hidgen modfs"
+APPEND="$APPEND crashhalt nopuls tz=120 lang=en usb hidgen modfs"
 APPEND="$APPEND nosched noproc nofs"
 
 qemu-system-x86_64 -kernel "$KERN" -m 2048 -append "$APPEND" \
@@ -83,7 +83,7 @@ grep -aE 'launcher:|taskbar: (state|btn)|desk: start|editor|edit:' "$W/serial.tx
     | tail -24 | sed 's/^/   /'
 echo
 
-n=$(grep -acE "ABSTURZ|EXCEPTION" "$W/serial.txt" 2>/dev/null | head -1); n=${n:-0}
+n=$(grep -acE "CRASH|EXCEPTION" "$W/serial.txt" 2>/dev/null | head -1); n=${n:-0}
 [ "$n" -eq 0 ] && ok "kein Absturz" || bad "$n Absturzzeilen"
 grep -qa 'desk: start /bin/launcher' "$W/serial.txt" \
     && ok "der Starter laeuft ueberhaupt" || bad "kein Starter"

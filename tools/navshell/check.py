@@ -93,7 +93,7 @@ def judge(txt, quiet=False):
             if p not in merged or n < merged[p]:
                 merged[p] = n if p in merged else max(n, 0)
         open(BASE, "w").write("".join("%d %d\n" % (p, merged[p]) for p in sorted(merged)))
-    ok(not re.search(r"ABSTURZ|EXCEPTION|panic", txt), "no crash lines")
+    ok(not re.search(r"CRASH|EXCEPTION|panic", txt), "no crash lines")
     return results
 
 

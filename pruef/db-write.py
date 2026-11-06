@@ -21,7 +21,7 @@ time.sleep(1)
 def lebt():
     """Laeuft die Maschine noch? Ein Absturz steht auf der Leitung."""
     t = lauf.read_text()
-    return ("kernel halted" not in t) and ("absturz:  0" not in t)
+    return ("kernel halted" not in t) and ("crash:  0" not in t)
 
 
 def schritt(row, wait=3.0):
@@ -56,6 +56,6 @@ schritt("cat /data/t1.txt")
 lauf.image("gegenprobe")
 t = lauf.read_text()
 lauf.say("--- Befund ---")
-for muster in ("kernel halted", "STUFE ST", "ofsj", "#UD", "absturz:"):
+for muster in ("kernel halted", "STUFE ST", "ofsj", "#UD", "crash:"):
     lauf.say("  %-16s %dx" % (muster, t.count(muster)))
 lauf.say("== Ende ==")

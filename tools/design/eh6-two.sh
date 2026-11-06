@@ -191,7 +191,7 @@ echo "platte $(stat -c%s "$OUT/disk.img") Oktette"
 # ------------------------------------------------------------ 3. starten
 #
 APPEND="osum gfx fbres=${XRES}x${YRES} wm wig desk wmshell wmdauer tafel herz"
-APPEND="$APPEND absturzhalt nopuls tz=120 lang=$lang nosched noproc nofs"
+APPEND="$APPEND crashhalt nopuls tz=120 lang=$lang nosched noproc nofs"
 [ -n "$SKAL" ] && APPEND="$APPEND $SKAL"
 [ "$halt" != 0 ] && APPEND="$APPEND wighalt=$halt"
 [ -n "$extra" ] && APPEND="$APPEND $extra"

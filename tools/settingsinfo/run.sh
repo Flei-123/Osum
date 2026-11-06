@@ -46,7 +46,7 @@ r=$(grep -an 'settings: rect name=ibexp ' "$S" | head -1 | cut -d: -f1)
 [ -n "$l" ] && [ -n "$r" ] && [ "$r" -lt "$l" ] && ok "COUNTER-PROBE: the export line comes only AFTER the button was shown/clicked" || bad "export line order (button $r, export $l)"
 b=$(grep -a 'settings: info export rc=0 bytes=' "$S" | head -1 | sed 's/.*bytes=//' | tr -dc 0-9)
 [ -n "$b" ] && [ "$b" -gt 0 ] && ok "export ran: rc=0, report has $b bytes" || bad "export result (bytes='$b')"
-c=$(grep -acE 'ABSTURZ|EXCEPTION' "$S" 2>/dev/null; true)
+c=$(grep -acE 'CRASH|EXCEPTION' "$S" 2>/dev/null; true)
 [ "$c" = 0 ] && ok "no crash" || bad "crash lines: $c"
 ls "$OUT"/*.ppm >/dev/null 2>&1 && ok "pictures taken: $(ls "$OUT"/*.ppm | wc -l)" || bad "no pictures"
 echo "SETTINGSINFO: $pass passed, $fail failed"

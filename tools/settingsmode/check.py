@@ -63,7 +63,7 @@ def judge(txt):
         ok(False, "tab rects reported after the last build")
     names = set(RECT.findall(txt))
     ok(all(n in names for n in ENTRY_RECTS), "address entry rects reported with the fixed address")
-    ok(not re.search(r"ABSTURZ|EXCEPTION", txt), "no crash lines")
+    ok(not re.search(r"CRASH|EXCEPTION", txt), "no crash lines")
     return res
 
 

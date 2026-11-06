@@ -215,7 +215,7 @@ cwin c4 4
 has "$TMPD/c4/serial.txt" "vaultprompt: timeout" "no answer: timeout"
 hasnot "$TMPD/c4/serial.txt" "vaultprompt: allow" "COUNTER-PROOF: a timeout never says allow"
 for d in c1 c2 c3 c4; do
-    c=$(grep -acE 'ABSTURZ|EXCEPTION' "$TMPD/$d/serial.txt" 2>/dev/null; true)
+    c=$(grep -acE 'CRASH|EXCEPTION' "$TMPD/$d/serial.txt" 2>/dev/null; true)
     [ "$c" = 0 ] || bad "crash lines in $d: $c"
 done
 echo "VAULTPROMPT: $pass passed, $fail failed"

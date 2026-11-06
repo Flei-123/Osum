@@ -33,7 +33,7 @@ grep -aq 'testmark: shown' "$SA" && ok "A: testmode=1 -> watermark shown" || bad
 grep -aq 'testmark: hidden' "$SA" && bad "A: watermark hidden again" || ok "A: watermark stays"
 grep -aq 'testmark: \(shown\|hidden\|no window\)' "$SB" && bad "B COUNTER-PROOF: watermark with testmode=0" || ok "B COUNTER-PROOF: testmode=0 -> no watermark"
 grep -aq 'testmark: \(shown\|hidden\|no window\)' "$SC" && bad "C COUNTER-PROOF: watermark without config" || ok "C COUNTER-PROOF: no config -> no watermark"
-n=$(grep -ac 'ABSTURZ\|EXCEPTION\|panic' "$SA" "$SB" "$SC" | awk -F: '{s+=$2} END{print s+0}')
+n=$(grep -ac 'CRASH\|EXCEPTION\|panic' "$SA" "$SB" "$SC" | awk -F: '{s+=$2} END{print s+0}')
 [ "$n" = 0 ] && ok "no crash or panic" || bad "crash lines: $n"
 echo "TESTMARK: $pass passed, $fail failed"
 [ "$fail" = 0 ]

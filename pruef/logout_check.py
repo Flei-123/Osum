@@ -107,7 +107,7 @@ def sample_diff(path_a, path_b, box=None):
     return differing, total
 
 
-cmdline = ("modfs osum gfx wm wig desk wmshell wmdauer herz absturzhalt nopuls "
+cmdline = ("modfs osum gfx wm wig desk wmshell wmdauer herz crashhalt nopuls "
            "tz=120 usb hidgen nosched noproc nofs fbres=1280x800 "
            "lang=de anmeldung")
 accel = ["-accel", "kvm", "-cpu", "host"] if os.access("/dev/kvm", os.W_OK) \

@@ -36,7 +36,7 @@ foto 04-programm-da
 DREH
 
 APPEND="osum gfx disp fbres=3440x1440 wm wig desk wmshell wmdauer herz"
-APPEND="$APPEND absturzhalt nopuls tz=120 lang=en usb hidgen modfs"
+APPEND="$APPEND crashhalt nopuls tz=120 lang=en usb hidgen modfs"
 APPEND="$APPEND nosched noproc nofs"
 
 qemu-system-x86_64 -kernel "$KERN" -m 2048 -append "$APPEND" \

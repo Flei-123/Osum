@@ -204,7 +204,7 @@ waitfor "==FERTIG==" 400 || true
 clean "$SER" | awk '/==G-CEIL==/{f=1;next} /==FERTIG==/{f=0} f' > "$TMPD/ceil.txt"
 grep -aqi 'ceiling' "$TMPD/ceil.txt" && ok "GEGENPROBE: 'apprights set alpha camera' refused (above the manifest ceiling)" || bad "ceiling refusal: $(head -3 "$TMPD/ceil.txt")"
 grep -aq '^alpha notify' "$TMPD/ceil.txt" && ok "conf unchanged after the refusal" || bad "conf after refusal: $(cat "$TMPD/ceil.txt" | head -3)"
-c=$(clean "$SER" | grep -acE 'ABSTURZ|EXCEPTION|PANIC'); [ "$c" = 0 ] && ok "no crash lines" || bad "crash lines: $c"
+c=$(clean "$SER" | grep -acE 'CRASH|EXCEPTION|PANIC'); [ "$c" = 0 ] && ok "no crash lines" || bad "crash lines: $c"
 kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null
 
 echo "== 8. short window 1024x576 =="

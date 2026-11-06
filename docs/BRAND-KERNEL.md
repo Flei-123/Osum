@@ -15,4 +15,4 @@ Source of truth: `marke.conf` (PRODUKT, KERN, HERSTELLER, KURZ, WEB, FEED). Envi
 - `OSUM-OFS`, `OSUMMOD`, `SSH-2.0-OsumSSH`, `osum_panic`, `osum.mb`, `.osp`, `/users/osum`, CPUID hypervisor id, ABI numbers.
 - Crypto and derivation labels (`orientos konto v1 siegel`, `orientos konto v1 marke`, `osum backup v1`).
 - Provider and protocol ids: `anb_fleitec` client `orientos-device`/audience `orientos`, `anb_xoffi` provider `xoffi`, `melder` backend `orientos`.
-- Kernel command line words (`osum`, `wmdauer`, `absturzhalt`, ...).
+- Kernel command line words (`osum`, `wmdauer`, `crashhalt`, ...).

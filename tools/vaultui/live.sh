@@ -115,7 +115,7 @@ hasnot "$S" "vaultui: unlock ok" "COUNTER-PROOF: no unlock during the delay"
 
 echo "== 5. live guests did not crash =="
 for d in r1 r2 r3 r4; do
-    c=$(grep -acE 'ABSTURZ|EXCEPTION' "$TMPD/$d/serial.txt" 2>/dev/null; true)
+    c=$(grep -acE 'CRASH|EXCEPTION' "$TMPD/$d/serial.txt" 2>/dev/null; true)
     [ "$c" = 0 ] || bad "crash lines in $d: $c"
 done
 echo "VAULTUI-LIVE: $pass passed, $fail failed"

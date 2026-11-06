@@ -35,7 +35,7 @@ ok(len(lays) > 0, "layout lines reported (%d)" % len(lays))
 if not lays:
     print("SETTINGSNARROW %s: no layout lines" % cfg)
     sys.exit(1)
-ok(not re.search(r"ABSTURZ|EXCEPTION", txt), "no crash lines")
+ok(not re.search(r"CRASH|EXCEPTION", txt), "no crash lines")
 
 nav = cfg.startswith("nav")
 first = lays[0]

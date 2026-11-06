@@ -167,7 +167,7 @@ if [ "$fail" != 0 ]; then
     echo "--- diagnosis: launcher lines ---"; grep -aE '^launcher: (geom|tile)' "$S" | head -n 12 | cut -c1-160
     echo "--- diagnosis: drive.log ---"; tail -n 25 "$OUT/drive.log" 2>/dev/null | cut -c1-160
 fi
-c=$(grep -acE 'ABSTURZ|EXCEPTION|PANIC' "$S"; true)
+c=$(grep -acE 'CRASH|EXCEPTION|PANIC' "$S"; true)
 [ "$c" = 0 ] && ok "no crash lines" || bad "crash lines: $c"
 kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null
 echo "SETTINGSPROBE: $pass passed, $fail failed"

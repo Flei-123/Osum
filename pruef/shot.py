@@ -19,7 +19,7 @@ from click_driver import Maschine
 # beide Laeufe denselben Rechner meinen. `fbres` setzt die Aufloesung;
 # `desk` startet den Schreibtisch, `wmdauer` laesst den Fensterserver
 # laufen statt nach einem Bild stehenzubleiben.
-CL = ("modfs osum gfx wm wig desk wmshell wmdauer herz absturzhalt nopuls "
+CL = ("modfs osum gfx wm wig desk wmshell wmdauer herz crashhalt nopuls "
       "tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 "
       "nosched noproc nofs fbres=1280x800")
 

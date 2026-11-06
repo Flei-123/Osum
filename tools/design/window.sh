@@ -41,7 +41,7 @@ cp "$WURZEL" "$W/disk.img"
 cp tools/design/window.txt "$W/drehbuch.txt"
 
 APPEND="osum gfx disp fbres=${SW}x${SH} wm wig desk wmshell wmdauer herz"
-APPEND="$APPEND absturzhalt nopuls tz=120 lang=en usb hidgen modfs"
+APPEND="$APPEND crashhalt nopuls tz=120 lang=en usb hidgen modfs"
 APPEND="$APPEND nosched noproc nofs"
 
 qemu-system-x86_64 -kernel "$BUILDD/k0.mb" -m 2048 -append "$APPEND" \
