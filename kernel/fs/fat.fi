@@ -457,6 +457,12 @@ fn node_hold(state: u64, node: u64) {
 }
 
 fn node_drop(state: u64, node: u64) {
+    let __f: u64 = enter(state)
+    node_drop__inner(state, node)
+    leave(state, __f)
+}
+
+fn node_drop__inner(state: u64, node: u64) {
     if node == 0 || node > MAX_NODES {
         return
     }
@@ -466,9 +472,15 @@ fn node_drop(state: u64, node: u64) {
     }
     let left: u64 = w - (1 << USE_SHIFT)
     if (left >> USE_SHIFT) == 0 && (left & DOFF_DEAD) != 0 {
-        pcache.drop_node(state, nget(state, node, N_MNT) - 1, node)
+        let m: u64 = nget(state, node, N_MNT) - 1
+        let clus: u64 = nget(state, node, N_CLUS)
+        pcache.drop_node(state, m, node)
         dcache.bump(state)
         octets.zero(nd(state, node), NODE_BYTES)
+        if clus >= 2 && sget(state, m, S_VALID) != 0 {
+            chain_free(state, m, clus)
+            mark_dirty(state, m)
+        }
         return
     }
     nset(state, node, N_DOFF, left)
@@ -483,8 +495,27 @@ fn node_detach(state: u64, node: u64) -> bool {
     dcache.bump(state)
     nset(state, node, N_DOFF, (w - (w & DOFF_MASK)) + DOFF_DEAD)
     nset(state, node, N_DLBA, 0)
-    nset(state, node, N_CLUS, 0)
-    nset(state, node, N_SIZE, 0)
+    return true
+}
+
+fn node_is_dead(state: u64, node: u64) -> bool {
+    return (nget(state, node, N_DOFF) & DOFF_DEAD) != 0
+}
+
+fn node_move(state: u64, node: u64, fresh: u64) -> bool {
+    let w: u64 = nget(state, node, N_DOFF)
+    if (w >> USE_SHIFT) == 0 || node == fresh {
+        return false
+    }
+    if (nget(state, fresh, N_DOFF) >> USE_SHIFT) != 0 {
+        return false
+    }
+    let dest: u64 = nget(state, fresh, N_DOFF) & DOFF_MASK
+    nset(state, node, N_DLBA, nget(state, fresh, N_DLBA))
+    nset(state, node, N_DOFF, (w - (w & DOFF_MASK)) + dest)
+    pcache.drop_node(state, nget(state, fresh, N_MNT) - 1, fresh)
+    octets.zero(nd(state, fresh), NODE_BYTES)
+    dcache.bump(state)
     return true
 }
 
@@ -1074,7 +1105,7 @@ fn f_write__body(state: u64, m: u64, node: u64, off: u64, src: u64,
     if node == 0 || sget(state, m, S_VALID) == 0 {
         return 0
     }
-    if (nget(state, node, N_ATTR) & A_DIR) != 0 || (nget(state, node, N_DOFF) & DOFF_DEAD) != 0 {
+    if (nget(state, node, N_ATTR) & A_DIR) != 0 {
         return 0
     }
     var first: u64 = nget(state, node, N_CLUS)
@@ -1843,7 +1874,7 @@ fn f_unlink__inner(state: u64, m: u64, path: u64) -> u64 {
     if !dir_remove(state, m, dir_clus, (&name[0]) as u64, true) {
         return 2
     }
-    if clus >= 2 {
+    if clus >= 2 && !node_is_dead(state, node) {
         chain_free(state, m, clus)
     }
     mark_dirty(state, m)
@@ -1884,9 +1915,11 @@ fn f_rename__inner(state: u64, m: u64, from: u64, to: u64) -> u64 {
     let clus: u64 = nget(state, node, N_CLUS)
     let size: u64 = nget(state, node, N_SIZE)
     let attr: u64 = nget(state, node, N_ATTR)
-    if dir_add(state, m, cb, (&b[0]) as u64, clus, attr, size) == 0 {
+    let fresh: u64 = dir_add(state, m, cb, (&b[0]) as u64, clus, attr, size)
+    if fresh == 0 {
         return 28
     }
+    let _moved: bool = node_move(state, node, fresh)
     if !dir_remove(state, m, ca, (&a[0]) as u64, false) {
         return 5
     }
