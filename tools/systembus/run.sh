@@ -264,7 +264,7 @@ gui() { # name extra drehbuch
     cp -f "$TMPD/disk.img" "$TMPD/$name.img"
     #
     timeout 320 $QEMU -kernel "$TMPD/k.mb" -m 512 \
-        -append "gfx fbres=1024x768 wm wig desk wmshell wmhold wighalt=300 nokbd nosched noproc nofs $extra" \
+        -append "gfx fbres=1024x768 wm wig desk wmshell wmdauer wighalt=300 nosched noproc nofs $extra" \
         -serial "file:$TMPD/$name.txt" -display none -no-reboot \
         -device "VGA,edid=on,xres=1024,yres=768,vgamem_mb=32" \
         -monitor "unix:$sock,server,nowait" \
@@ -272,7 +272,7 @@ gui() { # name extra drehbuch
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$TMPD/$name.qemu" 2>&1 &
     local pid=$! i=0
     while [ $i -lt 1500 ]; do
-        grep -qa '^wm: hold' "$TMPD/$name.txt" 2>/dev/null && break
+        grep -qa '^launcher: ready' "$TMPD/$name.txt" 2>/dev/null && break
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.2; i=$((i + 1))
     done
@@ -299,7 +299,7 @@ PY
 }
 
 cat > "$TMPD/dreh1" <<'DREH'
-warteauf 'wm: hold' || 90
+warteauf 'launcher: ready' || 90
 warteauf 'taskbar: text noti' || 90
 foto 01-leiste-meldung
 DREH
@@ -324,11 +324,9 @@ for c in sys.argv[1]:
 PY
 }
 {
-    echo "warteauf 'wm: hold' || 90"
+    echo "warteauf 'launcher: ready' || 90"
     echo "warte 5"
     echo "foto 02-schreibtisch"
-    echo "klickauf tbbtn0"
-    echo "warte 2"
     tipp "edit /etc/taskbar.conf"
     echo "taste ret"
     echo "warteauf 'edit: ready' || 40"
@@ -336,7 +334,7 @@ PY
     echo "foto 03-editor"
     echo "taste ctrl-k"
     echo "warte 2"
-    echo "photo 04-editor-after-ctrl-k"
+    echo "foto 04-editor-after-ctrl-k"
     echo "taste ctrl-x"
     echo "warte 2"
     echo "taste n"
@@ -358,7 +356,7 @@ else
 fi
 bild 02-schreibtisch
 bild 03-editor
-bild 04-editor-nach-strg-k
+bild 04-editor-after-ctrl-k
 bild 05-terminal-clip
 bild 06-terminal-verlauf
 
