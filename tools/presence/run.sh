@@ -210,7 +210,7 @@ mkdir -p docs/shots/praesenz
 geraet "$TMPD/D.img" "$TMPD/s2.sh"
 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" \
     -kernel "$TMPD/k0.img" -m 512 -vga std \
-    -append "osum vfs bus gfx wm wig desk wmhold wiglong wmdauer wigapp=/bin/freunde,--demo,--rahmen,400 wighalt=40 r3alle nokbd" \
+    -append "osum vfs bus gfx wm wig desk wmhold wiglong wmdauer wigapp=/bin/freunde,--demo,--frames,400 wighalt=40 r3alle nokbd" \
     -serial "file:$TMPD/o9.txt" -display none -no-reboot \
     -drive "file=$TMPD/D.img,format=raw,if=ide,index=0" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \

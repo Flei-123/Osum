@@ -535,8 +535,8 @@ social serve 6000 300 &
 sleep 3
 freunde --schuss --tab 2
 freunde --schuss --annehmen 0
-freunde --schuss --tab 3 --suche carla
-freunde --rahmen 900 --chat 0 --sende "aus der Leiste"
+freunde --schuss --tab 3 --search carla
+freunde --frames 900 --chat 0 --sende "aus der Leiste"
 EOS
 # r38: dora asks justin -- the bar's "Ausstehend" answers it
 python3 - "$PORT" "$SECRET" <<'PY'

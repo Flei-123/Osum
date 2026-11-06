@@ -126,7 +126,7 @@ lauf() {
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; RC=$?
 }
 cnt() { grep -ac "$2" "$1" 2>/dev/null; }
-keys_ok() { tr -d '\r' < "$1" | grep -a 's3: usb tasten=' | sed 's/.*tasten=//' | awk '$1>=1{n++} END{print n+0}'; }
+keys_ok() { tr -d '\r' < "$1" | grep -a 's3: usb keys=' | sed 's/.*keys=//' | awk '$1>=1{n++} END{print n+0}'; }
 rx_ok() { tr -d '\r' < "$1" | grep -a 's3: net arp rx=' | sed 's/.*rx=\([0-9]*\).*/\1/' | awk '$1>=1{n++} END{print n+0}'; }
 
 if [ "${S3DEV_ONLY:-}" != "tsc" ]; then

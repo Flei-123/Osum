@@ -214,7 +214,7 @@ timeout 180 $QEMU_X86 -kernel "$TMPD/neu.mb" -m 256 \
     -device "usb-ehci,id=eh" -device "usb-kbd,bus=eh.0" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
 hat "$TMPD/6.txt" "klasse=1" "die Tastatur wird als Tastatur erkannt"
-t=$(wert "$TMPD/6.txt" 'tasten=[0-9]+')
+t=$(wert "$TMPD/6.txt" '  keys=[0-9]+')
 [ "${t:-0}" -eq 6 ] && ok "six keys went through kbd.on_code (6)" \
                     || bad "Tasten: ${t:-0}, erwartet 6"
 if grep -qa "ehci: codes $ERWARTET" "$TMPD/6.txt"; then
@@ -223,7 +223,7 @@ else
     bad "the scan codes are wrong -- expected: $ERWARTET"
     grep -a 'ehci: codes' "$TMPD/6.txt" | sed 's/^/        /'
 fi
-p=$(wert "$TMPD/6.txt" 'abfragen=[0-9]+')
+p=$(wert "$TMPD/6.txt" 'polls=[0-9]+')
 [ "${p:-0}" -ge 500 ] && ok "the endpoint was polled $p times (no vector of its own)" \
                       || bad "zu wenige Abfragen: ${p:-0}"
 
