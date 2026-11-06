@@ -211,7 +211,7 @@ def grenzen(root):
         aus[name] = int(m.group(1))
     ad = open(os.path.join(root, "kernel/user/appdir.fi"),
               encoding="utf-8").read()
-    m = re.search(r"io\.read\(fd, \(&buf\[0 as usize\]\) as u64, (\d+)\)", ad)
+    m = re.search(r"io\.read(?:_full)?\(fd, \(&buf\[0 as usize\]\) as u64, (\d+)\)", ad)
     if not m:
         raise SystemExit("appdir.fi: die Leselaenge fuer INFO nicht gefunden")
     aus["INFO_READ"] = int(m.group(1))
