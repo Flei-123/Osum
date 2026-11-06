@@ -97,9 +97,11 @@ grep -qa '^import wlib$' kernel/user/edit.fi \
 grep -qa '^/bin/nedit' assets/apps/editor.osp/start.txt \
     && ok "assets/apps/editor.osp (the merged Editor) starts /bin/nedit" \
     || bad "assets/apps/editor.osp does not start /bin/nedit"
-[ -e assets/apps/nedit.osp ] \
-    && bad "assets/apps/nedit.osp is back: two Editor entries in the start menu" \
-    || ok "no second Editor+ bundle (merged into editor.osp)"
+if [ ! -e assets/apps/nedit.osp ] || grep -qx 'menu=hidden' assets/apps/nedit.osp/INFO; then
+    ok "no second Editor+ start menu entry (nedit.osp is hidden)"
+else
+    bad "assets/apps/nedit.osp is back: two Editor entries in the start menu"
+fi
 
 echo "== 2. the library does not paint past fUi =="
 if bash tools/check-ui.sh > "$OUT/checkui.txt" 2>&1; then

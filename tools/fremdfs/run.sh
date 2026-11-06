@@ -245,7 +245,7 @@ durchgang() { # name abbild art erwartet_verweise(0/1)
     local D="$TMPD/$name.txt"
     local rc
     rc=$(lauf "$name" "$TMPD/root.img" "$abbild" \
-        "osum nokbd vfs script=fremdfs $art /dev/hdb1 /mnt")
+        "osum nokbd vfs ${FF_WORDS:-} script=fremdfs $art /dev/hdb1 /mnt")
     num "[$name] der Kernel beendet sich selbst (21)" "$rc" eq 21
     if [ ! -f "$D" ]; then
         bad "[$name] no serial output"

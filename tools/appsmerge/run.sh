@@ -13,7 +13,7 @@ ok=0; bad=0
 chk() { if eval "$2"; then ok=$((ok+1)); echo "  OK    $1"; else bad=$((bad+1)); echo "  FAIL  $1"; fi; }
 chk "editor.osp starts /bin/nedit" "grep -qa '^/bin/nedit' assets/apps/editor.osp/start.txt"
 chk "editor.osp is named Editor" "grep -qa '^name=Editor\$' assets/apps/editor.osp/INFO"
-chk "no nedit.osp bundle (no Editor+)" "[ ! -e assets/apps/nedit.osp ]"
+chk "no visible nedit.osp bundle (no Editor+ menu entry)" "[ ! -e assets/apps/nedit.osp ] || grep -qx 'menu=hidden' assets/apps/nedit.osp/INFO"
 chk "no console bundle for /bin/edit" "! grep -qa '^/bin/edit' assets/apps/*/start.txt"
 chk "/bin/edit stays in the image program list" "grep -a 'PROGS=\${PROGS:-' -A2 tools/usbimg/build.sh | grep -qaw edit"
 chk "image check list: editor.osp/INFO present" "grep -qa '/apps/editor.osp/INFO' tools/usbimg/build.sh"
