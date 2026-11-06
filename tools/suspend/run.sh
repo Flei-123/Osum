@@ -532,6 +532,7 @@ wzyklus wz1 "" 400
 WA="$TMPD/wz1-a.txt"; WB="$TMPD/wz1-b.txt"
 hat_nicht "$WA" 'panic' "no exception in the save run (wake)"
 hat_nicht "$WB" 'panic' "no exception in the resume run (wake)"
+hat_nicht "$WB" 'EXCEPTION' "no CPU exception in the resume run (wake)"
 
 WN=$(grep -a 'wake: procs' "$WA" | sed -n '1s/.*n=\([0-9]*\).*/\1/p')
 WPIDS=$(grep -a 'wake: procs' "$WA" | sed -n '1s/.*pids=\([0-9,]*\).*/\1/p')
