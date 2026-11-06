@@ -77,7 +77,7 @@ grep -aq '[1-9][0-9]* received' "$H" && ok "usbonly: ping answered" || bad "usbo
 common usbonly
 if [ "${NETHOT_OLD:-1}" = 1 ]; then
     echo "== control: origin/main =="
-    mkdir -p "$T/old"; git archive "${NETHOT_BASE:-origin/main}" | tar -x -C "$T/old"
+    mkdir -p "$T/old"; git archive "${NETHOT_BASE:-97b7e6b71}" | tar -x -C "$T/old"
     cp -a vendor/firn/bin vendor/firn/lib "$T/old/vendor/firn/" 2>/dev/null
     if (cd "$T/old" && FIRNLIB="$T/old/lib" ./tools/build-kernel.sh "$T/old.img" --stufe 0 > "$T/old.txt" 2>&1); then
         run ctl "$T/old.img" s_usb.sh 1 "$T/p_attach"; H="$T/ctl.klar"

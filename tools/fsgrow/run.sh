@@ -3,7 +3,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/pidkill.sh
 export FIRNLIB="$(pwd)/lib"
-OLDREF=${OLDREF:-origin/main}
+OLDREF=${OLDREF:-6c1381392}
 DEV_MIB=${FSGROW_DEV_MIB:-4096}
 BASE_BLOCKS=${FSGROW_BASE_BLOCKS:-32768}
 BASE_MAPS=${FSGROW_BASE_MAPS:-8}

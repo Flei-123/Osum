@@ -29,7 +29,7 @@ command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "TASKMGR2: skipped, no q
 
 drive() {
     local tree=$1 out=$2 plan=$3
-    ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
+    ( cd "$tree" && FIRNLIB="$tree/lib" bash tools/toolbench/build.sh "$out" desk=yes \
         app=/bin/taskmgr,report,takt,500 wait=14 last=400 extra="wighalt=120" \
         plan="$plan" > "$out.log" 2>&1 )
 }
@@ -84,7 +84,7 @@ echo
 echo "== 3. performance page: five resource tiles, details grid =="
 drive_perf() {
     local tree=$1 out=$2
-    ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
+    ( cd "$tree" && FIRNLIB="$tree/lib" bash tools/toolbench/build.sh "$out" desk=yes \
         app=/bin/taskmgr,report,takt,500,performance wait=14 last=400 extra="wighalt=120" \
         plan="$tree/tools/taskmgr2/perf.txt" > "$out.log" 2>&1 )
 }
@@ -125,6 +125,7 @@ echo
 echo "== 4. counter-proof: the tree before S1 fails the same plans =="
 BWT="$TMPD/basewt"
 if git worktree add --detach "$BWT" "$BASE" >/dev/null 2>&1; then
+    cp -a vendor/firn/bin "$BWT/vendor/firn/bin" 2>/dev/null; cp -a vendor/firn/lib "$BWT/vendor/firn/lib" 2>/dev/null; cp -a vendor/firn/.gebaut "$BWT/vendor/firn/.gebaut" 2>/dev/null
     mkdir -p "$BWT/tools/taskmgr2"
     cp -r tools/toolbench/. "$BWT/tools/toolbench/"
     cp tools/taskmgr2/ctx.txt tools/taskmgr2/search.txt tools/taskmgr2/perf.txt tools/taskmgr2/eff.txt tools/taskmgr2/users.txt tools/taskmgr2/del.txt tools/taskmgr2/history.txt tools/taskmgr2/services.txt tools/taskmgr2/svc.state "$BWT/tools/taskmgr2/"
@@ -143,7 +144,7 @@ echo
 echo "== 5. S5: thread/disk counters, Efficiency mode =="
 drive_eff() {
     local tree=$1 out=$2
-    ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
+    ( cd "$tree" && FIRNLIB="$tree/lib" bash tools/toolbench/build.sh "$out" desk=yes \
         app=/bin/taskmgr,report,takt,500 wait=14 last=400 extra="wighalt=120" \
         plan="$tree/tools/taskmgr2/eff.txt" > "$out.log" 2>&1 )
 }
@@ -174,13 +175,13 @@ echo
 echo "== 6. S3/S6: Users page, Delete = End task, FPS only from /proc/frames =="
 drive_users() {
     local tree=$1 out=$2
-    ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
+    ( cd "$tree" && FIRNLIB="$tree/lib" bash tools/toolbench/build.sh "$out" desk=yes \
         app=/bin/taskmgr,report,takt,500,users wait=14 last=400 extra="wighalt=120" \
         plan="$tree/tools/taskmgr2/users.txt" > "$out.log" 2>&1 )
 }
 drive_del() {
     local tree=$1 out=$2
-    ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
+    ( cd "$tree" && FIRNLIB="$tree/lib" bash tools/toolbench/build.sh "$out" desk=yes \
         app=/bin/taskmgr,report,takt,500 wait=14 last=400 extra="wighalt=120" \
         plan="$tree/tools/taskmgr2/del.txt" > "$out.log" 2>&1 )
 }
@@ -194,8 +195,8 @@ num "no row report carries fps= without /proc/frames (shown as --)" "$(grep -a '
 drive_del "$ROOT" "$TMPD/d" || bad "build del"
 SD="$TMPD/d/serial.txt"
 num "plan targets not found" "$(cnt "$TMPD/d/plan.log" 'ZIEL NICHT GEFUNDEN')" eq 0
-DPID=$(grep -a '^taskmgr: pick' "$SD" | tail -1 | sed -E 's/.*wahl pid=([0-9]+).*/\1/')
-APID=$(grep -a '^taskmgr: ask pid=' "$SD" | head -1 | sed -E 's/.*frage pid=([0-9]+).*/\1/')
+DPID=$(grep -a '^taskmgr: pick' "$SD" | tail -1 | sed -E 's/.*pick pid=([0-9]+).*/\1/')
+APID=$(grep -a '^taskmgr: ask pid=' "$SD" | head -1 | sed -E 's/.*ask pid=([0-9]+).*/\1/')
 num "Delete on the chosen row asks once" "$(cnt "$SD" '^taskmgr: ask pid=')" eq 1
 [ -n "${APID:-}" ] && [ "${APID:-x}" = "${DPID:-y}" ] && ok "the question is about the chosen row (pid $APID)" || bad "question pid ${APID:-?}, chosen pid ${DPID:-?}"
 if [ -n "$BWT" ] && [ -d "$BWT" ]; then
@@ -209,13 +210,13 @@ echo
 echo "== 7. r1600: App history + Services pages from real sources =="
 drive_hist() {
     local tree=$1 out=$2
-    ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
+    ( cd "$tree" && FIRNLIB="$tree/lib" bash tools/toolbench/build.sh "$out" desk=yes \
         app=/bin/taskmgr,report,takt,500,history wait=14 last=400 extra="wighalt=120" \
         plan="$tree/tools/taskmgr2/history.txt" > "$out.log" 2>&1 )
 }
 drive_svc() {
     local tree=$1 out=$2
-    ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes svcstate="$tree/tools/taskmgr2/svc.state" \
+    ( cd "$tree" && FIRNLIB="$tree/lib" bash tools/toolbench/build.sh "$out" desk=yes svcstate="$tree/tools/taskmgr2/svc.state" \
         app=/bin/taskmgr,report,takt,500,services wait=14 last=400 extra="wighalt=120" \
         plan="$tree/tools/taskmgr2/services.txt" > "$out.log" 2>&1 )
 }
@@ -244,7 +245,7 @@ echo
 echo "== 8. r1618: Alt+Left / Alt+Right walk the visited pages =="
 drive_nav() {
     local tree=$1 out=$2 plan=$3
-    ( cd "$tree" && bash tools/toolbench/build.sh "$out" desk=yes \
+    ( cd "$tree" && FIRNLIB="$tree/lib" bash tools/toolbench/build.sh "$out" desk=yes \
         app=/bin/taskmgr,report,takt,500 wait=14 last=400 extra="wighalt=120" \
         plan="$plan" > "$out.log" 2>&1 )
 }
