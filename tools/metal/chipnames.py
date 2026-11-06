@@ -8,7 +8,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-SRC = os.path.join(ROOT, "kernel", "chipname.fi")
+SRC = os.path.join(ROOT, "kernel", "lib", "chipname.fi")
 
 IDS_URL = "https://pci-ids.ucw.cz/v2.2/pci.ids"
 IDS_CACHE = "/tmp/pci.ids"
@@ -72,6 +72,11 @@ VEN_MAP = {
 
 VAGUE = ("CNVi-WLAN", "Realtek-WLAN", "Broadcom-WLAN", "Atheros-WLAN",
          "I225/I226")
+
+LINUX_ONLY = {
+    (0x8086, 0x15F8), (0x8086, 0x3100), (0x8086, 0x15F7),
+    (0x8086, 0x125E), (0x1D6A, 0x88B1), (0x1D6A, 0x11C0),
+}
 
 KNOWN_CONFLICT = {
     (0x8086, 0x550B): "pci.ids wiederholt den Text von 550A; Linux: I219_V18",
@@ -178,7 +183,8 @@ def main():
                     wrong.append((ven, dev, name,
                                   "Linux: " + lin + " (nicht in pci.ids)"))
                     continue
-            if mark in ("L", "PL") or any(name.startswith(v) for v in VAGUE):
+            if mark in ("L", "PL") or (ven, dev) in LINUX_ONLY \
+                    or any(name.startswith(v) for v in VAGUE):
                 only_linux.append((ven, dev, name))
             else:
                 unsourced.append((ven, dev, name, mark))

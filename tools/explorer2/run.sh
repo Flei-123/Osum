@@ -194,9 +194,9 @@ hat "$S" 'explorer: ready' "der Dateimanager ist hochgekommen"
 echo "== 5. the mandatory items on the serial line =="
 
 hat "$S" 'explorer: zeit mtime=[0-9]+' "Punkt 5: die Zeiten werden gelesen"
-with_n=$(letzte "$S" 'explorer: zeit mtime=[0-9]+ with_n=[0-9]+')
-total_n=$(grep -aoE 'explorer: zeit [^ ]+ with_n=[0-9]+ total_n=[0-9]+' "$S" | tail -1 \
-      | grep -oE 'total_n=[0-9]+' | grep -oE '[0-9]+')
+with_n=$(groesste "$S" 'explorer: zeit mtime=[0-9]+ with_n=[0-9]+')
+total_n=$(grep -aoE 'explorer: zeit [^ ]+ with_n=[0-9]+ total_n=[0-9]+' "$S" \
+      | sort -t= -k3 -n | tail -1 | grep -oE 'total_n=[0-9]+' | grep -oE '[0-9]+')
 if [ "${with_n:-0}" -gt 0 ] 2>/dev/null; then
     ok "item 5: $with_n of ${total_n:-?} entries carry a REAL time"
 else
