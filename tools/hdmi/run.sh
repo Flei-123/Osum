@@ -61,15 +61,19 @@ mutate() {
         bad "control $name: the mutation did not change the file"
         return
     fi
-    if ! FIRNLIB="$L" "$FIRNC" tools/hdmi/oracle.fi -o "$T/o-$name" 2>/dev/null; then
-        bad "control $name: mutated oracle does not build"
-        return
-    fi
-    local nf
-    nf=$("$T/o-$name" 2>&1 | grep -c '^FAIL')
+    local nf=0 who
+    for who in oracle streamoracle; do
+        if ! FIRNLIB="$L" "$FIRNC" tools/hdmi/$who.fi -o "$T/o-$name-$who" 2>/dev/null; then
+            bad "control $name: mutated $who does not build"
+            return
+        fi
+        nf=$((nf + $("$T/o-$name-$who" 2>&1 | grep -c '^FAIL')))
+    done
     [ "$nf" -gt 0 ] && ok "control $name: oracle goes red ($nf FAIL)" \
                      || bad "control $name: oracle stays green on a broken lib"
 }
+mutate nochancount 's/add(V_SET_CHANCOUNT, (chans - 1) \& 0xFF)/add(V_SET_CHANCOUNT, 0)/' hdmistream.fi
+mutate nostreamtag 's/add(V_SET_STREAM, ((tag \& 0xF) << 4) | (channel \& 0xF))/add(V_SET_STREAM, 0)/' hdmistream.fi
 mutate nopinctl  's/add(V_SET_PINCTL, PINCTL_OUT)/add(V_SET_PINCTL, 0)/' hdmipin.fi
 mutate nounsol   's/add(V_SET_UNSOL, UNSOL_ENABLE | (tag \& 0x3F))/add(V_SET_UNSOL, tag \& 0x3F)/' hdmipin.fi
 mutate noeapd    's/if (pincap \& PINCAP_EAPD) != 0 {/if false {/' hdmipin.fi
@@ -86,6 +90,12 @@ mutate mfg       's/return octets.ld8(e, 16) | (octets.ld8(e, 17) << 8)/return o
 grep -q 'hdmipin.plan_pin' kernel/drv/snd/hdmi.fi \
     && ok "the driver builds its verbs from the model" \
     || bad "hdmi.fi no longer uses hdmipin.plan_pin"
+grep -q 'hdmistream.plan_stream' kernel/drv/snd/hdmi.fi \
+    && ok "the driver builds its stream plan from the model" \
+    || bad "hdmi.fi no longer uses hdmistream.plan_stream"
+grep -q 'hdmi.stream_start' kernel/drv/snd/audio.fi \
+    && ok "audio start hooks the HDMI stream" \
+    || bad "audio.fi does not start the HDMI stream"
 grep -q 'unsol_take' kernel/drv/snd/hdmi.fi \
     && ok "the driver consumes unsolicited responses" \
     || bad "hdmi.fi does not consume unsolicited responses"
@@ -128,6 +138,16 @@ if [ -s "$T/k.mb" ]; then
     grep -qaF "pstate=0x0 pinctl=0x40 unsol=0x85 conv=3" "$T/synth.txt" \
         && ok "pin line shows the activation read-back" || bad "activation read-back missing"
 
+    boot stream "osum nokbd nosched noproc nofs audio audgraph audsine audsay" "$ONE"
+    grep -qaE "^hdmi: stream pin=0 conv=3 tag=1 fmt=0x0*11 rate=48000 bits=16 ch=2 verbs=22 rb=0x0*100011 ai=1 sim=1" "$T/stream.txt" \
+        && ok "playback start sends format, channel count, stream tag and the audio InfoFrame (22 verbs)" \
+        || bad "stream start line missing or wrong: $(grep -a 'hdmi: stream' "$T/stream.txt" | head -2)"
+    grep -qaE "^hdmi: stream stop pin=0 conv=3" "$T/stream.txt" \
+        && ok "playback end sends the stop plan" || bad "stream stop line missing"
+    boot nostream "osum nokbd nosched noproc nofs audio audgraph audsay" "$ONE"
+    grep -qaF "hdmi: stream" "$T/nostream.txt" \
+        && bad "a stream plan ran without playback" || ok "no stream plan without playback"
+
     as --64 -o "$T/crt.o" kernel/user/crt.s 2>/dev/null
     SPEC="/bin/ /proc/"
     progs_ok=1
@@ -146,6 +166,10 @@ if [ -s "$T/k.mb" ]; then
             && ok "/proc/hdmi lists controllers and pins" || bad "/proc/hdmi header missing"
         grep -qaE "^pin 0 ctl=1 cad=0 nid=5 pincap=0x01000094 wcap=0x[0-9a-f]+ sense=0xc0000000 state=2" "$T/proc.txt" \
             && ok "/proc/hdmi pin line shows full-width pincap and sense" || bad "/proc/hdmi pin line wrong"
+        grep -qaE "^pin 0 .* streaming=0 strfmt=0x0+ strrb=0x0+ strwhy=0" "$T/proc.txt" \
+            && ok "/proc/hdmi pin line carries the stream state" || bad "/proc/hdmi stream fields missing"
+        grep -qaE "^hdmi v1 .* streams=0 stops=0" "$T/proc.txt" \
+            && ok "/proc/hdmi header counts stream starts and stops" || bad "/proc/hdmi stream counters missing"
         grep -qaE "^eld 0 len=36 valid=1 mon=ABC dp=0 hdcp=1" "$T/proc.txt" \
             && ok "/proc/hdmi parses the ELD" || bad "/proc/hdmi eld line wrong"
         grep -qaE "^eldhex 0 1000080003230501" "$T/proc.txt" \

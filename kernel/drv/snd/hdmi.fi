@@ -12,9 +12,10 @@ import drv.snd.hda
 import drv.snd.hdmitab
 import monitors.eld
 import monitors.hdmipin
+import monitors.hdmistream
 import libc.regio
 
-export { scan, resume, due, run, sound_ok }
+export { scan, resume, due, run, sound_ok, stream_start, stream_stop }
 
 static mut T0: [u8; 15] = "hdmi: eld pin=\0"
 static mut T1: [u8; 8] = " bytes=\0"
@@ -36,6 +37,17 @@ static mut T16: [u8; 7] = " rate=\0"
 static mut T17: [u8; 6] = " why=\0"
 static mut T18: [u8; 24] = "hdmi: scan controllers=\0"
 static mut T19: [u8; 7] = " pins=\0"
+static mut T20: [u8; 18] = "hdmi: stream pin=\0"
+static mut T21: [u8; 6] = " tag=\0"
+static mut T22: [u8; 6] = " fmt=\0"
+static mut T23: [u8; 7] = " bits=\0"
+static mut T24: [u8; 5] = " ch=\0"
+static mut T25: [u8; 8] = " verbs=\0"
+static mut T26: [u8; 5] = " rb=\0"
+static mut T27: [u8; 5] = " ai=\0"
+static mut T28: [u8; 7] = " sim=1\0"
+static mut T29: [u8; 23] = "hdmi: stream stop pin=\0"
+static mut T30: [u8; 23] = "hdmi: stream skip pin=\0"
 
 const NO_ANSWER: u64 = 0xFFFFFFFF
 const V_GET_PARAM: u64 = 0xF00
@@ -79,6 +91,20 @@ const ST_NORESET: u64 = 5
 const POLL_TICKS: u64 = 50
 const FAIL_LIMIT: u64 = 12
 const SYNTH_CTL: u64 = 0xFFFF
+const STREAM_LOG_MAX: u64 = 24
+const WHY_NONE: u64 = 0
+const WHY_NOCONV: u64 = 1
+const WHY_UNPLUGGED: u64 = 2
+const WHY_ELD: u64 = 3
+const WHY_NOLINK: u64 = 4
+const WHY_FORMAT: u64 = 5
+const WHY_NOANSWER: u64 = 6
+
+static mut want_on: u64 = 0
+static mut want_tag: u64 = 0
+static mut want_rate: u64 = 0
+static mut want_bits: u64 = 0
+static mut want_chans: u64 = 0
 
 static mut conn_nid: [u64; 16] = [0; 16]
 
@@ -408,6 +434,7 @@ fn activate(state: u64, c: u64, cad: u64, nid: u64, pc: u64, wcap: u64, ordinal:
     if conv != 0 {
         let cw: u64 = xv(state, c, cad, conv, V_GET_PARAM, P_WCAP, false)
         if cw != NO_ANSWER {
+            hdmitab.pin_set(i, hdmitab.P_CONVWCAP, cw)
             hdmipin.plan_converter(cw)
             k = 0
             while k < hdmipin.plan_len() {
@@ -495,6 +522,7 @@ fn inject_synthetic() {
     hdmitab.pin_set(i, hdmitab.P_CONNN, 3)
     hdmitab.pin_set(i, hdmitab.P_CONV, 3)
     hdmitab.pin_set(i, hdmitab.P_CONVDIGI, 1)
+    hdmitab.pin_set(i, hdmitab.P_CONVWCAP, 0x611)
     hdmitab.eld_clear(i)
     var b: [u8; 36] = [0 as u8; 36]
     b[0] = 16 as u8
@@ -523,6 +551,170 @@ fn inject_synthetic() {
     }
     hdmitab.pin_set(i, hdmitab.P_ELDLEN, 36)
     say_pin(i, 0)
+}
+
+fn send_plan(state: u64, c: u64, cad: u64, nid: u64) -> u64 {
+    var k: u64 = 0
+    var bad: u64 = 0
+    while k < hdmipin.plan_len() {
+        if xv(state, c, cad, nid, hdmipin.plan_verb(k), hdmipin.plan_payload(k), true) == NO_ANSWER {
+            bad = bad + 1
+        }
+        k = k + 1
+    }
+    return bad
+}
+
+fn stream_log_open() -> bool {
+    return hdmitab.ctr_get(hdmitab.K_STREAMS) + hdmitab.ctr_get(hdmitab.K_STOPS) <= STREAM_LOG_MAX
+}
+
+fn say_stream_skip(i: u64, why: u64) {
+    serial.puts((&T30[0]) as u64)
+    serial.dec(i)
+    serial.puts((&T17[0]) as u64)
+    serial.dec(why)
+    serial.nl()
+}
+
+fn say_stream(i: u64, fmt: u64, verbs: u64, ai_ok: bool, synth: bool) {
+    serial.puts((&T20[0]) as u64)
+    serial.dec(i)
+    serial.puts((&T11[0]) as u64)
+    serial.dec(hdmitab.pin_get(i, hdmitab.P_CONV))
+    serial.puts((&T21[0]) as u64)
+    serial.dec(want_tag)
+    serial.puts((&T22[0]) as u64)
+    serial.hex(fmt)
+    serial.puts((&T16[0]) as u64)
+    serial.dec(want_rate)
+    serial.puts((&T23[0]) as u64)
+    serial.dec(want_bits)
+    serial.puts((&T24[0]) as u64)
+    serial.dec(want_chans)
+    serial.puts((&T25[0]) as u64)
+    serial.dec(verbs)
+    serial.puts((&T26[0]) as u64)
+    serial.hex(hdmitab.pin_get(i, hdmitab.P_STRRB))
+    serial.puts((&T27[0]) as u64)
+    if ai_ok {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    if synth {
+        serial.puts((&T28[0]) as u64)
+    }
+    serial.nl()
+}
+
+fn stream_blocker(i: u64) -> u64 {
+    let c: u64 = hdmitab.pin_get(i, hdmitab.P_CTL)
+    let n: u64 = hdmitab.pin_get(i, hdmitab.P_ELDLEN)
+    if hdmitab.pin_get(i, hdmitab.P_CONV) == 0 {
+        return WHY_NOCONV
+    }
+    if hdmipin.pin_state(hdmitab.pin_get(i, hdmitab.P_SENSE)) != 2 || n == 0 {
+        return WHY_UNPLUGGED
+    }
+    if hdmitab.pin_get(i, hdmitab.P_SYNTH) == 0 && (hdmitab.ctl_get(c, hdmitab.C_OWNED) == 0 || hdmitab.ctl_get(c, hdmitab.C_STATE) != ST_OK) {
+        return WHY_NOLINK
+    }
+    if !eld.eld_pcm_ok(hdmitab.eld_ptr(i), n, want_chans, hdmistream.rate_flag(want_rate)) {
+        return WHY_ELD
+    }
+    if hdmistream.format_word(want_rate, want_bits, want_chans) == hdmistream.NO_FORMAT {
+        return WHY_FORMAT
+    }
+    return WHY_NONE
+}
+
+fn stream_pin(state: u64, i: u64) {
+    if want_on == 0 {
+        return
+    }
+    let why: u64 = stream_blocker(i)
+    if why != WHY_NONE {
+        if hdmitab.pin_get(i, hdmitab.P_STRWHY) != why {
+            say_stream_skip(i, why)
+        }
+        hdmitab.pin_set(i, hdmitab.P_STRWHY, why)
+        hdmitab.pin_set(i, hdmitab.P_STREAMING, 0)
+        return
+    }
+    let c: u64 = hdmitab.pin_get(i, hdmitab.P_CTL)
+    let cad: u64 = hdmitab.pin_get(i, hdmitab.P_CAD)
+    let nid: u64 = hdmitab.pin_get(i, hdmitab.P_NID)
+    let conv: u64 = hdmitab.pin_get(i, hdmitab.P_CONV)
+    let synth: bool = hdmitab.pin_get(i, hdmitab.P_SYNTH) != 0
+    let fmt: u64 = hdmistream.format_word(want_rate, want_bits, want_chans)
+    hdmistream.plan_stream(hdmitab.pin_get(i, hdmitab.P_CONVWCAP), want_tag, 0, fmt, want_chans)
+    var verbs: u64 = hdmipin.plan_len()
+    var bad: u64 = 0
+    if !synth {
+        bad = send_plan(state, c, cad, conv)
+    }
+    hdmistream.plan_infoframe(want_chans)
+    verbs = verbs + hdmipin.plan_len()
+    if !synth {
+        bad = bad + send_plan(state, c, cad, nid)
+    }
+    var rb_stream: u64 = (want_tag & 0xF) << 4
+    var rb_fmt: u64 = fmt
+    if !synth {
+        rb_stream = rb(state, c, cad, conv, hdmistream.V_GET_STREAM) & 0xFF
+        rb_fmt = rb(state, c, cad, conv, hdmistream.V_GET_FORMAT) & 0xFFFF
+    }
+    hdmitab.pin_set(i, hdmitab.P_STRRB, (rb_stream << 16) | rb_fmt)
+    hdmitab.pin_set(i, hdmitab.P_STREAMING, 1)
+    hdmitab.pin_set(i, hdmitab.P_STRFMT, fmt)
+    if bad != 0 {
+        hdmitab.pin_set(i, hdmitab.P_STRWHY, WHY_NOANSWER)
+    } else {
+        hdmitab.pin_set(i, hdmitab.P_STRWHY, WHY_NONE)
+    }
+    hdmitab.ctr_inc(hdmitab.K_STREAMS)
+    if stream_log_open() {
+        say_stream(i, fmt, verbs, hdmistream.ai_checksum_ok(), synth)
+    }
+}
+
+fn stream_start(state: u64, tag: u64, rate: u64, bits: u64, chans: u64) {
+    want_on = 1
+    want_tag = tag
+    want_rate = rate
+    want_bits = bits
+    want_chans = chans
+    var i: u64 = 0
+    while i < hdmitab.pin_count() {
+        stream_pin(state, i)
+        i = i + 1
+    }
+}
+
+fn stream_stop(state: u64) {
+    want_on = 0
+    var i: u64 = 0
+    while i < hdmitab.pin_count() {
+        if hdmitab.pin_get(i, hdmitab.P_STREAMING) != 0 {
+            let c: u64 = hdmitab.pin_get(i, hdmitab.P_CTL)
+            let cad: u64 = hdmitab.pin_get(i, hdmitab.P_CAD)
+            hdmistream.plan_stop()
+            if hdmitab.pin_get(i, hdmitab.P_SYNTH) == 0 {
+                send_plan(state, c, cad, hdmitab.pin_get(i, hdmitab.P_CONV))
+            }
+            hdmitab.pin_set(i, hdmitab.P_STREAMING, 0)
+            hdmitab.ctr_inc(hdmitab.K_STOPS)
+            if stream_log_open() {
+                serial.puts((&T29[0]) as u64)
+                serial.dec(i)
+                serial.puts((&T11[0]) as u64)
+                serial.dec(hdmitab.pin_get(i, hdmitab.P_CONV))
+                serial.nl()
+            }
+        }
+        i = i + 1
+    }
 }
 
 fn scan(state: u64) {
@@ -600,6 +792,7 @@ fn drain_events(state: u64) {
                 hdmitab.ctr_inc(hdmitab.K_EVENTS)
                 refresh(state, i)
                 say_pin(i, 1)
+                stream_pin(state, i)
             }
             i = i + 1
         }
@@ -626,6 +819,7 @@ fn run(state: u64) {
                     hdmitab.ctr_inc(hdmitab.K_SENSECHG)
                     refresh(state, i)
                     say_pin(i, 2)
+                    stream_pin(state, i)
                 }
             }
         }
