@@ -6,6 +6,7 @@ import block.blk
 import ldr.bootmod
 import sched.susp
 import sched.sched
+import sync.atomic
 import sched.proc
 import arch.x86_64.fpu
 import arch.arch
@@ -175,6 +176,8 @@ static mut frozen_state: [u64; 256] = [0 as u64; 256]
 static mut frozen_mark: [u64; 256] = [0 as u64; 256]
 
 const FREEZE_MS: u64 = 400
+const BURNERS: u64 = 3
+const BURN_USERTAG: u64 = 0x4255524e55534552
 const FREEZE_FALLBACK_CYCLES: u64 = 1200000000
 
 fn on_other_core(state: u64, i: u64) -> bool {
@@ -190,36 +193,105 @@ fn on_other_core(state: u64, i: u64) -> bool {
     return false
 }
 
-fn thaw(state: u64) {
-    var i: u64 = 0
-    while i < kstate.MAX_TASKS {
-        if frozen_mark[i as usize] != 0 {
-            sched.tset(state, i, sched.T_STATE, frozen_state[i as usize])
-            frozen_mark[i as usize] = 0
+static mut th_restored: u64 = 0
+static mut th_orphans: u64 = 0
+static mut fz_limit: u64 = 0
+static mut fz_marked: u64 = 0
+static mut fz_running: u64 = 0
+static mut fz_stray: u64 = 0
+static mut fz_waited: u64 = 0
+static mut fz_timeout: u64 = 0
+
+fn on_any_core(state: u64, i: u64) -> bool {
+    let n: u64 = cpu.count(state)
+    var c: u64 = 0
+    while c < n {
+        if cpu.get(state, c, cpu.C_CUR) == i {
+            return true
         }
-        i = i + 1
+        c = c + 1
     }
+    return false
 }
 
-fn freeze(state: u64) -> bool {
-    var seiten: u64 = 0
+fn count_running(state: u64) -> u64 {
     var n: u64 = 0
     var i: u64 = 0
     while i < kstate.MAX_TASKS {
+        if frozen_mark[i as usize] != 0 && on_other_core(state, i) {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn thaw(state: u64) {
+    let legacy: bool = kstate.mode_on(state, kstate.M_OLDTHAW)
+    th_restored = 0
+    th_orphans = 0
+    atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
+    var i: u64 = 0
+    while i < kstate.MAX_TASKS {
+        if frozen_mark[i as usize] != 0 {
+            var st: u64 = frozen_state[i as usize]
+            if st == sched.S_RUN && !legacy && !on_any_core(state, i) {
+                st = sched.S_READY
+            }
+            sched.tset(state, i, sched.T_STATE, st)
+            frozen_mark[i as usize] = 0
+            th_restored = th_restored + 1
+            if st == sched.S_RUN && !on_any_core(state, i) {
+                th_orphans = th_orphans + 1
+            }
+        }
+        i = i + 1
+    }
+    atomic.lock_give(state, atomic.L_SCHED)
+}
+
+fn mark_frozen(state: u64, i: u64) -> bool {
+    atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
+    let st: u64 = sched.tget(state, i, sched.T_STATE)
+    var marked: bool = false
+    if st != sched.S_FREE && st != sched.S_ZOMBIE {
+        frozen_state[i as usize] = st
+        frozen_mark[i as usize] = 1
+        sched.tset(state, i, sched.T_STATE, sched.S_STOP)
+        marked = true
+    }
+    atomic.lock_give(state, atomic.L_SCHED)
+    return marked
+}
+
+fn freeze(state: u64, limit: u64) -> bool {
+    var seiten: u64 = 0
+    var n: u64 = 0
+    var i: u64 = 0
+    fz_limit = limit
+    fz_marked = 0
+    fz_running = 0
+    fz_stray = 0
+    fz_waited = 0
+    fz_timeout = 0
+    while i < kstate.MAX_TASKS {
         frozen_mark[i as usize] = 0
-        if saveable(state, i) && n < MAX_SAVE {
+        if saveable(state, i) && n < limit {
             let c: u64 = proc.frame_count(state, i)
-            if seiten + c <= MAX_PAGES {
-                frozen_state[i as usize] = sched.tget(state, i, sched.T_STATE)
-                frozen_mark[i as usize] = 1
-                sched.tset(state, i, sched.T_STATE, sched.S_STOP)
+            if seiten + c <= MAX_PAGES && mark_frozen(state, i) {
                 seiten = seiten + c
                 n = n + 1
             }
         }
         i = i + 1
     }
+    fz_marked = n
     if cpu.count(state) <= 1 {
+        return true
+    }
+    fz_running = count_running(state)
+    if kstate.mode_on(state, kstate.M_NOFREEZEWAIT) {
+        fz_stray = fz_running
         return true
     }
     var budget: u64 = kstate.get(state, kstate.TIME_KHZ) * FREEZE_MS
@@ -228,24 +300,75 @@ fn freeze(state: u64) -> bool {
     }
     let t0: u64 = arch.cycles()
     while true {
-        var busy: bool = false
-        i = 0
-        while i < kstate.MAX_TASKS {
-            if frozen_mark[i as usize] != 0 && on_other_core(state, i) {
-                busy = true
-            }
-            i = i + 1
-        }
-        if !busy {
+        let busy: u64 = count_running(state)
+        let forced: bool = kstate.mode_on(state, kstate.M_FREEZETMO) && busy < fz_running
+        if busy == 0 && !forced {
+            fz_waited = arch.cycles() - t0
             return true
         }
-        if arch.cycles() - t0 > budget {
+        if forced || arch.cycles() - t0 > budget {
+            fz_waited = arch.cycles() - t0
+            fz_stray = busy
+            fz_timeout = 1
             thaw(state)
             return false
         }
         arch.pause()
     }
     return false
+}
+
+fn task_limit(state: u64, base: u64) -> u64 {
+    let total: u64 = susp.blocks(state)
+    if total <= base + 24 {
+        return 0
+    }
+    let per_task: u64 = kstack_frames() * 8 + 1
+    let fit: u64 = (total - base - 24) / per_task
+    if fit < MAX_SAVE {
+        return fit
+    }
+    return MAX_SAVE
+}
+
+fn freeze_report(state: u64) {
+    var s_f: [u8; 21] = "wake: freeze marked=\0"
+    var s_r: [u8; 10] = " running=\0"
+    var s_s: [u8; 8] = " stray=\0"
+    var s_w: [u8; 12] = " waited_ms=\0"
+    var s_t: [u8; 10] = " timeout=\0"
+    var s_c: [u8; 8] = " cores=\0"
+    var s_lm: [u8; 8] = " limit=\0"
+    var s_th: [u8; 11] = " restored=\0"
+    var s_or: [u8; 10] = " orphans=\0"
+    var wms: u64 = 0
+    let khz: u64 = kstate.get(state, kstate.TIME_KHZ)
+    if khz != 0 {
+        wms = fz_waited / khz
+    }
+    let z: u64 = serial.line_at()
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(fz_marked)
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(fz_running)
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(fz_stray)
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(wms)
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(fz_timeout)
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(cpu.count(state))
+    serial.puts((&s_lm[0]) as u64)
+    serial.dec(fz_limit)
+    if fz_timeout != 0 {
+        serial.puts((&s_th[0]) as u64)
+        serial.dec(th_restored)
+        serial.puts((&s_or[0]) as u64)
+        serial.dec(th_orphans)
+    }
+    serial.nl()
+    serial.line_clear(z)
 }
 
 fn collect(state: u64) -> u64 {
@@ -310,11 +433,49 @@ fn collect(state: u64) -> u64 {
 }
 
 fn save_tasks(state: u64, dev: u64, base: u64, b: u64) -> bool {
+    let ok: bool = write_image(state, dev, base, b)
+    var s_i: [u8; 22] = "wake: image written=\0\0"
+    var s_n: [u8; 8] = " tasks=\0"
+    var s_p: [u8; 8] = " phase=\0"
+    var s_b: [u8; 7] = " base=\0"
+    var s_l: [u8; 6] = " lba=\0"
+    let z: u64 = serial.line_at()
+    serial.puts((&s_i[0]) as u64)
+    if ok {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(g(state, W_SAVED))
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(save_phase)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(base)
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(save_lba)
+    serial.nl()
+    serial.line_clear(z)
+    return ok
+}
+
+static mut save_phase: u64 = 0
+static mut save_lba: u64 = 0
+
+fn put_block(state: u64, dev: u64, lba: u64, src: u64) -> bool {
+    save_lba = lba
+    return blk.write_on(state, dev, lba, src)
+}
+
+fn write_image(state: u64, dev: u64, base: u64, b: u64) -> bool {
     s(state, W_READY, 1)
     s(state, W_SAVED, 0)
     s(state, W_KFRAMES, 0)
+    save_phase = 1
     let freeze_flags: u64 = arch.irq_save()
-    if !freeze(state) {
+    let frozen: bool = freeze(state, task_limit(state, base))
+    freeze_report(state)
+    if !frozen {
         arch.irq_restore(freeze_flags)
         return false
     }
@@ -328,6 +489,7 @@ fn save_tasks(state: u64, dev: u64, base: u64, b: u64) -> bool {
     let saetze: u64 = (n * TS_BYTES + 511) / 512
     let board: u64 = (pages * PG_BYTES + 511) / 512
 
+    save_phase = 2
     var blkn: u64 = 0
     while blkn < saetze {
         var i: u64 = 0
@@ -345,12 +507,13 @@ fn save_tasks(state: u64, dev: u64, base: u64, b: u64) -> bool {
             i = i + 1
         }
         sum = bootmod.crc32_feed(sum, b, 512)
-        if !blk.write_on(state, dev, base + 1 + blkn, b) {
+        if !put_block(state, dev, base + 1 + blkn, b) {
             return false
         }
         blkn = blkn + 1
     }
 
+    save_phase = 3
     blkn = 0
     while blkn < board {
         var i: u64 = 0
@@ -368,12 +531,13 @@ fn save_tasks(state: u64, dev: u64, base: u64, b: u64) -> bool {
             i = i + 1
         }
         sum = bootmod.crc32_feed(sum, b, 512)
-        if !blk.write_on(state, dev, base + 1 + saetze + blkn, b) {
+        if !put_block(state, dev, base + 1 + saetze + blkn, b) {
             return false
         }
         blkn = blkn + 1
     }
 
+    save_phase = 4
     let kf: u64 = kstack_frames()
     let stack_lba: u64 = base + 1 + saetze + board
     var kframes: u64 = 0
@@ -391,7 +555,7 @@ fn save_tasks(state: u64, dev: u64, base: u64, b: u64) -> bool {
                     i = i + 1
                 }
                 sum = bootmod.crc32_feed(sum, b, 512)
-                if !blk.write_on(state, dev,
+                if !put_block(state, dev,
                     stack_lba + (t * kf + f) * 8 + bn, b) {
                     return false
                 }
@@ -409,6 +573,7 @@ fn save_tasks(state: u64, dev: u64, base: u64, b: u64) -> bool {
         kstate.set8(b + i, 0 as u8)
         i = i + 1
     }
+    save_phase = 5
     __mmio_write64(b as *mut u64, WACH_HEAD)
     __mmio_write64((b + 8) as *mut u64, n)
     __mmio_write64((b + 16) as *mut u64, pages)
@@ -417,7 +582,7 @@ fn save_tasks(state: u64, dev: u64, base: u64, b: u64) -> bool {
     __mmio_write64((b + 40) as *mut u64, kstate.get(state, kstate.TICKS))
     __mmio_write64((b + 48) as *mut u64, g(state, W_STEP0))
     __mmio_write64((b + 56) as *mut u64, g(state, W_SUM0))
-    if !blk.write_on(state, dev, base + B_PART, b) {
+    if !put_block(state, dev, base + B_PART, b) {
         return false
     }
     s(state, W_SAVED, n)
@@ -425,6 +590,7 @@ fn save_tasks(state: u64, dev: u64, base: u64, b: u64) -> bool {
     s(state, W_LBA, base)
     s(state, W_BLOCKS, part_blocks(n, pages))
     s(state, W_SUM, bootmod.crc32_end(sum))
+    save_phase = 6
     return true
 }
 
@@ -753,6 +919,22 @@ fn arm(state: u64, zyk: u64) {
     let a: u64 = proc.create(state, 65, 4000, 2)
     let b2: u64 = proc.create(state, 65, 4000, 2)
     let c: u64 = proc.create(state, 65, 4000, 2)
+    if kstate.mode_on(state, kstate.M_WACHBURN) {
+        var burners: u64 = 0
+        var attempts: u64 = 0
+        while burners < BURNERS && attempts < BURNERS * 2 {
+            if proc.create(state, 68, 4000000000, 2) != 0 {
+                burners = burners + 1
+            }
+            attempts = attempts + 1
+        }
+        var s_bn: [u8; 15] = "wake: burn n=\0\0"
+        let zb: u64 = serial.line_at()
+        serial.puts((&s_bn[0]) as u64)
+        serial.dec(burners)
+        serial.nl()
+        serial.line_clear(zb)
+    }
     var n: u64 = 0
     if a != 0 { n = n + 1 }
     if b2 != 0 { n = n + 1 }
@@ -801,6 +983,45 @@ fn arm(state: u64, zyk: u64) {
     arch.irq_restore(fv)
 }
 
+static mut burn_before: [u64; 256] = [0 as u64; 256]
+
+fn burner_sample(state: u64, record: bool) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < kstate.MAX_TASKS {
+        if sched.tget(state, i, sched.T_KIND) == sched.K_USER
+            && sched.tget(state, i, sched.T_STATE) != sched.S_FREE
+            && sched.tget(state, i, sched.T_CR3) != 0
+            && sched.tget(state, i, sched.T_CR3)
+                != kstate.get(state, kstate.KPML4) {
+            let pa: u64 = proc.translate(state, i, 0x40000000)
+            if pa != 0 && __mmio_read64(pa as *mut u64) == BURN_USERTAG {
+                let rounds: u64 = __mmio_read64((pa + 8) as *mut u64)
+                if record {
+                    burn_before[i as usize] = rounds
+                    n = n + 1
+                } else if rounds > burn_before[i as usize] && burn_before[i as usize] > 0 {
+                    n = n + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn burner_report(state: u64, found: u64, rising: u64) {
+    var s_b: [u8; 21] = "wake: burners found=\0"
+    var s_r: [u8; 9] = " rising=\0"
+    let z: u64 = serial.line_at()
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(found)
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(rising)
+    serial.nl()
+    serial.line_clear(z)
+}
+
 fn check(state: u64) {
     var s_t: [u8; 17] = "wake: == check\0\0\0"
     var s_w: [u8; 15] = "wake: resume \0\0"
@@ -823,7 +1044,12 @@ fn check(state: u64) {
         return
     }
 
+    let burners_found: u64 = burner_sample(state, true)
     sched.sleep_ticks(state, 80)
+    let burners_rising: u64 = burner_sample(state, false)
+    if burners_found > 0 {
+        burner_report(state, burners_found, burners_rising)
+    }
 
     var gelaufen: u64 = 0
     var go_on: u64 = 0
