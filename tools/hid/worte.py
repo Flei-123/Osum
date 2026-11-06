@@ -25,12 +25,19 @@ BEKANNT = {
     ("audio", "noaudio"),
     ("flip", "noflip"),
     ("self", "blkself"), ("self", "nicself"),
+    ("nic", "nicfail"), ("nic", "nicflush"), ("nic", "nicich"),
+    ("nofpu", "nofpuswitch"), ("nolock", "nolockall"),
+    ("usb", "usbholdticks"), ("usb", "usbloss"), ("usb", "usblossff"),
+    ("usb", "usbnorescan"), ("usb", "usbstall"), ("usb", "usbtrace"),
+    ("usbhold", "usbholdticks"),
 }
 
 
 def main():
     kdir = sys.argv[1] if len(sys.argv) > 1 else "kernel"
     worte = {}
+    prefix_used = set()
+    lead_used = set()
     def _all(d):
         aus = []
         for stamm, verz, names in os.walk(d):
@@ -40,15 +47,28 @@ def main():
 
     for path_2 in _all(kdir):
         source = open(path_2, "r", encoding="utf-8", errors="replace").read()
-        for name, w in re.findall(
+        for found in re.finditer(
                 r'var (w_\w+): \[u8; \d+\] = "([a-z0-9._=/-]+)\\0', source):
+            name, w = found.group(1), found.group(2)
             worte.setdefault(w, []).append("%s:%s" % (os.path.basename(path_2),
                                                       name))
+            end = source.find("\nfn ", found.end())
+            body = source[found.end():end if end >= 0 else len(source)]
+            if re.search(
+                    r'(?<![\w.])(?:bootscan\.)?find\(\s*\w+\s*,\s*\(&'
+                    + re.escape(name) + r'\[0\]\)\s+as\s+u64\s*,\s*\w+\s*\)',
+                    body):
+                prefix_used.add(w)
+            elif re.search(
+                    r'bootscan\.find_lead\(\s*\w+\s*,\s*\(&'
+                    + re.escape(name) + r'\[0\]\)', body):
+                lead_used.add(w)
     bad_2 = 0
     gefunden = set()
     for a in sorted(worte):
         for b in sorted(worte):
-            if a != b and a in b:
+            if a != b and ((a in prefix_used and a in b)
+                           or (a in lead_used and b.startswith(a))):
                 gefunden.add((a, b))
                 if (a, b) not in BEKANNT:
                     print("  FALL  %-10s steckt in %-10s (%s / %s)"
