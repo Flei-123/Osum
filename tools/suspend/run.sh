@@ -733,7 +733,7 @@ hat_nicht "$F1" 'EXCEPTION' "no CPU exception in the freeze save run"
 if [ "$(fzfield "$F1" cores)" = "4" ]; then ok "four cores online when the tasks are frozen"; else bad "cores=$(fzfield "$F1" cores), expected 4"; fi
 if [ "${F1RUN:=$(fzfield "$F1" running)}" -ge 1 ] 2>/dev/null; then ok "$F1RUN marked tasks were running on other cores at the moment of marking"; else bad "no marked task was running on another core: the probe measures nothing (running=${F1RUN:-?})"; fi
 if [ "$(fzfield "$F1" stray)" = "0" ] && [ "$(fzfield "$F1" timeout)" = "0" ]; then ok "freeze waited until every marked task left its core (stray=0)"; else bad "stray tasks after freeze: $(grep -a '^wake: freeze' "$F1" | head -1)"; fi
-if [ "$(fzfield "$F1" marked)" -ge 3 ] 2>/dev/null && [ "$(fzfield "$F1" marked)" -le "$(fzfield "$F1" limit)" ] 2>/dev/null; then ok "marked=$(fzfield "$F1" marked) within the capacity limit=$(fzfield "$F1" limit)"; else bad "marking outside the capacity: $(grep -a '^wake: freeze' "$F1" | head -1)"; fi
+if [ "$(fzfield "$F1" marked)" -ge 8 ] 2>/dev/null && [ "$(fzfield "$F1" marked)" -le "$(fzfield "$F1" limit)" ] 2>/dev/null; then ok "marked=$(fzfield "$F1" marked) within the capacity limit=$(fzfield "$F1" limit)"; else bad "marking outside the capacity: $(grep -a '^wake: freeze' "$F1" | head -1)"; fi
 hat "$F1" 'wake: image written=1' "the task image is written completely with burners (disk capacity respected)"
 hat "$TMPD/fz1-b.txt" 'wake: back .*why=ok' "the frozen burners come back on restart"
 FB=$(grep -a 'wake: burners' "$TMPD/fz1-b.txt" | sed -n '1s/.*found=\([0-9]*\).*/\1/p')
