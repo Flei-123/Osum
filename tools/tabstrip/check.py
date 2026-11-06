@@ -56,7 +56,7 @@ ok(len([1 for d in ds if d[0] is not None]) >= 4, "1 the window server lists a w
 mc = re.search(r" bar=(\d+) capw=(\d+) fr=(\d+)", ser)
 bar, capw, fr = (int(mc.group(i)) for i in (1, 2, 3)) if mc else (19, 30, 2)
 
-states = [(int(a), int(b)) for a, b in re.findall(r"explorer: reiter n=(\d+) a=(\d+)", ser)]
+states = [(int(a), int(b)) for a, b in re.findall(r"explorer: tabs n=(\d+) a=(\d+)", ser)]
 ok((2, 1) in states, "2 Ctrl+T gives two tabs, the second one is shown (n=2 a=1): %s" % states[:6])
 i2 = states.index((2, 1)) if (2, 1) in states else -1
 after = states[i2 + 1:] if i2 >= 0 else []

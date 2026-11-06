@@ -33,7 +33,7 @@ fi
 # default, and the click plan below (list, row, button, question, answer,
 # a photo of 3 MB between the steps) needs longer on the slow test VM: on
 # main the plan never got past the second click, and section 6 was red
-# for that reason alone ('taskmgr: frage pid=' never came). The hold is only
+# for that reason alone ('taskmgr: ask pid=' never came). The hold is only
 # the upper limit.
 SHOTS=docs/shots/werkzeug
 mkdir -p "$SHOTS"
@@ -56,7 +56,7 @@ warte 4
 foto v04_nachher
 EOF
 if bash tools/toolbench/build.sh "$TMPD/b1" desk=yes \
-       app=/bin/taskmgr,melde,takt,500 wait=14 last=400 extra="wighalt=120" \
+       app=/bin/taskmgr,report,takt,500 wait=14 last=400 extra="wighalt=120" \
        plan="$TMPD/plan1.txt" > "$TMPD/b1.log" 2>&1; then
     ok "Kern und Programme gebaut ($(grep -a '^kern ' "$TMPD/b1.log" | head -1))"
     ok "the disk is ready ($(grep -a '^platte ' "$TMPD/b1.log" | head -1))"
@@ -81,11 +81,11 @@ IDLE=$(grep -a 'taskmgr: kern n=' "$S1" | sed -E 's/.*idle=([0-9]+).*/\1/' | sor
 num "und der Leerlaufzaehler laeuft wirklich" "${IDLE:-0}" gt 100
 MAXPM=$(grep -a 'taskmgr: kern n=' "$S1" | sed -E 's/.*pm=([0-9]+).*/\1/' | sort -n | tail -1)
 num "der Kern mit dem Fensterserver ist ueber 50 % ausgelastet" "${MAXPM:-0}" ge 500
-MIT=$(grep -a 'taskmgr: zeile' "$S1" | grep -c 'kib=[1-9]')
-OHNE=$(grep -a 'taskmgr: zeile' "$S1" | grep -c 'kib=0 ')
+MIT=$(grep -a 'taskmgr: row' "$S1" | grep -c 'kib=[1-9]')
+OHNE=$(grep -a 'taskmgr: row' "$S1" | grep -c 'kib=0 ')
 num "Prozesse mit gemessenem Speicher" "$MIT" gt 0
 num "und Kernaufgaben ohne eigenen Adressraum (Strich statt Null)" "$OHNE" gt 0
-KERNE=$(grep -a 'taskmgr: zeile' "$S1" | sed -E 's/.*kern=([0-9]+).*/\1/' | sort -un | wc -l)
+KERNE=$(grep -a 'taskmgr: row' "$S1" | sed -E 's/.*kern=([0-9]+).*/\1/' | sort -un | wc -l)
 num "verschiedene Kerne, auf denen Prozesse zuletzt liefen" "$KERNE" ge 2
 
 echo
@@ -95,16 +95,16 @@ bash tools/toolbench/build.sh "$TMPD/b2" script='ps;exit' wait=1 last=120 \
 S2="$TMPD/b2/serial.txt"
 PSN=$(grep -acE '^ *[0-9]+ +[0-9]+ ' "$S2")
 num "/bin/ps meldet Zeilen" "$PSN" gt 0
-TMPIDS=$(grep -a 'taskmgr: zeile' "$S1" | grep -oE ' pid=[0-9]+' | sed 's/.*=//' | sort -un | wc -l)
+TMPIDS=$(grep -a 'taskmgr: row' "$S1" | grep -oE ' pid=[0-9]+' | sed 's/.*=//' | sort -un | wc -l)
 num "der Aufgabenverwalter kennt so viele Prozesse wie die Tafel Plaetze hat" "$TMPIDS" ge 5
-ZUST=$(grep -a 'taskmgr: zeile' "$S1" | sed -E 's/.*st=([0-9]+).*/\1/' | sort -un | tr '\n' ' ')
+ZUST=$(grep -a 'taskmgr: row' "$S1" | sed -E 's/.*st=([0-9]+).*/\1/' | sort -un | tr '\n' ' ')
 ok "the state numbers that occur: $ZUST (the same as sched.S_*)"
 
 echo
 echo "== 4. every rectangle lies in the window, every label has ink =="
 for try in 1 2 3; do
     rm -rf "$TMPD/b0"
-    bash tools/toolbench/build.sh "$TMPD/b0" app=/bin/taskmgr,melde,takt,300 \
+    bash tools/toolbench/build.sh "$TMPD/b0" app=/bin/taskmgr,report,takt,300 \
         wait=10 last=140 shot=allein > "$TMPD/b0.log" 2>&1
     grep -qa 'taskmgr: start bw=' "$TMPD/b0/serial.txt" 2>/dev/null && break
 done
@@ -126,7 +126,7 @@ RAUS=$(grep -a 'taskmgr: rect id=' "$S0" | awk -v w="$BW" -v h="$BH" '
 num "Rechtecke, die aus dem Fenster ragen" "$RAUS" eq 0
 if [ -s "$TMPD/b0/allein.ppm" ]; then
     python3 tools/themestore/shotcheck.py "$TMPD/b0/allein.ppm" "$S0" \
-        --window="$WX","$WY","$BW","$BH" --cut="taskmgr: neu" \
+        --window="$WX","$WY","$BW","$BH" --cut="taskmgr: reset" \
         > "$TMPD/shot1.txt" 2>&1
     cat "$TMPD/shot1.txt" | sed 's/^/        /' | head -3
     LEER=$(grep -oE 'empty [0-9]+' "$TMPD/shot1.txt" | grep -oE '[0-9]+')
@@ -134,7 +134,7 @@ if [ -s "$TMPD/b0/allein.ppm" ]; then
     UEB=$(grep -oE 'overlapping [0-9]+' "$TMPD/shot1.txt" | grep -oE '[0-9]+')
     GEM=$(grep -oE 'measured [0-9]+' "$TMPD/shot1.txt" | grep -oE '[0-9]+')
     # r402: the three text lines became four cards painted on a canvas; the checker measures the texts the
-# program reports after its last `taskmgr: neu` (the cards report their texts since r443: kpi_say).
+# program reports after its last `taskmgr: reset` (the cards report their texts since r443: kpi_say).
 num "gemessene Beschriftungen im Bild" "${GEM:-0}" ge 3
     num "leere Beschriftungen" "${LEER:-9}" eq 0
     num "abgeschnittene Beschriftungen" "${AB:-9}" eq 0
@@ -146,18 +146,18 @@ fi
 # ================================================= 5. sortieren und waehlen
 echo
 echo "== 5. sorting and selecting with the mouse =="
-has "$S1" "taskmgr: sortiert spalte=0" "ein Klick in die Kopfzeile sortiert nach Namen"
-has "$S1" "taskmgr: wahl pid=" "ein Klick auf eine Zeile waehlt einen Prozess"
+has "$S1" "taskmgr: sorted column=0" "ein Klick in die Kopfzeile sortiert nach Namen"
+has "$S1" "taskmgr: pick pid=" "ein Klick auf eine Zeile waehlt einen Prozess"
 python3 - "$S1" > "$TMPD/sortcheck.txt" 2>&1 <<'PY'
 import re, sys
 txt = open(sys.argv[1], "rb").read().decode("latin1").splitlines()
 n = max((i for i, z in enumerate(txt)
-         if z.startswith("taskmgr: sortiert spalte=0")), default=-1)
+         if z.startswith("taskmgr: sorted column=0")), default=-1)
 if n < 0:
     print("keine Sortiermeldung"); raise SystemExit(1)
 groups, r = {}, -1
 for z in txt[n:]:
-    m = re.search(r"taskmgr: zeile r=(\d+) .* grp=(\d+) .* name=(.*)$", z)
+    m = re.search(r"taskmgr: row r=(\d+) .* grp=(\d+) .* name=(.*)$", z)
     if not m:
         continue
     if int(m.group(1)) <= r:
@@ -177,10 +177,10 @@ else bad "the order after sorting is wrong: $(cat "$TMPD/sortcheck.txt")"; fi
 # ============================================== 6. Beenden beendet wirklich
 echo
 echo "== 6. the button really ends a process =="
-has "$S1" "taskmgr: frage pid=" "der Knopf fragt nach, statt sofort zu toeten"
+has "$S1" "taskmgr: ask pid=" "der Knopf fragt nach, statt sofort zu toeten"
 KPID=$(grep -a 'taskmgr: beende pid=' "$S1" | head -1 | grep -oE 'pid=[0-9]+' | sed 's/.*=//')
 KRC=$(grep -a 'taskmgr: beende pid=' "$S1" | head -1 | sed -E 's/.*rc=(-?[0-9]+).*/\1/')
-LPID=$(grep -a 'taskmgr: zeile' "$S1" | grep 'name=launcher' | head -1 | grep -oE ' pid=[0-9]+' | sed 's/.*=//')
+LPID=$(grep -a 'taskmgr: row' "$S1" | grep 'name=launcher' | head -1 | grep -oE ' pid=[0-9]+' | sed 's/.*=//')
 if [ "${KPID:-x}" = "${LPID:-y}" ]; then ok "and it was the launcher (pid $KPID)"
 else bad "pid ${KPID:-?} was ended, the launcher was meant (pid ${LPID:-?})"; fi
 num "der Aufruf SYS_KILL kam durch (rc)" "${KRC:-1}" eq 0
@@ -197,7 +197,7 @@ echo
 echo "== 7. the history graph is painted and not claimed =="
 # r443: the history graph lives on the PERFORMANCE page (a sidebar of pages since this round); the program is
 # started on that page with the word `performance`.
-bash tools/toolbench/build.sh "$TMPD/b4" app=/bin/taskmgr,melde,takt,300,performance \
+bash tools/toolbench/build.sh "$TMPD/b4" app=/bin/taskmgr,report,takt,300,performance \
     wait=10 last=140 shot=allein > "$TMPD/b4.log" 2>&1
 S4="$TMPD/b4/serial.txt"
 G=$(grep -a 'taskmgr: graph x=' "$S4" | tail -1)
@@ -219,7 +219,7 @@ has "$S4" "taskmgr: graph x=" "die Leistungsseite zeigt den Graphen"
 echo
 echo "== 7b. the bench page shows /proc/bench =="
 # `taskmgr bench` opens on the Bench page: /proc/bench as a read-only two-column table. The report lists every row.
-bash tools/toolbench/build.sh "$TMPD/b5" app=/bin/taskmgr,melde,takt,300,bench \
+bash tools/toolbench/build.sh "$TMPD/b5" app=/bin/taskmgr,report,takt,300,bench \
     wait=10 last=140 shot=bench > "$TMPD/b5.log" 2>&1
 S5="$TMPD/b5/serial.txt"
 # This image has no init, so /proc is not mounted (the data path is covered by tools/bench/inos.sh, which checks /proc/bench itself):

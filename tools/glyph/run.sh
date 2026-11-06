@@ -162,7 +162,7 @@ done
 schreibtisch() { # name smp extra
     local name=$1 smp=$2 extra=$3
     cp -f "$TMPD/disk.img" "$TMPD/d-$name.img"
-    local A="gfx wm wig desk wmhold wiglong wmdauer wigapp=/bin/taskmgr,melde,takt,500 wighalt=60"
+    local A="gfx wm wig desk wmhold wiglong wmdauer wigapp=/bin/taskmgr,report,takt,500 wighalt=60"
     A="$A r3alle nokbd nosched noproc nofs $extra"
     timeout "$SEK" $QEMU_X86 -kernel "$TMPD/k.mb" -m 512 -smp "$smp" \
         -append "$A" -serial "file:$TMPD/d-$name.txt" -display none \
@@ -184,7 +184,7 @@ serie() { # praefix smp extra -> "panics laeufe zeilen starts"
         [ -e "$f" ] || continue
         l=$((l + 1))
         grep -qa '^panic:\|EXCEPTION' "$f" && p=$((p + 1))
-        z=$((z + $(grep -ac 'taskmgr: zeile' "$f")))
+        z=$((z + $(grep -ac 'taskmgr: row' "$f")))
         grep -qa '^desk: start /bin/taskmgr ' "$f" && s=$((s + 1))
     done
     echo "$p $l $z $s"

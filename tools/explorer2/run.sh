@@ -208,12 +208,12 @@ hat "$S" 'tzoff=[0-9]+' "Punkt 5: der Ortszeitversatz aus /etc/time.conf"
 hat "$S" 'explorer: modell n=[0-9]+ blob=[0-9]+ ueberlauf=0' \
     "Punkt 11: eingelesen ohne Ueberlauf"
 
-orte=$(groesste "$S" 'explorer: orte n=[0-9]+')
+orte=$(groesste "$S" 'explorer: places n=[0-9]+')
 [ "${orte:-0}" -ge 4 ] 2>/dev/null \
     && ok "item 6: $orte places in the sidebar" \
     || bad "item 6: only ${orte:-0} places in the sidebar"
-hat "$S" 'explorer: krume n=[0-9]+' "Punkt 6: die Brosamenleiste ist gebaut"
-hat "$S" 'explorer: krume n=[0-9]+ feld=1' \
+hat "$S" 'explorer: crumbs n=[0-9]+' "Punkt 6: die Brosamenleiste ist gebaut"
+hat "$S" 'explorer: crumbs n=[0-9]+ feld=1' \
     "Punkt 6: Strg+L macht aus der Leiste ein Textfeld"
 
 # --- Punkt 3: die Mehrfachauswahl.

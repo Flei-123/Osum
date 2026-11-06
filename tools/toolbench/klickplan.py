@@ -17,10 +17,10 @@ WIN = re.compile(r"wlib: win id=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) "
 RECT = re.compile(r"taskmgr: rect id=(\d+) kind=(\d+) x=(\d+) y=(\d+) "
                   r"w=(\d+) h=(\d+)")
 CTXRECT = re.compile(r"taskmgr: ctxrect x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
-TAB = re.compile(r"taskmgr: tabelle x=(\d+) y=(\d+) kopf=(\d+) zh=(\d+)")
+TAB = re.compile(r"taskmgr: table x=(\d+) y=(\d+) head=(\d+) zh=(\d+)")
 NAV = re.compile(r"taskmgr: nav x=(\d+) y=(\d+) w=(\d+)")
-COLUMN = re.compile(r"taskmgr: spalte c=(\d+) x=(\d+) w=(\d+)")
-LINE = re.compile(r"taskmgr: zeile r=(\d+) pid=(\d+) ppid=(\d+) st=(\d+) "
+COLUMN = re.compile(r"taskmgr: column c=(\d+) x=(\d+) w=(\d+)")
+LINE = re.compile(r"taskmgr: row r=(\d+) pid=(\d+) ppid=(\d+) st=(\d+) "
                    r"pm=(\d+) kib=(\d+) kern=(\d+) ticks=(\d+) grp=(\d+) "
                    r"(uid=\d+ thr=\d+ prio=\d+ dr=\d+ dw=\d+ drate=\d+) "
                    r"(ntx=\d+ nrx=\d+|net=-) gpu=(\S+) y=(\d+) "
@@ -55,7 +55,7 @@ def window(lines, welches=0):
 def last_block(lines):
     ab = 0
     for i, z in enumerate(lines):
-        if "taskmgr: sortiert " in z:
+        if "taskmgr: sorted " in z:
             ab = i
     lines = lines[ab:]
     anf = None

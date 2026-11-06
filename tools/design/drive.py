@@ -753,7 +753,7 @@ class Fahrer:
             return (o[0] + int(m.group(1)), o[1] + y0, int(m.group(3)), zh)
         if name.startswith("fkante"):
             n = int(name[6:])
-            sp = last_2(r"explorer: spalten (\d+) (\d+) (\d+) (\d+)")
+            sp = last_2(r"explorer: columns (\d+) (\d+) (\d+) (\d+)")
             m = last_2(r"explorer: rect id=\d+ kind=6 "
                        r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             o = self.window("explorer")

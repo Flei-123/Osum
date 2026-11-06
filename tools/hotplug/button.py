@@ -74,7 +74,7 @@ try:
     if not wait_auf(r"wlib: win id=\d+ x=\d+ y=\d+ w=\d+ h=\d+", 180,
                      "das Fenster des Dateimanagers steht"):
         raise SystemExit(1)
-    if not wait_auf(r"explorer: orte n=\d+", 120, "die Seitenleiste steht"):
+    if not wait_auf(r"explorer: places n=\d+", 120, "die Seitenleiste steht"):
         raise SystemExit(1)
     time.sleep(6)
 
@@ -83,7 +83,7 @@ try:
     m.photo(os.path.join(ARB, "10-ohne.ppm"))
     say("Image 1: the bar without stick")
 
-    vor = len(re.findall(r"explorer: orte n=(\d+) traeger=(\d+)", read_2()))
+    vor = len(re.findall(r"explorer: places n=(\d+) traeger=(\d+)", read_2()))
 
     m.say("drive_add 0 id=stk,if=none,file=%s,format=raw"
           % os.path.join(ARB, "stick.img"))
@@ -95,7 +95,7 @@ try:
     got = False
     t0 = time.time()
     while time.time() - t0 < 60:
-        tr = re.findall(r"explorer: orte n=\d+ traeger=(\d+)", read_2())
+        tr = re.findall(r"explorer: places n=\d+ traeger=(\d+)", read_2())
         if tr and int(tr[-1]) >= 1:
             got = True
             break
@@ -141,7 +141,7 @@ try:
         % (cx, cy, wx, wy, rx, ry, rw, rh))
 
     list_2 = None
-    oid = re.findall(r"explorer: orteliste id=(\d+)", txt)
+    oid = re.findall(r"explorer: placelist id=(\d+)", txt)
     if oid:
         for r in rects:
             if r[0] == oid[-1]:
