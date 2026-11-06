@@ -165,7 +165,7 @@ python3 tools/hwnet/mkroots.py "$OUT/roots.pem" > "$OUT/roots.log" 2>&1 \
 grep -qa 'ISRG Root X1' "$OUT/roots.log" || true
 
 cat > "$OUT/ota.conf" <<EOF
-quelle=$BASIS_URL/aktuell
+source=$BASIS_URL/aktuell
 abstand=3600
 auto=nein
 frist=15

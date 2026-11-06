@@ -37,7 +37,7 @@ printf 'lang=de\n' > "$P/locale.conf"
 #
 printf 'nameserver 10.0.2.3\n' > "$P/resolv.conf"
 cat > "$P/ota.conf" <<EOF
-quelle=$QUELLE
+source=$QUELLE
 abstand=3600
 auto=nein
 frist=30

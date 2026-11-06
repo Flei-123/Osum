@@ -14,7 +14,7 @@ for d in "$OUT/k.mb" "$OUT/quelle.img" "$OUT/quelle.crc" "$OUT/ziel.img"; do
 done
 
 if [ -z "$PORT" ]; then
-    PORT=$(sed -n 's#^quelle=https://10\.0\.2\.2:\([0-9]*\).*#\1#p' "$OUT/ota.conf")
+    PORT=$(sed -n 's#^\(source\|quelle\)=https://10\.0\.2\.2:\([0-9]*\).*#\2#p' "$OUT/ota.conf")
 fi
 [ -n "$PORT" ] || { echo "IMAGE: no port in $OUT/ota.conf"; exit 1; }
 

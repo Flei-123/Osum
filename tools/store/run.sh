@@ -115,7 +115,7 @@ EOF
 EXTRA=()
 image() { # <image> <script> <port>
     local img=$1 script=$2 port=$3
-    printf 'quelle=https://10.0.2.2:%s\nname=ota.test\nabstand=3600\nauto=nein\nfrist=15\n' "$port" > "$TMPD/ota.conf"
+    printf 'source=https://10.0.2.2:%s\nname=ota.test\nabstand=3600\nauto=nein\nfrist=15\n' "$port" > "$TMPD/ota.conf"
     local -a A=(build "$img" $BLOCKS --v3 --inodes=512 --karten=64 /lib/
         "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
         /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /etc/actions.d/ /etc/orientbus/ /etc/ssl/ /store/ /apps/ /users/ /var/ /var/log/ /quelle1/)

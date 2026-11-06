@@ -163,7 +163,7 @@ if [ "${OTA_BASIS:-0}" = 1 ] && [ -s "$OUT/basis.img" ]; then
 fi
 
 cat > "$OUT/ota.conf" <<EOF
-quelle=https://10.0.2.2:$PORT
+source=https://10.0.2.2:$PORT
 name=ota.test
 abstand=3600
 auto=nein
@@ -619,7 +619,7 @@ hat "$OUT/kan1.txt" "ota: channel stable" "(a) der Kanal steht in der Anzeige"
 hat "$OUT/kan1.txt" "ota: version there 2" "(a) auf stable liegt Fassung 2"
 hatnicht "$OUT/kan1.txt" "ota: version there 4" "(a) und nicht die Fassung des Testkanals"
 hat "$OUT/kan1.txt" "phase=verfuegbar" "(a) /system/ota.stand: phase=verfuegbar"
-hat "$OUT/kan1.txt" "dort=2" "(a) /system/ota.stand: dort=2"
+hat "$OUT/kan1.txt" "there=2" "(a) /system/ota.stand: there=2"
 grep -qa "^200 stable/VERZEICHNIS" "$OUT/srv.log" \
     && ok "(a) the remote end saw the request under /stable/" \
     || bad "(a) no access to /stable/VERZEICHNIS in the log"

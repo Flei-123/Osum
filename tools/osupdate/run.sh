@@ -121,9 +121,9 @@ bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 && ok "pinned compiler" 
 bash tools/install/pakete.sh "$OUT" > "$OUT/pak.log" 2>&1 && ok "base packages + test key (tools/install/pakete.sh)" || { tail -5 "$OUT/pak.log"; bad "install/pakete.sh"; }
 python3 tools/ota/mkcerts.py "$OUT/certs" ota.test 10.0.2.2 > "$OUT/certs.log" 2>&1 && ok "certificates" || { cat "$OUT/certs.log"; bad "mkcerts.py"; }
 cat > "$OUT/ota.conf" <<EOF
-quelle=https://10.0.2.2:$PORT
+source=https://10.0.2.2:$PORT
 name=ota.test
-kanal=dev
+channel=dev
 abstand=3600
 auto=nein
 frist=15

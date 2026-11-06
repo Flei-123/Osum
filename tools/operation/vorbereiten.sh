@@ -46,7 +46,7 @@ done
 
 echo "== 4. the image (with substitute key)"
 cat > "$OUT/ota.conf" <<EOF
-quelle=https://$NAME:$PORT
+source=https://$NAME:$PORT
 abstand=3600
 auto=nein
 frist=15
