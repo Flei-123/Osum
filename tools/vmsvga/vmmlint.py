@@ -35,12 +35,12 @@ for name, size, fn in sizes:
     val = eval(m.group(1)) if m else None
     check("request %s has size %s (header 24 + body)" % (name, size), val == size)
 
-check("GetDisplayChangeRequest2: event_ack (offset 36) = VMM_EVENT_DISPLAY", re.search(r"wr32\(rq, 36, VMM_EVENT_DISPLAY\)", hint) is not None)
-check("GetDisplayChangeRequest2: display index (offset 40) = 0", re.search(r"wr32\(rq, 40, 0\)", hint) is not None)
-check("GetDisplayChangeRequest2: xres/yres read at offsets 24/28", "rd32(rq, 24)" in hint and "rd32(rq, 28)" in hint)
+check("GetDisplayChangeRequest2: event_ack (offset 36) = VMM_EVENT_DISPLAY", re.search(r"regio\.write32_at\(rq, 36, VMM_EVENT_DISPLAY\)", hint) is not None)
+check("GetDisplayChangeRequest2: display index (offset 40) = 0", re.search(r"regio\.write32_at\(rq, 40, 0\)", hint) is not None)
+check("GetDisplayChangeRequest2: xres/yres read at offsets 24/28", "regio.read32_at(rq, 24)" in hint and "regio.read32_at(rq, 28)" in hint)
 check("guest info 2: name at offset 40, additions version major in the low half of word 24",
-      "wr32(p, 40," in init and re.search(r"wr32\(p, 24, \(2 << 16\) \| 7\)", init) is not None)
-check("capabilities: graphics bit announced (set mask offset 24)", re.search(r"wr32\(p, 24, VMM_CAP_GRAPHICS\)", init) is not None)
+      "regio.write32_at(p, 40," in init and re.search(r"regio\.write32_at\(p, 24, \(2 << 16\) \| 7\)", init) is not None)
+check("capabilities: graphics bit announced (set mask offset 24)", re.search(r"regio\.write32_at\(p, 24, VMM_CAP_GRAPHICS\)", init) is not None)
 check("no event filter mask (the host would raise the VMMDev interrupt, no handler: VM froze after a resize hint)", "CTL_FILTER" not in init and "VMM_EVENT_DISPLAY)" not in init)
 print("vmmlint: %d fail" % bad)
 sys.exit(1 if bad else 0)
