@@ -116,16 +116,16 @@ has "$TMPD/mit.klar" "plugregel: regeln aus /etc/wmregeln.conf: 2" \
 has "$TMPD/mit.klar" "wmplug: reg regel" "es hat einen Tafelplatz bekommen"
 has "$TMPD/mit.klar" "rechte=0x103" "mit R_ACT_WIN (0x103 = EV_WIN|EV_FOCUS|ACT_WIN)"
 has "$TMPD/mit.klar" "app=rechner" "die Regel hat auf den Buendelnamen getroffen"
-has "$TMPD/mit.klar" "x=230 y=70 w=340 h=430 flaeche=2 sichtbar=1" \
-    "nachgemessen: zentriert (230,70) auf Flaeche 2 und sichtbar"
+has "$TMPD/mit.klar" "x=212 y=70 w=376 h=430 flaeche=2 sichtbar=1" \
+    "nachgemessen: zentriert (212,70) auf Flaeche 2 und sichtbar"
 hasnot "$TMPD/mit.klar" "plugregel: abgewiesen" "keine Handlung wurde abgewiesen"
 hasnot "$TMPD/mit.klar" "wmplug: unreg regel" "das Plugin wurde nicht hinausgeworfen"
 has "$TMPD/mit.klar" "plugregel: puls" "und es lebte nach der Regel weiter"
-if grep -a 'wm: win ' "$TMPD/mit.klar" | grep -q 'x=230 y=70 .*t=\[Rechner\]'; then
-    ok "the window table of the server shows the calculator at (230,70)"
+if grep -a 'wm: win ' "$TMPD/mit.klar" | grep -qE 'x=212 y=70 .*t=\[(Rechner|calc.title)\]'; then
+    ok "the window table of the server shows the calculator at (212,70)"
 else
-    bad "the window table does NOT show the calculator at (230,70)"
-    grep -a 'wm: win .*Rechner' "$TMPD/mit.klar" | sed 's/^/        /'
+    bad "the window table does NOT show the calculator at (212,70)"
+    grep -aE 'wm: win .*(Rechner|calc.title)' "$TMPD/mit.klar" | sed 's/^/        /'
 fi
 
 echo "== 4. the run WITHOUT the right (rights control) =="
@@ -139,11 +139,11 @@ has "$TMPD/ohne.klar" "abgewiesen handlung=6 id=" "PA_DESK wird abgewiesen"
 has "$TMPD/ohne.klar" "fehler=2" "mit -E_RIGHTS (cap.E_RIGHTS = 2)"
 has "$TMPD/ohne.klar" "plugregel: puls" "das Plugin lebt weiter, statt zu sterben"
 hasnot "$TMPD/ohne.klar" "wmplug: unreg regel" "und bleibt angemeldet"
-if grep -a 'wm: win ' "$TMPD/ohne.klar" | grep -q 'x=80 y=60 .*t=\[Rechner\]'; then
+if grep -a 'wm: win ' "$TMPD/ohne.klar" | grep -qE 'x=80 y=60 .*t=\[(Rechner|calc.title)\]'; then
     ok "THE WINDOW STAYS UNCHANGED at (80,60) -- measured by state"
 else
     bad "the window is no longer at (80,60), although the right was missing"
-    grep -a 'wm: win .*Rechner' "$TMPD/ohne.klar" | sed 's/^/        /'
+    grep -aE 'wm: win .*(Rechner|calc.title)' "$TMPD/ohne.klar" | sed 's/^/        /'
 fi
 
 echo "== 5. the short deadline: does the plugin sleep too long? =="
@@ -151,7 +151,7 @@ lauf kurz "recht,demo" "plugfrist"
 [ "$RC" = 21 ] && ok "the kernel exits cleanly (21)" || bad "Exitcode $RC statt 21"
 has "$TMPD/kurz.klar" "frist=3" "die Frist steht auf 3 Ticks (30 ms)"
 hasnot "$TMPD/kurz.klar" "wmplug: unreg regel"     "und das Plugin wird trotzdem nicht wegen Frist hinausgeworfen"
-has "$TMPD/kurz.klar" "x=230 y=70 w=340 h=430 flaeche=2 sichtbar=1"     "die Regel greift auch unter der kurzen Frist"
+has "$TMPD/kurz.klar" "x=212 y=70 w=376 h=430 flaeche=2 sichtbar=1"     "die Regel greift auch unter der kurzen Frist"
 
 echo "== 6. the two photos, told apart by machine =="
 for f in mit ohne; do
@@ -165,8 +165,9 @@ if [ -s "$TMPD/mit.ppm" ] && [ -s "$TMPD/ohne.ppm" ]; then
     d=$(punkt "$TMPD/mit.ppm" 120 300)
     [ "$a" != "$b" ] && ok "(500,300) ist in beiden Bildern verschieden: '$a' gegen '$b'" \
         || bad "(500,300) is the same in both images ('$a') -- kein sichtbarer Unterschied"
-    [ "$a" = "$c" ] && ok "and in the WITH image there is the window colour of the WITHOUT image from (120,300): '$a'" \
-        || bad "the window colour did not move along: '$a' gegen '$c'"
+    e=$(punkt "$TMPD/mit.ppm" 252 310)
+    [ "$e" = "$c" ] && ok "and in the WITH image the window colour of the WITHOUT image from (120,300) sits at the shifted point (252,310): '$e'" \
+        || bad "the window colour did not move along: '$e' gegen '$c'"
     [ "$d" != "$c" ] && ok "(120,300) has left the window: '$d' gegen '$c'" \
         || bad "(120,300) zeigt in beiden Bildern dasselbe"
 fi

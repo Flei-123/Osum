@@ -622,9 +622,10 @@ elif [ -s "$SHOTS/regel-mit-recht.png" ] && [ -s "$SHOTS/regel-ohne-recht.png" ]
     [ "$a" != "$b" ] \
         && ok "checkshot pixel (500,300): with right [$a], without right [$b] -- different" \
         || bad "checkshot pixel (500,300): both [$a] -- the rule cannot be seen in the image"
-    [ "$a" = "$c" ] \
-        && ok "and the same window colour is at (120,300) without the right: [$c] -- the window moved" \
-        || bad "the window colour did not move along: [$a] against [$c]"
+    e=$(python3 tools/gfx/checkshot.py pixel "$TMPD/rmit.ppm" 252 310 2>&1)
+    [ "$e" = "$c" ] \
+        && ok "and the window colour of (120,300) without the right sits at the shifted point (252,310) with it: [$e] -- the window moved" \
+        || bad "the window colour did not move along: [$e] against [$c]"
     [ "$d" != "$c" ] \
         && ok "checkshot pixel (120,300): with right [$d], without right [$c] -- different" \
         || bad "checkshot pixel (120,300): beide [$c]"

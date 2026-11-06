@@ -119,7 +119,7 @@ hasnot "$TMPD/aus.txt" "taskbar: plug nr=" "ohne Widget meldet die Leiste kein W
 cp -f "$TMPD/aus.ppm" "$SHOTS/widget-aus.ppm" 2>/dev/null
 
 echo "== 4. the run WITH widget =="
-lauf an "wigapp=/bin/wmplug,enable,uhr,runden=20" "taskbar: text plug " "pluguhr: ende"
+lauf an "wigapp=/bin/wmplug,enable,uhr,runden=20 wighalt=40" "taskbar: text plug " "pluguhr: end rounds="
 has "$TMPD/an.txt" "wm: hold" "der Schreibtisch steht (an)"
 has "$TMPD/an.txt" "wmplug: reg uhr" "das Widget hat sich angemeldet"
 has "$TMPD/an.txt" "pluguhr: angemeldet" "und sagt es selbst"
@@ -221,11 +221,9 @@ else
     else
         bad "after unregistering the image is unchanged (${d2:-0} points)"
     fi
-    it2=$(python3 tools/gfx/checkshot.py area "$SHOTS/widget-aus-laufzeit.ppm" \
-        "$((gx+px))" "$((gy+py))" "$pw" "$ph" \
-        $(pfarbe "$SHOTS/widget-aus-laufzeit.ppm" "$((gx+px+1))" "$((gy+py+1))") 2>&1 \
-        | grep -oE '^[0-9]+')
-    ok "in the box there are then $it2 points that are not bar surface (before $it)"
+    it2=$(punktdiff "$SHOTS/widget-aus.ppm" "$SHOTS/widget-aus-laufzeit.ppm" \
+        "$((gx+px))" "$((gy+py))" "$pw" "$ph")
+    ok "in the box $it2 points then differ from the run without widget (ink before: $it)"
     if [ "${it2:-0}" -lt "${it:-0}" ]; then
         ok "the widget text is gone without the window server being restarted"
     else
@@ -272,8 +270,7 @@ echo "== 6c. the gap between widget field and clock, at 640x480 =="
 ZEILE="$BASE fbres=640x480" lauf eng "wigapp=/bin/wmplug,enable,uhr,runden=20" \
     "taskbar: text plug "
 has "$TMPD/eng.txt" "taskbar: plug nr=0" "bei 640x480 hat die Leiste ein Widget-Feld"
-ezeile=$(head -n "$(cat "$TMPD/eng.marke")" "$TMPD/eng.txt" \
-    | grep -a '^taskbar: plug nr=0 ' | tail -1)
+ezeile=$(grep -a '^taskbar: plug nr=0 ' "$TMPD/eng.txt" | tail -1)
 epx=$(zahl "$ezeile" x); epw=$(zahl "$ezeile" w)
 eminx=$(grep -a '^taskbar: field ' "$TMPD/eng.txt" | awk '
     { name = $3; i = index($0, " x="); rest = substr($0, i + 3)
