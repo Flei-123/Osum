@@ -200,7 +200,7 @@ if grep -qE "(^|[[:space:]])/etc/uitrace([[:space:]]|\$)" "$LISTE"; then
         while IFS= read -r z; do
             ok "${z#  OK    }"
         done < <(grep '^  OK    ' "$AB")
-        grep -E '^ABMELDEN:' "$AB" | sed 's/^/        /'
+        grep -E '^LOGOUT:' "$AB" | sed 's/^/        /'
     else
         bad "pruef/abmelden.py failed"
         grep -E '^  (OK|FAIL)|^ABMELDEN:' "$AB" | tail -16 | sed 's/^/        /'
