@@ -438,10 +438,10 @@ gr_oe=$(baue_variante ohne-ext4 --ohne-ext4)
 gr_on=$(baue_variante ohne-ntfs --ohne-ntfs)
 gr_ob=$(baue_variante ohne-beide --ohne-fremdfs)
 
-if grep -aq 'ext4=an, ntfs=an' "$TMPD/v-voll.log"; then
+if grep -aq 'ext4=on, ntfs=on' "$TMPD/v-voll.log"; then
     ok "the full image is built with ext4 and ntfs"
 else
-    bad "the full image build line does not say ext4=an, ntfs=an"
+    bad "the full image build line does not say ext4=on, ntfs=on"
 fi
 variant_diag() {
     local n
@@ -475,11 +475,11 @@ fi
 printf 'voll %s\nohne-ext4 %s\nohne-ntfs %s\nohne-beide %s\n' \
     "$gr_voll" "$gr_oe" "$gr_on" "$gr_ob" > "$TMPD/groessen.txt"
 
-grep -qa 'ext4=aus, ntfs=aus' "$TMPD/v-ohne-beide.log" \
-    && ok "der Bau meldet 'ext4=aus, ntfs=aus'" \
+grep -qa 'ext4=off, ntfs=off' "$TMPD/v-ohne-beide.log" \
+    && ok "der Bau meldet 'ext4=off, ntfs=off'" \
     || bad "the build does not say that the two are missing"
-grep -qa 'ext4=an, ntfs=an' "$TMPD/v-voll.log" \
-    && ok "und beim vollen Bau 'ext4=an, ntfs=an'" \
+grep -qa 'ext4=on, ntfs=on' "$TMPD/v-voll.log" \
+    && ok "und beim vollen Bau 'ext4=on, ntfs=on'" \
     || bad "the full build does not say it"
 
 lauf_mit() { # name kernel zweite kommandozeile

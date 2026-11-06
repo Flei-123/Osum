@@ -263,4 +263,4 @@ fi
 mkdir -p "$(dirname "$AUS")"
 cp -f "$TMP/osum.elf" "$AUS.elf"
 objcopy -O elf32-i386 "$TMP/osum.elf" "$AUS" || exit 1
-echo "$AUS ($(stat -c%s "$AUS") Oktette, Stufe $STUFE, gui=$GUI, tunnel=$TUNNEL, ps2m=$([[ $OHNE_PS2M == 1 ]] && echo modul || echo fest), symbole=$SYMBOLE, ext4=$([[ $OHNE_EXT4 == 1 ]] && echo aus || echo an), ntfs=$([[ $OHNE_NTFS == 1 ]] && echo aus || echo an))"
+echo "$AUS ($(stat -c%s "$AUS") bytes, level $STUFE, gui=$GUI, tunnel=$TUNNEL, ps2m=$([[ $OHNE_PS2M == 1 ]] && echo module || echo builtin), symbols=$SYMBOLE, ext4=$([[ $OHNE_EXT4 == 1 ]] && echo off || echo on), ntfs=$([[ $OHNE_NTFS == 1 ]] && echo off || echo on))"

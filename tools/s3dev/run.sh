@@ -134,7 +134,7 @@ echo "== 2. three sleeps with the devices reset before the hooks run (NVMe machi
 lauf dev "$TMPD/a.img" "$CYCLES"
 L="$TMPD/l-dev.txt"
 num "the VM really slept" "$(echo "$STATES" | tr '|' '\n' | grep -ac suspended)" eq "$CYCLES"
-num "devices were reset (power-loss simulation)" "$(cnt "$L" 's3: geraete verloren')" eq "$CYCLES"
+num "devices were reset (power-loss simulation)" "$(cnt "$L" 'devices lost')" eq "$CYCLES"
 num "NVMe: resume ok" "$(cnt "$L" 's3: dev nvme da=1 resume=1')" eq "$CYCLES"
 num "NVMe: the first sectors read back with the same checksum" "$(cnt "$L" 's3: dev nvme da=1 resume=1 gleich=1')" eq "$CYCLES"
 num "USB: controller and enumeration came back, keyboard present" "$(cnt "$L" 's3: dev usb da=1 resume=1 .*kbd=1')" eq "$CYCLES"
@@ -158,7 +158,7 @@ echo "== 3. counter-check s3nohooks: the same reset, no resume hooks =="
 lauf nohooks "$TMPD/h.img" 1
 L="$TMPD/l-nohooks.txt"
 num "slept" "$(echo "$STATES" | tr '|' '\n' | grep -ac suspended)" ge 1
-num "devices were reset" "$(cnt "$L" 's3: geraete verloren')" ge 1
+num "devices were reset" "$(cnt "$L" 'devices lost')" ge 1
 num "NVMe: without the hook the controller is NOT back (resume=0)" "$(cnt "$L" 's3: dev nvme da=1 resume=0')" ge 1
 num "USB: without the hook the key does not arrive" "$(keys_ok "$L")" eq 0
 num "network: without the hook nothing is received" "$(rx_ok "$L")" eq 0
