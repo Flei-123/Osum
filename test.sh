@@ -64,7 +64,7 @@ abschnitt_ausfuehren() { # index
     : > "$WORK/.done.$i"
 }
 
-declare -A SUMMARY_REQUIRED_RE=([k15]='^K15: ([0-9]+ passed, [0-9]+ failed[[:space:]]*$|skipped)')
+declare -A SUMMARY_REQUIRED_RE=([k15]='^K15: ([0-9]+ passed, [0-9]+ failed[[:space:]]*$|skipped)' [systembus]='^SYSTEMBUS: ([0-9]+ passed, [0-9]+ failed[[:space:]]*$|skipped)')
 
 abschnitt_ausgeben() { # index
     local i=$1
