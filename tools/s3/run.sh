@@ -81,7 +81,7 @@ lauf() {
     for c in $(seq 1 "$cycles"); do
         # wait for the marker the machine printed itself, not the host's clock
         for i in $(seq 1 450); do
-            n=$(grep -ac 's3: schlafe' "$log" 2>/dev/null)
+            n=$(grep -ac 's3: sleep cycle' "$log" 2>/dev/null)
             [ "${n:-0}" -ge "$c" ] && break
             kill -0 "$pid" 2>/dev/null || break
             sleep 0.2
@@ -131,19 +131,19 @@ lauf "$TMPD/eins.img" "$L" 1 1
 has "$L" "s3: fadt=" "die Werte stehen da (_S3 aus dem AML, FACS, PM1a)"
 case $STATUS1 in *suspended*) ok "QEMU reports the machine as SLEEPING ($STATUS1)";;
     *) bad "QEMU-Zustand beim Schlafen: '$STATUS1'";; esac
-has "$L" "s3: wach zyklus=1 woke=1 stufe=4" "zurueck: der Aufwachcode lief bis zum Ende (Stufe 4), genau einmal"
+has "$L" "s3: wake cycle=1 woke=1 stage=4" "zurueck: der Aufwachcode lief bis zum Ende (Stufe 4), genau einmal"
 num "Rueckgabe" "$RC" eq 21
 has "$L" "kernel: done" "der Kern laeuft nach dem Aufwachen bis zu seinem Ende weiter"
-num "APIC: gesicherte Leitungen" "$(val "$L" 's3: apic' leitungen)" ge 1
-num "APIC: danach abweichend" "$(val "$L" 's3: apic' danach-falsch)" eq 0
-num "PCI: gesicherte Geraete" "$(val "$L" 's3: pci' geraete)" ge 1
-num "PCI: Register, die der Schlaf geloescht hatte" "$(val "$L" 's3: pci' verloren)" ge 1
-num "PCI: danach abweichend" "$(val "$L" 's3: pci' danach-falsch)" eq 0
+num "APIC: gesicherte Leitungen" "$(val "$L" 's3: apic' lines)" ge 1
+num "APIC: danach abweichend" "$(val "$L" 's3: apic' wrong-after)" eq 0
+num "PCI: gesicherte Geraete" "$(val "$L" 's3: pci' devices)" ge 1
+num "PCI: Register, die der Schlaf geloescht hatte" "$(val "$L" 's3: pci' lost)" ge 1
+num "PCI: danach abweichend" "$(val "$L" 's3: pci' wrong-after)" eq 0
 SV=$(val "$L" 's3: sci' vor); SN=$(val "$L" 's3: sci' nach)
 if [ -n "$SV" ] && [ "$SV" = "$SN" ]; then ok "ACPI-Modus (SCI_EN) wie vorher: $SN"
 else bad "SCI_EN before=$SV after=$SN"; fi
-num "Arbeitsspeicher: Muster gleich" "$(val "$L" 's3: speicher' gleich)" eq 1
-S1=$(val "$L" 's3: speicher' sum); V1=$(val "$L" 's3: speicher' vor)
+num "Arbeitsspeicher: Muster gleich" "$(val "$L" 's3: memory' same)" eq 1
+S1=$(val "$L" 's3: memory' sum); V1=$(val "$L" 's3: memory' vor)
 if [ -n "$S1" ] && [ "$S1" = "$V1" ] && [ "$S1" != "0x0" ]; then
     ok "checksum before = after and not zero ($S1)"
 else bad "Pruefsumme $V1 -> $S1"; fi
@@ -154,19 +154,19 @@ L="$TMPD/l-zwei.txt"
 lauf "$TMPD/zwei.img" "$L" 2 1
 case $STATUS2 in *suspended*) ok "the second sleep is real too ($STATUS2)";;
     *) bad "zweiter Schlaf: '$STATUS2'";; esac
-has "$L" "s3: wach zyklus=2 woke=1 stufe=4" "zweimal zurueck"
+has "$L" "s3: wake cycle=2 woke=1 stage=4" "zweimal zurueck"
 num "Rueckgabe" "$RC" eq 21
-A=$(val "$L" 's3: speicher' sum 1); B=$(val "$L" 's3: speicher' sum 2)
+A=$(val "$L" 's3: memory' sum 1); B=$(val "$L" 's3: memory' sum 2)
 if [ -n "$A" ] && [ -n "$B" ] && [ "$A" != "$B" ]; then
     ok "two different patterns, both held ($A / $B)"
 else bad "Muster $A / $B"; fi
-num "Zyklus 2: PCI danach abweichend" "$(val "$L" 's3: pci' danach-falsch 2)" eq 0
+num "Zyklus 2: PCI danach abweichend" "$(val "$L" 's3: pci' wrong-after 2)" eq 0
 
 # ------------------------------------------------------------ 4. scheduler
 echo "== 4. with timer and scheduler: the interrupts come back =="
 L="$TMPD/l-sched.txt"
 lauf "$TMPD/sched.img" "$L" 1 1
-has "$L" "s3: wach zyklus=1 woke=1 stufe=4" "zurueck, mit laufendem Scheduler davor"
+has "$L" "s3: wake cycle=1 woke=1 stage=4" "zurueck, mit laufendem Scheduler davor"
 num "Zeitgeber-Takte in 200 ms nach dem Aufwachen (100 Hz)" "$(val "$L" 's3: ticks' ms)" ge 10
 num "Rueckgabe" "$RC" eq 21
 
@@ -186,7 +186,7 @@ echo "== 6. with screen: the graphics mode comes back =="
 for g in gfx nobild; do
     L="$TMPD/l-$g.txt"
     lauf "$TMPD/$g.img" "$L" 1 1
-    has "$L" "s3: wach zyklus=1 woke=1 stufe=4" "$g: zurueck"
+    has "$L" "s3: wake cycle=1 woke=1 stage=4" "$g: zurueck"
 done
 L="$TMPD/l-gfx.txt"
 DV=$(val "$L" 's3: bildmodus' dispi-vorher); DN=$(val "$L" 's3: bildmodus' nach-wach); DD=$(val "$L" 's3: bildmodus' danach)
@@ -231,7 +231,7 @@ if OUT="$INST" PROGS="sh echo sync standby" APPS="" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
     pid=$!
     for i in $(seq 1 450); do
-        grep -qa 's3: schlafe\|standby: kein' "$L" 2>/dev/null && break
+        grep -qa 's3: sleep cycle\|standby: kein' "$L" 2>/dev/null && break
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.2
     done
@@ -285,7 +285,7 @@ if ALLTAGBUILD="$B8/bd" bash tools/alltag/build.sh "$B8/o" desk=no accel=kvm sho
         P8=$!
         local i
         for i in $(seq 1 600); do
-            grep -qa 's3: schlafe\|standby: antwort=' "$L8" 2>/dev/null && break
+            grep -qa 's3: sleep cycle\|standby: antwort=' "$L8" 2>/dev/null && break
             kill -0 "$P8" 2>/dev/null || break
             sleep 0.2
         done
@@ -315,7 +315,7 @@ if ALLTAGBUILD="$B8/bd" bash tools/alltag/build.sh "$B8/o" desk=no accel=kvm sho
         n=$(grep -ac 'standby: antwort=1' "$L8"); num "$np processors: the answer 1 (slept and woke), kernel + program" "$n" eq 2
         case $ST8 in *suspended*) ok "$np processors: the machine sleeps ($ST8)";; *) bad "$np processors: state at the standby: '$ST8'";; esac
         case $ST9 in *running*) ok "$np processors: and it runs again after the wake-up ($ST9)";; *) bad "$np processors: state after the wake-up: '$ST9'";; esac
-        has "$L8" "s3: kerne wieder online=$np" "$np processors: all cores are back"
+        has "$L8" "s3: cores back online=$np" "$np processors: all cores are back"
     done
     lauf9() { # name smp keys(1|0)
         local name=$1 smp=$2 keys=$3 t="$TMPD/e9.img" sock="$TMPD/mon.9$2"
@@ -341,7 +341,7 @@ if ALLTAGBUILD="$B8/bd" bash tools/alltag/build.sh "$B8/o" desk=no accel=kvm sho
         for i in $(seq 1 600); do
             [ "$keys" = 1 ] && ! grep -qa 'standby: wunsch' "$L9" 2>/dev/null && [ "$i" -gt 40 ] \
                 && echo 'sendkey sleep' | socat - "UNIX-CONNECT:$sock" >/dev/null 2>&1
-            grep -qa 's3: schlafe\|standby: antwort=' "$L9" 2>/dev/null && break
+            grep -qa 's3: sleep cycle\|standby: antwort=' "$L9" 2>/dev/null && break
             kill -0 "$P9" 2>/dev/null || break
             sleep 0.5
         done

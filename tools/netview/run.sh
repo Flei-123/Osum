@@ -1030,7 +1030,7 @@ for ed in bottom top left right; do
             # source file.
             # THE TILES COME FROM THE PANEL'S OWN REPORT. Since the Windows-11
             # quick settings a cell is a PLATE with the LABEL under it on the card
-            # (`qs: platte` / `qs: label`): the label rectangle holds only text, so
+            # (`qs: plate` / `qs: label`): the label rectangle holds only text, so
             # that is what is measured (no symbol band: 0 rows skipped). The plate
             # has its own gates (qsfui: plate size, symbol inside the plate).
             # Panel-relative in the report, screen pixels here.

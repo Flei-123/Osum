@@ -132,11 +132,11 @@ check_scale() {
         bad "scale $sc: brightness after the click: ${hv:-nothing}"
     fi
     sp=$(grep -aoE 'qs: bright trace from=[0-9]+ bis=[0-9]+ ym=[0-9]+' "$S" | head -1)
-    ym=$(echo "$sp" | sed -E 's/.* ym=([0-9]+).*/\1/'); von=$(echo "$sp" | sed -E 's/.* von=([0-9]+).*/\1/')
+    ym=$(echo "$sp" | sed -E 's/.* ym=([0-9]+).*/\1/'); from=$(echo "$sp" | sed -E 's/.* from=([0-9]+).*/\1/')
     bis=$(echo "$sp" | sed -E 's/.* bis=([0-9]+).*/\1/')
     # the knob: at the middle of the track the picture shows the track before
     # the click (the knob stood at about 44 %) and the knob after it
-    mx=$(( (von + bis) / 2 ))
+    mx=$(( (from + bis) / 2 ))
     a=$(px "$D/01-open.ppm" "$mx" "$ym"); b=$(px "$D/03-slider.ppm" "$mx" "$ym")
     if [ "$a" != "$b" ]; then
         ok "scale $sc: the brightness knob moved to the middle of the track ($a -> $b at $mx,$ym)"

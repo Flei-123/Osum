@@ -53,7 +53,7 @@ Die Gegenprobe **`s3nohooks`** setzt dasselbe zurück und führt die Haken **nic
 
 * **`tools/s3smp/run.sh`** [gemessen]: `-smp 2` und `-smp 4`, je drei Schlaf-Zyklen hintereinander (der Kern
   schläft aus `s3smp` heraus, nachdem die Zusatzkerne in ihrer Scheduler-Schleife stehen — der Zustand eines
-  laufenden Schreibtischs). Je Zyklus: die VM schläft wirklich (QEMU-Monitor), `kerne geparkt online=1`, `kerne wieder
+  laufenden Schreibtischs). Je Zyklus: die VM schläft wirklich (QEMU-Monitor), `cores parked online=1`, `kerne wieder
   online=N`, **jeder Kern** (nicht nur online) hat 300 ms danach ≥ 10 Zeitgebertakte mehr, die Leerlaufdrehungen der
   Zusatzkerne wachsen, die Echtzeit hat die Schlafzeit nachgeholt (3 Schlaf à ≥ 2 s: Summe ≥ 6 s), der Kern läuft
   bis zum Ende. Gegenprobe `s3nostart` (Kerne parken und **nicht** neu starten): der Takt-Test schlägt an
@@ -77,7 +77,7 @@ Die Gegenprobe **`s3nohooks`** setzt dasselbe zurück und führt die Haken **nic
 
 Alles unten ist **[unbekannt]** — QEMU/SeaBIOS bildet es nicht nach:
 
-1. **Mehrkern auf echter Hardware:** Standby → Taste: kommen alle Kerne zurück? (`dmesg`-Zeile `s3: kerne wieder online=N` auf der seriellen Leitung / im Foto).
+1. **Mehrkern auf echter Hardware:** Standby → Taste: kommen alle Kerne zurück? (`dmesg`-Zeile `s3: cores back online=N` auf der seriellen Leitung / im Foto).
 2. **UEFI/OVMF:** auf dem Dell-Stick (nicht SeaBIOS) — andere FACS/Wake-Vektor-Wege (r145).
 3. **Tastatur/Maus an einem echten xHCI** nach dem Aufwachen (QEMU-Regler behält seinen Zustand, die Simulation setzt ihn zurück — ein Intel/AMD-Regler kann anders aufwachen, z. B. mit gesetzten Ports/Legacy-Handover).
 4. **Netzkarte I217/I219 (Dell)**: der e1000-Haken ist gegen die QEMU-e1000 gemessen; die PCH-Karte hat einen anderen Aufwachweg (PHY-Reset, Link-Wartezeit). **virtio-net und r8169 werden bewusst nicht angefasst** (nie gemessen).

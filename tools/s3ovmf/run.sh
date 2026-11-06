@@ -54,7 +54,7 @@ run_cycles() {
     pid=$!
     for c in $(seq 1 "$cycles"); do
         for i in $(seq 1 600); do
-            n=$(grep -ac 's3: schlafe' "$log" 2>/dev/null)
+            n=$(grep -ac 's3: sleep cycle' "$log" 2>/dev/null)
             [ "${n:-0}" -ge "$c" ] && break
             kill -0 "$pid" 2>/dev/null || break
             sleep 0.2
@@ -102,28 +102,28 @@ run_cycles "$TMPD/one.img" "$L" 1 1
 has "$L" "BdsDxe" "booted through OVMF (UEFI), not SeaBIOS"
 has "$L" "s3: fadt=" "FADT, FACS and _S3 values found"
 case $STATUS1 in *suspended*) ok "QEMU reports the machine as SLEEPING ($STATUS1)";; *) bad "state while sleeping: '$STATUS1'";; esac
-has "$L" "s3: wach zyklus=1 woke=1 stufe=4" "OVMF resumed into the wake blob, which ran to stage 4 exactly once"
+has "$L" "s3: wake cycle=1 woke=1 stage=4" "OVMF resumed into the wake blob, which ran to stage 4 exactly once"
 num "exit code" "$RC" eq 21
 has "$L" "kernel: done" "the kernel runs on to its end after the wake-up"
-num "APIC: lines saved" "$(val "$L" 's3: apic' leitungen)" ge 1
-num "APIC: wrong afterwards" "$(val "$L" 's3: apic' danach-falsch)" eq 0
-num "PCI: devices saved" "$(val "$L" 's3: pci' geraete)" ge 1
-num "PCI: wrong afterwards" "$(val "$L" 's3: pci' danach-falsch)" eq 0
+num "APIC: lines saved" "$(val "$L" 's3: apic' lines)" ge 1
+num "APIC: wrong afterwards" "$(val "$L" 's3: apic' wrong-after)" eq 0
+num "PCI: devices saved" "$(val "$L" 's3: pci' devices)" ge 1
+num "PCI: wrong afterwards" "$(val "$L" 's3: pci' wrong-after)" eq 0
 SV=$(val "$L" 's3: sci' vor); SN=$(val "$L" 's3: sci' nach)
 if [ -n "$SV" ] && [ "$SV" = "$SN" ]; then ok "ACPI mode (SCI_EN) as before: $SN"; else bad "SCI_EN before=$SV after=$SN"; fi
-num "RAM: pattern equal" "$(val "$L" 's3: speicher' gleich)" eq 1
+num "RAM: pattern equal" "$(val "$L" 's3: memory' same)" eq 1
 
 echo "== 3. two cycles in a row ($OSUM_QEMU_ACCEL) =="
 L="$TMPD/l-two.txt"
 run_cycles "$TMPD/two.img" "$L" 2 1
 case $STATUS2 in *suspended*) ok "the second sleep is real too ($STATUS2)";; *) bad "second sleep: '$STATUS2'";; esac
-has "$L" "s3: wach zyklus=2 woke=1 stufe=4" "woke twice"
+has "$L" "s3: wake cycle=2 woke=1 stage=4" "woke twice"
 num "exit code" "$RC" eq 21
 
 echo "== 4. scheduler and timer after the wake-up =="
 L="$TMPD/l-sched.txt"
 run_cycles "$TMPD/sched.img" "$L" 1 1
-has "$L" "s3: wach zyklus=1 woke=1 stufe=4" "woke with the scheduler running"
+has "$L" "s3: wake cycle=1 woke=1 stage=4" "woke with the scheduler running"
 num "timer ticks in 200 ms after the wake-up" "$(val "$L" 's3: ticks' ms)" ge 10
 num "exit code" "$RC" eq 21
 
@@ -131,14 +131,14 @@ echo "== 5. several processors =="
 for np in 2 4; do
     L="$TMPD/l-smp$np.txt"
     run_cycles "$TMPD/sched.img" "$L" 1 1 "$np"
-    has "$L" "s3: wach zyklus=1 woke=1 stufe=4" "$np processors: woke"
+    has "$L" "s3: wake cycle=1 woke=1 stage=4" "$np processors: woke"
     has "$L" "kernel: done" "$np processors: the kernel reaches its end"
 done
 
 echo "== 6. graphics mode comes back under OVMF =="
 L="$TMPD/l-gfx.txt"
 run_cycles "$TMPD/gfx.img" "$L" 1 1
-has "$L" "s3: wach zyklus=1 woke=1 stufe=4" "gfx: woke"
+has "$L" "s3: wake cycle=1 woke=1 stage=4" "gfx: woke"
 DV=$(val "$L" 's3: bildmodus' dispi-vorher); DD=$(val "$L" 's3: bildmodus' danach)
 [ "$DV" = "0x41" ] && ok "before the sleep: DISPI on ($DV)" || bad "DISPI before: '$DV'"
 [ "$DD" = "0x41" ] && ok "after the restore: DISPI on again ($DD)" || bad "DISPI afterwards: '$DD'"
@@ -147,7 +147,7 @@ echo "== 7. OVMF i440fx (PIIX4 power management) =="
 L="$TMPD/l-pc.txt"
 run_cycles "$TMPD/one.img" "$L" 1 1 1 pc
 case $STATUS1 in *suspended*) ok "i440fx: the machine sleeps ($STATUS1)";; *) bad "i440fx: state while sleeping: '$STATUS1'";; esac
-has "$L" "s3: wach zyklus=1 woke=1 stufe=4" "i440fx: woke"
+has "$L" "s3: wake cycle=1 woke=1 stage=4" "i440fx: woke"
 
 echo "== 8. counter-proof: poisoned wake blob must NOT come back =="
 L="$TMPD/l-dead.txt"
