@@ -248,8 +248,8 @@ pruef_text() {
         tchain "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + x)) $((CY + base)) \
         $(rgb "$fg") $(rgb "$bg") "$soll"
 }
-pruef_text kopf "OSUM K15 WIDGETS"
-pruef_text knopf "Knopf"
+pruef_text head "OSUM K15 WIDGETS"
+pruef_text button "Knopf"
 pruef_text e1 "Kopiermich"
 RX=$(feld "$TMPD/ruhe.txt" "widgetdemo: rows" x)
 RB=$(feld "$TMPD/ruhe.txt" "widgetdemo: rows" base)
@@ -795,8 +795,8 @@ schau "with btn=804020 in the file the button has THIS colour" \
 schau_nicht "and then NOT the previous one" \
     area "$TMPD/theme2.ppm" $((CX + BX + 3)) $((CY + BY + 3)) 16 5 58 74 94
 schau "and the text on it is blended against the new ground" \
-    tchain "$TMPD/theme2.ppm" "$SANS_INK" 15 $((CX + $(feld "$TMPD/ruhe.txt" "widgetdemo: text knopf" x))) \
-    $((CY + $(feld "$TMPD/ruhe.txt" "widgetdemo: text knopf" base))) \
+    tchain "$TMPD/theme2.ppm" "$SANS_INK" 15 $((CX + $(feld "$TMPD/ruhe.txt" "widgetdemo: text button" x))) \
+    $((CY + $(feld "$TMPD/ruhe.txt" "widgetdemo: text button" base))) \
     $(rgb "$BTNFG") 128 64 32 "Knopf"
 
 echo "== 13. the pointer image -- the only place where ring 3 tells the server about the pointer =="
