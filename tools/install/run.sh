@@ -45,7 +45,7 @@ mkdir -p "$OUT/fmt"
 echo "hallo" > "$OUT/fmt/a.txt"
 git show main:tools/osum/mkfs.py > "$OUT/fmt/mkfs-main.py" 2>/dev/null
 if [ -s "$OUT/fmt/mkfs-main.py" ]; then
-    python3 "$OUT/fmt/mkfs-main.py" build "$OUT/fmt/alt.img" 4096 /x/ \
+    PYTHONPATH="$ROOT/tools/marke" python3 "$OUT/fmt/mkfs-main.py" build "$OUT/fmt/alt.img" 4096 /x/ \
         "/x/a=$OUT/fmt/a.txt" > /dev/null 2>&1
     bash tools/mkfsfi/mkfs.sh build "$OUT/fmt/neu.img" 4096 /x/ \
         "/x/a=$OUT/fmt/a.txt" > /dev/null 2>&1
@@ -129,6 +129,8 @@ for i in range(2):
     print("part%d" % i, e[:16].hex(), struct.unpack_from("<Q", e, 32)[0],
           struct.unpack_from("<Q", e, 40)[0],
           e[56:72].decode("utf-16-le").rstrip("\0"))
+root_end = struct.unpack_from("<Q", arr[128:256], 40)[0]
+print("tail_free_blocks", n - 1 - root_end)
 EOF
 cat "$OUT/gpt.txt" | sed 's/^/        /'
 hat "$OUT/gpt.txt" "mbr_sig True" "Schutz-MBR traegt 0x55AA"
@@ -141,6 +143,9 @@ hat "$OUT/gpt.txt" "bak_crc_ok True" "CRC32 des Sicherungskopfes stimmt"
 hat "$OUT/gpt.txt" "bak_arr_gleich True" "die Sicherungstafel ist Oktett fuer Oktett die primaere"
 hat "$OUT/gpt.txt" "part0 28732ac11ff8d211ba4b00a0c93ec93b" "Partition 0 traegt die EFI-Kennung"
 hat "$OUT/gpt.txt" "part1 4d55534f464f01538e756d6f72694f53" "Partition 1 traegt die OFS-Kennung"
+
+tail_free=$(awk '$1=="tail_free_blocks"{print $2}' "$OUT/gpt.txt")
+num "blocks free after the root partition (standby image 4096 + GPT backup 33)" "$tail_free" ge 4129
 
 # FAT32 mit fremden Werkzeugen
 if command -v fsck.fat > /dev/null; then
