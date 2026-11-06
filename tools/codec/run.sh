@@ -419,6 +419,6 @@ else
 fi
 
 echo
-summary_emit "$pass" "$fail" 60 || exit 1
+summary_emit "$pass" "$fail" 90 || exit 1
 [ "$fail" = 0 ] || exit 1
 exit 0

@@ -239,7 +239,7 @@ echo "== 8. the surface: the messages in the bar =="
 python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
     || bad "tools/k15/tree.py faellt"
 printf '# taskbar.conf\nedge=0\nheight=40\nwidth=0\nautohide=0\nontop=1\n' > "$TMPD/tb.conf"
-ARGS=(build "$TMPD/disk.img" 32768 /lib/
+ARGS=(build "$TMPD/disk.img" 65536 --v3 /lib/
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
