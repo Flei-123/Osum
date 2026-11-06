@@ -254,7 +254,7 @@ if grep -qa 'explorer: backup ' "$TMPD/sich2.txt"; then
     Z=$(grep -a 'explorer: backup ' "$TMPD/sich2.txt" | tail -1)
     ok "the menu item backed up: $Z"
     RCB=$(echo "$Z" | grep -oE 'rc=[0-9]+' | sed 's/.*=//')
-    NEU=$(echo "$Z" | grep -oE 'neu=[0-9]+' | sed 's/.*=//')
+    NEU=$(echo "$Z" | grep -oE 'written=[0-9]+' | sed 's/.*=//')
     DAT=$(echo "$Z" | grep -oE 'dateien=[0-9]+' | sed 's/.*=//')
     is "und der Lauf ist durchgegangen" "$RCB" "0"
     num "er hat Dateien gesichert" "$DAT" gt 0

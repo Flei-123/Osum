@@ -210,7 +210,7 @@ werden. Kein Aufrufer ist für diese Runde angefasst worden: `wm.fi` ruft
 
 ```
 sigok=1  secs=11  syms=218  rel=569  ext=12  bytes=34490
-datei=58384  basis=0x5fb000  rahmen=9  abi=1  initrc=0  plaetze=28
+datei=58384  basis=0x5fb000  rahmen=9  abi=1  initrc=0  slots=28
 ```
 
 569 Relokationen aufgelöst, 12 Namen gegen die Ausfuhrtafel des Kerns

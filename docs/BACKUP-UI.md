@@ -149,7 +149,7 @@ At the end the same line becomes the summary, and the run also reports
 on the serial line so it can be measured rather than admired:
 
 ```
-explorer: backup ziel=/sicherung name=sicherung1 dateien=3 oktette=44384 neu=45056 rc=0
+explorer: backup ziel=/sicherung name=sicherung1 dateien=3 oktette=44384 written=45056 rc=0
 ```
 
 **What gets backed up is `/data`**, and that is stated here rather than
