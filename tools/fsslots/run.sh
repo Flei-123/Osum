@@ -9,7 +9,7 @@ summary_begin FSSLOTS
 export FIRNLIB="$(pwd)/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 ULD=kernel/user/user.ld
-PROGS="sh cat echo ls shasum mount umount sleep rm wc"
+PROGS="sh cat echo ls shasum mount umount sleep rm wc mv"
 TMPD=$(mktemp -d)
 osum_tmp_guard "${1:-}" "$TMPD"
 trap 'summary_guard; [ -z "${FSSLOTS_OUT:-}" ] || { mkdir -p "$FSSLOTS_OUT"; cp "$TMPD"/*.out "$TMPD"/*.sh "$FSSLOTS_OUT"/ 2>/dev/null; }; rm -rf "$TMPD"; summary_exit_status || exit 1' EXIT
@@ -71,6 +71,22 @@ grep -qF "$DETACH_OFF" "$OLD_UNLINK/kernel/fs/fat.fi" && ok "unlink-old variant:
 ( cd "$OLD_UNLINK" && bash tools/build-kernel.sh "$TMPD/oldunlink.mb" > "$TMPD/oldunlinkbuild.log" 2>&1 ) \
     && ok "unlink-old variant builds" || { bad "unlink-old variant build"; tail -8 "$TMPD/oldunlinkbuild.log"; }
 
+patch_variant() {
+    local dir=$1 from=$2 to=$3 label=$4 mb=$5
+    mkdir -p "$dir"
+    for e in $(ls -A | grep -v '^\.git$'); do cp -al "$e" "$dir/"; done
+    local src
+    src=$(cat "$dir/kernel/fs/fat.fi")
+    printf '%s\n' "${src//"$from"/"$to"}" > "$TMPD/fat.$label.patched"
+    rm -f "$dir/kernel/fs/fat.fi"
+    cp "$TMPD/fat.$label.patched" "$dir/kernel/fs/fat.fi"
+    grep -qF "$to" "$dir/kernel/fs/fat.fi" && ok "$label variant: patch applied" || bad "$label variant: patch did not apply"
+    ( cd "$dir" && bash tools/build-kernel.sh "$mb" > "$TMPD/$label.build.log" 2>&1 ) \
+        && ok "$label variant builds" || { bad "$label variant build"; tail -8 "$TMPD/$label.build.log"; }
+}
+patch_variant "$TMPD/oldfree" 'if clus >= 2 && !node_is_dead(state, node) {' 'if clus >= 2 {' freeold "$TMPD/oldfree.mb"
+patch_variant "$TMPD/oldmove" 'let _moved: bool = node_move(state, node, fresh)' 'let _moved: bool = false' moveold "$TMPD/oldmove.mb"
+
 MKARGS=""
 for p in $PROGS; do
     if "$FIRNC" "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/e$p" 2>&1 \
@@ -121,16 +137,24 @@ mkfs.fat -F 32 -s 1 "$IMG/fat.fs" >/dev/null 2>&1 \
 mkdisk "$IMG/fat.fs" "$IMG/fat.disk" 0c
 
 HELD_SIZE=777
+REN_SIZE=1300
 mkdir -p "$TREE/h"
-python3 -I - "$TREE/h/held.bin" "$HELD_SIZE" <<'PYEOF'
-import random, sys
-open(sys.argv[1], "wb").write(bytes(random.Random(77).randrange(256) for _ in range(int(sys.argv[2]))))
+python3 -I - "$TREE/h" "$HELD_SIZE" "$REN_SIZE" <<'PYEOF'
+import hashlib, random, sys
+root, a, b = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+held = bytes(random.Random(77).randrange(256) for _ in range(a))
+ren = bytes(random.Random(78).randrange(256) for _ in range(b))
+open(root + "/held.bin", "wb").write(held)
+open(root + "/ren.bin", "wb").write(ren)
+open(root + "/ren.sha", "w").write(hashlib.sha256(ren).hexdigest() + "\n")
 PYEOF
+REN_SHA=$(cat "$TREE/h/ren.sha")
+rm -f "$TREE/h/ren.sha"
 dd if=/dev/null of="$IMG/fath.fs" bs=1M seek=40 2>/dev/null
 mkfs.fat -F 32 -s 1 "$IMG/fath.fs" >/dev/null 2>&1 \
     && mcopy -i "$IMG/fath.fs" -s "$TREE/d" ::/d >/dev/null 2>&1 \
     && mcopy -i "$IMG/fath.fs" -s "$TREE/h" ::/h >/dev/null 2>&1 \
-    && ok "FAT32 image with a file to hold open" || bad "FAT32 held image"
+    && ok "FAT32 image with files to hold open" || bad "FAT32 held image"
 mkdisk "$IMG/fath.fs" "$IMG/fath.disk" 0c
 
 dd if=/dev/null of="$IMG/exfat.fs" bs=1M seek=24 2>/dev/null
@@ -226,8 +250,9 @@ runfs() {
 
 run_held() {
     local kern=$1 tag=$2 name="$2-held"
-    local S="$TMPD/$name.sh" H="$TMPD/held.sh"
-    printf 'echo @@held-start\nsleep 4\nwc -c\necho @@held-end\n' > "$H"
+    local S="$TMPD/$name.sh"
+    printf 'echo @@held-start\nsleep 5\nwc -c\necho @@held-end\n' > "$TMPD/held.sh"
+    printf 'echo @@ren-start\nsleep 7\nwc -c\necho @@ren-end\n' > "$TMPD/ren.sh"
     {
         echo 'echo @@mount'
         echo 'echo "unlock hdb" > /dev/wlock'
@@ -235,9 +260,12 @@ run_held() {
         echo 'mount /dev/hdb1 /mnt vfat'
         echo 'echo "@@mount-rc=$?"'
         echo 'sh /t/held.sh < /mnt/h/held.bin &'
+        echo 'sh /t/ren.sh < /mnt/h/ren.bin &'
         echo 'sleep 1'
         echo 'rm /mnt/h/held.bin'
         echo 'echo "@@rm-rc=$?"'
+        echo 'mv /mnt/h/ren.bin /mnt/h/moved.bin'
+        echo 'echo "@@mv-rc=$?"'
         echo 'echo @@scan'
         local paths k=0 line=""
         for paths in $(cut -d' ' -f2 "$IMG/fat.want"); do
@@ -246,13 +274,15 @@ run_held() {
             if [ $((k % 3)) = 0 ]; then echo "shasum$line"; line=""; fi
         done
         [ -z "$line" ] || echo "shasum$line"
-        echo 'sleep 6'
+        echo 'sleep 11'
+        echo 'echo @@renamed'
+        echo 'shasum /mnt/h/moved.bin'
         echo 'echo @@end'
         echo 'umount /mnt'
         echo 'sleep 2'
     } > "$S"
     bash tools/mkfsfi/mkfs.sh build "$TMPD/root-$name.img" 20000 /bin/ /proc/ /dev/ /mnt/ /t/ $MKARGS \
-        "/t/s.sh=$S" "/t/held.sh=$H" > "$TMPD/mkfs-$name.log" 2>&1 \
+        "/t/s.sh=$S" "/t/held.sh=$TMPD/held.sh" "/t/ren.sh=$TMPD/ren.sh" > "$TMPD/mkfs-$name.log" 2>&1 \
         || { bad "[$name] mkfs"; tail -3 "$TMPD/mkfs-$name.log"; return 1; }
     cp --sparse=always "$IMG/fath.disk" "$TMPD/live2-$name.img"
     local acc=""
@@ -267,24 +297,52 @@ run_held() {
 }
 
 held_value() {
-    awk '/^@@held-start/{on=1; next} /^@@held-end/{on=0} on && /^ *[0-9]+ *$/{gsub(/ /,""); print; exit}' "$1"
+    awk -v t="$2" '/^ *[0-9]+ *$/{gsub(/ /,""); last=$0} $0 == "@@" t "-end"{print last; exit}' "$1"
+}
+
+check_fsck() {
+    local name=$1 expect=$2 img="$TMPD/live2-$1.img" rc
+    command -v fsck.fat >/dev/null 2>&1 || return 0
+    dd if="$img" of="$TMPD/$name.part" bs=512 skip=2048 status=none
+    fsck.fat -n "$TMPD/$name.part" > "$TMPD/$name.fsck" 2>&1
+    rc=$?
+    if [ "$expect" = green ]; then
+        [ "$rc" = 0 ] && ok "[$name] host fsck.fat: image clean, no leaked clusters" \
+            || { bad "[$name] host fsck.fat rc=$rc"; head -4 "$TMPD/$name.fsck"; }
+    fi
 }
 
 check_held() {
-    local kern=$1 tag=$2 expect=$3
+    local kern=$1 tag=$2 expect=$3 want_unlink=$4 want_rename=$5
     run_held "$kern" "$tag" || return
-    local name="$tag-held" out="$TMPD/$tag-held.out" v
+    local name="$tag-held" out="$TMPD/$tag-held.out" v r sha
     grep -aq '^@@end' "$out" && ok "[$name] script reached the end" || bad "[$name] script did not reach @@end"
     grep -aq '^@@rm-rc=0' "$out" && ok "[$name] unlink of the open file succeeded" || bad "[$name] unlink of the open file failed"
-    grep -aq '^@@held-end' "$out" && ok "[$name] the holder finished" || bad "[$name] the holder never finished"
-    v=$(held_value "$out")
-    if [ "$expect" = green ]; then
-        if [ "$v" = 0 ] || [ "$v" = "$HELD_SIZE" ]; then ok "[$name] the held descriptor still reads its own file or nothing ($v bytes)"
-        else bad "[$name] the held descriptor reads another file ($v bytes, expected 0 or $HELD_SIZE)"; fi
-    else
-        if [ -n "$v" ] && [ "$v" != 0 ] && [ "$v" != "$HELD_SIZE" ]; then ok "[$name] NEGATIVE: the held descriptor reads a foreign file ($v bytes)"
-        else bad "[$name] NEGATIVE: old kernel stays correct ($v bytes), probe is blind"; fi
-    fi
+    grep -aq '^@@mv-rc=0' "$out" && ok "[$name] rename of the open file succeeded" || bad "[$name] rename of the open file failed"
+    grep -aq '^@@held-end' "$out" && ok "[$name] the unlink holder finished" || bad "[$name] the unlink holder never finished"
+    grep -aq '^@@ren-end' "$out" && ok "[$name] the rename holder finished" || bad "[$name] the rename holder never finished"
+    v=$(held_value "$out" held)
+    r=$(held_value "$out" ren)
+    sha=$(awk '/^@@renamed/{on=1; next} on && length($1) == 64 {print $1; exit}' "$out")
+    case $want_unlink in
+        keep) [ "$v" = "$HELD_SIZE" ] && ok "[$name] unlinked open file: descriptor still reads all $HELD_SIZE bytes" \
+                  || bad "[$name] unlinked open file: descriptor reads '$v' bytes, expected $HELD_SIZE" ;;
+        neg_foreign) if [ -n "$v" ] && [ "$v" != 0 ] && [ "$v" != "$HELD_SIZE" ]; then ok "[$name] NEGATIVE: the held descriptor reads a foreign file ($v bytes)"
+                     else bad "[$name] NEGATIVE: old kernel stays correct ($v bytes), probe is blind"; fi ;;
+        neg_lost) [ "$v" != "$HELD_SIZE" ] && ok "[$name] NEGATIVE: clusters freed at unlink, descriptor loses data ('$v' bytes)" \
+                  || bad "[$name] NEGATIVE: descriptor still reads everything, probe is blind" ;;
+        skip) ;;
+    esac
+    case $want_rename in
+        keep) [ "$r" = "$REN_SIZE" ] && ok "[$name] renamed open file: descriptor still reads all $REN_SIZE bytes" \
+                  || bad "[$name] renamed open file: descriptor reads '$r' bytes, expected $REN_SIZE"
+              [ "$sha" = "$REN_SHA" ] && ok "[$name] renamed file content equals the host sha256" \
+                  || bad "[$name] renamed file content wrong ('$sha')" ;;
+        neg) [ "$r" != "$REN_SIZE" ] && ok "[$name] NEGATIVE: rename kills the open descriptor ('$r' bytes)" \
+                  || bad "[$name] NEGATIVE: old rename keeps the descriptor, probe is blind" ;;
+        skip) ;;
+    esac
+    check_fsck "$name" "$([ "$expect" = green ] && echo green || echo red)"
 }
 
 count_bad() {
@@ -340,8 +398,10 @@ for k in ${FSSLOTS_KINDS:-ofs fat ext4 ntfs exfat}; do check_kind "$TMPD/new.mb"
 echo "== 4. negative controls: kernel without the recycle-time drop =="
 for k in ${FSSLOTS_OLD_KINDS:-fat ext4 ntfs exfat}; do check_kind "$TMPD/old.mb" "$k" old red; done
 
-echo "== 5. unlink of an open FAT file: its slot must not be recycled under the descriptor =="
-check_held "$TMPD/new.mb" new green
-check_held "$TMPD/oldunlink.mb" oldunlink red
+echo "== 5. open FAT files: unlink keeps slot + data, rename keeps the descriptor =="
+check_held "$TMPD/new.mb" new green keep keep
+check_held "$TMPD/oldunlink.mb" oldunlink red neg_foreign skip
+check_held "$TMPD/oldfree.mb" oldfree red neg_lost skip
+check_held "$TMPD/oldmove.mb" oldmove red skip neg
 
-summary_emit "$pass" "$fail" 36
+summary_emit "$pass" "$fail" 48
