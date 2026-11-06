@@ -40,7 +40,7 @@ def verify(name, body, want_frame):
     ax, ay = (int(v) for v in texts[-1])
     check((inx > 0 and iny > 0) == want_frame, name + ": frame inset %d/%d as expected" % (inx, iny))
     if want_frame:
-        check(ax > x and ay > y, name + ": text ax/ay %d/%d is inside the frame of window %d/%d" % (ax, ay, x, y))
+        check((ax, ay) == (x + inx, y + iny), name + ": text ax/ay %d/%d == window %d/%d + inset %d/%d" % (ax, ay, x, y, inx, iny))
     else:
         check((ax, ay) == (x, y), name + ": text ax/ay %d/%d == window %d/%d" % (ax, ay, x, y))
 
