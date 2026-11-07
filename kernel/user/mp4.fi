@@ -12,7 +12,7 @@ export {
     mp4_height, mp4_rate, mp4_channels, mp4_bits, mp4_audio_codec,
     mp4_duration_ms, mp4_item_ms, mp4_nal_len_size, mp4_headers_annexb,
     mp4_sample_annexb, mp4_sample_raw,
-    TRK_VIDEO, TRK_AUDIO, AC_NONE, AC_PCM_LE, AC_PCM_BE, AC_OTHER,
+    TRK_VIDEO, TRK_AUDIO, AC_NONE, AC_PCM_LE, AC_PCM_BE, AC_OTHER, AC_MP3, AC_AAC,
     ME_OK, ME_OPEN, ME_NO_MOOV, ME_TRUNC, ME_NO_TRACK, ME_TABLE, ME_BIG
 }
 
@@ -31,6 +31,8 @@ const AC_NONE: u64 = 0
 const AC_PCM_LE: u64 = 1
 const AC_PCM_BE: u64 = 2
 const AC_OTHER: u64 = 3
+const AC_MP3: u64 = 4
+const AC_AAC: u64 = 5
 
 const MAX_ITEMS: u64 = 6144
 const SCRATCH: u64 = 524288
@@ -70,6 +72,16 @@ const FCC_VIDE: u64 = 0x76696465
 const FCC_SOUN: u64 = 0x736F756E
 const FCC_SOWT: u64 = 0x736F7774
 const FCC_TWOS: u64 = 0x74776F73
+const FCC_DOT_MP3: u64 = 0x2E6D7033
+const FCC_MP4A: u64 = 0x6D703461
+const BOX_ESDS: u64 = 0x65736473
+const TAG_ES: u64 = 3
+const TAG_DECODER_CONFIG: u64 = 4
+const OTI_AAC: u64 = 0x40
+const OTI_MP3_V1: u64 = 0x6B
+const OTI_MP3_V2: u64 = 0x69
+const AUDIO_V1_EXTRA: u64 = 16
+const AUDIO_ENTRY_HEAD: u64 = 36
 
 static mut trk: [u64; 32] = [0 as u64; 32]
 static mut it_off: [u64; 12288] = [0 as u64; 12288]
@@ -369,7 +381,32 @@ fn read_avcc(entry: u64, entry_end: u64) -> bool {
     return true
 }
 
-fn parse_audio_entry(e: u64, fcc: u64) {
+fn skip_descriptor_len(at: u64) -> u64 {
+    var p: u64 = at
+    while p < at + 3 && (media.src_byte(p) & 0x80) != 0 { p = p + 1 }
+    return p + 1
+}
+
+fn esds_object_type(e: u64, entry_end: u64) -> u64 {
+    var head: u64 = AUDIO_ENTRY_HEAD
+    if media.be16(e + 16) == 1 { head = head + AUDIO_V1_EXTRA }
+    if !child(e + head, entry_end, BOX_ESDS) { return 0 }
+    var p: u64 = g_pay + 4
+    if media.src_byte(p) != TAG_ES { return 0 }
+    p = skip_descriptor_len(p + 1) + 3
+    if media.src_byte(p) != TAG_DECODER_CONFIG { return 0 }
+    p = skip_descriptor_len(p + 1)
+    return media.src_byte(p)
+}
+
+fn mp4a_codec(e: u64, entry_end: u64) -> u64 {
+    let oti: u64 = esds_object_type(e, entry_end)
+    if oti == OTI_MP3_V1 || oti == OTI_MP3_V2 { return AC_MP3 }
+    if oti == OTI_AAC { return AC_AAC }
+    return AC_OTHER
+}
+
+fn parse_audio_entry(e: u64, entry_end: u64, fcc: u64) {
     fset(TRK_AUDIO, F_CH, media.be16(e + 24))
     fset(TRK_AUDIO, F_BITS, media.be16(e + 26))
     fset(TRK_AUDIO, F_RATE, media.be16(e + 32))
@@ -377,6 +414,10 @@ fn parse_audio_entry(e: u64, fcc: u64) {
         fset(TRK_AUDIO, F_CODEC, AC_PCM_LE)
     } else if fcc == FCC_TWOS {
         fset(TRK_AUDIO, F_CODEC, AC_PCM_BE)
+    } else if fcc == FCC_DOT_MP3 {
+        fset(TRK_AUDIO, F_CODEC, AC_MP3)
+    } else if fcc == FCC_MP4A {
+        fset(TRK_AUDIO, F_CODEC, mp4a_codec(e, entry_end))
     } else {
         fset(TRK_AUDIO, F_CODEC, AC_OTHER)
     }
@@ -415,7 +456,7 @@ fn parse_trak(pay: u64, end: u64) -> bool {
         fset(t, F_H, media.be16(entry + 34))
         if !read_avcc(entry, entry_end) { return false }
     } else {
-        parse_audio_entry(entry, fcc)
+        parse_audio_entry(entry, entry_end, fcc)
     }
     if !child(stbl_pay, stbl_end, BOX_STTS) { return fail(ME_TABLE) }
     let stts: u64 = g_pay

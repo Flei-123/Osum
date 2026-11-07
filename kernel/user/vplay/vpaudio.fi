@@ -2,7 +2,9 @@
 
 import ulib
 import libc.kcall
+import libc.octets
 import mp4
+import mp3
 
 const SYS_AUDGET: u64 = 1850
 const SYS_AUDSET: u64 = 1851
@@ -20,11 +22,15 @@ const BUF_CAP: u64 = 524288
 const CHUNK_FRAMES: u64 = 1024
 const AHEAD_MS: u64 = 250
 const FEED_ROUNDS: u64 = 8
+const MP3_PREROLL: u64 = 2
+const MP3_SKIP_LIMIT: u64 = 3
+const SIGN_FLIP_SAMPLE: u64 = 1
 
 static mut a_buf: [u8; 524288] = [0 as u8; 524288]
 static mut a_out: [u8; 4096] = [0 as u8; 4096]
 
 static mut a_active: bool = false
+static mut a_disabled: bool = false
 static mut a_started: bool = false
 static mut a_ended: bool = false
 static mut a_stream: u64 = 0
@@ -35,10 +41,18 @@ static mut a_base_ms: u64 = 0
 static mut a_sent: u64 = 0
 static mut a_played0: u64 = 0
 static mut a_dev_rate: u64 = 0
+static mut a_stat_frames: u64 = 0
+static mut a_stat_cross: u64 = 0
+static mut a_stat_peak: u64 = 0
+static mut a_stat_neg: bool = false
+
+fn audio_disable() { a_disabled = true }
 
 fn audio_available() -> bool {
+    if a_disabled { return false }
     if !mp4.mp4_has(mp4.TRK_AUDIO) { return false }
-    if mp4.mp4_audio_codec() != mp4.AC_PCM_LE { return false }
+    let codec: u64 = mp4.mp4_audio_codec()
+    if codec != mp4.AC_PCM_LE && codec != mp4.AC_MP3 { return false }
     if mp4.mp4_bits() != 16 { return false }
     let ch: u64 = mp4.mp4_channels()
     if ch != 1 && ch != 2 { return false }
@@ -47,7 +61,67 @@ fn audio_available() -> bool {
 
 fn audio_active() -> bool { return a_active }
 
+fn s16_at(p: u64) -> i64 {
+    let v: u64 = (__mmio_read8(p as *mut u8) as u64) | ((__mmio_read8((p + 1) as *mut u8) as u64) << 8)
+    if v >= 32768 { return (v as i64) - 65536 }
+    return v as i64
+}
+
+fn stat_frame(frames: u64) {
+    let bpf: u64 = mp4.mp4_channels() * 2
+    let src: u64 = (&a_buf[(0) as usize]) as u64
+    var f: u64 = 0
+    while f < frames {
+        let v: i64 = s16_at(src + f * bpf)
+        var mag: u64 = v as u64
+        if v < 0 { mag = (0 - v) as u64 }
+        if mag > a_stat_peak { a_stat_peak = mag }
+        let neg: bool = v < 0
+        if neg != a_stat_neg { a_stat_cross = a_stat_cross + SIGN_FLIP_SAMPLE }
+        a_stat_neg = neg
+        f = f + 1
+    }
+    a_stat_frames = a_stat_frames + frames
+}
+
+fn mp3_decode_item(i: u64) -> u64 {
+    let n: u64 = mp4.mp4_sample_raw(mp4.TRK_AUDIO, i, mp3.mp3_inbuf(), mp3.MAXIN)
+    if n == 0 { return 0 }
+    return mp3.mp3_decode(n)
+}
+
+fn mp3_load(i: u64) -> bool {
+    var k: u64 = i
+    var tries: u64 = 0
+    while tries < MP3_SKIP_LIMIT && k < mp4.mp4_items(mp4.TRK_AUDIO) {
+        let frames: u64 = mp3_decode_item(k)
+        if frames > 0 {
+            let bytes: u64 = frames * mp4.mp4_channels() * 2
+            octets.copy((&a_buf[(0) as usize]) as u64, mp3.mp3_pcm(), bytes)
+            a_item = k
+            a_pos = 0
+            a_len = bytes
+            stat_frame(frames)
+            return true
+        }
+        k = k + 1
+        tries = tries + 1
+    }
+    return false
+}
+
+fn mp3_preroll(idx: u64) {
+    mp3.mp3_reset()
+    var k: u64 = 0
+    if idx > MP3_PREROLL { k = idx - MP3_PREROLL }
+    while k < idx {
+        let _d: u64 = mp3_decode_item(k)
+        k = k + 1
+    }
+}
+
 fn audio_load(i: u64) -> bool {
+    if mp4.mp4_audio_codec() == mp4.AC_MP3 { return mp3_load(i) }
     let n: u64 = mp4.mp4_sample_raw(mp4.TRK_AUDIO, i, (&a_buf[(0) as usize]) as u64, BUF_CAP)
     if n == 0 { return false }
     a_item = i
@@ -55,6 +129,14 @@ fn audio_load(i: u64) -> bool {
     a_len = n
     return true
 }
+
+fn audio_stat_frames() -> u64 { return a_stat_frames }
+
+fn audio_stat_cross() -> u64 { return a_stat_cross }
+
+fn audio_stat_peak() -> u64 { return a_stat_peak }
+
+fn audio_stat_errors() -> u64 { return mp3.mp3_errors() + mp3.mp3_skipped() }
 
 fn audio_item_at(ms: u64) -> u64 {
     let n: u64 = mp4.mp4_items(mp4.TRK_AUDIO)
@@ -75,12 +157,13 @@ fn audio_start(ms: u64) -> bool {
     if ulib.bad(id) { return false }
     a_stream = id
     let idx: u64 = audio_item_at(ms)
+    if mp4.mp4_audio_codec() == mp4.AC_MP3 { mp3_preroll(idx) }
     if !audio_load(idx) {
         ulib.sys(SYS_AUDSET, AS_CLOSE, a_stream, 0)
         return false
     }
     let bpf: u64 = mp4.mp4_channels() * 2
-    let item_ms: u64 = mp4.mp4_item_ms(mp4.TRK_AUDIO, idx)
+    let item_ms: u64 = mp4.mp4_item_ms(mp4.TRK_AUDIO, a_item)
     var skip: u64 = 0
     if ms > item_ms { skip = (ms - item_ms) * mp4.mp4_rate() / 1000 }
     if skip * bpf >= a_len { skip = 0 }
