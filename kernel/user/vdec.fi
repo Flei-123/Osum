@@ -1,0 +1,219 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile kernel
+
+import ulib
+import h264
+import mp4
+import sha
+
+export { u_start }
+
+const ANNEXB_CAP: u64 = 1048576
+const AUDIO_CAP: u64 = 524288
+
+static mut annexb: [u8; 1048576] = [0 as u8; 1048576]
+static mut audio_buf: [u8; 524288] = [0 as u8; 524288]
+static mut digest: [u8; 32] = [0 as u8; 32]
+static mut hex: [u8; 72] = [0 as u8; 72]
+
+static mut k_usage: [u8; 23] = "vdec: usage: vdec file\0"
+static mut k_open: [u8; 22] = "vdec: cannot open: \0\0\0"
+static mut k_video: [u8; 13] = "vdec: video \0"
+static mut k_audio: [u8; 13] = "vdec: audio \0"
+static mut k_item: [u8; 12] = "vdec: item \0"
+static mut k_sha: [u8; 11] = "vdec: sha \0"
+static mut k_frames: [u8; 16] = "vdec: frames = \0"
+static mut k_err: [u8; 13] = "vdec: err = \0"
+static mut k_merr: [u8; 14] = "vdec: merr = \0"
+static mut k_asha: [u8; 14] = "vdec: asha = \0"
+static mut k_abytes: [u8; 16] = "vdec: abytes = \0"
+static mut k_ms: [u8; 12] = "vdec: ms = \0"
+static mut k_eq: [u8; 4] = " = \0"
+static mut k_sp: [u8; 2] = " \0"
+static mut k_done: [u8; 11] = "vdec: done\0"
+
+fn say(p: u64) { ulib.say(p) }
+
+fn num(v: u64) { ulib.sayn(v) }
+
+fn sp() { say((&k_sp[(0) as usize]) as u64) }
+
+fn clock_ms() -> u64 {
+    var ts: [u8; 16] = [0 as u8; 16]
+    let r: u64 = ulib.sys(228, 1, (&ts[(0) as usize]) as u64, 0)
+    if ulib.bad(r) { return 0 }
+    let s: u64 = __mmio_read64(((&ts[(0) as usize]) as u64) as *mut u64)
+    let ns: u64 = __mmio_read64((((&ts[(0) as usize]) as u64) + 8) as *mut u64)
+    return s * 1000 + ns / 1000000
+}
+
+fn report_tracks() {
+    if mp4.mp4_has(mp4.TRK_VIDEO) {
+        say((&k_video[(0) as usize]) as u64)
+        num(mp4.mp4_width())
+        sp()
+        num(mp4.mp4_height())
+        sp()
+        num(mp4.mp4_items(mp4.TRK_VIDEO))
+        sp()
+        num(mp4.mp4_duration_ms(mp4.TRK_VIDEO))
+        ulib.nl()
+    }
+    if mp4.mp4_has(mp4.TRK_AUDIO) {
+        say((&k_audio[(0) as usize]) as u64)
+        num(mp4.mp4_rate())
+        sp()
+        num(mp4.mp4_channels())
+        sp()
+        num(mp4.mp4_bits())
+        sp()
+        num(mp4.mp4_audio_codec())
+        sp()
+        num(mp4.mp4_items(mp4.TRK_AUDIO))
+        sp()
+        num(mp4.mp4_duration_ms(mp4.TRK_AUDIO))
+        ulib.nl()
+    }
+}
+
+fn report_items() {
+    var i: u64 = 0
+    let n: u64 = mp4.mp4_items(mp4.TRK_VIDEO)
+    while i < n {
+        say((&k_item[(0) as usize]) as u64)
+        num(i)
+        sp()
+        num(mp4.mp4_item_off(mp4.TRK_VIDEO, i))
+        sp()
+        num(mp4.mp4_item_size(mp4.TRK_VIDEO, i))
+        sp()
+        num(mp4.mp4_item_dts(mp4.TRK_VIDEO, i))
+        sp()
+        num(mp4.mp4_item_cts(mp4.TRK_VIDEO, i))
+        sp()
+        if mp4.mp4_item_key(mp4.TRK_VIDEO, i) { num(1) } else { num(0) }
+        ulib.nl()
+        i = i + 1
+    }
+}
+
+fn hash_frame(i: u64) {
+    let slot: u64 = h264.h264_cur_slot()
+    let w: u64 = h264.h264_stride()
+    let cw: u64 = h264.h264_cstride()
+    let ww: u64 = h264.h264_width()
+    let hh: u64 = h264.h264_height()
+    sha.begin()
+    var y: u64 = 0
+    while y < hh {
+        sha.update(h264.h264_plane_y(slot) + y * w, ww)
+        y = y + 1
+    }
+    var cy: u64 = 0
+    while cy < hh / 2 {
+        sha.update(h264.h264_plane_u(slot) + cy * cw, ww / 2)
+        cy = cy + 1
+    }
+    var cy2: u64 = 0
+    while cy2 < hh / 2 {
+        sha.update(h264.h264_plane_v(slot) + cy2 * cw, ww / 2)
+        cy2 = cy2 + 1
+    }
+    sha.finish((&digest[(0) as usize]) as u64)
+    sha.hex_out((&digest[(0) as usize]) as u64, 32, (&hex[(0) as usize]) as u64)
+    say((&k_sha[(0) as usize]) as u64)
+    num(i)
+    say((&k_eq[(0) as usize]) as u64)
+    say((&hex[(0) as usize]) as u64)
+    ulib.nl()
+}
+
+fn decode_video() -> u64 {
+    let buf: u64 = (&annexb[(0) as usize]) as u64
+    let hn: u64 = mp4.mp4_headers_annexb(buf, ANNEXB_CAP)
+    h264.h264_open(buf, hn)
+    let _h: bool = h264.h264_next()
+    if h264.h264_err() != 0 { return 0 }
+    var shown: u64 = 0
+    var i: u64 = 0
+    let n: u64 = mp4.mp4_items(mp4.TRK_VIDEO)
+    while i < n {
+        let len: u64 = mp4.mp4_sample_annexb(i, buf, ANNEXB_CAP)
+        if len == 0 { return shown }
+        h264.h264_continue(buf, len)
+        if h264.h264_next() {
+            hash_frame(i)
+            shown = shown + 1
+        }
+        if h264.h264_err() != 0 { return shown }
+        i = i + 1
+    }
+    return shown
+}
+
+fn hash_audio() {
+    let buf: u64 = (&audio_buf[(0) as usize]) as u64
+    var total: u64 = 0
+    var i: u64 = 0
+    let n: u64 = mp4.mp4_items(mp4.TRK_AUDIO)
+    sha.begin()
+    while i < n {
+        let len: u64 = mp4.mp4_sample_raw(mp4.TRK_AUDIO, i, buf, AUDIO_CAP)
+        if len == 0 { break }
+        sha.update(buf, len)
+        total = total + len
+        i = i + 1
+    }
+    sha.finish((&digest[(0) as usize]) as u64)
+    sha.hex_out((&digest[(0) as usize]) as u64, 32, (&hex[(0) as usize]) as u64)
+    say((&k_asha[(0) as usize]) as u64)
+    say((&hex[(0) as usize]) as u64)
+    ulib.nl()
+    say((&k_abytes[(0) as usize]) as u64)
+    num(total)
+    ulib.nl()
+}
+
+fn u_start(args: u64) -> u64 {
+    if ulib.arg_count(args) < 2 {
+        say((&k_usage[(0) as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    let t0: u64 = clock_ms()
+    if !mp4.mp4_open(ulib.arg_at(args, 1)) {
+        say((&k_merr[(0) as usize]) as u64)
+        num(mp4.mp4_err())
+        ulib.nl()
+        say((&k_done[(0) as usize]) as u64)
+        ulib.nl()
+        return 2
+    }
+    report_tracks()
+    report_items()
+    var code: u64 = 0
+    if mp4.mp4_has(mp4.TRK_VIDEO) {
+        let shown: u64 = decode_video()
+        say((&k_frames[(0) as usize]) as u64)
+        num(shown)
+        ulib.nl()
+        say((&k_err[(0) as usize]) as u64)
+        num(h264.h264_err())
+        ulib.nl()
+        if h264.h264_err() != 0 { code = 3 }
+    }
+    if mp4.mp4_has(mp4.TRK_AUDIO) && mp4.mp4_audio_codec() == mp4.AC_PCM_LE {
+        hash_audio()
+    }
+    say((&k_ms[(0) as usize]) as u64)
+    num(clock_ms() - t0)
+    ulib.nl()
+    say((&k_merr[(0) as usize]) as u64)
+    num(mp4.mp4_err())
+    ulib.nl()
+    say((&k_done[(0) as usize]) as u64)
+    ulib.nl()
+    mp4.mp4_close()
+    return code
+}
