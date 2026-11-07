@@ -213,6 +213,11 @@ fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if !sysuser.copy_in(state, me, bounce, buf, len) {
         return sysuser.neg(errno.E_FAULT)
     }
+    return file_commit(state, me, of, len)
+}
+
+fn file_commit(state: u64, me: u64, of: u64, len: u64) -> u64 {
+    let bounce: u64 = sysuser.blockb(state)
     let ino: u64 = file.open_ino(state, of)
     var off: u64 = file.open_off(state, of)
     if (file.open_flags(state, of) & sysconst.O_APPEND) != 0 {
@@ -680,18 +685,23 @@ fn vfs_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if mnt_gone(state, m) {
         return sysuser.neg(errno.E_NODEV)
     }
-    let node: u64 = file.open_ino(state, of)
-    var off: u64 = file.open_off(state, of)
-    if (file.open_flags(state, of) & sysconst.O_APPEND) != 0 {
-        off = vfs.v_attr(state, m, node, vfsops.A_SIZE)
-    }
-    let bounce: u64 = sysuser.blockb(state)
     var want: u64 = len
     if want > kstate.BLOCK_MAX {
         want = kstate.BLOCK_MAX
     }
-    if !sysuser.copy_in(state, me, bounce, buf, want) {
+    if !sysuser.copy_in(state, me, sysuser.blockb(state), buf, want) {
         return sysuser.neg(errno.E_FAULT)
+    }
+    return vfs_commit(state, me, of, want)
+}
+
+fn vfs_commit(state: u64, me: u64, of: u64, want: u64) -> u64 {
+    let m: u64 = file.open_mnt(state, of)
+    let bounce: u64 = sysuser.blockb(state)
+    let node: u64 = file.open_ino(state, of)
+    var off: u64 = file.open_off(state, of)
+    if (file.open_flags(state, of) & sysconst.O_APPEND) != 0 {
+        off = vfs.v_attr(state, m, node, vfsops.A_SIZE)
     }
     let n: u64 = vfs.v_write(state, m, node, off, bounce, want)
     if errno.is_error(n) {
@@ -1136,6 +1146,12 @@ fn do_writev(state: u64, me: u64, fd: u64, iov: u64, n: u64, writing: bool) -> u
     if !proc.user_ok(state, me, iov, n * 16) {
         return sysuser.neg(errno.E_FAULT)
     }
+    if writing && n > 1 {
+        let of: u64 = file.fd_check(state, me, fd, handle.R_WRITE)
+        if of < file.MAX_OPEN && file_like(file.open_kind(state, of)) {
+            return writev_staged(state, me, of, iov, n)
+        }
+    }
     var total: u64 = 0
     var i: u64 = 0
     while i < n {
@@ -1162,6 +1178,108 @@ fn do_writev(state: u64, me: u64, fd: u64, iov: u64, n: u64, writing: bool) -> u
         i = i + 1
     }
     return total
+}
+
+fn staged_ready(state: u64, of: u64) -> u64 {
+    if !writable(state, of) {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if file.open_kind(state, of) == file.K_VFILE && mnt_gone(state, file.open_mnt(state, of)) {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    return 0
+}
+
+fn staged_commit(state: u64, me: u64, of: u64, len: u64) -> u64 {
+    if file.open_kind(state, of) == file.K_VFILE {
+        return vfs_commit(state, me, of, len)
+    }
+    return file_commit(state, me, of, len)
+}
+
+fn iov_bytes(state: u64, me: u64, iov: u64, n: u64) -> u64 {
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        sum = sum + sysuser.get_user64(state, me, iov + i * 16 + 8)
+        i = i + 1
+    }
+    return sum
+}
+
+fn writev_staged(state: u64, me: u64, of: u64, iov: u64, n: u64) -> u64 {
+    let ready: u64 = staged_ready(state, of)
+    if ready != 0 {
+        return ready
+    }
+    let scoped: bool = iov_bytes(state, me, iov, n) > sysconst.MAX_IO
+    if scoped {
+        blk.wb_begin(state)
+    }
+    let r: u64 = writev_gather(state, me, of, iov, n)
+    if scoped && !blk.wb_end(state) {
+        return sysuser.neg(errno.E_IO)
+    }
+    return r
+}
+
+fn writev_gather(state: u64, me: u64, of: u64, iov: u64, n: u64) -> u64 {
+    let bounce: u64 = sysuser.blockb(state)
+    var total: u64 = 0
+    var fill: u64 = 0
+    var fault: bool = false
+    var i: u64 = 0
+    while i < n && !fault {
+        let base: u64 = sysuser.get_user64(state, me, iov + i * 16)
+        let len: u64 = sysuser.get_user64(state, me, iov + i * 16 + 8)
+        var used: u64 = 0
+        while used < len && !fault {
+            var take: u64 = len - used
+            if take > sysconst.MAX_IO - fill {
+                take = sysconst.MAX_IO - fill
+            }
+            if !sysuser.copy_in(state, me, bounce + fill, base + used, take) {
+                fault = true
+            } else {
+                fill = fill + take
+                used = used + take
+                if fill == sysconst.MAX_IO {
+                    let r: u64 = staged_commit(state, me, of, fill)
+                    if !staged_ok(r, fill) {
+                        return staged_result(total, r)
+                    }
+                    total = total + r
+                    fill = 0
+                }
+            }
+        }
+        i = i + 1
+    }
+    if fill != 0 {
+        let r: u64 = staged_commit(state, me, of, fill)
+        if !staged_ok(r, fill) {
+            return staged_result(total, r)
+        }
+        total = total + r
+    }
+    if fault && total == 0 {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return total
+}
+
+fn staged_ok(r: u64, want: u64) -> bool {
+    return (r >> 63) == 0 && r == want
+}
+
+fn staged_result(total: u64, r: u64) -> u64 {
+    if (r >> 63) != 0 {
+        if total == 0 {
+            return r
+        }
+        return total
+    }
+    return total + r
 }
 
 fn do_pvec(state: u64, me: u64, fd: u64, iov: u64, n: u64, off: u64, writing: bool) -> u64 {
