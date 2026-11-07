@@ -388,6 +388,19 @@ grep -qa "^200 hallo-2.opk von 0 " "$OUT/srv.log" \
 hatnicht "$OUT/c3b.txt" "wrong length" "(c3) no wrong-length failure after the restart"
 dienst_aus
 
+H2=$(python3 -c "print(open('$OUT/netz2/INDEX').read().split(chr(9))[2])" 2>/dev/null)
+rc=$(lauf c3c "echo ==A==;opk generations;opk check;mv /system/generations/1/GRUND /system/generations/1/REASON;mv /store/${H2:0:20}/PAKET /store/${H2:0:20}/PACKAGE;echo ==B==;opk generations;opk check;exit")
+sed -n '/==A==$/,/==B==$/p' "$OUT/c3c.txt" | grep -a -v '==' > "$OUT/c3c.a"
+sed -n '/==B==$/,$p' "$OUT/c3c.txt" | grep -a -v '==' | grep -a -v '^\(exit\|#\|/ \)' > "$OUT/c3c.b"
+hat "$OUT/c3c.a" "opk: ok" "(c3c) before the rename opk check passes"
+hat "$OUT/c3c.b" "opk: ok" "(c3c) English member names PACKAGE and REASON: opk check still finds the store entry"
+hatnicht "$OUT/c3c.b" "store entry missing" "(c3c) no store entry reported missing"
+GA=$(grep -a 'generation 1' "$OUT/c3c.a" | head -n 1)
+GB=$(grep -a 'generation 1' "$OUT/c3c.b" | head -n 1)
+[ -n "$GA" ] && [ "$GA" = "$GB" ] \
+    && ok "(c3c) opk generations prints the same line for generation 1 with GRUND and with REASON: $GA" \
+    || bad "(c3c) generation line differs: '$GA' vs '$GB'"
+
 dienst "$OUT/netzvoll" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf f1 "df;ota apply;opk list;opk generations;ota show;exit" 900)

@@ -839,7 +839,7 @@ EXTRA=""
 
 echo "   -- the PNG encoder itself, with a computed picture"
 lauf_ohne_netz "$TMPD/foto.img" "jarvisd -b;exit" "$TMPD/r13.txt"
-tr -d '\000' < "$TMPD/r13.txt" | grep -a '^bild ' | head -1 | awk '{print $2}' > "$TMPD/bild.hex"
+tr -d '\000' < "$TMPD/r13.txt" | grep -aE '^(image|bild) ' | head -1 | awk '{print $2}' > "$TMPD/bild.hex"
 if [ -s "$TMPD/bild.hex" ]; then
     python3 - "$TMPD/bild.hex" > "$TMPD/bild.txt" 2>&1 <<'PYEOF'
 import sys, struct, zlib

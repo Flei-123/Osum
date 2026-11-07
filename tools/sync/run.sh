@@ -141,7 +141,8 @@ mkdir -p "$TMPD/daten/unter"
 printf 'die erste zeile\nGEHEIMNIS-4711 steht hier\n' > "$TMPD/daten/a.txt"
 head -c 9000 /dev/urandom > "$TMPD/daten/unter/b.bin"
 printf 'hallo\n' > "$TMPD/daten/klein.txt"
-printf '100 farbe blau\n100 sprache de\n' > "$TMPD/daten/EINST"
+SETTINGS_FILE=${SYNC_SETTINGS_FILE:-EINST}
+printf '100 farbe blau\n100 sprache de\n' > "$TMPD/daten/$SETTINGS_FILE"
 head -c 200000 /dev/urandom > "$TMPD/daten/gross.bin"
 mkdir -p "$TMPD/fremd"
 printf 'diese datei hat er nicht\n' > "$TMPD/fremd/x.txt"
@@ -206,7 +207,7 @@ is "B meldet fertig" "$(klar B | grep -c '^done')" "1"
 hol "$TMPD/B.img" /daten "$TMPD/datenB"
 gleich=0
 ungleich=""
-for f in a.txt klein.txt EINST unter/b.bin gross.bin; do
+for f in a.txt klein.txt "$SETTINGS_FILE" unter/b.bin gross.bin; do
     if [ -f "$TMPD/datenB/$f" ] && cmp -s "$TMPD/daten/$f" "$TMPD/datenB/$f"; then
         gleich=$((gleich+1))
     else

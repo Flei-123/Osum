@@ -60,7 +60,7 @@ if [ "$N" -ge 2 ]; then
     ok "Osum photographed itself TWICE (via the kernel shim)"
 else
     bad "Osum did not take two images (only $N)"
-    grep -aE 'jarvisd:|schirm:|shot:' "$W/seriell.txt" 2>/dev/null | tail -6 | sed 's/^/        /'
+    grep -aE 'jarvisd:|screen:|schirm:|shot:' "$W/seriell.txt" 2>/dev/null | tail -6 | sed 's/^/        /'
 fi
 grep -qa "shot: pid=" "$W/seriell.txt" \
     && ok "and the KERNEL logged it (shot: pid=...) -- it cannot happen secretly" \
