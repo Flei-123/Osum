@@ -132,9 +132,9 @@ has "$O" "k13: ofsver=3" "und er sagt selbst, dass es Fassung 3 ist"
 g=$(val3 "$O" grossdatei)
 num "geschriebene Oktette in EINE Datei" "$g" gt 2134016
 num "und es sind die vollen 2,5 MiB" "$g" eq 2396160
-num "richtige Oktette am Anfang der Datei (von 512)" "$(val3 "$O" lesen1)" eq 512
-num "richtige Oktette HINTER der alten Grenze (von 512)" "$(val3 "$O" lesen2)" eq 512
-num "richtige Oktette ganz am Ende (von 512)" "$(val3 "$O" lesen3)" eq 512
+num "richtige Oktette am Anfang der Datei (von 512)" "$(val3 "$O" read1)" eq 512
+num "richtige Oktette HINTER der alten Grenze (von 512)" "$(val3 "$O" read2)" eq 512
+num "richtige Oktette ganz am Ende (von 512)" "$(val3 "$O" read3)" eq 512
 
 num "Laenge des angelegten Namens" "$(val3 "$O" namelen)" eq 255
 num "der Name liess sich anlegen und wiederfinden" "$(val3 "$O" nameok)" eq 1

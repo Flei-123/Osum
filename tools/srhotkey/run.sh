@@ -22,7 +22,7 @@ has() { grep -qaE -- "$2" "$1" 2>/dev/null && ok "$3" || bad "$3 -- '$2' missing
 hasnt() { grep -qaE -- "$2" "$1" 2>/dev/null && bad "$3 -- '$2' present" || ok "$3"; }
 
 printf 'ctrl+alt+n screenreader.toggle\n' > "$D/hotkeys.conf"
-{ cat etc/wmplug.conf; printf 'screenreader rechte=0x001 prog=/bin/screenreader\n'; } > "$D/wmplug.conf"
+{ cat etc/wmplug.conf; printf 'screenreader rights=0x001 prog=/bin/screenreader\n'; } > "$D/wmplug.conf"
 printf 'hotkey\nscreenreader serve\n' > "$D/autostart"
 printf 'screenreader hotkey\n' > "$D/rights.yes"
 printf '# no grants\n' > "$D/rights.no"

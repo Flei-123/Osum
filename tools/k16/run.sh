@@ -436,8 +436,8 @@ K art_fi_p    "/bin/firun" "und geoeffnet wird sie mit /bin/firun"
 K art_fi_e    ".fi"  "die Endung im Satz ist .fi"
 K art_txt_p   "/bin/edit" "eine .txt wird mit dem Editor geoeffnet"
 K art_tarn_l  "elf"  "DER INHALT GEHT VOR: /tarn.fi heisst .fi und IST ein Programm"
-K art_fremd   "-8"   "GEGENPROBE: weder magische Zahl noch bekannte Endung: -ENOEXEC"
-K art_weg     "-2"   "GEGENPROBE: eine Datei, die es nicht gibt: -ENOENT"
+K art_foreign   "-8"   "GEGENPROBE: weder magische Zahl noch bekannte Endung: -ENOEXEC"
+K art_gone     "-2"   "GEGENPROBE: eine Datei, die es nicht gibt: -ENOENT"
 num "Eintraege in der Tabelle" "$(k16w tab_anz)" ge 8
 K tab_end     "-2"   "GEGENPROBE: hinter dem letzten Eintrag: -ENOENT"
 num "freg hat einen Platz vergeben" "$(k16w reg_nr)" ge 0
@@ -447,9 +447,9 @@ else
     ok "after freg /fremd.zzz is classified (place $(k16w reg_danach)) -- the table really works"
 fi
 K reg_prog    "/bin/cat" "und zwar mit dem Programm, das Ring 3 eingetragen hat"
-K reg_kurz    "-22"  "GEGENPROBE: ein Satz der falschen Laenge wird abgelehnt (-EINVAL)"
+K reg_short    "-22"  "GEGENPROBE: ein Satz der falschen Laenge wird abgelehnt (-EINVAL)"
 num "fopen auf ein Programm gibt eine Prozessnummer" "$(k16w open_elf)" gt 0
-K open_fremd  "-2"   "GEGENPROBE: fopen auf einen Pfad, den es nicht gibt, startet NICHTS"
+K open_foreign  "-2"   "GEGENPROBE: fopen auf einen Pfad, den es nicht gibt, startet NICHTS"
 num "ein Skript mit #! startet ueber seinen Ausleger" "$(k16w shebang)" gt 0
 hat "$TMPD/tab.txt" "ausleger /s1.sh" \
     "DER AUSLEGER BEKOMMT SEIN ARGUMENT UND DEN PFAD: 'ausleger /s1.sh'"

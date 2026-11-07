@@ -892,7 +892,7 @@ while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
 #   /bin/jarvismini  started hidden at login by the autostart line `jmini` (/etc/wmplug.conf: prog=/bin/jarvismini);
 #                    --as-app labels it app:jarvismini and drops to uid 1000, so /etc/apprights.conf is REALLY checked
 #   Ctrl+Alt+J -> hotkeyd -> bus action jarvismini.toggle -> the box shows / hides
-{ cat etc/wmplug.conf; printf 'screenreader rechte=0x001 prog=/bin/screenreader\n'; } > "$OUT/wmplug.conf"
+{ cat etc/wmplug.conf; printf 'screenreader rights=0x001 prog=/bin/screenreader\n'; } > "$OUT/wmplug.conf"
 printf 'hotkey\nscreenreader serve\n' > "$OUT/wmplug.autostart"
 printf 'ctrl+alt+n screenreader.toggle\n' > "$OUT/hotkeys.conf"
 printf 'screenreader hotkey\n' > "$OUT/apprights.conf"
@@ -902,7 +902,7 @@ if [ "$IMAGE_PROFILE" = personal ]; then
     printf 'server jarvis.fleitec.com\n' > "$OUT/jarvismini.conf"
     printf 'jarvismini window.float,hotkey,net\n' >> "$OUT/apprights.conf"
     printf '\n# W-IMG2: JARVIS Mini, started hidden at login (not a plugin: only the name -> prog= mapping is used)\n' >> "$OUT/wmplug.conf"
-    printf 'jmini rechte=0x001 prog=/bin/jarvismini\n' >> "$OUT/wmplug.conf"
+    printf 'jmini rights=0x001 prog=/bin/jarvismini\n' >> "$OUT/wmplug.conf"
     JM_AUTOSTART='jmini --hidden --as-app'
     [ "${HP_STICK:-0}" = 1 ] && [ "${JM_HIDDEN:-0}" != 1 ] && JM_AUTOSTART='jmini --as-app'
     printf '%s\n' "$JM_AUTOSTART" >> "$OUT/wmplug.autostart"

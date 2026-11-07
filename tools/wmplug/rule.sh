@@ -114,7 +114,7 @@ has "$TMPD/mit.klar" "wm: hold" "der Schreibtisch steht"
 has "$TMPD/mit.klar" "plugregel: regeln aus /etc/wmregeln.conf: 2" \
     "das Plugin hat zwei Regeln gelesen"
 has "$TMPD/mit.klar" "wmplug: reg regel" "es hat einen Tafelplatz bekommen"
-has "$TMPD/mit.klar" "rechte=0x103" "mit R_ACT_WIN (0x103 = EV_WIN|EV_FOCUS|ACT_WIN)"
+has "$TMPD/mit.klar" "rights=0x103" "mit R_ACT_WIN (0x103 = EV_WIN|EV_FOCUS|ACT_WIN)"
 has "$TMPD/mit.klar" "app=rechner" "die Regel hat auf den Buendelnamen getroffen"
 has "$TMPD/mit.klar" "x=212 y=70 w=376 h=430 desk=2 sichtbar=1" \
     "nachgemessen: zentriert (212,70) auf Flaeche 2 und sichtbar"
@@ -131,7 +131,7 @@ fi
 echo "== 4. the run WITHOUT the right (rights control) =="
 lauf ohne "demo"
 [ "$RC" = 21 ] && ok "the kernel exits cleanly (21)" || bad "Exitcode $RC statt 21"
-has "$TMPD/ohne.klar" "rechte=0x1f" "ohne Eintrag bekommt das Plugin nur R_DEFAULT"
+has "$TMPD/ohne.klar" "rights=0x1f" "ohne Eintrag bekommt das Plugin nur R_DEFAULT"
 has "$TMPD/ohne.klar" "plugregel: WITHOUT R_ACT_WIN -- watching only" \
     "und sagt selbst, dass es nichts anfassen darf"
 has "$TMPD/ohne.klar" "app=rechner" "dieselbe Regel trifft dasselbe Fenster"
@@ -149,7 +149,7 @@ fi
 echo "== 5. the short deadline: does the plugin sleep too long? =="
 lauf kurz "recht,demo" "plugfrist"
 [ "$RC" = 21 ] && ok "the kernel exits cleanly (21)" || bad "Exitcode $RC statt 21"
-has "$TMPD/kurz.klar" "frist=3" "die Frist steht auf 3 Ticks (30 ms)"
+has "$TMPD/kurz.klar" "timeout=3" "die Frist steht auf 3 Ticks (30 ms)"
 hasnot "$TMPD/kurz.klar" "wmplug: unreg regel"     "und das Plugin wird trotzdem nicht wegen Frist hinausgeworfen"
 has "$TMPD/kurz.klar" "x=212 y=70 w=376 h=430 desk=2 sichtbar=1"     "die Regel greift auch unter der kurzen Frist"
 

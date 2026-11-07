@@ -186,7 +186,7 @@ fi
 
 # ---------------------------------------------------------------- boot E: the REAL image autostart (hotkey + `jmini --hidden --as-app`), no mbg driver
 if want E; then
-{ cat etc/wmplug.conf; printf '\njmini rechte=0x001 prog=/bin/jarvismini\n'; } > "$D/E.wmplug.conf"
+{ cat etc/wmplug.conf; printf '\njmini rights=0x001 prog=/bin/jarvismini\n'; } > "$D/E.wmplug.conf"
 printf 'hotkey\njmini --hidden %s\n' "${JM_E_ASAPP---as-app}" > "$D/E.autostart"
 cat > "$D/E.book" <<EOF2
 warteauf 'jarvismini: up float=1' || 200
@@ -277,7 +277,7 @@ res("D: the password is nowhere on the console", "geheim" not in rd(f"{d}/D/seri
 se = rd(f"{d}/E/serial.txt")
 if se:
     te = clean(se)
-    res("E: autostart started the Mini hidden through wmplug (jmini ... --hidden --as-app)", "wmplug: jmini rechte=0x1" in se and "wmplug: start /bin/jarvismini" in se, "")
+    res("E: autostart started the Mini hidden through wmplug (jmini ... --hidden --as-app)", "wmplug: jmini rights=0x1" in se and "wmplug: start /bin/jarvismini" in se, "")
     res("E: the box came up on the float layer, bus registered", bool(re.search(r"jarvismini: up float=1 bus=1", te)), "")
     tg = re.findall(r"jarvismini: toggle=(\d)", te)
     res("E: Ctrl+Alt+J toggled twice (1 then 0)", tg[:2] == ["1", "0"], f"toggles={tg}")

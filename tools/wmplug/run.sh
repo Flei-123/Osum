@@ -30,7 +30,7 @@ zahl() { grep -aE "$2" "$1" | tail -1 | grep -oE "$3=-?[0-9]+" | head -1 | sed '
 #
 #     wmplug: tot slot=0 pid=6
 #     wmplwm: fokus id=7 vor=0
-#     ug: unreg boese grund=1 holte=0 verlor=0
+#     ug: unreg boese reason=1 fetched=0 lost=0
 #
 flach() { tr -d '\n' < "$1" > "$1.flat"; }
 hasflat() { grep -qaE "$2" "$1.flat" && ok "$3" \
@@ -84,15 +84,15 @@ python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
 for f in etc/wmplug.conf etc/wmregeln.conf; do
     [ -f "$f" ] && ok "$f is in the tree" || bad "$f fehlt"
 done
-grep -qE '^boese[[:space:]]+rechte=0x0*1([[:space:]]|$)' etc/wmplug.conf \
+grep -qE '^boese[[:space:]]+rights=0x0*1([[:space:]]|$)' etc/wmplug.conf \
     && ok "/etc/wmplug.conf gibt 'boese' genau R_EV_WIN (0x001)" \
-    || bad "'boese rechte=0x001' steht nicht mehr in /etc/wmplug.conf"
-grep -qE '^uhr[[:space:]].*frist=100([[:space:]]|$)' etc/wmplug.conf \
+    || bad "'boese rights=0x001' steht nicht mehr in /etc/wmplug.conf"
+grep -qE '^uhr[[:space:]].*timeout=100([[:space:]]|$)' etc/wmplug.conf \
     && ok "/etc/wmplug.conf gives the widget deadline=100 ticks (1 s)" \
-    || bad "'uhr ... frist=100' steht nicht in /etc/wmplug.conf"
-grep -qE '^regel[[:space:]].*frist=500([[:space:]]|$)' etc/wmplug.conf \
+    || bad "'uhr ... timeout=100' steht nicht in /etc/wmplug.conf"
+grep -qE '^regel[[:space:]].*timeout=500([[:space:]]|$)' etc/wmplug.conf \
     && ok "/etc/wmplug.conf gives the rule engine deadline=500 ticks (5 s)" \
-    || bad "'regel ... frist=500' steht nicht in /etc/wmplug.conf"
+    || bad "'regel ... timeout=500' steht nicht in /etc/wmplug.conf"
 [ -f etc/wmplug.autostart ] \
     && ok "etc/wmplug.autostart is in the tree (the autostart list)" \
     || bad "etc/wmplug.autostart fehlt"
@@ -184,15 +184,15 @@ lauf segv "" '^plugboese: leiste gesetzt' 'wmplug: tot slot='
 S=$TMPD/segv.clean
 sauber segv
 has "$S" "plugboese: abi=1" "das Plugin hat die Fassung erfragt"
-hasre "$S" '^plugboese: slot=[0-9]+ rechte=2049$' \
+hasre "$S" '^plugboese: slot=[0-9]+ rights=2049$' \
     "es hat genau die Rechte aus /etc/wmplug.conf (0x801 = 2049: sehen + Leiste)"
 has "$S" "plugboese: leiste gesetzt, rc=0" \
     "es hat VOR dem Absturz ein Feld in der Leiste besetzt (WM_PLUG_BAR)"
 has "$S" "plugboese: about to crash" "es sagt an, dass es gleich abstuerzt"
 hasre "$S" 'wmplug: tot slot=[0-9]+ pid=[0-9]+' \
     "der Kern hat den Toten selbst abgeholt (reap)"
-hasflat "$S" 'unreg boesebar *grund=1' \
-    "und abgemeldet mit grund=1 (G_CRASH) -- der Grund steht auf der Leitung"
+hasflat "$S" 'unreg boesebar *reason=1' \
+    "und abgemeldet mit reason=1 (G_CRASH) -- der Grund steht auf der Leitung"
 has "$S" "wm: hold" "der Fensterserver steht noch"
 hasnotre "$S" '^(panic|PANIC|kernel panic)' "kein Panik im Kern"
 fr_tot=$(zahl "$S" '^wm: vsync=' 'comp')
@@ -268,8 +268,8 @@ lauf hang "plugfrist" '^wm: hold'
 H=$TMPD/hang.clean
 sauber hang
 has "$H" "plugboese: from now on fetch nothing" "das Plugin hoert auf abzuholen"
-hasflat "$H" 'unreg boese *grund=2' \
-    "die Frist hat gegriffen: abgemeldet mit grund=2 (G_FRIST)"
+hasflat "$H" 'unreg boese *reason=2' \
+    "die Frist hat gegriffen: abgemeldet mit reason=2 (G_FRIST)"
 has "$H" "wm: hold" "der Schreibtisch steht auch danach"
 hasnotre "$H" '^(panic|PANIC|kernel panic)' "kein Panik im Kern"
 fr_hang=$(zahl "$H" '^wm: vsync=' 'comp')
@@ -292,7 +292,7 @@ abbild greif 'boese greif' || bad "grab: the image is not built"
 lauf greif "" '^wm: hold'
 G=$TMPD/greif.clean
 sauber greif
-hasre "$G" '^plugboese: slot=[0-9]+ rechte=1$' \
+hasre "$G" '^plugboese: slot=[0-9]+ rights=1$' \
     "das Plugin hat GENAU R_EV_WIN (0x001) und ausdruecklich KEIN R_ACT_WIN (0x100)"
 hasnotre "$G" 'plugboese-lese' \
     "es legt KEIN verborgenes Hilfsfenster mehr an (der Titel kommt nicht vor)"
@@ -319,18 +319,18 @@ else
     ok "the window is NOT at (7,7), the target of the grab"
 fi
 #
-hasre "$G" 'plugboese: schwelle: griffe=[0-9]+ letzte=[0-9]+ deny=[0-9]+' \
+hasre "$G" 'plugboese: schwelle: griffe=[0-9]+ last=[0-9]+ deny=[0-9]+' \
     "das Plugin hat in einer Schleife weitergegriffen"
-hasflat "$G" 'unreg boese *grund=3' \
-    "der Kern meldet es mit grund=3 (G_RIGHTS) ab -- die Schwelle hat gegriffen"
+hasflat "$G" 'unreg boese *reason=3' \
+    "der Kern meldet es mit reason=3 (G_RIGHTS) ab -- die Schwelle hat gegriffen"
 d_ges=$(zahl "$G" '^wmplug: bilanz' 'deny')
 if [ "${d_ges:-0}" = 8 ]; then
     ok "the balance counts deny=8 -- exactly the threshold, no more"
 else
     bad "die Bilanz zaehlt deny='${d_ges}' statt 8 (wmplug.DENY_MAX)"
 fi
-l_rc=$(grep -aoE 'schwelle: griffe=[0-9]+ letzte=[0-9]+' "$G" | tail -1 \
-    | grep -oE 'letzte=[0-9]+' | sed 's/.*=//')
+l_rc=$(grep -aoE 'schwelle: griffe=[0-9]+ last=[0-9]+' "$G" | tail -1 \
+    | grep -oE 'last=[0-9]+' | sed 's/.*=//')
 if [ "${l_rc:-0}" = 3 ]; then
     ok "the last grabs get -E_NOTFOUND (3): the slot is gone, not just blocked"
 else
@@ -346,7 +346,7 @@ has "$P" "probe: abi=1" "PL_ABI meldet die Fassung 1 -- die Schnittstelle ist ve
 hasre "$P" '^probe: slot=[0-9]+' "der Prueflauf hat einen Tafelplatz"
 hasre "$P" '^probe: key without rc=-[0-9]+' \
     "ein Kuerzel OHNE R_ACT_KEY wird abgewiesen"
-hasre "$P" '^probe: key mit rc=[0-9]+' \
+hasre "$P" '^probe: key with rc=[0-9]+' \
     "und MIT Gewaehrung (WM_PLUG_GRANT) angenommen"
 hasre "$P" '^probe: ev typ=[0-9]+ dat=[0-9]+' \
     "es sind wirklich Ereignisse durch den Ring gelaufen"
@@ -508,8 +508,8 @@ has "$V" "wmprobe: list vorher" "list lief vor dem Abschalten"
 has "$V" "wmprobe: info" "info lief"
 has "$V" "wmprobe: disable" "disable lief"
 has "$V" "wmprobe: list nachher" "und list noch einmal danach"
-hasflat "$V" 'unreg uhr *grund=4' \
-    "der Kern meldet die Abmeldung mit grund=4 (G_USER) -- nicht Absturz, nicht Frist"
+hasflat "$V" 'unreg uhr *reason=4' \
+    "der Kern meldet die Abmeldung mit reason=4 (G_USER) -- nicht Absturz, nicht Frist"
 v1=$(grep -a 'Plugins [0-9]* von' "$V" | head -1 | grep -oE 'Plugins [0-9]+' | grep -oE '[0-9]+')
 v2=$(grep -a 'Plugins [0-9]* von' "$V" | tail -1 | grep -oE 'Plugins [0-9]+' | grep -oE '[0-9]+')
 if [ "${v1:-x}" = 1 ] && [ "${v2:-x}" = 0 ]; then
@@ -528,9 +528,9 @@ abbild frist 'regel demo laut' 'uhr rounds=40' || bad "deadline: the image is no
 lauf frist "" '^wm: hold'
 F=$TMPD/frist.clean
 sauber frist
-hasflat "$F" 'reg uhr *slot=[0-9]+ rechte=0x807 frist=100' \
+hasflat "$F" 'reg uhr *slot=[0-9]+ rights=0x807 timeout=100' \
     "das Widget ist mit SEINER Frist angetreten: 100 Ticks (1 s)"
-hasflat "$F" 'reg regel *slot=[0-9]+ rechte=0x301 frist=500' \
+hasflat "$F" 'reg regel *slot=[0-9]+ rights=0x301 timeout=500' \
     "die Regel-Engine mit IHRER: 500 Ticks (5 s)"
 k_frist=$(zahl "$F" '^wmplug: bilanz' 'kicks')
 p_frist=$(zahl "$F" '^wmplug: bilanz' 'plugs')
@@ -544,7 +544,7 @@ if [ "${p_frist:-0}" -ge 2 ] 2>/dev/null; then
 else
     bad "am Ende stehen '${p_frist}' Plugins auf der Tafel (erwartet 2)"
 fi
-hasnotre "$F" 'unreg uhr.*grund=2' "das Widget ist NICHT an der Frist gestorben"
+hasnotre "$F" 'unreg uhr.*reason=2' "das Widget ist NICHT an der Frist gestorben"
 hasre "$F" 'plugregel: nachgemessen id=[0-9]+ x=[0-9]+ y=[0-9]+' \
     "die Regel-Engine hat ein Fenster gesetzt und NACHGEMESSEN"
 hasre "$F" '^pluguhr: text ' "und das Widget hat Text in die Leiste geschickt"

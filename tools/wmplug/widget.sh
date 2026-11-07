@@ -128,14 +128,14 @@ has "$TMPD/an.txt" "pluguhr: deadline ticks=" "es liest die Frist des Kerns"
 hasnot "$TMPD/an.txt" "pluguhr: KEIN recht" "es hat R_ACT_BAR bekommen"
 has "$TMPD/an.txt" "taskbar: plug nr=0" "die Leiste hat ein Widget-Feld"
 has "$TMPD/an.txt" "taskbar: text plug " "und malt seinen Text"
-if grep -qaE '^wmplug: unreg uhr *grund=2' "$TMPD/an.txt.clean"; then
+if grep -qaE '^wmplug: unreg uhr *reason=2' "$TMPD/an.txt.clean"; then
     bad "the deadline was missed (reason=2) -- the widget collects too rarely"
 else
     ok "the deadline was not missed (no reason=2)"
 fi
 has "$TMPD/an.txt" "pluguhr: barget verweigert r=-2" \
     "das Plugin selbst darf WM_PLUG_BARGET NICHT (E_RIGHTS = -2)"
-if grep -qaE '^wmplug: unreg uhr *grund=0' "$TMPD/an.txt.clean"; then
+if grep -qaE '^wmplug: unreg uhr *reason=0' "$TMPD/an.txt.clean"; then
     ok "it unregistered ITSELF at run time (reason=0)"
 else
     bad "no unregistration with reason=0 -- the widget did not leave cleanly"
