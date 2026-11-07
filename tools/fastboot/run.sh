@@ -64,4 +64,14 @@ for cpus in 2 4; do
     [ "$(tick_count near$cpus)" -ge 20 ] 2>/dev/null && ok "smp $cpus: 'fastbootx' does not enable fastboot" || bad "smp $cpus: 'fastbootx' enabled fastboot"
 done
 
-summary_emit "$pass" "$fail" 26
+boot gslow 2 "gfx disp"
+boot gfast 2 "gfx disp fastboot"
+has gslow "$DONE_LINE" && ok "gfx: baseline boot completed" || bad "gfx: baseline boot did not complete"
+has gslow '^disp: custom selftest [0-9]' && has gslow '^fb: selftest2 [0-9]' \
+    && ok "gfx: baseline runs the display selftests" || bad "gfx: baseline display selftests missing"
+has gfast "$DONE_LINE" && ok "gfx: fastboot boot completed" || bad "gfx: fastboot boot did not complete"
+has gfast '^disp: selftests skipped (fast)' && ok "gfx: fastboot reports skipped display selftests" || bad "gfx: fastboot skip line missing"
+has gfast '^fb: selftest2 \|^disp: custom selftest ' && bad "gfx: fastboot ran the display selftests" || ok "gfx: fastboot skips the display selftests"
+has gfast '^disp: geom ' && ok "gfx: fastboot still brings up the display" || bad "gfx: fastboot has no display geometry"
+
+summary_emit "$pass" "$fail" 32
