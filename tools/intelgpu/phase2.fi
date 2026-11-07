@@ -1,0 +1,321 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import std.io
+import gpu.intel.mode
+import gpu.intel.regs
+import gpu.intel.flip
+import gpu.intel.ggtt
+import gpu.intel.dbuf
+import gpu.intel.confirm
+import gpu.intel.modeset
+
+const REG_CAP: u64 = 64
+const NOT_FOUND: u64 = 0xffff
+const PTE_CAP: u64 = 8192
+const HP_FB_PHYS: u64 = 0xb4800000
+const HP_FB_PAGES: u64 = 2025
+const BACK_OFF: u64 = 0x1000000
+const BACK_PHYS: u64 = 0x20000000
+const TRANSCONF_ON: u64 = 0xc0000000
+const PLANE_CTL_ON: u64 = 0x84000000
+const SURF_LIVE_LOW: u64 = 0x20
+
+static mut reg_off: [u64; 64] = [0; 64]
+static mut reg_val: [u64; 64] = [0; 64]
+static mut reg_n: u64 = 0
+static mut pte: [u64; 8192] = [0; 8192]
+static mut wr_count: u64 = 0
+static mut wr64_count: u64 = 0
+static mut inj_nolatch: u64 = 0
+static mut inj_pte_drop: u64 = 0
+static mut inj_htotal_bad: u64 = 0
+static mut revert_calls: u64 = 0
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn reg_find(off: u64) -> u64 {
+    var i: u64 = 0
+    while i < reg_n {
+        if reg_off[i as usize] == off {
+            return i
+        }
+        i = i + 1
+    }
+    return NOT_FOUND
+}
+
+fn reg_set(off: u64, v: u64) {
+    let i: u64 = reg_find(off)
+    if i != NOT_FOUND {
+        reg_val[i as usize] = v
+        return
+    }
+    reg_off[reg_n as usize] = off
+    reg_val[reg_n as usize] = v
+    reg_n = reg_n + 1
+}
+
+fn reg_get(off: u64) -> u64 {
+    let i: u64 = reg_find(off)
+    if i == NOT_FOUND {
+        return 0
+    }
+    return reg_val[i as usize]
+}
+
+fn pte_index(off: u64) -> u64 {
+    return (off - 0x800000) / 8
+}
+
+fn m_rd(off: u64) -> u64 {
+    return reg_get(off)
+}
+
+fn m_rd64(off: u64) -> u64 {
+    let i: u64 = pte_index(off)
+    if i >= PTE_CAP {
+        return 0
+    }
+    return pte[i as usize]
+}
+
+fn m_wr64(off: u64, v: u64) -> u64 {
+    wr64_count = wr64_count + 1
+    let i: u64 = pte_index(off)
+    if i >= PTE_CAP || inj_pte_drop != 0 {
+        return 0
+    }
+    pte[i as usize] = v
+    return 0
+}
+
+fn m_wr(off: u64, v: u64) -> u64 {
+    wr_count = wr_count + 1
+    var val: u64 = v
+    if off == 0x6f000 && inj_htotal_bad == 1 {
+        inj_htotal_bad = 2
+        val = v + 1
+    }
+    reg_set(off, val)
+    if off == 0x7019c && inj_nolatch == 0 {
+        reg_set(0x701ac, (v & 0xfffff000) | (reg_get(0x701ac) & 0xfff))
+    }
+    return 0
+}
+
+fn m_us(n: u64) -> u64 {
+    return 0
+}
+
+fn revert_cb() {
+    revert_calls = revert_calls + 1
+}
+
+fn clear_ptes() {
+    var i: u64 = 0
+    while i < PTE_CAP {
+        pte[i as usize] = 0
+        i = i + 1
+    }
+}
+
+fn hp_front() {
+    var i: u64 = 0
+    while i < HP_FB_PAGES {
+        pte[i as usize] = (HP_FB_PHYS + i * 4096) | 1
+        i = i + 1
+    }
+}
+
+fn fresh() {
+    reg_n = 0
+    wr_count = 0
+    wr64_count = 0
+    inj_nolatch = 0
+    inj_pte_drop = 0
+    inj_htotal_bad = 0
+    revert_calls = 0
+    clear_ptes()
+    reg_set(0x7019c, 0)
+    reg_set(0x701ac, SURF_LIVE_LOW)
+    reg_set(0x70180, PLANE_CTL_ON)
+    reg_set(0x7f008, TRANSCONF_ON)
+    reg_set(0x6f000, 0x0837077f)
+    reg_set(0x6f008, 0x079f078f)
+    reg_set(0x6f00c, 0x045b0437)
+    reg_set(0x6f014, 0x0448043a)
+    reg_set(0x6f010, 0x12345678)
+}
+
+fn hp_mode() -> mode.Mode {
+    var m: mode.Mode = mode.mode_new()
+    m.hactive = 1920
+    m.hsync_start = 1936
+    m.hsync_end = 1952
+    m.htotal = 2104
+    m.vactive = 1080
+    m.vsync_start = 1083
+    m.vsync_end = 1097
+    m.vtotal = 1116
+    m.pclk_khz = 141000
+    return m
+}
+
+fn test_ggtt() {
+    fresh()
+    chk("pte of the HP framebuffer is 0xb4800001", ggtt.pte_encode(HP_FB_PHYS) == 0xb4800001)
+    chk("pte of page 0 sits at the GGTT base 8 MiB", ggtt.pte_offset(0) == 0x800000)
+    chk("pte of page 1 is 8 bytes further", ggtt.pte_offset(0x1000) == 0x800008)
+    chk("pte of 16 MiB sits at index 4096", ggtt.pte_offset(BACK_OFF) == 0x800000 + 4096 * 8)
+    chk("low address bits never leak into the pte", ggtt.pte_encode(0xb4800fff) == 0xb4800001)
+    chk("pte decode returns the physical address", ggtt.pte_phys(0xb4800001) == HP_FB_PHYS && ggtt.pte_valid(0xb4800001))
+    chk("an empty pte is invalid", !ggtt.pte_valid(0))
+    let r: u64 = ggtt.map_linear(m_rd64, m_wr64, BACK_OFF, BACK_PHYS, 8)
+    chk("map_linear of 8 pages succeeds", r == ggtt.G_OK && wr64_count == 8)
+    chk("every page got its own physical address", pte[4096] == (BACK_PHYS | 1) && pte[4103] == ((BACK_PHYS + 7 * 4096) | 1))
+    chk("the neighbour pte is untouched", pte[4104] == 0 && pte[4095] == 0)
+    chk("mapped_linear confirms the range", ggtt.mapped_linear(m_rd64, BACK_OFF, BACK_PHYS, 8))
+    pte[4100] = 0
+    chk("mapped_linear notices one wrong pte", !ggtt.mapped_linear(m_rd64, BACK_OFF, BACK_PHYS, 8))
+    let w: u64 = wr64_count
+    chk("unaligned GGTT offset is refused without a write", ggtt.map_linear(m_rd64, m_wr64, BACK_OFF + 1, BACK_PHYS, 8) == ggtt.G_ARG
+        && wr64_count == w)
+    chk("unaligned physical address is refused without a write", ggtt.map_linear(m_rd64, m_wr64, BACK_OFF, BACK_PHYS + 1, 8) == ggtt.G_ARG
+        && wr64_count == w)
+    chk("zero pages are refused", ggtt.map_linear(m_rd64, m_wr64, BACK_OFF, BACK_PHYS, 0) == ggtt.G_ARG)
+    chk("too many pages are refused", ggtt.map_linear(m_rd64, m_wr64, BACK_OFF, BACK_PHYS, ggtt.MAX_PAGES + 1) == ggtt.G_ARG
+        && wr64_count == w)
+    chk("a range past 4 GiB is refused", ggtt.map_linear(m_rd64, m_wr64, 0xfffff000, BACK_PHYS, 2) == ggtt.G_ARG)
+    chk("a physical range past 39 bits is refused", ggtt.map_linear(m_rd64, m_wr64, BACK_OFF, 0x7fffffe000, 8) == ggtt.G_ARG)
+    inj_pte_drop = 1
+    chk("dropped pte writes are caught by the verify", ggtt.map_linear(m_rd64, m_wr64, BACK_OFF + 0x10000, BACK_PHYS, 4) == ggtt.G_VERIFY)
+    inj_pte_drop = 0
+    chk("unmap points the range at the scratch page", ggtt.unmap_range(m_wr64, 0x30000000, BACK_OFF, 8) == ggtt.G_OK
+        && pte[4096] == (0x30000000 | 1) && pte[4103] == (0x30000000 | 1))
+}
+
+fn test_dbuf() {
+    fresh()
+    hp_front()
+    var d: dbuf.Dbuf = dbuf.dbuf_new()
+    let r: u64 = dbuf.setup(m_rd, m_rd64, m_wr64, &d, BACK_OFF, BACK_PHYS, HP_FB_PHYS, HP_FB_PAGES)
+    chk("setup maps a full-screen back buffer", r == dbuf.D_OK && wr64_count == HP_FB_PAGES)
+    chk("back buffer first and last pte", pte[4096] == (BACK_PHYS | 1) && pte[4096 + 2024] == ((BACK_PHYS + 2024 * 4096) | 1))
+    chk("pte after the last back page stays empty", pte[4096 + 2025] == 0)
+    chk("front buffer ptes are untouched", pte[0] == 0xb4800001 && pte[2024] == ((HP_FB_PHYS + 2024 * 4096) | 1))
+    chk("front is the surface the firmware scans out", d.front_off == 0 && dbuf.shown(&d) == 0 && dbuf.hidden(&d) == BACK_OFF)
+    let w: u64 = wr_count
+    chk("present flips to the back buffer", dbuf.present(m_rd, m_wr, m_us, &d) == dbuf.D_OK && reg_get(0x7019c) == BACK_OFF
+        && reg_get(0x701ac) == BACK_OFF + SURF_LIVE_LOW)
+    chk("a present is exactly one plane write", wr_count - w == 1)
+    chk("the roles swapped", dbuf.shown(&d) == BACK_OFF && dbuf.hidden(&d) == 0 && d.flips == 1)
+    chk("second present returns to the front buffer", dbuf.present(m_rd, m_wr, m_us, &d) == dbuf.D_OK && reg_get(0x7019c) == 0 && d.flips == 2)
+    inj_nolatch = 1
+    let pre: u64 = d.flips
+    chk("a flip that never latches rolls back", dbuf.present(m_rd, m_wr, m_us, &d) == dbuf.D_ROLLED_BACK && reg_get(0x7019c) == 0)
+    chk("a rolled back present does not swap or count", dbuf.shown(&d) == 0 && d.flips == pre && d.rollbacks == 1)
+    inj_nolatch = 0
+    chk("present works again afterwards", dbuf.present(m_rd, m_wr, m_us, &d) == dbuf.D_OK && dbuf.shown(&d) == BACK_OFF)
+    chk("restore_front returns to the firmware surface", dbuf.restore_front(m_rd, m_wr, m_us, &d) == dbuf.D_OK
+        && reg_get(0x7019c) == 0 && dbuf.shown(&d) == 0)
+    let w2: u64 = wr_count
+    chk("restore_front on the front is no write", dbuf.restore_front(m_rd, m_wr, m_us, &d) == dbuf.D_OK && wr_count == w2)
+
+    fresh()
+    var d2: dbuf.Dbuf = dbuf.dbuf_new()
+    chk("a front that is not mapped as claimed is refused", dbuf.setup(m_rd, m_rd64, m_wr64, &d2, BACK_OFF, BACK_PHYS, HP_FB_PHYS, HP_FB_PAGES)
+        == dbuf.D_NOT_FRONT)
+    chk("a refused setup writes no pte", wr64_count == 0)
+    hp_front()
+    chk("a wrong claimed front address is refused", dbuf.setup(m_rd, m_rd64, m_wr64, &d2, BACK_OFF, BACK_PHYS, HP_FB_PHYS + 0x1000, HP_FB_PAGES)
+        == dbuf.D_NOT_FRONT && wr64_count == 0)
+    chk("a back buffer overlapping the front is refused", dbuf.setup(m_rd, m_rd64, m_wr64, &d2, 0x1000, BACK_PHYS, HP_FB_PHYS, HP_FB_PAGES)
+        == dbuf.D_ARG && wr64_count == 0)
+    chk("an unaligned back buffer is refused", dbuf.setup(m_rd, m_rd64, m_wr64, &d2, BACK_OFF + 8, BACK_PHYS, HP_FB_PHYS, HP_FB_PAGES)
+        == dbuf.D_ARG)
+    chk("zero pages are refused", dbuf.setup(m_rd, m_rd64, m_wr64, &d2, BACK_OFF, BACK_PHYS, HP_FB_PHYS, 0) == dbuf.D_ARG)
+    inj_pte_drop = 1
+    chk("a back buffer that does not map is reported", dbuf.setup(m_rd, m_rd64, m_wr64, &d2, BACK_OFF, BACK_PHYS, HP_FB_PHYS, 16)
+        == dbuf.D_MAP)
+    chk("a failed setup leaves the plane alone", reg_get(0x7019c) == 0 && wr_count == 0)
+}
+
+fn test_confirm() {
+    fresh()
+    var w: confirm.Watchdog = confirm.wd_new()
+    chk("a new watchdog is idle", w.state == confirm.W_IDLE)
+    chk("confirm on an idle watchdog is refused", !confirm.confirm(&w))
+    chk("a zero timeout cannot arm", !confirm.arm(&w, 100, 0))
+    chk("arm succeeds", confirm.arm(&w, 1000, 5000) && w.state == confirm.W_ARMED && w.deadline_ms == 6000)
+    chk("arming twice is refused", !confirm.arm(&w, 1000, 5000))
+    chk("tick before the deadline does nothing", !confirm.tick(&w, 5999, revert_cb) && revert_calls == 0)
+    chk("tick at the deadline reverts once", confirm.tick(&w, 6000, revert_cb) && revert_calls == 1 && w.state == confirm.W_REVERTED)
+    chk("a second tick does not revert again", !confirm.tick(&w, 9000, revert_cb) && revert_calls == 1)
+    chk("confirm after the revert is refused", !confirm.confirm(&w))
+    var v: confirm.Watchdog = confirm.wd_new()
+    confirm.arm(&v, 0, 100)
+    chk("confirm in time succeeds", confirm.confirm(&v) && v.state == confirm.W_CONFIRMED)
+    chk("a confirmed watchdog never reverts", !confirm.tick(&v, 500, revert_cb) && revert_calls == 1)
+    var u: confirm.Watchdog = confirm.wd_new()
+    confirm.arm(&u, 0, 100)
+    confirm.disarm(&u)
+    chk("a disarmed watchdog never reverts", !confirm.tick(&u, 500, revert_cb) && u.state == confirm.W_IDLE)
+    chk("a watchdog can be armed again after a revert", confirm.arm(&w, 0, 10) || w.state == confirm.W_REVERTED)
+}
+
+fn test_modeset() {
+    fresh()
+    var m: mode.Mode = hp_mode()
+    var s: modeset.Saved = modeset.saved_new()
+    chk("HTOTAL encodes like the HP register", modeset.encode_total(1920, 2104) == 0x0837077f)
+    chk("sync encodes like the HP register", modeset.encode_sync(1936, 1952) == 0x079f078f)
+    chk("the running HP pipe is detected", modeset.running(m_rd))
+    chk("revert without a saved state is refused", !modeset.revert(m_wr, &s))
+    let w: u64 = wr_count
+    chk("same-mode apply succeeds", modeset.apply_same(m_rd, m_wr, &m, &s) == modeset.M_OK)
+    chk("it wrote exactly the four timing registers", wr_count - w == modeset.REG_COUNT)
+    chk("the registers still hold the firmware values", reg_get(0x6f000) == 0x0837077f && reg_get(0x6f008) == 0x079f078f
+        && reg_get(0x6f00c) == 0x045b0437)
+    chk("the saved copy holds the firmware values", s.valid && s.htotal == 0x0837077f && s.hsync == 0x079f078f && s.vtotal == 0x045b0437 && s.vsync == 0x0448043a)
+    let w2: u64 = wr_count
+    chk("revert writes the four saved registers", modeset.revert(m_wr, &s) && wr_count - w2 == modeset.REG_COUNT)
+
+    fresh()
+    var other: mode.Mode = hp_mode()
+    other.htotal = 2105
+    var s2: modeset.Saved = modeset.saved_new()
+    chk("a different mode is refused", modeset.apply_same(m_rd, m_wr, &other, &s2) == modeset.M_MISMATCH)
+    chk("a refused mode writes nothing and saves nothing", wr_count == 0 && !s2.valid)
+    var other2: mode.Mode = hp_mode()
+    other2.vsync_end = 1098
+    chk("a different vertical sync is refused", modeset.apply_same(m_rd, m_wr, &other2, &s2) == modeset.M_MISMATCH && wr_count == 0)
+
+    fresh()
+    reg_set(0x7f008, 0)
+    var s3: modeset.Saved = modeset.saved_new()
+    chk("a stopped transcoder is refused", modeset.apply_same(m_rd, m_wr, &m, &s3) == modeset.M_NOT_RUNNING && wr_count == 0)
+    fresh()
+    reg_set(0x70180, 0)
+    chk("a disabled plane is refused", modeset.apply_same(m_rd, m_wr, &m, &s3) == modeset.M_NOT_RUNNING && wr_count == 0)
+
+    fresh()
+    inj_htotal_bad = 1
+    var s4: modeset.Saved = modeset.saved_new()
+    chk("a register that does not take its value fails the verify", modeset.apply_same(m_rd, m_wr, &m, &s4) == modeset.M_VERIFY_FAIL)
+    chk("the verify failure restores the firmware value", reg_get(0x6f000) == 0x0837077f && s4.valid)
+}
+
+fn main() -> i32 {
+    test_ggtt()
+    test_dbuf()
+    test_confirm()
+    test_modeset()
+    return 0
+}

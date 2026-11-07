@@ -1,0 +1,96 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import gpu.intel.regs
+import gpu.intel.bits
+import gpu.intel.flip
+import gpu.intel.ggtt
+
+export {
+    Dbuf, dbuf_new, setup, present, shown, hidden, restore_front,
+    D_OK, D_ARG, D_MAP, D_NOT_FRONT, D_ROLLED_BACK, D_TIMEOUT
+}
+
+const D_OK: u64 = 0
+const D_ARG: u64 = 1
+const D_MAP: u64 = 2
+const D_NOT_FRONT: u64 = 3
+const D_ROLLED_BACK: u64 = 4
+const D_TIMEOUT: u64 = 5
+
+struct Dbuf {
+    front_off: u64,
+    back_off: u64,
+    pages: u64,
+    cur: u64,
+    flips: u64,
+    rollbacks: u64
+}
+
+fn dbuf_new() -> Dbuf {
+    var d: Dbuf = Dbuf { front_off: 0, back_off: 0, pages: 0, cur: 0, flips: 0, rollbacks: 0 }
+    return d
+}
+
+fn shown(d: *mut Dbuf) -> u64 {
+    if (*d).cur == 0 {
+        return (*d).front_off
+    }
+    return (*d).back_off
+}
+
+fn hidden(d: *mut Dbuf) -> u64 {
+    if (*d).cur == 0 {
+        return (*d).back_off
+    }
+    return (*d).front_off
+}
+
+fn setup(rd: fn(u64) -> u64, rd64: fn(u64) -> u64, wr64: fn(u64, u64) -> u64, d: *mut Dbuf, back_off: u64,
+    back_phys: u64, front_phys: u64, pages: u64) -> u64 {
+    let front_off: u64 = rd(regs.PLANE_SURF_1_A) & bits.PLANE_SURF_MASK
+    if !flip.aligned(back_off) || pages == 0 {
+        return D_ARG
+    }
+    if back_off < front_off + pages * ggtt.PAGE_SIZE && front_off < back_off + pages * ggtt.PAGE_SIZE {
+        return D_ARG
+    }
+    if !ggtt.mapped_linear(rd64, front_off, front_phys, pages) {
+        return D_NOT_FRONT
+    }
+    if ggtt.map_linear(rd64, wr64, back_off, back_phys, pages) != ggtt.G_OK {
+        return D_MAP
+    }
+    (*d).front_off = front_off
+    (*d).back_off = back_off
+    (*d).pages = pages
+    (*d).cur = 0
+    (*d).flips = 0
+    (*d).rollbacks = 0
+    return D_OK
+}
+
+fn present(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, d: *mut Dbuf) -> u64 {
+    let target: u64 = hidden(d)
+    let r: u64 = flip.flip_checked(rd, wr, us, target, shown(d))
+    if r == flip.F_OK {
+        (*d).cur = 1 - (*d).cur
+        (*d).flips = (*d).flips + 1
+        return D_OK
+    }
+    if r == flip.F_ROLLED_BACK {
+        (*d).rollbacks = (*d).rollbacks + 1
+        return D_ROLLED_BACK
+    }
+    return D_ARG
+}
+
+fn restore_front(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, d: *mut Dbuf) -> u64 {
+    if (*d).cur == 0 {
+        return D_OK
+    }
+    let r: u64 = flip.flip_checked(rd, wr, us, (*d).front_off, (*d).back_off)
+    if r != flip.F_OK {
+        return D_TIMEOUT
+    }
+    (*d).cur = 0
+    return D_OK
+}

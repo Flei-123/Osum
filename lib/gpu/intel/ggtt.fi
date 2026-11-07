@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: GPL-2.0-only
+export {
+    pte_encode, pte_offset, pte_phys, pte_valid, map_linear, unmap_range, mapped_linear,
+    G_OK, G_ARG, G_VERIFY, GGTT_BASE_OFFSET, PAGE_SIZE, PTE_BYTES, PTE_VALID, MAX_PAGES
+}
+
+const G_OK: u64 = 0
+const G_ARG: u64 = 1
+const G_VERIFY: u64 = 2
+const GGTT_BASE_OFFSET: u64 = 0x800000
+const PAGE_SIZE: u64 = 0x1000
+const PAGE_MASK: u64 = 0xfff
+const PTE_BYTES: u64 = 8
+const PTE_VALID: u64 = 1
+const PTE_PHYS_MASK: u64 = 0x7ffffff000
+const MAX_PAGES: u64 = 4096
+const MAX_GGTT_BYTES: u64 = 0x100000000
+
+fn pte_encode(phys: u64) -> u64 {
+    return (phys & PTE_PHYS_MASK) | PTE_VALID
+}
+
+fn pte_valid(pte: u64) -> bool {
+    return (pte & PTE_VALID) != 0
+}
+
+fn pte_phys(pte: u64) -> u64 {
+    return pte & PTE_PHYS_MASK
+}
+
+fn pte_offset(ggtt_off: u64) -> u64 {
+    return GGTT_BASE_OFFSET + (ggtt_off / PAGE_SIZE) * PTE_BYTES
+}
+
+fn range_ok(ggtt_off: u64, phys: u64, pages: u64) -> bool {
+    if pages == 0 || pages > MAX_PAGES {
+        return false
+    }
+    if (ggtt_off & PAGE_MASK) != 0 || (phys & PAGE_MASK) != 0 {
+        return false
+    }
+    if ggtt_off + pages * PAGE_SIZE > MAX_GGTT_BYTES || phys + pages * PAGE_SIZE > PTE_PHYS_MASK {
+        return false
+    }
+    return true
+}
+
+fn mapped_linear(rd64: fn(u64) -> u64, ggtt_off: u64, phys: u64, pages: u64) -> bool {
+    if !range_ok(ggtt_off, phys, pages) {
+        return false
+    }
+    var i: u64 = 0
+    while i < pages {
+        if rd64(pte_offset(ggtt_off + i * PAGE_SIZE)) != pte_encode(phys + i * PAGE_SIZE) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn map_linear(rd64: fn(u64) -> u64, wr64: fn(u64, u64) -> u64, ggtt_off: u64, phys: u64, pages: u64) -> u64 {
+    if !range_ok(ggtt_off, phys, pages) {
+        return G_ARG
+    }
+    var i: u64 = 0
+    while i < pages {
+        wr64(pte_offset(ggtt_off + i * PAGE_SIZE), pte_encode(phys + i * PAGE_SIZE))
+        i = i + 1
+    }
+    if !mapped_linear(rd64, ggtt_off, phys, pages) {
+        return G_VERIFY
+    }
+    return G_OK
+}
+
+fn unmap_range(wr64: fn(u64, u64) -> u64, scratch_phys: u64, ggtt_off: u64, pages: u64) -> u64 {
+    if !range_ok(ggtt_off, scratch_phys, pages) {
+        return G_ARG
+    }
+    var i: u64 = 0
+    while i < pages {
+        wr64(pte_offset(ggtt_off + i * PAGE_SIZE), pte_encode(scratch_phys))
+        i = i + 1
+    }
+    return G_OK
+}

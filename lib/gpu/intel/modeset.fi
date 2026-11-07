@@ -1,0 +1,92 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import gpu.intel.regs
+import gpu.intel.bits
+import gpu.intel.mode
+
+export {
+    Saved, saved_new, encode_total, encode_sync, apply_same, revert, running,
+    M_OK, M_NOT_RUNNING, M_MISMATCH, M_VERIFY_FAIL, REG_COUNT
+}
+
+const M_OK: u64 = 0
+const M_NOT_RUNNING: u64 = 1
+const M_MISMATCH: u64 = 2
+const M_VERIFY_FAIL: u64 = 3
+const REG_COUNT: u64 = 4
+const LOW16: u64 = 0xffff
+const HIGH_SHIFT: u64 = 16
+
+struct Saved {
+    htotal: u64,
+    hsync: u64,
+    vtotal: u64,
+    vsync: u64,
+    valid: bool
+}
+
+fn saved_new() -> Saved {
+    var s: Saved = Saved { htotal: 0, hsync: 0, vtotal: 0, vsync: 0, valid: false }
+    return s
+}
+
+fn pack(low: u64, high: u64) -> u64 {
+    return ((low - 1) & LOW16) | (((high - 1) & LOW16) << HIGH_SHIFT)
+}
+
+fn encode_total(active: u64, total: u64) -> u64 {
+    return pack(active, total)
+}
+
+fn encode_sync(start: u64, end: u64) -> u64 {
+    return pack(start, end)
+}
+
+fn running(rd: fn(u64) -> u64) -> bool {
+    return (rd(regs.TRANSCONF_EDP) & bits.ENABLE) != 0 && (rd(regs.PLANE_CTL_1_A) & bits.ENABLE) != 0
+}
+
+fn matches(rd: fn(u64) -> u64, m: *mut mode.Mode) -> bool {
+    let base: u64 = regs.TRANS_EDP
+    return rd(base + regs.T_HTOTAL) == encode_total((*m).hactive, (*m).htotal)
+        && rd(base + regs.T_HSYNC) == encode_sync((*m).hsync_start, (*m).hsync_end)
+        && rd(base + regs.T_VTOTAL) == encode_total((*m).vactive, (*m).vtotal)
+        && rd(base + regs.T_VSYNC) == encode_sync((*m).vsync_start, (*m).vsync_end)
+}
+
+fn write_regs(wr: fn(u64, u64) -> u64, htotal: u64, hsync: u64, vtotal: u64, vsync: u64) {
+    let base: u64 = regs.TRANS_EDP
+    wr(base + regs.T_HTOTAL, htotal)
+    wr(base + regs.T_HSYNC, hsync)
+    wr(base + regs.T_VTOTAL, vtotal)
+    wr(base + regs.T_VSYNC, vsync)
+}
+
+fn revert(wr: fn(u64, u64) -> u64, s: *mut Saved) -> bool {
+    if !(*s).valid {
+        return false
+    }
+    write_regs(wr, (*s).htotal, (*s).hsync, (*s).vtotal, (*s).vsync)
+    return true
+}
+
+fn apply_same(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, m: *mut mode.Mode, s: *mut Saved) -> u64 {
+    if !running(rd) {
+        return M_NOT_RUNNING
+    }
+    if !matches(rd, m) {
+        return M_MISMATCH
+    }
+    let base: u64 = regs.TRANS_EDP
+    (*s).htotal = rd(base + regs.T_HTOTAL)
+    (*s).hsync = rd(base + regs.T_HSYNC)
+    (*s).vtotal = rd(base + regs.T_VTOTAL)
+    (*s).vsync = rd(base + regs.T_VSYNC)
+    (*s).valid = true
+    write_regs(wr, encode_total((*m).hactive, (*m).htotal), encode_sync((*m).hsync_start, (*m).hsync_end),
+        encode_total((*m).vactive, (*m).vtotal), encode_sync((*m).vsync_start, (*m).vsync_end))
+    if !matches(rd, m) || !running(rd) {
+        revert(wr, s)
+        return M_VERIFY_FAIL
+    }
+    return M_OK
+}

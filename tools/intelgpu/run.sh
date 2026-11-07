@@ -14,7 +14,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 [ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 
-for m in ids regs bits mode timing edid aux snap dump flip; do
+for m in ids regs bits mode timing edid aux snap dump flip ggtt dbuf confirm modeset; do
     printf 'import gpu.intel.%s\nfn main() -> i32 {\n    return 0\n}\n' "$m" > "$T/k_$m.fi"
     "$FIRNC" --profile=kernel -c "$T/k_$m.fi" -o "$T/k_$m.o" 2> "$T/k.err" \
         && ok "gpu.intel.$m compiles with --profile=kernel" \
@@ -36,6 +36,23 @@ if [ -x "$T/oracle" ]; then
     pass=$((pass+nok))
 fi
 
+"$FIRNC" tools/intelgpu/phase2.fi -o "$T/phase2" 2> "$T/p2.err" \
+    && ok "phase 2 oracle builds" || { bad "phase 2 oracle does not build"; head -10 "$T/p2.err"; }
+
+if [ -x "$T/phase2" ]; then
+    "$T/phase2" > "$T/out2.txt" 2>&1
+    rc=$?
+    nok=$(grep -c '^OK' "$T/out2.txt")
+    nbad=$(grep -c '^FAIL' "$T/out2.txt")
+    sed -n 's/^FAIL /  FAIL  phase2: /p' "$T/out2.txt"
+    [ "$rc" = 0 ] && ok "phase 2 oracle exits 0" || bad "phase 2 oracle exit code $rc"
+    [ "$nbad" = 0 ] && ok "phase 2 oracle: no FAIL line" || bad "phase 2 oracle: $nbad FAIL lines"
+    [ "$nok" -ge 60 ] && ok "phase 2 oracle: $nok promises OK (>= 60)" || bad "phase 2 oracle: only $nok OK (< 60)"
+    pass=$((pass+nok))
+fi
+
+ORACLE=tools/intelgpu/oracle.fi
+
 mutate() {
     local name=$1 file=$2 expr=$3
     local L="$T/lib-$name"
@@ -54,7 +71,7 @@ mutate() {
         bad "control $name: the mutation did not change the file"
         return
     fi
-    if ! FIRNLIB="$L" "$FIRNC" tools/intelgpu/oracle.fi -o "$T/o-$name" 2>/dev/null; then
+    if ! FIRNLIB="$L" "$FIRNC" "$ORACLE" -o "$T/o-$name" 2>/dev/null; then
         bad "control $name: mutated oracle does not build"
         return
     fi
@@ -115,6 +132,42 @@ mutate flip_always  flip   's/    return F_TIMEOUT$/    return F_OK/'
 mutate flip_nofall  flip   's/    wr(regs.PLANE_SURF_1_A, fallback)//'
 mutate flip_rb_ok   flip   's/    return F_ROLLED_BACK/    return F_TIMEOUT/'
 mutate flip_reg     regs   's/PLANE_SURFLIVE_1_A: u64 = 0x701ac/PLANE_SURFLIVE_1_A: u64 = 0x701a8/'
+
+ORACLE=tools/intelgpu/phase2.fi
+mutate pte_valid     ggtt   's/PTE_VALID: u64 = 1$/PTE_VALID: u64 = 3/'
+mutate pte_mask      ggtt   's/PTE_PHYS_MASK: u64 = 0x7ffffff000/PTE_PHYS_MASK: u64 = 0x7fffffff00/'
+mutate pte_base      ggtt   's/GGTT_BASE_OFFSET: u64 = 0x800000/GGTT_BASE_OFFSET: u64 = 0x400000/'
+mutate pte_stride    ggtt   's/PTE_BYTES: u64 = 8$/PTE_BYTES: u64 = 4/'
+mutate ggtt_noalign  ggtt   's/if (ggtt_off \& PAGE_MASK) != 0 || (phys \& PAGE_MASK) != 0 {/if false {/'
+mutate ggtt_nolimit  ggtt   's/pages > MAX_PAGES {/false {/'
+mutate ggtt_noverify ggtt   's/if !mapped_linear(rd64, ggtt_off, phys, pages) {/if false {/'
+mutate ggtt_phys_adv ggtt   's/pte_encode(phys + i \* PAGE_SIZE))$/pte_encode(phys))/'
+mutate ggtt_zero     ggtt   's/if pages == 0 || pages > MAX_PAGES {/if pages > MAX_PAGES {/'
+mutate dbuf_nofront  dbuf   's/if !ggtt.mapped_linear(rd64, front_off, front_phys, pages) {/if false {/'
+mutate dbuf_overlap  dbuf   's/if back_off < front_off + pages \* ggtt.PAGE_SIZE \&\& front_off < back_off + pages \* ggtt.PAGE_SIZE {/if false {/'
+mutate dbuf_noswap   dbuf   's/(\*d).cur = 1 - (\*d).cur/(*d).cur = (*d).cur/'
+mutate dbuf_nofall   dbuf   's/flip.flip_checked(rd, wr, us, target, shown(d))/flip.flip(rd, wr, us, target)/'
+mutate dbuf_rbcount  dbuf   's/(\*d).rollbacks = (\*d).rollbacks + 1//'
+mutate dbuf_rb_swap  dbuf   's/    if r == flip.F_ROLLED_BACK {/    if r == flip.F_ROLLED_BACK {\n        (*d).cur = 1 - (*d).cur/'
+mutate dbuf_restore  dbuf   's/    (\*d).cur = 0\n    return D_OK/    return D_OK/;/^fn restore_front/,/^}/{s/    (\*d).cur = 0$//}'
+mutate dbuf_mapfail  dbuf   's/if ggtt.map_linear(rd64, wr64, back_off, back_phys, pages) != ggtt.G_OK {/if false {/'
+mutate wd_noarm      confirm 's/    (\*w).state = W_ARMED$/    (*w).state = W_IDLE/'
+mutate wd_deadline   confirm 's/(\*w).deadline_ms = now_ms + timeout_ms/(*w).deadline_ms = timeout_ms/'
+mutate wd_early      confirm 's/now_ms < (\*w).deadline_ms {/now_ms + 1 < (*w).deadline_ms {/'
+mutate wd_norevert   confirm 's/^    revert()$//'
+mutate wd_twice      confirm 's/if timeout_ms == 0 || (\*w).state == W_ARMED {/if timeout_ms == 0 {/'
+mutate wd_confirm    confirm 's/if (\*w).state != W_ARMED {$/if false {/'
+mutate wd_after      confirm 's/    (\*w).state = W_REVERTED/    (*w).state = W_IDLE/'
+mutate ms_noroll     modeset 's/        revert(wr, s)$//'
+mutate ms_nocheck    modeset 's/    if !matches(rd, m) || !running(rd) {/    if false {/'
+mutate ms_norun      modeset 's/    if !running(rd) {$/    if false {/'
+mutate ms_nomismatch modeset 's/    if !matches(rd, m) {$/    if false {/'
+mutate ms_pack       modeset 's/((low - 1) \& LOW16)/(low \& LOW16)/'
+mutate ms_shift      modeset 's/HIGH_SHIFT: u64 = 16/HIGH_SHIFT: u64 = 15/'
+mutate ms_nosave     modeset 's/    (\*s).valid = true//'
+mutate ms_vsync      modeset 's/rd(base + regs.T_VSYNC)$/rd(base + regs.T_VBLANK)/'
+mutate ms_planeck    modeset 's/ \&\& (rd(regs.PLANE_CTL_1_A) \& bits.ENABLE) != 0//'
+ORACLE=tools/intelgpu/oracle.fi
 
 echo "INTELGPU: $pass passed, $fail failed"
 [ "$fail" = 0 ]
