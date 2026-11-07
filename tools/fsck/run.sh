@@ -37,6 +37,7 @@ bash tools/build-kernel.sh "$TMPD/k.mb" >"$TMPD/build.txt" 2>&1 \
 SRC="$TMPD/src"
 mkdir -p "$SRC"
 cp kernel/user/*.fi "$SRC/"
+cp -r kernel/user/lineedit "$SRC/"
 PROGS="sh echo cat ls fsck"
 if [ -n "${FSCK_OLD_REF:-}" ] && git show "$FSCK_OLD_REF:kernel/user/fsck.fi" > "$SRC/fsckold.fi" 2>/dev/null; then
     PROGS="$PROGS fsckold"
