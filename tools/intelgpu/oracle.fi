@@ -1,0 +1,670 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import std.rt
+import std.io
+import libc.octets
+import hwinv.buf
+import gpu.intel.ids
+import gpu.intel.mode
+import gpu.intel.timing
+import gpu.intel.edid
+import gpu.intel.aux
+import gpu.intel.state
+import gpu.intel.dump
+
+const NOT_FOUND: u64 = 0xffff
+const REG_CAP: u64 = 128
+const DPCD_LEN: u64 = 272
+const EDID_I2C_ADDR: u64 = 0x50
+const IDLE_CTL: u64 = 0x0410023f
+const SINK_DEFER_NATIVE: u64 = 0x20
+const SINK_DEFER_I2C: u64 = 0x80
+const SINK_NACK_NATIVE: u64 = 0x10
+const SINK_NACK_I2C: u64 = 0x40
+const SHORT_CHUNK: u64 = 8
+const FOREVER: u64 = 99
+
+static mut reg_off: [u64; 128] = [0; 128]
+static mut reg_val: [u64; 128] = [0; 128]
+static mut reg_n: u64 = 0
+static mut wr_count: u64 = 0
+static mut delay_total: u64 = 0
+static mut delay_calls: u64 = 0
+static mut aux_calls: u64 = 0
+static mut bad_send: u64 = 0
+static mut mot_bad: u64 = 0
+static mut inj_timeout: u64 = 0
+static mut inj_recv: u64 = 0
+static mut inj_nack: u64 = 0
+static mut inj_defer: u64 = 0
+static mut inj_size0: u64 = 0
+static mut inj_big: u64 = 0
+static mut inj_short: u64 = 0
+static mut edid_ptr: u64 = 0
+static mut edid_blk: [u8; 128] = [0 as u8; 128]
+static mut dpcd_blk: [u8; 272] = [0 as u8; 272]
+static mut got_blk: [u8; 128] = [0 as u8; 128]
+static mut got_dpcd: [u8; 32] = [0 as u8; 32]
+static SKL_IDS: [u64; 25] = [0x1902, 0x1906, 0x190A, 0x190B, 0x190E, 0x1912, 0x1913, 0x1915, 0x1916, 0x1917, 0x191A,
+    0x191B, 0x191D, 0x191E, 0x1921, 0x1923, 0x1926, 0x1927, 0x192A, 0x192B, 0x192D, 0x1932, 0x193A, 0x193B, 0x193D]
+static KBL_IDS: [u64; 22] = [0x5902, 0x5906, 0x5908, 0x590A, 0x590B, 0x590E, 0x5912, 0x5913, 0x5915, 0x5916, 0x5917,
+    0x591A, 0x591B, 0x591C, 0x591D, 0x591E, 0x5921, 0x5923, 0x5926, 0x5927, 0x593B, 0x87C0]
+static EXPECT: [u8; 1378] = "pipesrc_w=1920\npipesrc_h=1080\nhactive=1920\nhsync_start=1936\nhsync_end=1952\nhtotal=2104\nvactive=1080\nvsync_start=1083\nvsync_end=1097\nvtotal=1116\npclk_khz=141000\nrefresh_mhz=60049\nlink_symbol_khz=270000\ndata_tu=64\ndata_ratio_ppm=587500\ntransconf_edp=0xc0000000\nedp_enabled=1\npipeconf_a=0x00000000\npipeconf_b=0x00000000\nddi_func_edp=0x82200002\nddi_func_enabled=1\nddi_mode=2\nddi_bpc=6\nddi_pipe=0\nddi_lanes=2\nhsync_positive=0\nvsync_positive=0\nddi_func_a=0x00030000\nddi_buf_a=0x80000003\nddi_buf_enabled=1\nddi_buf_lanes=2\ndp_tp_ctl_a=0x80040300\ndp_tp_status_a=0x00000000\ndp_mst=0\ndp_enhanced=1\ndp_pattern=3\naux_ctl_a=0x0410023f\ndpll_ctrl1=0x00000003\ndpll_ctrl2=0x00a00001\ndpll_status=0x00000011\ndpll0_locked=1\nlcpll1_ctl=0xc0000000\nlcpll1_enabled=1\nlcpll1_locked=1\ncdclk_ctl=0x0c000544\ncdclk_khz=675000\ndssm=0x00000001\ndfsm=0x20400042\ncdclk_limit_khz=675000\nfuse_status=0x8e000000\nplane_ctl_1_a=0x84000000\nplane_enabled=1\nplane_format=4\nplane_tiling=0\nplane_stride_bytes=7680\nplane_width=1920\nplane_height=1080\nplane_surf=0x00000000\npp_status=0x80000008\npanel_on=1\npp_sequence=8\npp_control=0x00000007\npp_off_delay_100us=500\nblc_pch_ctl1=0x80000000\nblc_pwm_enabled=1\nblc_period=7500\nblc_duty=7500\nblc_cpu_ctl2=0x80000000\nblc_cpu_ctl=0x00000000\npwr_well_ctl1=0xf000000f\npwr_well_ctl2=0x50000005\npwr_well_ctl3=0x40000000\npwr_well_ctl4=0x50000005\ndc_state_en=0x00000000\ngmbus2=0x00000800\n\0"
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn reg_find(off: u64) -> u64 {
+    var i: u64 = 0
+    while i < reg_n {
+        if reg_off[i as usize] == off {
+            return i
+        }
+        i = i + 1
+    }
+    return NOT_FOUND
+}
+
+fn reg_set(off: u64, v: u64) {
+    let i: u64 = reg_find(off)
+    if i != NOT_FOUND {
+        reg_val[i as usize] = v
+        return
+    }
+    reg_off[reg_n as usize] = off
+    reg_val[reg_n as usize] = v
+    reg_n = reg_n + 1
+}
+
+fn reg_get(off: u64) -> u64 {
+    let i: u64 = reg_find(off)
+    if i == NOT_FOUND {
+        return 0
+    }
+    return reg_val[i as usize]
+}
+
+fn expected_send(size: u64) -> u64 {
+    return 0xf0000000 | (3 << 26) | 0x2000000 | (size << 20) | 0x23f
+}
+
+fn sink_tx_byte(i: u64) -> u64 {
+    return (reg_get(0x64014 + (i / 4) * 4) >> ((3 - (i % 4)) * 8)) & 0xff
+}
+
+fn sink_reply(rb: *mut [u8; 20], n: u64) {
+    var w: u64 = 0
+    while w * 4 < n {
+        var v: u64 = 0
+        var b: u64 = 0
+        while b < 4 {
+            v = v << 8
+            if w * 4 + b < n {
+                v = v | ((*rb)[(w * 4 + b) as usize] as u64)
+            }
+            b = b + 1
+        }
+        reg_set(0x64014 + w * 4, v)
+        w = w + 1
+    }
+    reg_set(0x64010, 0x40000000 | (n << 20))
+}
+
+fn sink_status_only(bitmask: u64) {
+    reg_set(0x64010, bitmask)
+}
+
+fn sink_native_read(rb: *mut [u8; 20], addr: u64, len: u64) -> u64 {
+    var n: u64 = len
+    if inj_short != 0 && n > SHORT_CHUNK {
+        n = SHORT_CHUNK
+    }
+    var i: u64 = 0
+    while i < n {
+        (*rb)[(1 + i) as usize] = dpcd_blk[((addr + i) % DPCD_LEN) as usize]
+        i = i + 1
+    }
+    (*rb)[0] = 0 as u8
+    return 1 + n
+}
+
+fn sink_i2c_read(rb: *mut [u8; 20], len: u64, mot: bool) -> u64 {
+    var n: u64 = len
+    if inj_short != 0 && n > SHORT_CHUNK {
+        n = SHORT_CHUNK
+    }
+    var i: u64 = 0
+    while i < n {
+        (*rb)[(1 + i) as usize] = edid_blk[((edid_ptr + i) % 128) as usize]
+        i = i + 1
+    }
+    edid_ptr = edid_ptr + n
+    if inj_short == 0 && (edid_ptr < 128) != mot {
+        mot_bad = mot_bad + 1
+    }
+    (*rb)[0] = 0 as u8
+    return 1 + n
+}
+
+fn reply_code(native: bool, native_code: u64, i2c_code: u64) -> u64 {
+    if native {
+        return native_code
+    }
+    return i2c_code
+}
+
+fn sink_dispatch(rb: *mut [u8; 20]) -> u64 {
+    let req: u64 = sink_tx_byte(0) >> 4
+    let native: bool = (req & 8) != 0
+    let addr: u64 = ((sink_tx_byte(0) & 0xf) << 16) | (sink_tx_byte(1) << 8) | sink_tx_byte(2)
+    let len: u64 = sink_tx_byte(3) + 1
+    if inj_defer > 0 {
+        inj_defer = inj_defer - 1
+        (*rb)[0] = reply_code(native, SINK_DEFER_NATIVE, SINK_DEFER_I2C) as u8
+        return 1
+    }
+    if inj_nack > 0 {
+        inj_nack = inj_nack - 1
+        (*rb)[0] = reply_code(native, SINK_NACK_NATIVE, SINK_NACK_I2C) as u8
+        return 1
+    }
+    if native {
+        return sink_native_read(rb, addr, len)
+    }
+    if (req & 3) == 0 {
+        edid_ptr = sink_tx_byte(4)
+        if (req & 4) == 0 {
+            mot_bad = mot_bad + 1
+        }
+        (*rb)[0] = 0 as u8
+        return 1
+    }
+    return sink_i2c_read(rb, len, (req & 4) != 0)
+}
+
+fn aux_start(v: u64) {
+    aux_calls = aux_calls + 1
+    if v != expected_send((v >> 20) & 0x1f) {
+        bad_send = bad_send + 1
+    }
+    if inj_timeout > 0 {
+        inj_timeout = inj_timeout - 1
+        sink_status_only(0x10000000)
+        return
+    }
+    if inj_recv > 0 {
+        inj_recv = inj_recv - 1
+        sink_status_only(0x2000000)
+        return
+    }
+    if inj_size0 > 0 {
+        inj_size0 = inj_size0 - 1
+        sink_status_only(0x40000000)
+        return
+    }
+    if inj_big > 0 {
+        inj_big = inj_big - 1
+        sink_status_only(0x40000000 | (21 << 20))
+        return
+    }
+    var rb: [u8; 20] = [0 as u8; 20]
+    let n: u64 = sink_dispatch(&rb)
+    sink_reply(&rb, n)
+}
+
+fn m_rd(off: u64) -> u64 {
+    return reg_get(off)
+}
+
+fn m_wr(off: u64, v: u64) -> u64 {
+    wr_count = wr_count + 1
+    if off == 0x64010 {
+        if (v & 0x80000000) != 0 {
+            aux_start(v)
+            return 0
+        }
+        let cur: u64 = reg_get(off)
+        let clr: u64 = v & 0x52000000
+        reg_set(off, cur ^ (cur & clr))
+        return 0
+    }
+    reg_set(off, v)
+    return 0
+}
+
+fn m_us(n: u64) -> u64 {
+    delay_total = delay_total + n
+    delay_calls = delay_calls + 1
+    return 0
+}
+
+fn fresh() {
+    inj_timeout = 0
+    inj_recv = 0
+    inj_nack = 0
+    inj_defer = 0
+    inj_size0 = 0
+    inj_big = 0
+    inj_short = 0
+    edid_ptr = 0
+    aux_calls = 0
+    bad_send = 0
+    mot_bad = 0
+    delay_total = 0
+    delay_calls = 0
+    reg_set(0x64010, IDLE_CTL)
+}
+
+fn load_fixtures() {
+    reg_set(0x6001c, 0x77f0437)
+    reg_set(0x6f000, 0x837077f)
+    reg_set(0x6f004, 0x837077f)
+    reg_set(0x6f008, 0x79f078f)
+    reg_set(0x6f00c, 0x45b0437)
+    reg_set(0x6f010, 0x45b0437)
+    reg_set(0x6f014, 0x448043a)
+    reg_set(0x7f008, 0xc0000000)
+    reg_set(0x70008, 0x0)
+    reg_set(0x71008, 0x0)
+    reg_set(0x6f400, 0x82200002)
+    reg_set(0x60400, 0x30000)
+    reg_set(0x6f030, 0x7e4b3333)
+    reg_set(0x6f034, 0x800000)
+    reg_set(0x6f040, 0x42d82)
+    reg_set(0x6f044, 0x80000)
+    reg_set(0x64000, 0x80000003)
+    reg_set(0x64040, 0x80040300)
+    reg_set(0x64044, 0x0)
+    reg_set(0x64010, 0x410023f)
+    reg_set(0x6c058, 0x3)
+    reg_set(0x6c05c, 0xa00001)
+    reg_set(0x6c060, 0x11)
+    reg_set(0x46010, 0xc0000000)
+    reg_set(0x46000, 0xc000544)
+    reg_set(0x51004, 0x1)
+    reg_set(0x51000, 0x20400042)
+    reg_set(0x42000, 0x8e000000)
+    reg_set(0x70180, 0x84000000)
+    reg_set(0x70188, 0x78)
+    reg_set(0x70190, 0x437077f)
+    reg_set(0x7019c, 0x0)
+    reg_set(0xc7200, 0x80000008)
+    reg_set(0xc7204, 0x7)
+    reg_set(0xc7208, 0x0)
+    reg_set(0xc720c, 0x1f40000)
+    reg_set(0xc7210, 0x4af06)
+    reg_set(0xc8250, 0x80000000)
+    reg_set(0xc8254, 0x1d4c1d4c)
+    reg_set(0x48250, 0x80000000)
+    reg_set(0x48254, 0x0)
+    reg_set(0x45400, 0xf000000f)
+    reg_set(0x45404, 0x50000005)
+    reg_set(0x45408, 0x40000000)
+    reg_set(0x4540c, 0x50000005)
+    reg_set(0x45504, 0x0)
+    reg_set(0xc5108, 0x800)
+}
+
+fn put_edid(i: u64, v: u64) {
+    edid_blk[i as usize] = v as u8
+}
+
+fn fix_edid_sum() {
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < 127 {
+        sum = sum + (edid_blk[i as usize] as u64)
+        i = i + 1
+    }
+    edid_blk[127] = ((256 - (sum & 0xff)) & 0xff) as u8
+}
+
+fn build_edid() {
+    var i: u64 = 0
+    while i < 128 {
+        edid_blk[i as usize] = 0 as u8
+        i = i + 1
+    }
+    i = 1
+    while i < 7 {
+        put_edid(i, 0xff)
+        i = i + 1
+    }
+    put_edid(8, 0x30)
+    put_edid(9, 0xe4)
+    put_edid(10, 0x23)
+    put_edid(11, 0x01)
+    put_edid(18, 1)
+    put_edid(19, 4)
+    put_edid(21, 31)
+    put_edid(22, 17)
+    put_edid(54, 0x14)
+    put_edid(55, 0x37)
+    put_edid(56, 0x80)
+    put_edid(57, 0xb8)
+    put_edid(58, 0x70)
+    put_edid(59, 0x38)
+    put_edid(60, 0x24)
+    put_edid(61, 0x40)
+    put_edid(62, 0x10)
+    put_edid(63, 0x10)
+    put_edid(64, 0x3e)
+    put_edid(66, 0x58)
+    put_edid(67, 0xc1)
+    put_edid(68, 0x10)
+    fix_edid_sum()
+}
+
+fn build_dpcd() {
+    var i: u64 = 0
+    while i < DPCD_LEN {
+        dpcd_blk[i as usize] = ((i * 7 + 3) & 0xff) as u8
+        i = i + 1
+    }
+    dpcd_blk[0] = 0x12 as u8
+    dpcd_blk[1] = 0x0a as u8
+    dpcd_blk[2] = 0x82 as u8
+    dpcd_blk[0x100] = 0x0a as u8
+    dpcd_blk[0x101] = 0x02 as u8
+}
+
+fn same_bytes(a: u64, b: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if octets.ld8(a, i) != octets.ld8(b, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn pe() -> u64 {
+    return (&edid_blk[0]) as u64
+}
+
+fn pg() -> u64 {
+    return (&got_blk[0]) as u64
+}
+
+fn pd() -> u64 {
+    return (&got_dpcd[0]) as u64
+}
+
+fn read_edid() -> u64 {
+    return aux.i2c_read(m_rd, m_wr, m_us, EDID_I2C_ADDR, 0, pg(), 128)
+}
+
+fn test_ids() {
+    var skl: u64 = 0
+    var kbl: u64 = 0
+    var d: u64 = 0
+    while d < 65536 {
+        let g: u64 = ids.gen_x10(0x8086, d)
+        if g == 90 {
+            skl = skl + 1
+        } else if g == 95 {
+            kbl = kbl + 1
+        }
+        d = d + 1
+    }
+    chk("exactly 25 SKL ids over all device numbers", skl == 25)
+    chk("exactly 22 KBL ids over all device numbers", kbl == 22)
+    var ok_skl: bool = true
+    var i: u64 = 0
+    while i < 25 {
+        if ids.gen_x10(0x8086, SKL_IDS[i as usize]) != 90 {
+            ok_skl = false
+        }
+        i = i + 1
+    }
+    chk("every listed SKL id maps to gen 9.0", ok_skl)
+    var ok_kbl: bool = true
+    i = 0
+    while i < 22 {
+        if ids.gen_x10(0x8086, KBL_IDS[i as usize]) != 95 {
+            ok_kbl = false
+        }
+        i = i + 1
+    }
+    chk("every listed KBL id maps to gen 9.5", ok_kbl)
+    chk("5916 (HP HD 620) is gen 9.5", ids.gen_x10(0x8086, 0x5916) == 95)
+    chk("other vendor with 5916 is rejected", ids.gen_x10(0x10de, 0x5916) == 0)
+    chk("87C0 is gen 9.5", ids.gen_x10(0x8086, 0x87c0) == 95)
+    chk("1912 is gen 9.0", ids.gen_x10(0x8086, 0x1912) == 90)
+    chk("5918 is not listed", !ids.is_gen9(0x8086, 0x5918))
+    chk("Coffee Lake 3E9B is not gen 9 here", !ids.is_gen9(0x8086, 0x3e9b))
+    chk("5916 is_gen9", ids.is_gen9(0x8086, 0x5916))
+}
+
+fn test_timing_units() {
+    chk("pixel clock 273794/524288 of 270 MHz rounds to 141000 kHz", timing.pixel_clock_khz(273794, 524288, 270000) == 141000)
+    chk("pixel clock with zero N is 0", timing.pixel_clock_khz(5, 0, 270000) == 0)
+    chk("DPLL0 rate field 1 is 270 MHz symbol clock", timing.link_symbol_khz(0x3, 0) == 270000)
+    chk("DPLL0 rate field 0 is 540 MHz symbol clock", timing.link_symbol_khz(0x1, 0) == 540000)
+    chk("DPLL1 rate field sits 6 bits higher", timing.link_symbol_khz((1 << 6) | (2 << 7), 1) == 162000)
+    chk("unknown rate field gives 0", timing.link_symbol_khz(7 << 1, 0) == 0)
+    chk("data M TU field 63 means TU 64", timing.data_tu(0x7e4b3333) == 64)
+    chk("data M/N 0x4b3333/0x800000 is 587500 ppm", timing.data_ratio_ppm(0x7e4b3333, 0x800000) == 587500)
+}
+
+fn test_decode() {
+    var s: state.State = state.state_new()
+    let before: u64 = wr_count
+    state.snapshot(m_rd, &s)
+    chk("snapshot performs zero register writes", wr_count == before)
+    chk("PIPESRC_A decodes to 1920x1080", s.pipesrc_w == 1920 && s.pipesrc_h == 1080)
+    chk("horizontal timing 1920/1936/1952/2104", s.mode.hactive == 1920 && s.mode.hsync_start == 1936
+        && s.mode.hsync_end == 1952 && s.mode.htotal == 2104)
+    chk("vertical timing 1080/1083/1097/1116", s.mode.vactive == 1080 && s.mode.vsync_start == 1083
+        && s.mode.vsync_end == 1097 && s.mode.vtotal == 1116)
+    chk("pixel clock from link M/N is 141000 kHz", s.mode.pclk_khz == 141000)
+    chk("refresh is 60.049 Hz", mode.refresh_mhz(&s.mode) == 60049)
+    chk("eDP transcoder is enabled", (s.transconf_edp & 0x80000000) != 0)
+    chk("DDI function is DP SST, 6 bpc, 2 lanes", ((s.ddi_func >> 24) & 7) == 2 && state.bpc_of(s.ddi_func) == 6
+        && state.lanes_of(s.ddi_func) == 2)
+    chk("CDCLK 675 MHz, limit 675 MHz", state.cdclk_khz_of(s.cdclk_ctl) == 675000
+        && state.cdclk_limit_khz_of(s.dfsm) == 675000)
+    chk("link symbol clock 270 MHz", s.symbol_khz == 270000)
+    chk("data TU 64", s.data_tu == 64)
+    chk("CDCLK select table 540/450/337.5/675 MHz", state.cdclk_khz_of(0) == 540000 && state.cdclk_khz_of(1 << 26) == 450000
+        && state.cdclk_khz_of(2 << 26) == 337500 && state.cdclk_khz_of(3 << 26) == 675000)
+    chk("DFSM limit table 675/540/450/337.5 MHz", state.cdclk_limit_khz_of(0) == 675000
+        && state.cdclk_limit_khz_of(1 << 23) == 540000 && state.cdclk_limit_khz_of(2 << 23) == 450000
+        && state.cdclk_limit_khz_of(3 << 23) == 337500)
+    chk("bpc table 8/10/6/12", state.bpc_of(0) == 8 && state.bpc_of(1 << 20) == 10 && state.bpc_of(2 << 20) == 6
+        && state.bpc_of(3 << 20) == 12 && state.bpc_of(5 << 20) == 0)
+    var m: mode.Mode = mode.mode_new()
+    timing.read_mode(m_rd, 0x60000, 270000, &m)
+    chk("transcoder A (off) decodes to an empty mode", m.hactive == 1 && m.pclk_khz == 0)
+}
+
+fn test_dump() {
+    var s: state.State = state.state_new()
+    state.snapshot(m_rd, &s)
+    buf.reset_out()
+    dump.dump(&s)
+    let p: u64 = buf.out_ptr()
+    let n: u64 = buf.out_len()
+    let e: u64 = (&EXPECT[0]) as u64
+    chk("dump has one line per label", buf.line_end(p, 0, n) > 0 && n > 0)
+    var at: u64 = 0
+    var lines: u64 = 0
+    var eat: u64 = 0
+    while at < n {
+        let end: u64 = buf.line_end(p, at, n)
+        let eend: u64 = buf.line_end(e, eat, octets.cstr_len(e))
+        let ok: bool = (end - at) == (eend - eat) && same_bytes(p + at, e + eat, end - at)
+        if ok {
+            io.print("OK   dump: ")
+        } else {
+            io.print("FAIL dump: ")
+        }
+        io.print_bytes(e + eat, (eend - eat) as usize)
+        io.new_line()
+        at = end + 1
+        eat = eend + 1
+        lines = lines + 1
+    }
+    chk("dump line count equals label count", lines == 75)
+    chk("dump text length equals expected text", n == octets.cstr_len(e))
+}
+
+fn test_edid() {
+    build_edid()
+    chk("fixture EDID passes header and checksum", edid.block_ok(pe()))
+    chk("manufacturer is LGD", edid.manufacturer_letter(pe(), 0) == 76 && edid.manufacturer_letter(pe(), 1) == 71
+        && edid.manufacturer_letter(pe(), 2) == 68)
+    chk("product code 0x0123", edid.product_code(pe()) == 0x123)
+    chk("base size 310x170 mm", edid.base_width_mm(pe()) == 310 && edid.base_height_mm(pe()) == 170)
+    chk("DTD size 344x193 mm", edid.dtd_width_mm(pe()) == 344 && edid.dtd_height_mm(pe()) == 193)
+    var em: mode.Mode = mode.mode_new()
+    chk("native mode parses", edid.native_mode(pe(), &em))
+    var hm: mode.Mode = mode.mode_new()
+    timing.read_mode(m_rd, 0x6f000, 270000, &hm)
+    chk("EDID native mode equals the register readback", mode.same_timing(&em, &hm) && em.pclk_khz == hm.pclk_khz)
+    chk("EDID pixel clock 141000 kHz", em.pclk_khz == 141000)
+    put_edid(20, 0x80)
+    chk("flipped byte breaks the checksum", !edid.checksum_ok(pe()) && !edid.block_ok(pe()))
+    build_edid()
+    put_edid(3, 0)
+    fix_edid_sum()
+    chk("broken header is rejected even with a valid checksum", edid.checksum_ok(pe()) && !edid.header_ok(pe()))
+    build_edid()
+    put_edid(7, 1)
+    fix_edid_sum()
+    chk("broken trailing header byte is rejected", edid.checksum_ok(pe()) && !edid.header_ok(pe()))
+    build_edid()
+    put_edid(0, 1)
+    fix_edid_sum()
+    chk("broken leading header byte is rejected", edid.checksum_ok(pe()) && !edid.header_ok(pe()))
+    build_edid()
+    put_edid(54, 0)
+    put_edid(55, 0)
+    fix_edid_sum()
+    chk("zero pixel clock gives no native mode", !edid.native_mode(pe(), &em))
+    build_edid()
+}
+
+fn test_aux_reads() {
+    fresh()
+    var e: u64 = aux.native_read(m_rd, m_wr, m_us, 0, pd(), 16)
+    chk("DPCD read at 0 succeeds", e == aux.E_OK)
+    chk("DPCD revision 1.2, max rate 0x0a, lanes 2 + enhanced", got_dpcd[0] == 0x12 && got_dpcd[1] == 0x0a
+        && (got_dpcd[2] & 0x1f) == 2 && (got_dpcd[2] & 0x80) != 0)
+    chk("DPCD bytes 3..15 equal the sink", same_bytes(pd() + 3, (&dpcd_blk[3]) as u64, 13))
+    chk("DPCD 16 bytes took one AUX transaction", aux_calls == 1)
+    e = aux.native_read(m_rd, m_wr, m_us, 0x100, pd(), 2)
+    chk("DPCD current link at 0x100 reads rate 0x0a lanes 2", e == aux.E_OK && got_dpcd[0] == 0x0a && got_dpcd[1] == 2)
+    fresh()
+    e = aux.native_read(m_rd, m_wr, m_us, 0, pd(), 32)
+    chk("32 DPCD bytes take two transactions", e == aux.E_OK && aux_calls == 2 && same_bytes(pd(), (&dpcd_blk[0]) as u64, 32))
+    fresh()
+    e = read_edid()
+    chk("EDID read over I2C-over-AUX succeeds", e == aux.E_OK)
+    chk("EDID bytes equal the sink block", same_bytes(pg(), pe(), 128))
+    chk("EDID read uses 1 offset write + 8 reads", aux_calls == 9)
+    chk("every send word matches the HP pattern 0x...023f", bad_send == 0)
+    chk("MOT set on all reads but the last", mot_bad == 0)
+    chk("fetched EDID passes block_ok", edid.block_ok(pg()))
+    fresh()
+    inj_short = 1
+    e = read_edid()
+    chk("short replies (8 of 16 bytes) still assemble the block", e == aux.E_OK && same_bytes(pg(), pe(), 128))
+    fresh()
+    inj_short = 1
+    e = aux.native_read(m_rd, m_wr, m_us, 0, pd(), 32)
+    chk("short native replies still assemble 32 bytes", e == aux.E_OK && same_bytes(pd(), (&dpcd_blk[0]) as u64, 32))
+}
+
+fn test_aux_faults() {
+    fresh()
+    inj_defer = 2
+    var e: u64 = aux.native_read(m_rd, m_wr, m_us, 0, pd(), 4)
+    chk("two DEFERs then ACK succeeds", e == aux.E_OK && aux_calls == 3 && got_dpcd[0] == 0x12)
+    chk("DEFER waits 400 us each", delay_total >= 800)
+    fresh()
+    inj_defer = FOREVER
+    e = aux.native_read(m_rd, m_wr, m_us, 0, pd(), 4)
+    chk("endless DEFER ends in E_DEFER after 7 attempts", e == aux.E_DEFER && aux_calls == 7)
+    fresh()
+    inj_nack = 1
+    e = aux.native_read(m_rd, m_wr, m_us, 0, pd(), 4)
+    chk("native NACK is E_NACK without retry", e == aux.E_NACK && aux_calls == 1)
+    fresh()
+    inj_nack = 1
+    e = read_edid()
+    chk("I2C NACK on the offset write is E_NACK", e == aux.E_NACK && aux_calls == 1)
+    fresh()
+    inj_defer = 1
+    e = read_edid()
+    chk("I2C DEFER is retried and the EDID still matches", e == aux.E_OK && same_bytes(pg(), pe(), 128))
+    fresh()
+    inj_timeout = 2
+    e = aux.native_read(m_rd, m_wr, m_us, 0, pd(), 4)
+    chk("two timeouts then success", e == aux.E_OK && aux_calls == 3)
+    fresh()
+    inj_timeout = FOREVER
+    e = aux.native_read(m_rd, m_wr, m_us, 0, pd(), 4)
+    chk("endless timeout ends in E_TIMEOUT after 5 sends", e == aux.E_TIMEOUT && aux_calls == 5)
+    fresh()
+    inj_recv = 1
+    e = aux.native_read(m_rd, m_wr, m_us, 0, pd(), 4)
+    chk("one receive error then success", e == aux.E_OK && aux_calls == 2)
+    chk("receive error waits 400 us before the retry", delay_total >= 400)
+    fresh()
+    inj_recv = FOREVER
+    e = aux.native_read(m_rd, m_wr, m_us, 0, pd(), 4)
+    chk("endless receive error ends in E_RECV", e == aux.E_RECV && aux_calls == 5)
+    fresh()
+    inj_size0 = 1
+    e = aux.native_read(m_rd, m_wr, m_us, 0, pd(), 4)
+    chk("DONE with reply size 0 is E_SIZE", e == aux.E_SIZE)
+    fresh()
+    var tx: [u8; 4] = [0 as u8; 4]
+    var rx: [u8; 20] = [0 as u8; 20]
+    var rxn: u64 = 0
+    inj_size0 = 1
+    e = aux.transfer(m_rd, m_wr, m_us, (&tx[0]) as u64, 4, (&rx[0]) as u64, 20, &rxn)
+    chk("transfer: reply size 0 is E_SIZE", e == aux.E_SIZE)
+    fresh()
+    inj_big = 1
+    e = aux.transfer(m_rd, m_wr, m_us, (&tx[0]) as u64, 4, (&rx[0]) as u64, 20, &rxn)
+    chk("transfer: reply size 21 is E_SIZE", e == aux.E_SIZE)
+    fresh()
+    reg_set(0x64010, 0x80000000 | IDLE_CTL)
+    e = aux.native_read(m_rd, m_wr, m_us, 0, pd(), 4)
+    chk("stuck BUSY channel is E_BUSY after 3 ms and sends nothing", e == aux.E_BUSY && aux_calls == 0 && delay_total == 3000)
+    fresh()
+    var got: u64 = 0
+    var rb: [u8; 20] = [0 as u8; 20]
+    chk("empty payload is rejected", aux.request(m_rd, m_wr, m_us, aux.REQ_NATIVE_READ, 0, 0, 0, (&rb[0]) as u64, 20, &got) == aux.E_ARG)
+    chk("17-byte payload is rejected", aux.request(m_rd, m_wr, m_us, aux.REQ_NATIVE_READ, 0, 0, 17, (&rb[0]) as u64, 20, &got) == aux.E_ARG)
+    chk("21-byte transfer is rejected", aux.transfer(m_rd, m_wr, m_us, (&rb[0]) as u64, 21, (&rb[0]) as u64, 20, &got) == aux.E_ARG)
+    chk("rejected requests touched no register", aux_calls == 0)
+    fresh()
+    e = aux.native_read(m_rd, m_wr, m_us, 0, pd(), 4)
+    chk("DONE bit is write-1-cleared again", (reg_get(0x64010) & 0x40000000) == 0)
+    chk("status register left idle (BUSY clear)", (reg_get(0x64010) & 0x80000000) == 0)
+}
+
+fn main() -> i32 {
+    load_fixtures()
+    build_edid()
+    build_dpcd()
+    fresh()
+    test_ids()
+    test_timing_units()
+    test_decode()
+    test_dump()
+    test_edid()
+    test_aux_reads()
+    test_aux_faults()
+    return 0
+}
