@@ -6,6 +6,7 @@ import gpu.intel.regs
 import gpu.intel.flip
 import gpu.intel.ggtt
 import gpu.intel.dbuf
+import gpu.intel.backbuf
 import gpu.intel.confirm
 import gpu.intel.modeset
 
@@ -27,6 +28,7 @@ static mut pte: [u64; 8192] = [0; 8192]
 static mut wr_count: u64 = 0
 static mut wr64_count: u64 = 0
 static mut inj_nolatch: u64 = 0
+static mut inj_skip: u64 = 0
 static mut inj_pte_drop: u64 = 0
 static mut inj_htotal_bad: u64 = 0
 static mut revert_calls: u64 = 0
@@ -105,7 +107,11 @@ fn m_wr(off: u64, v: u64) -> u64 {
     }
     reg_set(off, val)
     if off == 0x7019c && inj_nolatch == 0 {
-        reg_set(0x701ac, (v & 0xfffff000) | (reg_get(0x701ac) & 0xfff))
+        if inj_skip > 0 {
+            inj_skip = inj_skip - 1
+        } else {
+            reg_set(0x701ac, (v & 0xfffff000) | (reg_get(0x701ac) & 0xfff))
+        }
     }
     return 0
 }
@@ -139,6 +145,7 @@ fn fresh() {
     wr_count = 0
     wr64_count = 0
     inj_nolatch = 0
+    inj_skip = 0
     inj_pte_drop = 0
     inj_htotal_bad = 0
     revert_calls = 0
@@ -312,10 +319,77 @@ fn test_modeset() {
     chk("the verify failure restores the firmware value", reg_get(0x6f000) == 0x0837077f && s4.valid)
 }
 
+fn bb_ready(d: *mut dbuf.Dbuf, b: *mut backbuf.Backbuf) {
+    fresh()
+    hp_front()
+    dbuf.setup(m_rd, m_rd64, m_wr64, d, BACK_OFF, BACK_PHYS, HP_FB_PHYS, HP_FB_PAGES)
+    backbuf.arm(b)
+}
+
+fn bb_commit(d: *mut dbuf.Dbuf, b: *mut backbuf.Backbuf) -> u64 {
+    return backbuf.commit(m_rd, m_wr, m_us, d, b)
+}
+
+fn test_backbuf() {
+    var d: dbuf.Dbuf = dbuf.dbuf_new()
+    var b: backbuf.Backbuf = backbuf.backbuf_new()
+    fresh()
+    hp_front()
+    dbuf.setup(m_rd, m_rd64, m_wr64, &d, BACK_OFF, BACK_PHYS, HP_FB_PHYS, HP_FB_PAGES)
+    chk("a new back buffer state is off", backbuf.mode(&b) == backbuf.B_OFF)
+    chk("while off the desktop draws into the front", !backbuf.draw_is_back(&d, &b) && !backbuf.shown_is_back(&d))
+    let w0: u64 = wr_count
+    chk("commit while off is idle and writes nothing", bb_commit(&d, &b) == backbuf.C_IDLE && wr_count == w0)
+    backbuf.arm(&b)
+    chk("armed means double buffered", backbuf.mode(&b) == backbuf.B_DOUBLE)
+    chk("the desktop now draws into the hidden back buffer", backbuf.draw_is_back(&d, &b) && !backbuf.shown_is_back(&d))
+    let w1: u64 = wr_count
+    chk("the first commit presents the back buffer", bb_commit(&d, &b) == backbuf.C_PRESENTED && reg_get(0x7019c) == BACK_OFF)
+    chk("a commit is exactly one plane write", wr_count - w1 == 1)
+    chk("the roles swapped after the commit", !backbuf.draw_is_back(&d, &b) && backbuf.shown_is_back(&d) && b.presented == 1)
+    chk("the second commit presents the front again", bb_commit(&d, &b) == backbuf.C_PRESENTED && reg_get(0x7019c) == 0)
+    chk("and the desktop draws into the back buffer again", backbuf.draw_is_back(&d, &b) && b.presented == 2)
+
+    bb_ready(&d, &b)
+    inj_nolatch = 1
+    chk("a first miss asks for a retry", bb_commit(&d, &b) == backbuf.C_RETRY && b.misses == 1)
+    chk("a retry keeps the shown surface and the draw target", reg_get(0x7019c) == 0 && backbuf.draw_is_back(&d, &b) && !backbuf.shown_is_back(&d))
+    chk("a second miss asks for a retry", bb_commit(&d, &b) == backbuf.C_RETRY && b.misses == 2)
+    chk("the third miss leaves double buffering and asks for a copy", bb_commit(&d, &b) == backbuf.C_OFF_COPY && backbuf.mode(&b) == backbuf.B_OFF)
+    chk("after giving up the front is shown and drawn", reg_get(0x7019c) == 0 && !backbuf.draw_is_back(&d, &b) && !backbuf.shown_is_back(&d))
+    chk("commit after giving up is idle", bb_commit(&d, &b) == backbuf.C_IDLE)
+
+    bb_ready(&d, &b)
+    bb_commit(&d, &b)
+    chk("setup for the shown-back case", backbuf.shown_is_back(&d) && !backbuf.draw_is_back(&d, &b))
+    inj_skip = 6
+    bb_commit(&d, &b)
+    bb_commit(&d, &b)
+    chk("the third miss with the back buffer shown restores the front without a copy", bb_commit(&d, &b) == backbuf.C_OFF
+        && backbuf.mode(&b) == backbuf.B_OFF && reg_get(0x7019c) == 0 && !backbuf.shown_is_back(&d))
+
+    bb_ready(&d, &b)
+    bb_commit(&d, &b)
+    inj_nolatch = 1
+    bb_commit(&d, &b)
+    bb_commit(&d, &b)
+    chk("a restore that never latches ends stuck", bb_commit(&d, &b) == backbuf.C_STUCK && backbuf.mode(&b) == backbuf.B_SINGLE)
+    chk("stuck draws into the surface that is shown", backbuf.draw_is_back(&d, &b) && backbuf.shown_is_back(&d))
+    chk("commit while stuck is idle", bb_commit(&d, &b) == backbuf.C_IDLE)
+
+    bb_ready(&d, &b)
+    inj_skip = 2
+    chk("one miss then success", bb_commit(&d, &b) == backbuf.C_RETRY && bb_commit(&d, &b) == backbuf.C_PRESENTED)
+    chk("a success resets the miss counter", b.misses == 0 && b.presented == 1)
+    inj_nolatch = 1
+    chk("two more misses are still only retries", bb_commit(&d, &b) == backbuf.C_RETRY && bb_commit(&d, &b) == backbuf.C_RETRY && backbuf.mode(&b) == backbuf.B_DOUBLE)
+}
+
 fn main() -> i32 {
     test_ggtt()
     test_dbuf()
     test_confirm()
     test_modeset()
+    test_backbuf()
     return 0
 }

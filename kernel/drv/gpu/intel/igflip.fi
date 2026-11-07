@@ -9,11 +9,13 @@ import gpu.intel.regs
 import gpu.intel.bits
 import gpu.intel.ggtt
 import gpu.intel.dbuf
+import gpu.intel.backbuf
 import drv.gpu.intel.mmio
 import drv.gpu.intel.probe
 
 export {
     stage, status, pages, back_phys, back_addr, flips, rollbacks, shown_off, present, restore,
+    ready, arm, copy_words, bb_mode, bb_presented, commit, draw_is_back, shown_is_back,
     S_OFF, S_NO_GGTT, S_NO_FB, S_MISMATCH, S_NO_MEM, S_SETUP, S_FLIP_FAIL, S_OK
 }
 
@@ -40,6 +42,8 @@ static mut g_status: u64 = 0
 static mut g_pages: u64 = 0
 static mut g_back_phys: u64 = 0
 static mut g_state: dbuf.Dbuf = dbuf.Dbuf { front_off: 0, back_off: 0, pages: 0, cur: 0, flips: 0, rollbacks: 0 }
+
+static mut g_bb: backbuf.Backbuf = backbuf.Backbuf { mode: 0, misses: 0, presented: 0 }
 
 static mut s_say: [u8; 17] = "intelgpuflip: ok\0"
 static mut s_fail: [u8; 22] = "intelgpuflip: failed \0"
@@ -76,18 +80,48 @@ fn present() -> u64 {
     return dbuf.present(mmio.rd, mmio.wr, mmio.us, &g_state)
 }
 
+fn ready() -> bool {
+    return g_status == S_OK && g_pages != 0
+}
+
+fn arm() {
+    backbuf.arm(&g_bb)
+}
+
+fn bb_mode() -> u64 {
+    return backbuf.mode(&g_bb)
+}
+
+fn bb_presented() -> u64 {
+    return g_bb.presented
+}
+
+fn commit() -> u64 {
+    return backbuf.commit(mmio.rd, mmio.wr, mmio.us, &g_state, &g_bb)
+}
+
+fn draw_is_back() -> bool {
+    return backbuf.draw_is_back(&g_state, &g_bb)
+}
+
+fn shown_is_back() -> bool {
+    return backbuf.shown_is_back(&g_state)
+}
+
 fn restore() -> u64 {
     return dbuf.restore_front(mmio.rd, mmio.wr, mmio.us, &g_state)
 }
 
-fn copy_front(ks: u64, bytes: u64) {
-    let src: u64 = fb.addr(ks)
-    let dst: u64 = back_addr()
+fn copy_words(dst: u64, src: u64, bytes: u64) {
     var i: u64 = 0
     while i < bytes {
         __mmio_write64((dst + i) as *mut u64, __mmio_read64((src + i) as *mut u64))
         i = i + COPY_STEP
     }
+}
+
+fn copy_front(ks: u64, bytes: u64) {
+    copy_words(back_addr(), fb.addr(ks), bytes)
 }
 
 fn mark_back(ks: u64) {
@@ -141,7 +175,7 @@ fn selftest() {
 }
 
 fn stage(ks: u64) {
-    if !kstate.mode_on(ks, kstate.M_INTELGPUFLIP) || probe.result() != probe.R_OK {
+    if !probe.flip_wanted(ks) || probe.result() != probe.R_OK {
         return
     }
     if !mmio.ggtt_attached() {
@@ -160,12 +194,19 @@ fn stage(ks: u64) {
         return
     }
     copy_front(ks, bytes)
-    mark_back(ks)
+    let selftest_on: bool = kstate.mode_on(ks, kstate.M_INTELGPUFLIP)
+    if selftest_on {
+        mark_back(ks)
+    }
     mmio.permit_ggtt(BACK_GGTT_OFFSET, g_pages)
     mmio.permit_plane()
     if dbuf.setup(mmio.rd, mmio.rd64, mmio.wr64, &g_state, BACK_GGTT_OFFSET, g_back_phys, fb.phys(ks), g_pages) != dbuf.D_OK {
         fail(S_SETUP)
         return
     }
-    selftest()
+    if selftest_on {
+        selftest()
+        return
+    }
+    g_status = S_OK
 }

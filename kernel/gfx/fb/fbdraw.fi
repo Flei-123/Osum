@@ -51,6 +51,8 @@ const S_PATVAL: u64 = 0x938 // the PAT value the boot core set (WC at index 4); 
 
 const S_PATDONE: u64 = 0x940 // bit per core: this core has the value (bit 0 = the boot core)
 
+const S_EXT: u64 = 0xFF0
+
 // ------------------------------------------------------- Bochs-VBE
 
 const VBE_INDEX: u16 = 0x01CE
@@ -839,6 +841,48 @@ fn flip_setup(state: u64) -> bool {
     return true
 }
 
+fn ext_call(state: u64, op: u64) -> u64 {
+    let hook: fn(u64, u64) -> u64 = kstate.get(state, fbbase.FB_OFF + S_EXT) as fn(u64, u64) -> u64
+    return hook(state, op)
+}
+
+fn ext_attached(state: u64) -> bool {
+    return kstate.get(state, fbbase.FB_OFF + S_EXT) != 0
+}
+
+fn ext_attach(state: u64, hook: u64) -> bool {
+    if hook == 0 || ext_attached(state) || kstate.get(state, fbbase.FB_OFF + S_FLIP) != 0 {
+        return false
+    }
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_STRIPE) != 0 {
+        return false
+    }
+    kstate.set(state, fbbase.FB_OFF + S_EXT, hook)
+    kstate.set(state, fbbase.FB_OFF + S_PAGE, 0)
+    kstate.set(state, fbbase.FB_OFF + S_FLIPS, 0)
+    kstate.set(state, fbbase.FB_OFF + S_FLIP, 1)
+    return true
+}
+
+fn ext_detach(state: u64) {
+    kstate.set(state, fbbase.FB_OFF + S_EXT, 0)
+    kstate.set(state, fbbase.FB_OFF + S_FLIP, 0)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_SHVALID, 0)
+}
+
+fn shown_base(state: u64) -> u64 {
+    if ext_attached(state) {
+        return ext_call(state, fbbase.EXT_SHOWN)
+    }
+    let basis: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_ADDR)
+    if kstate.get(state, fbbase.FB_OFF + S_FLIP) == 0 {
+        return basis
+    }
+    let h: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+    let pt: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_PITCH)
+    return basis +% (1 - kstate.get(state, fbbase.FB_OFF + S_PAGE)) *% h *% pt
+}
+
 fn flip_on(state: u64) -> bool {
     return kstate.get(state, fbbase.FB_OFF + S_FLIP) != 0
 }
@@ -852,6 +896,9 @@ fn page(state: u64) -> u64 {
 }
 
 fn draw_base(state: u64) -> u64 {
+    if ext_attached(state) {
+        return ext_call(state, fbbase.EXT_DRAW)
+    }
     let basis: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_ADDR)
     if kstate.get(state, fbbase.FB_OFF + S_FLIP) == 0 {
         return basis
@@ -861,8 +908,21 @@ fn draw_base(state: u64) -> u64 {
     return basis +% kstate.get(state, fbbase.FB_OFF + S_PAGE) *% h *% pt
 }
 
+fn flip_ext(state: u64) {
+    kstate.add(state, fbbase.FB_OFF + S_SEQ, 1)
+    arch.barrier_write()
+    let _r: u64 = ext_call(state, fbbase.EXT_PRESENT)
+    kstate.add(state, fbbase.FB_OFF + S_FLIPS, 1)
+    arch.barrier_write()
+    kstate.add(state, fbbase.FB_OFF + S_SEQ, 1)
+}
+
 fn flip(state: u64) {
     if kstate.get(state, fbbase.FB_OFF + S_FLIP) == 0 {
+        return
+    }
+    if ext_attached(state) {
+        flip_ext(state)
         return
     }
     let h: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
@@ -898,13 +958,10 @@ fn front_paar(state: u64, x: u64, y0: u64, y1: u64, aus: u64) -> bool {
         return false
     }
     arch.barrier_read()
-    var off: u64 = 0
-    if kstate.get(state, fbbase.FB_OFF + S_FLIP) != 0 {
-        off = (1 - kstate.get(state, fbbase.FB_OFF + S_PAGE)) *% h
-    }
-    let a: u64 = __mmio_read32((basis +% (y0 +% off) *% pt
+    let shown: u64 = shown_base(state)
+    let a: u64 = __mmio_read32((shown +% y0 *% pt
         +% x *% 4) as *mut u32) as u64
-    let b: u64 = __mmio_read32((basis +% (y1 +% off) *% pt
+    let b: u64 = __mmio_read32((shown +% y1 *% pt
         +% x *% 4) as *mut u32) as u64
     arch.barrier_read()
     if kstate.get(state, fbbase.FB_OFF + S_SEQ) != f0 {
@@ -930,12 +987,7 @@ fn front_pixel(state: u64, x: u64, y: u64) -> u64 {
         return 0xFFFFFFFF
     }
     let pt: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_PITCH)
-    var vy: u64 = y
-    if kstate.get(state, fbbase.FB_OFF + S_FLIP) != 0 {
-        let h: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
-        vy = y +% (1 - kstate.get(state, fbbase.FB_OFF + S_PAGE)) *% h
-    }
-    return __mmio_read32((basis +% vy *% pt +% x *% 4) as *mut u32) as u64
+    return __mmio_read32((shown_base(state) +% y *% pt +% x *% 4) as *mut u32) as u64
 }
 
 fn get_pixel(state: u64, x: u64, y: u64) -> u64 {

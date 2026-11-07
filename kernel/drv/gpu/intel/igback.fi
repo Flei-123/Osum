@@ -1,0 +1,97 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import arch.arch
+import serial
+import lib.kstate
+import gfx.fb
+import gpu.intel.backbuf
+import drv.gpu.intel.igflip
+
+export { attach, hook, last, offs }
+
+static mut g_last: u64 = 0
+static mut g_offs: u64 = 0
+
+static mut s_ok: [u8; 17] = "intelgpuback: ok\0"
+static mut s_skip: [u8; 26] = "intelgpuback: unavailable\0"
+static mut s_off: [u8; 18] = "intelgpuback: off\0"
+static mut s_stuck: [u8; 20] = "intelgpuback: stuck\0"
+
+fn last() -> u64 {
+    return g_last
+}
+
+fn offs() -> u64 {
+    return g_offs
+}
+
+fn say(msg: u64) {
+    serial.puts(msg)
+    serial.nl()
+}
+
+fn front_bytes(state: u64) -> u64 {
+    return fb.pitch(state) * fb.height(state)
+}
+
+fn draw_addr(state: u64) -> u64 {
+    if igflip.draw_is_back() {
+        return igflip.back_addr()
+    }
+    return fb.addr(state)
+}
+
+fn shown_addr(state: u64) -> u64 {
+    if igflip.shown_is_back() {
+        return igflip.back_addr()
+    }
+    return fb.addr(state)
+}
+
+fn leave(state: u64, copy: bool) {
+    if copy {
+        igflip.copy_words(fb.addr(state), igflip.back_addr(), front_bytes(state))
+        arch.barrier_write()
+    }
+    fb.ext_detach(state)
+    g_offs = g_offs + 1
+    say((&s_off[0]) as u64)
+}
+
+fn present(state: u64) -> u64 {
+    arch.cache_writeback()
+    let c: u64 = igflip.commit()
+    g_last = c
+    if c == backbuf.C_OFF_COPY {
+        leave(state, true)
+    } else if c == backbuf.C_OFF {
+        leave(state, false)
+    } else if c == backbuf.C_STUCK {
+        say((&s_stuck[0]) as u64)
+    }
+    return c
+}
+
+fn hook(state: u64, op: u64) -> u64 {
+    if op == fb.EXT_DRAW {
+        return draw_addr(state)
+    }
+    if op == fb.EXT_SHOWN {
+        return shown_addr(state)
+    }
+    return present(state)
+}
+
+fn attach(state: u64) -> bool {
+    if !kstate.mode_on(state, kstate.M_INTELGPUBACK) {
+        return false
+    }
+    if !igflip.ready() || !fb.ext_attach(state, hook as u64) {
+        say((&s_skip[0]) as u64)
+        return false
+    }
+    igflip.arm()
+    say((&s_ok[0]) as u64)
+    return true
+}

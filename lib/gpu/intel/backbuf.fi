@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import gpu.intel.dbuf
+
+export {
+    Backbuf, backbuf_new, arm, mode, draw_is_back, shown_is_back, commit,
+    B_OFF, B_DOUBLE, B_SINGLE, C_IDLE, C_PRESENTED, C_RETRY, C_OFF, C_OFF_COPY, C_STUCK
+}
+
+const B_OFF: u64 = 0
+const B_DOUBLE: u64 = 1
+const B_SINGLE: u64 = 2
+
+const C_IDLE: u64 = 0
+const C_PRESENTED: u64 = 1
+const C_RETRY: u64 = 2
+const C_OFF: u64 = 3
+const C_OFF_COPY: u64 = 4
+const C_STUCK: u64 = 5
+
+const MAX_MISSES: u64 = 3
+
+struct Backbuf {
+    mode: u64,
+    misses: u64,
+    presented: u64
+}
+
+fn backbuf_new() -> Backbuf {
+    var b: Backbuf = Backbuf { mode: B_OFF, misses: 0, presented: 0 }
+    return b
+}
+
+fn arm(b: *mut Backbuf) {
+    (*b).mode = B_DOUBLE
+    (*b).misses = 0
+    (*b).presented = 0
+}
+
+fn mode(b: *mut Backbuf) -> u64 {
+    return (*b).mode
+}
+
+fn shown_is_back(d: *mut dbuf.Dbuf) -> bool {
+    return dbuf.shown(d) == (*d).back_off
+}
+
+fn draw_is_back(d: *mut dbuf.Dbuf, b: *mut Backbuf) -> bool {
+    if (*b).mode == B_DOUBLE {
+        return dbuf.hidden(d) == (*d).back_off
+    }
+    if (*b).mode == B_SINGLE {
+        return shown_is_back(d)
+    }
+    return false
+}
+
+fn give_up(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, d: *mut dbuf.Dbuf, b: *mut Backbuf) -> u64 {
+    let drawn_back: bool = draw_is_back(d, b)
+    if dbuf.restore_front(rd, wr, us, d) != dbuf.D_OK {
+        (*b).mode = B_SINGLE
+        return C_STUCK
+    }
+    (*b).mode = B_OFF
+    if drawn_back {
+        return C_OFF_COPY
+    }
+    return C_OFF
+}
+
+fn commit(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, d: *mut dbuf.Dbuf, b: *mut Backbuf) -> u64 {
+    if (*b).mode != B_DOUBLE {
+        return C_IDLE
+    }
+    let r: u64 = dbuf.present(rd, wr, us, d)
+    if r == dbuf.D_OK {
+        (*b).misses = 0
+        (*b).presented = (*b).presented + 1
+        return C_PRESENTED
+    }
+    if r == dbuf.D_ROLLED_BACK {
+        (*b).misses = (*b).misses + 1
+        if (*b).misses < MAX_MISSES {
+            return C_RETRY
+        }
+    }
+    return give_up(rd, wr, us, d, b)
+}

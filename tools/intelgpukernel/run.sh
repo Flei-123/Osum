@@ -73,19 +73,21 @@ if [ -f "$TMPD/new.mb" ] && [ -f "$TMPD/base.mb" ]; then
     boot "$TMPD/new.mb" flip "intelgpuflip"
     boot "$TMPD/new.mb" mode "intelgpumode"
     boot "$TMPD/new.mb" p2both "intelgpu intelgpuflip intelgpumode"
-    boot "$TMPD/new.mb" near "intelgpux intelgpuedidx intelgpuflipx intelgpumodex"
+    boot "$TMPD/new.mb" back "intelgpuback"
+    boot "$TMPD/new.mb" backflip "intelgpuflip intelgpuback"
+    boot "$TMPD/new.mb" near "intelgpux intelgpuedidx intelgpuflipx intelgpumodex intelgpubackx"
     boot "$TMPD/base.mb" oldgpu "intelgpu intelgpuedid"
 
-    for n in plain gpu edid both flip mode p2both near oldgpu; do
+    for n in plain gpu edid both flip mode p2both back backflip near oldgpu; do
         has "$n" "$DONE_LINE" && ok "$n: boot completes" || bad "$n: boot did not complete"
         has "$n" 'EXCEPTION\|kernel halted\|panic:' && bad "$n: fault line" || ok "$n: no fault line"
     done
     [ "$(count plain "$ANY_LINE")" = 0 ] && ok "no word: no intelgpu line" || bad "no word: intelgpu line printed"
-    for n in gpu edid both flip mode p2both; do
+    for n in gpu edid both flip mode p2both back backflip; do
         [ "$(count $n "$NO_DEVICE")" = 1 ] && ok "$n: one 'no device' line without hardware" || bad "$n: 'no device' line count $(count $n "$NO_DEVICE")"
         has "$n" '^intelgpu: bound' && bad "$n: bound line without hardware" || ok "$n: no bound line without hardware"
         has "$n" '^intelgpu: edid' && bad "$n: edid line without hardware" || ok "$n: no edid line without hardware"
-        has "$n" '^intelgpuflip:\|^intelgpumode:' && bad "$n: phase 2 line without hardware" || ok "$n: no phase 2 line without hardware"
+        has "$n" '^intelgpuflip:\|^intelgpumode:\|^intelgpuback:' && bad "$n: phase 2 line without hardware" || ok "$n: no phase 2 line without hardware"
     done
     [ "$(count near "$ANY_LINE")" = 0 ] && ok "near words are not words (whole-word match)" || bad "near words enabled the driver"
     [ "$(count oldgpu "$ANY_LINE")" = 0 ] && ok "counter-proof: kernel without the driver prints no intelgpu line" || bad "counter-proof: old kernel printed an intelgpu line"

@@ -14,7 +14,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 [ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 
-for m in ids regs bits mode timing edid aux snap dump flip ggtt dbuf confirm modeset; do
+for m in ids regs bits mode timing edid aux snap dump flip ggtt dbuf backbuf confirm modeset; do
     printf 'import gpu.intel.%s\nfn main() -> i32 {\n    return 0\n}\n' "$m" > "$T/k_$m.fi"
     "$FIRNC" --profile=kernel -c "$T/k_$m.fi" -o "$T/k_$m.o" 2> "$T/k.err" \
         && ok "gpu.intel.$m compiles with --profile=kernel" \
@@ -47,7 +47,7 @@ if [ -x "$T/phase2" ]; then
     sed -n 's/^FAIL /  FAIL  phase2: /p' "$T/out2.txt"
     [ "$rc" = 0 ] && ok "phase 2 oracle exits 0" || bad "phase 2 oracle exit code $rc"
     [ "$nbad" = 0 ] && ok "phase 2 oracle: no FAIL line" || bad "phase 2 oracle: $nbad FAIL lines"
-    [ "$nok" -ge 60 ] && ok "phase 2 oracle: $nok promises OK (>= 60)" || bad "phase 2 oracle: only $nok OK (< 60)"
+    [ "$nok" -ge 90 ] && ok "phase 2 oracle: $nok promises OK (>= 90)" || bad "phase 2 oracle: only $nok OK (< 90)"
     pass=$((pass+nok))
 fi
 
@@ -167,6 +167,17 @@ mutate ms_shift      modeset 's/HIGH_SHIFT: u64 = 16/HIGH_SHIFT: u64 = 15/'
 mutate ms_nosave     modeset 's/    (\*s).valid = true//'
 mutate ms_vsync      modeset 's/rd(base + regs.T_VSYNC)$/rd(base + regs.T_VBLANK)/'
 mutate ms_planeck    modeset 's/ \&\& (rd(regs.PLANE_CTL_1_A) \& bits.ENABLE) != 0//'
+mutate bb_noarm      backbuf 's/    (\*b).mode = B_DOUBLE$/    (*b).mode = B_OFF/'
+mutate bb_drawshown  backbuf 's/return dbuf.hidden(d) == (\*d).back_off/return dbuf.shown(d) == (*d).back_off/'
+mutate bb_noreset    backbuf 's/^        (\*b).misses = 0$//'
+mutate bb_maxmiss    backbuf 's/MAX_MISSES: u64 = 3/MAX_MISSES: u64 = 1/'
+mutate bb_nocopy     backbuf 's/    if drawn_back {/    if false {/'
+mutate bb_nostuck    backbuf 's/(\*b).mode = B_SINGLE$/(*b).mode = B_OFF/'
+mutate bb_idle       backbuf 's/    if (\*b).mode != B_DOUBLE {/    if false {/'
+mutate bb_nocount    backbuf 's/(\*b).presented = (\*b).presented + 1//'
+mutate bb_singledraw backbuf 's/        return shown_is_back(d)$/        return false/'
+mutate bb_norbwait   backbuf 's/        if (\*b).misses < MAX_MISSES {/        if false {/'
+mutate bb_stillon    backbuf 's/    (\*b).mode = B_OFF$/    (*b).mode = B_DOUBLE/'
 ORACLE=tools/intelgpu/oracle.fi
 
 echo "INTELGPU: $pass passed, $fail failed"
