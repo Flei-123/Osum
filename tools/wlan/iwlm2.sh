@@ -5,7 +5,7 @@
 #   lib/wlan/iwl_pwr.fi  reset/clock/PRPH/fw-kick      vs a CSR model with real handshakes (iwlpwr.fi)
 #   lib/wlan/iwl_ctxt.fi context info, TFD, command queue (round trips, bounds, layout table)
 #   lib/wlan/scanfmt.fi  scan results as text lines (real beacons from tools/wlan/mitschnitt.txt)
-# Plus 22 counter-probes: each mutates ONE line of a copy of lib/wlan and must turn the gate red.
+# Plus 26 counter-probes: each mutates ONE line of a copy of lib/wlan and must turn the gate red.
 # With WLAN_AX201_FW=<real .ucode> the real blob is parsed too and compared with the Python walk.
 # usage: bash tools/wlan/iwlm2.sh        exit 0 = all OK
 set -uo pipefail
@@ -95,6 +95,10 @@ mutate() { # name file sed-expr runner(fw|pw)
     fi
 }
 mutate "apm_init never sets INIT_DONE"       iwl_pwr.fi  '/^fn apm_init/,/^}/ s/set_bits(p, iwl_probe.CSR_GP_CNTRL, GP_INIT_DONE)/let _x: u64 = 0/' pw
+mutate "7000 apm skips OSC_CLK force"        iwl_pwr.fi  's/    let r: i64 = osc_clk_force(p)/    let r: i64 = 0/' pw
+mutate "7000 apm skips APMG init"             iwl_pwr.fi  's/    return apmg_init_7000(p)/    return 0/' pw
+mutate "7000 apm uses the gen2 chicken bit"   iwl_pwr.fi  '/^fn apm_init_7000/,/^}/ s/GIO_DIS_L0S_EXIT_TIMER/GIO_L1A_NO_L0S_RX/' pw
+mutate "7000 apm not dispatched"              iwl_pwr.fi  's/if (\*p).fam == iwl_probe.FAM_7000 { return apm_init_7000(p, init_delay_reads) }//' pw
 mutate "stop_master ignores MASTER_DISABLED"  iwl_pwr.fi  's/if !poll(p, iwl_probe.CSR_RESET, RESET_MASTER_DISABLED, RESET_MASTER_DISABLED) { return E_PWR_MASTER }//' pw
 mutate "mac access ignores GOING_TO_SLEEP"    iwl_pwr.fi  's/GP_CLOCK_READY | GP_SLEEP, GP_CLOCK_READY/GP_CLOCK_READY, GP_CLOCK_READY/' pw
 mutate "fw_kick skips mac access"             iwl_pwr.fi  '/^fn fw_kick/,/^}/ s/let r: i64 = mac_access_get(p)/let r: i64 = 0/' pw
@@ -102,10 +106,10 @@ mutate "txq may fill the last slot"           iwl_ctxt.fi 's/return (\*q).n - 1 
 mutate "context info size word wrong"         iwl_ctxt.fi 's/st16(buf, 4, (CTXT_SIZE \/ 4) as u64)/st16(buf, 4, (CTXT_SIZE \/ 8) as u64)/' pw
 mutate "TFD accepts 4096-octet buffers"       iwl_ctxt.fi 's/len >= 4096/len > 4096/' pw
 mutate "section classifier: separators swapped" iwl_fw.fi 's/^const SEP_CPU: u64 = 0xFFFFCCCC/const SEP_CPU: u64 = 0xAAAABBBB/;s/^const SEP_PAGING: u64 = 0xAAAABBBB/const SEP_PAGING: u64 = 0xFFFFCCCC/' fw
-mutate "CMD_VERSIONS octets swapped (cmd read as group)" iwl_fw.fi 's/if ld8(blob, d + q as usize + 1) == 0 {/if ld8(blob, d + q as usize) == 0 {/' fw
+mutate "CMD_VERSIONS octets swapped (cmd read as group)" iwl_fw.fi 's/if octets.ld8_idx(blob, d + q as usize + 1) == 0 {/if octets.ld8_idx(blob, d + q as usize) == 0 {/' fw
 mutate "fw_cmd_ver folds foreign groups onto group 0" iwl_fw.fi 's/if !legacy_group(cmd) { return -1 }/let _g: u64 = 0/' fw
 mutate "adaptive dwell fallback ignored"      iwl_fwcaps.fi 's/if iwl_fw.fw_has_api1(f, API_ADAPTIVE_DWELL) { dflt = SCAN_VER_ADWELL }//' fw
-mutate "api1 TLV never parsed"                iwl_fw.fi 's/if ld32(blob, d) == 1 { (\*f).api1/if ld32(blob, d) == 7 { (*f).api1/' fw
+mutate "api1 TLV never parsed"                iwl_fw.fi 's/if octets.ld32_idx(blob, d) == 1 { (\*f).api1/if octets.ld32_idx(blob, d) == 7 { (*f).api1/' fw
 mutate "alive_wait ignores the HW error bit"   iwl_alive.fi 's/if v \& INT_HW_ERR != 0 {/if false {/' pw
 mutate "alive_wait never acks ALIVE"           iwl_alive.fi '/if v \& accept != 0 {/,/}/ s/ack_int(p, v \& accept)/let _x: u64 = 0/' pw
 mutate "boot_fw kicks even if power_up failed" iwl_alive.fi 's/    if r != 0 { return r }\n    r = iwl_pwr.fw_kick//;0,/if r != 0 { return r }/ s/if r != 0 { return r }/if false { return r }/' pw

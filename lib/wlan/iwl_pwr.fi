@@ -14,7 +14,7 @@ import wlan.iwl_probe
 export {
     rd, wr, poll, set_bits, stop_master, sw_reset, apm_init, mac_access_get, mac_access_put, apm_init_x,
     prph_rd, prph_wr, int_disable, power_up, power_up_x, fw_kick, prepare_card, retake_own, start_fw, settle, snap_regs, snap_fh, snap_alive, snap_warm, nic_config,
-    prph_wr_win, prph_or_win,
+    prph_wr_win, prph_or_win, apm_init_7000,
     E_PWR_MASTER, E_PWR_CLOCK, E_PWR_ACCESS, E_PWR_NOTREADY, POLL_MAX, SNAP_N,
     CSR_INT_MASK, CSR_FH_INT_STATUS, CSR_CTXT_INFO_BA, CSR_CTXT_INFO_BA_HI,
     HBUS_WADDR, HBUS_WDAT, HBUS_RADDR, HBUS_RDAT, HBUS_WRPTR, UREG_CPU_INIT_RUN,
@@ -41,6 +41,16 @@ const HWIF_HAP_WAKE_L1A: u64 = 0x00080000
 const LINK_PWR_DISABLED: u64 = 0x80000000
 const GIO_L1A_NO_L0S_RX: u64 = 0x00800000
 const CSR_GIO_REG: u64 = 0x03C
+const GIO_DIS_L0S_EXIT_TIMER: u64 = 0x2
+const PRPH_OSC_CLK: u64 = 0xA04068
+const OSC_CLK_FORCE_CONTROL: u64 = 0x8
+const PRPH_APMG_CLK_EN: u64 = 0xA03004
+const APMG_CLK_DMA_RQT: u64 = 0x200
+const PRPH_APMG_PCIDEV_STT: u64 = 0xA03010
+const APMG_PCIDEV_L1_ACT_DIS: u64 = 0x800
+const PRPH_APMG_RTC_INT_STT: u64 = 0xA0301C
+const APMG_RTC_INT_RFKILL: u64 = 0x10000000
+const APMG_CLK_DELAY_READS: u64 = 20
 const GIO_L0S_DISABLED: u64 = 0x2
 const HPET_VAL: u64 = 0xFFFF0000
 const MBOX_OS_ALIVE: u64 = 0x20
@@ -299,6 +309,7 @@ fn apm_init(p: *mut iwl_probe.Probe) -> i64 {
 }
 
 fn apm_init_x(p: *mut iwl_probe.Probe, init_delay_reads: u64) -> i64 {
+    if (*p).fam == iwl_probe.FAM_7000 { return apm_init_7000(p, init_delay_reads) }
     set_bits(p, CSR_GIO_CHICKEN, GIO_L1A_NO_L0S_RX)
     set_bits(p, CSR_DBG_HPET, HPET_VAL)
     set_bits(p, iwl_probe.CSR_HW_IF_CONFIG, HWIF_HAP_WAKE_L1A)
@@ -363,4 +374,41 @@ fn fw_kick(p: *mut iwl_probe.Probe, ba: u64) -> i64 {
     prph_wr(p, UREG_CPU_INIT_RUN, 1)
     mac_access_put(p)
     return 0
+}
+
+fn osc_clk_force(p: *mut iwl_probe.Probe) -> i64 {
+    let r: i64 = mac_access_get(p)
+    if r != 0 {
+        mac_access_put(p)
+        return r
+    }
+    let _a: u64 = prph_rd(p, PRPH_OSC_CLK)
+    let _b: u64 = prph_rd(p, PRPH_OSC_CLK)
+    prph_wr(p, PRPH_OSC_CLK, prph_rd(p, PRPH_OSC_CLK) | OSC_CLK_FORCE_CONTROL)
+    let _c: u64 = prph_rd(p, PRPH_OSC_CLK)
+    let _d: u64 = prph_rd(p, PRPH_OSC_CLK)
+    mac_access_put(p)
+    return 0
+}
+
+fn apmg_init_7000(p: *mut iwl_probe.Probe) -> i64 {
+    var r: i64 = prph_wr_win(p, PRPH_APMG_CLK_EN, APMG_CLK_DMA_RQT)
+    if r != 0 { return r }
+    settle(p, APMG_CLK_DELAY_READS)
+    r = prph_or_win(p, PRPH_APMG_PCIDEV_STT, APMG_PCIDEV_L1_ACT_DIS)
+    if r != 0 { return r }
+    return prph_wr_win(p, PRPH_APMG_RTC_INT_STT, APMG_RTC_INT_RFKILL)
+}
+
+fn apm_init_7000(p: *mut iwl_probe.Probe, init_delay_reads: u64) -> i64 {
+    set_bits(p, CSR_GIO_CHICKEN, GIO_DIS_L0S_EXIT_TIMER)
+    set_bits(p, CSR_DBG_HPET, HPET_VAL)
+    set_bits(p, iwl_probe.CSR_HW_IF_CONFIG, HWIF_HAP_WAKE_L1A)
+    set_bits(p, CSR_GIO_REG, GIO_L0S_DISABLED)
+    set_bits(p, iwl_probe.CSR_GP_CNTRL, GP_INIT_DONE)
+    settle(p, init_delay_reads)
+    if !poll(p, iwl_probe.CSR_GP_CNTRL, GP_CLOCK_READY, GP_CLOCK_READY) { return E_PWR_CLOCK }
+    let r: i64 = osc_clk_force(p)
+    if r != 0 { return r }
+    return apmg_init_7000(p)
 }
