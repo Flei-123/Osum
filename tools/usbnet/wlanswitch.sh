@@ -81,12 +81,17 @@ bash tools/mkfsfi/mkfs.sh build "$T/d.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /de
     /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" /bin/sleep="$T/bin/sleep.elf" /bin/ping="$T/bin/ping.elf" /bin/host="$T/bin/host.elf" /bin/dhcp="$T/bin/dhcp.elf" /bin/wget="$T/bin/wget.elf" /bin/wlanctl="$T/bin/wlanctl.elf" /bin/netstat="$T/bin/netstat.elf" /etc/resolv.conf="$T/resolv.old" \
     "/t/s.sh=$T/s.sh" "$FWPATH=$T/blobs/v7.bin" > "$T/mkfs.txt" 2>&1 || { tail -3 "$T/mkfs.txt"; bad "image"; exit 1; }
 
+printf 'wlanfirst\n' > "$T/knobs.txt"
+bash tools/mkfsfi/mkfs.sh build "$T/dk.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /dev/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
+    /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" /bin/sleep="$T/bin/sleep.elf" /bin/ping="$T/bin/ping.elf" /bin/host="$T/bin/host.elf" /bin/dhcp="$T/bin/dhcp.elf" /bin/wget="$T/bin/wget.elf" /bin/wlanctl="$T/bin/wlanctl.elf" /bin/netstat="$T/bin/netstat.elf" /etc/resolv.conf="$T/resolv.old" \
+    "/t/s.sh=$T/s.sh" "$FWPATH=$T/blobs/v7.bin" "/etc/wlan.knobs=$T/knobs.txt" > "$T/mkfsk.txt" 2>&1 || { tail -3 "$T/mkfsk.txt"; bad "image knob file"; exit 1; }
+
 run() {
-    local n=$1 words=${2:-nethotwait nethotlate}
+    local n=$1 words=${2:-nethotwait nethotlate} img=${3:-d}
     timeout ${USBWLAN_TIMEOUT:-500} qemu-system-x86_64 -accel "$ACC" -smp 1 -kernel "${USBWLAN_KERNEL:-$T/k.img}" -m 512 \
         -append "osum vfs usb usbpoll iwlfhtest iwlfhbind nic nip=169.254.10.1/16 nsvc=0 nwait=0 $words script=sh /t/s.sh;exit" \
         -serial "file:$T/$n.txt" -display none -no-reboot \
-        -drive "file=$T/d.img,format=raw,if=ide,index=0" \
+        -drive "file=$T/$img.img,format=raw,if=ide,index=0" \
         -device qemu-xhci,id=x0 \
         -netdev "user,id=n0,net=192.168.77.0/24,host=$GW,dhcpstart=192.168.77.15" -device usb-net,bus=x0.0,netdev=n0,mac=$MAC \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
@@ -106,6 +111,7 @@ if [ "${USBWLAN_LATE_ONLY:-0}" != 1 ]; then
 run m
 run o "nethotwait nethotlate wlanfirst nohotkeep"
 run d "nethotwait nethotlate iwlfhdrop"
+run k "nethotwait nethotlate" dk
 fi
 check() {
     local f=$1 tag=$2
@@ -157,6 +163,7 @@ section "$T/d.klar" '==WPING==' '==WWGET==' > "$T/deaf.ww"
 has "$T/deaf.ww" 'octets 131072' "deaf: wget over USB while the WLAN access point is deaf"
 section "$T/d.klar" '==WWGET==' '==WHOST==' > "$T/deaf.wh"
 hasnot "$T/d.klar" 'nethot: uplink card=1 kind=wlan' "deaf: the deaf WLAN never becomes the uplink"
+check "$T/k.klar" knobfile
 check "$T/o.klar" old
 has "$T/old.b0" 'ip=169.254' "control wlanfirst+nohotkeep: old behaviour leaves USB on link-local"
 hasnot "$T/old.b0" 'gw=192.168.77.1' "control wlanfirst+nohotkeep: old behaviour loses the gateway"
