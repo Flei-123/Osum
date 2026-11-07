@@ -10,6 +10,8 @@ import sched.futex
 import fs.fs
 import lib.errno
 import fs.file
+import fs.mnt
+import fs.vfsops
 import arch.x86_64.guard
 import sched.signal
 import fs.unixsock
@@ -253,7 +255,7 @@ fn do_map(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64,
         // RUNDE UNTERBAU: a mapping of a REGULAR FILE (dlopen of a shared object, a mapped data file). The other descriptors that
         // can be mapped (frame buffer, shared memory objects) keep their way.
         let of: u64 = sysuser.of_of(state, me, fd)
-        if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_FILE {
+        if of < file.MAX_OPEN && (file.open_kind(state, of) == file.K_FILE || file.open_kind(state, of) == file.K_VFILE) {
             return map_file(state, me, addr, len, prot, flags, fd, off)
         }
         return map_fd(state, me, fd, len, prot, off)
@@ -551,11 +553,23 @@ fn map_file_shared(state: u64, me: u64, len: u64, flags: u64, fd: u64, off: u64,
 }
 
 const FLAZY_MIN_PAGES: u64 = 16
+const ROOT_MOUNT: u64 = 0
+
+fn plain_file(state: u64, of: u64) -> bool {
+    if of >= file.MAX_OPEN {
+        return false
+    }
+    let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_FILE {
+        return true
+    }
+    return kind == file.K_VFILE && file.open_mnt(state, of) == ROOT_MOUNT && mnt.fstype(state, ROOT_MOUNT) == vfsops.FS_OFS
+}
 
 // Demand-paged private file mapping: the pages are lazy entries that carry (inode, file page); the first touch reads the file page
 // into a frame of its own (proc.lazy_file_fault). 0 = not applicable (small, not a plain file, outside the lazy window): the eager path runs.
 fn map_file_lazy(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64, of: u64, off: u64) -> u64 {
-    if kstate.mode_on(state, kstate.M_NOLAZY) || file.open_kind(state, of) != file.K_FILE {
+    if kstate.mode_on(state, kstate.M_NOLAZY) || !plain_file(state, of) {
         return 0
     }
     let ino: u64 = file.open_ino(state, of)
@@ -590,6 +604,9 @@ fn map_file(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64, fd:
         return sysuser.neg(errno.E_INVAL)
     }
     if (flags & MAP_SHARED) != 0 && (flags & MAP_PRIVATE) == 0 && (prot & PROT_WRITE) != 0 {
+        if !plain_file(state, sysuser.of_of(state, me, fd)) {
+            return sysuser.neg(errno.E_NODEV)
+        }
         return map_file_shared(state, me, len, flags, fd, off, prot)
     }
     let of: u64 = sysuser.of_of(state, me, fd)
