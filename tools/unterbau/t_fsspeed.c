@@ -1,5 +1,6 @@
 #define TNAME "fsspeed"
 #include "t.h"
+#include <dirent.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -119,6 +120,98 @@ static long unlink_calls(void)
     return (now_us() - t0) / SAMPLE_COUNT;
 }
 
+static int exists(const char *p)
+{
+    struct stat st;
+    return stat(p, &st) == 0;
+}
+
+static void touch(const char *p)
+{
+    int fd = open(p, O_CREAT | O_WRONLY, 0644);
+    if (fd >= 0)
+        close(fd);
+}
+
+static int coherence_basic(void)
+{
+    touch(DIR_PATH "/c_a");
+    int ok = exists(DIR_PATH "/c_a") && !exists(DIR_PATH "/c_b");
+    touch(DIR_PATH "/c_b");
+    ok = ok && exists(DIR_PATH "/c_b");
+    rename(DIR_PATH "/c_a", DIR_PATH "/c_c");
+    ok = ok && !exists(DIR_PATH "/c_a") && exists(DIR_PATH "/c_c");
+    unlink(DIR_PATH "/c_b");
+    ok = ok && !exists(DIR_PATH "/c_b");
+    unlink(DIR_PATH "/c_c");
+    return ok && !exists(DIR_PATH "/c_c");
+}
+
+static int coherence_link(void)
+{
+    touch(DIR_PATH "/l_a");
+    link(DIR_PATH "/l_a", DIR_PATH "/l_b");
+    int ok = exists(DIR_PATH "/l_a") && exists(DIR_PATH "/l_b");
+    unlink(DIR_PATH "/l_a");
+    ok = ok && !exists(DIR_PATH "/l_a") && exists(DIR_PATH "/l_b");
+    unlink(DIR_PATH "/l_b");
+    return ok && !exists(DIR_PATH "/l_b");
+}
+
+static int coherence_dir(void)
+{
+    mkdir(DIR_PATH "/d_a", 0755);
+    touch(DIR_PATH "/d_a/f");
+    int ok = exists(DIR_PATH "/d_a/f");
+    rename(DIR_PATH "/d_a", DIR_PATH "/d_b");
+    ok = ok && !exists(DIR_PATH "/d_a/f") && exists(DIR_PATH "/d_b/f");
+    unlink(DIR_PATH "/d_b/f");
+    ok = ok && !exists(DIR_PATH "/d_b/f");
+    rmdir(DIR_PATH "/d_b");
+    return ok && !exists(DIR_PATH "/d_b");
+}
+
+static int coherence_slot_reuse(void)
+{
+    char p[64];
+    int seen = 0;
+    int expect = 0;
+    for (int i = 0; i < 3; i++) {
+        snprintf(p, sizeof p, DIR_PATH "/f%04d", 200 + i * 7);
+        unlink(p);
+        snprintf(p, sizeof p, DIR_PATH "/r%04d", i);
+        touch(p);
+    }
+    DIR *d = opendir(DIR_PATH);
+    struct dirent *e;
+    while (d && (e = readdir(d)) != NULL) {
+        if (e->d_name[0] == 'r')
+            seen++;
+    }
+    if (d)
+        closedir(d);
+    for (int i = 0; i < 3; i++) {
+        snprintf(p, sizeof p, DIR_PATH "/r%04d", i);
+        expect += exists(p);
+        unlink(p);
+    }
+    return seen == 3 && expect == 3;
+}
+
+static int listing_complete(void)
+{
+    int count = 0;
+    DIR *d = opendir(DIR_PATH);
+    struct dirent *e;
+    while (d && (e = readdir(d)) != NULL) {
+        if (e->d_name[0] == 'f')
+            count++;
+    }
+    if (d)
+        closedir(d);
+    return count;
+}
+
 int main(void)
 {
     mkdir(DIR_PATH, 0755);
@@ -135,6 +228,14 @@ int main(void)
     long append_page = append_calls(4096, 100);
     long rename_us = rename_calls();
     long unlink_us = unlink_calls();
+    int listed = listing_complete();
+    PASS("metrics", "create_first=%ld create_last=%ld open=%ld stat=%ld access=%ld writev_small=%ld writev_page=%ld rename=%ld unlink=%ld",
+        create_first, create_last, open_us, stat_us, access_us, append_small, append_page, rename_us, unlink_us);
+    CHECK("coherence_basic", coherence_basic(), "stale lookup after create/rename/unlink");
+    CHECK("coherence_link", coherence_link(), "stale lookup after unlinking one hard link");
+    CHECK("coherence_dir", coherence_dir(), "stale lookup below a renamed directory");
+    CHECK("coherence_slot_reuse", coherence_slot_reuse(), "freed directory slots not reused or entries lost");
+    CHECK("listing_complete", listed == FILE_COUNT - SAMPLE_COUNT, "listed=%d expected=%d", listed, FILE_COUNT - SAMPLE_COUNT);
     CHECK("create_first", create_first < CREATE_LIMIT_US, "us=%ld limit=%d", create_first, CREATE_LIMIT_US);
     CHECK("create_last", create_last < CREATE_LIMIT_US, "us=%ld limit=%d", create_last, CREATE_LIMIT_US);
     CHECK("open_cold", open_us < LOOKUP_LIMIT_US, "us=%ld limit=%d", open_us, LOOKUP_LIMIT_US);

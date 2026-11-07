@@ -1126,6 +1126,29 @@ fn cache_drop(state: u64, dev: u64, lba: u64) {
     }
 }
 
+fn cache_put(state: u64, dev: u64, lba: u64, src: u64) {
+    if cg(state, S_VALID) != 0 {
+        let s0: u64 = cg(state, S_LBA)
+        if cg(state, S_DEV) == dev && lba >= s0 && lba < s0 + cg(state, S_N) {
+            copy(src, cg(state, S_DATA) + (lba - s0) * BLOCK_SIZE)
+        } else {
+            cs(state, S_VALID, 0)
+        }
+    }
+    var w: u64 = 0
+    while w < ways(state) {
+        if wg(state, w, C_VALID) != 0 {
+            let c0: u64 = wg(state, w, C_LBA)
+            if wg(state, w, C_DEV) != dev {
+                ws(state, w, C_VALID, 0)
+            } else if lba >= c0 && lba < c0 + wg(state, w, C_N) {
+                copy(src, gone_data(state, w) + (lba - c0) * BLOCK_SIZE)
+            }
+        }
+        w = w + 1
+    }
+}
+
 // ------------------------------------------------------------ r728
 // WRITE-BEHIND for the ATA volume path, scoped to one file-system call.
 //
@@ -1492,7 +1515,16 @@ fn write_on_held(state: u64, dev: u64, lba: u64, src: u64) -> bool {
         return false
     }
     stat_writes = stat_writes + 1
-    cache_drop(state, dev, lba)
+    let ok: bool = write_on_store(state, dev, lba, src)
+    if ok {
+        cache_put(state, dev, lba, src)
+    } else {
+        cache_drop(state, dev, lba)
+    }
+    return ok
+}
+
+fn write_on_store(state: u64, dev: u64, lba: u64, src: u64) -> bool {
     if dev == DEV_ATA || dev == DEV_ATA1 {
         wb_flush(state)
     }
@@ -1602,8 +1634,17 @@ fn write_raw_held(state: u64, lba: u64, src: u64) -> bool {
         return false
     }
     let abs: u64 = lba + kstate.get(state, kstate.DISK_FIRST)
-    cache_drop(state, kstate.get(state, kstate.DISK_DEV), abs)
     let wdv: u64 = kstate.get(state, kstate.DISK_DEV)
+    let ok: bool = write_raw_store(state, wdv, abs, src)
+    if ok {
+        cache_put(state, wdv, abs, src)
+    } else {
+        cache_drop(state, wdv, abs)
+    }
+    return ok
+}
+
+fn write_raw_store(state: u64, wdv: u64, abs: u64, src: u64) -> bool {
     if (wdv == DEV_ATA || wdv == DEV_ATA1) && wb_active(state) {
         return wb_put(state, wdv, abs, src)
     }
@@ -1670,12 +1711,17 @@ fn write_run_held(state: u64, lba: u64, src: u64, n: u64) -> bool {
         if c > 128 {
             c = 128
         }
+        let wrote: bool = ata_write_run_twice(abs + done, src + done * BLOCK_SIZE, c, dv == DEV_ATA1)
         var j: u64 = 0
         while j < c {
-            cache_drop(state, dv, abs + done + j)
+            if wrote {
+                cache_put(state, dv, abs + done + j, src + (done + j) * BLOCK_SIZE)
+            } else {
+                cache_drop(state, dv, abs + done + j)
+            }
             j = j + 1
         }
-        if !ata_write_run_twice(abs + done, src + done * BLOCK_SIZE, c, dv == DEV_ATA1) {
+        if !wrote {
             return false
         }
         done = done + c

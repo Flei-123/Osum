@@ -55,6 +55,7 @@ import sync.atomic
 import arch.cpu
 import fs.nidx
 import fs.dcache
+import fs.dirscan
 import fs.pcache
 import fs.ofsj
 import fs.ofsext
@@ -115,6 +116,7 @@ const PER_BLOCK: u64 = BS / 8 // pointers in one block: 64
 const T_FREE: u64 = 0
 const T_FILE: u64 = 1
 const T_DIR: u64 = 2
+const NO_SLOT: u64 = 0xFFFFFFFFFFFFFFFF
 const T_LINK: u64 = 3
 const MAX_HOPS: u64 = 8
 
@@ -1707,15 +1709,34 @@ fn dir_entries(state: u64, dir: u64) -> u64 {
     return inode_get(state, dir, I_SIZE) / dirent_size(state)
 }
 
+fn dir_chunk(state: u64, dir: u64, first: u64, total: u64) -> u64 {
+    let de: u64 = dirent_size(state)
+    var count: u64 = dirscan.per_chunk(de)
+    if total - first < count {
+        count = total - first
+    }
+    return read_at(state, dir, first * de, dirscan.buffer(), count * de) / de
+}
+
 fn dir_find(state: u64, dir: u64, name: u64) -> u64 {
     let n: u64 = dir_entries(state, dir)
+    let de: u64 = dirent_size(state)
     var i: u64 = 0
     while i < n {
-        let ino: u64 = entry_read(state, dir, i, buf_nm(state))
-        if ino != 0 && name_eq(state, buf_nm(state) + 8, name) {
-            return ino
+        let got: u64 = dir_chunk(state, dir, i, n)
+        if got == 0 {
+            return 0
         }
-        i = i + 1
+        var k: u64 = 0
+        while k < got {
+            let e: u64 = dirscan.entry(k, de)
+            let ino: u64 = regio.read64(e)
+            if ino != 0 && name_eq(state, e + 8, name) {
+                return ino
+            }
+            k = k + 1
+        }
+        i = i + got
     }
     return 0
 }
@@ -1745,7 +1766,8 @@ fn slot_count(state: u64, dir: u64) -> u64 {
 }
 
 fn entry_at(state: u64, dir: u64, index: u64, out: u64, cap: u64) -> u64 {
-    if dirent_size(state) > cap {
+    let de: u64 = dirent_size(state)
+    if de > cap {
         return 0
     }
     let flags: u64 = enter(state)
@@ -1753,16 +1775,25 @@ fn entry_at(state: u64, dir: u64, index: u64, out: u64, cap: u64) -> u64 {
     var i: u64 = 0
     var seen: u64 = 0
     var got: u64 = 0
-    while i < n {
-        let ino: u64 = entry_read(state, dir, i, out)
-        if ino != 0 {
-            if seen == index {
-                got = ino
-                i = n
-            }
-            seen = seen + 1
+    while i < n && got == 0 {
+        let count: u64 = dir_chunk(state, dir, i, n)
+        if count == 0 {
+            i = n
         }
-        i = i + 1
+        var k: u64 = 0
+        while k < count && got == 0 {
+            let e: u64 = dirscan.entry(k, de)
+            let ino: u64 = regio.read64(e)
+            if ino != 0 {
+                if seen == index {
+                    copy(e, out, de)
+                    got = ino
+                }
+                seen = seen + 1
+            }
+            k = k + 1
+        }
+        i = i + count
     }
     leave(state, flags)
     return got
@@ -1775,11 +1806,22 @@ fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
     var slot: u64 = n
     var i: u64 = 0
     while i < n {
-        if entry_read(state, dir, i, buf_nm(state)) == 0 {
-            slot = i
+        let got: u64 = dir_chunk(state, dir, i, n)
+        if got == 0 {
             i = n
-        } else {
-            i = i + 1
+        }
+        var k: u64 = 0
+        while k < got {
+            if regio.read64(dirscan.entry(k, de)) == 0 {
+                slot = i + k
+                k = got
+                i = n
+            } else {
+                k = k + 1
+            }
+        }
+        if i < n {
+            i = i + got
         }
     }
     octets.zero(buf_nm(state), de)
@@ -1792,7 +1834,7 @@ fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
     if write_at(state, dir, slot * de, buf_nm(state), de) != de {
         return false
     }
-    dcache.bump(state)
+    dcache.bump_add(state)
     if !punktname(name) {
         var kind: u64 = 0
         var sz: u64 = 0
@@ -1819,31 +1861,53 @@ fn punktname(p: u64) -> bool {
     return kstate.get8(p + 2) == 0
 }
 
-fn dir_remove(state: u64, dir: u64, name: u64) -> u64 {
+fn dir_remove_slot(state: u64, dir: u64, name: u64) -> u64 {
     let n: u64 = dir_entries(state, dir)
+    let de: u64 = dirent_size(state)
     var i: u64 = 0
     while i < n {
-        let ino: u64 = entry_read(state, dir, i, buf_nm(state))
-        if ino != 0 && name_eq(state, buf_nm(state) + 8, name) {
-            octets.zero(buf_nm(state), dirent_size(state))
-            write_at(state, dir, i * dirent_size(state), buf_nm(state),
-                dirent_size(state))
-            dcache.bump(state)
-            if !punktname(name) {
-                var kind: u64 = 0
-                var sz: u64 = 0
-                if ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
-                    let at: u64 = buf_in(state) + inode_off(state, ino)
-                    kind = regio.read64(at + I_TYPE)
-                    sz = regio.read64(at + I_SIZE)
-                }
-                nidx.note(state, nidx.OP_DEL, dir, ino, kind, sz, name)
-            }
-            return ino
+        let got: u64 = dir_chunk(state, dir, i, n)
+        if got == 0 {
+            return NO_SLOT
         }
-        i = i + 1
+        var k: u64 = 0
+        while k < got {
+            let e: u64 = dirscan.entry(k, de)
+            if regio.read64(e) != 0 && name_eq(state, e + 8, name) {
+                return i + k
+            }
+            k = k + 1
+        }
+        i = i + got
     }
-    return 0
+    return NO_SLOT
+}
+
+fn dir_remove(state: u64, dir: u64, name: u64) -> u64 {
+    let slot: u64 = dir_remove_slot(state, dir, name)
+    if slot == NO_SLOT {
+        return 0
+    }
+    let de: u64 = dirent_size(state)
+    let ino: u64 = entry_read(state, dir, slot, buf_nm(state))
+    octets.zero(buf_nm(state), de)
+    write_at(state, dir, slot * de, buf_nm(state), de)
+    var kind: u64 = 0
+    var sz: u64 = 0
+    if ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
+        let at: u64 = buf_in(state) + inode_off(state, ino)
+        kind = regio.read64(at + I_TYPE)
+        sz = regio.read64(at + I_SIZE)
+    }
+    if kind == T_FILE {
+        dcache.forget_node(state, ino)
+    } else {
+        dcache.bump(state)
+    }
+    if !punktname(name) {
+        nidx.note(state, nidx.OP_DEL, dir, ino, kind, sz, name)
+    }
+    return ino
 }
 
 // --------------------------------------------------------- the paths

@@ -4,7 +4,7 @@ profile kernel
 import lib.kstate
 import fs.cachelock
 
-export { attach, FRAMES, probe, insert, stamp, bump, hits, misses, negative_hits, inserts, flushes, MISS, NEG }
+export { attach, FRAMES, probe, insert, stamp, bump, bump_add, forget_node, hits, misses, negative_hits, inserts, flushes, MISS, NEG }
 
 const MISS: u64 = 0xFFFFFFFFFFFFFFFF
 const NEG: u64 = 0xFFFFFFFFFFFFFFFE
@@ -24,6 +24,7 @@ const H_NEGHITS: u64 = 40
 const H_INSERTS: u64 = 48
 const H_FLUSHES: u64 = 56
 const H_VICTIM: u64 = 64
+const H_NEG_GEN: u64 = 72
 const E_GEN: u64 = 0
 const E_MOUNT: u64 = 8
 const E_NODE: u64 = 16
@@ -39,6 +40,7 @@ fn attach(state: u64, region: u64) {
         o = o + 8
     }
     kstate.set(region, H_GEN, 1)
+    kstate.set(region, H_NEG_GEN, 1)
     kstate.set(state, kstate.DCACHE_BASE, region)
 }
 
@@ -86,6 +88,13 @@ fn path_same(entry: u64, path: u64, n: u64) -> bool {
     return true
 }
 
+fn entry_live(e: u64, gen: u64, neg_gen: u64) -> bool {
+    if kstate.get(e, E_NEG) != 0 {
+        return kstate.get(e, E_GEN) == neg_gen
+    }
+    return kstate.get(e, E_GEN) == gen
+}
+
 fn slot_at(b: u64, h: u64, way: u64) -> u64 {
     return b + ENTRIES_AT + (((h >> 7) % SETS) * WAYS + way) * ENTRY_BYTES
 }
@@ -105,10 +114,11 @@ fn probe(state: u64, m: u64, path: u64) -> u64 {
     let h: u64 = hash_of(m, path, n)
     let flags: u64 = cachelock.take(b)
     let gen: u64 = kstate.get(b, H_GEN)
+    let neg_gen: u64 = kstate.get(b, H_NEG_GEN)
     var way: u64 = 0
     while way < WAYS {
         let e: u64 = slot_at(b, h, way)
-        if kstate.get(e, E_GEN) == gen && kstate.get(e, E_HASH) == h && kstate.get(e, E_MOUNT) == m && path_same(e, path, n) {
+        if entry_live(e, gen, neg_gen) && kstate.get(e, E_HASH) == h && kstate.get(e, E_MOUNT) == m && path_same(e, path, n) {
             var r: u64 = kstate.get(e, E_NODE)
             kstate.set(b, H_HITS, kstate.get(b, H_HITS) + 1)
             if kstate.get(e, E_NEG) != 0 {
@@ -152,11 +162,12 @@ fn insert(state: u64, m: u64, path: u64, node: u64, stamp_at_start: u64) {
         return
     }
     let gen: u64 = kstate.get(b, H_GEN)
+    let neg_gen: u64 = kstate.get(b, H_NEG_GEN)
     var pick: u64 = 0
     var way: u64 = 0
     while way < WAYS {
         let e: u64 = slot_at(b, h, way)
-        if kstate.get(e, E_GEN) == gen && kstate.get(e, E_HASH) == h && kstate.get(e, E_MOUNT) == m && path_same(e, path, n) {
+        if entry_live(e, gen, neg_gen) && kstate.get(e, E_HASH) == h && kstate.get(e, E_MOUNT) == m && path_same(e, path, n) {
             pick = e
         }
         way = way + 1
@@ -164,7 +175,7 @@ fn insert(state: u64, m: u64, path: u64, node: u64, stamp_at_start: u64) {
     way = 0
     while pick == 0 && way < WAYS {
         let e: u64 = slot_at(b, h, way)
-        if kstate.get(e, E_GEN) != gen {
+        if !entry_live(e, gen, neg_gen) {
             pick = e
         }
         way = way + 1
@@ -174,13 +185,14 @@ fn insert(state: u64, m: u64, path: u64, node: u64, stamp_at_start: u64) {
         kstate.set(b, H_VICTIM, v + 1)
         pick = slot_at(b, h, v % WAYS)
     }
-    kstate.set(pick, E_GEN, gen)
     kstate.set(pick, E_MOUNT, m)
     kstate.set(pick, E_HASH, h)
     if node == 0 {
+        kstate.set(pick, E_GEN, neg_gen)
         kstate.set(pick, E_NEG, 1)
         kstate.set(pick, E_NODE, 0)
     } else {
+        kstate.set(pick, E_GEN, gen)
         kstate.set(pick, E_NEG, 0)
         kstate.set(pick, E_NODE, node)
     }
@@ -203,6 +215,45 @@ fn bump(state: u64) {
     }
     let flags: u64 = cachelock.take(b)
     kstate.set(b, H_GEN, kstate.get(b, H_GEN) + 1)
+    kstate.set(b, H_NEG_GEN, kstate.get(b, H_NEG_GEN) + 1)
+    kstate.set(b, H_EPOCH, kstate.get(b, H_EPOCH) + 1)
+    kstate.set(b, H_FLUSHES, kstate.get(b, H_FLUSHES) + 1)
+    cachelock.give(b, flags)
+}
+
+fn bump_add(state: u64) {
+    if kstate.mode_on(state, kstate.M_DCNOINVAL) {
+        return
+    }
+    let b: u64 = kstate.get(state, kstate.DCACHE_BASE)
+    if b == 0 {
+        return
+    }
+    let flags: u64 = cachelock.take(b)
+    kstate.set(b, H_NEG_GEN, kstate.get(b, H_NEG_GEN) + 1)
+    kstate.set(b, H_EPOCH, kstate.get(b, H_EPOCH) + 1)
+    kstate.set(b, H_FLUSHES, kstate.get(b, H_FLUSHES) + 1)
+    cachelock.give(b, flags)
+}
+
+fn forget_node(state: u64, node: u64) {
+    if kstate.mode_on(state, kstate.M_DCNOINVAL) {
+        return
+    }
+    let b: u64 = kstate.get(state, kstate.DCACHE_BASE)
+    if b == 0 {
+        return
+    }
+    let flags: u64 = cachelock.take(b)
+    let gen: u64 = kstate.get(b, H_GEN)
+    var i: u64 = 0
+    while i < SETS * WAYS {
+        let e: u64 = b + ENTRIES_AT + i * ENTRY_BYTES
+        if kstate.get(e, E_NEG) == 0 && kstate.get(e, E_GEN) == gen && kstate.get(e, E_NODE) == node {
+            kstate.set(e, E_GEN, 0)
+        }
+        i = i + 1
+    }
     kstate.set(b, H_EPOCH, kstate.get(b, H_EPOCH) + 1)
     kstate.set(b, H_FLUSHES, kstate.get(b, H_FLUSHES) + 1)
     cachelock.give(b, flags)
