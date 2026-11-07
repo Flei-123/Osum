@@ -11,7 +11,7 @@ export {
     mp4_item_size, mp4_item_dts, mp4_item_cts, mp4_item_key, mp4_width,
     mp4_height, mp4_rate, mp4_channels, mp4_bits, mp4_audio_codec,
     mp4_duration_ms, mp4_item_ms, mp4_nal_len_size, mp4_headers_annexb,
-    mp4_sample_annexb, mp4_sample_raw, mp4_aac_config,
+    mp4_sample_annexb, mp4_sample_raw, mp4_aac_config, mp4_audio_delay,
     TRK_VIDEO, TRK_AUDIO, AC_NONE, AC_PCM_LE, AC_PCM_BE, AC_OTHER, AC_MP3, AC_AAC,
     ME_OK, ME_OPEN, ME_NO_MOOV, ME_TRUNC, ME_NO_TRACK, ME_TABLE, ME_BIG
 }
@@ -49,6 +49,7 @@ const F_CODEC: u64 = 8
 const F_ITEMS: u64 = 9
 const F_NAL_LEN: u64 = 10
 const F_AVCC: u64 = 11
+const F_DELAY: u64 = 12
 const F_FIELDS: u64 = 16
 
 const BOX_MOOV: u64 = 0x6D6F6F76
@@ -66,6 +67,11 @@ const BOX_STCO: u64 = 0x7374636F
 const BOX_CO64: u64 = 0x636F3634
 const BOX_STSS: u64 = 0x73747373
 const BOX_CTTS: u64 = 0x63747473
+const BOX_EDTS: u64 = 0x65647473
+const BOX_ELST: u64 = 0x656C7374
+const ELST_V0_ENTRY: u64 = 12
+const ELST_V1_ENTRY: u64 = 20
+const ELST_EMPTY_EDIT: u64 = 0xFFFFFFFF
 const BOX_AVCC: u64 = 0x61766343
 const FCC_AVC1: u64 = 0x61766331
 const FCC_VIDE: u64 = 0x76696465
@@ -133,6 +139,34 @@ fn mp4_width() -> u64 { return fld(TRK_VIDEO, F_W) }
 fn mp4_height() -> u64 { return fld(TRK_VIDEO, F_H) }
 fn mp4_rate() -> u64 { return fld(TRK_AUDIO, F_RATE) }
 fn mp4_channels() -> u64 { return fld(TRK_AUDIO, F_CH) }
+
+fn mp4_audio_delay() -> u64 {
+    let scale: u64 = fld(TRK_AUDIO, F_SCALE)
+    if scale == 0 { return 0 }
+    return fld(TRK_AUDIO, F_DELAY) * mp4_rate() / scale
+}
+
+fn elst_media_time(pay: u64, i: u64, wide: bool) -> u64 {
+    if wide { return media.be32(pay + 8 + i * ELST_V1_ENTRY + 12) }
+    return media.be32(pay + 8 + i * ELST_V0_ENTRY + 4)
+}
+
+fn parse_edit_delay(t: u64, trak_pay: u64, trak_end: u64) {
+    if !child(trak_pay, trak_end, BOX_EDTS) { return }
+    if !child(g_pay, g_end, BOX_ELST) { return }
+    let pay: u64 = g_pay
+    let wide: bool = (media.be32(pay) >> 24) == 1
+    let count: u64 = media.be32(pay + 4)
+    var i: u64 = 0
+    while i < count && i < 4 {
+        let mt: u64 = elst_media_time(pay, i, wide)
+        if mt != ELST_EMPTY_EDIT {
+            if mt < 0x80000000 { fset(t, F_DELAY, mt) }
+            return
+        }
+        i = i + 1
+    }
+}
 fn mp4_bits() -> u64 { return fld(TRK_AUDIO, F_BITS) }
 fn mp4_audio_codec() -> u64 { return fld(TRK_AUDIO, F_CODEC) }
 fn mp4_nal_len_size() -> u64 { return fld(TRK_VIDEO, F_NAL_LEN) }
@@ -473,6 +507,7 @@ fn parse_trak(pay: u64, end: u64) -> bool {
     else if handler == FCC_SOUN { t = TRK_AUDIO }
     else { return true }
     if mp4_has(t) { return true }
+    if t == TRK_AUDIO { parse_edit_delay(t, pay, end) }
     if !child(mdia_pay, mdia_end, BOX_MDHD) { return fail(ME_TABLE) }
     if (media.be32(g_pay) >> 24) == 1 {
         fset(t, F_SCALE, media.be32(g_pay + 20))

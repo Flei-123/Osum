@@ -29,6 +29,8 @@ const AAC_PREROLL: u64 = 2
 const AAC_IN_CAP: u64 = 16384
 const ASC_CAP: u64 = 64
 const SIGN_FLIP_SAMPLE: u64 = 1
+const LEAD_LOUD: u64 = 1000
+const LEAD_GIVE_UP: u64 = 20000
 
 static mut a_buf: [u8; 524288] = [0 as u8; 524288]
 static mut a_out: [u8; 4096] = [0 as u8; 4096]
@@ -52,11 +54,18 @@ static mut a_stat_cross: u64 = 0
 static mut a_stat_peak: u64 = 0
 static mut a_stat_sum: u64 = 0
 static mut a_stat_neg: bool = false
+static mut a_lead: u64 = 0
+static mut a_lead_done: bool = false
+static mut a_gapless: bool = true
 static mut aac_dec: u64 = 0
 static mut aac_ready: bool = false
 static mut aac_errors: u64 = 0
 
 fn audio_disable() { a_disabled = true }
+
+fn audio_no_gapless() { a_gapless = false }
+
+fn audio_stat_lead() -> u64 { return a_lead }
 
 fn aac_prepare() -> bool {
     if aac_ready { return true }
@@ -225,13 +234,31 @@ fn audio_item_at(ms: u64) -> u64 {
     return best
 }
 
+fn decoder_delay_samples() -> u64 {
+    if mp4.mp4_audio_codec() != mp4.AC_MP3 || !a_gapless { return 0 }
+    return mp4.mp4_audio_delay()
+}
+
+fn skip_whole_items(skip_in: u64, bpf: u64) -> u64 {
+    var skip: u64 = skip_in
+    while skip * bpf >= a_len {
+        let held: u64 = a_len / bpf
+        if !audio_load(a_item + 1) { return 0 }
+        skip = skip - held
+    }
+    return skip
+}
+
 fn audio_start(ms: u64) -> bool {
     audio_stop()
     if !audio_available() { return false }
     let id: u64 = ulib.sys(SYS_AUDOPEN, a_rate(), 0, 0)
     if ulib.bad(id) { return false }
     a_stream = id
-    let idx: u64 = audio_item_at(ms)
+    let delay: u64 = decoder_delay_samples()
+    let delay_ms: u64 = delay * 1000 / a_rate()
+    let target_ms: u64 = ms + delay_ms
+    let idx: u64 = audio_item_at(target_ms)
     if mp4.mp4_audio_codec() == mp4.AC_MP3 { mp3_preroll(idx) }
     if is_aac() { aac_preroll(idx) }
     if !audio_load(idx) {
@@ -239,13 +266,17 @@ fn audio_start(ms: u64) -> bool {
         return false
     }
     let bpf: u64 = a_channels() * 2
-    let item_ms: u64 = mp4.mp4_item_ms(mp4.TRK_AUDIO, a_item)
     var skip: u64 = 0
-    if ms > item_ms { skip = (ms - item_ms) * a_rate() / 1000 }
-    if skip * bpf >= a_len { skip = 0 }
+    let first_ms: u64 = mp4.mp4_item_ms(mp4.TRK_AUDIO, a_item)
+    if target_ms > first_ms { skip = (target_ms - first_ms) * a_rate() / 1000 }
+    skip = skip_whole_items(skip, bpf)
+    let item_ms: u64 = mp4.mp4_item_ms(mp4.TRK_AUDIO, a_item)
     a_pos = skip * bpf
     a_base_ms = item_ms + skip * 1000 / a_rate()
+    if a_base_ms > delay_ms { a_base_ms = a_base_ms - delay_ms } else { a_base_ms = 0 }
     a_sent = 0
+    a_lead = 0
+    a_lead_done = false
     a_started = false
     a_ended = false
     a_dev_rate = ulib.sys(SYS_AUDGET, A_RATE, 0, 0)
@@ -263,6 +294,23 @@ fn audio_stop() {
 
 fn remaining_ms() -> u64 {
     return ulib.sys(SYS_AUDGET, A_REMAIN, 0, 0) * 1000 / a_dev_rate
+}
+
+fn track_lead(n: u64) {
+    if a_lead_done { return }
+    let src: u64 = (&a_out[(0) as usize]) as u64
+    var f: u64 = 0
+    while f < n {
+        var mag: u64 = 0
+        let v: i64 = s16_at(src + f * 4)
+        if v < 0 { mag = (0 - v) as u64 } else { mag = v as u64 }
+        if mag >= LEAD_LOUD || a_lead >= LEAD_GIVE_UP {
+            a_lead_done = true
+            return
+        }
+        a_lead = a_lead + 1
+        f = f + 1
+    }
 }
 
 fn convert_chunk(n: u64) {
@@ -308,6 +356,7 @@ fn audio_feed() {
             continue
         }
         convert_chunk(n)
+        track_lead(n)
         let got: u64 = kcall.sys4(SYS_AUDSEND, a_stream, (&a_out[(0) as usize]) as u64, n, 0)
         if ulib.bad(got) { return }
         a_pos = a_pos + got * bpf
