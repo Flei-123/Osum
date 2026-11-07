@@ -236,11 +236,11 @@ hat "$S" 'explorer: (props lines=[0-9]+|taste 288)' \
     "Punkt 4: Alt+Eingabe oeffnet die Eigenschaften"
 
 # --- Punkt 7: die Kuerzel.
-hat "$S" 'explorer: taste ' "Punkt 7: die Kuerzel kommen im Programm an"
-hat "$S" 'explorer: taste 304 an=[01]' \
+hat "$S" 'explorer: key ' "Punkt 7: die Kuerzel kommen im Programm an"
+hat "$S" 'explorer: key 304 an=[01]' \
     "Punkt 7: Strg+H schaltet versteckte Dateien"
-hat "$S" 'explorer: taste 273' "Punkt 7: F2 kommt an"
-hat "$S" 'explorer: taste 276' "Punkt 7: F5 kommt an"
+hat "$S" 'explorer: key 273' "Punkt 7: F2 kommt an"
+hat "$S" 'explorer: key 276' "Punkt 7: F5 kommt an"
 
 # --- Punkt 9: rueckgaengig.
 hat "$S" 'explorer: (undo|taste 26)' "Punkt 9: Strg+Z meldet sich"

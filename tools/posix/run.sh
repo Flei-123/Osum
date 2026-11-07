@@ -392,13 +392,13 @@ say "$F" "prctl bad" -22 "GEGENPROBE: ein Unterbefehl, den es nicht gibt: -EINVA
 say "$F" "mprotect" 0 "mprotect(10) nimmt eine seitenweise Adresse an"
 say "$F" "mprotect un" -22 "GEGENPROBE: eine Adresse mitten in einer Seite: -EINVAL"
 say "$F" "futex weck" 0 "futex(202) FUTEX_WAKE: niemand wartet, also null geweckt"
-say "$F" "futex wert" -11 "FUTEX_WAIT mit dem falschen Wert kommt SOFORT zurueck (-EAGAIN) -- das ist der Wertvergleich im Kern"
+say "$F" "futex value" -11 "FUTEX_WAIT mit dem falschen Wert kommt SOFORT zurueck (-EAGAIN) -- das ist der Wertvergleich im Kern"
 say "$F" "futex schr" -22 "GEGENPROBE: eine Adresse, die nicht durch vier teilbar ist: -EINVAL"
 say "$F" "lock setzt" 0 "fcntl(72) F_SETLK setzt eine echte Schreibsperre auf Oktett 0..15"
-say "$F" "lock frage" 2 "F_GETLK auf denselben Bereich gibt F_UNLCK (2) -- der eigene Halter steht sich nie im Weg"
+say "$F" "lock query" 2 "F_GETLK auf denselben Bereich gibt F_UNLCK (2) -- der eigene Halter steht sich nie im Weg"
 say "$F" "lock loest" 0 "F_UNLCK gibt sie wieder frei"
 say "$F" "lock bloed" -22 "GEGENPROBE: eine Sperrart, die es nicht gibt: -EINVAL"
-say "$F" "tid gleich" 1 "getpid == gettid, solange es einen Faden gibt -- die Umstellung auf die Fadengruppe hat nichts verschoben"
+say "$F" "tid equal" 1 "getpid == gettid, solange es einen Faden gibt -- die Umstellung auf die Fadengruppe hat nichts verschoben"
 
 lines=$(value_of "$F" lines)
 seen=$(grep -ac '^posix: ' "$F")

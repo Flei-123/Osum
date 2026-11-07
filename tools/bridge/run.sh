@@ -756,7 +756,7 @@ F="$TMPD/r9.txt"
 hat "$F" "probe: hat_schreibrecht nein" "der beschnittene Deskriptor hat R_WRITE nicht mehr"
 hat "$F" "probe: write attempt rejected" "und der KERN weist das Schreiben darauf ab"
 hat "$F" "probe: gelesen 5 hallo" "lesen geht weiter -- beschnitten ist nicht kaputt"
-ROFF=$(grep -a 'probe: rechte_offen' "$F" | head -1 | awk '{print $3}')
+ROFF=$(grep -a 'probe: perms_open' "$F" | head -1 | awk '{print $3}')
 RENG=$(grep -a 'probe: rechte_eng' "$F" | head -1 | awk '{print $3}')
 note "Rechtebitfeld vorher $ROFF, nachher $RENG (R_READ|R_INSPECT|R_SEEK = 2081)"
 zahl "die Rechte des beschnittenen Deskriptors" "${RENG:-0}" eq 2081

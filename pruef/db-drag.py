@@ -124,7 +124,7 @@ for muster, was in ((r"expl: zieh", "Ziehen angefangen"),
                     (r"expl: drop\* rc=(\d+)", "davon vollzogen"),
                     (r"expl: droport", "Ablegen Ortsleiste"),
                     (r"expl: ort nimmt nix", "Ort nimmt nichts"),
-                    (r"expl: ort gleich", "schon dort"),
+                    (r"expl: place same", "schon dort"),
                     (r"trash rc=(\d+)", "in den Papierkorb")):
     r = re.findall(muster, t)
     lauf.say("  %-24s %s" % (was, ("%dx %s" % (len(r), r[:3])) if r else "-"))
