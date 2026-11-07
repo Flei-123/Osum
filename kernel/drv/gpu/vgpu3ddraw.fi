@@ -1,0 +1,271 @@
+profile kernel
+
+import libc.regio
+import serial
+import drv.gpu.vgpu3dcmd
+
+export { setup, draw, report, VBO_RES }
+
+const CCMD_CREATE_OBJECT: u64 = 1
+const CCMD_BIND_OBJECT: u64 = 2
+const CCMD_SET_VIEWPORT: u64 = 4
+const CCMD_SET_VERTEX_BUFFERS: u64 = 6
+const CCMD_DRAW_VBO: u64 = 8
+const CCMD_INLINE_WRITE: u64 = 9
+const CCMD_BIND_SHADER: u64 = 31
+
+const OBJ_BLEND: u64 = 1
+const OBJ_RASTERIZER: u64 = 2
+const OBJ_DSA: u64 = 3
+const OBJ_SHADER: u64 = 4
+const OBJ_VERTEX_ELEMENTS: u64 = 5
+
+const VBO_RES: u64 = 11
+const BLEND_HANDLE: u64 = 30
+const DSA_HANDLE: u64 = 31
+const RASTERIZER_HANDLE: u64 = 32
+const VERTEX_SHADER_HANDLE: u64 = 33
+const FRAGMENT_SHADER_HANDLE: u64 = 34
+const ELEMENTS_HANDLE: u64 = 35
+
+const SHADER_VERTEX: u64 = 0
+const SHADER_FRAGMENT: u64 = 1
+const SHADER_HEADER_DWORDS: u64 = 5
+const SHADER_TOKEN_BOUND: u64 = 300
+
+const BLEND_DWORDS: u64 = 11
+const DSA_DWORDS: u64 = 5
+const RASTERIZER_DWORDS: u64 = 9
+const COLORMASK_ALL: u64 = 0x78000000
+const RASTERIZER_DEPTH_CLIP: u64 = 2
+const RASTERIZER_HALF_PIXEL: u64 = 0x20000000
+
+const FORMAT_FLOAT4: u64 = 31
+const VERTEX_STRIDE: u64 = 16
+const VERTEX_COUNT: u64 = 3
+const VERTEX_BYTES: u64 = 48
+const PRIM_TRIANGLES: u64 = 4
+
+const VIEWPORT_HALF: u64 = 0x42000000
+const VIEWPORT_DEPTH: u64 = 0x3F000000
+const FLOAT_MINUS_ONE: u64 = 0xBF800000
+
+const FENCE_BASE: u64 = 10
+const PIXEL_RED: u64 = 0xFFFF0000
+const PIXEL_GREEN: u64 = 0xFF00FF00
+const TARGET_PIXELS: u64 = 4096
+const CENTER_INDEX: u64 = 2080
+
+fn text_bytes(text: u64) -> u64 {
+    var n: u64 = 0
+    while regio.read8_at(text, n) != 0 {
+        n = n + 1
+    }
+    return n + 1
+}
+
+fn put_text(cmd: u64, at: u64, text: u64) -> u64 {
+    let bytes: u64 = text_bytes(text)
+    let words: u64 = (bytes + 3) / 4
+    let dst: u64 = cmd + vgpu3dcmd.SUBMIT_DATA + at * 4
+    regio.zero(dst, words * 4)
+    regio.copy(dst, text, bytes)
+    return words
+}
+
+fn put_bind(cmd: u64, at: u64, object: u64, handle: u64) -> u64 {
+    vgpu3dcmd.put_header(cmd, at, 1, object, CCMD_BIND_OBJECT)
+    vgpu3dcmd.put_dword(cmd, at + 1, handle)
+    return at + 2
+}
+
+fn put_zero_object(cmd: u64, at: u64, object: u64, handle: u64, length: u64) -> u64 {
+    vgpu3dcmd.put_header(cmd, at, length, object, CCMD_CREATE_OBJECT)
+    vgpu3dcmd.put_dword(cmd, at + 1, handle)
+    var i: u64 = 1
+    while i < length {
+        vgpu3dcmd.put_dword(cmd, at + 1 + i, 0)
+        i = i + 1
+    }
+    return at + 1 + length
+}
+
+fn put_blend(cmd: u64, at: u64) -> u64 {
+    let end: u64 = put_zero_object(cmd, at, OBJ_BLEND, BLEND_HANDLE, BLEND_DWORDS)
+    vgpu3dcmd.put_dword(cmd, at + 4, COLORMASK_ALL)
+    return put_bind(cmd, end, OBJ_BLEND, BLEND_HANDLE)
+}
+
+fn put_rasterizer(cmd: u64, at: u64) -> u64 {
+    let end: u64 = put_zero_object(cmd, at, OBJ_RASTERIZER, RASTERIZER_HANDLE, RASTERIZER_DWORDS)
+    vgpu3dcmd.put_dword(cmd, at + 2, RASTERIZER_DEPTH_CLIP | RASTERIZER_HALF_PIXEL)
+    vgpu3dcmd.put_dword(cmd, at + 3, vgpu3dcmd.FLOAT_ONE)
+    vgpu3dcmd.put_dword(cmd, at + 6, vgpu3dcmd.FLOAT_ONE)
+    return put_bind(cmd, end, OBJ_RASTERIZER, RASTERIZER_HANDLE)
+}
+
+fn put_elements(cmd: u64, at: u64) -> u64 {
+    vgpu3dcmd.put_header(cmd, at, 5, OBJ_VERTEX_ELEMENTS, CCMD_CREATE_OBJECT)
+    vgpu3dcmd.put_dword(cmd, at + 1, ELEMENTS_HANDLE)
+    vgpu3dcmd.put_dword(cmd, at + 2, 0)
+    vgpu3dcmd.put_dword(cmd, at + 3, 0)
+    vgpu3dcmd.put_dword(cmd, at + 4, 0)
+    vgpu3dcmd.put_dword(cmd, at + 5, FORMAT_FLOAT4)
+    return put_bind(cmd, at + 6, OBJ_VERTEX_ELEMENTS, ELEMENTS_HANDLE)
+}
+
+fn setup_states(state: u64) -> bool {
+    let fence: u64 = FENCE_BASE
+    let cmd: u64 = vgpu3dcmd.begin(state, vgpu3dcmd.CMD_SUBMIT_3D, vgpu3dcmd.CTX_ID, fence)
+    var at: u64 = put_blend(cmd, 0)
+    at = put_zero_object(cmd, at, OBJ_DSA, DSA_HANDLE, DSA_DWORDS)
+    at = put_bind(cmd, at, OBJ_DSA, DSA_HANDLE)
+    at = put_rasterizer(cmd, at)
+    at = put_elements(cmd, at)
+    return vgpu3dcmd.submit(state, cmd, at, fence)
+}
+
+fn create_shader(state: u64, handle: u64, kind: u64, text: u64, fence: u64) -> bool {
+    let cmd: u64 = vgpu3dcmd.begin(state, vgpu3dcmd.CMD_SUBMIT_3D, vgpu3dcmd.CTX_ID, fence)
+    let bytes: u64 = text_bytes(text)
+    let words: u64 = (bytes + 3) / 4
+    vgpu3dcmd.put_header(cmd, 0, SHADER_HEADER_DWORDS + words, OBJ_SHADER, CCMD_CREATE_OBJECT)
+    vgpu3dcmd.put_dword(cmd, 1, handle)
+    vgpu3dcmd.put_dword(cmd, 2, kind)
+    vgpu3dcmd.put_dword(cmd, 3, bytes)
+    vgpu3dcmd.put_dword(cmd, 4, SHADER_TOKEN_BOUND)
+    vgpu3dcmd.put_dword(cmd, 5, 0)
+    let at: u64 = 6 + put_text(cmd, 6, text)
+    vgpu3dcmd.put_header(cmd, at, 2, 0, CCMD_BIND_SHADER)
+    vgpu3dcmd.put_dword(cmd, at + 1, handle)
+    vgpu3dcmd.put_dword(cmd, at + 2, kind)
+    return vgpu3dcmd.submit(state, cmd, at + 3, fence)
+}
+
+fn setup_shaders(state: u64) -> bool {
+    var vs: [u8; 69] = "VERT\nDCL IN[0]\nDCL OUT[0], POSITION\n  0: MOV OUT[0], IN[0]\n  1: END\n\0"
+    var fs: [u8; 93] = "FRAG\nDCL OUT[0], COLOR\nIMM[0] FLT32 { 0.0, 1.0, 0.0, 1.0 }\n  0: MOV OUT[0], IMM[0]\n  1: END\n\0"
+    if !create_shader(state, VERTEX_SHADER_HANDLE, SHADER_VERTEX, (&vs[0]) as u64, FENCE_BASE + 1) {
+        return false
+    }
+    return create_shader(state, FRAGMENT_SHADER_HANDLE, SHADER_FRAGMENT, (&fs[0]) as u64, FENCE_BASE + 2)
+}
+
+fn put_vertex(cmd: u64, at: u64, x: u64, y: u64) -> u64 {
+    vgpu3dcmd.put_dword(cmd, at, x)
+    vgpu3dcmd.put_dword(cmd, at + 1, y)
+    vgpu3dcmd.put_dword(cmd, at + 2, vgpu3dcmd.FLOAT_ZERO)
+    vgpu3dcmd.put_dword(cmd, at + 3, vgpu3dcmd.FLOAT_ONE)
+    return at + 4
+}
+
+fn setup_vertices(state: u64) -> bool {
+    let fence: u64 = FENCE_BASE + 3
+    let cmd: u64 = vgpu3dcmd.begin(state, vgpu3dcmd.CMD_SUBMIT_3D, vgpu3dcmd.CTX_ID, fence)
+    vgpu3dcmd.put_header(cmd, 0, 11 + VERTEX_BYTES / 4, 0, CCMD_INLINE_WRITE)
+    vgpu3dcmd.put_dword(cmd, 1, VBO_RES)
+    var i: u64 = 2
+    while i < 9 {
+        vgpu3dcmd.put_dword(cmd, i, 0)
+        i = i + 1
+    }
+    vgpu3dcmd.put_dword(cmd, 9, VERTEX_BYTES)
+    vgpu3dcmd.put_dword(cmd, 10, 1)
+    vgpu3dcmd.put_dword(cmd, 11, 1)
+    var at: u64 = put_vertex(cmd, 12, FLOAT_MINUS_ONE, FLOAT_MINUS_ONE)
+    at = put_vertex(cmd, at, vgpu3dcmd.FLOAT_ONE, FLOAT_MINUS_ONE)
+    at = put_vertex(cmd, at, vgpu3dcmd.FLOAT_ZERO, vgpu3dcmd.FLOAT_ONE)
+    return vgpu3dcmd.submit(state, cmd, at, fence)
+}
+
+fn setup(state: u64) -> u64 {
+    if !setup_states(state) {
+        return 1
+    }
+    if !setup_shaders(state) {
+        return 2
+    }
+    if !setup_vertices(state) {
+        return 3
+    }
+    return 0
+}
+
+fn put_viewport(cmd: u64, at: u64) -> u64 {
+    vgpu3dcmd.put_header(cmd, at, 7, 0, CCMD_SET_VIEWPORT)
+    vgpu3dcmd.put_dword(cmd, at + 1, 0)
+    vgpu3dcmd.put_dword(cmd, at + 2, VIEWPORT_HALF)
+    vgpu3dcmd.put_dword(cmd, at + 3, VIEWPORT_HALF)
+    vgpu3dcmd.put_dword(cmd, at + 4, VIEWPORT_DEPTH)
+    vgpu3dcmd.put_dword(cmd, at + 5, VIEWPORT_HALF)
+    vgpu3dcmd.put_dword(cmd, at + 6, VIEWPORT_HALF)
+    vgpu3dcmd.put_dword(cmd, at + 7, VIEWPORT_DEPTH)
+    return at + 8
+}
+
+fn put_vertex_buffer(cmd: u64, at: u64) -> u64 {
+    vgpu3dcmd.put_header(cmd, at, 3, 0, CCMD_SET_VERTEX_BUFFERS)
+    vgpu3dcmd.put_dword(cmd, at + 1, VERTEX_STRIDE)
+    vgpu3dcmd.put_dword(cmd, at + 2, 0)
+    vgpu3dcmd.put_dword(cmd, at + 3, VBO_RES)
+    return at + 4
+}
+
+fn put_draw(cmd: u64, at: u64) -> u64 {
+    vgpu3dcmd.put_header(cmd, at, 12, 0, CCMD_DRAW_VBO)
+    vgpu3dcmd.put_dword(cmd, at + 1, 0)
+    vgpu3dcmd.put_dword(cmd, at + 2, VERTEX_COUNT)
+    vgpu3dcmd.put_dword(cmd, at + 3, PRIM_TRIANGLES)
+    vgpu3dcmd.put_dword(cmd, at + 4, 0)
+    vgpu3dcmd.put_dword(cmd, at + 5, 1)
+    var i: u64 = 6
+    while i < 10 {
+        vgpu3dcmd.put_dword(cmd, at + i, 0)
+        i = i + 1
+    }
+    vgpu3dcmd.put_dword(cmd, at + 10, 0)
+    vgpu3dcmd.put_dword(cmd, at + 11, VERTEX_COUNT - 1)
+    vgpu3dcmd.put_dword(cmd, at + 12, 0)
+    return at + 13
+}
+
+fn draw(state: u64, with_draw: bool) -> bool {
+    let fence: u64 = FENCE_BASE + 4
+    let cmd: u64 = vgpu3dcmd.begin(state, vgpu3dcmd.CMD_SUBMIT_3D, vgpu3dcmd.CTX_ID, fence)
+    var at: u64 = vgpu3dcmd.put_clear(cmd, 0, vgpu3dcmd.FLOAT_ONE, vgpu3dcmd.FLOAT_ZERO, vgpu3dcmd.FLOAT_ZERO)
+    at = put_viewport(cmd, at)
+    at = put_vertex_buffer(cmd, at)
+    if with_draw {
+        at = put_draw(cmd, at)
+    }
+    return vgpu3dcmd.submit(state, cmd, at, fence)
+}
+
+fn emit(label: u64, v: u64) {
+    serial.puts(label)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn report(buf: u64) {
+    var g: [u8; 21] = "vgpu3d: draw green=\0\0"
+    var o: [u8; 21] = "vgpu3d: draw other=\0\0"
+    var c: [u8; 22] = "vgpu3d: draw center=\0\0"
+    var green: u64 = 0
+    var other: u64 = 0
+    var i: u64 = 0
+    while i < TARGET_PIXELS {
+        let px: u64 = regio.read32_at(buf, i * 4)
+        if px == PIXEL_GREEN {
+            green = green + 1
+        } else if px != PIXEL_RED {
+            other = other + 1
+        }
+        i = i + 1
+    }
+    emit((&g[0]) as u64, green)
+    emit((&o[0]) as u64, other)
+    serial.puts((&c[0]) as u64)
+    serial.hex(regio.read32_at(buf, CENTER_INDEX * 4))
+    serial.nl()
+}

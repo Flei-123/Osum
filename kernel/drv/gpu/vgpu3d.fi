@@ -6,6 +6,8 @@ import serial
 import libc.regio
 import arch.x86_64.apic
 import drv.gpu.vgpu
+import drv.gpu.vgpu3dcmd
+import drv.gpu.vgpu3ddraw
 
 export { probe }
 
@@ -16,68 +18,37 @@ const CMD_CTX_CREATE: u64 = 0x0200
 const CMD_CTX_ATTACH_RESOURCE: u64 = 0x0202
 const CMD_RESOURCE_CREATE_3D: u64 = 0x0204
 const CMD_TRANSFER_FROM_HOST_3D: u64 = 0x0206
-const CMD_SUBMIT_3D: u64 = 0x0207
 const CMD_RESOURCE_ATTACH_BACKING: u64 = 0x0106
-const RESP_OK_NODATA: u64 = 0x1100
 const RESP_OK_CAPSET_INFO: u64 = 0x1102
 const RESP_OK_CAPSET: u64 = 0x1103
 
-const HDR_FLAGS: u64 = 4
-const HDR_FENCE: u64 = 8
-const HDR_CTX: u64 = 16
-const BODY: u64 = 24
-const FLAG_FENCE: u64 = 1
-const SUBMIT_DATA: u64 = 32
 const CAPS_RSP_LEN: u64 = 2048
 const SMALL_RSP_LEN: u64 = 64
 const CAPSET_VIRGL: u64 = 1
 const CAPS_RENDER_MASK: u64 = 24 + 68
-const FORMAT_BGRA8: u64 = 1
 const TARGET_2D: u64 = 2
+const TARGET_BUFFER: u64 = 0
+const FORMAT_R8: u64 = 64
+const BIND_VERTEX_BUFFER: u64 = 0x10
+const VBO_BYTES: u64 = 48
 const BIND_RENDER_TARGET: u64 = 0x2
 const BIND_SAMPLER_VIEW: u64 = 0x8
 
-const CTX_ID: u64 = 1
-const TARGET_RES: u64 = 10
-const SURFACE_HANDLE: u64 = 20
 const TARGET_W: u64 = 64
 const TARGET_H: u64 = 64
 const TARGET_PIXELS: u64 = 4096
 const TARGET_BYTES: u64 = 16384
 const FILL_PATTERN: u64 = 0x11223344
 
-const FLOAT_ZERO: u64 = 0
-const FLOAT_ONE: u64 = 0x3F800000
 const PIXEL_RED: u64 = 0xFFFF0000
 const PIXEL_BLUE: u64 = 0xFF0000FF
 
 const VIRGL_CREATE_SURFACE: u64 = 0x00050801
 const VIRGL_SET_FRAMEBUFFER: u64 = 0x00030005
-const VIRGL_CLEAR: u64 = 0x00080007
-const VIRGL_CLEAR_COLOR0: u64 = 4
 
 const FENCE_RED: u64 = 1
 const FENCE_BLUE: u64 = 2
 const FENCE_FLUSH: u64 = 3
-
-fn begin(state: u64, typ: u64, ctx: u64, fence: u64) -> u64 {
-    let cmd: u64 = vgpu.cmd_buf(state)
-    vgpu.header(cmd, typ)
-    regio.write32_at(cmd, HDR_CTX, ctx)
-    if fence != 0 {
-        regio.write32_at(cmd, HDR_FLAGS, FLAG_FENCE)
-        vgpu.put64(cmd, HDR_FENCE, fence)
-    }
-    return cmd
-}
-
-fn fence_echoed(state: u64, fence: u64) -> bool {
-    let rsp: u64 = vgpu.rsp_buf(state)
-    if (regio.read32_at(rsp, HDR_FLAGS) & FLAG_FENCE) == 0 {
-        return false
-    }
-    return regio.read32_at(rsp, HDR_FENCE) == fence
-}
 
 fn emit(label: u64, v: u64) {
     serial.puts(label)
@@ -92,8 +63,8 @@ fn emit_hex(label: u64, v: u64) {
 }
 
 fn capset_info(state: u64, index: u64) -> bool {
-    let cmd: u64 = begin(state, CMD_GET_CAPSET_INFO, 0, 0)
-    regio.write32_at(cmd, BODY, index)
+    let cmd: u64 = vgpu3dcmd.begin(state, CMD_GET_CAPSET_INFO, 0, 0)
+    regio.write32_at(cmd, vgpu3dcmd.BODY, index)
     if !vgpu.command_rsp(state, 32, SMALL_RSP_LEN, RESP_OK_CAPSET_INFO) {
         return false
     }
@@ -102,19 +73,19 @@ fn capset_info(state: u64, index: u64) -> bool {
     var b: [u8; 6] = " ver=\0"
     var c: [u8; 7] = " size=\0"
     serial.puts((&a[0]) as u64)
-    serial.dec(regio.read32_at(rsp, BODY))
+    serial.dec(regio.read32_at(rsp, vgpu3dcmd.BODY))
     serial.puts((&b[0]) as u64)
-    serial.dec(regio.read32_at(rsp, BODY + 4))
+    serial.dec(regio.read32_at(rsp, vgpu3dcmd.BODY + 4))
     serial.puts((&c[0]) as u64)
-    serial.dec(regio.read32_at(rsp, BODY + 8))
+    serial.dec(regio.read32_at(rsp, vgpu3dcmd.BODY + 8))
     serial.nl()
     return true
 }
 
 fn capset_render_mask(state: u64) -> u64 {
-    let cmd: u64 = begin(state, CMD_GET_CAPSET, 0, 0)
-    regio.write32_at(cmd, BODY, CAPSET_VIRGL)
-    regio.write32_at(cmd, BODY + 4, 1)
+    let cmd: u64 = vgpu3dcmd.begin(state, CMD_GET_CAPSET, 0, 0)
+    regio.write32_at(cmd, vgpu3dcmd.BODY, CAPSET_VIRGL)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 4, 1)
     if !vgpu.command_rsp(state, 32, CAPS_RSP_LEN, RESP_OK_CAPSET) {
         return 0
     }
@@ -131,7 +102,7 @@ fn check_caps(state: u64) -> bool {
         return false
     }
     let mask: u64 = capset_render_mask(state)
-    if (mask & (1 << FORMAT_BGRA8)) == 0 {
+    if (mask & (1 << vgpu3dcmd.FORMAT_BGRA8)) == 0 {
         serial.puts((&b[0]) as u64)
         serial.nl()
         return false
@@ -142,97 +113,90 @@ fn check_caps(state: u64) -> bool {
 }
 
 fn create_context(state: u64) -> bool {
-    let cmd: u64 = begin(state, CMD_CTX_CREATE, CTX_ID, 0)
-    regio.write32_at(cmd, BODY, 4)
-    regio.write32_at(cmd, BODY + 8, 0x75706776)
-    return vgpu.command(state, 96, RESP_OK_NODATA)
+    let cmd: u64 = vgpu3dcmd.begin(state, CMD_CTX_CREATE, vgpu3dcmd.CTX_ID, 0)
+    regio.write32_at(cmd, vgpu3dcmd.BODY, 4)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 8, 0x75706776)
+    return vgpu.command(state, 96, vgpu3dcmd.RESP_OK_NODATA)
 }
 
 fn create_target(state: u64, backing: u64) -> bool {
-    var cmd: u64 = begin(state, CMD_RESOURCE_CREATE_3D, 0, 0)
-    regio.write32_at(cmd, BODY, TARGET_RES)
-    regio.write32_at(cmd, BODY + 4, TARGET_2D)
-    regio.write32_at(cmd, BODY + 8, FORMAT_BGRA8)
-    regio.write32_at(cmd, BODY + 12, BIND_RENDER_TARGET | BIND_SAMPLER_VIEW)
-    regio.write32_at(cmd, BODY + 16, TARGET_W)
-    regio.write32_at(cmd, BODY + 20, TARGET_H)
-    regio.write32_at(cmd, BODY + 24, 1)
-    regio.write32_at(cmd, BODY + 28, 1)
-    if !vgpu.command(state, 72, RESP_OK_NODATA) {
+    var cmd: u64 = vgpu3dcmd.begin(state, CMD_RESOURCE_CREATE_3D, 0, 0)
+    regio.write32_at(cmd, vgpu3dcmd.BODY, vgpu3dcmd.TARGET_RES)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 4, TARGET_2D)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 8, vgpu3dcmd.FORMAT_BGRA8)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 12, BIND_RENDER_TARGET | BIND_SAMPLER_VIEW)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 16, TARGET_W)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 20, TARGET_H)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 24, 1)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 28, 1)
+    if !vgpu.command(state, 72, vgpu3dcmd.RESP_OK_NODATA) {
         return false
     }
-    cmd = begin(state, CMD_RESOURCE_ATTACH_BACKING, 0, 0)
-    regio.write32_at(cmd, BODY, TARGET_RES)
-    regio.write32_at(cmd, BODY + 4, 1)
-    vgpu.put64(cmd, BODY + 8, backing)
-    regio.write32_at(cmd, BODY + 16, TARGET_BYTES)
-    if !vgpu.command(state, 48, RESP_OK_NODATA) {
+    cmd = vgpu3dcmd.begin(state, CMD_RESOURCE_ATTACH_BACKING, 0, 0)
+    regio.write32_at(cmd, vgpu3dcmd.BODY, vgpu3dcmd.TARGET_RES)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 4, 1)
+    vgpu.put64(cmd, vgpu3dcmd.BODY + 8, backing)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 16, TARGET_BYTES)
+    if !vgpu.command(state, 48, vgpu3dcmd.RESP_OK_NODATA) {
         return false
     }
-    cmd = begin(state, CMD_CTX_ATTACH_RESOURCE, CTX_ID, 0)
-    regio.write32_at(cmd, BODY, TARGET_RES)
-    return vgpu.command(state, 32, RESP_OK_NODATA)
+    cmd = vgpu3dcmd.begin(state, CMD_CTX_ATTACH_RESOURCE, vgpu3dcmd.CTX_ID, 0)
+    regio.write32_at(cmd, vgpu3dcmd.BODY, vgpu3dcmd.TARGET_RES)
+    return vgpu.command(state, 32, vgpu3dcmd.RESP_OK_NODATA)
 }
 
-fn put_dword(cmd: u64, index: u64, v: u64) {
-    regio.write32_at(cmd, SUBMIT_DATA + index * 4, v)
-}
-
-fn put_clear(cmd: u64, at: u64, r: u64, g: u64, b: u64) -> u64 {
-    put_dword(cmd, at, VIRGL_CLEAR)
-    put_dword(cmd, at + 1, VIRGL_CLEAR_COLOR0)
-    put_dword(cmd, at + 2, r)
-    put_dword(cmd, at + 3, g)
-    put_dword(cmd, at + 4, b)
-    put_dword(cmd, at + 5, FLOAT_ONE)
-    put_dword(cmd, at + 6, 0)
-    put_dword(cmd, at + 7, 0)
-    put_dword(cmd, at + 8, 0)
-    return at + 9
+fn create_vbo(state: u64) -> bool {
+    var cmd: u64 = vgpu3dcmd.begin(state, CMD_RESOURCE_CREATE_3D, 0, 0)
+    regio.write32_at(cmd, vgpu3dcmd.BODY, vgpu3ddraw.VBO_RES)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 4, TARGET_BUFFER)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 8, FORMAT_R8)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 12, BIND_VERTEX_BUFFER)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 16, VBO_BYTES)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 20, 1)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 24, 1)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 28, 1)
+    if !vgpu.command(state, 72, vgpu3dcmd.RESP_OK_NODATA) {
+        return false
+    }
+    cmd = vgpu3dcmd.begin(state, CMD_CTX_ATTACH_RESOURCE, vgpu3dcmd.CTX_ID, 0)
+    regio.write32_at(cmd, vgpu3dcmd.BODY, vgpu3ddraw.VBO_RES)
+    return vgpu.command(state, 32, vgpu3dcmd.RESP_OK_NODATA)
 }
 
 fn put_surface_setup(cmd: u64) -> u64 {
-    put_dword(cmd, 0, VIRGL_CREATE_SURFACE)
-    put_dword(cmd, 1, SURFACE_HANDLE)
-    put_dword(cmd, 2, TARGET_RES)
-    put_dword(cmd, 3, FORMAT_BGRA8)
-    put_dword(cmd, 4, 0)
-    put_dword(cmd, 5, 0)
-    put_dword(cmd, 6, VIRGL_SET_FRAMEBUFFER)
-    put_dword(cmd, 7, 1)
-    put_dword(cmd, 8, 0)
-    put_dword(cmd, 9, SURFACE_HANDLE)
+    vgpu3dcmd.put_dword(cmd, 0, VIRGL_CREATE_SURFACE)
+    vgpu3dcmd.put_dword(cmd, 1, vgpu3dcmd.SURFACE_HANDLE)
+    vgpu3dcmd.put_dword(cmd, 2, vgpu3dcmd.TARGET_RES)
+    vgpu3dcmd.put_dword(cmd, 3, vgpu3dcmd.FORMAT_BGRA8)
+    vgpu3dcmd.put_dword(cmd, 4, 0)
+    vgpu3dcmd.put_dword(cmd, 5, 0)
+    vgpu3dcmd.put_dword(cmd, 6, VIRGL_SET_FRAMEBUFFER)
+    vgpu3dcmd.put_dword(cmd, 7, 1)
+    vgpu3dcmd.put_dword(cmd, 8, 0)
+    vgpu3dcmd.put_dword(cmd, 9, vgpu3dcmd.SURFACE_HANDLE)
     return 10
 }
 
-fn submit(state: u64, cmd: u64, dwords: u64, fence: u64) -> bool {
-    regio.write32_at(cmd, BODY, dwords * 4)
-    if !vgpu.command(state, SUBMIT_DATA + dwords * 4, RESP_OK_NODATA) {
-        return false
-    }
-    return fence_echoed(state, fence)
-}
-
 fn submit_red(state: u64) -> bool {
-    let cmd: u64 = begin(state, CMD_SUBMIT_3D, CTX_ID, FENCE_RED)
-    let n: u64 = put_clear(cmd, put_surface_setup(cmd), FLOAT_ONE, FLOAT_ZERO, FLOAT_ZERO)
-    return submit(state, cmd, n, FENCE_RED)
+    let cmd: u64 = vgpu3dcmd.begin(state, vgpu3dcmd.CMD_SUBMIT_3D, vgpu3dcmd.CTX_ID, FENCE_RED)
+    let n: u64 = vgpu3dcmd.put_clear(cmd, put_surface_setup(cmd), vgpu3dcmd.FLOAT_ONE, vgpu3dcmd.FLOAT_ZERO, vgpu3dcmd.FLOAT_ZERO)
+    return vgpu3dcmd.submit(state, cmd, n, FENCE_RED)
 }
 
 fn submit_blue(state: u64) -> bool {
-    let cmd: u64 = begin(state, CMD_SUBMIT_3D, CTX_ID, FENCE_BLUE)
-    let n: u64 = put_clear(cmd, 0, FLOAT_ZERO, FLOAT_ZERO, FLOAT_ONE)
-    return submit(state, cmd, n, FENCE_BLUE)
+    let cmd: u64 = vgpu3dcmd.begin(state, vgpu3dcmd.CMD_SUBMIT_3D, vgpu3dcmd.CTX_ID, FENCE_BLUE)
+    let n: u64 = vgpu3dcmd.put_clear(cmd, 0, vgpu3dcmd.FLOAT_ZERO, vgpu3dcmd.FLOAT_ZERO, vgpu3dcmd.FLOAT_ONE)
+    return vgpu3dcmd.submit(state, cmd, n, FENCE_BLUE)
 }
 
 fn read_back(state: u64) -> bool {
-    let cmd: u64 = begin(state, CMD_TRANSFER_FROM_HOST_3D, CTX_ID, 0)
-    regio.write32_at(cmd, BODY + 12, TARGET_W)
-    regio.write32_at(cmd, BODY + 16, TARGET_H)
-    regio.write32_at(cmd, BODY + 20, 1)
-    regio.write32_at(cmd, BODY + 32, TARGET_RES)
-    regio.write32_at(cmd, BODY + 40, TARGET_W * 4)
-    return vgpu.command(state, 72, RESP_OK_NODATA)
+    let cmd: u64 = vgpu3dcmd.begin(state, CMD_TRANSFER_FROM_HOST_3D, vgpu3dcmd.CTX_ID, 0)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 12, TARGET_W)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 16, TARGET_H)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 20, 1)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 32, vgpu3dcmd.TARGET_RES)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 40, TARGET_W * 4)
+    return vgpu.command(state, 72, vgpu3dcmd.RESP_OK_NODATA)
 }
 
 fn fill(buf: u64, v: u64) {
@@ -271,15 +235,15 @@ fn pass_result(state: u64, buf: u64, want: u64) -> u64 {
 }
 
 fn flush_fenced(state: u64) -> u64 {
-    let cmd: u64 = begin(state, CMD_RESOURCE_FLUSH, 0, FENCE_FLUSH)
-    regio.write32_at(cmd, BODY + 8, vgpu.scanout_w(state))
-    regio.write32_at(cmd, BODY + 12, vgpu.scanout_h(state))
-    regio.write32_at(cmd, BODY + 16, vgpu.scanout_resource())
+    let cmd: u64 = vgpu3dcmd.begin(state, CMD_RESOURCE_FLUSH, 0, FENCE_FLUSH)
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 8, vgpu.scanout_w(state))
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 12, vgpu.scanout_h(state))
+    regio.write32_at(cmd, vgpu3dcmd.BODY + 16, vgpu.scanout_resource())
     let t0: u64 = apic.tsc()
-    if !vgpu.command(state, 48, RESP_OK_NODATA) {
+    if !vgpu.command(state, 48, vgpu3dcmd.RESP_OK_NODATA) {
         return 0
     }
-    if !fence_echoed(state, FENCE_FLUSH) {
+    if !vgpu3dcmd.fence_echoed(state, FENCE_FLUSH) {
         return 0
     }
     return apic.tsc() - t0 + 1
@@ -304,6 +268,27 @@ fn render_passes(state: u64, buf: u64) {
     }
     emit((&d[0]) as u64, blue_fence)
     emit((&b[0]) as u64, pass_result(state, buf, PIXEL_BLUE))
+}
+
+fn draw_stage(state: u64, buf: u64) {
+    var s: [u8; 20] = "vgpu3d: draw setup=\0"
+    var f: [u8; 20] = "vgpu3d: draw fence=\0"
+    var v: [u8; 20] = "vgpu3d: draw vbo ok\0"
+    if !create_vbo(state) {
+        serial.puts((&v[0]) as u64)
+        serial.nl()
+        return
+    }
+    emit((&s[0]) as u64, vgpu3ddraw.setup(state))
+    var drawn: u64 = 0
+    if vgpu3ddraw.draw(state, !kstate.mode_on(state, kstate.M_VGPU3DNODRAW)) {
+        drawn = 1
+    }
+    emit((&f[0]) as u64, drawn)
+    fill(buf, FILL_PATTERN)
+    if read_back(state) {
+        vgpu3ddraw.report(buf)
+    }
 }
 
 fn probe(state: u64) {
@@ -342,6 +327,7 @@ fn probe(state: u64) {
         return
     }
     render_passes(state, buf)
+    draw_stage(state, buf)
     serial.puts((&s_end[0]) as u64)
     serial.nl()
 }

@@ -1,0 +1,81 @@
+profile kernel
+
+import libc.regio
+import drv.gpu.vgpu
+
+export {
+    CTX_ID, BODY, SUBMIT_DATA, CMD_SUBMIT_3D, RESP_OK_NODATA,
+    FLOAT_ZERO, FLOAT_ONE, FORMAT_BGRA8, SURFACE_HANDLE, TARGET_RES,
+    begin, fence_echoed, put_dword, put_header, put_clear, submit
+}
+
+const CMD_SUBMIT_3D: u64 = 0x0207
+const RESP_OK_NODATA: u64 = 0x1100
+
+const HDR_FLAGS: u64 = 4
+const HDR_FENCE: u64 = 8
+const HDR_CTX: u64 = 16
+const BODY: u64 = 24
+const FLAG_FENCE: u64 = 1
+const SUBMIT_DATA: u64 = 32
+const FORMAT_BGRA8: u64 = 1
+
+const CTX_ID: u64 = 1
+const TARGET_RES: u64 = 10
+const SURFACE_HANDLE: u64 = 20
+
+const FLOAT_ZERO: u64 = 0
+const FLOAT_ONE: u64 = 0x3F800000
+
+const VIRGL_CLEAR: u64 = 0x00080007
+const VIRGL_CLEAR_COLOR0: u64 = 4
+const HEADER_LENGTH_SHIFT: u64 = 16
+const HEADER_OBJECT_SHIFT: u64 = 8
+
+fn begin(state: u64, typ: u64, ctx: u64, fence: u64) -> u64 {
+    let cmd: u64 = vgpu.cmd_buf(state)
+    vgpu.header(cmd, typ)
+    regio.write32_at(cmd, HDR_CTX, ctx)
+    if fence != 0 {
+        regio.write32_at(cmd, HDR_FLAGS, FLAG_FENCE)
+        vgpu.put64(cmd, HDR_FENCE, fence)
+    }
+    return cmd
+}
+
+fn fence_echoed(state: u64, fence: u64) -> bool {
+    let rsp: u64 = vgpu.rsp_buf(state)
+    if (regio.read32_at(rsp, HDR_FLAGS) & FLAG_FENCE) == 0 {
+        return false
+    }
+    return regio.read32_at(rsp, HDR_FENCE) == fence
+}
+
+fn put_dword(cmd: u64, index: u64, v: u64) {
+    regio.write32_at(cmd, SUBMIT_DATA + index * 4, v)
+}
+
+fn put_header(cmd: u64, index: u64, length: u64, object: u64, op: u64) {
+    put_dword(cmd, index, (length << HEADER_LENGTH_SHIFT) | (object << HEADER_OBJECT_SHIFT) | op)
+}
+
+fn put_clear(cmd: u64, at: u64, r: u64, g: u64, b: u64) -> u64 {
+    put_dword(cmd, at, VIRGL_CLEAR)
+    put_dword(cmd, at + 1, VIRGL_CLEAR_COLOR0)
+    put_dword(cmd, at + 2, r)
+    put_dword(cmd, at + 3, g)
+    put_dword(cmd, at + 4, b)
+    put_dword(cmd, at + 5, FLOAT_ONE)
+    put_dword(cmd, at + 6, 0)
+    put_dword(cmd, at + 7, 0)
+    put_dword(cmd, at + 8, 0)
+    return at + 9
+}
+
+fn submit(state: u64, cmd: u64, dwords: u64, fence: u64) -> bool {
+    regio.write32_at(cmd, BODY, dwords * 4)
+    if !vgpu.command(state, SUBMIT_DATA + dwords * 4, RESP_OK_NODATA) {
+        return false
+    }
+    return fence_echoed(state, fence)
+}
