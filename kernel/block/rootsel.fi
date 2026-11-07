@@ -13,6 +13,7 @@ import usb.usb
 import drv.usb.ehci
 import mm.mmframe
 import block.blkdev
+import block.bootdev
 import crypto.cryptboot
 import crypto.krypto
 
@@ -54,11 +55,11 @@ const E_VEN: u64 = 16
 const E_DEV: u64 = 24
 const E_EXTRA: u64 = 32
 
-const K_NONE: u64 = 0
-const K_NVME: u64 = 1
-const K_AHCI: u64 = 2
-const K_USB: u64 = 3
-const K_IDE: u64 = 4
+const K_NONE: u64 = bootdev.K_NONE
+const K_NVME: u64 = bootdev.K_NVME
+const K_AHCI: u64 = bootdev.K_AHCI
+const K_USB: u64 = bootdev.K_USB
+const K_IDE: u64 = bootdev.K_IDE
 
 const W_RAID: u64 = 1
 const W_SATA_LEGACY: u64 = 2
@@ -541,63 +542,85 @@ fn blocks_of(state: u64, kind: u64, dev: u64) -> u64 {
     return c
 }
 
-fn mount_root(state: u64, skip_nvme: bool, skip_ahci: bool) -> bool {
+fn kind_locked(kind: u64, skip_nvme: bool, skip_ahci: bool) -> bool {
+    return (kind == K_NVME && skip_nvme) || (kind == K_AHCI && skip_ahci)
+}
+
+fn try_kind(state: u64, kind: u64, locked: bool) -> bool {
     var s_try: [u8; 9] = "versuch \0"
     var s_up: [u8; 16] = " -- kommt nicht\0"
     var s_ok: [u8; 22] = " -- WURZEL, Bloecke=\0\0"
     var s_nx: [u8; 18] = " -- no root on it\0"
     var s_fi: [u8; 10] = "  first=\0\0"
-    var s_none: [u8; 38] = "no device carries a root -- end here\0\0"
     var s_skip: [u8; 35] = " -- uebersprungen, gehoert hw.disk\0"
+    kstate.set(state, sc(S_TRIED), kstate.get(state, sc(S_TRIED)) + 1)
+    tag()
+    serial.puts((&s_try[0]) as u64)
+    kind_name(kind)
+    serial.nl()
+    if locked {
+        tag()
+        kind_name(kind)
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return false
+    }
+    let dev: u64 = bring_up(state, kind)
+    if dev == DEV_BAD {
+        tag()
+        kind_name(kind)
+        serial.puts((&s_up[0]) as u64)
+        serial.nl()
+        return false
+    }
+    if try_mount_on(state, dev, blocks_of(state, kind, dev)) {
+        kstate.set(state, sc(S_PICKED), kind)
+        tag()
+        kind_name(kind)
+        serial.puts((&s_ok[0]) as u64)
+        serial.dec(kstate.get(state, sc(S_BLOCKS)))
+        serial.puts((&s_fi[0]) as u64)
+        serial.dec(kstate.get(state, sc(S_FIRST)))
+        serial.nl()
+        return true
+    }
+    tag()
+    kind_name(kind)
+    serial.puts((&s_nx[0]) as u64)
+    serial.nl()
+    return false
+}
+
+fn has_kind(state: u64, kind: u64) -> bool {
+    let lim: u64 = blkdev.disks(state)
+    var i: u64 = 0
+    while i < lim {
+        if blkdev_kind(blkdev.kind_at(state, i)) == kind {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn mount_root(state: u64, skip_nvme: bool, skip_ahci: bool, first_kind: u64) -> bool {
+    var s_none: [u8; 38] = "no device carries a root -- end here\0\0"
     scan(state)
+    var tried_first: bool = false
+    if first_kind != K_NONE && has_kind(state, first_kind) {
+        tried_first = true
+        if try_kind(state, first_kind, kind_locked(first_kind, skip_nvme, skip_ahci)) {
+            return true
+        }
+    }
     let lim: u64 = blkdev.disks(state)
     var i: u64 = 0
     while i < lim {
         let kind: u64 = blkdev_kind(blkdev.kind_at(state, i))
-        kstate.set(state, sc(S_TRIED), kstate.get(state, sc(S_TRIED)) + 1)
-        tag()
-        serial.puts((&s_try[0]) as u64)
-        kind_name(kind)
-        serial.nl()
-        var dev: u64 = DEV_BAD
-        var locked: bool = false
-        if kind == K_NVME && skip_nvme {
-            locked = true
-        }
-        if kind == K_AHCI && skip_ahci {
-            locked = true
-        }
-        if locked {
-            tag()
-            kind_name(kind)
-            serial.puts((&s_skip[0]) as u64)
-            serial.nl()
-        } else {
-            dev = bring_up(state, kind)
-        }
-        if locked {
-        } else if dev == DEV_BAD {
-            tag()
-            kind_name(kind)
-            serial.puts((&s_up[0]) as u64)
-            serial.nl()
-        } else {
-            let cnt: u64 = blocks_of(state, kind, dev)
-            if try_mount_on(state, dev, cnt) {
-                kstate.set(state, sc(S_PICKED), kind)
-                tag()
-                kind_name(kind)
-                serial.puts((&s_ok[0]) as u64)
-                serial.dec(kstate.get(state, sc(S_BLOCKS)))
-                serial.puts((&s_fi[0]) as u64)
-                serial.dec(kstate.get(state, sc(S_FIRST)))
-                serial.nl()
+        if !(tried_first && kind == first_kind) {
+            if try_kind(state, kind, kind_locked(kind, skip_nvme, skip_ahci)) {
                 return true
             }
-            tag()
-            kind_name(kind)
-            serial.puts((&s_nx[0]) as u64)
-            serial.nl()
         }
         i = i + 1
     }

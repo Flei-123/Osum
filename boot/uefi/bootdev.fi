@@ -1,0 +1,86 @@
+import mem
+import ctx
+import efi
+import mbcore
+
+export { append_word }
+
+const NODE_END: u64 = 0x7F
+const TYPE_MESSAGING: u64 = 3
+const SUB_ATAPI: u64 = 1
+const SUB_USB: u64 = 5
+const SUB_USB_CLASS: u64 = 15
+const SUB_SATA: u64 = 18
+const SUB_NVME: u64 = 23
+const MAX_NODES: u64 = 32
+const LOADED_IMAGE_DEVICE: u64 = 24
+
+fn device_path(c: u64) -> u64 {
+    let hp: u64 = efi.bs_fn(c, 152)
+    let img: u64 = mem.get64(c + ctx.C_IMG)
+    if efi.call3(hp, img, efi.guid(c, 0x11d295625b1b31a1, 0x3b7269c9a0003f8e), efi.out_addr(c, 0)) != 0 {
+        return 0
+    }
+    let dev: u64 = mem.get64(efi.out(c, 0) + LOADED_IMAGE_DEVICE)
+    if efi.call3(hp, dev, efi.guid(c, 0x11d26d3f09576e91, 0x3b7269c9a000398e), efi.out_addr(c, 0)) != 0 {
+        return 0
+    }
+    return efi.out(c, 0)
+}
+
+fn kind_of(path: u64) -> u64 {
+    var node: u64 = path
+    var i: u64 = 0
+    while i < MAX_NODES {
+        let t: u64 = mem.get8(node)
+        if t == NODE_END {
+            return 0
+        }
+        let s: u64 = mem.get8(node + 1)
+        if t == TYPE_MESSAGING {
+            if s == SUB_USB || s == SUB_USB_CLASS {
+                return 3
+            }
+            if s == SUB_SATA {
+                return 2
+            }
+            if s == SUB_NVME {
+                return 1
+            }
+            if s == SUB_ATAPI {
+                return 4
+            }
+        }
+        let len: u64 = mem.get8(node + 2) | (mem.get8(node + 3) << 8)
+        if len < 4 {
+            return 0
+        }
+        node = node + len
+        i = i + 1
+    }
+    return 0
+}
+
+fn append_word(c: u64, mbi: u64) {
+    var w_nvme: [u8; 14] = " bootdev=nvme\0"
+    var w_sata: [u8; 14] = " bootdev=sata\0"
+    var w_usb: [u8; 13] = " bootdev=usb\0"
+    var w_ide: [u8; 13] = " bootdev=ide\0"
+    let path: u64 = device_path(c)
+    if path == 0 {
+        return
+    }
+    let kind: u64 = kind_of(path)
+    if kind == 1 {
+        mbcore.append_cmdline(mbi, (&w_nvme[0]) as u64)
+    }
+    if kind == 2 {
+        mbcore.append_cmdline(mbi, (&w_sata[0]) as u64)
+    }
+    if kind == 3 {
+        mbcore.append_cmdline(mbi, (&w_usb[0]) as u64)
+    }
+    if kind == 4 {
+        mbcore.append_cmdline(mbi, (&w_ide[0]) as u64)
+    }
+}
