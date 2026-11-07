@@ -131,3 +131,11 @@ pruefbare Weg aus §3/§4: **Atheros AR9271 (USB, `ath9k_htc`)**.
 2. OrientOS (Stick/Dell mit USB-WLAN): Terminal `wlan chips` (Liste), `wlan fw` (Firmware-
    Datei + Pin); beim Einstecken erscheint `wifi-usb: <Name> (<vid>:<pid>), kein Treiber`.
 3. `0cf3:9271` / `0cf3:1006` = AR9271 -> genau dieser Treiber (M1 ruft den Chip an).
+
+## 9. Stand 07.11.2026 -- Intel family 7000 (7260/3160/7265/7265D/3165/3168), gegen Simulation
+
+* **[Quelle]** PCI-Ids aus der Alias-Tabelle des installierten iwlwifi-Moduls (08b1 08b2 08b3 08b4 095a 095b 3165 3166 24fb) und `pcie/drv.c`: 7260 = 08b1/08b2, 3160 = 08b3/08b4, 7265 = 095a/095b (7265D = gleiche Ids, `hw_rev & 0xFFF0 == 0x210`), 3165 = 3165/3166, 3168 = 24fb.
+* **[Quelle]** Firmware laut `MODULE_FIRMWARE`: `iwlwifi-7260-17`, `-3160-17`, `-7265-17`, `-7265D-29` (auch 3165/3166), `-3168-29`.
+* **[Quelle]** Ladepfad `iwl_pcie_load_given_ucode` (nicht `_8000`): Abschnitte CPU1, bei zwei CPUs (`TLV_NUM_OF_CPU == 2`) `LMPM_SECURE_UCODE_LOAD_CPU2_HDR_ADDR (0x1E7C) = 0x420400` und CPU2-Abschnitte, dann `CSR_INT_MASK = INI_SET_MASK`, `CSR_RESET = 0`. Keine `FH_UCODE_LOAD_STATUS`-Worte, kein WFPM/RELEASE_CPU_RESET.
+* **[gemessen]** `tools/wlan/fh7000.sh`: echter Lader `lib/wlan/iwl_fh7000.fi` gegen das Flow-Handler-Modell (`tools/wlan/fh8000.fi`, Modus 32) == Python-Referenz (`fh7000_ref.py`), 12 Gegenproben.
+* **Nicht gemacht (ehrlich):** `apm_init` der 7000er (DIS_L0S_EXIT_TIMER, APMG-Block, OSC_CLK-Tanz bei 7260/3160), ALIVE-Auswertung der alten Firmware, LMAC-Scan (die 7000er kennen kein UMAC-Scan; `iwl_mvm_scan.fi` ist UMAC-only). Boot nur mit Wort `iwlboot`, nie automatisch. Echte Hardware offen (r118).
