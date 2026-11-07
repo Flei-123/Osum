@@ -323,9 +323,9 @@ print(len(descs.ACPI_BLOB))")
 ERW_ADR=$(python3 -c "
 import sys; sys.path.insert(0,'tools/hid'); import descs
 print(' '.join('i2ctest: adr=%s' % hex(a) for a in descs.I2C_ADRESSEN))")
-Z=$(grep -a '^i2ctest: laenge=' "$TMPD/i2ctest.txt")
+Z=$(grep -a '^i2ctest: length=' "$TMPD/i2ctest.txt")
 gleich "die gebaute Tabelle kommt vollstaendig an" \
-    "$ERW_LEN" "$(echo "$Z" | sed 's/i2ctest: laenge=\([0-9]*\).*/\1/')"
+    "$ERW_LEN" "$(echo "$Z" | sed 's/i2ctest: length=\([0-9]*\).*/\1/')"
 gleich "GENAU zwei I2C-Verbindungen -- die drei Koeder fallen weg" "2" \
     "$(echo "$Z" | sed 's/.*treffer=\([0-9]*\).*/\1/')"
 gleich "und die Adressen sind die, die drinstehen" "$ERW_ADR" \

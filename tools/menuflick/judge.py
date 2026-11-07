@@ -9,7 +9,7 @@ t = open(sys.argv[1], "rb").read().decode("latin1")
 phases = []
 cur = {"rects": 0, "px": 0}
 for line in t.splitlines():
-    m = re.match(r"wm: bild n=(\d+) mittel=([\d.,]+)\D.*?max=([\d.,]+)\D.*?ueber16=(\d+)", line)
+    m = re.match(r"wm: frame n=(\d+) mittel=([\d.,]+)\D.*?max=([\d.,]+)\D.*?over16=(\d+)", line)
     if m:
         cur.update(n=int(m.group(1)), mean=m.group(2), mx=m.group(3), o16=int(m.group(4)))
         phases.append(cur)

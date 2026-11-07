@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/bench/ui.sh <outdir> -- UI timing numbers of the shipping desktop on the audit machine (QEMU/KVM), as JSON for run.sh --ui.
 #   ui.input_to_picture_ms   median input -> picture (tools/latency, kernel clocks, `wm: lat`)
-#   ui.drag_frame_mean_ms / ui.drag_frame_max_ms / ui.drag_fps   window drag, phase 5 of tools/design/stationaer.sh (`wm: bild`)
+#   ui.drag_frame_mean_ms / ui.drag_frame_max_ms / ui.drag_fps   window drag, phase 5 of tools/design/stationaer.sh (`wm: frame`)
 #   ui.menu_frame_max_ms     start menu open/close, phase 4 (largest frame)
 # Both runs build their own kernel (~5-10 min each); start through /root/jarvis/bin/heavy. Writes <outdir>/ui.json.
 set -uo pipefail

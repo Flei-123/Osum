@@ -11,7 +11,7 @@ BUDGET = 0
 def parse(text):
     rows = []
     for line in text.splitlines():
-        m = re.search(r"wm: bild n=(\d+) mittel=(\d+) max=(\d+) ueber16=(\d+) fach=([\d ]+)", line)
+        m = re.search(r"wm: frame n=(\d+) mittel=(\d+) max=(\d+) over16=(\d+) fach=([\d ]+)", line)
         if m:
             rows.append(dict(n=int(m.group(1)), mean=int(m.group(2)), mx=int(m.group(3)), o16=int(m.group(4)),
                              fach=[int(x) for x in m.group(5).split()]))
@@ -41,12 +41,12 @@ def judge(rows, out):
 
 
 def selftest():
-    rows = parse("""wm: bild n=900 mittel=2000 max=40000 ueber16=3 fach=800 50 20 10 10 5 5 0
-wm: bild n=300 mittel=900 max=3000 ueber16=0 fach=290 10 0 0 0 0 0 0
-wm: bild n=120 mittel=3000 max=12000 ueber16=0 fach=20 30 40 30 0 0 0 0
-wm: bild n=200 mittel=3000 max=14000 ueber16=0 fach=20 30 40 30 0 0 0 0
-wm: bild n=80 mittel=3000 max=11000 ueber16=0 fach=20 30 20 10 0 0 0 0
-wm: bild n=150 mittel=2000 max=9000 ueber16=0 fach=60 50 30 10 0 0 0 0""")
+    rows = parse("""wm: frame n=900 mittel=2000 max=40000 over16=3 fach=800 50 20 10 10 5 5 0
+wm: frame n=300 mittel=900 max=3000 over16=0 fach=290 10 0 0 0 0 0 0
+wm: frame n=120 mittel=3000 max=12000 over16=0 fach=20 30 40 30 0 0 0 0
+wm: frame n=200 mittel=3000 max=14000 over16=0 fach=20 30 40 30 0 0 0 0
+wm: frame n=80 mittel=3000 max=11000 over16=0 fach=20 30 20 10 0 0 0 0
+wm: frame n=150 mittel=2000 max=9000 over16=0 fach=60 50 30 10 0 0 0 0""")
     quiet = []
     clean = judge(rows, quiet.append)
     rows[4]["fach"][6] = 1

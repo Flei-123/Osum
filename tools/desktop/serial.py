@@ -6,7 +6,7 @@ Several ring 3 programs write their `prefix: key=value ...` records to ONE seria
 load the line lock is taken over (stale takeover), and a record is cut by another program's
 record. Seen in real logs:
 
-    taskbar: glas alpha=100 key=ffffffwm: rahmen x=24 y=40 w=562 h=415 r=8
+    taskbar: glas alpha=100 key=ffffffwm: border x=24 y=40 w=562 h=415 r=8
     taskbar: text clock x=1229settings: preset i=4 id=papier ... sel=0
     settings: preset i=6 ... acc=1409085 base=17 fg=988970 bg=16777215 tw=41 t=20:30
 

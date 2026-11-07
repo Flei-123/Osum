@@ -16,7 +16,7 @@
 # controller. Three sleeps in a row (the kernel's `s3smp` entry, after the other
 # cores run). Per cycle the runner checks:
 #   * NVMe/AHCI: the first eight sectors read back with the SAME checksum as before
-#     the sleep (`gleich=1`) -- after the controller was reset
+#     the sleep (`same=1`) -- after the controller was reset
 #   * USB: the controller and the enumeration came back, the keyboard is there, and
 #     a key typed through the QEMU monitor AFTER the wake-up arrives (`tasten>=1`)
 #   * network: the card is up again and receives: an ARP request for the gateway is
@@ -136,7 +136,7 @@ L="$TMPD/l-dev.txt"
 num "the VM really slept" "$(echo "$STATES" | tr '|' '\n' | grep -ac suspended)" eq "$CYCLES"
 num "devices were reset (power-loss simulation)" "$(cnt "$L" 'devices lost')" eq "$CYCLES"
 num "NVMe: resume ok" "$(cnt "$L" 's3: dev nvme da=1 resume=1')" eq "$CYCLES"
-num "NVMe: the first sectors read back with the same checksum" "$(cnt "$L" 's3: dev nvme da=1 resume=1 gleich=1')" eq "$CYCLES"
+num "NVMe: the first sectors read back with the same checksum" "$(cnt "$L" 's3: dev nvme da=1 resume=1 same=1')" eq "$CYCLES"
 num "USB: controller and enumeration came back, keyboard present" "$(cnt "$L" 's3: dev usb da=1 resume=1 .*kbd=1')" eq "$CYCLES"
 num "USB: a key typed after the wake-up arrived" "$(keys_ok "$L")" eq "$CYCLES"
 num "network: the card came back, link up" "$(cnt "$L" 's3: dev net da=1 resume=1 link=1')" eq "$CYCLES"
@@ -151,7 +151,7 @@ lauf deva "$TMPD/b.img" "$CYCLES"
 L="$TMPD/l-deva.txt"
 num "the VM really slept" "$(echo "$STATES" | tr '|' '\n' | grep -ac suspended)" eq "$CYCLES"
 num "AHCI: resume ok" "$(cnt "$L" 's3: dev ahci da=1 resume=1')" eq "$CYCLES"
-num "AHCI: the first sectors read back with the same checksum" "$(cnt "$L" 's3: dev ahci da=1 resume=1 gleich=1')" eq "$CYCLES"
+num "AHCI: the first sectors read back with the same checksum" "$(cnt "$L" 's3: dev ahci da=1 resume=1 same=1')" eq "$CYCLES"
 num "every sleep returned rc=0" "$(cnt "$L" 's3: smp zyklus=[0-9] rc=0')" eq "$CYCLES"
 
 echo "== 3. counter-check s3nohooks: the same reset, no resume hooks =="
@@ -174,7 +174,7 @@ num "the TSC was set back after every wake-up" "$(cnt "$L" 's3: tscback ms=3000'
 num "a stamp taken before the jump reads as a span of 0, no underflow" "$(cnt "$L" 's3: tscback ms=3000 since=0')" eq "$CYCLES"
 num "the clock was fixed after every wake-up" "$(cnt "$L" 's3: clock sleep=')" eq "$CYCLES"
 num "no panic" "$(cnt "$L" 'panic')" eq 0
-num "NVMe: the first sectors read back with the same checksum" "$(cnt "$L" 's3: dev nvme da=1 resume=1 gleich=1')" eq "$CYCLES"
+num "NVMe: the first sectors read back with the same checksum" "$(cnt "$L" 's3: dev nvme da=1 resume=1 same=1')" eq "$CYCLES"
 num "network: the card came back, link up" "$(cnt "$L" 's3: dev net da=1 resume=1 link=1')" eq "$CYCLES"
 num "network: it receives again (ARP reply from the gateway)" "$(rx_ok "$L")" eq "$CYCLES"
 num "every sleep returned rc=0" "$(cnt "$L" 's3: smp zyklus=[0-9] rc=0')" eq "$CYCLES"

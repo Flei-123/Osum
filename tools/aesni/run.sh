@@ -82,7 +82,7 @@ if [[ -x "$TMPD/kreis" ]]; then
         bad "this machine has no AES-NI: the round-trip check cannot run (no skip allowed)"
     else
         ungl=$(echo "$kr" | grep -oE 'ungleich=[0-9]+' | cut -d= -f2)
-        glei=$(echo "$kr" | grep -oE 'gleich=[0-9]+' | head -1 | cut -d= -f2)
+        glei=$(echo "$kr" | grep -oE 'same=[0-9]+' | head -1 | cut -d= -f2)
         gleich "ungleiche Bloecke ueber 128/192/256" "$ungl" "0"
         [[ ${glei:-0} -ge 6000 ]] \
             && ok "verglichene Bloecke: $glei (>= 6000)" \
@@ -211,7 +211,7 @@ if [[ -f "$TMPD/k0.mb" ]]; then
         [[ $zeile == *"used=1"* ]] \
             && ok "on -cpu max the fast path is armed (used=1)" \
             || bad "AES-NI is there but not used: $zeile"
-        kz=$(grep -E '^aesni: gleich=' "$TMPD/mit.txt" | head -1)
+        kz=$(grep -E '^aesni: same=' "$TMPD/mit.txt" | head -1)
         info "${kz:-no round-trip line}"
         ung=$(echo "$kz" | grep -oE 'ungleich=[0-9]+' | cut -d= -f2)
         gleich "die Kreisprobe im Kern, ungleiche Bloecke" "${ung:-keine}" "0"

@@ -60,7 +60,7 @@ def frame(dirpath):
         return None
     last = None
     for ln in open(p, "rb"):
-        m = re.search(rb"bildzeit: n=(\d+)\s+mittel=(\d+) us\s+max=(\d+) us\s+ueber16=(\d+)", ln)
+        m = re.search(rb"bildzeit: n=(\d+)\s+mittel=(\d+) us\s+max=(\d+) us\s+over16=(\d+)", ln)
         if m:
             last = tuple(int(g) for g in m.groups())
     return last

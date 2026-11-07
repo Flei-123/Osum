@@ -950,7 +950,7 @@ def field_lines():
             continue
         for j, e in enumerate(f):
             out.append("hidf: %d %d rid=%d art=%d mrk=0x%x bit=%d gr=%d anz=%d "
-                       "seite=0x%x geb=0x%x gmax=0x%x lmin=0x%x lmax=0x%x"
+                       "page=0x%x geb=0x%x gmax=0x%x lmin=0x%x lmax=0x%x"
                        % (i, j, e["rid"], e["kind"], e["flags"], e["bitoff"],
                           e["bitsz"], e["count"], e["page"], e["usage"],
                           e["umax"], e["lmin"] & M64, e["lmax"] & M64))

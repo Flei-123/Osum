@@ -5,7 +5,7 @@
 #   /root/jarvis/bin/heavy bash tools/menuflick/run.sh [outdir] [extra kernel words]
 #
 # One boot of the shipping configuration (tools/design/audit.sh, word `phases`), the workload tools/menuflick/menuhover.txt, and per
-# phase the `wm: bild` line (frames composed, mean/max ms, frames over 16 ms) plus the large dirty rectangles (> 16384 px) the
+# phase the `wm: frame` line (frames composed, mean/max ms, frames over 16 ms) plus the large dirty rectangles (> 16384 px) the
 # compositor printed in that phase. Verdict: hover phases need <= 1 large dirty rectangle per 20 frames (hover must not repaint the
 # whole window or the blurred backdrop again and again) and no frame over 16 ms at the mean.
 set -uo pipefail

@@ -30,7 +30,7 @@ for c in ${CASES:-1920x1080-new 1920x1080-old 3440x1440-new 3440x1440-old}; do
     # the burst is the block between the LAST two F12 dumps
     ser="$TMPD/$c/serial.txt"
     mapfile -t FL < <(grep -a '^wm: flush n=' "$ser")
-    mapfile -t BI < <(grep -a '^wm: bild n=' "$ser")
+    mapfile -t BI < <(grep -a '^wm: frame n=' "$ser")
     nf=${#FL[@]}
     if [ "$nf" -lt 2 ]; then bad "case $c: fewer than two F12 dumps ($nf)"; continue; fi
     # the burst is the dump with the most copies among the last three (the very last dump is the one at the end of the run, after the burst)

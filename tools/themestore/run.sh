@@ -847,13 +847,13 @@ num "und die bei 12 auch" "${W12:-0}" ge 3
 num "GEGENPROBE: bei Radius 0 ist die Ecke ein rechter Winkel" "${T0:-99}" eq 0
 num "und hat keinen einzigen Mischton -- da ist nichts zu glaetten" "${W0:-99}" eq 0
 
-RH=$(grep -ao 'wm: rahmen x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]* r=[0-9]*' \
+RH=$(grep -ao 'wm: border x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]* r=[0-9]*' \
      "$TMPD/rad24/serial.txt" | awk -F'[= ]' '$8 >= 400' | tail -1)
 if [ -z "${RH:-}" ]; then
     echo "        (no frame row, rad24 is repeated once)"
     bash tools/themestore/build.sh "$TMPD/rad24" extra='einst' uitrace=yes \
         keep=yes radius=24 > "$TMPD/rad24.log" 2>&1
-    RH=$(grep -ao 'wm: rahmen x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]* r=[0-9]*' \
+    RH=$(grep -ao 'wm: border x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]* r=[0-9]*' \
          "$TMPD/rad24/serial.txt" | awk -F'[= ]' '$8 >= 400' | tail -1)
 fi
 echo "        ${RH:-KEINE Rahmenzeile}"

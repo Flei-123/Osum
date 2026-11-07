@@ -126,7 +126,7 @@ def phase(name, action):
     f12()
     time.sleep(1.5)
     txt = read()[p0:]
-    bl = re.findall(r"wm: bild n=(\d+) mittel=(\d+) max=(\d+) ueber16=(\d+)", txt)
+    bl = re.findall(r"wm: frame n=(\d+) mittel=(\d+) max=(\d+) over16=(\d+)", txt)
     fl = re.findall(r"wm: flush n=(\d+) us=(\d+) max=(\d+) okt=(\d+)", txt)
     n = sum(int(b[0]) for b in bl)
     mean = sum(int(b[0]) * int(b[1]) for b in bl) // max(n, 1)

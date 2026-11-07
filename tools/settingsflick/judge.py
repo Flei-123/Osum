@@ -7,7 +7,7 @@ t = open(sys.argv[1], "rb").read().decode("latin1")
 phases = []
 cur = {"rects": 0, "org": {}}
 for line in t.splitlines():
-    m = re.match(r"wm: bild n=(\d+)", line)
+    m = re.match(r"wm: frame n=(\d+)", line)
     if m:
         cur["n"] = int(m.group(1))
         phases.append(cur)

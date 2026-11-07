@@ -16,7 +16,7 @@ bilder = []
 pairs = []
 last_image = None
 for line in t.splitlines():
-    m = re.search(r"wm: bild n=(\d+) mittel=(\d+) max=(\d+) ueber16=(\d+) fach=([\d ]+)", line)
+    m = re.search(r"wm: frame n=(\d+) mittel=(\d+) max=(\d+) over16=(\d+) fach=([\d ]+)", line)
     if m:
         last_image = (int(m.group(1)), int(m.group(3)), [int(x) for x in m.group(5).split()])
         continue
@@ -68,7 +68,7 @@ else:
     chk(med <= LIM_MEDIAN, "median input -> picture %.1f ms (limit 16)" % (med / 1000.0))
     chk(over <= 25, "slices above 33 ms: %d%% (limit 25%%)" % over)
     chk(calm >= 90, "slices with <= 2 poll gaps above 33 ms: %d%% (need 90%%)" % calm)
-    chk(len(pairs) * 10 >= len(allrows) * 9, "frame times: %d of %d slices have a `wm: bild` line" % (len(pairs), len(allrows)))
+    chk(len(pairs) * 10 >= len(allrows) * 9, "frame times: %d of %d slices have a `wm: frame` line" % (len(pairs), len(allrows)))
     chk(frames > 0 and slow_frames * 100 <= frames and slow_slices <= 3,
         "frames >= 32 ms: %d of %d (limit 1%%, in at most 3 slices; here %d)" % (slow_frames, frames, slow_slices))
 sys.exit(1 if bad else 0)

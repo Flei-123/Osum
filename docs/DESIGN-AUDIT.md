@@ -239,7 +239,7 @@ Result: `signinlook` 147/0 (before the fixes 137/10); loginscene 21/0, lockscene
 ### r483: why `lockseal` flickered (42/1) and `midline` threw `KeyError 26`
 
 Not the tests: **the serial line.** The window server's pulse (every 500 ms: `wm: fenliste`, the window
-list, `wm: bild`, the pulse line) wrote its block character by character WITHOUT the serial line lock that
+list, `wm: frame`, the pulse line) wrote its block character by character WITHOUT the serial line lock that
 a ring-3 `write` already takes (`sys.conout`), so the block and a program's line cut into each other
 ("wm: fen i=0 id=7 ... la" + `a11ydemo: lockprobe node ...`). A different line broke each run (a leak
 check that read `id=9` out of the pulse's window list, a lost `name=Save`, a lost `explorer: rect id=26`).

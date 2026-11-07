@@ -18,7 +18,7 @@ def cadence(case):
     if not os.path.exists(p):
         return rows
     for line in open(p, "rb").read().decode("latin1").splitlines():
-        m = re.match(r"wm: cadence n=(\d+) mittel=(\d+) max=(\d+) ueber17=(\d+) idle=(\d+) fach=([\d ]+) total=(\d+)", line)
+        m = re.match(r"wm: cadence n=(\d+) mittel=(\d+) max=(\d+) over17=(\d+) idle=(\d+) fach=([\d ]+) total=(\d+)", line)
         if m:
             f = [int(x) for x in m.group(6).split()]
             rows.append(dict(n=int(m.group(1)), mean=int(m.group(2)), max=int(m.group(3)), over=int(m.group(4)),
@@ -50,7 +50,7 @@ def slices(case):
         return out
     last = None
     for line in open(p, "rb").read().decode("latin1").splitlines():
-        m = re.search(r"wm: bild n=(\d+) mittel=(\d+) max=(\d+) ueber16=(\d+) fach=([\d ]+)", line)
+        m = re.search(r"wm: frame n=(\d+) mittel=(\d+) max=(\d+) over16=(\d+) fach=([\d ]+)", line)
         if m:
             last = (int(m.group(1)), int(m.group(3)), [int(x) for x in m.group(5).split()])
             continue
