@@ -1,0 +1,214 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import mm.mmframe
+import fs.cachelock
+
+export { lookup, insert, epoch, drop_ino, resident, retired, hits, misses, stores, drops, disabled, ENTRIES }
+
+const ENTRIES: u64 = 16384
+const ENTRY_BYTES: u64 = 16
+const TABLE_FRAMES: u64 = 64
+const BUCKETS: u64 = 1024
+const COUNT_FRAMES: u64 = 2
+const LOCK_AT: u64 = 0
+const TABLE_AT: u64 = 64
+const COUNTS_AT: u64 = 262208
+const RUN_FRAMES: u64 = 67
+const MAX_RESIDENT: u64 = 12288
+const MAX_RETIRED: u64 = 2048
+const MAX_PROBE: u64 = 32
+const TOMB: u64 = 0xFFFFFFFFFFFFFFFF
+const HASH_MUL: u64 = 0x9E3779B97F4A7C15
+const HASH_SHIFT: u64 = 50
+const PAGE_BITS: u64 = 20
+
+static mut base: u64 = 0
+static mut tried: u64 = 0
+static mut gen: u64 = 0
+static mut n_resident: u64 = 0
+static mut n_retired: u64 = 0
+static mut n_hits: u64 = 0
+static mut n_misses: u64 = 0
+static mut n_stores: u64 = 0
+static mut n_drops: u64 = 0
+static mut shut: u64 = 0
+
+fn key_of(ino: u64, pg: u64) -> u64 {
+    return ((ino << PAGE_BITS) | pg) + 1
+}
+
+fn ino_of(key: u64) -> u64 {
+    return (key - 1) >> PAGE_BITS
+}
+
+fn slot_of(key: u64) -> u64 {
+    return (key *% HASH_MUL) >> HASH_SHIFT
+}
+
+fn entry_at(slot: u64) -> u64 {
+    return base + TABLE_AT + slot * ENTRY_BYTES
+}
+
+fn bucket_at(ino: u64) -> u64 {
+    return base + COUNTS_AT + (ino % BUCKETS) * 8
+}
+
+fn ensure(state: u64) -> bool {
+    if base != 0 {
+        return true
+    }
+    if tried != 0 || shut != 0 {
+        return false
+    }
+    tried = 1
+    let run: u64 = mmframe.frame_run(state, RUN_FRAMES)
+    if run == 0 {
+        return false
+    }
+    let at: u64 = mmframe.kva(run)
+    var o: u64 = 0
+    while o < RUN_FRAMES * mmframe.FRAME_SIZE {
+        kstate.set(at, o, 0)
+        o = o + 8
+    }
+    base = at
+    return true
+}
+
+fn disabled() -> bool {
+    return shut != 0
+}
+
+fn epoch() -> u64 {
+    return gen
+}
+
+fn lookup(state: u64, ino: u64, pg: u64) -> u64 {
+    if base == 0 || shut != 0 {
+        return 0
+    }
+    let key: u64 = key_of(ino, pg)
+    let flags: u64 = cachelock.take(base + LOCK_AT)
+    var slot: u64 = slot_of(key)
+    var probe: u64 = 0
+    var found: u64 = 0
+    var done: bool = false
+    while probe < MAX_PROBE && !done {
+        let at: u64 = entry_at(slot)
+        let k: u64 = kstate.get(at, 0)
+        if k == key {
+            found = kstate.get(at, 8)
+            done = true
+        } else if k == 0 {
+            done = true
+        }
+        slot = (slot + 1) % ENTRIES
+        probe = probe + 1
+    }
+    if found != 0 {
+        n_hits = n_hits + 1
+    } else {
+        n_misses = n_misses + 1
+    }
+    cachelock.give(base + LOCK_AT, flags)
+    return found
+}
+
+fn insert(state: u64, ino: u64, pg: u64, frame: u64, seen: u64) -> u64 {
+    if !ensure(state) || shut != 0 {
+        return 0
+    }
+    let key: u64 = key_of(ino, pg)
+    let flags: u64 = cachelock.take(base + LOCK_AT)
+    var result: u64 = 0
+    if epoch() == seen && n_resident < MAX_RESIDENT {
+        var slot: u64 = slot_of(key)
+        var probe: u64 = 0
+        var spot: u64 = 0
+        var done: bool = false
+        while probe < MAX_PROBE && !done {
+            let at: u64 = entry_at(slot)
+            let k: u64 = kstate.get(at, 0)
+            if k == key {
+                result = kstate.get(at, 8)
+                done = true
+            } else if k == 0 {
+                if spot == 0 {
+                    spot = at
+                }
+                done = true
+            } else if k == TOMB && spot == 0 {
+                spot = at
+            }
+            slot = (slot + 1) % ENTRIES
+            probe = probe + 1
+        }
+        if result == 0 && spot != 0 {
+            kstate.set(spot, 8, frame)
+            kstate.set(spot, 0, key)
+            let b: u64 = bucket_at(ino)
+            kstate.set(b, 0, kstate.get(b, 0) + 1)
+            n_resident = n_resident + 1
+            n_stores = n_stores + 1
+            result = frame
+        }
+    }
+    cachelock.give(base + LOCK_AT, flags)
+    return result
+}
+
+fn drop_ino(state: u64, ino: u64) {
+    let _g: u64 = __atomic_add((&gen) as *mut u64, 1)
+    if base == 0 {
+        return
+    }
+    if kstate.get(bucket_at(ino), 0) == 0 {
+        return
+    }
+    let flags: u64 = cachelock.take(base + LOCK_AT)
+    var i: u64 = 0
+    while i < ENTRIES {
+        let at: u64 = entry_at(i)
+        let k: u64 = kstate.get(at, 0)
+        if k != 0 && k != TOMB && ino_of(k) == ino {
+            kstate.set(at, 0, TOMB)
+            kstate.set(at, 8, 0)
+            let b: u64 = bucket_at(ino)
+            kstate.set(b, 0, kstate.get(b, 0) - 1)
+            n_resident = n_resident - 1
+            n_retired = n_retired + 1
+            n_drops = n_drops + 1
+        }
+        i = i + 1
+    }
+    if n_retired > MAX_RETIRED {
+        shut = 1
+    }
+    cachelock.give(base + LOCK_AT, flags)
+}
+
+fn resident() -> u64 {
+    return n_resident
+}
+
+fn retired() -> u64 {
+    return n_retired
+}
+
+fn hits() -> u64 {
+    return n_hits
+}
+
+fn misses() -> u64 {
+    return n_misses
+}
+
+fn stores() -> u64 {
+    return n_stores
+}
+
+fn drops() -> u64 {
+    return n_drops
+}
