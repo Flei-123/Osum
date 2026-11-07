@@ -1,0 +1,150 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import serial
+import net.netdev
+import net.inet
+import net.nethealth
+
+export { allowed, engage, release, step, has_saved, saved_ip, saved_mask, saved_gw, take_saved, falls, phase,
+    PHASE_IDLE, PHASE_PROBATION, PHASE_PROVEN, PHASE_FELL_BACK }
+
+const PHASE_IDLE: u64 = 0
+const PHASE_PROBATION: u64 = 1
+const PHASE_PROVEN: u64 = 2
+const PHASE_FELL_BACK: u64 = 3
+
+const REASON_NO_GATEWAY: u64 = 1
+const REASON_UNHEALTHY: u64 = 2
+
+const PROBATION_TICKS: u64 = 800
+const ASK_TICKS: u64 = 50
+const BAD_TICKS: u64 = 1000
+const STEP_TICKS: u64 = 10
+const MAX_FALLS: u64 = 2
+const LINK_LOCAL_HIGH: u64 = 0xA9FE
+
+static mut wf_phase: u64 = 0
+static mut wf_falls: u64 = 0
+static mut wf_started: u64 = 0
+static mut wf_proven_at: u64 = 0
+static mut wf_bad_since: u64 = 0
+static mut wf_next_step: u64 = 0
+static mut wf_next_ask: u64 = 0
+static mut wf_flush_pending: bool = false
+static mut wf_saved_ip: u64 = 0
+static mut wf_saved_mask: u64 = 0
+static mut wf_saved_gw: u64 = 0
+
+fn phase() -> u64 { return wf_phase }
+
+fn falls() -> u64 { return wf_falls }
+
+fn has_saved() -> bool { return wf_saved_ip != 0 }
+
+fn saved_ip() -> u64 { return wf_saved_ip }
+
+fn saved_mask() -> u64 { return wf_saved_mask }
+
+fn saved_gw() -> u64 { return wf_saved_gw }
+
+fn take_saved() { wf_saved_ip = 0 }
+
+fn say(text: u64, value: u64) {
+    serial.puts(text)
+    serial.dec(value)
+    serial.nl()
+}
+
+fn allowed(state: u64) -> bool {
+    return kstate.mode_on(state, kstate.M_WLANFIRST) && wf_falls < MAX_FALLS
+}
+
+fn save_current(state: u64) {
+    if !inet.ready(state) { return }
+    let ip: u64 = inet.ip(state)
+    if ip == 0 || (ip >> 16) == LINK_LOCAL_HIGH { return }
+    if netdev.kind_on(state, netdev.uplink(state)) == netdev.KIND_WLAN { return }
+    wf_saved_ip = ip
+    wf_saved_mask = inet.mask(state)
+    wf_saved_gw = inet.gw(state)
+}
+
+fn engage(state: u64) {
+    var s_probe: [u8; 24] = "wlanfirst: probation n=\0"
+    save_current(state)
+    if kstate.mode_on(state, kstate.M_WFNOGUARD) || !netdev.alt_alive(state) {
+        wf_phase = PHASE_IDLE
+        return
+    }
+    wf_phase = PHASE_PROBATION
+    wf_started = kstate.get(state, kstate.TICKS)
+    wf_next_ask = wf_started
+    wf_bad_since = 0
+    wf_flush_pending = true
+    say((&s_probe[0]) as u64, wf_falls)
+}
+
+fn release() {
+    wf_phase = PHASE_IDLE
+    wf_flush_pending = false
+}
+
+fn fall_back(state: u64, reason: u64) {
+    var s_fall: [u8; 25] = "wlanfirst: fallback why=\0"
+    wf_falls = wf_falls + 1
+    wf_phase = PHASE_FELL_BACK
+    say((&s_fall[0]) as u64, reason)
+    netdev.uplink_prefer(state, netdev.KIND_NONE)
+}
+
+fn probe_gateway(state: u64, t: u64) {
+    var s_ok: [u8; 22] = "wlanfirst: proven ms=\0"
+    if wf_flush_pending {
+        wf_flush_pending = false
+        inet.arp_flush(state)
+    }
+    if inet.gw_known(state) {
+        wf_phase = PHASE_PROVEN
+        wf_proven_at = t
+        wf_bad_since = 0
+        say((&s_ok[0]) as u64, (t - wf_started) * 10)
+        return
+    }
+    if t - wf_started >= PROBATION_TICKS {
+        fall_back(state, REASON_NO_GATEWAY)
+        return
+    }
+    if t >= wf_next_ask {
+        wf_next_ask = t + ASK_TICKS
+        inet.arp_ask(state, inet.gw(state))
+    }
+}
+
+fn watch_health(state: u64, t: u64) {
+    let stage: u64 = nethealth.stage(state)
+    if stage <= nethealth.H_OK || !nethealth.published_since(wf_proven_at) {
+        wf_bad_since = 0
+        return
+    }
+    if wf_bad_since == 0 {
+        wf_bad_since = t
+        return
+    }
+    if t - wf_bad_since >= BAD_TICKS {
+        fall_back(state, REASON_UNHEALTHY)
+    }
+}
+
+fn step(state: u64) {
+    if wf_phase != PHASE_PROBATION && wf_phase != PHASE_PROVEN { return }
+    let t: u64 = kstate.get(state, kstate.TICKS)
+    if t < wf_next_step { return }
+    wf_next_step = t + STEP_TICKS
+    if wf_phase == PHASE_PROBATION {
+        probe_gateway(state, t)
+    } else {
+        watch_health(state, t)
+    }
+}
