@@ -112,7 +112,7 @@ sed 's/^/        /' "$TMPD/gross.txt"
 gr_gr=$(grep -oa 'groesse=[0-9]*' "$TMPD/gross.txt" | cut -d= -f2)
 num "das Verzeichnis liegt hinter der doppelt indirekten Stufe" \
     "${gr_gr:-0}" gt 2134016
-lauf "$TMPD/gross.img" "script=fsrlim big;exit" "$TMPD/grossl.txt" 900
+lauf "$TMPD/gross.img" "script=fsrlim gross;exit" "$TMPD/grossl.txt" 900
 num "alle Eintraege kamen ueber getdents zurueck" \
     "$(val "$TMPD/grossl.txt" fsrlim dents)" eq 12002
 num "und der LETZTE Name liess sich oeffnen" \
