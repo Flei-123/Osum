@@ -35,7 +35,7 @@ import sys.sysuser
 import sys.systerm
 
 export {
-    cx_bit, cx_close_marked, cx_copy, cx_pair, cx_put, cx_result, dir_allowed, do_close, do_dup, do_dup2, do_dup_min, do_fsync, do_ftruncate, do_lseek, do_open_mode, do_pio, do_pipe, do_pipe_flags, do_pvec, do_read, do_recvfrom, do_sendto, do_writev, ev_kind, file_io_loop, fsync_of, nl_name_out, nl_recv_of, nl_run, nl_wait, open_named, page_up, read_of, readable, sa_in, sa_out, sa_un, sock_deadline, sock_gave_up, sock_of, vfs_on_create, wl_recv, wl_send, writable, write_of
+    cx_bit, cx_close_marked, cx_copy, cx_pair, cx_put, cx_result, dir_allowed, do_close, do_dup, do_dup2, do_dup_min, do_fsync, do_ftruncate, do_lseek, do_open_mode, do_pio, do_pipe, do_pipe_flags, do_pvec, do_read, do_recvfrom, do_sendto, do_writev, ev_kind, file_io_loop, fsync_of, nl_name_out, nl_recv_of, nl_run, nl_wait, open_named, page_up, read_of, readable, sa_in, sa_out, sa_un, net_wait, sock_deadline, sock_gave_up, sock_of, vfs_on_create, wl_recv, wl_send, writable, write_of
 }
 
 const SA_BYTES: u64 = 16
@@ -406,6 +406,7 @@ fn pipe_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     var waited: u64 = 0
     var going: bool = true
     while going {
+        let seen: u64 = sched.poll_seq(state)
         if n >= len {
             going = false
         } else {
@@ -419,8 +420,7 @@ fn pipe_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
                 if waited >= sysconst.BLOCK_ROUNDS || (file.open_flags(state, of) & sysconst.UB_O_NONBLOCK) != 0 {
                     going = false
                 } else {
-                    waited = waited + 1
-                    sched.sleep_ticks(state, 1)
+                    waited = waited + net_wait(state, seen)
                 }
             } else {
                 if !file.pipe_put(state, p, sysuser.peek(state, me, buf + n)) {
@@ -1493,6 +1493,7 @@ fn do_recvfrom(state: u64, me: u64, fd: u64, buf: u64, want: u64,
     var n: u64 = 0
     var going: bool = true
     while going {
+        let seen: u64 = sched.poll_seq(state)
         n = inet.sock_recvfrom(state, si, bounce, len, &a, &port)
         if !errno.is_error(n) {
             going = false
@@ -1501,8 +1502,7 @@ fn do_recvfrom(state: u64, me: u64, fd: u64, buf: u64, want: u64,
         } else if nb || sock_gave_up(state, rdl, waited) {
             return sysuser.neg(errno.E_AGAIN)
         } else {
-            waited = waited + 1
-            sched.sleep_ticks(state, 1)
+            waited = waited + net_wait(state, seen)
         }
     }
     if n > 0 {
@@ -1529,6 +1529,7 @@ fn sock_io(state: u64, si: u64, bounce: u64, len: u64, a: u64, port: u64,
     let nb: bool = inet.sock_nonblock(state, si)
     let sdl: u64 = sock_deadline(state, si, true)
     while !sock_gave_up(state, sdl, waited) {
+        let seen: u64 = sched.poll_seq(state)
         if to && sdl == 0 && waited >= SENDTO_ROUNDS {
             return sysuser.neg(errno.E_HOSTUNREACH)
         }
@@ -1547,8 +1548,7 @@ fn sock_io(state: u64, si: u64, bounce: u64, len: u64, a: u64, port: u64,
         if nb {
             return sysuser.neg(errno.E_AGAIN)
         }
-        waited = waited + 1
-        sched.sleep_ticks(state, 1)
+        waited = waited + net_wait(state, seen)
     }
     return sysuser.neg(errno.E_AGAIN)
 }
@@ -1589,6 +1589,12 @@ fn sock_deadline(state: u64, si: u64, snd: bool) -> u64 {
         return 0
     }
     return kstate.get(state, kstate.TICKS) + t + 1
+}
+
+fn net_wait(state: u64, seen: u64) -> u64 {
+    let t0: u64 = kstate.get(state, kstate.TICKS)
+    sched.poll_sleep(state, seen, t0 + 1)
+    return kstate.get(state, kstate.TICKS) - t0
 }
 
 // True when a waiting loop has to stop: the user timeout passed, or --
@@ -2154,6 +2160,7 @@ fn nl_wait(state: u64, me: u64, of: u64, flags: u64) -> u64 {
     let fr: u64 = file.open_off(state, of)
     var waited: u64 = 0
     while !netlink.nl_pending(fr) {
+        let seen: u64 = sched.poll_seq(state)
         if (flags & sysconst.MSG_DONTWAIT) != 0 || (file.open_flags(state, of) & sysconst.UB_O_NONBLOCK) != 0 {
             return sysuser.neg(errno.E_AGAIN)
         }
@@ -2163,8 +2170,7 @@ fn nl_wait(state: u64, me: u64, of: u64, flags: u64) -> u64 {
         if waited >= sysconst.NET_ROUNDS {
             return sysuser.neg(errno.E_AGAIN)
         }
-        waited = waited + 1
-        sched.sleep_ticks(state, 1)
+        waited = waited + net_wait(state, seen)
     }
     return 0
 }

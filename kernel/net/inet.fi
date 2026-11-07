@@ -642,11 +642,13 @@ fn quiet_since(state: u64, t0: u64) -> bool {
 }
 
 fn netd_body(state: u64, index: u64) {
+    set_task(state, index + 1)
     var hot: u64 = HOT_TURNS
     var hot_t0: u64 = now_us(state)
     var seen: u64 = 0
     let old_rule: bool = kstate.mode_on(state, kstate.M_NETDHOT)
     while true {
+        let kick_before: u64 = kstate.get(state, sc(S_KICK))
         var w: u64 = pump(state)
         kodb.service(state, ip(state))
         w = w + share.pump(state)
@@ -673,15 +675,19 @@ fn netd_body(state: u64, index: u64) {
         if hot > 0 {
             sched.yield_now(state)
         } else if !old_rule && quiet_since(state, hot_t0) {
-            sched.sleep_ticks(state, QUIET_TICKS)
+            sched.sleep_ticks_unless(state, sc(S_KICK), kick_before, QUIET_TICKS)
         } else {
-            sched.sleep_ticks(state, 1)
+            sched.sleep_ticks_unless(state, sc(S_KICK), kick_before, 1)
         }
     }
 }
 
 fn wake(state: u64) {
     kstate.add(state, sc(S_KICK), 1)
+    let t: u64 = kstate.get(state, sc(S_TASK))
+    if t != 0 {
+        sched.wake_sleeper(state, t - 1)
+    }
 }
 
 fn arp_at(i: u64) -> u64 {
@@ -1245,6 +1251,7 @@ fn sock_connect(state: u64, i: u64, addr: u64, port: u64) -> u64 {
     netmon.sset(state, i, netmon.S_LPORT, lp as u64)
     netmon.sset(state, i, netmon.S_RADDR, addr)
     netmon.sset(state, i, netmon.S_RPORT, port)
+    wake(state)
     return 0
 }
 
@@ -1406,6 +1413,7 @@ fn sock_send(state: u64, i: u64, src: u64, n: u64) -> u64 {
             return errno.neg(errno.E_AGAIN)
         }
         netmon.pay_out(state, i, got as u64)
+        wake(state)
         return got as u64
     }
     if k == SK_UDP && (sock_flags(state, i) & SF_CONNECTED) != 0 {
@@ -1493,6 +1501,7 @@ fn sock_sendto(state: u64, i: u64, src: u64, n: u64, addr: u64,
         return errno.neg(errno.E_AGAIN)
     }
     netmon.pay_out(state, i, n)
+    wake(state)
     return n
 }
 
@@ -1592,6 +1601,7 @@ fn sock_shutdown(state: u64, i: u64, how: u64) -> u64 {
         let flags: u64 = hold(state)
         stack.net_close(st(state), h as i32)
         drop_lock(state, flags)
+        wake(state)
     }
     return 0
 }
@@ -1610,6 +1620,7 @@ fn sock_close(state: u64, i: u64) {
             stack.udp_close(st(state), h as i32)
         }
         drop_lock(state, flags)
+        wake(state)
     }
     sock_free(state, i)
 }

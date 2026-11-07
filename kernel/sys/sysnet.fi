@@ -452,6 +452,7 @@ fn do_accept(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
     let adl: u64 = sysfd.sock_deadline(state, si, false)
     var got: u64 = inet.SOCK_MAX
     while got >= inet.SOCK_MAX {
+        let seen: u64 = sched.poll_seq(state)
         let c: u64 = inet.sock_accept(state, si)
         if !errno.is_error(c) && c < inet.SOCK_MAX {
             got = c
@@ -460,8 +461,7 @@ fn do_accept(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
         } else if sysfd.sock_gave_up(state, adl, waited) {
             return sysuser.neg(errno.E_AGAIN)
         } else {
-            waited = waited + 1
-            sched.sleep_ticks(state, 1)
+            waited = waited + sysfd.net_wait(state, seen)
         }
     }
     let nfd: u64 = file.fd_alloc(state, me, 0)
@@ -528,6 +528,7 @@ fn do_connect(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
     }
     var waited: u64 = 0
     while waited < sysconst.NET_ROUNDS {
+        let seen: u64 = sched.poll_seq(state)
         let st: u64 = inet.sock_state(state, si)
         if st == 4 {
             return 0
@@ -539,8 +540,7 @@ fn do_connect(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
         if st == 0 && waited > 20 {
             return sysuser.neg(errno.E_CONNREFUSED)
         }
-        waited = waited + 1
-        sched.sleep_ticks(state, 1)
+        waited = waited + sysfd.net_wait(state, seen)
     }
     return sysuser.neg(errno.E_TIMEDOUT)
 }
@@ -1456,11 +1456,11 @@ fn do_uconnect(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
     sched.poll_kick(state)
     var waited: u64 = 0
     while waited < sysconst.NET_ROUNDS {
+        let seen: u64 = sched.poll_seq(state)
         if unixsock.sock_state(state, si) == unixsock.S_CONNECTED {
             return 0
         }
-        waited = waited + 1
-        sched.sleep_ticks(state, 1)
+        waited = waited + sysfd.net_wait(state, seen)
     }
     return sysuser.neg(errno.E_AGAIN)
 }
@@ -1474,6 +1474,7 @@ fn do_uaccept(state: u64, me: u64, fd: u64, flags: u64) -> u64 {
     var waited: u64 = 0
     var got: u64 = unixsock.USOCK_MAX
     while got >= unixsock.USOCK_MAX {
+        let seen: u64 = sched.poll_seq(state)
         got = unixsock.accept_from(state, si)
         if got >= unixsock.USOCK_MAX {
             if nb {
@@ -1482,8 +1483,7 @@ fn do_uaccept(state: u64, me: u64, fd: u64, flags: u64) -> u64 {
             if waited >= sysconst.NET_ROUNDS {
                 return sysuser.neg(errno.E_AGAIN)
             }
-            waited = waited + 1
-            sched.sleep_ticks(state, 1)
+            waited = waited + sysfd.net_wait(state, seen)
         }
     }
     let of: u64 = file.open_alloc(state, file.K_USOCK, got, sysconst.O_RDWR)
@@ -1552,14 +1552,14 @@ fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
             }
             var qwait: u64 = 0
             while unixsock.fd_room(state, si) < nfds {
+                let seen: u64 = sched.poll_seq(state)
                 if unixsock.peer_gone(state, si) {
                     return sysuser.neg(errno.E_PIPE)
                 }
                 if (flags & sysconst.MSG_DONTWAIT) != 0 || qwait >= sysconst.NET_ROUNDS {
                     return sysuser.neg(errno.E_AGAIN)
                 }
-                qwait = qwait + 1
-                sched.sleep_ticks(state, 1)
+                qwait = qwait + sysfd.net_wait(state, seen)
             }
             var k: u64 = 0
             while k < nfds {
@@ -1584,6 +1584,7 @@ fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
         let blen: u64 = sysuser.get64u(state, me, iov + v * 16 + 8)
         var off: u64 = 0
         while off < blen {
+            let seen: u64 = sched.poll_seq(state)
             var chunk: u64 = blen - off
             if chunk > sysconst.MSG_MAX {
                 chunk = sysconst.MSG_MAX
@@ -1597,7 +1598,7 @@ fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
                     }
                     return sysuser.neg(errno.E_AGAIN)
                 }
-                sched.sleep_ticks(state, 1)
+                sysfd.net_wait(state, seen)
             } else {
                 if chunk > free {
                     chunk = free
@@ -1677,6 +1678,7 @@ fn sendmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
     let nonblock: bool = frame_nonblock(state, me, fd, flags)
     var waits: u64 = 0
     while true {
+        let seen: u64 = sched.poll_seq(state)
         if unixsock.peer_gone(state, si) {
             return sysuser.neg(errno.E_PIPE)
         }
@@ -1713,8 +1715,7 @@ fn sendmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
         if nonblock || waits >= sysconst.NET_ROUNDS {
             return sysuser.neg(errno.E_AGAIN)
         }
-        waits = waits + 1
-        sched.sleep_ticks(state, 1)
+        waits = waits + sysfd.net_wait(state, seen)
     }
     return 0
 }
@@ -1728,14 +1729,14 @@ fn recvmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
     let nonblock: bool = frame_nonblock(state, me, fd, flags)
     var waited: u64 = 0
     while unixsock.waiting(state, si) < unixsock.DGRAM_HDR {
+        let seen: u64 = sched.poll_seq(state)
         if unixsock.peer_gone(state, si) {
             return 0
         }
         if nonblock || waited >= sysconst.NET_ROUNDS {
             return sysuser.neg(errno.E_AGAIN)
         }
-        waited = waited + 1
-        sched.sleep_ticks(state, 1)
+        waited = waited + sysfd.net_wait(state, seen)
     }
     var cap: u64 = 0
     var v: u64 = 0
@@ -1846,6 +1847,7 @@ fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
     let iovlen: u64 = sysuser.get64u(state, me, mh + sysconst.MH_IOVLEN)
     var waited: u64 = 0
     while unixsock.waiting(state, si) == 0 {
+        let seen: u64 = sched.poll_seq(state)
         if unixsock.peer_gone(state, si) {
             return 0
         }
@@ -1855,8 +1857,7 @@ fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
         if waited >= sysconst.NET_ROUNDS {
             return sysuser.neg(errno.E_AGAIN)
         }
-        waited = waited + 1
-        sched.sleep_ticks(state, 1)
+        waited = waited + sysfd.net_wait(state, seen)
     }
     var ctlout: u64 = 0
     let ctl: u64 = sysuser.get64u(state, me, mh + MH_CONTROL)

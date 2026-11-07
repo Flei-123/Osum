@@ -4,14 +4,23 @@
 #include <poll.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <signal.h>
+#include <unistd.h>
 #include <sys/eventfd.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <time.h>
 
 #define ROUNDS 200
 #define LIMIT_US 1000
+#define ECHO_IP "10.0.2.100"
+#define ECHO_PORT 7777
 
 static long now_us(void)
 {
@@ -296,6 +305,80 @@ static void bench_socketpair(void)
     report("socketpair_proc_pingpong", v, ROUNDS, LIMIT_US);
 }
 
+static void msg_send(int fd, char c)
+{
+    struct iovec iov = { &c, 1 };
+    struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
+    sendmsg(fd, &mh, 0);
+}
+
+static void msg_recv(int fd, char *c)
+{
+    struct iovec iov = { c, 1 };
+    struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
+    recvmsg(fd, &mh, 0);
+}
+
+static void bench_sendmsg(void)
+{
+    static long v[ROUNDS];
+    int s[2];
+    char c = 'x';
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, s) < 0) {
+        GAP("sendmsg_proc_pingpong", "socketpair failed");
+        return;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        for (int i = 0; i < ROUNDS; i++) {
+            msg_recv(s[1], &c);
+            msg_send(s[1], c);
+        }
+        _exit(0);
+    }
+    for (int i = 0; i < ROUNDS; i++) {
+        long t0 = now_us();
+        msg_send(s[0], c);
+        msg_recv(s[0], &c);
+        v[i] = now_us() - t0;
+    }
+    waitpid(pid, 0, 0);
+    report("sendmsg_proc_pingpong", v, ROUNDS, LIMIT_US);
+}
+
+static void bench_tcp_echo(void)
+{
+    static long v[ROUNDS];
+    struct sockaddr_in ea;
+    char c = 'x';
+    memset(&ea, 0, sizeof ea);
+    ea.sin_family = AF_INET;
+    ea.sin_port = htons(ECHO_PORT);
+    ea.sin_addr.s_addr = inet_addr(ECHO_IP);
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    long t0 = now_us();
+    if (s < 0 || connect(s, (void *)&ea, sizeof ea) < 0) {
+        GAP("tcp_echo_connect", "connect failed errno %d", errno);
+        return;
+    }
+    long conn_us = now_us() - t0;
+    if (conn_us <= LIMIT_US * 10)
+        PASS("tcp_echo_connect", "connect_us=%ld limit_us=%ld", conn_us, LIMIT_US * 10);
+    else
+        FAIL("tcp_echo_connect", "connect_us=%ld limit_us=%ld", conn_us, LIMIT_US * 10);
+    int n = 0;
+    for (int i = 0; i < ROUNDS; i++) {
+        t0 = now_us();
+        if (write(s, &c, 1) != 1 || read(s, &c, 1) != 1)
+            break;
+        v[n++] = now_us() - t0;
+    }
+    if (n < ROUNDS)
+        GAP("tcp_echo_pingpong", "only %d of %d rounds completed", n, ROUNDS);
+    else
+        report("tcp_echo_pingpong", v, ROUNDS, LIMIT_US * 5);
+}
+
 int main(void)
 {
     bench_futex();
@@ -308,5 +391,7 @@ int main(void)
     bench_futex_timeout();
     bench_wake_to_run();
     bench_socketpair();
+    bench_sendmsg();
+    bench_tcp_echo();
     return 0;
 }

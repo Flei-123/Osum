@@ -112,6 +112,25 @@ boot() { # boot <kernel> <disk> <script> <serial-out>
         ${NETARGS:-} -drive "file=$2.live,format=raw,if=ide,index=0${UB_DRIVEX:-}" -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
     local rc=$?; rm -f "$2.live"; return $rc
 }
+word_counter_proofs() {
+    local word name line t wt tests_save=$TESTS
+    for word in $(awk '$1!~/^#/ && $2!=""{print $2}' "$HERE/words.txt" | sort -u); do
+        wt=""
+        for t in $tests_save; do
+            awk -v t="${t#t_}." -v w="$word" 'index($1,t)==1 && $2==w{f=1} END{exit !f}' "$HERE/words.txt" && wt="$wt $t"
+        done
+        [ -n "$wt" ] || continue
+        TESTS=$wt
+        KARGS_EXTRA=$word run_all "$KNEW" "$D/new/disk.img" "word-$word"
+        while read -r name w; do
+            case "$name" in ''|'#'*) continue ;; esac
+            [ "$w" = "$word" ] || continue
+            line=$(grep -a "^$name " "$D/word-$word.all" | head -1)
+            case "$line" in *" PASS"*) bad "word counter-proof: $name PASSES with boot word $word -- the word does not switch the feature off" ;; *) ok "word counter-proof: $name does not pass with boot word $word (${line:-no line})" ;; esac
+        done < "$HERE/words.txt"
+    done
+    TESTS=$tests_save
+}
 pinned_counter_proofs() {
     local ref pinned_tests t name pinned line wt
     for ref in $(awk '$1!~/^#/ && $2!=""{print $2}' "$HERE/fixed.txt" | sort -u); do
@@ -138,9 +157,9 @@ pinned_counter_proofs() {
 run_all() { # run_all <kernel> <disk> <tag>
     for t in $TESTS; do
         local ka="" na=""
-        case "$t" in t_events|t_udpnet|t_netlink) ka="nic nip=10.0.2.15/24 ngw=10.0.2.2"; na="-netdev user,id=n0 -device virtio-net-pci,netdev=n0";; esac
+        case "$t" in t_events|t_udpnet|t_netlink) ka="nic nip=10.0.2.15/24 ngw=10.0.2.2"; na="-netdev user,id=n0 -device virtio-net-pci,netdev=n0";; t_wakelat) ka="nic nip=10.0.2.15/24 ngw=10.0.2.2"; na="-netdev user,id=n0,guestfwd=tcp:10.0.2.100:7777-cmd:cat -device virtio-net-pci,netdev=n0";; esac
         local t0=$SECONDS tv="TMO_$t"
-        TMO=${!tv:-$TMO} KARGS="$ka" NETARGS="$na" boot "$1" "$2" "/bin/$t" "$D/$3-$t.ser"; rc=$?
+        TMO=${!tv:-$TMO} KARGS="$ka ${KARGS_EXTRA:-}" NETARGS="$na" boot "$1" "$2" "/bin/$t" "$D/$3-$t.ser"; rc=$?
         local el=$((SECONDS-t0))
         grep -a '^T ' "$D/$3-$t.ser" 2>/dev/null | awk '!seen[$2]++' > "$D/$3-$t.res" || : > "$D/$3-$t.res"
         printf '        %-12s %3d checks   (qemu rc=%s, %ss)\n' "$t" "$(wc -l < "$D/$3-$t.res")" "$rc" "$el"
@@ -333,6 +352,10 @@ while [ -z "${REGEN:-}" ] && read -r name; do
     case "$line" in *" PASS"*) ok "$name" ;; *) bad "$name  ->  ${line:-no line (crash or hang?)}" ;; esac
 done < "$HERE/accept.txt"
 
+if [ -z "${REGEN:-}" ]; then
+    echo "== 5b. counter-proof by boot word: with the word the feature is off and the checks of words.txt must NOT pass =="
+    word_counter_proofs
+fi
 if [ -n "${OLDKERNEL:-}" ] || [ -n "${OLDK:-}" ]; then
     echo "== 6. counter-proof: the same tests on the kernel from before this round ($OLDREF) must NOT pass the fixed checks (fixed.txt) =="
     KOLD=${OLDK:-}
