@@ -11,9 +11,9 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 if python3 -I tools/pidkill/lint.py . > "$work/real.log"; then
-    ok "tools/ has no name-based process kills ($(tail -1 "$work/real.log"))"
+    ok "repo has no name-based process kills ($(tail -1 "$work/real.log"))"
 else
-    bad "tools/ has name-based process kills"
+    bad "repo has name-based process kills"
     head -20 "$work/real.log"
 fi
 
@@ -41,6 +41,38 @@ if python3 -I tools/pidkill/lint.py "$work/mut" > /dev/null; then
 else
     ok "counter-proof: pgrep -f feeding kill is caught"
 fi
+
+mkdir -p "$work/mut/tools/probe" "$work/mut/scripts"
+verb_c="kill"
+printf 'for p in $(pgrep qemu-system-x86_64); do %s "$p"; done\n' "$verb_c" > "$work/mut/tools/probe/a.sh"
+if python3 -I tools/pidkill/lint.py "$work/mut" > /dev/null; then
+    bad "counter-proof: pgrep without -f feeding kill was not caught"
+else
+    ok "counter-proof: pgrep without -f feeding kill is caught"
+fi
+
+printf 'pgrep -x heavy | xargs %s\n' "$verb_c" > "$work/mut/tools/probe/a.sh"
+if python3 -I tools/pidkill/lint.py "$work/mut" > /dev/null; then
+    bad "counter-proof: pgrep piped to xargs kill was not caught"
+else
+    ok "counter-proof: pgrep piped to xargs kill is caught"
+fi
+
+printf '%s -9 -1\n' "$verb_c" > "$work/mut/tools/probe/a.sh"
+if python3 -I tools/pidkill/lint.py "$work/mut" > /dev/null; then
+    bad "counter-proof: kill of every process was not caught"
+else
+    ok "counter-proof: kill of every process is caught"
+fi
+
+rm -f "$work/mut/tools/probe/a.sh"
+printf '%s -f qemu\n' "$verb_a" > "$work/mut/scripts/cleanup.sh"
+if python3 -I tools/pidkill/lint.py "$work/mut" > /dev/null; then
+    bad "counter-proof: name-based kill outside tools/ was not caught"
+else
+    ok "counter-proof: name-based kill outside tools/ is caught"
+fi
+rm -f "$work/mut/scripts/cleanup.sh"
 
 printf 'kill "$pid"; wait "$pid"\n' > "$work/mut/tools/probe/a.sh"
 if python3 -I tools/pidkill/lint.py "$work/mut" > /dev/null; then
