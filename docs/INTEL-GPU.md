@@ -101,3 +101,12 @@ Sources: Linux 6.12.101 (`include/drm/intel/i915_pciids.h`, `display/intel_dp_au
 - Kernel: boot words `intelgpuflip` (back buffer = `frame_run`, copy of the front + marker bar, one checked flip to it, hold 400 ms, flip back) and `intelgpumode` (apply_same + 5 s watchdog + stability check, revert + front restore on failure). Write policy in `kernel/drv/gpu/intel/mmio.fi`: only AUX, PLANE_SURF (flip word), the four timing registers (mode word) and the PTE range of the back buffer; everything else counts in `denied=`. `/proc/intelgpu` shows `flip_*`, `mode_*`, `ptes=`.
 - Not wired: the desktop does not draw into the back buffer yet (`fb.flip_setup` is Bochs-VBE only); `igflip.present`/`back_addr` are the hooks.
 - HP evidence (07.11., regdump): firmware already maps GGTT beyond the framebuffer (PTE idx 4096 at `0x808000` = `0xb5800001`, contiguous from `0xb4800000`); a PTE write at that offset (`0xb4801001`) read back correctly and was restored to `0xb5800001`. Boot words cannot be set over OTA on the HP, so the kernel path is not run at the HP yet.
+
+## 8. Desktop back buffer (07.11.2026)
+
+- Boot word `intelgpuback` (default off, needs `intelgpu` hardware path: GGTT + front verified by `dbuf.setup`). `igflip.stage` also runs for this word (no marker bar, no self-test unless `intelgpuflip` is set).
+- `fb` got a generic hook (`fbdraw.ext_attach(state, hook)`, cell `S_EXT` 0xFF0): `draw_base`, `shown_base` (used by `front_paar`/`front_pixel`) and `flip` call `hook(state, EXT_DRAW|EXT_SHOWN|EXT_PRESENT)`. VBE flipping is unchanged; `kgstage` tries the hook only when `fb.flip_setup` failed.
+- `kernel/drv/gpu/intel/igback.fi`: hook = back/front addresses from `gpu.intel.backbuf` state; present = `arch.cache_writeback` + `dbuf.present` (`flip_checked`, rollback to the shown surface).
+- `lib/gpu/intel/backbuf.fi`: `commit` returns PRESENTED / RETRY (rolled back, shown unchanged, max 2 retries) / OFF_COPY (3rd miss: restore front, copy the drawn back buffer into the front, `fb.ext_detach`) / OFF / STUCK (restore failed: draw into the shown surface). The WM does a full-frame flush before each flip, so the stale hidden buffer is never reused partially.
+- `/proc/intelgpu`: `back_mode=`, `back_presented=`, `back_last=`, `back_offs=`.
+- Open: `wbinvd` per present is costly on real HW (needs a WC mapping of the back buffer or ranged clflush); direct writers to `fb.addr` (panic screen, `write_bytes`) bypass the back buffer; not run on the HP.
