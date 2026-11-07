@@ -401,7 +401,7 @@ if [ -n "$clicks" ]; then
     # runs shared it. MEASURED on this host, same disk, same click:
     # idle the settings page reported 34 texts and 6 buttons, under a
     # load of eleven it reported 11 and 0 -- the click had switched the
-    # page (`settings: stand reiter=7` is in the log) and the picture
+    # page (`settings: state tab=7` is in the log) and the picture
     # was taken before it was painted. Four green assertions went red
     # without a single line of the system changing.
     #

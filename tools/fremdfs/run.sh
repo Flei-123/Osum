@@ -414,8 +414,8 @@ rc=$(lauf schmutz "$TMPD/root.img" "$TMPD/schmutz-part.img" \
     "osum nokbd vfs script=fremdfs ext4 /dev/hdb1 /mnt")
 num "[unsauber] der Kernel beendet sich selbst" "$rc" eq 21
 sagt "$TMPD/schmutz.txt" mount 1 \
-    "[unsauber] ein unsauber ausgehaengtes ext4 wird NUR LESEND eingehaengt"
-hat "$TMPD/schmutz.txt" "ext4: WARNUNG unsauber ausgehaengt" \
+    "[unsauber] ein unclean unmountes ext4 wird NUR LESEND eingehaengt"
+hat "$TMPD/schmutz.txt" "ext4: WARNING unclean unmount" \
     "[unsauber] und der Treiber WARNT im Klartext"
 
 # ------------------------------------------------- 7b. DIE ABSCHALTBARKEIT

@@ -101,7 +101,7 @@ CMD
 }
 
 current_tab() {
-    grep -a 'settings: stand reiter=' "$OUT/serial.txt" | tail -1 | sed -n 's/.*reiter=\([0-9]*\).*/\1/p'
+    grep -a 'settings: state tab=' "$OUT/serial.txt" | tail -1 | sed -n 's/.*reiter=\([0-9]*\).*/\1/p'
 }
 
 wait_for_tab() {

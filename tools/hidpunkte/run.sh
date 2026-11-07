@@ -115,8 +115,8 @@ BASE="modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nosched noproc nofs"
 echo
 echo "== 2. JUSTIN'S SETUP: the input hangs on the SECOND controller =="
 lauf justin "$JUSTIN" "$BASE" 120
-hat "$TMPD/justin.txt" 'usb: wahl' "die Wahl steht im Bericht (usb: wahl ...)"
-W=$(grep -a '^usb: wahl' "$TMPD/justin.txt" | tail -1)
+hat "$TMPD/justin.txt" 'usb: choice' "die Wahl steht im Bericht (usb: choice ...)"
+W=$(grep -a '^usb: choice' "$TMPD/justin.txt" | tail -1)
 echo "        $W"
 is "der Regler mit Tastatur und Maus gewinnt" \
    "$(echo "$W" | sed -n 's/.*-> hc\([0-9]*\).*/\1/p')" 1
@@ -134,7 +134,7 @@ echo "== 3. GEGENPROBE: dieselbe Aufstellung UMGEKEHRT =="
 echo "   input on the FIRST controller, the weak HID on the second. Without"
 echo "   this probe a fixed choice would only have become another one."
 lauf umgek "$UMGEKEHRT" "$BASE" 120
-W2=$(grep -a '^usb: wahl' "$TMPD/umgek.txt" | tail -1)
+W2=$(grep -a '^usb: choice' "$TMPD/umgek.txt" | tail -1)
 echo "        $W2"
 is "jetzt gewinnt hc0" "$(echo "$W2" | sed -n 's/.*-> hc\([0-9]*\).*/\1/p')" 0
 gt "und die Tasten kommen genauso an" "$(feld "$TMPD/umgek.txt" ta)" 0

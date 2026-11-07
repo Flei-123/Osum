@@ -31,7 +31,7 @@ hat() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hat_nicht() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
 
 ew() { # datei nummer name
-    grep -a '^disp: eigen ' "$1" 2>/dev/null | sed -n "$2p" \
+    grep -a '^disp: own ' "$1" 2>/dev/null | sed -n "$2p" \
         | grep -ao "$3=[0-9]*" | head -1 | sed 's/.*=//' | tr -d '\r\000'; }
 kw() { grep -ao "^disp:.*[ =]$2=[0-9a-fx]*" "$1" 2>/dev/null | head -1 \
        | grep -ao "$2=[0-9a-fx]*" | head -1 | sed 's/.*=//' | tr -d '\r\000'; }
@@ -227,7 +227,7 @@ VGA_STD="-device VGA,edid=off,vgamem_mb=64" \
     foto schranken "gfx disp dispeigenbad nocursor fbtest fbhold $GRUND"
 num "der Lauf endet sauber -- eine abgelehnte Zahl haelt den Kernel NICHT an" "$RC" eq 21
 S="$TMPD/schranken.txt"
-gleich "drei Anfragen, drei Antworten" "3" "$(grep -ac '^disp: eigen ' "$S")"
+gleich "drei Anfragen, drei Antworten" "3" "$(grep -ac '^disp: own ' "$S")"
 
 gleich "1. Schranke: dieser Kernel kann es nicht einblenden (Grund 3)" "3" "$(ew "$S" 1 why)"
 gleich "   und die genannte Zahl ist GENAU das, was das Bild braucht" \
@@ -413,7 +413,7 @@ echo "== 8. THE NEGATIVE TEST: the same kernel without the word 'disp' =="
 rc=$(lauf ohne "gfx dispeigen dispeigenbad $GRUND")
 num "der Lauf endet sauber" "$rc" eq 21
 O="$TMPD/ohne.txt"
-hat_nicht "$O" "disp: eigen" "ohne 'disp' wird keine eigene Aufloesung gesetzt"
+hat_nicht "$O" "disp: own" "ohne 'disp' wird keine eigene Aufloesung gesetzt"
 hat_nicht "$O" "disp: tiles" "und keine Belegung gemeldet"
 hat_nicht "$O" "disp: save" "und die Platte wird nicht angefasst"
 hat "$O" "fb: 800x600x32" "der Bildschirm von Runde K7 steht unveraendert"

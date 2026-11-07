@@ -286,7 +286,7 @@ is "root liest /etc/shadow" "$(nth "$F" wdeny 1)" "1"
 is "justin liest /etc/shadow NICHT" "$(nth "$F" wdeny 2)" "0"
 has "$F" "uid=1000(justin) gid=1000 euid=1000(justin) egid=1000" \
     "id nennt Kennung UND Namen aus /etc/passwd"
-has "$F" "su: falsches Passwort" "su lehnt ein falsches Passwort ab"
+has "$F" "su: wrong password" "su lehnt ein falsches Passwort ab"
 is "und gibt dabei 1 zurueck" "$(val "$F" 'badpw=[0-9]+')" "1"
 has "$F" "uid=0(root) gid=0 euid=0(root) egid=0" \
     "MIT dem richtigen Passwort wird justin zu root"

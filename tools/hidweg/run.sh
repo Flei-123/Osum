@@ -2,8 +2,8 @@
 #
 #   bash tools/hidweg/run.sh
 #
-#     usbleg: gut=2 schlecht=0
-#     usb: hc1 ... id=1022:149c ... strom=8/8 verbunden=2 frei=2
+#     usbleg: gut=2 bad=0
+#     usb: hc1 ... id=1022:149c ... power=8/8 verbunden=2 frei=2
 #     usb: port=3 ... id=046d:c08b class=03:01:02 driver=mouse
 #     usb: port=4 ... id=046d:c336 class=03:01:01 driver=kbd
 #     usb: devices=2 kbd=1 mouse=1 ... events=36 irqs=23
@@ -174,7 +174,7 @@ is "Maus"                          "$(echo "$D" | sed -n 's/.*mouse=\([0-9]*\).*
 hat "$TMPD/neu.txt" 'driver=kbd'   "die Tastatur ist gebunden"
 hat "$TMPD/neu.txt" 'driver=mouse' "die Maus ist gebunden"
 is "beide Regler melden ihre Meldeart" \
-    "$(grep -ac 'usb: hc[0-9] melde=' "$TMPD/neu.txt")" 2
+    "$(grep -ac 'usb: hc[0-9] report=' "$TMPD/neu.txt")" 2
 
 echo
 echo "== 7. the priority order of the interfaces (built descriptor) =="

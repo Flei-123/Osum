@@ -1177,7 +1177,7 @@ suchmon "$M" 1.2 b l a u
 foto dsuche "gfx wm wigstart wmhold wiglong $GRUND" "$M"
 has "$TMPD/dsuche.txt" "launcher: suche [blau] treffer=1 apps=0   dateien=1" \
     "typed 'blau': one hit, and it is NOT a program but a file"
-has "$TMPD/dsuche.txt" "launcher: datei i=0 name=[/data/bilder/blau.ppm]" \
+has "$TMPD/dsuche.txt" "launcher: file i=0 name=[/data/bilder/blau.ppm]" \
     "and it is the file that really lies there"
 grep -q '^/data/bilder/blau.ppm ' "$TMPD/disk.ls" \
     && ok "which the image really carries at this place" \

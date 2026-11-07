@@ -215,8 +215,8 @@ F="$TMPD/dienste.txt"
 is "die Maschine faehrt ueber ACPI herunter (QEMU beendet sich mit 0)" "$rc" "0"
 has "$F" "osum: pid1 init" "der Kern startet init und nicht die Shell"
 is "und der Kern sagt es auch" "$(val "$F" 'init=[0-9]+')" "1"
-has "$F" "init: wurzel=1" "init hat die Wurzel nachgeprueft und sie steht"
-has "$F" "init: ziel=konsole" "das Ziel kommt aus /etc/ziel"
+has "$F" "init: root=1" "init hat die Wurzel nachgeprueft und sie steht"
+has "$F" "init: target=konsole" "das Ziel kommt aus /etc/ziel"
 has "$F" "init: dienste=9" "init liest /etc/inittab und findet neun Dienste"
 hasnot "$F" "init: I am not process 1" "init IST der Prozess 1"
 
@@ -317,7 +317,7 @@ else bad "the number of reaped children does not separate the two runs (${wr:-?}
 echo "== 4. THE NEGATIVE TEST FOR THE TARGET: the same tree with /etc/ziel=grafik =="
 rc=$(run_case grafik "$TMPD/dg.img" "osum $BASE script=sh /t/kurz.sh" 300 -no-reboot)
 G="$TMPD/grafik.txt"
-has "$G" "init: ziel=grafik" "das Ziel ist ein anderes"
+has "$G" "init: target=grafik" "das Ziel ist ein anderes"
 is "JETZT laeuft der grafische Dienst" "$(sp "$G" fenster 2 head)" "running"
 gs=$(spmax "$G" fenster 4)
 if [ -n "${gs:-}" ] && [ "$gs" -ge 1 ]; then

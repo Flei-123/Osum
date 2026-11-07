@@ -263,7 +263,7 @@ foto 02-startmenue
 #
 #
 #     launcher: ready
-#     launcher: fokus weg t=9226 gnade=6335
+#     launcher: focus lost t=9226 gnade=6335
 #     launcher: zugemacht
 #     ...
 #     osum: syscalls=7 forks=0 execves=0     <- NIE ein Programm

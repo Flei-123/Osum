@@ -80,7 +80,7 @@ SER="$OUT/stick.txt"
 rm -f "$SER" "$SOCK"
 
 #     osum: pid1 init
-#     init: ziel=grafik
+#     init: target=grafik
 #     init: dienste=1
 #     init: herunterfahren      <- und `k15: start` kam nie
 #
@@ -225,7 +225,7 @@ platte_lauf() { # <name> <skript> <limit>
         if [ -n "$skript" ]; then
             #
             #     osum: pid1 init
-            #     init: ziel=grafik
+            #     init: target=grafik
             #     init: herunterfahren
             #
             echo "    cmdline: osum vfs nokbd nosched noproc nofs noring3 initsh script=$skript"

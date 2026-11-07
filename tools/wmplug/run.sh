@@ -188,7 +188,7 @@ hasre "$S" '^plugboese: slot=[0-9]+ rechte=2049$' \
     "es hat genau die Rechte aus /etc/wmplug.conf (0x801 = 2049: sehen + Leiste)"
 has "$S" "plugboese: leiste gesetzt, rc=0" \
     "es hat VOR dem Absturz ein Feld in der Leiste besetzt (WM_PLUG_BAR)"
-has "$S" "plugboese: gleich stuerze ich ab" "es sagt an, dass es gleich abstuerzt"
+has "$S" "plugboese: about to crash" "es sagt an, dass es gleich abstuerzt"
 hasre "$S" 'wmplug: tot slot=[0-9]+ pid=[0-9]+' \
     "der Kern hat den Toten selbst abgeholt (reap)"
 hasflat "$S" 'unreg boesebar *grund=1' \
@@ -267,7 +267,7 @@ abbild hang 'boese hang' || bad "hang: the image is not built"
 lauf hang "plugfrist" '^wm: hold'
 H=$TMPD/hang.clean
 sauber hang
-has "$H" "plugboese: ab jetzt hole ich nichts" "das Plugin hoert auf abzuholen"
+has "$H" "plugboese: from now on fetch nothing" "das Plugin hoert auf abzuholen"
 hasflat "$H" 'unreg boese *grund=2' \
     "die Frist hat gegriffen: abgemeldet mit grund=2 (G_FRIST)"
 has "$H" "wm: hold" "der Schreibtisch steht auch danach"

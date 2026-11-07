@@ -1423,6 +1423,6 @@ exit 0
 # /sbin/init when the image has one, and init reads `/etc/ziel` = grafik
 # from this image. Without `gfx` there is no graphics, init finds no
 # service, and shuts the machine down -- this entry gave NO command line
-# ("init: ziel=grafik", "init: herunterfahren", measured in
+# ("init: target=grafik", "init: herunterfahren", measured in
 # tools/stick/run.sh). `initsh` is the kernel's own word for "the shell is
 # the first process"; the same holds for the `netlauf` entry below.

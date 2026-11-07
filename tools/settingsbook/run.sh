@@ -13,7 +13,7 @@
 #     2nd call (--continue=, --exchange) -> state ok, `exchange = offline`
 #   The drehbuch opens Settings, clicks the tab "Konten" (rect `tabi` (driver name srecttabi)), clicks the button (rect
 #   `kbook`, reported by settings since r126) twice, takes a picture after each step.
-#   settings prints `settings: stand reiter=8 ... konto=[<status line>] book=[<book line>]`.
+#   settings prints `settings: state tab=8 ... konto=[<status line>] book=[<book line>]`.
 #
 # WHAT IT CHECKS (serial log)
 #   1. the Konten page reports the button rect `kbook` (and `kdev`);
@@ -74,10 +74,10 @@ grep -aq 'settings: rect name=kdev ' "$S" && ok "... and kdev" || bad "no rect k
 grep -aq 'klickauf srectkbook -> ' "$OUT/fahren.log" 2>/dev/null && ok "the runner clicked kbook" || bad "the runner found no kbook"
 
 # the lines of the Konten page, in order
-grep -a 'settings: stand reiter=8 .* konto=\[' "$S" | sed 's/.* konto=\[//; s/\] book=\[.*//' > "$OUT.konto"
-grep -a 'settings: stand reiter=8 .* konto=\[' "$S" | sed 's/.* book=\[//; s/\]$//' | tr -d '\r' > "$OUT.book"
+grep -a 'settings: state tab=8 .* konto=\[' "$S" | sed 's/.* konto=\[//; s/\] book=\[.*//' > "$OUT.konto"
+grep -a 'settings: state tab=8 .* konto=\[' "$S" | sed 's/.* book=\[//; s/\]$//' | tr -d '\r' > "$OUT.book"
 N=$(wc -l < "$OUT.konto")
-[ "$N" -ge 1 ] && ok "the page printed its status lines ($N)" || bad "no 'settings: stand reiter=8 ... konto=[' line"
+[ "$N" -ge 1 ] && ok "the page printed its status lines ($N)" || bad "no 'settings: state tab=8 ... konto=[' line"
 FIRST=$(head -1 "$OUT.konto" | tr -d '\r')
 [ -z "$FIRST" ] && ok "before the click the status line is empty" || bad "status line before the click: '$FIRST'"
 C1=$(grep -a 'ABCD-EFGH' "$OUT.konto" | head -1 | tr -d '\r')

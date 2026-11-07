@@ -403,7 +403,7 @@ done
 u_anz=$(uw "$R" count)
 same "also the length of the list" "$anz" "$u_anz"
 #
-k_panel=$(grep -ao '^disp: eigen .* panel=[0-9]*x[0-9]*' "$R" 2>/dev/null \
+k_panel=$(grep -ao '^disp: own .* panel=[0-9]*x[0-9]*' "$R" 2>/dev/null \
     | tail -1 | grep -ao 'panel=[0-9]*' | sed 's/panel=//')
 [ -n "$k_panel" ] || k_panel=$(grep -ao '^fb: [0-9]*x[0-9]*' "$R" 2>/dev/null \
     | head -1 | sed 's/^fb: //' | cut -dx -f1)

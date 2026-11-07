@@ -34,7 +34,7 @@ kvb=$(echo "$lb" | grep -oE 'kvis=[0-9]+' | grep -oE '[0-9]+')
 [ -n "$kdb" ] && [ "${kvb:-x}" = "$kdb" ] && ok "with hidden shown all $kdb are visible (the filter is what hides them)" || bad "counter-proof: $lb"
 
 echo "== 3. no pseudo drive in the pane =="
-if grep -aE 'explorer: traeger i=[0-9]+ .*' "$SA" | grep -aqE '/(proc|dev|sys)'; then
+if grep -aE 'explorer: drive i=[0-9]+ .*' "$SA" | grep -aqE '/(proc|dev|sys)'; then
     bad "a pseudo file system is listed as a drive"
 else
     ok "no /proc /dev /sys drive row"
@@ -44,7 +44,7 @@ echo "== 3b. drive label percent (W6): the label built a second time must not do
 pp=$(grep -aE 'explorer: pctprobe ' "$SA" | tail -1 | sed 's/.*pctprobe //' | tr -d '\r')
 [ -n "$pp" ] && ok "the pane built its labels and ran the self-check ($pp)" || bad "no 'explorer: pctprobe' line in the serial output"
 [ "$pp" = "/ 92%" ] && ok "second build over stale bytes reads '/ 92%' (not '/ 92%92%')" || bad "second build reads '$pp' (expected '/ 92%')"
-if grep -aE 'explorer: traeger i=[0-9]+ .*lbl=' "$SA" | grep -aqE 'lbl=.*%.*%'; then
+if grep -aE 'explorer: drive i=[0-9]+ .*lbl=' "$SA" | grep -aqE 'lbl=.*%.*%'; then
     bad "a real drive label carries two percent signs"
 else
     ok "no real drive label has two percent signs"

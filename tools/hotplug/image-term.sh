@@ -65,7 +65,7 @@ stecke stk $ARB/stick.img
 aufzeile wechsel: kommt
 warte 10
 foto $ARB/20-steckt.ppm
-aufzeile wechsel: auswerfen
+aufzeile wechsel: eject
 warte 8
 foto $ARB/30-danach.ppm
 warte 2

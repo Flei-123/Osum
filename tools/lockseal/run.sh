@@ -23,7 +23,7 @@
 #   3. events        no a11y event about an emptied node
 #   4. window table  root's list shows the lock screen only (no title, no id
 #                    of the window behind)
-#   5. keys          Alt+Tab, Alt+Q, F11 are dropped ("wm: hot gesperrt"), no
+#   5. keys          Alt+Tab, Alt+Q, F11 are dropped ("wm: hot locked"), no
 #                    focus change, no "wm: hot getan=1", the window is still
 #                    there after the unlock
 #   6. mouse         a click at the place of the window behind does not raise
@@ -240,7 +240,7 @@ if [ -n "$VID" ]; then
     n=$(printf '%s\n' "$LK" | grep -aEc "wm: fokus id=$VID( |$)")
     [ "$n" = 0 ] && ok "no focus change to the window behind the lock while locked: $n" || bad "the window behind the lock got the focus $n times"
 fi
-n=$(printf '%s\n' "$LK" | grep -ac 'wm: hot gesperrt')
+n=$(printf '%s\n' "$LK" | grep -ac 'wm: hot locked')
 [ "$n" -ge 3 ] && ok "shortcuts reached the window server and were dropped: $n" || bad "shortcut lines dropped: $n (expected >= 3)"
 n=$(printf '%s\n' "$LK" | grep -ac 'wm: hot getan=1')
 [ "$n" = 0 ] && ok "no shortcut did anything while locked (getan=1: $n)" || bad "shortcuts that DID something while locked: $n"

@@ -285,7 +285,7 @@ if ALLTAGBUILD="$B8/bd" bash tools/alltag/build.sh "$B8/o" desk=no accel=kvm sho
         P8=$!
         local i
         for i in $(seq 1 600); do
-            grep -qa 's3: sleep cycle\|standby: antwort=' "$L8" 2>/dev/null && break
+            grep -qa 's3: sleep cycle\|standby: reply=' "$L8" 2>/dev/null && break
             kill -0 "$P8" 2>/dev/null || break
             sleep 0.2
         done
@@ -293,7 +293,7 @@ if ALLTAGBUILD="$B8/bd" bash tools/alltag/build.sh "$B8/o" desk=no accel=kvm sho
         ST8=$(echo 'info status' | socat - "UNIX-CONNECT:$sock" 2>/dev/null | tr -d '\r' | grep -ao 'VM status: .*' | head -1)
         case $ST8 in *suspended*) echo system_wakeup | socat - "UNIX-CONNECT:$sock" >/dev/null 2>&1 ;; esac
         for i in $(seq 1 300); do
-            [ "$(grep -ac 'standby: antwort=' "$L8" 2>/dev/null)" -ge 2 ] && break
+            [ "$(grep -ac 'standby: reply=' "$L8" 2>/dev/null)" -ge 2 ] && break
             kill -0 "$P8" 2>/dev/null || break
             sleep 0.2
         done
@@ -305,14 +305,14 @@ if ALLTAGBUILD="$B8/bd" bash tools/alltag/build.sh "$B8/o" desk=no accel=kvm sho
     has "$L8" "standby: wunsch gestellt" "the program put the wish"
     has "$L8" "standby: wunsch" "the kernel took it up in the window server's loop"
     case $ST8 in *suspended*) ok "the machine sleeps ($ST8)";; *) bad "state at the standby: '$ST8'";; esac
-    n=$(grep -ac 'standby: antwort=1' "$L8"); num "the answer 1 (slept and woke), kernel + program" "$n" eq 2
+    n=$(grep -ac 'standby: reply=1' "$L8"); num "the answer 1 (slept and woke), kernel + program" "$n" eq 2
     case $ST9 in *running*) ok "and it runs again after the wake-up ($ST9)";; *) bad "state after the wake-up: '$ST9'";; esac
     # DD-12 (K-004c): the other processors are parked before the sleep and started again
     # after it -- with two and with four processors the menu's path now sleeps and wakes
     # (tools/s3smp/run.sh measures the cores one by one, tools/s3dev/run.sh the devices)
     for np in 2 4; do
         lauf8 "cores$np" "$np"
-        n=$(grep -ac 'standby: antwort=1' "$L8"); num "$np processors: the answer 1 (slept and woke), kernel + program" "$n" eq 2
+        n=$(grep -ac 'standby: reply=1' "$L8"); num "$np processors: the answer 1 (slept and woke), kernel + program" "$n" eq 2
         case $ST8 in *suspended*) ok "$np processors: the machine sleeps ($ST8)";; *) bad "$np processors: state at the standby: '$ST8'";; esac
         case $ST9 in *running*) ok "$np processors: and it runs again after the wake-up ($ST9)";; *) bad "$np processors: state after the wake-up: '$ST9'";; esac
         has "$L8" "s3: cores back online=$np" "$np processors: all cores are back"
@@ -341,7 +341,7 @@ if ALLTAGBUILD="$B8/bd" bash tools/alltag/build.sh "$B8/o" desk=no accel=kvm sho
         for i in $(seq 1 600); do
             [ "$keys" = 1 ] && ! grep -qa 'standby: wunsch' "$L9" 2>/dev/null && [ "$i" -gt 40 ] \
                 && echo 'sendkey sleep' | socat - "UNIX-CONNECT:$sock" >/dev/null 2>&1
-            grep -qa 's3: sleep cycle\|standby: antwort=' "$L9" 2>/dev/null && break
+            grep -qa 's3: sleep cycle\|standby: reply=' "$L9" 2>/dev/null && break
             kill -0 "$P9" 2>/dev/null || break
             sleep 0.5
         done
@@ -349,7 +349,7 @@ if ALLTAGBUILD="$B8/bd" bash tools/alltag/build.sh "$B8/o" desk=no accel=kvm sho
         ST10=$(echo 'info status' | socat - "UNIX-CONNECT:$sock" 2>/dev/null | tr -d '\r' | grep -ao 'VM status: .*' | head -1)
         case $ST10 in *suspended*) echo system_wakeup | socat - "UNIX-CONNECT:$sock" >/dev/null 2>&1 ;; esac
         for i in $(seq 1 100); do
-            [ "$(grep -ac 'standby: antwort=' "$L9" 2>/dev/null)" -ge 1 ] && break
+            [ "$(grep -ac 'standby: reply=' "$L9" 2>/dev/null)" -ge 1 ] && break
             kill -0 "$P9" 2>/dev/null || break
             sleep 0.5
         done
@@ -362,7 +362,7 @@ if ALLTAGBUILD="$B8/bd" bash tools/alltag/build.sh "$B8/o" desk=no accel=kvm sho
     has "$L9" "hk: sleep" "sleep key: the keyboard driver saw E0 5F"
     has "$L9" "standby: wunsch" "sleep key: the window server's loop took the wish up"
     case $ST10 in *suspended*) ok "sleep key: the machine sleeps ($ST10)";; *) bad "sleep key: state at the standby: '$ST10'";; esac
-    n=$(grep -ac 'standby: antwort=1' "$L9"); num "sleep key: the answer 1 (slept and woke)" "$n" ge 1
+    n=$(grep -ac 'standby: reply=1' "$L9"); num "sleep key: the answer 1 (slept and woke)" "$n" ge 1
     case $ST11 in *running*) ok "sleep key: runs again after the wake-up ($ST11)";; *) bad "sleep key: state after the wake-up: '$ST11'";; esac
     lauf9 nokey 1 0
     hasnot "$L9" "hk: sleep" "counter-proof: no key, no sleep key line"

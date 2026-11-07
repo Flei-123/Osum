@@ -22,7 +22,7 @@ def main(path):
           "pin starts: three times the menu item = 3 starts, the left click none (saw %d)" % len(starts))
     sw = re.findall(r"taskbar: pin schalte terminal", txt)
     check(len(sw) >= 1, "the left click on the running pin only switched the window (%d switch line(s))" % len(sw))
-    check("taskbar: pin neu starte" in txt, "the context menu item 'New window' was taken")
+    check("taskbar: pin new start" in txt, "the context menu item 'New window' was taken")
     last = sn[-1] if sn else {}
     peak = max((len(x) for x in sn), default=0)
     check(peak >= 4, "console + three menu windows at once: saw %d" % peak)

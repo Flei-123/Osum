@@ -54,7 +54,7 @@ rc=$(boot "$T/a.img" "$T/a.txt")
 [ "$rc" = 0 ] && ok "machine powers off through ACPI (qemu exit 0)" || bad "qemu exit $rc"
 A="$T/a.txt"
 has "$A" "osum: pid1 init" "kernel starts /bin/init"
-has "$A" "init: ziel=konsole" "target konsole from /etc/ziel"
+has "$A" "init: target=konsole" "target konsole from /etc/ziel"
 has "$A" "init: dienste=4" "init reads /etc/inittab: 4 services"
 has "$A" "^dhcp running" "svc status: dhcp running"
 has "$A" "^sh running" "svc status: console shell running"

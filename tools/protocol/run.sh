@@ -211,7 +211,7 @@ num "(c) resolved symbols in the report" "${n:-0}" ge 1
 # ---- /bin/log
 run_vm_disk "$K0" "osum $QUIET logall script=log -z;log -p HALLOWELT;log -n 4;exit" \
     "$TMPD/tool.txt" "$TMPD/disk.img"
-has "$TMPD/tool.txt" "zeilen:" "/bin/log -z shows the numbers of the ring"
+has "$TMPD/tool.txt" "lines:" "/bin/log -z shows the numbers of the ring"
 has "$TMPD/tool.txt" "HALLOWELT" "/bin/log -p writes a line into the ring"
 grep -qa 'prog *: HALLOWELT' "$TMPD/tool.txt" \
     && ok "the written line shows as source 'prog' in the ring" \
@@ -339,10 +339,10 @@ else
 fi
 has "$TMPD/panic.txt" "*** EXCEPTION" "(b) the same panic is also on the serial line"
 trace_names() { # file -> the names of the kspur lines, one per line
-    awk '/^  kspur:/ { an = 1; next } an && /^      / { print $1; next } an { exit }' "$1" \
+    awk '/^  ktrace:/ { an = 1; next } an && /^      / { print $1; next } an { exit }' "$1" \
         | sed 's/+0x.*//'
 }
-has "$TMPD/panic.txt" "kspur: rahmenkette" "(b) the backtrace walks the frame pointers, not the stack"
+has "$TMPD/panic.txt" "ktrace: rahmenkette" "(b) the backtrace walks the frame pointers, not the stack"
 chain=$(trace_names "$TMPD/panic.txt" | tr '\n' ' ')
 same "(b) the serial backtrace is exactly the call chain up to the start" \
     "crash.knall_b crash.knall_a crash.knall stage_late.crash_knall initstage.run initstage.run_all stages.run KERNEL_MAIN long_mode " "$chain"
@@ -353,7 +353,7 @@ timeout 120 $QEMU_X86 $ACCEL -kernel "$K0" -m 256 \
     -append "nokbd nosched noproc noring3 logall krach krachjetzt stapelscan" \
     -serial "file:$TMPD/scan.txt" -display none -no-reboot \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
-has "$TMPD/scan.txt" "kspur: stapelscan" "COUNTER-PROOF: with 'stapelscan' the stack is scanned again"
+has "$TMPD/scan.txt" "ktrace: stapelscan" "COUNTER-PROOF: with 'stapelscan' the stack is scanned again"
 stale=$(trace_names "$TMPD/scan.txt" | grep -cvE '^(crash\.knall(_a|_b)?|KERNEL_MAIN|long_mode)$')
 num "COUNTER-PROOF: the scan reports entries that are not callers (legacy)" "${stale:-0}" ge 1
 has "$TMPD/panic.txt" "die letzten Protokollzeilen" \
