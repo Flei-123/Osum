@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: GPL-2.0-only
+export {
+    choose, line_from_cpuid, line_valid, first_line, line_count, flush_range, needs_flush,
+    P_WC, P_CLFLUSHOPT, P_CLFLUSH, P_WBINVD
+}
+
+const P_WC: u64 = 0
+const P_CLFLUSHOPT: u64 = 1
+const P_CLFLUSH: u64 = 2
+const P_WBINVD: u64 = 3
+
+const LINE_UNIT: u64 = 8
+const LINE_SHIFT: u64 = 8
+const BYTE_MASK: u64 = 0xff
+const LINE_MIN: u64 = 16
+const LINE_MAX: u64 = 256
+
+fn line_from_cpuid(ebx: u64) -> u64 {
+    return ((ebx >> LINE_SHIFT) & BYTE_MASK) * LINE_UNIT
+}
+
+fn line_valid(line: u64) -> bool {
+    return line >= LINE_MIN && line <= LINE_MAX && (line & (line - 1)) == 0
+}
+
+fn choose(wc_target: bool, has_clflushopt: bool, has_clflush: bool, line: u64) -> u64 {
+    if wc_target {
+        return P_WC
+    }
+    if !line_valid(line) {
+        return P_WBINVD
+    }
+    if has_clflushopt {
+        return P_CLFLUSHOPT
+    }
+    if has_clflush {
+        return P_CLFLUSH
+    }
+    return P_WBINVD
+}
+
+fn needs_flush(policy: u64) -> bool {
+    return policy != P_WC
+}
+
+fn first_line(addr: u64, line: u64) -> u64 {
+    return addr & (~(line - 1))
+}
+
+fn line_count(addr: u64, bytes: u64, line: u64) -> u64 {
+    if bytes == 0 || !line_valid(line) {
+        return 0
+    }
+    let first: u64 = first_line(addr, line)
+    let last: u64 = first_line(addr + bytes - 1, line)
+    return (last - first) / line + 1
+}
+
+fn flush_range(fence: fn(), flush_line: fn(u64), addr: u64, bytes: u64, line: u64) -> u64 {
+    let n: u64 = line_count(addr, bytes, line)
+    if n == 0 {
+        return 0
+    }
+    fence()
+    var p: u64 = first_line(addr, line)
+    var i: u64 = 0
+    while i < n {
+        flush_line(p)
+        p = p + line
+        i = i + 1
+    }
+    fence()
+    return n
+}

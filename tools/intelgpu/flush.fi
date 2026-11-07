@@ -1,0 +1,219 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import std.io
+import gpu.intel.flushpol
+import gpu.intel.flushstat
+
+const UNIT: u64 = 16
+const UNIT_CAP: u64 = 65536
+const BASE: u64 = 0x100000
+const FRAME_BYTES: u64 = 8294400
+
+static mut dirty: [u8; 65536] = [0; 65536]
+static mut hits: [u8; 65536] = [0; 65536]
+static mut model_line: u64 = 64
+static mut fence_count: u64 = 0
+static mut flush_count: u64 = 0
+static mut fences_at_first: u64 = 0
+static mut fences_at_last: u64 = 0
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn model_reset(line: u64) {
+    var i: u64 = 0
+    while i < UNIT_CAP {
+        dirty[i as usize] = 0
+        hits[i as usize] = 0
+        i = i + 1
+    }
+    model_line = line
+    fence_count = 0
+    flush_count = 0
+    fences_at_first = 0
+    fences_at_last = 0
+}
+
+fn m_fence() {
+    fence_count = fence_count + 1
+}
+
+fn m_flush(addr: u64) {
+    if flush_count == 0 {
+        fences_at_first = fence_count
+    }
+    fences_at_last = fence_count
+    flush_count = flush_count + 1
+    let first: u64 = (addr - BASE) / UNIT
+    var i: u64 = 0
+    while i < model_line / UNIT {
+        dirty[(first + i) as usize] = 0
+        hits[(first + i) as usize] = hits[(first + i) as usize] + 1
+        i = i + 1
+    }
+}
+
+fn model_write(addr: u64, bytes: u64) {
+    var i: u64 = (addr - BASE) / UNIT
+    let end: u64 = (addr - BASE + bytes + UNIT - 1) / UNIT
+    while i < end {
+        dirty[i as usize] = 1
+        i = i + 1
+    }
+}
+
+fn dirty_in(addr: u64, bytes: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = (addr - BASE) / UNIT
+    let end: u64 = (addr - BASE + bytes + UNIT - 1) / UNIT
+    while i < end {
+        n = n + dirty[i as usize] as u64
+        i = i + 1
+    }
+    return n
+}
+
+fn dirty_total() -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < UNIT_CAP {
+        n = n + dirty[i as usize] as u64
+        i = i + 1
+    }
+    return n
+}
+
+fn over_flushed() -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < UNIT_CAP {
+        if hits[i as usize] > 1 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn test_choose() {
+    chk("a write-combining target needs no flush", flushpol.choose(true, true, true, 64) == flushpol.P_WC)
+    chk("write-combining wins without any clflush", flushpol.choose(true, false, false, 0) == flushpol.P_WC)
+    chk("clflushopt is preferred", flushpol.choose(false, true, true, 64) == flushpol.P_CLFLUSHOPT)
+    chk("clflush is the second choice", flushpol.choose(false, false, true, 64) == flushpol.P_CLFLUSH)
+    chk("no clflush at all falls back to wbinvd", flushpol.choose(false, false, false, 64) == flushpol.P_WBINVD)
+    chk("clflushopt without clflush feature bit still works", flushpol.choose(false, true, false, 64) == flushpol.P_CLFLUSHOPT)
+    chk("an unusable line size falls back to wbinvd", flushpol.choose(false, true, true, 0) == flushpol.P_WBINVD)
+    chk("a non power of two line size falls back to wbinvd", flushpol.choose(false, true, true, 24) == flushpol.P_WBINVD)
+    chk("only write-combining skips the flush", !flushpol.needs_flush(flushpol.P_WC) && flushpol.needs_flush(flushpol.P_CLFLUSHOPT)
+        && flushpol.needs_flush(flushpol.P_CLFLUSH) && flushpol.needs_flush(flushpol.P_WBINVD))
+}
+
+fn test_line_size() {
+    chk("cpuid ebx 0x00000810 means 64 byte lines", flushpol.line_from_cpuid(0x00000810) == 64)
+    chk("cpuid ebx 0x00001010 means 128 byte lines", flushpol.line_from_cpuid(0x00001010) == 128)
+    chk("only bits 15..8 count", flushpol.line_from_cpuid(0xff0008ff) == 64)
+    chk("a zero field gives no line size", flushpol.line_from_cpuid(0) == 0)
+    chk("64 is valid", flushpol.line_valid(64))
+    chk("32 and 128 and 256 are valid", flushpol.line_valid(32) && flushpol.line_valid(128) && flushpol.line_valid(256))
+    chk("16 is valid", flushpol.line_valid(16))
+    chk("0 is invalid", !flushpol.line_valid(0))
+    chk("8 is invalid", !flushpol.line_valid(8))
+    chk("96 is invalid", !flushpol.line_valid(96))
+    chk("48 is invalid", !flushpol.line_valid(48))
+    chk("512 is invalid", !flushpol.line_valid(512))
+}
+
+fn test_counts() {
+    chk("aligned 4096 bytes are 64 lines", flushpol.line_count(BASE, 4096, 64) == 64)
+    chk("one byte is one line", flushpol.line_count(BASE + 5, 1, 64) == 1)
+    chk("a range ending exactly on a line boundary adds nothing", flushpol.line_count(BASE, 64, 64) == 1)
+    chk("a range one byte past the boundary adds a line", flushpol.line_count(BASE, 65, 64) == 2)
+    chk("an unaligned start counts the line it begins in", flushpol.line_count(BASE + 60, 8, 64) == 2)
+    chk("an unaligned start and end", flushpol.line_count(BASE + 63, 66, 64) == 3)
+    chk("zero bytes are zero lines", flushpol.line_count(BASE, 0, 64) == 0)
+    chk("a bad line size flushes nothing", flushpol.line_count(BASE, 4096, 24) == 0)
+    chk("128 byte lines halve the count", flushpol.line_count(BASE, 4096, 128) == 32)
+    chk("a full 1920x1080 frame is 129600 lines of 64 bytes", flushpol.line_count(BASE, FRAME_BYTES, 64) == 129600)
+    chk("the first line rounds down", flushpol.first_line(BASE + 77, 64) == BASE + 64)
+}
+
+fn run_range(line: u64, addr: u64, bytes: u64) -> u64 {
+    model_reset(line)
+    model_write(addr, bytes)
+    return flushpol.flush_range(m_fence, m_flush, addr, bytes, line)
+}
+
+fn test_ranges() {
+    var n: u64 = run_range(64, BASE + 4096, 8192)
+    chk("a flushed range leaves no dirty unit", dirty_in(BASE + 4096, 8192) == 0 && n == 128)
+    chk("every line is flushed exactly once", flush_count == 128 && over_flushed() == 0)
+    chk("fences go before the first and after the last flush", fences_at_first == 1 && fences_at_last == 1 && fence_count == 2)
+
+    n = run_range(64, BASE + 70, 200)
+    chk("an unaligned range is fully clean afterwards", dirty_in(BASE + 70, 200) == 0)
+    chk("an unaligned range flushes 4 lines", n == 4 && flush_count == 4)
+
+    model_reset(64)
+    model_write(BASE, 65536)
+    n = flushpol.flush_range(m_fence, m_flush, BASE + 16384, 4096, 64)
+    chk("lines outside the dirty rect stay dirty", dirty_in(BASE, 16384) == 1024 && dirty_in(BASE + 20480, 65536 - 20480) == 2816)
+    chk("lines inside the dirty rect are clean", dirty_in(BASE + 16384, 4096) == 0)
+
+    n = run_range(128, BASE + 100, 1000)
+    chk("128 byte lines clean the whole range", dirty_in(BASE + 100, 1000) == 0 && over_flushed() == 0)
+    chk("128 byte lines flush 9 lines", n == 9)
+
+    model_reset(128)
+    model_write(BASE, 1100)
+    n = flushpol.flush_range(m_fence, m_flush, BASE + 100, 1000, 128)
+    chk("an unaligned start also cleans the head of its line", dirty_in(BASE, 100) == 0 && dirty_total() == 0)
+
+    n = run_range(32, BASE, 4096)
+    chk("32 byte lines clean the whole range", dirty_in(BASE, 4096) == 0 && n == 128)
+
+    n = run_range(64, BASE, 0)
+    chk("an empty range does not touch fences or lines", n == 0 && fence_count == 0 && flush_count == 0)
+
+    n = run_range(24, BASE, 4096)
+    chk("an invalid line size flushes nothing and does not fence", n == 0 && flush_count == 0 && dirty_in(BASE, 4096) != 0)
+
+    n = run_range(64, BASE, 65536)
+    chk("a 64 KiB frame strip is 1024 flushes and no dirty unit", n == 1024 && dirty_total() == 0)
+}
+
+fn test_stats() {
+    var s: flushstat.Flushstat = flushstat.flushstat_new()
+    chk("a new stat is empty", s.count == 0 && s.last == 0 && s.max == 0 && s.sum == 0 && s.lines == 0)
+    chk("the average of nothing is zero", flushstat.average(&s) == 0)
+    flushstat.note(&s, 1000, 10)
+    flushstat.note(&s, 3000, 20)
+    flushstat.note(&s, 2000, 0)
+    chk("count and sum add up", s.count == 3 && s.sum == 6000 && s.lines == 30)
+    chk("last is the newest", s.last == 2000)
+    chk("max keeps the largest", s.max == 3000)
+    chk("average divides by count", flushstat.average(&s) == 2000)
+}
+
+fn test_cost_model() {
+    let lines: u64 = flushpol.line_count(BASE, FRAME_BYTES, 64)
+    chk("model: write-combining issues zero line flushes per frame", flushpol.needs_flush(flushpol.P_WC) == false)
+    chk("model: clflush costs one operation per line, a full frame is 129600", lines == 129600)
+    io.print("INFO frame lines per present: wbinvd=whole cache, clflush=")
+    io.fmt_print_line(io.fmt_u64(io.fmt_new(), lines))
+}
+
+fn main() -> i32 {
+    test_choose()
+    test_line_size()
+    test_counts()
+    test_ranges()
+    test_stats()
+    test_cost_model()
+    return 0
+}

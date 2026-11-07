@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import arch.arch
+import arch.x86_64.fpu
+import sched.time
+import gpu.intel.flushpol
+import gpu.intel.flushstat
+
+export {
+    setup, sync, settle, policy, policy_used, line_size, has_clflush, has_clflushopt,
+    count, last_cycles, max_cycles, avg_cycles, lines_total
+}
+
+const F1_EDX_CLFSH: u64 = 19
+const F7_EBX_CLFLUSHOPT: u64 = 23
+const LEAF_EXT_FEATURES: u64 = 7
+
+static mut g_has_clflush: bool = false
+static mut g_has_clflushopt: bool = false
+static mut g_line: u64 = 0
+static mut g_policy: u64 = 0
+static mut g_policy_used: u64 = 0
+static mut g_stat: flushstat.Flushstat = flushstat.Flushstat { count: 0, last: 0, max: 0, sum: 0, lines: 0 }
+
+fn setup() {
+    g_has_clflush = ((fpu.cpuid_d(1, 0) >> F1_EDX_CLFSH) & 1) != 0
+    g_line = flushpol.line_from_cpuid(fpu.cpuid_b(1, 0))
+    g_has_clflushopt = false
+    if fpu.max_leaf() >= LEAF_EXT_FEATURES {
+        g_has_clflushopt = ((fpu.cpuid_b(LEAF_EXT_FEATURES, 0) >> F7_EBX_CLFLUSHOPT) & 1) != 0
+    }
+    g_policy = flushpol.choose(false, g_has_clflushopt, g_has_clflush, g_line)
+}
+
+fn policy() -> u64 {
+    return g_policy
+}
+
+fn policy_used() -> u64 {
+    return g_policy_used
+}
+
+fn line_size() -> u64 {
+    return g_line
+}
+
+fn has_clflush() -> bool {
+    return g_has_clflush
+}
+
+fn has_clflushopt() -> bool {
+    return g_has_clflushopt
+}
+
+fn count() -> u64 {
+    return g_stat.count
+}
+
+fn last_cycles() -> u64 {
+    return g_stat.last
+}
+
+fn max_cycles() -> u64 {
+    return g_stat.max
+}
+
+fn avg_cycles() -> u64 {
+    return flushstat.average(&g_stat)
+}
+
+fn lines_total() -> u64 {
+    return g_stat.lines
+}
+
+fn flush_with(p: u64, addr: u64, bytes: u64) -> u64 {
+    if p == flushpol.P_WC {
+        arch.barrier_write()
+        return 0
+    }
+    if p == flushpol.P_CLFLUSHOPT {
+        return flushpol.flush_range(arch.barrier, arch.cache_flush_line_opt, addr, bytes, g_line)
+    }
+    if p == flushpol.P_CLFLUSH {
+        return flushpol.flush_range(arch.barrier, arch.cache_flush_line, addr, bytes, g_line)
+    }
+    arch.cache_writeback()
+    return 0
+}
+
+fn settle(addr: u64, bytes: u64, cached: bool) {
+    let p: u64 = flushpol.choose(!cached, g_has_clflushopt, g_has_clflush, g_line)
+    let _n: u64 = flush_with(p, addr, bytes)
+}
+
+fn sync(addr: u64, bytes: u64, cached: bool) {
+    let began: u64 = time.tsc()
+    let p: u64 = flushpol.choose(!cached, g_has_clflushopt, g_has_clflush, g_line)
+    g_policy_used = p
+    let lines: u64 = flush_with(p, addr, bytes)
+    flushstat.note(&g_stat, time.since(began), lines)
+}

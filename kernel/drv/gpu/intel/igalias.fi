@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import mm.mmframe
+import gfx.fb
+import drv.gpu.intel.igflush
+
+export { alloc, release, phys, virt, tiles, active }
+
+const HUGE_BYTES: u64 = 0x200000
+const FRAMES_PER_HUGE: u64 = 512
+const MAX_CANDIDATES: u64 = 512
+
+static mut g_phys: u64 = 0
+static mut g_virt: u64 = 0
+static mut g_tiles: u64 = 0
+
+fn phys() -> u64 {
+    return g_phys
+}
+
+fn virt() -> u64 {
+    return g_virt
+}
+
+fn tiles() -> u64 {
+    return g_tiles
+}
+
+fn active() -> bool {
+    return g_virt != 0
+}
+
+fn release(state: u64) {
+    if g_phys != 0 {
+        mmframe.frame_free_run(state, g_phys, g_tiles * FRAMES_PER_HUGE)
+    }
+    g_phys = 0
+    g_virt = 0
+    g_tiles = 0
+}
+
+fn claim(state: u64, n_tiles: u64) -> u64 {
+    let frames: u64 = n_tiles * FRAMES_PER_HUGE
+    var k: u64 = 1
+    while k < MAX_CANDIDATES {
+        let addr: u64 = k * HUGE_BYTES
+        if mmframe.frame_run_at(state, addr, frames) {
+            return addr
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+fn alloc(state: u64, bytes: u64) -> bool {
+    if fb.wc(state) == 0 || fb.uncached(state) || bytes == 0 {
+        return false
+    }
+    let n_tiles: u64 = (bytes + HUGE_BYTES - 1) / HUGE_BYTES
+    let addr: u64 = claim(state, n_tiles)
+    if addr == 0 {
+        return false
+    }
+    igflush.settle(mmframe.kva(addr), n_tiles * HUGE_BYTES, true)
+    let v: u64 = fb.map_wc(state, addr, n_tiles)
+    g_phys = addr
+    g_tiles = n_tiles
+    if v == 0 {
+        release(state)
+        return false
+    }
+    g_virt = v
+    return true
+}

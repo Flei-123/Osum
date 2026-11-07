@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 profile kernel
 
-import arch.arch
 import serial
 import lib.kstate
 import gfx.fb
 import gpu.intel.backbuf
 import drv.gpu.intel.igflip
+import drv.gpu.intel.igflush
 
 export { attach, hook, last, offs }
 
@@ -49,18 +49,29 @@ fn shown_addr(state: u64) -> u64 {
     return fb.addr(state)
 }
 
+fn front_cached(state: u64) -> bool {
+    return fb.wc(state) == 0 && !fb.uncached(state)
+}
+
 fn leave(state: u64, copy: bool) {
     if copy {
         igflip.copy_words(fb.addr(state), igflip.back_addr(), front_bytes(state))
-        arch.barrier_write()
+        igflush.sync(fb.addr(state), front_bytes(state), front_cached(state))
     }
     fb.ext_detach(state)
     g_offs = g_offs + 1
     say((&s_off[0]) as u64)
 }
 
+fn drawn_cached(state: u64) -> bool {
+    if igflip.draw_is_back() {
+        return !igflip.back_wc()
+    }
+    return front_cached(state)
+}
+
 fn present(state: u64) -> u64 {
-    arch.cache_writeback()
+    igflush.sync(draw_addr(state), front_bytes(state), drawn_cached(state))
     let c: u64 = igflip.commit()
     g_last = c
     if c == backbuf.C_OFF_COPY {

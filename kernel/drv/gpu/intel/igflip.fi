@@ -12,9 +12,11 @@ import gpu.intel.dbuf
 import gpu.intel.backbuf
 import drv.gpu.intel.mmio
 import drv.gpu.intel.probe
+import drv.gpu.intel.igalias
+import drv.gpu.intel.igflush
 
 export {
-    stage, status, pages, back_phys, back_addr, flips, rollbacks, shown_off, present, restore,
+    stage, status, pages, back_phys, back_addr, back_wc, back_wc_flag, flips, rollbacks, shown_off, present, restore,
     ready, arm, copy_words, bb_mode, bb_presented, commit, draw_is_back, shown_is_back,
     S_OFF, S_NO_GGTT, S_NO_FB, S_MISMATCH, S_NO_MEM, S_SETUP, S_FLIP_FAIL, S_OK
 }
@@ -61,7 +63,21 @@ fn back_phys() -> u64 {
 }
 
 fn back_addr() -> u64 {
+    if igalias.active() {
+        return igalias.virt()
+    }
     return mmframe.kva(g_back_phys)
+}
+
+fn back_wc() -> bool {
+    return igalias.active()
+}
+
+fn back_wc_flag() -> u64 {
+    if igalias.active() {
+        return 1
+    }
+    return 0
 }
 
 fn flips() -> u64 {
@@ -188,7 +204,12 @@ fn stage(ks: u64) {
     }
     let bytes: u64 = fb.pitch(ks) * fb.height(ks)
     g_pages = (bytes + PAGE - 1) / PAGE
-    g_back_phys = mmframe.frame_run(ks, g_pages)
+    igflush.setup()
+    if igalias.alloc(ks, bytes) {
+        g_back_phys = igalias.phys()
+    } else {
+        g_back_phys = mmframe.frame_run(ks, g_pages)
+    }
     if g_back_phys == 0 {
         fail(S_NO_MEM)
         return
@@ -198,6 +219,7 @@ fn stage(ks: u64) {
     if selftest_on {
         mark_back(ks)
     }
+    igflush.settle(back_addr(), bytes, !back_wc())
     mmio.permit_ggtt(BACK_GGTT_OFFSET, g_pages)
     mmio.permit_plane()
     if dbuf.setup(mmio.rd, mmio.rd64, mmio.wr64, &g_state, BACK_GGTT_OFFSET, g_back_phys, fb.phys(ks), g_pages) != dbuf.D_OK {

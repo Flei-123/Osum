@@ -14,7 +14,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 [ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 
-for m in ids regs bits mode timing edid aux snap dump flip ggtt dbuf backbuf confirm modeset; do
+for m in ids regs bits mode timing edid aux snap dump flip ggtt dbuf backbuf confirm modeset flushpol flushstat; do
     printf 'import gpu.intel.%s\nfn main() -> i32 {\n    return 0\n}\n' "$m" > "$T/k_$m.fi"
     "$FIRNC" --profile=kernel -c "$T/k_$m.fi" -o "$T/k_$m.o" 2> "$T/k.err" \
         && ok "gpu.intel.$m compiles with --profile=kernel" \
@@ -48,6 +48,22 @@ if [ -x "$T/phase2" ]; then
     [ "$rc" = 0 ] && ok "phase 2 oracle exits 0" || bad "phase 2 oracle exit code $rc"
     [ "$nbad" = 0 ] && ok "phase 2 oracle: no FAIL line" || bad "phase 2 oracle: $nbad FAIL lines"
     [ "$nok" -ge 90 ] && ok "phase 2 oracle: $nok promises OK (>= 90)" || bad "phase 2 oracle: only $nok OK (< 90)"
+    pass=$((pass+nok))
+fi
+
+"$FIRNC" tools/intelgpu/flush.fi -o "$T/flush" 2> "$T/f.err" \
+    && ok "flush oracle builds" || { bad "flush oracle does not build"; head -10 "$T/f.err"; }
+
+if [ -x "$T/flush" ]; then
+    "$T/flush" > "$T/out3.txt" 2>&1
+    rc=$?
+    nok=$(grep -c '^OK' "$T/out3.txt")
+    nbad=$(grep -c '^FAIL' "$T/out3.txt")
+    sed -n 's/^FAIL /  FAIL  flush: /p' "$T/out3.txt"
+    [ "$rc" = 0 ] && ok "flush oracle exits 0" || bad "flush oracle exit code $rc"
+    [ "$nbad" = 0 ] && ok "flush oracle: no FAIL line" || bad "flush oracle: $nbad FAIL lines"
+    [ "$nok" -ge 45 ] && ok "flush oracle: $nok promises OK (>= 45)" || bad "flush oracle: only $nok OK (< 45)"
+    sed -n 's/^INFO /  INFO  /p' "$T/out3.txt"
     pass=$((pass+nok))
 fi
 
@@ -178,6 +194,31 @@ mutate bb_nocount    backbuf 's/(\*b).presented = (\*b).presented + 1//'
 mutate bb_singledraw backbuf 's/        return shown_is_back(d)$/        return false/'
 mutate bb_norbwait   backbuf 's/        if (\*b).misses < MAX_MISSES {/        if false {/'
 mutate bb_stillon    backbuf 's/    (\*b).mode = B_OFF$/    (*b).mode = B_DOUBLE/'
+ORACLE=tools/intelgpu/flush.fi
+mutate fp_nowc       flushpol 's/    if wc_target {/    if false {/'
+mutate fp_noopt      flushpol 's/    if has_clflushopt {/    if false {/'
+mutate fp_noclf      flushpol 's/    if has_clflush {/    if true {/'
+mutate fp_badline    flushpol 's/    if !line_valid(line) {/    if false {/'
+mutate fp_unit       flushpol 's/LINE_UNIT: u64 = 8/LINE_UNIT: u64 = 4/'
+mutate fp_shift      flushpol 's/LINE_SHIFT: u64 = 8/LINE_SHIFT: u64 = 7/'
+mutate fp_pow2       flushpol 's/ \&\& (line \& (line - 1)) == 0//'
+mutate fp_min        flushpol 's/LINE_MIN: u64 = 16/LINE_MIN: u64 = 4/'
+mutate fp_max        flushpol 's/LINE_MAX: u64 = 256/LINE_MAX: u64 = 512/'
+mutate fp_needs      flushpol 's/return policy != P_WC/return true/'
+mutate fp_floor      flushpol 's/return addr \& (~(line - 1))/return addr/'
+mutate fp_lastbyte   flushpol 's/first_line(addr + bytes - 1, line)/first_line(addr + bytes, line)/'
+mutate fp_plusone    flushpol 's/(last - first) \/ line + 1/(last - first) \/ line/'
+mutate fp_zero       flushpol 's/if bytes == 0 || !line_valid(line) {/if false {/'
+mutate fp_nofence1   flushpol '0,/^    fence()$/{s/^    fence()$//}'
+mutate fp_nofence2   flushpol ':a;N;$!ba;s/    fence()\n    return n/    return n/'
+mutate fp_noflush    flushpol 's/^        flush_line(p)$//'
+mutate fp_step       flushpol 's/p = p + line$/p = p + line + line/'
+mutate fp_firstline  flushpol 's/var p: u64 = first_line(addr, line)/var p: u64 = addr/'
+mutate fs_nomax      flushstat 's/if cycles > (\*s).max {/if false {/'
+mutate fs_sum        flushstat 's/(\*s).sum = (\*s).sum + cycles/(*s).sum = cycles/'
+mutate fs_last       flushstat 's/(\*s).last = cycles//'
+mutate fs_lines      flushstat 's/(\*s).lines = (\*s).lines + lines//'
+mutate fs_count      flushstat 's/(\*s).count = (\*s).count + 1//'
 ORACLE=tools/intelgpu/oracle.fi
 
 echo "INTELGPU: $pass passed, $fail failed"
