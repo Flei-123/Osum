@@ -104,30 +104,43 @@ hasnot "$U" 'nameserver 192.168.1.1' "U: old nameserver gone"
 has "$U" 'fallback 1.1.1.1' "U: fallback line kept"
 has "$U" '==ALIVE==' "U: script reached the end"
 
-echo "== W: WLAN uplink, kernel lease DNS lands in resolv.conf =="
 mkdir -p "$T/blobs"
 python3 -I tools/iwlfh/ref.py gen "$T/blobs" >/dev/null 2>&1 || bad "W: firmware reference generator"
 FWPATH=/lib/firmware/intel/iwlwifi/iwlwifi-8265-36.ucode
 printf 'ssid OrientFake\npsk orient-fake-pw1\n' > "$T/wlan.conf"
 { echo 'echo ==START=='; for _ in 1 2 3 4 5 6 7 8; do echo 'sleep 6'; done
   echo 'dhcp'; echo 'echo ==RESOLV=='; echo 'cat /etc/resolv.conf'; echo 'cat /proc/wlan'; echo 'echo ==END=='; } > "$T/s_w.sh"
-bash tools/mkfsfi/mkfs.sh build "$T/w.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
-    "${BINS[@]}" "/t/s.sh=$T/s_w.sh" "$FWPATH=$T/blobs/v7.bin" "/etc/wlan.conf=$T/wlan.conf" "/etc/resolv.conf=$T/resolv.old" > "$T/w.mkfs" 2>&1 || tail -3 "$T/w.mkfs"
-timeout 400 qemu-system-x86_64 -accel "$ACC" -smp 1 -kernel "$KNEW" -m 512 \
-    -append "osum vfs iwlfhtest iwlfhbind nic script=sh /t/s.sh;exit" \
-    -serial "file:$T/w.txt" -display none -no-reboot \
-    -netdev user,id=n0,net=10.0.2.0/24 -device e1000,netdev=n0 \
-    -drive "file=$T/w.img,format=raw,if=ide,index=0" \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
-tr -cd '\11\12\15\40-\176' < "$T/w.txt" > "$T/w.klar"; W="$T/w.klar"
+
+run_wlan() { # name words
+    local n=$1 words=$2
+    bash tools/mkfsfi/mkfs.sh build "$T/$n.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
+        "${BINS[@]}" "/t/s.sh=$T/s_w.sh" "$FWPATH=$T/blobs/v7.bin" "/etc/wlan.conf=$T/wlan.conf" "/etc/resolv.conf=$T/resolv.old" > "$T/$n.mkfs" 2>&1 || tail -3 "$T/$n.mkfs"
+    timeout 400 qemu-system-x86_64 -accel "$ACC" -smp 1 -kernel "$KNEW" -m 512 \
+        -append "osum vfs iwlfhtest iwlfhbind $words nic script=sh /t/s.sh;exit" \
+        -serial "file:$T/$n.txt" -display none -no-reboot \
+        -netdev user,id=n0,net=10.0.2.0/24 -device e1000,netdev=n0 \
+        -drive "file=$T/$n.img,format=raw,if=ide,index=0" \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+    tr -cd '\11\12\15\40-\176' < "$T/$n.txt" > "$T/$n.klar"
+    awk '/==RESOLV==/{f=1} f' "$T/$n.klar" > "$T/${n}_res.txt"
+}
+
+echo "== W: WLAN uplink (wlanfirst), kernel lease DNS lands in resolv.conf =="
+run_wlan w wlanfirst; W="$T/w.klar"
 has "$W" 'stack wired=1 uplink=1' "W: WLAN card is the uplink"
 has "$W" 'dhcp: wlan lease adopted' "W: dhcp adopts the kernel WLAN lease"
-awk '/==RESOLV==/{f=1} f' "$W" > "$T/w_res.txt"
 grep -aq 'nameserver 192\.168\.77\.' "$T/w_res.txt" && ok "W: resolv.conf names the WLAN lease DNS" || bad "W: resolv.conf has no WLAN DNS"
 hasnot "$T/w_res.txt" 'nameserver 192.168.1.1' "W: old nameserver gone"
 hasnot "$T/w_res.txt" 'nameserver 10.0.2.3' "W: no e1000 DNS"
 has "$T/w_res.txt" 'fallback 1.1.1.1' "W: fallback line kept"
 has "$W" '==END==' "W: system keeps running"
+
+echo "== V: WLAN without wlanfirst stays on standby while a wired card is present =="
+run_wlan v ""; V="$T/v.klar"
+hasnot "$V" 'dhcp: wlan lease adopted' "V: dhcp does not adopt the WLAN lease"
+hasnot "$V" 'stack wired=1 uplink=1' "V: WLAN card is not the uplink"
+grep -aq 'nameserver 192\.168\.77\.' "$T/v_res.txt" && bad "V: resolv.conf names the WLAN DNS" || ok "V: resolv.conf free of WLAN DNS"
+has "$V" '==END==' "V: system keeps running"
 
 if [ "${UPLSW_OLD:-1}" = 1 ]; then
     echo "== control: ${UPLSW_BASE:-origin/main} kernel in case A =="
