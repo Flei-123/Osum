@@ -9,9 +9,9 @@ import numpy as np
 
 out, yuv_path = sys.argv[1], sys.argv[2]
 counter = len(sys.argv) > 3 and sys.argv[3] == "nosync"
-WIDTH, HEIGHT, FRAMES, FRAME_MS = 176, 144, 40, 100
-MAX_DRIFT_MS = 150
-MIN_SHOWN = 35
+WIDTH, HEIGHT, FRAMES, FRAME_MS = 176, 144, 200, 100
+MAX_DRIFT_MS = 200
+MIN_SHOWN = 190
 ok = fail = 0
 
 
@@ -126,6 +126,13 @@ try:
     say(changed["01-playing"] > 2000, "01-playing differs from the open window (%d px)" % changed["01-playing"])
     say(int((photos["02-ended"][2] != photos["01-playing"][2]).any(axis=2).sum()) > 2000, "02-ended shows another picture than 01-playing")
     say(int((photos["04-seek"][2] != photos["03-paused"][2]).any(axis=2).sum()) > 2000, "04-seek shows another picture than 03-paused")
+    diff = (photos["01-playing"][2] != base).any(axis=2)
+    cols = np.where(diff.any(axis=0))[0]
+    rows = np.where(diff.any(axis=1))[0]
+    pic_w = int(cols.max() - cols.min() + 1) if len(cols) else 0
+    pic_h = int(rows.max() - rows.min() + 1) if len(rows) else 0
+    say(pic_w >= 2 * WIDTH * photos["01-playing"][0] // 1280 and pic_h >= 2 * HEIGHT * photos["01-playing"][0] // 1280,
+        "the picture is upscaled in the window (%dx%d px changed, source %dx%d)" % (pic_w, pic_h, WIDTH, HEIGHT))
     colours = len(set(map(bytes, photos["01-playing"][2].reshape(-1, 3)[::37])))
     say(colours >= 40, "01-playing is a real picture (%d colours sampled)" % colours)
 except (OSError, KeyError, ValueError) as e:

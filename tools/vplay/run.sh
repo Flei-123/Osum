@@ -32,4 +32,4 @@ python3 -I tools/vplay/check.py "$D/nosync" "$D/m/clip.yuv" nosync | tee "$D/ns.
 python3 -I tools/vplay/check.py "$D/x2" "$D/m/clip.yuv" | grep -a "all .* shown frames\|reached the end" | sed 's/^  \(OK\|FAIL\)  /  \1    scale 2: /' | tee "$D/x2.res"
 [ -n "$KEEP" ] && { mkdir -p "$KEEP"; cp -r "$D"/new "$D"/nosync "$D"/x2 "$KEEP/" 2>/dev/null; }
 n_ok=$(cat "$D"/*.res | grep -ac '^  OK'); n_bad=$(cat "$D"/*.res | grep -ac '^  FAIL')
-summary_emit $((pass + n_ok)) $((fail + n_bad)) 22
+summary_emit $((pass + n_ok)) $((fail + n_bad)) 28
