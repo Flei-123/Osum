@@ -27,6 +27,7 @@
 #define VEC_PIECE_BYTES 150
 #define VEC_COUNT 200
 #define VEC_LIMIT_US 3000
+#define PVEC_LIMIT_US 2200
 #define VEC_BIG_PIECE 1500
 #define VEC_BIG_PIECES 5
 #define ONE_BIG_BYTES 32768
@@ -265,6 +266,42 @@ static long vec_calls(int *intact)
     return total / VEC_COUNT;
 }
 
+static long pvec_calls(int *intact)
+{
+    static char piece[VEC_PIECES][VEC_PIECE_BYTES];
+    struct iovec iov[VEC_PIECES];
+    long chunk = (long)VEC_PIECES * VEC_PIECE_BYTES;
+    char *back = malloc(chunk * VEC_COUNT);
+    int fd = open(DIR_PATH "/pvec", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    long total = 0;
+    *intact = fd >= 0 && back != NULL;
+    for (int i = 0; i < VEC_PIECES; i++) {
+        fill_pattern(piece[i], VEC_PIECE_BYTES, i);
+        iov[i].iov_base = piece[i];
+        iov[i].iov_len = VEC_PIECE_BYTES;
+    }
+    for (int n = 0; n < VEC_COUNT && *intact; n++) {
+        long t0 = now_us();
+        long r = pwritev(fd, iov, VEC_PIECES, chunk * n);
+        total += now_us() - t0;
+        if (r != chunk)
+            *intact = 0;
+    }
+    if (*intact)
+        *intact = lseek(fd, 0, SEEK_CUR) == 0;
+    if (*intact) {
+        long want = chunk * VEC_COUNT;
+        *intact = pread(fd, back, want, 0) == want;
+        for (long off = 0; *intact && off < want; off++)
+            if (back[off] != piece[(off / VEC_PIECE_BYTES) % VEC_PIECES][off % VEC_PIECE_BYTES])
+                *intact = 0;
+    }
+    if (fd >= 0)
+        close(fd);
+    free(back);
+    return total / VEC_COUNT;
+}
+
 static long one_big_calls(int *intact)
 {
     static char data[ONE_BIG_BYTES];
@@ -393,10 +430,12 @@ int main(void)
     int listed = listing_complete();
     int vec_intact = 0;
     long vec_us = vec_calls(&vec_intact);
+    int pvec_intact = 0;
+    long pvec_us = pvec_calls(&pvec_intact);
     int one_intact = 0;
     long one_us = one_big_calls(&one_intact);
-    PASS("metrics", "small_scan=%ld create_first=%ld create_last=%ld open=%ld stat=%ld access=%ld writev_small=%ld writev_page=%ld writev_iov6=%ld writev_one32k=%ld rename=%ld unlink=%ld",
-        small_scan_us, create_first, create_last, open_us, stat_us, access_us, append_small, append_page, vec_us, one_us, rename_us, unlink_us);
+    PASS("metrics", "small_scan=%ld create_first=%ld create_last=%ld open=%ld stat=%ld access=%ld writev_small=%ld writev_page=%ld writev_iov6=%ld writev_one32k=%ld pwritev_iov6=%ld rename=%ld unlink=%ld",
+        small_scan_us, create_first, create_last, open_us, stat_us, access_us, append_small, append_page, vec_us, one_us, pvec_us, rename_us, unlink_us);
     CHECK("coherence_basic", coherence_basic(), "stale lookup after create/rename/unlink");
     CHECK("coherence_link", coherence_link(), "stale lookup after unlinking one hard link");
     CHECK("coherence_dir", coherence_dir(), "stale lookup below a renamed directory");
@@ -411,6 +450,8 @@ int main(void)
     CHECK("writev_page", append_page < APPEND_PAGE_LIMIT_US, "us=%ld limit=%d", append_page, APPEND_PAGE_LIMIT_US);
     CHECK("writev_iov6", vec_us < VEC_LIMIT_US, "us=%ld limit=%d", vec_us, VEC_LIMIT_US);
     CHECK("writev_iov6_content", vec_intact, "appended vector content differs from the source pieces");
+    CHECK("pwritev_iov6", pvec_us < PVEC_LIMIT_US, "us=%ld limit=%d", pvec_us, PVEC_LIMIT_US);
+    CHECK("pwritev_iov6_content", pvec_intact, "pwritev content differs, or the file offset moved");
     CHECK("writev_one32k", one_us < ONE_BIG_LIMIT_US, "us=%ld limit=%d", one_us, ONE_BIG_LIMIT_US);
     CHECK("writev_one32k_content", one_intact, "single large iovec lost data");
     CHECK("writev_big_content", vec_big_content(), "vector write across block boundaries lost or reordered data");
