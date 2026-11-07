@@ -1,0 +1,128 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import arch.arch
+import libc.regio
+
+export { arm, disarm, wake_flag, MAX_SECS }
+
+const CMOS_INDEX: u64 = 0x70
+const CMOS_DATA: u64 = 0x71
+const REG_SEC: u64 = 0
+const REG_SEC_ALARM: u64 = 1
+const REG_MIN: u64 = 2
+const REG_MIN_ALARM: u64 = 3
+const REG_HOUR: u64 = 4
+const REG_HOUR_ALARM: u64 = 5
+const REG_A: u64 = 0x0A
+const REG_B: u64 = 0x0B
+const REG_C: u64 = 0x0C
+const A_UIP: u64 = 0x80
+const B_AIE: u64 = 0x20
+const B_24H: u64 = 2
+const B_BINARY: u64 = 4
+const PM1_RTC: u64 = 0x400
+const F_PM1A_EVT: u64 = 56
+const F_PM1_EVT_LEN: u64 = 88
+const SECS_PER_DAY: u64 = 86400
+const MAX_SECS: u64 = 3600
+const UIP_GUARD: u64 = 100000
+
+fn cmos_read(reg: u64) -> u64 {
+    arch.dev_out8(CMOS_INDEX as u16, reg as u8)
+    return arch.dev_in8(CMOS_DATA as u16) as u64
+}
+
+fn cmos_write(reg: u64, value: u64) {
+    arch.dev_out8(CMOS_INDEX as u16, reg as u8)
+    arch.dev_out8(CMOS_DATA as u16, value as u8)
+}
+
+fn decode(mode: u64, raw: u64) -> u64 {
+    if (mode & B_BINARY) != 0 {
+        return raw
+    }
+    return (raw & 15) + (raw >> 4) * 10
+}
+
+fn encode(mode: u64, value: u64) -> u64 {
+    if (mode & B_BINARY) != 0 {
+        return value
+    }
+    return ((value / 10) << 4) | (value % 10)
+}
+
+fn settle() {
+    var guard: u64 = 0
+    while guard < UIP_GUARD && (cmos_read(REG_A) & A_UIP) != 0 {
+        guard = guard + 1
+    }
+}
+
+fn enable_port(fadt: u64) -> u64 {
+    let evt: u64 = regio.read32(fadt + F_PM1A_EVT)
+    if evt == 0 {
+        return 0
+    }
+    var half: u64 = evt_len(fadt) / 2
+    if half == 0 {
+        half = 2
+    }
+    return evt + half
+}
+
+fn evt_len(fadt: u64) -> u64 {
+    return regio.read8(fadt + F_PM1_EVT_LEN)
+}
+
+fn status_port(fadt: u64) -> u64 {
+    return regio.read32(fadt + F_PM1A_EVT)
+}
+
+fn arm(fadt: u64, secs: u64) -> bool {
+    if fadt == 0 || secs == 0 || secs > MAX_SECS {
+        return false
+    }
+    let enable: u64 = enable_port(fadt)
+    if enable == 0 {
+        return false
+    }
+    let mode: u64 = cmos_read(REG_B)
+    if (mode & B_24H) == 0 {
+        return false
+    }
+    settle()
+    let now: u64 = decode(mode, cmos_read(REG_HOUR)) * 3600 + decode(mode, cmos_read(REG_MIN)) * 60 + decode(mode, cmos_read(REG_SEC))
+    let at: u64 = (now + secs) % SECS_PER_DAY
+    cmos_write(REG_SEC_ALARM, encode(mode, at % 60))
+    cmos_write(REG_MIN_ALARM, encode(mode, (at / 60) % 60))
+    cmos_write(REG_HOUR_ALARM, encode(mode, at / 3600))
+    cmos_write(REG_B, mode | B_AIE)
+    let _c: u64 = cmos_read(REG_C)
+    let en: u64 = arch.dev_in16((enable & 0xFFFF) as u16) as u64
+    arch.dev_out16((enable & 0xFFFF) as u16, ((en | PM1_RTC) & 0xFFFF) as u16)
+    arch.dev_out16((status_port(fadt) & 0xFFFF) as u16, PM1_RTC as u16)
+    return true
+}
+
+fn disarm(fadt: u64) {
+    let mode: u64 = cmos_read(REG_B)
+    cmos_write(REG_B, mode & (0xFF ^ B_AIE))
+    let _c: u64 = cmos_read(REG_C)
+    if fadt == 0 {
+        return
+    }
+    let enable: u64 = enable_port(fadt)
+    if enable != 0 {
+        let en: u64 = arch.dev_in16((enable & 0xFFFF) as u16) as u64
+        arch.dev_out16((enable & 0xFFFF) as u16, ((en & (0xFFFF ^ PM1_RTC)) & 0xFFFF) as u16)
+    }
+    arch.dev_out16((status_port(fadt) & 0xFFFF) as u16, PM1_RTC as u16)
+}
+
+fn wake_flag(sts: u64) -> u64 {
+    if (sts & PM1_RTC) != 0 {
+        return 1
+    }
+    return 0
+}
