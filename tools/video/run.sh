@@ -204,6 +204,42 @@ me=$(val "$TMPD/cut_fast.txt" merr)
 if [ "$rc" = 21 ] && { [ "$me" = 3 ] || [ "${fr:-0}" -lt 9 ]; }; then ok "[cut_fast] media data cut off: no hang (merr=$me frames=$fr)"
 else bad "[cut_fast] rc=$rc merr=${me:-none} frames=${fr:-none}"; fi
 
+echo "== 6b. counter-proof: decoder without the end-of-slice peek fix =="
+OLD="$TMPD/old"
+mkdir -p "$OLD/kernel"
+cp -a kernel/user "$OLD/kernel/user"
+python3 - "$OLD/kernel/user/h264.fi" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+a = "    bs_p = save\n    bs_over = save_over\n"
+assert a in s
+s = s.replace(a, "    bs_p = save\n")
+open(p, 'w').write(s)
+PYEOF
+if (cd "$OLD" && . "$ROOT/tools/lib/userprog.sh" \
+    && up_build "$ROOT/$FIRNC" vdec "$TMPD/vold.o" "$TMPD/vold.elf" "$TMPD/crt.o" "$ROOT/$ULD" 0 "$TMPD/evold"); then
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/rootold.img" 32768 --inodes=128 /bin/ /v/ \
+        /bin/sh="$TMPD/sh.elf" /bin/vdec="$TMPD/vold.elf" /v/p_long.mp4="$MED/p_long.mp4" > "$TMPD/mkfsold.log" 2>&1
+    cp --sparse=always "$TMPD/rootold.img" "$TMPD/live-old.img"
+    cpuarg=""; [ "$OSUM_QEMU_ACCEL" = kvm ] && cpuarg="-cpu host"
+    # shellcheck disable=SC2086
+    timeout 240 $QEMU_X86 $cpuarg -kernel "$TMPD/k.mb" -m 512 \
+        -append "osum nokbd script=vdec /v/p_long.mp4" \
+        -serial "file:$TMPD/old.txt" -display none -no-reboot \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -drive "file=$TMPD/live-old.img,format=raw,if=ide,index=0" >/dev/null 2>&1
+    rm -f "$TMPD/live-old.img"
+    oerr=$(val "$TMPD/old.txt" err); ofr=$(val "$TMPD/old.txt" frames)
+    if [ "${oerr:-0}" = 5 ] && [ "${ofr:-12}" -lt 12 ]; then
+        ok "COUNTER-PROOF: without the fix p_long stops at frame $ofr with err=5"
+    else
+        bad "COUNTER-PROOF: old decoder did not fail (err=${oerr:-none} frames=${ofr:-none})"
+    fi
+else
+    bad "COUNTER-PROOF: old decoder does not build"; head -5 "$TMPD/evold" | sed 's/^/        /'
+fi
+
 echo "== 7. corrupted container bytes =="
 flip_ok=0; flip_bad=0
 for s in 1 2 3 4 5 6 7 8 9 10 11 12; do

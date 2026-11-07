@@ -20,6 +20,10 @@ encode p_moov_end 176 144 9 mp4 "testsrc2=size=176x144:rate=10" -g 100 -qp 26
 encode p_faststart 176 144 9 mp4 "testsrc2=size=176x144:rate=10" -g 5 -qp 26 -movflags +faststart
 encode p_cif 352 288 8 mp4 "testsrc2=size=352x288:rate=10" -g 100 -qp 26
 encode p_mov 128 96 6 mov "testsrc2=size=128x96:rate=10" -g 4 -qp 24
+encode p_long 176 144 12 mp4 "testsrc2=size=176x144:rate=10" -g 100 -qp 26
+encode p_gop4 128 96 12 mov "testsrc2=size=128x96:rate=10" -g 4 -qp 24
+encode p_long30 176 144 30 mp4 "testsrc2=size=176x144:rate=10" -g 100 -qp 20
+encode p_hq 96 80 20 mp4 "testsrc2=size=96x80:rate=10" -g 7 -qp 6
 
 ffmpeg -y -v error -f lavfi -i "testsrc2=size=176x144:rate=10" \
     -f lavfi -i "sine=frequency=440:sample_rate=22050:duration=1.2" \
