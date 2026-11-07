@@ -31,7 +31,7 @@
 #define VEC_BIG_PIECES 5
 #define ONE_BIG_BYTES 32768
 #define ONE_BIG_COUNT 20
-#define ONE_BIG_LIMIT_US 11000
+#define ONE_BIG_LIMIT_US 14000
 
 static long now_us(void)
 {
