@@ -1,0 +1,126 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import instkern
+import dualkern
+import libc.regio
+import power.standbylayout
+
+export { LAYOUT_OK, LAYOUT_TRIMMABLE, LAYOUT_OVERLAP, limit, state_of, trim, trimmable, run }
+
+const LAYOUT_OK: u64 = 0
+const LAYOUT_TRIMMABLE: u64 = 1
+const LAYOUT_OVERLAP: u64 = 2
+
+const BS: u64 = 512
+const SB_BLOCKS_OFFSET: u64 = 16
+
+static mut SB: [u8; 512] = [0 as u8; 512]
+static mut S_PART: [u8; 20] = "dual: standby part \0"
+static mut S_STATE: [u8; 8] = " state=\0"
+static mut S_END: [u8; 6] = " end=\0"
+static mut S_LIMIT: [u8; 8] = " limit=\0"
+static mut S_TRIMMED: [u8; 23] = "dual: standby trimmed \0"
+static mut S_FAILED: [u8; 27] = "dual: standby trim failed \0"
+static mut N_OK: [u8; 3] = "ok\0"
+static mut N_TRIMMABLE: [u8; 10] = "trimmable\0"
+static mut N_OVERLAP: [u8; 8] = "overlap\0"
+
+fn limit() -> u64 {
+    return standbylayout.last_data_block(dualkern.sect_total())
+}
+
+fn state_of(fd: u64, i: u64) -> u64 {
+    if dualkern.p_typ(i) != dualkern.T_OSUM {
+        return LAYOUT_OK
+    }
+    if standbylayout.image_base(dualkern.sect_total()) == 0 {
+        return LAYOUT_OK
+    }
+    if dualkern.p_end(i) <= limit() {
+        return LAYOUT_OK
+    }
+    if dualkern.p_fve(i) {
+        return LAYOUT_OVERLAP
+    }
+    let sb: u64 = (&SB[0 as usize]) as u64
+    if !instkern.read_at(fd, dualkern.p_start(i), sb, BS) || !instkern.is_ofs(sb) {
+        return LAYOUT_OVERLAP
+    }
+    let blocks: u64 = regio.read64_at(sb, SB_BLOCKS_OFFSET)
+    if blocks == 0 || dualkern.p_start(i) + blocks - 1 > limit() {
+        return LAYOUT_OVERLAP
+    }
+    return LAYOUT_TRIMMABLE
+}
+
+fn trimmable(fd: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < dualkern.entry_count() {
+        if state_of(fd, i) == LAYOUT_TRIMMABLE {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn trim(fd: u64, i: u64) -> bool {
+    if state_of(fd, i) != LAYOUT_TRIMMABLE {
+        return false
+    }
+    return dualkern.trim_entry(fd, i, limit())
+}
+
+fn state_name(state: u64) -> u64 {
+    if state == LAYOUT_OK {
+        return (&N_OK[0 as usize]) as u64
+    }
+    if state == LAYOUT_TRIMMABLE {
+        return (&N_TRIMMABLE[0 as usize]) as u64
+    }
+    return (&N_OVERLAP[0 as usize]) as u64
+}
+
+fn say_part(fd: u64, i: u64, state: u64) {
+    ulib.say((&S_PART[0 as usize]) as u64)
+    ulib.sayu(i + 1)
+    ulib.say((&S_STATE[0 as usize]) as u64)
+    ulib.say(state_name(state))
+    ulib.say((&S_END[0 as usize]) as u64)
+    ulib.sayu(dualkern.p_end(i))
+    ulib.say((&S_LIMIT[0 as usize]) as u64)
+    ulib.sayu(limit())
+    ulib.nl()
+}
+
+fn say_result(prefix: u64, i: u64) {
+    ulib.say(prefix)
+    ulib.sayu(i + 1)
+    ulib.nl()
+}
+
+fn run(fd: u64, apply: bool) -> u64 {
+    var remaining: u64 = 0
+    var i: u64 = 0
+    while i < dualkern.entry_count() {
+        let state: u64 = state_of(fd, i)
+        if dualkern.p_typ(i) == dualkern.T_OSUM {
+            say_part(fd, i, state)
+        }
+        if state == LAYOUT_TRIMMABLE && apply {
+            if trim(fd, i) {
+                say_result((&S_TRIMMED[0 as usize]) as u64, i)
+            } else {
+                say_result((&S_FAILED[0 as usize]) as u64, i)
+                remaining = remaining + 1
+            }
+        } else if state != LAYOUT_OK {
+            remaining = remaining + 1
+        }
+        i = i + 1
+    }
+    return remaining
+}
