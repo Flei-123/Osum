@@ -689,6 +689,11 @@ class Fahrer:
             if m is None:
                 return None
             return (int(m.group(3)), int(m.group(4)), int(m.group(1)), int(m.group(2)))
+        if name.startswith("vprect"):
+            m = last_2(r"vplay: rect name=%s x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)" % re.escape(name[6:]))
+            if m is None:
+                return None
+            return (int(m.group(3)), int(m.group(4)), int(m.group(1)), int(m.group(2)))
         if name.startswith("chrect"):
             m = last_2(r"charmap: rect name=%s x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)" % re.escape(name[6:]))
             if m is None:
