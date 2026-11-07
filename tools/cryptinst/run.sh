@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/cryptinst/run.sh -- K-019 gate: install an ENCRYPTED root, reboot, unlock.
-#   1. install /dev/hda --ja --crypt <pw>   (KVM, image from tools/install/build.sh)
+#   1. install /dev/hda --yes --crypt <pw>   (KVM, image from tools/install/build.sh)
 #   2. host: the root partition holds the OSUMCRYPT header and the plain marker text is NOT on the disk
 #   3. boot (roh) with kryptopw=<pw>   -> "crypt: unlocked"
 #   4. boot (roh) with a wrong kryptopw -> "crypt: locked", no unlock
@@ -18,7 +18,7 @@ ok()  { pass=$((pass+1)); echo "  OK    $1"; }
 bad() { fail=$((fail+1)); echo "  FAIL  $1"; }
 bash tools/install/build.sh "$OUT" > "$OUT/bauen.log" 2>&1 || { echo "build failed"; tail -5 "$OUT/bauen.log"; exit 1; }
 PW=geheim123
-bash tools/install/oneshot.sh inst iso "install /dev/hda --ja --crypt $PW;exit" 900 > /dev/null 2>&1
+bash tools/install/oneshot.sh inst iso "install /dev/hda --yes --crypt $PW;exit" 900 > /dev/null 2>&1
 grep -aq "install: encrypted" "$OUT/inst.txt" && ok "installer reports encryption" || bad "installer reports encryption"
 grep -aq "install: done" "$OUT/inst.txt" && ok "installation finished" || bad "installation finished"
 # host view: header magic somewhere in the root partition, no plaintext OFS magic / known strings

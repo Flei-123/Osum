@@ -158,7 +158,7 @@ echo "== 6. disk: install /dev/hda, update, rollback =="
 [ -s "$OUT/ziel.img" ] || { bad "no ziel.img in $OUT (run stage build first)"; exit 1; }
 ZMIB=$(( $(stat -c%s "$OUT/ziel.img") / 1048576 ))
 rm -f "$OUT/ziel.img"; head -c $((ZMIB * 1048576)) /dev/zero > "$OUT/ziel.img"
-OUT="$OUT" bash tools/install/oneshot.sh dinst iso "install /dev/hda --ja;exit" 900 > /dev/null 2>&1
+OUT="$OUT" bash tools/install/oneshot.sh dinst iso "install /dev/hda --yes;exit" 900 > /dev/null 2>&1
 sed -i -e 's/\x1b\[[0-9;=]*[a-zA-Z]//g' "$OUT/dinst.txt" 2>/dev/null
 hat "$OUT/dinst.txt" "install: done" "install /dev/hda finished"
 hatnicht "$OUT/dinst.txt" "install: ERROR" "installer reports no error"

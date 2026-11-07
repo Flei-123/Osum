@@ -68,7 +68,7 @@ grep -a 'ersatz\|apps \|programme' "$OUT/build.log"
 echo "== 5. the empty disk and the installation"
 rm -f "$OUT/ziel.img"
 head -c $((96 * 1024 * 1024)) /dev/zero > "$OUT/ziel.img"
-OUT="$OUT" bash tools/install/oneshot.sh inst iso "install /dev/hda --ja;exit" 900 \
+OUT="$OUT" bash tools/install/oneshot.sh inst iso "install /dev/hda --yes;exit" 900 \
     > /dev/null 2>&1
 echo "   installer rc=$(cat "$OUT/inst.rc" 2>/dev/null) $(grep -ac 'install: done' "$OUT/inst.txt")"
 

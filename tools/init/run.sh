@@ -272,7 +272,7 @@ is "und zwar GENAU EINMAL -- sie ging nicht auch auf die Konsole" "$n" "1"
 echo "-- 3h. svc: the table and the manual action"
 has "$F" "SERVICE          STATE     PID  STARTS  ERRORS  UPTIME    TARGET" \
     "svc list zeigt eine Tafel mit Laufzeit und Neustarts"
-has "$F" "Dienste laufen" "und darunter, wieviele von wievielen laufen"
+has "$F" "services running" "und darunter, wieviele von wievielen laufen"
 is "svc stop haelt einen Dienst an" "$(sp "$F" blink 2 tail)" "done"
 kn=$(sp "$F" kaputt 4 tail)
 if [ -n "${kn:-}" ] && [ "$kn" -gt 5 ]; then

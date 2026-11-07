@@ -989,12 +989,12 @@ PYF
 )
 num "mittlerer Farbabstand des Leistengrundes zwischen 70 %% und 40 %% (Stufen)" \
     "${FABST:-0}" ge 12
-GL40=$(grep -a 'wm: glas alpha_soll=' "$TMPD/al40/serial.txt" | tail -1)
+GL40=$(grep -a 'wm: glass alpha_target=' "$TMPD/al40/serial.txt" | tail -1)
 echo "        $GL40"
 num "bei Regler 40 hebt die Lesbarkeitsschranke keinen einzigen Bildpunkt an" \
     "$(printf '%s' "$GL40" | grep -oE 'high=[0-9]+' | cut -d= -f2)" eq 0
 same "und der Server meldet genau die Reglerstellung als Soll" "40" \
-    "$(printf '%s' "$GL40" | grep -oE 'alpha_soll=[0-9]+' | cut -d= -f2)"
+    "$(printf '%s' "$GL40" | grep -oE 'alpha_target=[0-9]+' | cut -d= -f2)"
 #
 echo
 echo "== 11b2. the text badge of the bar =="
@@ -1305,15 +1305,15 @@ bash tools/themestore/build.sh "$TMPD/dunkelmod" scheme=midnight mode=dark \
     > "$TMPD/dunkelmod.log" 2>&1
 cp "$TMPD/dunkelmod/desktop.png" "$SHOTS/glas-dunkel-40.png" 2>/dev/null
 DV=$(python3 tools/themestore/glascheck.py var "$SHOTS/glas-dunkel-40.png")
-DA=$(grep -a 'wm: glas alpha_soll=' "$TMPD/dunkelmod/serial.txt" | tail -1)
+DA=$(grep -a 'wm: glass alpha_target=' "$TMPD/dunkelmod/serial.txt" | tail -1)
 echo "        dark scheme on dark image: $DV"
 echo "        $DA"
 num "bei 40 %% ueber dem dunklen Bild traegt der Leistengrund das Muster (Farben)" \
     "$(printf '%s' "$DV" | grep -oE 'farben [0-9]+' | cut -d' ' -f2)" ge 2
 num "und er streut wirklich (die deckende Leiste streut 0)" \
     "$(printf '%s' "$DV" | grep -oE '^var [0-9]+' | cut -d' ' -f2)" ge 100
-DSOLL=$(printf '%s' "$DA" | grep -oE 'alpha_soll=[0-9]+' | cut -d= -f2)
-DIST=$(printf '%s' "$DA" | grep -oE 'alpha_ist=[0-9]+' | cut -d= -f2)
+DSOLL=$(printf '%s' "$DA" | grep -oE 'alpha_target=[0-9]+' | cut -d= -f2)
+DIST=$(printf '%s' "$DA" | grep -oE 'alpha_actual=[0-9]+' | cut -d= -f2)
 num "der Regler sagt 40, und der Server malt hier fast dasselbe" \
     "$(( ${DIST:-99} - ${DSOLL:-0} ))" le 10
 DFG=$(grep -a 'taskbar: text clock ' "$TMPD/dunkelmod/serial.txt" | tail -1 \
@@ -1323,11 +1323,11 @@ DK=$(python3 tools/themestore/glascheck.py kontrast \
 echo "        $DK"
 num "und die Leistenschrift haelt dabei ihre 4,5:1 (x100)" \
     "$(printf '%s' "$DK" | grep -oE '^kontrast [0-9]+' | cut -d' ' -f2)" ge 450
-HA=$(grep -a 'wm: glas alpha_soll=' "$TMPD/dunkel/serial.txt" | tail -1)
+HA=$(grep -a 'wm: glass alpha_target=' "$TMPD/dunkel/serial.txt" | tail -1)
 echo "        CONTROL, light bar on the same image: $HA"
 num "GEGENPROBE: dort hebt der Schleier die Deckkraft ueber die Reglerstellung" \
-    "$(printf '%s' "$HA" | grep -oE 'alpha_ist=[0-9]+' | cut -d= -f2)" gt \
-    "$(printf '%s' "$HA" | grep -oE 'alpha_soll=[0-9]+' | cut -d= -f2)"
+    "$(printf '%s' "$HA" | grep -oE 'alpha_actual=[0-9]+' | cut -d= -f2)" gt \
+    "$(printf '%s' "$HA" | grep -oE 'alpha_target=[0-9]+' | cut -d= -f2)"
 SGL=$(grep -a 'settings: glas ' "$SE" | tail -1)
 echo "        $SGL"
 num "die Einstellungsseite fuehrt das WIRKSAME Alpha neben dem Regler" \
@@ -1371,9 +1371,9 @@ for pair in "dblur:dunkel mit Milchglas 12" "dunkel2:zweites dunkles Muster"; do
         ge 450
 done
 for d in dunkel dblur dunkel2; do
-    AL=$(grep -a 'wm: glas alpha_soll=' "$TMPD/$d/serial.txt" | tail -1)
-    EXPECTED=$(printf '%s' "$AL" | grep -oE 'alpha_soll=[0-9]+' | cut -d= -f2)
-    ACTUAL=$(printf '%s' "$AL" | grep -oE 'alpha_ist=[0-9]+' | cut -d= -f2)
+    AL=$(grep -a 'wm: glass alpha_target=' "$TMPD/$d/serial.txt" | tail -1)
+    EXPECTED=$(printf '%s' "$AL" | grep -oE 'alpha_target=[0-9]+' | cut -d= -f2)
+    ACTUAL=$(printf '%s' "$AL" | grep -oE 'alpha_actual=[0-9]+' | cut -d= -f2)
     VZ=$(python3 tools/themestore/glascheck.py var "$TMPD/$d/desktop.png")
     FAB=$(printf '%s' "$VZ" | grep -oE 'farben [0-9]+' | cut -d' ' -f2)
     VAR=$(printf '%s' "$VZ" | grep -oE '^var [0-9]+' | cut -d' ' -f2)
@@ -1399,7 +1399,7 @@ txt = open(sys.argv[1], 'rb').read().decode('latin1').splitlines()
 seite = [(i, int(m.group(1))) for i, z in enumerate(txt)
          for m in [re.search(r'settings: glas .* ist=(\d+)', z)] if m]
 server = [(i, int(m.group(1))) for i, z in enumerate(txt)
-          for m in [re.search(r'wm: glas alpha_soll=\d+ alpha_ist=(\d+)', z)]
+          for m in [re.search(r'wm: glass alpha_target=\d+ alpha_actual=(\d+)', z)]
           if m]
 if not seite or not server:
     print("0 0")

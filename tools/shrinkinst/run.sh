@@ -82,7 +82,7 @@ run_qemu() {
     ZWEITE_PLATTE="$img" bash tools/install/oneshot.sh "$name" iso "$script" "$RUN_LIMIT" >/dev/null 2>&1
 }
 
-echo "== 3. dry run (no --ja) leaves the disk untouched =="
+echo "== 3. dry run (no --yes) leaves the disk untouched =="
 cp "$OUT/pristine.img" "$OUT/probe.img"
 BEFORE=$(sha "$OUT/probe.img")
 run_qemu probe "$OUT/probe.img" "dualcli /dev/hdb --free $FREE_MIB;exit"
@@ -96,7 +96,7 @@ mv "$OUT/probe.img" "$OUT/skip.img"
 echo "== 4. shrink and install =="
 cp "$OUT/pristine.img" "$OUT/main.img"
 ESP_BEFORE=$(dd if="$OUT/main.img" bs=512 skip="$ESP_START" count="$ESP_SECT" status=none | sha256sum | cut -d' ' -f1)
-run_qemu main "$OUT/main.img" "dualcli /dev/hdb --free $FREE_MIB --ja --name hdb;exit"
+run_qemu main "$OUT/main.img" "dualcli /dev/hdb --free $FREE_MIB --yes --name hdb;exit"
 serial_lines "$OUT/main.txt" 24
 grep -aq '^dual: shresult=0' "$OUT/main.txt" && ok "shrink reports success" || bad "shrink did not report success"
 grep -aq '^dual: shrunk ' "$OUT/main.txt" && ok "table re-read after the shrink" || bad "no re-read of the table"
@@ -132,7 +132,7 @@ refuse_case() {
     splice "$OUT/$name.img" "$part"
     local before
     before=$(sha "$OUT/$name.img")
-    run_qemu "$name" "$OUT/$name.img" "dualcli /dev/hdb --free $FREE_MIB --ja --name hdb;exit"
+    run_qemu "$name" "$OUT/$name.img" "dualcli /dev/hdb --free $FREE_MIB --yes --name hdb;exit"
     serial_lines "$OUT/$name.txt" 6
     if grep -aq "^dual: shrefuse $want\$" "$OUT/$name.txt"; then ok "$label -> shrefuse $want"; else bad "$label: expected shrefuse $want"; fi
     if grep -aq '^dual: done' "$OUT/$name.txt"; then bad "$label: installed anyway"; else ok "$label: no installation"; fi
@@ -214,7 +214,7 @@ splice "$OUT/reloc.img" "$OUT/endp.part"
 ntfsfix -n "$OUT/endp.part" >/dev/null 2>&1 && ok "end-placed NTFS is clean" || bad "end-placed NTFS not clean"
 python3 -I tools/shrinkinst/check.py "$OUT/reloc.img" "$EXPECT" "$OUT/inst4k.files" > "$OUT/reloc.pre" 2>&1
 [ "$(head -1 "$OUT/reloc.pre")" != ALLOK ] && ok "oracle rejects the end-placed disk before the shrink" || bad "oracle accepted the unshrunk end-placed disk"
-run_qemu reloc "$OUT/reloc.img" "dualcli /dev/hdb --free $FREE_MIB --ja --name hdb;exit"
+run_qemu reloc "$OUT/reloc.img" "dualcli /dev/hdb --free $FREE_MIB --yes --name hdb;exit"
 serial_lines "$OUT/reloc.txt" 24
 grep -aq '^dual: shresult=0' "$OUT/reloc.txt" && ok "shrink with relocation reports success" || bad "relocating shrink failed ($(grep -a '^dual: sh' "$OUT/reloc.txt" | tr '\n' ' ' | cut -c1-120))"
 tr -d '\000' < "$OUT/reloc.txt" | grep -a '^dual: shprog ' | awk '{print $3}' > "$OUT/prog.txt"

@@ -587,7 +587,7 @@ has "$B" "dhcp: ack ip=192.168.42.100" "and an ACK for it"
 grep -qaE 'gateway=192\.168\.42\.1 +server=192\.168\.42\.1' "$B" \
     && ok "with this machine as its gateway and as the server that answered" \
     || bad "the offer carries the wrong gateway or server"
-has "$B" "dhcp: gesetzt ip=192.168.42.100" "and the client really took the address"
+has "$B" "dhcp: set ip=192.168.42.100" "and the client really took the address"
 hasnot "$B" "dhcp: offer ip=169.254" \
     "it was NOT handed back the address it booted with (a bug this round had)"
 

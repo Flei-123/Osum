@@ -189,7 +189,7 @@ ZIEL_MIB=${OTA_ZIEL_MIB:-96}
 if [ "$WIEDER" = 0 ]; then
 rm -f "$OUT/ziel.img"
 head -c $((ZIEL_MIB * 1024 * 1024)) /dev/zero > "$OUT/ziel.img"
-OUT="$OUT" bash tools/install/oneshot.sh inst iso "install /dev/hda --ja;exit" 900 \
+OUT="$OUT" bash tools/install/oneshot.sh inst iso "install /dev/hda --yes;exit" 900 \
     > /dev/null 2>&1
 gleich "die Installation auf die leere Platte" "$(cat "$OUT/inst.rc")" "21"
 hat "$OUT/inst.txt" "install: done" "der Installer meldet sich fertig"
@@ -618,7 +618,7 @@ gleich "(a) stable: die Maschine kommt hoch" "$rc" "21"
 hat "$OUT/kan1.txt" "ota: channel stable" "(a) der Kanal steht in der Anzeige"
 hat "$OUT/kan1.txt" "ota: version there 2" "(a) auf stable liegt Fassung 2"
 hatnicht "$OUT/kan1.txt" "ota: version there 4" "(a) und nicht die Fassung des Testkanals"
-hat "$OUT/kan1.txt" "phase=verfuegbar" "(a) /system/ota.stand: phase=verfuegbar"
+hat "$OUT/kan1.txt" "phase=available" "(a) /system/ota.stand: phase=verfuegbar"
 hat "$OUT/kan1.txt" "there=2" "(a) /system/ota.stand: there=2"
 grep -qaE "^200 stable/(LISTING|VERZEICHNIS) " "$OUT/srv.log" \
     && ok "(a) the remote end saw the request under /stable/" \
@@ -636,7 +636,7 @@ gleich "(b) der Neustart" "$rc" "21"
 hat "$OUT/kan3.txt" "paket-hallo fassung 2" "(b) die neue Generation laeuft"
 hat "$OUT/kan3.txt" "ota: version here 4" "(b) der Fassungszaehler steht auf 4"
 hat "$OUT/kan3.txt" "ota: channel test" "(b) und der Kanal ist noch test"
-hat "$OUT/kan3.txt" "phase=ruhe" "(b) nach der Bestaetigung steht phase=ruhe"
+hat "$OUT/kan3.txt" "phase=idle" "(b) nach der Bestaetigung steht phase=idle"
 
 rc=$(lauf kan4 "ota set kanal stable;ota search;exit")
 hat "$OUT/kan4.txt" "ROLLBACK REFUSED" "(c) test -> stable ist ein Rueckschritt und wird abgelehnt"
@@ -683,7 +683,7 @@ hat "$OUT/kan11.txt" "ota: READY FOR RESTART" "(g) Ausgangslage: Fassung 2 steht
 rc=$(lauf kan12 "opk rebuild;ota set healthy 3;ota boot sh;ota show;cat /system/ota.stand;exit" 300)
 hat "$OUT/kan12.txt" "ota: start healthy, trial confirmed" "(g) ein gesunder Start wird von selbst bestaetigt"
 hat "$OUT/kan12.txt" "ota: nothing in trial" "(g) danach steht nichts mehr in Erprobung"
-hat "$OUT/kan12.txt" "phase=ruhe" "(g) und die Anzeige sagt phase=ruhe"
+hat "$OUT/kan12.txt" "phase=idle" "(g) und die Anzeige sagt phase=idle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf kan13 "ota apply;exit")
 rc=$(lauf kan14 "opk rebuild;ota set gesund 2;ota set frist 6;ota boot nirgends;exit" 300)

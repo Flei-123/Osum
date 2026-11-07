@@ -786,7 +786,7 @@ has "$TMPD/p.txt" "leerlauf=900" "lock.idle lands in /etc/sperre.conf, where idl
 has "$TMPD/p.txt" "# /etc/sperre.conf -- test copy" "... and the file's other lines stay"
 part "$E" S-UPD S-HIST > "$TMPD/p.txt"
 has "$TMPD/p.txt" "here=0" "DAILY-DRIVER: settings.update.status answers (here=0: no ota.stand yet)"
-has "$TMPD/p.txt" "phase=ruhe" "... phase ruhe by default"
+has "$TMPD/p.txt" "phase=idle" "... phase ruhe by default"
 has "$TMPD/p.txt" "channel=stable" "... channel from /etc/ota.conf"
 has "$TMPD/p.txt" "busy=0" "... and nothing running"
 has "$TMPD/p.txt" "would=search" "a dry run of update.check says what it would run and starts nothing"

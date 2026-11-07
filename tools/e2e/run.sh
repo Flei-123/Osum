@@ -70,7 +70,7 @@ echo
 echo "== 2. install onto an empty disk =="
 rm -f "$OUT/ziel.img"
 head -c $((256 * 1024 * 1024)) /dev/zero > "$OUT/ziel.img"
-rc=$(lauf inst iso "install /dev/hda --ja;exit" 900)
+rc=$(lauf inst iso "install /dev/hda --yes;exit" 900)
 gleich "installer exit code" "$rc" "21"
 hat "$OUT/inst.txt" "install: gpt ok" "the GPT is written"
 hat "$OUT/inst.txt" "install: fat32 ok" "the EFI partition carries FAT32"

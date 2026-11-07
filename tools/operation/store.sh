@@ -182,7 +182,7 @@ OTA_ROOTS="$OUT/roots.pem" OTA_CONF="$OUT/ota.conf" \
 rm -f "$OUT/ziel.img"
 head -c $((96 * 1024 * 1024)) /dev/zero > "$OUT/ziel.img"
 OUT="$OUT" bash tools/install/oneshot.sh inst iso \
-    "install /dev/hda --ja;exit" 900 > /dev/null 2>&1
+    "install /dev/hda --yes;exit" 900 > /dev/null 2>&1
 gleich "der Installer ist durchgelaufen" "$(cat "$OUT/inst.rc" 2>/dev/null)" "21"
 grep -qa 'install: done' "$OUT/inst.txt" \
     && ok "and says so" || bad "'install: done' fehlt"

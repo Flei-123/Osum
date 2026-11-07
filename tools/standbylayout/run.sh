@@ -75,13 +75,13 @@ for c in new oldfit oldfull; do
 done
 text "$OUT/d_foreign.txt" | grep -aq '^dual: standby part' && bad "foreign partition is reported" || ok "foreign partition is not touched or reported"
 
-echo "== 4. dualcli --standby --ja: migrate only where safe =="
+echo "== 4. dualcli --standby --yes: migrate only where safe =="
 sb_before=$(dd if="$OUT/oldfit.img" bs=512 skip=34816 count=1 2>/dev/null | sha256sum | cut -d' ' -f1)
 cp "$OUT/oldfit.img" "$OUT/noname.img"
 before=$(sha "$OUT/noname.img")
-cli_run m_noname "$OUT/noname.img" "--standby --ja"
+cli_run m_noname "$OUT/noname.img" "--standby --yes"
 [ "$(sha "$OUT/noname.img")" = "$before" ] && ok "oldfit without --name: refused, disk byte-identical" || bad "oldfit without --name: disk changed"
-cli_run m_oldfit "$OUT/oldfit.img" "--standby --ja --name hdb"
+cli_run m_oldfit "$OUT/oldfit.img" "--standby --yes --name hdb"
 text "$OUT/m_oldfit.txt" | grep -a '^dual: standby' | sed 's/^/        /'
 text "$OUT/m_oldfit.txt" | grep -aqx 'dual: standby trimmed 2' && ok "oldfit: trimmed" || bad "oldfit: no trim line"
 [ "$(python3 -I "$MKDISK" end "$OUT/oldfit.img")" = 126942 ] && ok "oldfit: GPT entry now ends at the last data block" || bad "oldfit: entry end wrong"
@@ -92,13 +92,13 @@ cli_run m_oldfit2 "$OUT/oldfit.img" "--standby"
 text "$OUT/m_oldfit2.txt" | grep -aqxF "$(want ok 126942)" && ok "oldfit: second run reports ok" || bad "oldfit: second run not ok"
 
 before=$(sha "$OUT/oldfull.img")
-cli_run m_oldfull "$OUT/oldfull.img" "--standby --ja --name hdb"
+cli_run m_oldfull "$OUT/oldfull.img" "--standby --yes --name hdb"
 text "$OUT/m_oldfull.txt" | grep -a '^dual: standby' | sed 's/^/        /'
 [ "$(sha "$OUT/oldfull.img")" = "$before" ] && ok "oldfull: refused, disk byte-identical" || bad "oldfull: disk changed although the filesystem reaches the reserve"
 text "$OUT/m_oldfull.txt" | grep -aq 'dual: standby trimmed' && bad "oldfull: claims a trim" || ok "oldfull: no trim claimed"
 
 before=$(sha "$OUT/foreign.img")
-cli_run m_foreign "$OUT/foreign.img" "--standby --ja --name hdb"
+cli_run m_foreign "$OUT/foreign.img" "--standby --yes --name hdb"
 [ "$(sha "$OUT/foreign.img")" = "$before" ] && ok "foreign: not modified" || bad "foreign: modified"
 
 echo "== 5. kernel: standby refuses a disk whose partitions reach the image area =="

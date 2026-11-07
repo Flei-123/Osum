@@ -46,7 +46,7 @@ check() { if [ "$2" = "1" ]; then ok=$((ok+1)); echo "OK   $1"; else fail=$((fai
 has() { grep -aq -- "$2" "$1" && echo 1 || echo 0; }
 check "lease acquired" "$(has "$T/s.klar" 'dhcp: ack ip=')"
 check "lease renewed at least 3 times" "$([ "$(grep -ac 'dhcp: lease renewed' "$T/s.klar")" -ge 3 ] && echo 1 || echo 0)"
-check "address set exactly once" "$([ "$(grep -ac 'dhcp: gesetzt ip=' "$T/s.klar")" -eq 1 ] && echo 1 || echo 0)"
+check "address set exactly once" "$([ "$(grep -ac 'dhcp: set ip=' "$T/s.klar")" -eq 1 ] && echo 1 || echo 0)"
 check "resolv.conf has nameserver after lease" "$(has "$T/r1.txt" '^nameserver ')"
 check "resolv.conf has fallback after lease" "$(has "$T/r1.txt" '^fallback ')"
 check "resolv.conf repaired after being clobbered" "$(has "$T/r2.txt" '^nameserver ')"

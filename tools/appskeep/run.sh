@@ -60,7 +60,7 @@ EXTRA="$EX" bash tools/install/build.sh "$OUT" > "$OUT/build.log" 2>&1 \
     && ok "image built" || { tail -20 "$OUT/build.log"; bad "build.sh"; }
 rm -f "$OUT/ziel.img"
 head -c $((256 * 1024 * 1024)) /dev/zero > "$OUT/ziel.img"
-OUT="$OUT" bash tools/install/oneshot.sh inst iso "install /dev/hda --ja;exit" 900 > /dev/null 2>&1
+OUT="$OUT" bash tools/install/oneshot.sh inst iso "install /dev/hda --yes;exit" 900 > /dev/null 2>&1
 gleich "install onto empty disk" "$(cat "$OUT/inst.rc" 2>/dev/null)" "21"
 cp -f "$OUT/ziel.img" "$OUT/leer.img"
 

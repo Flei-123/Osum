@@ -162,7 +162,7 @@ OTA_ROOTS="$OUT/certs/ca.pem" OTA_CONF="$OUT/ota.conf" ZIEL_MIB=96 \
     && ok "image built (kernel $(stat -c%s "$OUT/k.mb") octets)" || { tail -20 "$OUT/build.log"; bad "install/build.sh"; }
 rm -f "$OUT/ziel.img"
 head -c $((96 * 1024 * 1024)) /dev/zero > "$OUT/ziel.img"
-OUT="$OUT" bash tools/install/oneshot.sh inst iso "install /dev/hda --ja;exit" 900 > /dev/null 2>&1
+OUT="$OUT" bash tools/install/oneshot.sh inst iso "install /dev/hda --yes;exit" 900 > /dev/null 2>&1
 gleich "install onto an empty GPT disk" "$(cat "$OUT/inst.rc" 2>/dev/null)" "21"
 mdir -i "$ESP" ::/ > /dev/null 2>&1 && ok "ESP (partition 1) is a readable FAT" || bad "ESP unreadable"
 

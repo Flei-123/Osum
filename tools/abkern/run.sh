@@ -79,7 +79,7 @@ EXTRA="/erpseed=$OUT/erp" bash tools/install/build.sh "$OUT" > "$OUT/build.log" 
     && ok "image built" || { tail -20 "$OUT/build.log"; bad "build.sh"; }
 rm -f "$OUT/ziel.img"
 head -c $((96 * 1024 * 1024)) /dev/zero > "$OUT/ziel.img"
-OUT="$OUT" bash tools/install/oneshot.sh inst iso "install /dev/hda --ja;exit" 900 > /dev/null 2>&1
+OUT="$OUT" bash tools/install/oneshot.sh inst iso "install /dev/hda --yes;exit" 900 > /dev/null 2>&1
 gleich "install onto empty disk" "$(cat "$OUT/inst.rc" 2>/dev/null)" "21"
 
 echo

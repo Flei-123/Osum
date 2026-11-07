@@ -187,7 +187,7 @@ stick_lauf() { # <name> <bios|uefi> <mit-gegenstelle:0|1> <console.py-args...>
 
 set -- \
     --deadline 150 --erwarte 'sh: ready' \
-    --sende 'dhcp\n'                           --deadline 90  --erwarte 'dhcp: gesetzt ip=' \
+    --sende 'dhcp\n'                           --deadline 90  --erwarte 'dhcp: set ip=' \
     --sende 'cat /etc/resolv.conf\n'           --deadline 30  --erwarte 'nameserver' \
     --sende "host $NAME\n"                     --deadline 90  --erwarte 'host -> 0' \
     --sende "fetch https://$NAME/index.json\n" --deadline 150 --erwarte 'fetch -> 0' \
@@ -203,7 +203,7 @@ stick_lauf sbios bios 0 "${NETZFOLGE[@]}"
 B="$TMPD/sbios/con.log"
 hat "$B" 'console=ttyS0' "der Menueeintrag 'Command line' wurde gewaehlt"
 hat "$B" 'sh: ready' "die Shell steht auf der seriellen Leitung"
-hat "$B" 'dhcp: gesetzt ip=' "DHCP hat eine Adresse gesetzt"
+hat "$B" 'dhcp: set ip=' "DHCP hat eine Adresse gesetzt"
 hat "$B" 'nameserver' "und einen Nameserver nach /etc/resolv.conf geschrieben"
 IPO=$(grep -aoE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$B" | tail -1)
 IPD=""
@@ -231,7 +231,7 @@ if [ -n "$OVMF_CODE" ] && [ -n "$OVMF_VARS" ]; then
     stick_lauf suefi uefi 0 "${NETZFOLGE[@]}"
     U="$TMPD/suefi/con.log"
     hat "$U" 'sh: ready' "unter UEFI steht dieselbe Shell"
-    hat "$U" 'dhcp: gesetzt ip=' "DHCP unter UEFI"
+    hat "$U" 'dhcp: set ip=' "DHCP unter UEFI"
     hat "$U" 'fetch: verify OK' "und dieselbe gepruefte Kette"
     hat "$U" 'ota: NEW VERSION available' "und dasselbe VERZEICHNIS"
 else
@@ -247,7 +247,7 @@ stick_lauf sbr bios 1 \
     --deadline 150 --erwarte 'sh: ready' \
     --sende 'mount\n'                    --deadline 60  --erwarte 'mount -> 0' \
     --sende 'cat /mnt/rechte.conf\n'     --deadline 40  --erwarte 'servername' \
-    --sende 'dhcp\n'                     --deadline 90  --erwarte 'dhcp: gesetzt ip=' \
+    --sende 'dhcp\n'                     --deadline 90  --erwarte 'dhcp: set ip=' \
     --sende 'jarvisd -c /mnt/rechte.conf -1 -t 90000\n' \
                                          --deadline 240 --erwarte 'jarvisd -> ' \
     --sende 'jarvisctl log 20\n'   --deadline 60  --erwarte 'jarvisctl -> '

@@ -35,11 +35,11 @@ cat > "$KLEIN" <<'EOF'
 // probe.fi -- eine Testdatei fuer den Editor
 fn gruss(name: u64) -> u64 {
     let x: u64 = 42
-    var summe: u64 = 0
-    while summe < x {
-        summe = summe + 1   // zaehlen
+    var total: u64 = 0
+    while total < x {
+        total = total + 1   // zaehlen
     }
-    return summe
+    return total
 }
 const TEXT: u64 = 0x1234
 // Ende der Probe
@@ -195,7 +195,7 @@ bash tools/alltag/build.sh "$d" \
     shot=no desk=no kbd=yes warten=5 bloecke=32768 keep=yes \
     "xfile=/probe.fi=$KLEIN" \
     extra="wigapp=/bin/nedit,/probe.fi,show=5" > "$d.log" 2>&1
-grep -qa 'nedit: gesichert' "$d/serial.txt" \
+grep -qa 'nedit: saved' "$d/serial.txt" \
     && ok "the editor reports that it saved" \
     || bad "the editor reports no save"
 mod=$(grep -aoE 'modif [0-9]+' "$d/serial.txt" | tail -1 | grep -oE '[0-9]+$')

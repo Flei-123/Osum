@@ -4,7 +4,7 @@
 # Three foreign disks (IDE hdb, NVMe, AHCI) carry a random pattern + GPT signature.
 # Case 1 (lock): raw writes + installer/dual calls without confirmation -> sha256 unchanged.
 # Case 2 (nowlock, counter-proof): same raw writes with the kernel word nowlock -> sha256 MUST change.
-# Case 3 (confirmed): install /dev/hdb --ja --name hdb -> allowed, hdb changes, nvme/ahci untouched.
+# Case 3 (confirmed): install /dev/hdb --yes --name hdb -> allowed, hdb changes, nvme/ahci untouched.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -49,7 +49,7 @@ run() {
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
 }
 S0=$(sums)
-run lockide "" "cp /bin/sh /dev/hdb;install /dev/hdb --ja;install /dev/ram0 --ja;install /dev/usb --ja;exit"
+run lockide "" "cp /bin/sh /dev/hdb;install /dev/hdb --yes;install /dev/ram0 --yes;install /dev/usb --yes;exit"
 T=45 run lockn "nvme wlforeign" ""
 T=45 run locka "ahci wlforeign" ""
 S1=$(sums)
@@ -66,7 +66,7 @@ T=45 run nolocka "ahci wlforeign nowlock" ""
 [ "$(sha256sum "$W/nvme.img" | cut -c1-64)" != "$(echo "$S1" | cut -d' ' -f2)" ] && ok "COUNTER-PROOF nowlock: nvme changes" || bad "COUNTER-PROOF: nvme unchanged"
 [ "$(sha256sum "$W/sda.img" | cut -c1-64)" != "$(echo "$S1" | cut -d' ' -f3)" ] && ok "COUNTER-PROOF nowlock: ahci changes" || bad "COUNTER-PROOF: ahci unchanged"
 S3a=$(sums)
-T=75 run conf "" "install /dev/hda --ja;exit"
+T=75 run conf "" "install /dev/hda --yes;exit"
 S3b=$(sums)
 grep -a -q "wipe: unlocked" "$W/conf.txt" && ok "confirmed: unlock granted" || bad "confirmed: no unlock"
 grep -a -q "install: fat32 ok" "$W/conf.txt" && ok "confirmed: install wrote GPT + FAT32 on blank hda (full run: tools/install/run.sh)" || bad "confirmed: install did not write"

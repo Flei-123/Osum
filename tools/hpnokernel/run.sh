@@ -46,7 +46,7 @@ run_cli() {
     zblk=$(bash tools/mkfsfi/mkfs.sh where "$work/root.img" /etc/ziel 2>/dev/null | sed -n 's/.*first=\([0-9]*\).*/\1/p')
     [ -n "$zblk" ] && printf 'kons\n\0\0' | dd of="$work/root.img" bs=512 seek="$zblk" conv=notrunc status=none
     timeout 900 $QEMU_X86 -m 512 -kernel "$bau/osum.mb" \
-        -append "osum vfs nokbd nosched noproc noring3 script=dualcli /dev/hdb --quelle /dev/hda --ja --name hdb;exit" \
+        -append "osum vfs nokbd nosched noproc noring3 script=dualcli /dev/hdb --quelle /dev/hda --yes --name hdb;exit" \
         -serial "file:$ser" -display none -no-reboot \
         -drive "file=$work/root.img,format=raw,if=ide,index=0" \
         -drive "file=$disk,format=raw,if=ide,index=1" > "$work/qemu.log" 2>&1

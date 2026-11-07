@@ -8,7 +8,7 @@
 # (T1 shortened to 12 s for the test, the real one is lease/2) must
 #   * get the lease                              "dhcp: ack ip="
 #   * renew it again and again, unicast          "dhcp: lease renewed" >= 3 times
-#   * NOT touch the address while doing so       exactly one "dhcp: gesetzt ip="
+#   * NOT touch the address while doing so       exactly one "dhcp: set ip="
 # STAB_TREE=<worktree> builds the guest from another tree: the counter-proof is
 # the tree before the change -- it has no renewal at all (0 renewals).
 set -uo pipefail
@@ -35,7 +35,7 @@ timeout $((SECS + 120)) qemu-system-x86_64 -accel $ACC -kernel "$T/k.img" -m 256
 tr -cd '\11\12\15\40-\176' < "$T/s.txt" > "$T/s.klar"
 acks=$(grep -ac "dhcp: ack ip=" "$T/s.klar")
 ren=$(grep -ac "dhcp: lease renewed" "$T/s.klar")
-sets=$(grep -ac "dhcp: gesetzt ip=" "$T/s.klar")
+sets=$(grep -ac "dhcp: set ip=" "$T/s.klar")
 lost=$(grep -ac "dhcp: lease lost" "$T/s.klar")
 echo "STABLEASE: acks=$acks renewals=$ren address_sets=$sets lease_lost=$lost (window ${SECS} s, t1=12 s)"
 [ -n "${STAB_KEEP:-}" ] && cp "$T/s.klar" "$STAB_KEEP"

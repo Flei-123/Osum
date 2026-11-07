@@ -108,7 +108,7 @@ install_into() {
     local img=$1 ser=$2 base=$3
     local saved=$BAU
     BAU=$base
-    lauf "$img" "dualcli /dev/hdb --quelle /dev/hda --ja --name hdb" "$ser"
+    lauf "$img" "dualcli /dev/hdb --quelle /dev/hda --yes --name hdb" "$ser"
     BAU=$saved
 }
 

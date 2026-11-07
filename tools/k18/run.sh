@@ -475,7 +475,7 @@ done
 
 hat "$S" "Profil:" "die Uebersicht nennt das Profil"
 hat "$S" "Ausgeglichen" "und zwar beim Namen"
-hat "$S" "Akku:" "sie nennt den Akku"
+hat "$S" "Battery:" "sie nennt den Akku"
 hat "$S" "OSUM-BAT" "und den Modellnamen aus _BIF"
 hat "$S" "Netz:" "sie nennt das Netzteil"
 hat "$S" "Heat:" "sie nennt die Temperatur"
@@ -491,7 +491,7 @@ RC=$(lauf shellaus "osum nokbd nosched noproc nopwr script=power" akku)
 SA="$TMPD/shellaus.txt"
 hat "$SA" "power: the energy layer is not running" "GEGENPROBE nopwr: /bin/power sagt es und rechnet nicht weiter"
 hat_nicht "$SA" "Profil:" "und zeigt kein Profil"
-hat_nicht "$SA" "Akku:" "und keinen Akku"
+hat_nicht "$SA" "Battery:" "und keinen Akku"
 hat "$SA" "pwr: skipped" "der Kernel sagt es ebenfalls"
 
 echo "== 10. the interface rejects what it must reject =="

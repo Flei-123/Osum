@@ -68,7 +68,7 @@ b[off] ^= 0x01
 open(p, 'wb').write(b)
 PY
 mcopy -o -i "$OUT/store.img@@1048576" "$OUT/PACK.bin" "::$PACKPATH/PACK" && ok "one octet in the pack flipped on the medium"
-rc=$(lauf bad iso "mount;recover /dev/hda /mnt/store snap1 --ja --into /data;exit" 900)
+rc=$(lauf bad iso "mount;recover /dev/hda /mnt/store snap1 --yes --into /data;exit" 900)
 hat "$OUT/bad.txt" "recover: backup verify failed, target untouched" "damaged backup is refused before anything is written"
 nicht "$OUT/bad.txt" "install: gpt ok" "the installer never ran"
 gleich "target disk after the refused run" "$(sum "$OUT/ziel.img")" "$BEFORE"
@@ -79,12 +79,12 @@ echo "== 4. counter-proof: a dry run writes nothing =="
 rc=$(lauf dry iso "mount;recover /dev/hda /mnt/store snap1;exit" 900)
 hat "$OUT/dry.txt" "recover: dry run, nothing written" "dry run says so"
 gleich "target disk after the dry run" "$(sum "$OUT/ziel.img")" "$BEFORE"
-rc=$(lauf prot iso "mount;recover /dev/ram0 /mnt/store snap1 --ja;exit" 900)
+rc=$(lauf prot iso "mount;recover /dev/ram0 /mnt/store snap1 --yes;exit" 900)
 hat "$OUT/prot.txt" "recover: refused, boot or ram device" "the boot ram device is refused"
 
 echo
 echo "== 5. recovery onto the blank disk =="
-rc=$(lauf rec iso "ls /data;mount;recover /dev/hda /mnt/store snap1 --ja --into /data;exit" 1500)
+rc=$(lauf rec iso "ls /data;mount;recover /dev/hda /mnt/store snap1 --yes --into /data;exit" 1500)
 gleich "recover run: exit code" "$rc" "21"
 hat "$OUT/rec.txt" "recover: backup verified" "backup verified first"
 hat "$OUT/rec.txt" "install: done" "system installed on the blank disk"
