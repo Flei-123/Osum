@@ -5,6 +5,8 @@ profile kernel
 
 import ulib
 import h264tab
+import h264poc
+import h264dpb
 import libc.octets
 import libc.regio
 
@@ -16,7 +18,8 @@ export {
     E_OK, E_FORM, E_PROFIL, E_ART, E_BIG, E_DATA, E_UNGERADE,
     MAXW, MAXH,
     prof_get, prof_reset, PF_CAVLC, PF_MC, PF_RECON, PF_DEBLOCK, PF_REST, PF_N,
-    mc_put_slow
+    mc_put_slow,
+    h264_enable_main, h264_set_tag, h264_out_tag, h264_drain
 }
 
 // ------------------------------------------------------------ Fehler
@@ -63,15 +66,15 @@ const MAXMBH: u64 = 45      // MAXH / 16
 const MAXMB: u64 = 3600     // MAXMBW * MAXMBH
 const LUMA: u64 = 921600    // MAXW * MAXH
 const CHROMA: u64 = 230400  // LUMA / 4
-const NSLOT: u64 = 4
+const NSLOT: u64 = 6
 const NREF: u64 = 3          // hoechstens so viele Referenzen
 
 fn h264_luma_size() -> u64 { return LUMA }
 fn h264_chroma_size() -> u64 { return CHROMA }
 
-static mut pY: [u8; 3686400] = [0 as u8; 3686400]   // NSLOT * LUMA
-static mut pU: [u8; 921600] = [0 as u8; 921600]     // NSLOT * CHROMA
-static mut pV: [u8; 921600] = [0 as u8; 921600]
+static mut pY: [u8; 5529600] = [0 as u8; 5529600]   // NSLOT * LUMA
+static mut pU: [u8; 1382400] = [0 as u8; 1382400]   // NSLOT * CHROMA
+static mut pV: [u8; 1382400] = [0 as u8; 1382400]
 
 static mut cur_slot: u64 = 0
 static mut ref_slot: [u64; 4] = [0; 4]
@@ -298,6 +301,8 @@ static mut s_log2fn: u64 = 4
 static mut s_poctype: u64 = 0
 static mut s_log2poc: u64 = 4
 static mut s_nref: u64 = 1
+static mut s_reorder: u64 = 0
+static mut f_main: bool = false
 static mut s_mbw: u64 = 0
 static mut s_mbh: u64 = 0
 static mut s_w: u64 = 0
@@ -318,6 +323,7 @@ static mut p_deblockctl: u64 = 0
 static mut p_constrained: u64 = 0
 
 fn h264_profile() -> u64 { return s_profile }
+fn h264_enable_main(on: bool) { f_main = on }
 fn h264_width() -> u64 {
     if s_w == 0 { return 0 }
     return s_w - 2 * (s_cropl + s_cropr)
@@ -328,12 +334,66 @@ fn h264_height() -> u64 {
 }
 fn h264_mbs() -> u64 { return s_mbw * s_mbh }
 
+fn skip_hrd() {
+    let cnt: u64 = ue() + 1
+    un(8)
+    var i: u64 = 0
+    while i < cnt && i < 32 {
+        ue()
+        ue()
+        u1()
+        i = i + 1
+    }
+    un(20)
+}
+
+fn parse_vui() {
+    if u1() == 1 {
+        if un(8) == 255 { un(32) }
+    }
+    if u1() == 1 { u1() }
+    if u1() == 1 {
+        un(4)
+        if u1() == 1 { un(24) }
+    }
+    if u1() == 1 {
+        ue()
+        ue()
+    }
+    if u1() == 1 {
+        un(32)
+        un(32)
+        u1()
+    }
+    let nal_hrd: u64 = u1()
+    if nal_hrd == 1 { skip_hrd() }
+    let vcl_hrd: u64 = u1()
+    if vcl_hrd == 1 { skip_hrd() }
+    if nal_hrd == 1 || vcl_hrd == 1 { u1() }
+    u1()
+    if u1() == 1 {
+        u1()
+        ue()
+        ue()
+        ue()
+        ue()
+        s_reorder = ue()
+        ue()
+    }
+}
+
+fn ref_cap() -> u64 {
+    if s_nref < 1 { return 1 }
+    if s_nref > NREF { return NREF }
+    return s_nref
+}
+
 fn parse_sps() -> bool {
     s_profile = un(8)
     un(8)                    // constraint_set-Fahnen + reserviert
     s_level = un(8)
     ue()                     // seq_parameter_set_id
-    if s_profile != 66 {
+    if s_profile != 66 && !(f_main && s_profile == 77) {
         h_err = E_PROFIL
         return false
     }
@@ -371,6 +431,13 @@ fn parse_sps() -> bool {
     if s_w > MAXW || s_h > MAXH || s_w == 0 || s_h == 0 {
         h_err = E_BIG
         return false
+    }
+    s_reorder = 0
+    if s_profile == 77 {
+        if s_poctype != 2 { s_reorder = 2 }
+        if u1() == 1 { parse_vui() }
+        let room: u64 = NSLOT - 1 - ref_cap()
+        if s_reorder > room { s_reorder = room }
     }
     if bs_over {
         h_err = E_DATA
@@ -2460,6 +2527,12 @@ fn deblock_inner() {
 
 static mut first_mb: u64 = 0
 static mut slice_nr: u64 = 0
+static mut sl_poc: i64 = 0
+static mut pic_poc: i64 = 0
+static mut epoch: u64 = 0
+static mut cur_tag: u64 = 0
+static mut out_slot: u64 = 0
+static mut out_tag: u64 = 0
 
 fn parse_slice_header(nal_type: u64, nal_ref_idc: u64) -> bool {
     first_mb = ue()
@@ -2476,8 +2549,12 @@ fn parse_slice_header(nal_type: u64, nal_ref_idc: u64) -> bool {
     let idr: bool = nal_type == 5
     if idr { ue() }          // idr_pic_id
     if s_poctype == 0 {
-        un(s_log2poc)
-        if p_pocpresent == 1 { se() }
+        let lsb: u64 = un(s_log2poc)
+        var delta_bottom: i64 = 0
+        if p_pocpresent == 1 { delta_bottom = se() }
+        sl_poc = h264poc.poc_decode(idr, lsb, s_log2poc, delta_bottom)
+    } else {
+        sl_poc = 2 * (n_frames as i64)
     }
     sl_nref0 = p_nref0
     if sl_type == 0 {
@@ -2574,8 +2651,13 @@ fn slice_process_inner(nal_type: u64, nal_ref_idc: u64) -> u64 {
     if !parse_slice_header(nal_type, nal_ref_idc) { return 2 }
     if first_mb >= s_mbw * s_mbh { h_err = E_UNGERADE; return 2 }
     if first_mb == 0 {
-        if nal_type == 5 { ref_n = 0 }
+        if nal_type == 5 {
+            ref_n = 0
+            epoch = epoch + 1
+        }
         cur_slot = pick_slot()
+        if cur_slot == h264dpb.NO_SLOT { h_err = E_BIG; return 2 }
+        pic_poc = sl_poc
         mbs_clear()
         picture_open = true
     } else {
@@ -2592,14 +2674,17 @@ fn slice_process_inner(nal_type: u64, nal_ref_idc: u64) -> u64 {
     deblock()
     picture_open = false
     n_frames = n_frames + 1
+    h264dpb.dpb_hold(cur_slot, epoch, pic_poc, cur_tag)
     if nal_ref_idc > 0 {
-        var k: u64 = NREF - 1
+        h264poc.poc_note_reference()
+        let cap: u64 = ref_cap()
+        var k: u64 = cap - 1
         while k > 0 {
             ref_slot[(k) as usize] = ref_slot[((k - 1)) as usize]
             k = k - 1
         }
         ref_slot[(0) as usize] = cur_slot
-        if ref_n < NREF { ref_n = ref_n + 1 }
+        if ref_n < cap { ref_n = ref_n + 1 }
     }
     return 1
 }
@@ -2617,6 +2702,12 @@ fn h264_reset() {
     ref_slot[(1) as usize] = 1
     ref_slot[(2) as usize] = 2
     ref_slot[(3) as usize] = 3
+    epoch = 0
+    cur_tag = 0
+    out_slot = 0
+    out_tag = 0
+    h264dpb.dpb_reset()
+    h264poc.poc_reset()
     s_w = 0
     s_h = 0
     s_mbw = 0
@@ -2658,10 +2749,10 @@ fn pick_slot() -> u64 {
             if ref_slot[(i) as usize] == s { belegt = true }
             i = i + 1
         }
-        if !belegt { return s }
+        if !belegt && !h264dpb.dpb_busy(s) { return s }
         s = s + 1
     }
-    return NSLOT - 1
+    return h264dpb.NO_SLOT
 }
 
 // Decode the whole stream. There is no callback per finished picture: the
@@ -2697,7 +2788,10 @@ fn h264_decode(p: u64, n: u64) -> bool {
             } else {
                 let r: u64 = slice_process(nal_type, nal_ref_idc)
                 if r == 2 { return false }
-                if r == 1 { irgendwas = true }
+                if r == 1 {
+                    irgendwas = true
+                    h264dpb.dpb_reset()
+                }
             }
         }
     }
@@ -2747,7 +2841,19 @@ static mut st_von: u64 = 0
 
 fn h264_stride() -> u64 { return s_w }
 fn h264_cstride() -> u64 { return s_w >> 1 }
-fn h264_cur_slot() -> u64 { return cur_slot }
+fn h264_cur_slot() -> u64 { return out_slot }
+fn h264_out_tag() -> u64 { return out_tag }
+fn h264_set_tag(t: u64) { cur_tag = t }
+
+fn pop_output(reorder: u64) -> bool {
+    let s: u64 = h264dpb.dpb_pop(reorder, epoch)
+    if s == h264dpb.NO_SLOT { return false }
+    out_slot = s
+    out_tag = h264dpb.dpb_tag(s)
+    return true
+}
+
+fn h264_drain() -> bool { return pop_output(0) }
 
 fn h264_open(p: u64, n: u64) {
     h264_reset()
@@ -2763,6 +2869,7 @@ fn h264_continue(p: u64, n: u64) {
 }
 
 fn h264_next() -> bool {
+    if pop_output(s_reorder) { return true }
     while nal_next(st_p, st_n, st_von) {
         st_von = nal_e
         if nal_e <= nal_a { return false }
@@ -2780,7 +2887,7 @@ fn h264_next() -> bool {
             } else {
                 let r: u64 = slice_process(nal_type, nal_ref_idc)
                 if r == 2 { return false }
-                if r == 1 { return true }
+                if r == 1 && pop_output(s_reorder) { return true }
             }
         }
     }
