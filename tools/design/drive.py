@@ -74,13 +74,35 @@ class Fahrer:
         finally:
             self.s.settimeout(5.0)
 
+    fast = False
+    FAST_GAP = 0.02
+
     def cmd(self, line):
         try:
             self.s.sendall((line + "\n").encode())
         except OSError as e:
             raise SystemExit("monitor write failed (%s): %s" % (e, line))
+        if self.fast and line.startswith("mouse_"):
+            time.sleep(self.FAST_GAP)
+            return
         time.sleep(0.06)
         self.clear()
+
+    def klickmess(self, x, y, muster, deadline):
+        self.fahre(x, y)
+        time.sleep(0.35)
+        self.clear()
+        self.brand(muster)
+        t0 = time.time()
+        self.cmd("mouse_button 1")
+        time.sleep(0.05)
+        self.cmd("mouse_button 0")
+        r = re.compile(muster)
+        while time.time() - t0 < deadline:
+            if len(r.findall(read_2(self.serial))) > self.mark_n:
+                return (time.time() - t0) * 1000.0
+            time.sleep(0.02)
+        return None
 
     ECKSCHRITTE = 32
 
@@ -888,6 +910,25 @@ def main():
             time.sleep(float(arg))
         elif b == "marke":
             f.brand(arg.strip().strip("'\""))
+        elif b == "schnell":
+            f.fast = arg.strip() == "an"
+            print("schnell %s" % ("an" if f.fast else "aus"))
+        elif b == "klickmess":
+            head, _, tail = arg.partition(" | ")
+            muster, _, dl = tail.partition("||")
+            muster = muster.strip().strip("'\"")
+            r = f.rechteck(head.strip())
+            if r is None:
+                print("klickmess %s -> NO RECT REPORTED" % head.strip())
+                error += 1
+                continue
+            ms = f.klickmess(r[0] + r[2] // 2, r[1] + r[3] // 2, muster, float(dl) if dl.strip() else 30.0)
+            if ms is None:
+                print("klickmess %s -> NOT THERE" % head.strip())
+                error += 1
+            else:
+                print("klickmess %s -> %d ms" % (head.strip(), ms))
+            time.sleep(0.5)
         elif b == "warteneu":
             st = arg.split("||")
             muster = st[0].strip().strip("'\"")
