@@ -18,7 +18,7 @@
 static void t_emit(const char *name, const char *verdict, const char *fmt, ...)
 {
     char buf[400];
-    int n = snprintf(buf, sizeof buf, "T %s.%s %s ", TNAME, name, verdict);
+    int n = snprintf(buf, sizeof buf, "\nT %s.%s %s ", TNAME, name, verdict);
     va_list ap;
     va_start(ap, fmt);
     if (n < (int)sizeof buf)

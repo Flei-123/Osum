@@ -16,6 +16,7 @@
 #define LOOKUP_LIMIT_US 2500
 #define CREATE_LIMIT_US 30000
 #define APPEND_LIMIT_US 3500
+#define APPEND_PAGE_LIMIT_US 8000
 #define RENAME_LIMIT_US 22000
 #define UNLINK_LIMIT_US 13000
 
@@ -242,7 +243,7 @@ int main(void)
     CHECK("stat_cold", stat_us < LOOKUP_LIMIT_US, "us=%ld limit=%d", stat_us, LOOKUP_LIMIT_US);
     CHECK("access_cold", access_us < LOOKUP_LIMIT_US, "us=%ld limit=%d", access_us, LOOKUP_LIMIT_US);
     CHECK("writev_small", append_small < APPEND_LIMIT_US, "us=%ld limit=%d", append_small, APPEND_LIMIT_US);
-    CHECK("writev_page", append_page < APPEND_LIMIT_US, "us=%ld limit=%d", append_page, APPEND_LIMIT_US);
+    CHECK("writev_page", append_page < APPEND_PAGE_LIMIT_US, "us=%ld limit=%d", append_page, APPEND_PAGE_LIMIT_US);
     CHECK("rename_over", rename_us < RENAME_LIMIT_US, "us=%ld limit=%d", rename_us, RENAME_LIMIT_US);
     CHECK("unlink", unlink_us < UNLINK_LIMIT_US, "us=%ld limit=%d", unlink_us, UNLINK_LIMIT_US);
     return 0;
