@@ -1048,7 +1048,7 @@ fn read_stream_span(state: u64, lba: u64, dst: u64, span: u64) -> bool {
 
 fn read_stream_held(state: u64, lba: u64, dst: u64, span: u64) -> bool {
     let dv: u64 = kstate.get(state, kstate.DISK_DEV)
-    if krypto.active(state) || (dv != DEV_ATA && dv != DEV_ATA1 && dv != DEV_AHCI && !is_usb(dv)) || lba >= blocks(state) {
+    if krypto.active(state) || (dv != DEV_ATA && dv != DEV_ATA1 && dv != DEV_AHCI && !is_usb(dv) && !(dv == DEV_NVME && kstate.mode_on(state, kstate.M_NVMEMANY))) || lba >= blocks(state) {
         return read(state, lba, dst)
     }
     let abs: u64 = lba + kstate.get(state, kstate.DISK_FIRST)
@@ -1351,6 +1351,9 @@ fn dev_read_run(state: u64, dev: u64, lba: u64, n: u64, buf: u64) -> bool {
     if dev == DEV_AHCI {
         return ahci.read_many(state, lba, n, buf)
     }
+    if dev == DEV_NVME {
+        return nvme.read_run(state, lba, n, buf)
+    }
     if is_usb(dev) {
         return usb.msc_read_run_at(state, usb_slot(dev), lba, n, buf)
     }
@@ -1360,6 +1363,9 @@ fn dev_read_run(state: u64, dev: u64, lba: u64, n: u64, buf: u64) -> bool {
 fn dev_read_one(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
     if dev == DEV_AHCI {
         return ahci.read_block(state, lba, dst)
+    }
+    if dev == DEV_NVME {
+        return nvme.read_block(state, lba, dst)
     }
     if is_usb(dev) {
         return usb.msc_read_at(state, usb_slot(dev), lba, dst)
@@ -1469,6 +1475,13 @@ fn ahci_read_cached(state: u64, lba: u64, dst: u64, ende: u64) -> bool {
     return ata_read_cached(state, lba, dst, DEV_AHCI, ende)
 }
 
+fn nvme_read_cached(state: u64, lba: u64, dst: u64, ende: u64) -> bool {
+    if !kstate.mode_on(state, kstate.M_NVMEMANY) {
+        return nvme.read_block(state, lba, dst)
+    }
+    return ata_read_cached(state, lba, dst, DEV_NVME, ende)
+}
+
 static mut stat_reads: u64 = 0
 static mut stat_writes: u64 = 0
 
@@ -1503,7 +1516,7 @@ fn read_on_held(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
         return ata_read_cached(state, lba, dst, dev, blocks_on(state, dev))
     }
     if dev == DEV_NVME {
-        return nvme.read_block(state, lba, dst)
+        return nvme_read_cached(state, lba, dst, blocks_on(state, dev))
     }
     if is_usb(dev) {
         return usb.msc_read_at(state, usb_slot(dev), lba, dst)
@@ -1620,7 +1633,8 @@ fn read_raw_held(state: u64, lba: u64, dst: u64) -> bool {
             kstate.get(state, kstate.DISK_FIRST) + blocks(state))
     }
     if kstate.get(state, kstate.DISK_DEV) == DEV_NVME {
-        return nvme.read_block(state, abs, dst)
+        return nvme_read_cached(state, abs, dst,
+            kstate.get(state, kstate.DISK_FIRST) + blocks(state))
     }
     if kstate.get(state, kstate.DISK_DEV) == DEV_AHCI {
         return ahci_read_cached(state, abs, dst,
