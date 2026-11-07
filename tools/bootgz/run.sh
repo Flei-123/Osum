@@ -84,4 +84,4 @@ kernel_publish "$SPEC" "$D/osum.mb" 0
 boot_case dropped "dropped gz"
 expect_new "dropped gz"
 
-summary_emit "$pass" "$fail" 16
+summary_emit "$pass" "$fail" 12
