@@ -57,4 +57,4 @@ python3 -I tools/vplay/clickcheck.py "$D/click" | tee "$D/click.res"
 python3 -I tools/vplay/clickcheck.py "$D/stall" stall | tee "$D/stall.res"
 [ -n "$KEEP" ] && { mkdir -p "$KEEP"; cp -r "$D"/new "$D"/nosync "$D"/x2 "$D"/click "$D"/stall "$D"/mp3a "$D"/mp3b "$D"/mute "$D"/aac "$D"/aacmute "$KEEP/" 2>/dev/null; }
 n_ok=$(cat "$D"/*.res | grep -ac '^  OK'); n_bad=$(cat "$D"/*.res | grep -ac '^  FAIL')
-summary_emit $((pass + n_ok)) $((fail + n_bad)) 68
+summary_emit $((pass + n_ok)) $((fail + n_bad)) 96
