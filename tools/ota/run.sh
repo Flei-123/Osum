@@ -620,7 +620,7 @@ hat "$OUT/kan1.txt" "ota: version there 2" "(a) auf stable liegt Fassung 2"
 hatnicht "$OUT/kan1.txt" "ota: version there 4" "(a) und nicht die Fassung des Testkanals"
 hat "$OUT/kan1.txt" "phase=verfuegbar" "(a) /system/ota.stand: phase=verfuegbar"
 hat "$OUT/kan1.txt" "there=2" "(a) /system/ota.stand: there=2"
-grep -qaE "^200 stable/(LISTING|VERZEICHNIS)$" "$OUT/srv.log" \
+grep -qaE "^200 stable/(LISTING|VERZEICHNIS) " "$OUT/srv.log" \
     && ok "(a) the remote end saw the request under /stable/" \
     || bad "(a) no access to /stable/LISTING in the log"
 
@@ -669,7 +669,7 @@ hatnicht "$OUT/kan10.txt" "ota: channel" "(f) und es wird kein Kanal angezeigt"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf kan10d "ota set kanal dev;ota search;exit")
 hat "$OUT/kan10d.txt" "ota: version there 2" "(f2) kanal=dev: the package check reads the flat feed"
-grep -qaE "^200 (LISTING|VERZEICHNIS)$" "$OUT/srv.log" \
+grep -qaE "^200 (LISTING|VERZEICHNIS) " "$OUT/srv.log" \
     && ok "(f2) the server saw /LISTING and not /dev/LISTING" \
     || bad "(f2) no flat /LISTING request in the server log"
 
