@@ -458,7 +458,7 @@ if waitfor "==S-WAIT==" 150; then
     i=0; while [ $i -lt 30 ] && ! sawjob; do sleep 1; i=$((i + 1)); done
     sawjob && ok "Installieren, then yes: the card shows the job progress in percent" || bad "no job progress after yes"
     shot s5-busy
-    waitlog "fertig installiert" 150 && ok "... and the job ends: installed" || bad "no installed end of the job"
+    waitlog "done installiert" 150 && ok "... and the job ends: installed" || bad "no installed end of the job"
     PCTS=$(wclean | tail -n +"$MARK" | grep -ao "store: pct=[0-9]*" | tr -cd '0-9\n' | tr '\n' ' ')
     note "pct seen while working: $PCTS"
     echo "$PCTS" | awk '{ n=NF; ok=(n>=2); for (i=2;i<=n;i++) if ($i<$(i-1)) ok=0; exit ok?0:1 }' \
@@ -472,7 +472,7 @@ if waitfor "==S-WAIT==" 150; then
     mark; D0=$(dlgn); tapt "Alle aktualisieren"; sleep 1.5; shot s7b-askall
     differs s7-updates s7b-askall && ok "one question for all opens (picture differs)" || bad "no question for all"
     key ret; dlgyes "$D0"
-    waitlog "fertig installiert" 150 && ok "yes: hallo is updated" || bad "hallo was not updated"
+    waitlog "done installiert" 150 && ok "yes: hallo is updated" || bad "hallo was not updated"
     sleep 2; shot s8-uptodate
     differs s7-updates s8-uptodate && ok "afterwards the updates page looks different (the list is empty)" || bad "updates page unchanged"
     echo "  -- remove gruss from its detail page"
@@ -482,7 +482,7 @@ if waitfor "==S-WAIT==" 150; then
     sleep 1.5; shot s8b-askremove
     differs s6-installed s8b-askremove && ok "Entfernen asks first: a question window opens (picture differs)" || bad "no remove question"
     key ret; dlgyes "$D0"
-    waitlog "fertig entfernt" 150 && ok "yes: gruss removed" || bad "gruss was not removed"
+    waitlog "done entfernt" 150 && ok "yes: gruss removed" || bad "gruss was not removed"
     shot s9-end
     N=$(wclean | grep -ac "==S-SNAP==")
     i=0; while [ $i -lt 100 ]; do [ "$(wclean | grep -ac '==S-SNAP==')" -ge $((N + 2)) ] && break; sleep 2; i=$((i + 1)); done
