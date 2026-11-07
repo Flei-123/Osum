@@ -1341,6 +1341,25 @@ fn clock_victim(state: u64) -> u64 {
     return hand
 }
 
+const HINT_SHIFT: u64 = 3
+const HINT_MASK: u64 = 255
+static mut way_hint: [u64; 256] = [0 as u64; 256]
+
+fn way_holds(state: u64, w: u64, dev: u64, lba: u64) -> bool {
+    if wg(state, w, C_VALID) == 0 || wg(state, w, C_DEV) != dev {
+        return false
+    }
+    let c0: u64 = wg(state, w, C_LBA)
+    return lba >= c0 && lba < c0 + wg(state, w, C_N)
+}
+
+fn cache_serve(state: u64, w: u64, lba: u64, dst: u64) {
+    ws(state, w, C_VALID, 2)
+    cs(state, C_HITS, cg(state, C_HITS) + 1)
+    cs(state, C_LAST, lba)
+    copy(gone_data(state, w) + (lba - wg(state, w, C_LBA)) * BLOCK_SIZE, dst)
+}
+
 fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool {
     dma_up(state)
     cache_grow(state)
@@ -1351,17 +1370,17 @@ fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool 
             return true
         }
     }
+    let hinted: u64 = way_hint[((lba >> HINT_SHIFT) & HINT_MASK) as usize]
+    if hinted < ways(state) && way_holds(state, hinted, dev, lba) {
+        cache_serve(state, hinted, lba, dst)
+        return true
+    }
     var w: u64 = 0
     while w < ways(state) {
-        if wg(state, w, C_VALID) != 0 && wg(state, w, C_DEV) == dev {
-            let c0: u64 = wg(state, w, C_LBA)
-            if lba >= c0 && lba < c0 + wg(state, w, C_N) {
-                ws(state, w, C_VALID, 2)
-                cs(state, C_HITS, cg(state, C_HITS) + 1)
-                cs(state, C_LAST, lba)
-                copy(gone_data(state, w) + (lba - c0) * BLOCK_SIZE, dst)
-                return true
-            }
+        if way_holds(state, w, dev, lba) {
+            way_hint[((lba >> HINT_SHIFT) & HINT_MASK) as usize] = w
+            cache_serve(state, w, lba, dst)
+            return true
         }
         w = w + 1
     }
@@ -1392,6 +1411,8 @@ fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool 
     ws(state, target, C_N, n)
     ws(state, target, C_DEV, dev)
     ws(state, target, C_VALID, 1)
+    way_hint[((lba >> HINT_SHIFT) & HINT_MASK) as usize] = target
+    way_hint[(((lba + n - 1) >> HINT_SHIFT) & HINT_MASK) as usize] = target
     copy(data, dst)
     return true
 }
