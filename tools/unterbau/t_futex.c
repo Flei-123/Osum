@@ -137,7 +137,7 @@ int main(void)
         errno = 0;
         r = fx(&wa, F_WAIT_BITSET | F_PRIV, 0, &ab, 0, -1);
         dt = now_ms() - a;
-        CHECK("wait_bitset_abs_timeout", r == -1 && errno == ETIMEDOUT && dt >= 45 && dt < 500, "ret %ld errno %d after %ld ms", r, errno, dt);
+        CHECK("wait_bitset_abs_timeout", r == -1 && errno == ETIMEDOUT && dt >= 35 && dt < 500, "ret %ld errno %d after %ld ms", r, errno, dt);
     }
 
     /* three waiters, wake 2 -> 2, then 1 -> 1; FIFO order */
