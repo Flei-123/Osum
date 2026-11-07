@@ -231,6 +231,7 @@ num "eine Platte OHNE Journal haengt sich ein" \
 num "und sie meldet 0 Journalbloecke" \
     "$(val "$TMPD/nj.txt" fsck journal)" eq 0
 num "und sie ist unversehrt" "$(val "$TMPD/nj.txt" fsck errors)" eq 0
+printf 'osum\n' > "$TMPD/sh.elf"
 bash tools/mkfsfi/mkfs.sh build "$TMPD/v2a.img" 4096 /bin/ \
     "/bin/sh=$TMPD/sh.elf" >/dev/null 2>&1
 bash tools/mkfsfi/mkfs.sh build "$TMPD/v2b.img" 4096 /bin/ \
