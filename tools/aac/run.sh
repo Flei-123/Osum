@@ -53,4 +53,4 @@ PY
 "$D/aacdec" "$D/c/tone_st.aac" "$D/c/shift.out" > /dev/null
 python3 -I tools/aac/compare.py "$D/c/shift.out" "$D/c/shifted.ref" 2 shifted_counter expect-fail > "$D/line.txt"
 tally < "$D/line.txt"
-summary_emit "$pass" "$fail" 18
+summary_emit "$pass" "$fail" 20

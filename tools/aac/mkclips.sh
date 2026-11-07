@@ -17,5 +17,6 @@ mk mix_st 44100 2 mix -b:a 128k
 mk mix_ms 48000 2 mix -b:a 96k -aac_ms 1 -aac_is 0
 mk mix_tns 32000 2 mix -b:a 64k -aac_tns 1
 mk mix_pns 44100 2 mix -b:a 48k -aac_pns 1 -aac_is 1
+mk mix_msis 44100 2 mix -b:a 64k -aac_ms 1 -aac_is 1
 mk mix_mono8 8000 1 mix -b:a 16k
 mk mix_hi 96000 2 mix -b:a 256k
