@@ -112,6 +112,29 @@ boot() { # boot <kernel> <disk> <script> <serial-out>
         ${NETARGS:-} -drive "file=$2.live,format=raw,if=ide,index=0${UB_DRIVEX:-}" -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
     local rc=$?; rm -f "$2.live"; return $rc
 }
+pinned_counter_proofs() {
+    local ref pinned_tests t name pinned line wt
+    for ref in $(awk '$1!~/^#/ && $2!=""{print $2}' "$HERE/fixed.txt" | sort -u); do
+        pinned_tests=""
+        for t in $TESTS; do
+            awk -v t="${t#t_}." -v r="$ref" 'index($1,t)==1 && $2==r{f=1} END{exit !f}' "$HERE/fixed.txt" && pinned_tests="$pinned_tests $t"
+        done
+        [ -n "$pinned_tests" ] || continue
+        wt=$D/pinned-$ref
+        git -C "$ROOT" worktree add --detach "$wt" "$ref" > /dev/null 2>&1 || { bad "cannot check out $ref"; continue; }
+        build_kernel "$wt" "$D/k-$ref.mb" || bad "kernel of $ref does not build"
+        git -C "$ROOT" worktree remove --force "$wt" > /dev/null 2>&1
+        [ -s "$D/k-$ref.mb" ] || continue
+        TESTS=$pinned_tests
+        run_all "$D/k-$ref.mb" "$D/new/disk.img" "old-$ref"
+        while read -r name pinned; do
+            case "$name" in ''|'#'*) continue ;; esac
+            [ "$pinned" = "$ref" ] || continue
+            line=$(grep -a "^$name " "$D/old-$ref.all" | head -1)
+            case "$line" in *" PASS"*) bad "counter-proof: $name PASSES on $ref -- the check measures nothing" ;; *) ok "counter-proof: $name does not pass on $ref (${line:-no line})" ;; esac
+        done < "$HERE/fixed.txt"
+    done
+}
 run_all() { # run_all <kernel> <disk> <tag>
     for t in $TESTS; do
         local ka="" na=""
@@ -326,15 +349,18 @@ if [ -n "${OLDKERNEL:-}" ] || [ -n "${OLDK:-}" ]; then
     if [ -s "${KOLD:-/nonexistent}" ]; then
         TESTS_SAVE=$TESTS
         # only the tests that hold fixed checks
-        if [ -n "${REGEN:-}" ]; then TESTS=$TESTS_SAVE; else TESTS=""; for t in $TESTS_SAVE; do grep -q "^${t#t_}\." "$HERE/fixed.txt" && TESTS="$TESTS $t"; done; fi
+        if [ -n "${REGEN:-}" ]; then TESTS=$TESTS_SAVE; else TESTS=""; for t in $TESTS_SAVE; do awk -v t="${t#t_}." '$2=="" && index($1,t)==1{f=1} END{exit !f}' "$HERE/fixed.txt" && TESTS="$TESTS $t"; done; fi
         run_all "$KOLD" "$D/new/disk.img" old
-        while [ -z "${REGEN:-}" ] && read -r name; do
+        while [ -z "${REGEN:-}" ] && read -r name pinned; do
             case "$name" in ''|'#'*) continue ;; esac
+            [ -z "$pinned" ] || continue
             t=${name%%.*}; case " $TESTS " in *" t_$t "*) ;; *) continue ;; esac
             line=$(grep -a "^$name " "$D/old.all" | head -1)
             case "$line" in *" PASS"*) bad "counter-proof: $name PASSES on the old kernel -- the check measures nothing" ;; *) ok "counter-proof: $name does not pass on the old kernel (${line:-no line})" ;; esac
         done < "$HERE/fixed.txt"
         cp "$D/old.all" "${UB_OLD_RESULT:-$D/results-old.txt}" 2>/dev/null
+        TESTS=$TESTS_SAVE
+        [ -n "${REGEN:-}" ] || pinned_counter_proofs
         if [ -n "${REGEN:-}" ]; then python3 "$HERE/mkgate.py" "$D/old.all" "$D/new.all" "$HERE" && ok "accept.txt and fixed.txt written"; fi
     fi
 fi
