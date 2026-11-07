@@ -360,7 +360,7 @@ mouse_button 0
 warte 0.4
 EOF
 foto reiter "gfx wm wig wmhold wiglong $GRUND" "$M"
-rt=$(feld "$TMPD/reiter.txt" "widgetdemo: state" reiter)
+rt=$(feld "$TMPD/reiter.txt" "widgetdemo: state" tab)
 num "the second tab is active" "$rt" eq 1
 has "$TMPD/reiter.txt" "widgetdemo: fired id=1 kind=7 ix=1" "and the tab reports the change"
 
