@@ -9,7 +9,7 @@ counter = len(sys.argv) > 2 and sys.argv[2] == "mute"
 RATE = 44100
 TONE_HZ = 440
 TONE_TOLERANCE_HZ = 9
-PEAK_MIN, PEAK_MAX = 3600, 4700
+PEAK_MIN, PEAK_MAX = 2700, 2830
 MAX_BAD_FRAMES = 2
 ok = fail = 0
 
