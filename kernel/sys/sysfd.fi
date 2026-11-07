@@ -190,7 +190,7 @@ fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     // RUNDE UNTERBAU: `write` on a local socket (it was -EBADF: only sendmsg worked, so a program that talks to its peer with plain
     // read/write -- most IPC code -- got nothing).
     if kind == file.K_USOCK {
-        return usock_rw(state, me, of, buf, len, true)
+        return usock_rw(state, me, of, buf, len, true, false)
     }
     if kind == file.K_NETLINK {
         return nl_send_of(state, me, of, buf, len)
@@ -316,7 +316,7 @@ fn read_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
         return sock_read(state, me, of, buf, len)
     }
     if kind == file.K_USOCK {
-        return usock_rw(state, me, of, buf, len, false)
+        return usock_rw(state, me, of, buf, len, false, false)
     }
     if kind == file.K_NETLINK {
         return nl_recv_of(state, me, of, buf, len, 0, 0, 0)
@@ -1380,14 +1380,14 @@ fn sa_out(state: u64, me: u64, addr: u64, lenp: u64, a: u64,
 // glibc does on x86-64, and copying it is what makes a Linux program
 // work here without a translation table.
 fn do_sendto(state: u64, me: u64, fd: u64, buf: u64, want: u64,
-    addr: u64, alen: u64) -> u64 {
+    addr: u64, alen: u64, flags: u64) -> u64 {
     // RUNDE EVENTS: send() on a local socket (socketpair, AF_UNIX) is a write
     let uof: u64 = sysuser.of_of(state, me, fd)
     if uof < file.MAX_OPEN && file.open_kind(state, uof) == file.K_USOCK {
         if addr != 0 {
             return usock_sendto(state, me, uof, buf, want, addr, alen)
         }
-        return write_of(state, me, uof, buf, want)
+        return usock_rw(state, me, uof, buf, want, true, (flags & sysconst.MSG_DONTWAIT) != 0)
     }
     if uof < file.MAX_OPEN && file.open_kind(state, uof) == file.K_NETLINK {
         return nl_send_of(state, me, uof, buf, want)
@@ -1437,15 +1437,15 @@ fn do_sendto(state: u64, me: u64, fd: u64, buf: u64, want: u64,
     if !sysuser.copy_in(state, me, bounce, buf, len) {
         return sysuser.neg(errno.E_FAULT)
     }
-    return sock_io(state, si, bounce, len, a, port, true)
+    return sock_io(state, si, bounce, len, a, port, true, flags)
 }
 
 fn do_recvfrom(state: u64, me: u64, fd: u64, buf: u64, want: u64,
-    addr: u64, lenp: u64) -> u64 {
+    addr: u64, lenp: u64, flags: u64) -> u64 {
     // RUNDE EVENTS: recv() on a local socket (socketpair, AF_UNIX) is a read
     let uof: u64 = sysuser.of_of(state, me, fd)
     if uof < file.MAX_OPEN && file.open_kind(state, uof) == file.K_USOCK {
-        return read_of(state, me, uof, buf, want)
+        return usock_rw(state, me, uof, buf, want, false, (flags & sysconst.MSG_DONTWAIT) != 0)
     }
     let si: u64 = sock_of(state, me, fd)
     if si >= inet.SOCK_MAX {
@@ -1488,7 +1488,7 @@ fn do_recvfrom(state: u64, me: u64, fd: u64, buf: u64, want: u64,
     var a: u64 = 0
     var port: u64 = 0
     var waited: u64 = 0
-    let nb: bool = inet.sock_nonblock(state, si)
+    let nb: bool = inet.sock_nonblock(state, si) || (flags & sysconst.MSG_DONTWAIT) != 0
     let rdl: u64 = sock_deadline(state, si, false)
     var n: u64 = 0
     var going: bool = true
@@ -1524,9 +1524,9 @@ fn do_recvfrom(state: u64, me: u64, fd: u64, buf: u64, want: u64,
 // in a moment -- and a `write` that returns a SHORT count is what the
 // interface has always allowed.
 fn sock_io(state: u64, si: u64, bounce: u64, len: u64, a: u64, port: u64,
-    to: bool) -> u64 {
+    to: bool, flags: u64) -> u64 {
     var waited: u64 = 0
-    let nb: bool = inet.sock_nonblock(state, si)
+    let nb: bool = inet.sock_nonblock(state, si) || (flags & sysconst.MSG_DONTWAIT) != 0
     let sdl: u64 = sock_deadline(state, si, true)
     while !sock_gave_up(state, sdl, waited) {
         let seen: u64 = sched.poll_seq(state)
@@ -1557,11 +1557,11 @@ fn sock_io(state: u64, si: u64, bounce: u64, len: u64, a: u64, port: u64,
 // calls above use, minus the address -- so a program can point `stdout`
 // at a connection with `dup2` and never call a socket function again.
 fn sock_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
-    return do_recvfrom(state, me, fd_back(state, me, of), buf, len, 0, 0)
+    return do_recvfrom(state, me, fd_back(state, me, of), buf, len, 0, 0, 0)
 }
 
 fn sock_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
-    return do_sendto(state, me, fd_back(state, me, of), buf, len, 0, 0)
+    return do_sendto(state, me, fd_back(state, me, of), buf, len, 0, 0, 0)
 }
 
 // `read_of`/`write_of` were split off a descriptor for the native ABI of
@@ -1887,12 +1887,13 @@ fn usock_sendto(state: u64, me: u64, of: u64, buf: u64, len: u64, addr: u64, ale
 
 // read/write on a local (AF_UNIX) socket: the same ring as sendmsg/recvmsg, one buffer, no descriptors. O_NONBLOCK on the open file means
 // MSG_DONTWAIT. A closed peer reads as end of file (0) and writes -EPIPE.
-fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool) -> u64 {
+fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool,
+    dontwait: bool) -> u64 {
     let si: u64 = file.open_ino(state, of)
     if si >= unixsock.USOCK_MAX {
         return sysuser.neg(errno.E_BADF)
     }
-    let nonblock: bool = (file.open_flags(state, of) & sysconst.UB_O_NONBLOCK) != 0
+    let nonblock: bool = dontwait || (file.open_flags(state, of) & sysconst.UB_O_NONBLOCK) != 0
     let dg: bool = unixsock.sock_kind(state, si) == unixsock.UK_DGRAM
     var n: u64 = len
     if n > sysconst.MSG_MAX {

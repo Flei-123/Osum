@@ -35,25 +35,30 @@ static int connected_socket(void)
     return s;
 }
 
-static long timed_recv(int s, int *err)
+static long timed_recv_flags(int s, int flags, int *err)
 {
     char c;
     long t0 = now_us();
     errno = 0;
-    long r = recv(s, &c, 1, 0);
+    long r = recv(s, &c, 1, flags);
     *err = errno;
     long dt = now_us() - t0;
     return r == -1 && *err == EAGAIN ? dt : -1;
 }
 
-static void check_eagain(const char *name, int s)
+static void check_eagain_flags(const char *name, int s, int flags)
 {
     int err;
-    long dt = timed_recv(s, &err);
+    long dt = timed_recv_flags(s, flags, &err);
     if (dt >= 0 && dt < EAGAIN_LIMIT_US)
         PASS(name, "us=%ld", dt);
     else
         FAIL(name, "us=%ld errno=%d", dt, err);
+}
+
+static void check_eagain(const char *name, int s)
+{
+    check_eagain_flags(name, s, 0);
 }
 
 static void tcp_setfl(void)
@@ -108,11 +113,73 @@ static void udp_setfl(void)
     close(s);
 }
 
+static void tcp_msg_dontwait(void)
+{
+    int s = connected_socket();
+    if (s < 0) {
+        GAP("msg_dontwait_tcp_eagain", "no echo peer");
+        return;
+    }
+    check_eagain_flags("msg_dontwait_tcp_eagain", s, MSG_DONTWAIT);
+    char c = 'y', back = 0;
+    struct pollfd p = { s, POLLIN, 0 };
+    send(s, &c, 1, MSG_DONTWAIT);
+    long r = poll(&p, 1, ECHO_WAIT_MS) == 1 ? recv(s, &back, 1, MSG_DONTWAIT) : -1;
+    CHECK("msg_dontwait_tcp_data", r == 1 && back == 'y', "r=%ld back=%d", r, back);
+    close(s);
+}
+
+static void udp_msg_dontwait(void)
+{
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_port = htons(40124);
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    bind(s, (void *)&a, sizeof a);
+    check_eagain_flags("msg_dontwait_udp_eagain", s, MSG_DONTWAIT);
+    close(s);
+}
+
+static void unix_msg_dontwait(void)
+{
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
+        GAP("msg_dontwait_unix_eagain", "no socketpair");
+        return;
+    }
+    check_eagain_flags("msg_dontwait_unix_eagain", sv[0], MSG_DONTWAIT);
+    close(sv[0]);
+    close(sv[1]);
+}
+
+static void tcp_recvfrom_dontwait(void)
+{
+    int s = connected_socket();
+    if (s < 0) {
+        GAP("msg_dontwait_recvfrom_eagain", "no echo peer");
+        return;
+    }
+    char c;
+    struct sockaddr_in from;
+    socklen_t fl = sizeof from;
+    long t0 = now_us();
+    errno = 0;
+    long r = recvfrom(s, &c, 1, MSG_DONTWAIT, (void *)&from, &fl);
+    long dt = now_us() - t0;
+    CHECK("msg_dontwait_recvfrom_eagain", r == -1 && errno == EAGAIN && dt < EAGAIN_LIMIT_US, "r=%ld errno=%d us=%ld", r, errno, dt);
+    close(s);
+}
+
 int main(void)
 {
     tcp_creation_flag();
     udp_setfl();
     tcp_setfl();
     tcp_fionbio();
+    tcp_msg_dontwait();
+    udp_msg_dontwait();
+    unix_msg_dontwait();
+    tcp_recvfrom_dontwait();
     return 0;
 }
