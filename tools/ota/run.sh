@@ -390,7 +390,7 @@ dienst_aus
 
 H2=$(python3 -c "print(open('$OUT/netz2/INDEX').read().split(chr(9))[2])" 2>/dev/null)
 rc=$(lauf c3c "echo ==A==;ls /system/generations/1;ls /store/${H2:0:20};opk generations;opk verify;mv /system/generations/1/REASON /system/generations/1/GRUND;mv /store/${H2:0:20}/PACKAGE /store/${H2:0:20}/PAKET;echo ==B==;opk generations;opk verify;exit")
-sed -n '/==A==$/,/==B==$/p' "$OUT/c3c.txt" | grep -a -v '==' > "$OUT/c3c.a"
+sed -n '/==A==$/,/==B==$/p' "$OUT/c3c.txt" | grep -a -v '==' | grep -a -v 'osum\$ mv ' > "$OUT/c3c.a"
 sed -n '/==B==$/,$p' "$OUT/c3c.txt" | grep -a -v '==' | grep -a -v '^\(exit\|#\|/ \)' > "$OUT/c3c.b"
 hat "$OUT/c3c.a" "REASON" "(c3c) the writer emits the English generation file REASON"
 hat "$OUT/c3c.a" "PACKAGE" "(c3c) the writer emits the English store member PACKAGE"
