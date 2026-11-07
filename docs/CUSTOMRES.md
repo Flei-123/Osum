@@ -137,7 +137,7 @@ same is a string.**
 
 ### What the user reads
 
-`/bin/dispctl eigen 2560 1440`:
+`/bin/dispctl custom 2560 1440`:
 
 ```
 dispctl: abgelehnt -- dieser Kernel kann es nicht einblenden. Noetig
@@ -145,7 +145,7 @@ dispctl: abgelehnt -- dieser Kernel kann es nicht einblenden. Noetig
   (acht 2-MiB-Fensterplaetze, geteilt mit apic.fi)
 ```
 
-`/bin/dispctl eigen 1366 768`:
+`/bin/dispctl custom 1366 768`:
 
 ```
 dispctl: abgelehnt -- die Karte nimmt diese Zahl nicht an. Sie hat
@@ -196,7 +196,7 @@ Measured on this branch, before the fix -- a program in ring 3 switches
 and then sleeps:
 
 ```
-script=dispctl eigen 1400 1050;sleep 22;dispctl raw
+script=dispctl custom 1400 1050;sleep 22;dispctl raw
     panelw=1400   pending=1   reverts=0      <- 22 seconds later
 ```
 
@@ -278,7 +278,7 @@ a warrant: the monitor may be a different one and the card smaller.
 ### Measured, five boots on the same disk image
 
 ```
-START 1  dispctl eigen 1400 1050; dispctl behalten
+START 1  dispctl custom 1400 1050; dispctl keep
          disp: save none                       (nothing on the disk yet)
          panelw=1400   pending 1 -> 0
 START 2  disp: save on 1400x1050x 32  v=1
@@ -298,13 +298,13 @@ And the other direction -- confirming resets it:
 
 ```
 after the reboot  savetry=1
-dispctl behalten  savetry=0
+dispctl keep  savetry=0
 ```
 
 ### Why confirming is a human act, and stays one
 
 The counter is set to zero by `osum_dispset(DS_CONFIRM)` -- the
-"Behalten" button, or `dispctl behalten`. Not automatically. This is the
+"Behalten" button, or `dispctl keep`. Not automatically. This is the
 uncomfortable part of the round and it is written down rather than
 smoothed over:
 
@@ -411,9 +411,9 @@ Words on the kernel command line, all off by default and all requiring
 From ring 3:
 
 ```
-dispctl eigen 1400 1050        set it
+dispctl custom 1400 1050        set it
 dispctl pruefen 2560 1440      only check -- does not touch the screen
-dispctl behalten               answer the deadline AND save it
+dispctl keep               answer the deadline AND save it
 dispctl speichern              save the running mode without a deadline
 dispctl testc                  the ten assertions of this round
 ```
