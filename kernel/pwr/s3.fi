@@ -12,6 +12,8 @@ import gfx.gfx
 import arch.cpu
 import arch.x86_64.smp
 import pwr.s3dev
+import pwr.s3rec
+import pwr.s3rtc
 import sched.time
 import libc.regio
 
@@ -34,6 +36,7 @@ const SLP_TYP_MASK: u64 = 0x1C00
 const SCI_EN: u64 = 1
 const WAK_STS: u64 = 0x8000
 
+const STAGE_RTC_SECS: u64 = 4
 const PCI_WORDS: u64 = 24
 const BUF_FRAMES: u64 = 3
 
@@ -326,7 +329,7 @@ fn kbc_restore(buf: u64) -> u64 {
     return 1
 }
 
-fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
+fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64, wake_secs: u64) -> bool {
     var s_sl: [u8; 18] = "s3: sleep cycle=\0\0"
     var s_wa: [u8; 17] = "s3: wake cycle=\0\0"
     var s_wo: [u8; 7] = " woke=\0"
@@ -386,6 +389,10 @@ fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
         __mmio_write64((facs + FACS_XWAKE) as *mut u64, 0)
     }
 
+    s3rec.add(s3rec.ATTEMPTS, 1)
+    s3rec.set(s3rec.RTC_SECS, wake_secs)
+    s3rec.set(s3rec.WAKE_STS, 0)
+    s3rec.set(s3rec.IMAGE_BACK, 0)
     serial.puts((&s_sl[0]) as u64)
     serial.dec(nr)
     serial.nl()
@@ -396,6 +403,13 @@ fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
     asm("pushfq; pop rax", out("rax") & fl)
     let if_on: bool = (fl & 0x200) != 0
     let ticks_before: u64 = kstate.get(state, kstate.TICKS)
+    s3rec.set(s3rec.RTC_ARMED, 0)
+    if wake_secs != 0 {
+        if !s3rtc.arm(fadt, wake_secs) {
+            return false
+        }
+        s3rec.set(s3rec.RTC_ARMED, 1)
+    }
     s3dev.prepare(state)
     time.suspend_mark(state)
     asm("cli")
@@ -418,11 +432,16 @@ fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
         }
         serial.puts((&s_ng[0]) as u64)
         serial.nl()
+        s3rtc.disarm(fadt)
         return false
     }
 
     serial.init()
     let t1: u64 = apic.tsc()
+    let wake_sts: u64 = arch.dev_in16((evta & 0xFFFF) as u16) as u64
+    s3rec.set(s3rec.WAKE_STS, wake_sts)
+    s3rtc.disarm(fadt)
+    s3rec.add(s3rec.CYCLES, 1)
     serial.puts((&s_wa[0]) as u64)
     serial.dec(nr)
     serial.puts((&s_wo[0]) as u64)
@@ -455,6 +474,7 @@ fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
         serial.nl()
     }
     let slept: u64 = time.resume_fix(state)
+    s3rec.set(s3rec.SLEPT_S, slept)
     serial.puts((&s_uh[0]) as u64)
     serial.dec(slept)
     serial.puts((&s_us[0]) as u64)
@@ -462,6 +482,8 @@ fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
 
     let lost: u64 = pci_lost(state, buf + 0x1000, npci)
     let pci_bad: u64 = pci_restore(state, buf + 0x1000, npci)
+    s3rec.set(s3rec.PCI_LOST, lost)
+    s3rec.set(s3rec.PCI_BAD, pci_bad)
     serial.puts((&s_pci[0]) as u64)
     serial.dec(npci)
     serial.puts((&s_lo[0]) as u64)
@@ -482,6 +504,7 @@ fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
             gfx.flush(state)
         }
     }
+    s3rec.set(s3rec.IMAGE_BACK, image)
     let kbc: u64 = kbc_restore(buf)
     serial.puts((&s_bi[0]) as u64)
     serial.dec(image)
@@ -550,6 +573,7 @@ fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
     serial.dec(ticks_before)
     serial.nl()
     if hz != 0 && t1 > t0 {
+        s3rec.set(s3rec.DURATION_MS, (t1 - t0) / (hz / 1000))
         serial.puts((&s_ta[0]) as u64)
         serial.dec((t1 - t0) / (hz / 1000))
         serial.puts((&s_ms[0]) as u64)
@@ -598,7 +622,7 @@ fn cores_report(state: u64, tag: u64) {
     }
 }
 
-fn suspend(state: u64) -> u64 {
+fn suspend(state: u64, wake_secs: u64) -> u64 {
     if !susp.ready(state) {
         susp.measure(state)
     }
@@ -621,6 +645,7 @@ fn suspend(state: u64) -> u64 {
     var s_wk: [u8; 24] = "s3: cores back online=\0\0"
     let multi: bool = cpu.online_count(state) > 1
     let cores: u64 = cpu.count(state)
+    s3rec.set(s3rec.CORES_BEFORE, cpu.online_count(state))
     if multi {
         cores_report(state, (&s_vor[0]) as u64)
         if !smp.park_all(state) {
@@ -636,7 +661,7 @@ fn suspend(state: u64) -> u64 {
     }
     let n: u64 = kstate.get(state, kstate.TICKS)
     wdt.pause(state)
-    let back: bool = cycle(state, n, false, buf, frame)
+    let back: bool = cycle(state, n, false, buf, frame, wake_secs)
     wdt.resume(state)
     mmframe.frame_free_run(state, buf, BUF_FRAMES)
     mmframe.frame_free_run(state, frame, 1)
@@ -667,6 +692,8 @@ fn suspend(state: u64) -> u64 {
         }
         cores_report(state, (&s_nach[0]) as u64)
     }
+    s3rec.set(s3rec.CORES_AFTER, cpu.online_count(state))
+    s3rec.set(s3rec.RESULT, res + 1)
     return res
 }
 
@@ -726,7 +753,7 @@ fn stage(state: u64) {
     }
     var k: u64 = 1
     while k <= n {
-        if !cycle(state, k, broken, buf, frame) {
+        if !cycle(state, k, broken, buf, frame, 0) {
             k = n
         }
         k = k + 1
@@ -757,6 +784,10 @@ fn stage_smp(state: u64) {
     }
     var s_z: [u8; 17] = "s3: smp zyklus=\0\0"
     var s_r: [u8; 6] = " rc=\0\0"
+    var wake_secs: u64 = 0
+    if kstate.mode_on(state, kstate.M_S3RTC) {
+        wake_secs = STAGE_RTC_SECS
+    }
     let hz: u64 = apic.tsc_hz(state)
     var k: u64 = 1
     while k <= 3 {
@@ -770,7 +801,7 @@ fn stage_smp(state: u64) {
             asm("pause")
             w = w + 1
         }
-        let r: u64 = suspend(state)
+        let r: u64 = suspend(state, wake_secs)
         serial.puts((&s_z[0]) as u64)
         serial.dec(k)
         serial.puts((&s_r[0]) as u64)
