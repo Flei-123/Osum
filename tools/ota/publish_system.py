@@ -263,16 +263,16 @@ def main():
             if not m.ed25519_verify(pub, raw, sig):
                 raise SystemExit("own signature does not verify")
             open(sig_path, "wb").write(sig)
-        chain_links = []
+        chain_entries = []
     else:
         b = vf.bund_read(opt["--bund"])
         pub = bytes.fromhex(b["haupt"]["pub"])
 
         def sign(doc, sig_path):
             vf.signieren(opt["--bund"], doc, sig_path)
-        chain_links = [dict(k) for k in b["kette"]]
+        chain_entries = [dict(k) for k in b["kette"]]
     key_gen = 0 if opt["--key"] else b["haupt"]["gen"]
-    written = listdoc.write_signed(out, sign, count, key_gen, chain=chain_links, extra_lines=lines)
+    written = listdoc.write_signed(out, sign, count, key_gen, chain=chain_entries, extra_lines=lines)
     if "--no-size-check" not in flags:
         for doc_path in written.values():
             check_list_size(doc_path)
