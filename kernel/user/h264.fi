@@ -7,6 +7,8 @@ import ulib
 import h264tab
 import h264poc
 import h264dpb
+import h264b
+import h264refs
 import libc.octets
 import libc.regio
 
@@ -66,15 +68,15 @@ const MAXMBH: u64 = 45      // MAXH / 16
 const MAXMB: u64 = 3600     // MAXMBW * MAXMBH
 const LUMA: u64 = 921600    // MAXW * MAXH
 const CHROMA: u64 = 230400  // LUMA / 4
-const NSLOT: u64 = 6
-const NREF: u64 = 3          // hoechstens so viele Referenzen
+const NSLOT: u64 = 7
+const NREF: u64 = 4
 
 fn h264_luma_size() -> u64 { return LUMA }
 fn h264_chroma_size() -> u64 { return CHROMA }
 
-static mut pY: [u8; 5529600] = [0 as u8; 5529600]   // NSLOT * LUMA
-static mut pU: [u8; 1382400] = [0 as u8; 1382400]   // NSLOT * CHROMA
-static mut pV: [u8; 1382400] = [0 as u8; 1382400]
+static mut pY: [u8; 6451200] = [0 as u8; 6451200]
+static mut pU: [u8; 1612800] = [0 as u8; 1612800]   // NSLOT * CHROMA
+static mut pV: [u8; 1612800] = [0 as u8; 1612800]
 
 static mut cur_slot: u64 = 0
 static mut ref_slot: [u64; 4] = [0; 4]
@@ -316,6 +318,9 @@ static mut p_da: bool = false
 static mut p_cabac: u64 = 0
 static mut p_pocpresent: u64 = 0
 static mut p_nref0: u64 = 1
+static mut p_nref1: u64 = 1
+static mut p_bipred: u64 = 0
+static mut s_direct8x8: u64 = 0
 static mut p_weighted: u64 = 0
 static mut p_qp: i64 = 26
 static mut p_cqpoff: i64 = 0
@@ -414,7 +419,7 @@ fn parse_sps() -> bool {
         h_err = E_ART
         return false
     }
-    u1()                     // direct_8x8_inference_flag
+    s_direct8x8 = u1()
     s_cropl = 0
     s_cropr = 0
     s_cropt = 0
@@ -462,17 +467,17 @@ fn parse_pps() -> bool {
         return false
     }
     p_nref0 = ue() + 1
-    ue()                     // num_ref_idx_l1_default_active_minus1
+    p_nref1 = ue() + 1
     p_weighted = u1()
-    un(2)                    // weighted_bipred_idc
+    p_bipred = un(2)
     p_qp = 26 + se()
     se()                     // pic_init_qs_minus26
     p_cqpoff = se()
     p_deblockctl = u1()
     p_constrained = u1()
     u1()                     // redundant_pic_cnt_present_flag
-    if p_weighted == 1 {
-        h_err = E_ART        // gewichtete Vorhersage
+    if p_weighted == 1 || p_bipred == 1 || p_bipred == 3 {
+        h_err = E_ART
         return false
     }
     if p_qp < 0 || p_qp > 51 {
@@ -501,6 +506,18 @@ static mut b_i4: [u64; 57600] = [0; 57600]     // MAXMB * 16
 static mut b_mvx: [i64; 57600] = [0; 57600]
 static mut b_mvy: [i64; 57600] = [0; 57600]
 static mut b_ref: [i64; 57600] = [0; 57600]
+static mut b_mvx1: [i64; 57600] = [0; 57600]
+static mut b_mvy1: [i64; 57600] = [0; 57600]
+static mut b_ref1: [i64; 57600] = [0; 57600]
+static mut slot_col: [u8; 403200] = [0 as u8; 403200]
+static mut sl_nref1: u64 = 1
+static mut pic_has_b: bool = false
+static mut cur_b8: u64 = 0
+static mut sl_frame_num: u64 = 0
+static mut sl_adaptive: u64 = 0
+static mut mmco_n: u64 = 0
+static mut mmco_diff: [u64; 8] = [0; 8]
+static mut slot_fn: [u64; 8] = [0; 8]
 static mut b_nz: [u64; 86400] = [0; 86400]     // MAXMB * 24 (16 Luma + 8 Chroma)
 
 static mut sl_type: u64 = 2      // 0 = P, 2 = I
@@ -1415,7 +1432,7 @@ static mut mv_x: i64 = 0
 static mut mv_y: i64 = 0
 static mut mv_r: i64 = 0
 
-fn mv_of(nx: i64, ny: i64) {
+fn mv_of(l: u64, nx: i64, ny: i64) {
     mv_ok = false
     mv_x = 0
     mv_y = 0
@@ -1432,10 +1449,23 @@ fn mv_of(nx: i64, ny: i64) {
     if mb_intra[(m) as usize] == (1 as u8) {
         return
     }
+    if nmbx == cur_mbx && nmby == cur_mby {
+        let nb8: u64 = (((gy as u64) & 3) >> 1) * 2 + (((gx as u64) & 3) >> 1)
+        if nb8 > cur_b8 {
+            mv_ok = false
+            return
+        }
+    }
     let i: u64 = m * 16 + ((gy as u64) & 3) * 4 + ((gx as u64) & 3)
-    mv_x = b_mvx[(i) as usize]
-    mv_y = b_mvy[(i) as usize]
-    mv_r = b_ref[(i) as usize]
+    if l == 0 {
+        mv_x = b_mvx[(i) as usize]
+        mv_y = b_mvy[(i) as usize]
+        mv_r = b_ref[(i) as usize]
+        return
+    }
+    mv_x = b_mvx1[(i) as usize]
+    mv_y = b_mvy1[(i) as usize]
+    mv_r = b_ref1[(i) as usize]
 }
 
 fn median3(a: i64, b: i64, c: i64) -> i64 {
@@ -1451,24 +1481,25 @@ fn median3(a: i64, b: i64, c: i64) -> i64 {
 static mut pmv_x: i64 = 0
 static mut pmv_y: i64 = 0
 
-fn pred_mv(bx: u64, by: u64, bw: u64, refidx: i64, n: u64, ph: u64) {
-    mv_of((bx as i64) - 1, by as i64)
+fn pred_mv(l: u64, bx: u64, by: u64, bw: u64, refidx: i64, n: u64, ph: u64) {
+    cur_b8 = (by >> 1) * 2 + (bx >> 1)
+    mv_of(l, (bx as i64) - 1, by as i64)
     let aok: bool = mv_ok
     let ax: i64 = mv_x
     let ay: i64 = mv_y
     let ar: i64 = mv_r
-    mv_of(bx as i64, (by as i64) - 1)
+    mv_of(l, bx as i64, (by as i64) - 1)
     let bok: bool = mv_ok
     let bx2: i64 = mv_x
     let by2: i64 = mv_y
     let br: i64 = mv_r
-    mv_of((bx + bw) as i64, (by as i64) - 1)
+    mv_of(l, (bx + bw) as i64, (by as i64) - 1)
     var cok: bool = mv_ok
     var cx: i64 = mv_x
     var cy: i64 = mv_y
     var cr: i64 = mv_r
     if !cok {
-        mv_of((bx as i64) - 1, (by as i64) - 1)
+        mv_of(l, (bx as i64) - 1, (by as i64) - 1)
         cok = mv_ok
         cx = mv_x
         cy = mv_y
@@ -1571,12 +1602,128 @@ fn mc_mb(mbx: u64, mby: u64) {
     prof_add(PF_MC, pt0)
 }
 
+static mut bi_tmp: [u8; 256] = [0 as u8; 256]
+
+fn l0_of(i: u64) -> i64 {
+    let r: i64 = b_ref[(i) as usize]
+    if r < 0 && b_ref1[(i) as usize] < 0 { return 0 }
+    if r >= 0 && (r as u64) >= h264refs.refs_n0() { return 0 }
+    return r
+}
+
+fn l1_of(i: u64) -> i64 {
+    let r: i64 = b_ref1[(i) as usize]
+    if r >= 0 && (r as u64) >= h264refs.refs_n1() { return 0 }
+    return r
+}
+
+fn same_motion(i: u64, j: u64) -> bool {
+    if l0_of(i) != l0_of(j) || l1_of(i) != l1_of(j) { return false }
+    if b_mvx[(i) as usize] != b_mvx[(j) as usize] { return false }
+    if b_mvy[(i) as usize] != b_mvy[(j) as usize] { return false }
+    if b_mvx1[(i) as usize] != b_mvx1[(j) as usize] { return false }
+    if b_mvy1[(i) as usize] != b_mvy1[(j) as usize] { return false }
+    return true
+}
+
+fn plane_base(pl: u64) -> u64 {
+    if pl == 0 { return h264_plane_y(cur_slot) }
+    if pl == 1 { return h264_plane_u(cur_slot) }
+    return h264_plane_v(cur_slot)
+}
+
+fn plane_stride(pl: u64) -> u64 {
+    if pl == 0 { return s_w }
+    return s_w >> 1
+}
+
+fn mc_part(rs: u64, pl: u64, x: u64, y: u64, vx: i64, vy: i64, w: u64, h: u64) {
+    if pl == 0 {
+        mc_ref = h264_plane_y(rs)
+        mc_rw = s_w
+        mc_rh = s_h
+        mc_luma(plane_base(0), s_w, x, y, vx, vy, w, h)
+        return
+    }
+    mc_rw = s_w >> 1
+    mc_rh = s_h >> 1
+    if pl == 1 { mc_ref = h264_plane_u(rs) } else { mc_ref = h264_plane_v(rs) }
+    mc_chroma(plane_base(pl), s_w >> 1, x, y, vx, vy, w, h)
+}
+
+fn bi_save(pl: u64, x: u64, y: u64, w: u64, h: u64) {
+    let base: u64 = plane_base(pl)
+    let st: u64 = plane_stride(pl)
+    var r: u64 = 0
+    while r < h {
+        var c: u64 = 0
+        while c < w {
+            bi_tmp[((r * 16 + c)) as usize] = octets.ld8(base, (y + r) * st + x + c) as u8
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+fn bi_mix(pl: u64, x: u64, y: u64, w: u64, h: u64, w1: i64) {
+    let base: u64 = plane_base(pl)
+    let st: u64 = plane_stride(pl)
+    let w0: i64 = 64 - w1
+    var r: u64 = 0
+    while r < h {
+        var c: u64 = 0
+        while c < w {
+            let a: i64 = bi_tmp[((r * 16 + c)) as usize] as i64
+            let b: i64 = octets.ld8(base, (y + r) * st + x + c) as i64
+            let v: i64 = clip3(0, 255, (a * w0 + b * w1 + 32) >> 6)
+            regio.write8_at(base, (y + r) * st + x + c, v as u64)
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+fn bi_weight1(s0: u64, s1: u64) -> i64 {
+    if p_bipred != 2 { return 32 }
+    return h264b.implicit_w1(pic_poc, h264refs.refs_poc(s0), h264refs.refs_poc(s1))
+}
+
+fn mc_region(i: u64, mbx: u64, mby: u64, bx: u64, by: u64, bw: u64, bh: u64) {
+    let r0: i64 = l0_of(i)
+    let r1: i64 = l1_of(i)
+    var pl: u64 = 0
+    while pl < 3 {
+        var x: u64 = mbx * 16 + bx * 4
+        var y: u64 = mby * 16 + by * 4
+        var w: u64 = bw * 4
+        var h: u64 = bh * 4
+        if pl > 0 {
+            x = mbx * 8 + bx * 2
+            y = mby * 8 + by * 2
+            w = bw * 2
+            h = bh * 2
+        }
+        if r0 >= 0 && r1 >= 0 {
+            let s0: u64 = h264refs.refs_l0(r0 as u64)
+            let s1: u64 = h264refs.refs_l1(r1 as u64)
+            mc_part(s0, pl, x, y, b_mvx[(i) as usize], b_mvy[(i) as usize], w, h)
+            bi_save(pl, x, y, w, h)
+            mc_part(s1, pl, x, y, b_mvx1[(i) as usize], b_mvy1[(i) as usize], w, h)
+            bi_mix(pl, x, y, w, h, bi_weight1(s0, s1))
+        } else if r0 >= 0 {
+            mc_part(h264refs.refs_l0(r0 as u64), pl, x, y,
+                    b_mvx[(i) as usize], b_mvy[(i) as usize], w, h)
+        } else {
+            mc_part(h264refs.refs_l1(r1 as u64), pl, x, y,
+                    b_mvx1[(i) as usize], b_mvy1[(i) as usize], w, h)
+        }
+        pl = pl + 1
+    }
+}
+
 fn mc_mb_inner(mbx: u64, mby: u64) {
     let m: u64 = mb_at(mbx, mby)
-    let dy: u64 = h264_plane_y(cur_slot)
-    let du: u64 = h264_plane_u(cur_slot)
-    let dv: u64 = h264_plane_v(cur_slot)
-    if ref_n == 0 { return }
+    if h264refs.refs_n0() == 0 && h264refs.refs_n1() == 0 { return }
     var fertig: [bool; 16] = [false; 16]
     var by: u64 = 0
     while by < 4 {
@@ -1584,19 +1731,9 @@ fn mc_mb_inner(mbx: u64, mby: u64) {
         while bx < 4 {
             if !fertig[((by * 4 + bx)) as usize] {
                 let i: u64 = m * 16 + by * 4 + bx
-                var ri: i64 = b_ref[(i) as usize]
-                if ri < 0 { ri = 0 }
-                if (ri as u64) >= ref_n { ri = 0 }
-                let vx: i64 = b_mvx[(i) as usize]
-                let vy: i64 = b_mvy[(i) as usize]
                 var bw: u64 = 1
                 while bx + bw < 4 {
-                    let j: u64 = m * 16 + by * 4 + bx + bw
-                    var rj: i64 = b_ref[(j) as usize]
-                    if rj < 0 { rj = 0 }
-                    if (rj as u64) >= ref_n { rj = 0 }
-                    if rj != ri || b_mvx[(j) as usize] != vx
-                        || b_mvy[(j) as usize] != vy { break }
+                    if !same_motion(i, m * 16 + by * 4 + bx + bw) { break }
                     bw = bw + 1
                 }
                 var bh: u64 = 1
@@ -1604,12 +1741,7 @@ fn mc_mb_inner(mbx: u64, mby: u64) {
                     var line_equal: bool = true
                     var k: u64 = 0
                     while k < bw {
-                        let j: u64 = m * 16 + (by + bh) * 4 + bx + k
-                        var rj: i64 = b_ref[(j) as usize]
-                        if rj < 0 { rj = 0 }
-                        if (rj as u64) >= ref_n { rj = 0 }
-                        if rj != ri || b_mvx[(j) as usize] != vx
-                            || b_mvy[(j) as usize] != vy { line_equal = false }
+                        if !same_motion(i, m * 16 + (by + bh) * 4 + bx + k) { line_equal = false }
                         k = k + 1
                     }
                     if !line_equal { break }
@@ -1624,27 +1756,417 @@ fn mc_mb_inner(mbx: u64, mby: u64) {
                     }
                     r = r + 1
                 }
-                let rs: u64 = ref_slot[(ri) as usize]
-                // Luma
-                mc_ref = h264_plane_y(rs)
-                mc_rw = s_w
-                mc_rh = s_h
-                mc_luma(dy, s_w, mbx * 16 + bx * 4, mby * 16 + by * 4,
-                        vx, vy, bw * 4, bh * 4)
-                // Chroma: derselbe Vektor, halbe Aufloesung, Achtelpel
-                mc_ref = h264_plane_u(rs)
-                mc_rw = s_w >> 1
-                mc_rh = s_h >> 1
-                mc_chroma(du, s_w >> 1, mbx * 8 + bx * 2, mby * 8 + by * 2,
-                          vx, vy, bw * 2, bh * 2)
-                mc_ref = h264_plane_v(rs)
-                mc_chroma(dv, s_w >> 1, mbx * 8 + bx * 2, mby * 8 + by * 2,
-                          vx, vy, bw * 2, bh * 2)
+                mc_region(i, mbx, mby, bx, by, bw, bh)
             }
             bx = bx + 1
         }
         by = by + 1
     }
+}
+
+static mut d_ref0: i64 = 0
+static mut d_ref1: i64 = 0
+static mut d_mvx0: i64 = 0
+static mut d_mvy0: i64 = 0
+static mut d_mvx1: i64 = 0
+static mut d_mvy1: i64 = 0
+
+fn min_positive(a: i64, b: i64) -> i64 {
+    if a >= 0 && b >= 0 {
+        if a < b { return a }
+        return b
+    }
+    if a > b { return a }
+    return b
+}
+
+fn direct_neighbour_ref(l: u64) -> i64 {
+    mv_of(l, -1, 0)
+    let ra: i64 = mv_r
+    mv_of(l, 0, -1)
+    let rb: i64 = mv_r
+    mv_of(l, 4, -1)
+    var rc: i64 = mv_r
+    if !mv_ok {
+        mv_of(l, -1, -1)
+        rc = mv_r
+    }
+    return min_positive(ra, min_positive(rb, rc))
+}
+
+fn direct_prepare() {
+    cur_b8 = 0
+    d_ref0 = direct_neighbour_ref(0)
+    d_ref1 = direct_neighbour_ref(1)
+    d_mvx0 = 0
+    d_mvy0 = 0
+    d_mvx1 = 0
+    d_mvy1 = 0
+    if d_ref0 < 0 && d_ref1 < 0 {
+        d_ref0 = 0
+        d_ref1 = 0
+        return
+    }
+    if d_ref0 >= 0 {
+        pred_mv(0, 0, 0, 4, d_ref0, 1, 4)
+        d_mvx0 = pmv_x
+        d_mvy0 = pmv_y
+    }
+    if d_ref1 >= 0 {
+        pred_mv(1, 0, 0, 4, d_ref1, 1, 4)
+        d_mvx1 = pmv_x
+        d_mvy1 = pmv_y
+    }
+}
+
+fn direct_apply(m: u64, q: u64) {
+    let base: u64 = h264refs.refs_l1(0) * 57600 + m * 16
+    var k: u64 = 0
+    while k < 4 {
+        let bx: u64 = (q & 1) * 2 + (k & 1)
+        let by: u64 = (q >> 1) * 2 + (k >> 1)
+        var cx: u64 = bx
+        var cy: u64 = by
+        if s_direct8x8 == 1 {
+            cx = (bx >> 1) * 3
+            cy = (by >> 1) * 3
+        }
+        let col_zero: bool = slot_col[((base + cy * 4 + cx)) as usize] != (0 as u8)
+        let i: u64 = m * 16 + by * 4 + bx
+        b_ref[(i) as usize] = d_ref0
+        b_mvx[(i) as usize] = d_mvx0
+        b_mvy[(i) as usize] = d_mvy0
+        if d_ref0 < 0 || (d_ref0 == 0 && col_zero) {
+            b_mvx[(i) as usize] = 0
+            b_mvy[(i) as usize] = 0
+        }
+        b_ref1[(i) as usize] = d_ref1
+        b_mvx1[(i) as usize] = d_mvx1
+        b_mvy1[(i) as usize] = d_mvy1
+        if d_ref1 < 0 || (d_ref1 == 0 && col_zero) {
+            b_mvx1[(i) as usize] = 0
+            b_mvy1[(i) as usize] = 0
+        }
+        k = k + 1
+    }
+}
+
+fn direct_all(m: u64) {
+    direct_prepare()
+    var q: u64 = 0
+    while q < 4 {
+        direct_apply(m, q)
+        q = q + 1
+    }
+}
+
+fn do_skip_b(mbx: u64, mby: u64, qp: i64) {
+    let m: u64 = mb_at(mbx, mby)
+    cur_mbx = mbx
+    cur_mby = mby
+    mb_type[(m) as usize] = 0
+    mb_intra[(m) as usize] = 0 as u8
+    mb_cbp[(m) as usize] = 0
+    mb_qp[(m) as usize] = qp
+    var i: u64 = 0
+    while i < 24 { b_nz[((m * 24 + i)) as usize] = 0; i = i + 1 }
+    var k: u64 = 0
+    while k < 16 {
+        b_i4[((m * 16 + k)) as usize] = 2
+        k = k + 1
+    }
+    direct_all(m)
+    mb_done[(m) as usize] = 1 as u8
+    mb_slice[(m) as usize] = slice_nr
+    mc_mb(mbx, mby)
+}
+
+static mut bm_mode: [u64; 4] = [0; 4]
+static mut bm_ref0: [i64; 4] = [0; 4]
+static mut bm_ref1: [i64; 4] = [0; 4]
+static mut bm_sub: [u64; 4] = [0; 4]
+
+fn mode_uses(l: u64, mode: u64) -> bool {
+    if l == 0 { return h264b.uses_l0(mode) }
+    return h264b.uses_l1(mode)
+}
+
+fn read_ref(active: u64, avail: u64) -> i64 {
+    if avail == 0 { return -2 }
+    if active <= 1 { return 0 }
+    let r: u64 = te(active - 1)
+    if r >= avail { return -2 }
+    return r as i64
+}
+
+fn read_part_refs(n: u64, l: u64) -> bool {
+    var p: u64 = 0
+    while p < n {
+        var r: i64 = -1
+        if mode_uses(l, bm_mode[(p) as usize]) {
+            if l == 0 { r = read_ref(sl_nref0, h264refs.refs_n0()) }
+            else { r = read_ref(sl_nref1, h264refs.refs_n1()) }
+            if r == -2 { h_err = E_UNGERADE; return false }
+        }
+        if l == 0 { bm_ref0[(p) as usize] = r } else { bm_ref1[(p) as usize] = r }
+        p = p + 1
+    }
+    return true
+}
+
+fn store_part(m: u64, l: u64, bx: u64, by: u64, w: u64, h: u64, refi: i64, vx: i64, vy: i64) {
+    var yy: u64 = 0
+    while yy < h {
+        var xx: u64 = 0
+        while xx < w {
+            let i: u64 = m * 16 + (by + yy) * 4 + bx + xx
+            if l == 0 {
+                b_ref[(i) as usize] = refi
+                b_mvx[(i) as usize] = vx
+                b_mvy[(i) as usize] = vy
+            } else {
+                b_ref1[(i) as usize] = refi
+                b_mvx1[(i) as usize] = vx
+                b_mvy1[(i) as usize] = vy
+            }
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+}
+
+fn read_part_mvs(m: u64, shape: u64, n: u64, pw: u64, ph: u64, l: u64) {
+    var p: u64 = 0
+    while p < n {
+        if mode_uses(l, bm_mode[(p) as usize]) {
+            var refi: i64 = bm_ref0[(p) as usize]
+            if l == 1 { refi = bm_ref1[(p) as usize] }
+            if shape == h264b.SHAPE_8X8 {
+                let _s: bool = sub_part(h264b.bsub_shape(bm_sub[(p) as usize]))
+                let sn: u64 = sp_n
+                let sw: u64 = sp_w
+                let sh: u64 = sp_h
+                let bx0: u64 = (p % 2) * 2
+                let by0: u64 = (p / 2) * 2
+                var q: u64 = 0
+                while q < sn {
+                    sub_xy(sn, sw, sh, q)
+                    let bx: u64 = bx0 + px0
+                    let by: u64 = by0 + py0
+                    pred_mv(l, bx, by, sw, refi, 4, 2)
+                    let vx: i64 = pmv_x + se()
+                    let vy: i64 = pmv_y + se()
+                    store_part(m, l, bx, by, sw, sh, refi, vx, vy)
+                    q = q + 1
+                }
+            } else {
+                part_xy(n, pw, ph, p)
+                let bx: u64 = px0
+                let by: u64 = py0
+                pred_mv(l, bx, by, pw, refi, n, ph)
+                let vx: i64 = pmv_x + se()
+                let vy: i64 = pmv_y + se()
+                store_part(m, l, bx, by, pw, ph, refi, vx, vy)
+            }
+        }
+        p = p + 1
+    }
+}
+
+fn decode_b_inter(m: u64, mbx: u64, mby: u64, mt: u64) -> bool {
+    let shape: u64 = h264b.bmb_shape(mt)
+    var n: u64 = 1
+    var pw: u64 = 4
+    var ph: u64 = 4
+    if shape == h264b.SHAPE_DIRECT {
+        direct_all(m)
+    } else {
+        if shape == h264b.SHAPE_16X8 { n = 2; pw = 4; ph = 2 }
+        if shape == h264b.SHAPE_8X16 { n = 2; pw = 2; ph = 4 }
+        if shape == h264b.SHAPE_8X8 {
+            n = 4
+            pw = 2
+            ph = 2
+            var p: u64 = 0
+            var any_direct: bool = false
+            while p < 4 {
+                let st: u64 = ue()
+                if st > 12 { h_err = E_UNGERADE; return false }
+                bm_sub[(p) as usize] = st
+                bm_mode[(p) as usize] = h264b.bsub_mode(st)
+                if st == 0 { any_direct = true }
+                p = p + 1
+            }
+            if any_direct {
+                direct_prepare()
+                var q: u64 = 0
+                while q < 4 {
+                    if bm_sub[(q) as usize] == 0 { direct_apply(m, q) }
+                    q = q + 1
+                }
+            }
+        } else {
+            var p2: u64 = 0
+            while p2 < n {
+                bm_mode[(p2) as usize] = h264b.bmb_mode(mt, p2)
+                p2 = p2 + 1
+            }
+        }
+        if !read_part_refs(n, 0) { return false }
+        if !read_part_refs(n, 1) { return false }
+        read_part_mvs(m, shape, n, pw, ph, 0)
+        read_part_mvs(m, shape, n, pw, ph, 1)
+    }
+    mb_done[(m) as usize] = 1 as u8
+    mb_slice[(m) as usize] = slice_nr
+    mc_mb(mbx, mby)
+    return true
+}
+
+fn drop_ref(i: u64) {
+    var j: u64 = i
+    while j + 1 < ref_n {
+        ref_slot[(j) as usize] = ref_slot[((j + 1)) as usize]
+        j = j + 1
+    }
+    ref_n = ref_n - 1
+}
+
+fn apply_mmco() {
+    var k: u64 = 0
+    while k < mmco_n {
+        let cur_num: i64 = sl_frame_num as i64
+        let target: i64 = cur_num - ((mmco_diff[(k) as usize] as i64) + 1)
+        var i: u64 = 0
+        while i < ref_n {
+            var pn: i64 = slot_fn[((ref_slot[(i) as usize])) as usize] as i64
+            if pn > cur_num { pn = pn - ((1 << s_log2fn) as i64) }
+            if pn == target {
+                drop_ref(i)
+                i = ref_n
+            } else {
+                i = i + 1
+            }
+        }
+        k = k + 1
+    }
+}
+
+fn prepare_lists() -> bool {
+    h264refs.refs_begin()
+    var q: u64 = 0
+    while q < ref_n {
+        h264refs.refs_push(ref_slot[(q) as usize])
+        q = q + 1
+    }
+    if sl_type == 1 {
+        h264refs.refs_build_b(pic_poc, sl_nref0, sl_nref1)
+        if h264refs.refs_n0() == 0 || h264refs.refs_n1() == 0 {
+            h_err = E_UNGERADE
+            return false
+        }
+        pic_has_b = true
+        return true
+    }
+    h264refs.refs_build_p()
+    return true
+}
+
+fn near_zero(vx: i64, vy: i64) -> bool {
+    return vx >= -1 && vx <= 1 && vy >= -1 && vy <= 1
+}
+
+fn store_col(slot: u64) {
+    let nmb: u64 = s_mbw * s_mbh
+    let base: u64 = slot * 57600
+    var m: u64 = 0
+    while m < nmb {
+        var k: u64 = 0
+        while k < 16 {
+            let i: u64 = m * 16 + k
+            var z: bool = false
+            if mb_intra[(m) as usize] == (0 as u8) {
+                if b_ref[(i) as usize] >= 0 {
+                    z = b_ref[(i) as usize] == 0 && near_zero(b_mvx[(i) as usize], b_mvy[(i) as usize])
+                } else if b_ref1[(i) as usize] >= 0 {
+                    z = b_ref1[(i) as usize] == 0 && near_zero(b_mvx1[(i) as usize], b_mvy1[(i) as usize])
+                }
+            }
+            if z { slot_col[((base + i)) as usize] = 1 as u8 }
+            else { slot_col[((base + i)) as usize] = 0 as u8 }
+            k = k + 1
+        }
+        m = m + 1
+    }
+}
+
+const NOPIC: u64 = 0xFFFF
+
+fn pic_of0(i: u64) -> u64 {
+    let r: i64 = b_ref[(i) as usize]
+    if r < 0 { return NOPIC }
+    return h264refs.refs_l0(r as u64)
+}
+
+fn pic_of1(i: u64) -> u64 {
+    let r: i64 = b_ref1[(i) as usize]
+    if r < 0 { return NOPIC }
+    return h264refs.refs_l1(r as u64)
+}
+
+fn far_pair(lp: u64, p: u64, lq: u64, q: u64) -> bool {
+    var ax: i64 = b_mvx[(p) as usize]
+    var ay: i64 = b_mvy[(p) as usize]
+    if lp == 1 { ax = b_mvx1[(p) as usize]; ay = b_mvy1[(p) as usize] }
+    var bx: i64 = b_mvx[(q) as usize]
+    var by: i64 = b_mvy[(q) as usize]
+    if lq == 1 { bx = b_mvx1[(q) as usize]; by = b_mvy1[(q) as usize] }
+    var dx: i64 = ax - bx
+    var dy: i64 = ay - by
+    if dx < 0 { dx = 0 - dx }
+    if dy < 0 { dy = 0 - dy }
+    return dx >= 4 || dy >= 4
+}
+
+fn bs_motion(p: u64, q: u64) -> u64 {
+    let p0: u64 = pic_of0(p)
+    let p1: u64 = pic_of1(p)
+    let q0: u64 = pic_of0(q)
+    let q1: u64 = pic_of1(q)
+    var np: u64 = 0
+    if p0 != NOPIC { np = np + 1 }
+    if p1 != NOPIC { np = np + 1 }
+    var nq: u64 = 0
+    if q0 != NOPIC { nq = nq + 1 }
+    if q1 != NOPIC { nq = nq + 1 }
+    if np != nq { return 1 }
+    if np == 0 { return 0 }
+    if np == 1 {
+        var lp: u64 = 0
+        var pp: u64 = p0
+        if p0 == NOPIC { lp = 1; pp = p1 }
+        var lq: u64 = 0
+        var qq: u64 = q0
+        if q0 == NOPIC { lq = 1; qq = q1 }
+        if pp != qq { return 1 }
+        if far_pair(lp, p, lq, q) { return 1 }
+        return 0
+    }
+    let straight: bool = p0 == q0 && p1 == q1
+    let crossed: bool = p0 == q1 && p1 == q0
+    if !straight && !crossed { return 1 }
+    if p0 != p1 {
+        if straight {
+            if far_pair(0, p, 0, q) || far_pair(1, p, 1, q) { return 1 }
+        } else {
+            if far_pair(0, p, 1, q) || far_pair(1, p, 0, q) { return 1 }
+        }
+        return 0
+    }
+    let straight_far: bool = far_pair(0, p, 0, q) || far_pair(1, p, 1, q)
+    let crossed_far: bool = far_pair(0, p, 1, q) || far_pair(1, p, 0, q)
+    if straight_far && crossed_far { return 1 }
+    return 0
 }
 
 fn do_skip(mbx: u64, mby: u64, qp: i64) {
@@ -1657,16 +2179,16 @@ fn do_skip(mbx: u64, mby: u64, qp: i64) {
     mb_qp[(m) as usize] = qp
     var i: u64 = 0
     while i < 24 { b_nz[((m * 24 + i)) as usize] = 0; i = i + 1 }
-    mv_of(-1, 0)
+    mv_of(0, -1, 0)
     let aok: bool = mv_ok
     let anull: bool = mv_ok && mv_r == 0 && mv_x == 0 && mv_y == 0
-    mv_of(0, -1)
+    mv_of(0, 0, -1)
     let bok: bool = mv_ok
     let bnull: bool = mv_ok && mv_r == 0 && mv_x == 0 && mv_y == 0
     var vx: i64 = 0
     var vy: i64 = 0
     if aok && bok && !anull && !bnull {
-        pred_mv(0, 0, 4, 0, 1, 4)
+        pred_mv(0, 0, 0, 4, 0, 1, 4)
         vx = pmv_x
         vy = pmv_y
     }
@@ -2000,11 +2522,19 @@ fn decode_mb(mbx: u64, mby: u64, qp_in: i64) -> i64 {
     while i < 24 { b_nz[((m * 24 + i)) as usize] = 0; i = i + 1 }
     var mt: u64 = ue()
     var intra: bool = true
+    var binter: bool = false
     if sl_type == 0 {
         if mt < 5 {
             intra = false
         } else {
             mt = mt - 5
+        }
+    } else if sl_type == 1 {
+        if mt < 23 {
+            intra = false
+            binter = true
+        } else {
+            mt = mt - 23
         }
     }
     mb_type[(m) as usize] = mt
@@ -2052,6 +2582,11 @@ fn decode_mb(mbx: u64, mby: u64, qp_in: i64) -> i64 {
             var z: u64 = 0
             while z < 16 { b_i4[((m * 16 + z)) as usize] = 2; z = z + 1 }
         }
+    } else if binter {
+        if !decode_b_inter(m, mbx, mby, mt) { return QPFEHLER }
+        let gb: u64 = ue()
+        if gb >= 48 { h_err = E_UNGERADE; return QPFEHLER }
+        cbp = G2P[(gb) as usize]
     } else {
         if !p_part(mt) { h_err = E_ART; return QPFEHLER }
         let n: u64 = pp_n
@@ -2092,7 +2627,7 @@ fn decode_mb(mbx: u64, mby: u64, qp_in: i64) -> i64 {
                     sub_xy(sn, sw, sh, q)
                     let bx: u64 = bx0 + px0
                     let by: u64 = by0 + py0
-                    pred_mv(bx, by, sw, refs[(p3) as usize], 4, 2)
+                    pred_mv(0, bx, by, sw, refs[(p3) as usize], 4, 2)
                     let vx: i64 = pmv_x + se()
                     let vy: i64 = pmv_y + se()
                     var yy: u64 = 0
@@ -2117,7 +2652,7 @@ fn decode_mb(mbx: u64, mby: u64, qp_in: i64) -> i64 {
                 part_xy(n, pw, ph, p4)
                 let bx: u64 = px0
                 let by: u64 = py0
-                pred_mv(bx, by, pw, refs[(p4) as usize], n, ph)
+                pred_mv(0, bx, by, pw, refs[(p4) as usize], n, ph)
                 let vx: i64 = pmv_x + se()
                 let vy: i64 = pmv_y + se()
                 var yy2: u64 = 0
@@ -2258,6 +2793,7 @@ fn bs_of(mP: u64, iP: u64, mQ: u64, iQ: u64, mb_edge: bool) -> u64 {
     }
     if b_nz[((mP * 24 + iP)) as usize] > 0
         || b_nz[((mQ * 24 + iQ)) as usize] > 0 { return 2 }
+    if pic_has_b { return bs_motion(mP * 16 + iP, mQ * 16 + iQ) }
     if b_ref[((mP * 16 + iP)) as usize] != b_ref[((mQ * 16 + iQ)) as usize] {
         return 1
     }
@@ -2359,8 +2895,14 @@ fn mb_innen_glatt(m: u64) -> bool {
     let r0: i64 = b_ref[((m * 16)) as usize]
     let x0: i64 = b_mvx[((m * 16)) as usize]
     let y0: i64 = b_mvy[((m * 16)) as usize]
+    let r1: i64 = b_ref1[((m * 16)) as usize]
+    let x1: i64 = b_mvx1[((m * 16)) as usize]
+    let y1: i64 = b_mvy1[((m * 16)) as usize]
     var k: u64 = 1
     while k < 16 {
+        if b_ref1[((m * 16 + k)) as usize] != r1 { return false }
+        if b_mvx1[((m * 16 + k)) as usize] != x1 { return false }
+        if b_mvy1[((m * 16 + k)) as usize] != y1 { return false }
         if b_ref[((m * 16 + k)) as usize] != r0 { return false }
         if b_mvx[((m * 16 + k)) as usize] != x0 { return false }
         if b_mvy[((m * 16 + k)) as usize] != y0 { return false }
@@ -2539,13 +3081,15 @@ fn parse_slice_header(nal_type: u64, nal_ref_idc: u64) -> bool {
     let st: u64 = ue()
     if st > 9 { h_err = E_UNGERADE; return false }
     sl_type = st % 5
-    if sl_type != 0 && sl_type != 2 {
+    if sl_type > 2 {
         h_err = E_ART
         return false
     }
     ue()                     // pic_parameter_set_id
     if !p_da || !s_da { h_err = E_FORM; return false }
-    un(s_log2fn)             // frame_num
+    sl_frame_num = un(s_log2fn)
+    sl_adaptive = 0
+    mmco_n = 0
     let idr: bool = nal_type == 5
     if idr { ue() }          // idr_pic_id
     if s_poctype == 0 {
@@ -2557,14 +3101,21 @@ fn parse_slice_header(nal_type: u64, nal_ref_idc: u64) -> bool {
         sl_poc = 2 * (n_frames as i64)
     }
     sl_nref0 = p_nref0
-    if sl_type == 0 {
+    sl_nref1 = p_nref1
+    if sl_type == 1 {
+        if u1() == 0 { h_err = E_ART; return false }
+    }
+    if sl_type != 2 {
         if u1() == 1 {
             sl_nref0 = ue() + 1
-            if sl_nref0 > 16 { h_err = E_UNGERADE; return false }
+            if sl_type == 1 { sl_nref1 = ue() + 1 }
+            if sl_nref0 > 16 || sl_nref1 > 16 { h_err = E_UNGERADE; return false }
         }
     }
-    // ref_pic_list_modification
-    if sl_type != 2 {
+    if sl_type == 1 {
+        if u1() == 1 { h_err = E_ART; return false }
+        if u1() == 1 { h_err = E_ART; return false }
+    } else if sl_type != 2 {
         if u1() == 1 {
             var n: u64 = 0
             while n < 64 {
@@ -2581,12 +3132,19 @@ fn parse_slice_header(nal_type: u64, nal_ref_idc: u64) -> bool {
             u1()             // no_output_of_prior_pics_flag
             u1()             // long_term_reference_flag
         } else {
-            if u1() == 1 {   // adaptive_ref_pic_marking_mode_flag
+            sl_adaptive = u1()
+            if sl_adaptive == 1 {
                 var n2: u64 = 0
                 while n2 < 64 {
                     let op: u64 = ue()
                     if op == 0 { break }
-                    if op == 1 || op == 3 { ue() }
+                    if op == 1 {
+                        let diff: u64 = ue()
+                        if mmco_n < 8 {
+                            mmco_diff[(mmco_n) as usize] = diff
+                            mmco_n = mmco_n + 1
+                        }
+                    } else if op == 3 { ue() }
                     if op == 2 { ue() }
                     if op == 3 || op == 6 { ue() }
                     if op == 4 { ue() }
@@ -2619,12 +3177,13 @@ fn decode_slice_data() -> bool {
     var idx: u64 = first_mb
     var qp: i64 = sl_qp
     while idx < total && more_rbsp() {
-        if sl_type == 0 {
+        if sl_type != 2 {
             let run: u64 = ue()
             if run > total { h_err = E_UNGERADE; return false }
             var r: u64 = 0
             while r < run && idx < total {
-                do_skip(idx % s_mbw, idx / s_mbw, qp)
+                if sl_type == 1 { do_skip_b(idx % s_mbw, idx / s_mbw, qp) }
+                else { do_skip(idx % s_mbw, idx / s_mbw, qp) }
                 idx = idx + 1
                 r = r + 1
             }
@@ -2659,10 +3218,12 @@ fn slice_process_inner(nal_type: u64, nal_ref_idc: u64) -> u64 {
         if cur_slot == h264dpb.NO_SLOT { h_err = E_BIG; return 2 }
         pic_poc = sl_poc
         mbs_clear()
+        pic_has_b = false
         picture_open = true
     } else {
         if !picture_open { h_err = E_DATA; return 2 }
     }
+    if !prepare_lists() { return 2 }
     if !decode_slice_data() { return 2 }
     var all: bool = true
     var i: u64 = 0
@@ -2674,9 +3235,13 @@ fn slice_process_inner(nal_type: u64, nal_ref_idc: u64) -> u64 {
     deblock()
     picture_open = false
     n_frames = n_frames + 1
+    h264refs.refs_set_poc(cur_slot, pic_poc)
+    store_col(cur_slot)
+    slot_fn[(cur_slot) as usize] = sl_frame_num
     h264dpb.dpb_hold(cur_slot, epoch, pic_poc, cur_tag)
     if nal_ref_idc > 0 {
         h264poc.poc_note_reference()
+        apply_mmco()
         let cap: u64 = ref_cap()
         var k: u64 = cap - 1
         while k > 0 {
@@ -2734,6 +3299,9 @@ fn mbs_clear() {
         b_mvx[(k) as usize] = 0
         b_mvy[(k) as usize] = 0
         b_ref[(k) as usize] = -1
+        b_mvx1[(k) as usize] = 0
+        b_mvy1[(k) as usize] = 0
+        b_ref1[(k) as usize] = -1
         k = k + 1
     }
     var z: u64 = 0

@@ -68,6 +68,13 @@ mutant noreorder h264.fi \
     "if r == 1 && pop_output(s_reorder) { return true }" "if r == 1 && pop_output(0) { return true }"
 mutant nomsb h264poc.fi "cur_msb = h264b.poc_msb(prev_msb, prev_lsb, cur_lsb, max_lsb)" "cur_msb = 0"
 mutant nodefault h264.fi "if s_poctype != 2 { s_reorder = 2 }" "if s_poctype != 2 { s_reorder = 0 }"
+mutant nobipred h264.fi "if p_bipred != 2 { return 32 }" "if p_bipred != 3 { return 32 }"
+mutant nocolzero h264.fi "!= (0 as u8)
+        let i: u64 = m * 16 + by * 4 + bx" "== (7 as u8)
+        let i: u64 = m * 16 + by * 4 + bx"
+mutant noc8 h264.fi "if nb8 > cur_b8 {" "if nb8 > 9 {"
+mutant nobsmotion h264.fi "if pic_has_b { return bs_motion(mP * 16 + iP, mQ * 16 + iQ) }" ""
+mutant nol1order h264refs.fi "len1 = fill_list(1, cur, false)" "len1 = fill_list(1, cur, true)"
 mutant novui h264.fi "        un(32)
         un(32)
         u1()
@@ -85,7 +92,7 @@ echo "== 3. root disk =="
 FILES=""
 for f in "$MED"/*.mp4; do FILES="$FILES /v/$(basename "$f")=$f"; done
 PROGS="/bin/sh=$TMPD/sh.elf /bin/vdec=$TMPD/vdec.elf"
-for m in vnoreorder vnodefault vnovui vnomsb; do
+for m in vnoreorder vnodefault vnovui vnomsb vnobipred vnocolzero vnoc8 vnobsmotion vnol1order; do
     [ -f "$TMPD/$m.elf" ] && PROGS="$PROGS /bin/$m=$TMPD/$m.elf"
 done
 bash tools/mkfsfi/mkfs.sh build "$TMPD/root.img" 32768 --inodes=128 /bin/ /v/ $PROGS $FILES \
@@ -128,6 +135,20 @@ while read -r name w h nf ext; do
     fi
 done < "$MED/list.txt"
 
+echo "== 4b. B-slice clips: every frame bit-identical to ffmpeg =="
+while read -r name w h nf ext; do
+    case "$name" in b_*) ;; *) continue ;; esac
+    rc=$(run_guest "$name" "vdec /v/$name.$ext main" 480)
+    D="$TMPD/$name.txt"
+    if [ "$rc" != 21 ]; then bad "[$name] kernel did not exit by itself (rc=$rc)"; continue; fi
+    if python3 -I tools/bframes/checkb.py "$D" "$MED/$name.yuv" "$w" "$h" > "$TMPD/$name.chk" 2>&1 \
+        && [ "$(val "$D" err)" = 0 ]; then
+        ok "[$name] $(tail -1 "$TMPD/$name.chk")"
+    else
+        bad "[$name] err=$(val "$D" err) $(tail -1 "$TMPD/$name.chk")"
+    fi
+done < "$MED/list.txt"
+
 echo "== 5. gate and rejects =="
 rc=$(run_guest ro_off "vdec /v/ro_min.mp4")
 same "[ro_min without the word] kernel exits" "21" "$rc"
@@ -135,11 +156,21 @@ same "[ro_min without the word] Main profile rejected (err=2)" "2" "$(val "$TMPD
 same "[ro_min without the word] no frame" "0" "$(val "$TMPD/ro_off.txt" frames)"
 rc=$(run_guest b_off "vdec /v/b_main.mp4")
 same "[b_main without the word] err=2" "2" "$(val "$TMPD/b_off.txt" err)"
-rc=$(run_guest b_on "vdec /v/b_main.mp4 main")
-same "[b_main with the word] kernel exits" "21" "$rc"
-same "[b_main with the word] B slices not decoded yet (err=3)" "3" "$(val "$TMPD/b_on.txt" err)"
 
 echo "== 6. counter-proofs =="
+for m in nobipred nocolzero noc8 nobsmotion nol1order; do
+    clip=b_noise
+    [ "$m" = nobipred ] && clip=b_main
+    [ "$m" = noc8 ] && clip=b_part
+    [ "$m" = nol1order ] && clip=b_pyr
+    if [ ! -f "$TMPD/v$m.elf" ]; then bad "COUNTER-PROOF $m: mutant missing"; continue; fi
+    rc=$(run_guest "cp_$m" "v$m /v/$clip.mp4 main" 480)
+    if python3 -I tools/bframes/checkb.py "$TMPD/cp_$m.txt" "$MED/$clip.yuv" 176 144 >/dev/null 2>&1; then
+        bad "COUNTER-PROOF $m: the mutant still passes"
+    else
+        ok "COUNTER-PROOF $m: the comparison sees the broken decoder"
+    fi
+done
 for m in noreorder nodefault novui nomsb; do
     clip=ro_min
     [ "$m" = nodefault ] && clip=ro_none
