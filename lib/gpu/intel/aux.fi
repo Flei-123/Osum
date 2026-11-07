@@ -1,0 +1,234 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.octets
+import gpu.intel.regs
+import gpu.intel.bits
+
+export { transfer, request, native_read, i2c_read, E_OK, E_BUSY, E_TIMEOUT, E_RECV, E_SIZE, E_NACK, E_DEFER, E_ARG,
+    REQ_I2C_WRITE, REQ_I2C_READ, REQ_MOT, REQ_NATIVE_WRITE, REQ_NATIVE_READ, MAX_PAYLOAD, MAX_SEND_RETRIES,
+    MAX_DEFER_RETRIES, RECV_ERR_PAUSE_US }
+
+const E_OK: u64 = 0
+const E_BUSY: u64 = 1
+const E_TIMEOUT: u64 = 2
+const E_RECV: u64 = 3
+const E_SIZE: u64 = 4
+const E_NACK: u64 = 5
+const E_DEFER: u64 = 6
+const E_ARG: u64 = 7
+
+const REQ_I2C_WRITE: u64 = 0
+const REQ_I2C_READ: u64 = 1
+const REQ_MOT: u64 = 4
+const REQ_NATIVE_WRITE: u64 = 8
+const REQ_NATIVE_READ: u64 = 9
+
+const HEADER_LEN: u64 = 4
+const MAX_PAYLOAD: u64 = 16
+const MAX_MSG: u64 = 20
+const IDLE_POLLS: u64 = 3
+const DONE_POLLS: u64 = 10
+const POLL_US: u64 = 1000
+const MAX_SEND_RETRIES: u64 = 5
+const MAX_DEFER_RETRIES: u64 = 7
+const RECV_ERR_PAUSE_US: u64 = 400
+const DEFER_PAUSE_US: u64 = 400
+const REPLY_CODE_SHIFT: u64 = 4
+const REPLY_DEFER_MASK: u64 = 10
+
+fn send_ctl(size: u64) -> u64 {
+    return bits.AUX_BUSY | bits.AUX_DONE | bits.AUX_IRQ_DONE | bits.AUX_TIMEOUT_ERR
+        | (bits.AUX_TIMEOUT_MAX << bits.AUX_TIMEOUT_SHIFT) | bits.AUX_RECV_ERR
+        | (size << bits.AUX_SIZE_SHIFT) | bits.AUX_CLOCK_BITS
+}
+
+fn wait_idle(rd: fn(u64) -> u64, us: fn(u64) -> u64, polls: u64) -> u64 {
+    var n: u64 = 0
+    while n < polls {
+        if (rd(regs.AUX_CTL_A) & bits.AUX_BUSY) == 0 {
+            return 1
+        }
+        us(POLL_US)
+        n = n + 1
+    }
+    return 0
+}
+
+fn load_words(wr: fn(u64, u64) -> u64, tx: u64, len: u64) {
+    var w: u64 = 0
+    while w * 4 < len {
+        var v: u64 = 0
+        var b: u64 = 0
+        while b < 4 {
+            v = v << 8
+            if w * 4 + b < len {
+                v = v | octets.ld8(tx, w * 4 + b)
+            }
+            b = b + 1
+        }
+        wr(regs.AUX_DATA_A + w * 4, v)
+        w = w + 1
+    }
+}
+
+fn store_words(rd: fn(u64) -> u64, rx: u64, cap: u64, size: u64) {
+    var i: u64 = 0
+    while i < size && i < cap {
+        let v: u64 = rd(regs.AUX_DATA_A + (i / 4) * 4)
+        octets.st8(rx, i, (v >> ((3 - (i % 4)) * 8)) & 0xff)
+        i = i + 1
+    }
+}
+
+fn transfer(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, tx: u64, tx_len: u64, rx: u64,
+    rx_cap: u64, rx_len: *mut u64) -> u64 {
+    if tx_len == 0 || tx_len > MAX_MSG {
+        return E_ARG
+    }
+    if wait_idle(rd, us, IDLE_POLLS) == 0 {
+        return E_BUSY
+    }
+    var err: u64 = E_TIMEOUT
+    var status: u64 = 0
+    var sends: u64 = 0
+    while sends < MAX_SEND_RETRIES {
+        load_words(wr, tx, tx_len)
+        wr(regs.AUX_CTL_A, send_ctl(tx_len))
+        wait_idle(rd, us, DONE_POLLS)
+        status = rd(regs.AUX_CTL_A)
+        wr(regs.AUX_CTL_A, status | bits.AUX_DONE | bits.AUX_TIMEOUT_ERR | bits.AUX_RECV_ERR)
+        if (status & bits.AUX_BUSY) != 0 || (status & bits.AUX_TIMEOUT_ERR) != 0 {
+            err = E_TIMEOUT
+        } else if (status & bits.AUX_RECV_ERR) != 0 {
+            err = E_RECV
+            us(RECV_ERR_PAUSE_US)
+        } else if (status & bits.AUX_DONE) != 0 {
+            err = E_OK
+            sends = MAX_SEND_RETRIES
+        }
+        sends = sends + 1
+    }
+    if err != E_OK {
+        return err
+    }
+    let size: u64 = (status >> bits.AUX_SIZE_SHIFT) & bits.AUX_SIZE_MASK
+    if size == 0 || size > MAX_MSG {
+        return E_SIZE
+    }
+    store_words(rd, rx, rx_cap, size)
+    (*rx_len) = size
+    return E_OK
+}
+
+fn reply_status(code: u64) -> u64 {
+    if code == 0 {
+        return E_OK
+    }
+    if (code & REPLY_DEFER_MASK) != 0 {
+        return E_DEFER
+    }
+    return E_NACK
+}
+
+fn request(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, req: u64, addr: u64, data: u64,
+    len: u64, reply: u64, reply_cap: u64, reply_len: *mut u64) -> u64 {
+    if len == 0 || len > MAX_PAYLOAD || reply_cap < 1 {
+        return E_ARG
+    }
+    var msg: [u8; 20] = [0 as u8; 20]
+    let m: u64 = (&msg[0]) as u64
+    octets.st8(m, 0, (req << REPLY_CODE_SHIFT) | ((addr >> 16) & 0xf))
+    octets.st8(m, 1, (addr >> 8) & 0xff)
+    octets.st8(m, 2, addr & 0xff)
+    octets.st8(m, 3, len - 1)
+    var tx_len: u64 = HEADER_LEN
+    let writes: bool = (req & 1) == 0
+    if writes {
+        octets.copy(m + HEADER_LEN, data, len)
+        tx_len = HEADER_LEN + len
+    }
+    var attempt: u64 = 0
+    while attempt < MAX_DEFER_RETRIES {
+        var got: u64 = 0
+        let e: u64 = transfer(rd, wr, us, m, tx_len, reply, reply_cap, &got)
+        if e != E_OK {
+            return e
+        }
+        let st: u64 = reply_status(octets.ld8(reply, 0) >> REPLY_CODE_SHIFT)
+        if st == E_OK {
+            (*reply_len) = got
+            return E_OK
+        }
+        if st != E_DEFER {
+            return st
+        }
+        us(DEFER_PAUSE_US)
+        attempt = attempt + 1
+    }
+    return E_DEFER
+}
+
+fn native_read(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, addr: u64, dst: u64,
+    n: u64) -> u64 {
+    var reply: [u8; 20] = [0 as u8; 20]
+    let r: u64 = (&reply[0]) as u64
+    var done: u64 = 0
+    while done < n {
+        var chunk: u64 = n - done
+        if chunk > MAX_PAYLOAD {
+            chunk = MAX_PAYLOAD
+        }
+        var got: u64 = 0
+        let e: u64 = request(rd, wr, us, REQ_NATIVE_READ, addr + done, 0, chunk, r, MAX_MSG, &got)
+        if e != E_OK {
+            return e
+        }
+        if got < 2 {
+            return E_SIZE
+        }
+        var take: u64 = got - 1
+        if take > chunk {
+            take = chunk
+        }
+        octets.copy(dst + done, r + 1, take)
+        done = done + take
+    }
+    return E_OK
+}
+
+fn i2c_read(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, i2c_addr: u64, offset: u64, dst: u64,
+    n: u64) -> u64 {
+    var reply: [u8; 20] = [0 as u8; 20]
+    let r: u64 = (&reply[0]) as u64
+    var off: [u8; 1] = [0 as u8; 1]
+    off[0] = (offset & 0xff) as u8
+    var got: u64 = 0
+    var e: u64 = request(rd, wr, us, REQ_I2C_WRITE | REQ_MOT, i2c_addr, (&off[0]) as u64, 1, r, MAX_MSG, &got)
+    if e != E_OK {
+        return e
+    }
+    var done: u64 = 0
+    while done < n {
+        var chunk: u64 = n - done
+        if chunk > MAX_PAYLOAD {
+            chunk = MAX_PAYLOAD
+        }
+        var req: u64 = REQ_I2C_READ | REQ_MOT
+        if done + chunk >= n {
+            req = REQ_I2C_READ
+        }
+        e = request(rd, wr, us, req, i2c_addr, 0, chunk, r, MAX_MSG, &got)
+        if e != E_OK {
+            return e
+        }
+        if got < 2 {
+            return E_SIZE
+        }
+        var take: u64 = got - 1
+        if take > chunk {
+            take = chunk
+        }
+        octets.copy(dst + done, r + 1, take)
+        done = done + take
+    }
+    return E_OK
+}

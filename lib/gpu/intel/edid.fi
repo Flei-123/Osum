@@ -1,0 +1,117 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.octets
+import gpu.intel.mode
+
+export { BLOCK_LEN, checksum_ok, header_ok, block_ok, manufacturer_letter, product_code, base_width_mm,
+    base_height_mm, dtd_width_mm, dtd_height_mm, native_mode, native_width_mm, native_height_mm }
+
+const BLOCK_LEN: u64 = 128
+const HEADER_FILL: u64 = 0xff
+const O_MANUFACTURER: u64 = 8
+const O_PRODUCT: u64 = 10
+const O_WIDTH_CM: u64 = 21
+const O_HEIGHT_CM: u64 = 22
+const O_DTD: u64 = 54
+const LETTER_BASE: u64 = 64
+const LETTER_BITS: u64 = 5
+const LETTER_MASK: u64 = 31
+const CM_TO_MM: u64 = 10
+const PCLK_UNIT_KHZ: u64 = 10
+
+fn checksum_ok(p: u64) -> bool {
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < BLOCK_LEN {
+        sum = sum + octets.ld8(p, i)
+        i = i + 1
+    }
+    return (sum & 0xff) == 0
+}
+
+fn header_ok(p: u64) -> bool {
+    if octets.ld8(p, 0) != 0 || octets.ld8(p, 7) != 0 {
+        return false
+    }
+    var i: u64 = 1
+    while i < 7 {
+        if octets.ld8(p, i) != HEADER_FILL {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn block_ok(p: u64) -> bool {
+    return header_ok(p) && checksum_ok(p)
+}
+
+fn manufacturer_letter(p: u64, index: u64) -> u64 {
+    let word: u64 = (octets.ld8(p, O_MANUFACTURER) << 8) | octets.ld8(p, O_MANUFACTURER + 1)
+    return LETTER_BASE + ((word >> ((2 - index) * LETTER_BITS)) & LETTER_MASK)
+}
+
+fn product_code(p: u64) -> u64 {
+    return octets.ld8(p, O_PRODUCT) | (octets.ld8(p, O_PRODUCT + 1) << 8)
+}
+
+fn base_width_mm(p: u64) -> u64 {
+    return octets.ld8(p, O_WIDTH_CM) * CM_TO_MM
+}
+
+fn base_height_mm(p: u64) -> u64 {
+    return octets.ld8(p, O_HEIGHT_CM) * CM_TO_MM
+}
+
+fn dtd_width_mm(p: u64) -> u64 {
+    return octets.ld8(p, O_DTD + 12) | ((octets.ld8(p, O_DTD + 14) & 0xf0) << 4)
+}
+
+fn dtd_height_mm(p: u64) -> u64 {
+    return octets.ld8(p, O_DTD + 13) | ((octets.ld8(p, O_DTD + 14) & 0x0f) << 8)
+}
+
+fn native_width_mm(p: u64) -> u64 {
+    let w: u64 = dtd_width_mm(p)
+    if w != 0 {
+        return w
+    }
+    return base_width_mm(p)
+}
+
+fn native_height_mm(p: u64) -> u64 {
+    let h: u64 = dtd_height_mm(p)
+    if h != 0 {
+        return h
+    }
+    return base_height_mm(p)
+}
+
+fn native_mode(p: u64, out: *mut mode.Mode) -> bool {
+    let pclk: u64 = octets.ld16(p, O_DTD) * PCLK_UNIT_KHZ
+    if pclk == 0 {
+        return false
+    }
+    let d: u64 = O_DTD
+    let hact: u64 = octets.ld8(p, d + 2) | ((octets.ld8(p, d + 4) & 0xf0) << 4)
+    let hblank: u64 = octets.ld8(p, d + 3) | ((octets.ld8(p, d + 4) & 0x0f) << 8)
+    let vact: u64 = octets.ld8(p, d + 5) | ((octets.ld8(p, d + 7) & 0xf0) << 4)
+    let vblank: u64 = octets.ld8(p, d + 6) | ((octets.ld8(p, d + 7) & 0x0f) << 8)
+    let hso: u64 = octets.ld8(p, d + 8) | ((octets.ld8(p, d + 11) & 0xc0) << 2)
+    let hsw: u64 = octets.ld8(p, d + 9) | ((octets.ld8(p, d + 11) & 0x30) << 4)
+    let vso: u64 = (octets.ld8(p, d + 10) >> 4) | ((octets.ld8(p, d + 11) & 0x0c) << 2)
+    let vsw: u64 = (octets.ld8(p, d + 10) & 0x0f) | ((octets.ld8(p, d + 11) & 0x03) << 4)
+    if hact == 0 || vact == 0 {
+        return false
+    }
+    (*out).pclk_khz = pclk
+    (*out).hactive = hact
+    (*out).hsync_start = hact + hso
+    (*out).hsync_end = hact + hso + hsw
+    (*out).htotal = hact + hblank
+    (*out).vactive = vact
+    (*out).vsync_start = vact + vso
+    (*out).vsync_end = vact + vso + vsw
+    (*out).vtotal = vact + vblank
+    return true
+}
