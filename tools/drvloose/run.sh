@@ -17,8 +17,8 @@ bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 
 PROGS="sh cat echo drvctl"
 mkdir -p "$D/bin" "$D/pk"
-bash tools/module/build.sh "$D/auxdemo.omod" --quelle module/store/auxdemo.fi > "$D/m1.txt" 2>&1 && ok "auxdemo module builds and is signed" || { bad "auxdemo module"; tail -3 "$D/m1.txt"; fin; }
-bash tools/module/build.sh "$D/mousedemo.omod" --quelle module/store/mousedemo.fi > "$D/m2.txt" 2>&1 && ok "mousedemo module builds and is signed" || { bad "mousedemo module"; tail -3 "$D/m2.txt"; fin; }
+bash tools/module/build.sh "$D/auxdemo.omod" --source module/store/auxdemo.fi > "$D/m1.txt" 2>&1 && ok "auxdemo module builds and is signed" || { bad "auxdemo module"; tail -3 "$D/m1.txt"; fin; }
+bash tools/module/build.sh "$D/mousedemo.omod" --source module/store/mousedemo.fi > "$D/m2.txt" 2>&1 && ok "mousedemo module builds and is signed" || { bad "mousedemo module"; tail -3 "$D/m2.txt"; fin; }
 bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/b.txt" 2>&1 && ok "programs build" || { bad "programs"; head -10 "$D/b.txt"; fin; }
 python3 -c "
 d = bytearray(open('$D/auxdemo.omod', 'rb').read())

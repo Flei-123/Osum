@@ -213,7 +213,7 @@ orte=$(groesste "$S" 'explorer: places n=[0-9]+')
     && ok "item 6: $orte places in the sidebar" \
     || bad "item 6: only ${orte:-0} places in the sidebar"
 hat "$S" 'explorer: crumbs n=[0-9]+' "Punkt 6: die Brosamenleiste ist gebaut"
-hat "$S" 'explorer: crumbs n=[0-9]+ feld=1' \
+hat "$S" 'explorer: crumbs n=[0-9]+ field=1' \
     "Punkt 6: Strg+L macht aus der Leiste ein Textfeld"
 
 # --- Punkt 3: die Mehrfachauswahl.

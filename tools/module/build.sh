@@ -16,7 +16,7 @@ MKARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --stufe) STUFE=$2; shift 2 ;;
-        --quelle) QUELLE=$2; shift 2 ;;
+        --source|--quelle) QUELLE=$2; shift 2 ;;
         *) MKARGS+=("$1"); shift ;;
     esac
 done

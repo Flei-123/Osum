@@ -770,7 +770,7 @@ class Fahrer:
             n = int(name[9:])
             m = last_2(r"explorer: rect id=\d+ kind=6 "
                        r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
-            z = last_2(r"explorer: rows x=\d+ base=\d+ zh=(\d+)(?: kopf=\d+ kopfh=(\d+))?")
+            z = last_2(r"explorer: rows x=\d+ base=\d+ zh=(\d+)(?: head=\d+ headh=(\d+))?")
             o = self.window("explorer")
             if m is None or z is None or o is None:
                 return None

@@ -63,7 +63,7 @@ bash tools/module/build.sh "$TMPD/m-sig.omod"  --name ps2maus --abi 1 --sig-dreh
 bash tools/module/build.sh "$TMPD/m-nutz.omod" --name ps2maus --abi 1 --nutz-dreh 1000 >/dev/null 2>&1
 bash tools/module/build.sh "$TMPD/m-kenn.omod" --name ps2maus --abi 1 --kennung >/dev/null 2>&1
 bash tools/module/build.sh "$TMPD/m-text.omod" --name ps2maus --abi 1 --text-dreh 64 >/dev/null 2>&1
-bash tools/module/build.sh "$TMPD/m-fremd.omod" --quelle module/ps2mouse-foreign.fi \
+bash tools/module/build.sh "$TMPD/m-fremd.omod" --source module/ps2mouse-foreign.fi \
     --name ps2maus --abi 1 >/dev/null 2>&1
 n=0
 for f in m-abi m-sig m-nutz m-kenn m-text m-fremd; do

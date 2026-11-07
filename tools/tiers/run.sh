@@ -66,7 +66,7 @@ sed -i 's/^tier=compat/tier=native/' "$D/pk/lkpi-fake/driver.inf"
 [[ "$($MK check "$D/pk/lkpi-fake")" == INVALID* ]] && ok "counter-proof: flipping tier breaks the signature" || bad "tier flip not detected"
 
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-bash tools/module/build.sh "$D/edudemo.omod" --quelle module/store/edudemo.fi > "$D/m.txt" 2>&1 && ok "edudemo module builds" || { bad "module"; tail -5 "$D/m.txt"; fin; }
+bash tools/module/build.sh "$D/edudemo.omod" --source module/store/edudemo.fi > "$D/m.txt" 2>&1 && ok "edudemo module builds" || { bad "module"; tail -5 "$D/m.txt"; fin; }
 PROGS="sh cat echo drvctl"
 mkdir -p "$D/bin" "$D/kp"
 bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/b.txt" 2>&1 && ok "programs build" || { bad "programs"; head -10 "$D/b.txt"; fin; }

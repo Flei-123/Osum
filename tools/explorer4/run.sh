@@ -6,7 +6,7 @@
 #
 # One machine, one script (tools/design/drive.py), the explorer under /etc/uitrace:
 #  1. command bar in a row of its own, WORDS next to the icons: `explorer: cmdbar mode=N hid=N` with mode >= 1
-#  2. sort menu opened by a click on the Sort button; the rows drive `explorer: sort spalte= rev=` (size 1, type 4, reversed)
+#  2. sort menu opened by a click on the Sort button; the rows drive `explorer: sort column= rev=` (size 1, type 4, reversed)
 #  3. Alt+P toggles the preview pane: `explorer: preview on=1`, again on=0
 #  4. a drag on the right edge of the header cell of column 0 widens it: `explorer: colresize a=` and the
 #     text start of column 1 (`explorer: columns`) moves right by about the drag
@@ -141,9 +141,9 @@ hat "$S" 'explorer: rect id=41 kind=2 ' "the Sort button is reported (id=41)"
 echo "== 2. sort menu =="
 n=$(grep -ac 'explorer: menurect' "$S")
 [ "$n" -ge 3 ] && ok "the Sort button opened a menu three times ($n menurect lines)" || bad "only $n menurect lines"
-hat "$S" 'explorer: sort spalte=1 rev=0' "By size -> sort spalte=1"
-hat "$S" 'explorer: sort spalte=4 rev=0' "By type -> sort spalte=4"
-hat "$S" 'explorer: sort spalte=4 rev=1' "Reversed -> rev=1"
+hat "$S" 'explorer: sort column=1 rev=0' "By size -> sort column=1"
+hat "$S" 'explorer: sort column=4 rev=0' "By type -> sort column=4"
+hat "$S" 'explorer: sort column=4 rev=1' "Reversed -> rev=1"
 
 echo "== 3. Alt+P preview pane, text content =="
 hat "$S" 'explorer: preview on=1' "Alt+P switches the preview pane on"

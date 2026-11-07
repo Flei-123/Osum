@@ -146,8 +146,8 @@ fi
 run=$(wert "$A" 'busa: run=')
 abw=$(wert "$A" 'busa: abw=')
 got=$(wert "$A" 'busb: got=')
-leer=$(wert "$A" 'busb: leer=')
-echo "        busa run=$run abw=$abw   busb got=$got leer=$leer"
+leer=$(wert "$A" 'busb: empty=')
+echo "        busa run=$run abw=$abw   busb got=$got empty=$leer"
 [ "${run:-0}" = 100 ] && ok "hundert Durchlaeufe gefahren" \
                       || bad "nicht hundert Durchlaeufe, sondern '${run:-nichts}'"
 [ "${abw:-1}" = 0 ] && ok "ZERO deviations -- what A put down, B read octet for octet" \

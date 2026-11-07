@@ -38,8 +38,8 @@ open(d + "/test.seed", "wb").write(seed)
 open(d + "/keys.test", "w").write(mkomod.pubkey(seed).hex() + "\n")
 open(d + "/keys.both", "w").write(mkomod.pubkey(open("tools/module/verify.seed", "rb").read()).hex() + "\n" + mkomod.pubkey(seed).hex() + "\n")
 EOS
-bash tools/module/build.sh "$D/dev.omod" --quelle module/store/edudemo.fi > "$D/m1.txt" 2>&1 && ok "edudemo signed with the development key" || { bad "dev module"; tail -3 "$D/m1.txt"; fin; }
-bash tools/module/build.sh "$D/tst.omod" --quelle module/store/edudemo.fi --seed "$D/test.seed" > "$D/m2.txt" 2>&1 && ok "edudemo signed with the test delivery key" || { bad "test module"; tail -3 "$D/m2.txt"; fin; }
+bash tools/module/build.sh "$D/dev.omod" --source module/store/edudemo.fi > "$D/m1.txt" 2>&1 && ok "edudemo signed with the development key" || { bad "dev module"; tail -3 "$D/m1.txt"; fin; }
+bash tools/module/build.sh "$D/tst.omod" --source module/store/edudemo.fi --seed "$D/test.seed" > "$D/m2.txt" 2>&1 && ok "edudemo signed with the test delivery key" || { bad "test module"; tail -3 "$D/m2.txt"; fin; }
 python3 -c "import sys;d=open('$D/dev.omod','rb').read();print(d[-64:].hex())" > "$D/floor.txt"
 python3 -c "import sys;d=open('$D/tst.omod','rb').read();print(d[-64:].hex())" > "$D/floor-tst.txt"
 [ "$(cat $D/floor.txt)" != "$(cat $D/floor-tst.txt)" ] && ok "the two signed files have different signatures" || bad "signatures equal"

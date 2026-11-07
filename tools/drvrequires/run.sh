@@ -16,7 +16,7 @@ D=$(mktemp -d); [ -z "${REQUIRES_KEEP:-}" ] && trap 'rm -rf "$D"' EXIT
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 fin() { echo "DRVSTORE-REQUIRES: $pass passed, $fail failed"; [ "$fail" -eq 0 ]; exit $?; }
 for m in provdemo provother consdemo; do
-    bash tools/module/build.sh "$D/$m.omod" --quelle "module/store/$m.fi" > "$D/m-$m.txt" 2>&1 && ok "$m module builds and is signed" || { bad "$m module"; tail -5 "$D/m-$m.txt"; fin; }
+    bash tools/module/build.sh "$D/$m.omod" --source "module/store/$m.fi" > "$D/m-$m.txt" 2>&1 && ok "$m module builds and is signed" || { bad "$m module"; tail -5 "$D/m-$m.txt"; fin; }
 done
 MK="python3 -I tools/drvstore/mkpkg.py"
 mkdir -p "$D/bin" "$D/pk" "$D/src"

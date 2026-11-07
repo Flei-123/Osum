@@ -157,7 +157,7 @@ run_case auto 2 auto "vgpuheads vgpuextend"
 L=$(grep -a '^vgpu: bdf' "$T/auto.txt" | tail -1); echo "   $L"
 grep -aq '^fb: heads desk=1280x480$' "$T/auto.txt" && ok "fb sized 1280x480 from two 640x480 heads" || bad "no derived desk line"
 echo "$L" | grep -aq 'ext=1  extp=2  exte=0  extc=0' && ok "derived size: extend active, nothing cut" || bad "derived size: extend counters wrong"
-echo "$L" | grep -aq 'schirm=1280x480' && ok "resource is 1280x480" || bad "resource size wrong"
+echo "$L" | grep -aq 'screen=1280x480' && ok "resource is 1280x480" || bad "resource size wrong"
 
 echo "== control: one head + vgpuextend"
 run_case one 1 1280x480 "vgpuheads vgpuextend"

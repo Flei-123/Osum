@@ -381,8 +381,8 @@ fi
 printf '# /etc/module.conf -- name=an,anker,dx,dy\nuhr=1,1,16,16\nspeicher=1,1,16,56\ncpu=1,1,16,96\ntaste=280\n' \
     > "$OUT/module.conf"
 
-printf '# /etc/papierkorb.conf -- die Grenze des Papierkorbs.\n# grenze=<MiB>: wird sie ueberschritten, fliegt das AELTESTE heraus,\n# bis es wieder passt. trash.fi sagt jedes endgueltige Loeschen auf\n# der seriellen Leitung an.\ngrenze=512\n' \
-    > "$OUT/papierkorb.conf"
+printf '# /etc/trash.conf -- the limit of the trash.\n# limit=<MiB>: when exceeded the OLDEST goes first, until it fits again.\nlimit=512\n' \
+    > "$OUT/trash.conf"
 
 #     /etc/theme.conf   scheme=, mode=, shape=
 #     /etc/schemas/     die Farbschemata
@@ -557,7 +557,7 @@ ARGS+=(/etc/ "/etc/passwd=$OUT/passwd"
        "/etc/sperre.conf=$OUT/sperre.conf"
        "/etc/taskbar.conf=$OUT/taskbar.conf"
        "/etc/module.conf=$OUT/module.conf"
-       "/etc/papierkorb.conf=$OUT/papierkorb.conf"
+       "/etc/trash.conf=$OUT/trash.conf"
        "/etc/theme.conf=$OUT/theme.conf"
        "/etc/locale.conf=$OUT/locale.conf"
        "/etc/netlauf.sh=$OUT/netlauf.sh")
@@ -961,7 +961,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /apps/explorer.osp/start /apps/editor.osp/start /apps/terminal.osp/start \
 /bin/nedit /apps/editor.osp/INFO \
 /bin/trashbin /apps/trashbin.osp/start /apps/trashbin.osp/INFO \
-/apps/trashbin.osp/symbol /etc/papierkorb.conf \
+/apps/trashbin.osp/symbol /etc/trash.conf \
 /usr/share/appreg/top/symbol /usr/share/appreg/top/console /usr/share/appreg/edit/alias /apps/launcher.osp/start /apps/widgets.osp/start /apps/settings.osp/start \
 /apps/settings.osp/INFO /apps/settings.osp/symbol \
 /bin/taskmgr /apps/taskmgr.osp/start /apps/taskmgr.osp/INFO \

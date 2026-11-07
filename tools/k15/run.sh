@@ -576,7 +576,7 @@ else bad "the layout of the file manager is wrong"; echo "$aus" | sed 's/^/     
 TX=$(feld "$TMPD/files.txt" "explorer: rows" x)
 TB=$(feld "$TMPD/files.txt" "explorer: rows" base)
 TZH=$(feld "$TMPD/files.txt" "explorer: rows" zh)
-TKOPF=$(feld "$TMPD/files.txt" "explorer: rows" kopf)
+TKOPF=$(feld "$TMPD/files.txt" "explorer: rows" head)
 TFG=$(frgb "$TMPD/files.txt" "explorer: rows" fg)
 TBG=$(frgb "$TMPD/files.txt" "explorer: rows" bg)
 TSEL=$(frgb "$TMPD/files.txt" "explorer: rows" sel)

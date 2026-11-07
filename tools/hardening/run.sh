@@ -35,12 +35,12 @@ echo "  -- satt (Gegenprobe: heap_alloc gelingt)"
 for f in 1 2 3 4; do
     zeile=$("$TMPD/nachweis" "$f" 2>&1)
     echo "     $zeile"
-    kan=$(feld "$zeile" kanarie)
+    kan=$(feld "$zeile" canary)
     cn=$(feld "$zeile" capnach)
     if [[ $kan == 1 ]]; then
         ok "satt, Fall $f: Kanarienvogel heil"
     else
-        nok "satt, Fall $f: Kanarienvogel ueberschrieben (kanarie=$kan)"
+        nok "satt, Fall $f: Kanarienvogel ueberschrieben (canary=$kan)"
     fi
     if [[ $cn == 256 ]]; then
         ok "full, case $f: the buffer has grown (cap 128 -> 256)"
@@ -53,7 +53,7 @@ echo "  -- hungry (the arena is really exhausted)"
 for f in 1 2 3; do
     zeile=$(ulimit -v 32768; timeout 120 "$TMPD/nachweis" "$f" hunger 2>&1)
     echo "     $zeile"
-    kan=$(feld "$zeile" kanarie)
+    kan=$(feld "$zeile" canary)
     cn=$(feld "$zeile" capnach)
     ln=$(feld "$zeile" len)
     if [[ $cn == 128 ]]; then
@@ -64,7 +64,7 @@ for f in 1 2 3; do
     if [[ $kan == 1 ]]; then
         ok "hungrig, Fall $f: Kanarienvogel heil"
     else
-        nok "hungrig, Fall $f: STILLER UEBERLAUF (kanarie=$kan, len=$ln)"
+        nok "hungrig, Fall $f: STILLER UEBERLAUF (canary=$kan, len=$ln)"
     fi
     if [[ $ln == 128 ]]; then
         ok "hungry, case $f: nothing was written (len stays 128)"
@@ -76,7 +76,7 @@ done
 echo "  -- the control run (case 4: the unchecked caller)"
 zeile=$(ulimit -v 32768; timeout 120 "$TMPD/nachweis" 4 hunger 2>&1)
 echo "     $zeile"
-kan=$(feld "$zeile" kanarie)
+kan=$(feld "$zeile" canary)
 ln=$(feld "$zeile" len)
 if [[ $kan == 0 && $ln == 192 ]]; then
     ok "the control run FAILS (canary=0, len=192) -- the proof really measures"

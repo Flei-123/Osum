@@ -386,7 +386,7 @@ while read -r name w h nf; do
     if [ "$NUR" = 1 ]; then
         case "$name" in i_klein|p_klein) ;; *) continue ;; esac
     fi
-    rc=$(lauf "l_$name" "osum nokbd script=h264t --langsam /v/$name.264")
+    rc=$(lauf "l_$name" "osum nokbd script=h264t --slow /v/$name.264")
     if [ "$rc" != 21 ]; then
         bad "[$name] the slow path does not exit by itself (rc=$rc)"
         continue

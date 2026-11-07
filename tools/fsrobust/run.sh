@@ -78,13 +78,13 @@ echo "== 2. die Grenzen, in Ring 3 gemessen =="
 bash tools/mkfsfi/mkfs.sh build "$TMPD/lim.img" 262144 --v3 --inodes=256 \
     --time=1780000000 $SPEC >/dev/null 2>&1
 cp --sparse=always "$TMPD/lim.img" "$TMPD/lim-live.img"
-lauf "$TMPD/lim-live.img" "script=fsrlim datei;exit" "$TMPD/lim.txt" 900
+lauf "$TMPD/lim-live.img" "script=fsrlim file;exit" "$TMPD/lim.txt" 900
 rc=$?
 [ "$rc" -eq 21 ] && ok "the kernel shut itself down (exit 21)" \
                  || bad "QEMU exit $rc, erwartet 21"
 num "groesster Blockindex einer Datei" "$(val "$TMPD/lim.txt" fsrlim maxidx)" eq 17043527
 num "groesste Datei in Oktetten" "$(val "$TMPD/lim.txt" fsrlim maxfile)" eq 8726286336
-num "EIN Block weiter geht es NICHT" "$(val "$TMPD/lim.txt" fsrlim ueber)" eq 0
+num "EIN Block weiter geht es NICHT" "$(val "$TMPD/lim.txt" fsrlim over)" eq 0
 
 FSR_PROGS="$PROGS" python3 - "$TMPD" <<'PY' > "$TMPD/gross.txt" 2>&1
 import sys, os
@@ -112,7 +112,7 @@ sed 's/^/        /' "$TMPD/gross.txt"
 gr_gr=$(grep -oa 'groesse=[0-9]*' "$TMPD/gross.txt" | cut -d= -f2)
 num "das Verzeichnis liegt hinter der doppelt indirekten Stufe" \
     "${gr_gr:-0}" gt 2134016
-lauf "$TMPD/gross.img" "script=fsrlim gross;exit" "$TMPD/grossl.txt" 900
+lauf "$TMPD/gross.img" "script=fsrlim big;exit" "$TMPD/grossl.txt" 900
 num "alle Eintraege kamen ueber getdents zurueck" \
     "$(val "$TMPD/grossl.txt" fsrlim dents)" eq 12002
 num "und der LETZTE Name liess sich oeffnen" \

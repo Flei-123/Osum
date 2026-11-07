@@ -66,7 +66,7 @@ def main():
     print("== 0. DIE ARBEITSFLAECHE ==")
     mw = None
     for mw in re.finditer(
-            r"wm: work x=(\d+) y=(\d+) w=(\d+) h=(\d+)\s+schirm=(\d+)x(\d+)"
+            r"wm: work x=(\d+) y=(\d+) w=(\d+) h=(\d+)\s+screen=(\d+)x(\d+)"
             r" struts=(\d+)", t):
         pass
     mt = None

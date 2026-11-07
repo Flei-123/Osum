@@ -11,7 +11,7 @@ D=${DRVTEST_DIR:-$(mktemp -d)}; [ -z "${DRVTEST_DIR:-}" ] && trap 'rm -rf "$D"' 
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-bash tools/module/build.sh "$D/edudemo.omod" --quelle module/store/edudemo.fi > "$D/m.txt" 2>&1 && ok "module builds" || { bad "module"; tail -5 "$D/m.txt"; echo "DRVTEST: $pass passed, $fail failed"; exit 1; }
+bash tools/module/build.sh "$D/edudemo.omod" --source module/store/edudemo.fi > "$D/m.txt" 2>&1 && ok "module builds" || { bad "module"; tail -5 "$D/m.txt"; echo "DRVTEST: $pass passed, $fail failed"; exit 1; }
 python3 - "$D/edudemo.omod" "$D/unsigned.omod" <<'PY'
 import sys
 d = bytearray(open(sys.argv[1], "rb").read())

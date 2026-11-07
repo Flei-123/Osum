@@ -83,7 +83,7 @@ try:
     m.photo(os.path.join(ARB, "10-ohne.ppm"))
     say("Image 1: the bar without stick")
 
-    vor = len(re.findall(r"explorer: places n=(\d+) traeger=(\d+)", read_2()))
+    vor = len(re.findall(r"explorer: places n=(\d+) carrier=(\d+)", read_2()))
 
     m.say("drive_add 0 id=stk,if=none,file=%s,format=raw"
           % os.path.join(ARB, "stick.img"))
@@ -95,7 +95,7 @@ try:
     got = False
     t0 = time.time()
     while time.time() - t0 < 60:
-        tr = re.findall(r"explorer: places n=\d+ traeger=(\d+)", read_2())
+        tr = re.findall(r"explorer: places n=\d+ carrier=(\d+)", read_2())
         if tr and int(tr[-1]) >= 1:
             got = True
             break

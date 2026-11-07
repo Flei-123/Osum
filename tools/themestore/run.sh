@@ -992,7 +992,7 @@ num "mittlerer Farbabstand des Leistengrundes zwischen 70 %% und 40 %% (Stufen)"
 GL40=$(grep -a 'wm: glas alpha_soll=' "$TMPD/al40/serial.txt" | tail -1)
 echo "        $GL40"
 num "bei Regler 40 hebt die Lesbarkeitsschranke keinen einzigen Bildpunkt an" \
-    "$(printf '%s' "$GL40" | grep -oE 'hoch=[0-9]+' | cut -d= -f2)" eq 0
+    "$(printf '%s' "$GL40" | grep -oE 'high=[0-9]+' | cut -d= -f2)" eq 0
 same "und der Server meldet genau die Reglerstellung als Soll" "40" \
     "$(printf '%s' "$GL40" | grep -oE 'alpha_soll=[0-9]+' | cut -d= -f2)"
 #
@@ -1010,8 +1010,8 @@ same "GEGENPROBE: bei voller Deckung ist er aus" "0" \
     "$(printf '%s' "$SCH100" | grep -oE 'an=[0-9]+' | cut -d= -f2)"
 num "und dann malt er auch keine einzige Platte" \
     "$(printf '%s' "$SCH100" | grep -oE ' n=[0-9]+' | cut -d= -f2)" eq 0
-SFARBE=$(printf '%s' "$SCH" | grep -oE 'farbe=[0-9a-f]+' | cut -d= -f2)
-SGRUND=$(printf '%s' "$SCH" | grep -oE 'grund=[0-9a-f]+' | cut -d= -f2)
+SFARBE=$(printf '%s' "$SCH" | grep -oE 'color=[0-9a-f]+' | cut -d= -f2)
+SGRUND=$(printf '%s' "$SCH" | grep -oE 'reason=[0-9a-f]+' | cut -d= -f2)
 SABST=$(python3 -c "
 import sys
 a = int('${SFARBE:-0}', 16); b = int('${SGRUND:-0}', 16)
