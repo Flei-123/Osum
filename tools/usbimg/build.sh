@@ -456,9 +456,9 @@ if [ -n "${OTA_CONF:-}" ] && [ -s "${OTA_CONF}" ]; then
 else
     cat > "$OUT/ota.conf" <<EOFOTA
 source=$STORE/aktuell
-abstand=3600
+interval=3600
 auto=true
-frist=120
+timeout=120
 EOFOTA
     [ "${HP_STICK:-0}" = 1 ] && echo "channel=dev" >> "$OUT/ota.conf"
 fi

@@ -165,9 +165,9 @@ fi
 cat > "$OUT/ota.conf" <<EOF
 source=https://10.0.2.2:$PORT
 name=ota.test
-abstand=3600
+interval=3600
 auto=nein
-frist=15
+timeout=15
 EOF
 #
 printf 'opk rebuild\nif /apps/hallo.osp/start\nthen\nota confirm\nfi\nopk trial\n' \
@@ -416,7 +416,7 @@ cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf ein1 "ota settings;ota set abstand 900;ota set auto ja;ota settings;exit")
 hat "$OUT/ein1.txt" "ota: settings (/etc/ota.conf)" "die Einstellungsseite zeigt, wie das Geraet eingestellt ist"
 hat "$OUT/ein1.txt" "source   https://10.0.2.2:$PORT" "mit der Quelle"
-hat "$OUT/ein1.txt" "ota: set abstand is now 900" "und sie laesst sich umstellen"
+hat "$OUT/ein1.txt" "ota: set interval is now 900" "und sie laesst sich umstellen"
 hat "$OUT/ein1.txt" "interval 900" "die neue Zahl steht danach wirklich da"
 hat "$OUT/ein1.txt" "auto     ja" "und der Schalter fuer die automatische Suche auch"
 # ota service never returns (rounds == 0), the VM is killed by the limit; boot under load needs headroom
@@ -680,7 +680,7 @@ hat "$OUT/kan10e.txt" "keepme" "(f3) a 404 does not overwrite the target file"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf kan11 "ota apply;exit")
 hat "$OUT/kan11.txt" "ota: READY FOR RESTART" "(g) Ausgangslage: Fassung 2 steht in Erprobung"
-rc=$(lauf kan12 "opk rebuild;ota set gesund 3;ota boot sh;ota show;cat /system/ota.stand;exit" 300)
+rc=$(lauf kan12 "opk rebuild;ota set healthy 3;ota boot sh;ota show;cat /system/ota.stand;exit" 300)
 hat "$OUT/kan12.txt" "ota: start healthy, trial confirmed" "(g) ein gesunder Start wird von selbst bestaetigt"
 hat "$OUT/kan12.txt" "ota: nothing in trial" "(g) danach steht nichts mehr in Erprobung"
 hat "$OUT/kan12.txt" "phase=ruhe" "(g) und die Anzeige sagt phase=ruhe"

@@ -146,9 +146,9 @@ if [ -n "${OTA_CONF:-}" ]; then
     [ "$OTA_CONF" -ef "$OUT/ota.conf" ] || cp -f "$OTA_CONF" "$OUT/ota.conf"
 else
     cat > "$OUT/ota.conf" <<'EOFC'
-abstand=3600
+interval=3600
 auto=true
-frist=120
+timeout=120
 EOFC
 fi
 SPEC+=("/etc/ota.conf=$OUT/ota.conf")
