@@ -1044,7 +1044,7 @@ interface_branding: @MARKE_PRODUKT@ - Secure Boot must be OFF
     protocol: multiboot1
     path: boot():/osum.mb
     module_path: boot():/root.img
-    cmdline: modfs osum gfx disp audio wm wig desk wmshell nobootterm wmdauer crashhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
+    cmdline: modfs osum fastboot gfx disp audio wm wig desk wmshell nobootterm wmdauer crashhalt nopuls tz=60 tzrule=eu usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis nosched noproc nofs anmeldung
 
 /@MARKE_PRODUKT@ (safe graphics)
     protocol: multiboot1
