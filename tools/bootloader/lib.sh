@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 OSB_OFF=$((2048*512))
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/kernel_publish.sh"
 OSB_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
 OSB_VARS=/usr/share/OVMF/OVMF_VARS_4M.fd
 OSB_KVM=(); [ -w /dev/kvm ] && OSB_KVM=(-accel kvm -cpu host)
@@ -15,7 +16,7 @@ osb_prepare() {
         rm -rf "$dir/build"
     fi
     if [ -n "${KERNEL:-}" ]; then
-        mcopy -i "$dir/stick.img@@$OSB_OFF" -o "$KERNEL" ::osum.mb || return 1
+        kernel_publish "$dir/stick.img@@$OSB_OFF" "$KERNEL" || return 1
     fi
     mcopy -i "$dir/stick.img@@$OSB_OFF" ::limine.conf "$dir/limine.conf" || return 1
     sed -i 's/^timeout: .*/timeout: 0/' "$dir/limine.conf"
@@ -129,7 +130,7 @@ bios_prepare() {
         rm -rf "$dir/build"
     fi
     if [ -n "${KERNEL:-}" ]; then
-        mcopy -i "$dir/stick.img@@$OSB_OFF" -o "$KERNEL" ::osum.mb || return 1
+        kernel_publish "$dir/stick.img@@$OSB_OFF" "$KERNEL" || return 1
     fi
     python3 tools/bootloader/biosinstall.py "$dir/stick.img" "$dir/bios/osboot-stage0.bin" "$dir/bios/osboot-stage2.bin" > "$dir/bios-install.txt" || return 1
     mcopy -i "$dir/stick.img@@$OSB_OFF" ::limine.conf "$dir/limine.conf" || return 1

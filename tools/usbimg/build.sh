@@ -29,6 +29,7 @@ mkdir -p "$OUT"
 #   OSUM_MARKE_PRODUKT="Xoffi OS" bash tools/usbimg/build.sh /tmp/bau
 #
 . tools/lib/brand.sh
+. tools/lib/kernel_publish.sh
 marke_laden . || fehler "marke.conf laesst sich nicht lesen"
 RENDERED="$OUT/rendered"
 rm -rf "$RENDERED"
@@ -1315,7 +1316,12 @@ if [ "${OSBOOT:-1}" = 1 ] && [ "${ROOT_GZ_DISABLE:-0}" != 1 ] && command -v gzip
     gzip -9 -n -c "$OUT/root.img" > "$OUT/root.img.gz" || fehler "gzip root.img"
     ROOT_GZ=1
 fi
+KERNEL_GZ=0
+if [ "${OSBOOT:-1}" = 1 ] && [ "${KERNEL_GZ_ENABLE:-0}" = 1 ] && command -v gzip > /dev/null; then
+    KERNEL_GZ=1
+fi
 ESP_BYTES=0
+[ "$KERNEL_GZ" = 1 ] && ESP_BYTES=$(stat -c%s "$OUT/osum.mb")
 for esp_file in "$BOOT_LOADER_EFI" "$LIMINE/BOOTX64.EFI" "$LIMINE/limine-bios.sys" "$OUT/osum.mb" "$OUT/root.img" \
                 "$OUT/root.img.gz" "$OUT/limine.conf" "$OUT/osboot.logo" "$OUT/osboot.cfg" "${BOOTREG_EFI:-}"; do
     [ -f "$esp_file" ] && ESP_BYTES=$(( ESP_BYTES + $(stat -c%s "$esp_file") ))
@@ -1397,7 +1403,7 @@ if [ -n "$BOOTREG_EFI" ]; then
 fi
 mcopy -i "$OUT/esp.img" "$OUT/limine.conf" ::/limine.conf || fehler "mcopy conf"
 mcopy -i "$OUT/esp.img" "$OUT/limine.conf" ::/boot/limine.conf || fehler "mcopy conf2"
-mcopy -i "$OUT/esp.img" "$OUT/osum.mb" ::/osum.mb || fehler "mcopy kern"
+kernel_publish "$OUT/esp.img" "$OUT/osum.mb" "$KERNEL_GZ" || fehler "kernel_publish"
 mcopy -i "$OUT/esp.img" "$OUT/root.img" ::/root.img || fehler "mcopy wurzel"
 [ "$ROOT_GZ" = 1 ] && { mcopy -i "$OUT/esp.img" "$OUT/root.img.gz" ::/root.img.gz || fehler "mcopy root.img.gz"; }
 
