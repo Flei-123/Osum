@@ -61,7 +61,9 @@ def meta_aus_opk(path_2):
     for line in meta.split("\n"):
         if line.startswith("name="):
             name = line[5:].strip()
-        elif line.startswith("fassung="):
+        elif line.startswith("version="):
+            revision = line[8:].strip()
+        elif line.startswith("fassung=") and revision is None:
             revision = line[8:].strip()
     if not name:
         raise SystemExit("verzeichnis: %s hat keinen Namen" % path_2)

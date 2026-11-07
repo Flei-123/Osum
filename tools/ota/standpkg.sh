@@ -11,6 +11,6 @@ bash pakete/bauen.sh "$T" > "$T/log" 2>&1
 PKG=$(sed -n 's/^name=//p' "pakete/$NAME/rezept" | head -1)
 OPKF=$(ls "$T/$PKG"-*.opk 2>/dev/null | head -1)
 [ -n "$OPKF" ] || { echo "== $PKG package not built:"; grep -i "$PKG" "$T/log"; exit 1; }
-FASSUNG=$(sed -n 's/^fassung=//p' "pakete/$NAME/INFO" 2>/dev/null | head -1)
+FASSUNG=$(sed -n 's/^\(revision\|fassung\)=//p' "pakete/$NAME/INFO" 2>/dev/null | head -1)
 [ -n "$FASSUNG" ] || FASSUNG=$(sed -n 's/^fassung=//p' "pakete/$NAME/rezept" | head -1)
 cp "$OPKF" "$STAND/$PKG-${FASSUNG%%.*}.opk" && echo "ok: $STAND/$PKG-${FASSUNG%%.*}.opk"

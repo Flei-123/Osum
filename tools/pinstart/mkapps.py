@@ -25,7 +25,7 @@ def main(argv):
         pkg = os.path.join(out, app + ".osp")
         os.makedirs(os.path.join(pkg, "data"))
         with open(os.path.join(pkg, "INFO"), "w") as f:
-            f.write("name=%s\ninfo=%s\nkeys=%s\nfassung=1\n" % (row[3], row[4], row[5]))
+            f.write("name=%s\ninfo=%s\nkeys=%s\nrevision=1\n" % (row[3], row[4], row[5]))
         with open(os.path.join(pkg, "start.txt"), "w") as f:
             f.write("/bin/%s\n" % (os.environ.get("PINSTART_BIN_" + app) or row[1]))
         with open(os.path.join(pkg, "data", "README"), "w") as f:

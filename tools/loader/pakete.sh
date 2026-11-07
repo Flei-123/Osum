@@ -28,7 +28,7 @@ while IFS='|' read -r paket programm fassung titel info keys art; do
         echo "name=$titel"
         echo "info=$info"
         echo "keys=$keys"
-        echo "fassung=${fassung%%.*}"
+        echo "revision=${fassung%%.*}"
     } > "$OUT/info/$paket"
 
     cp "$OUT/registry/usr/share/appreg/$paket/symbol" "$OUT/symbole/$paket" || {

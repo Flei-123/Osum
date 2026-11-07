@@ -67,7 +67,9 @@ def meta_aus_opk(path_2):
     for z in meta.split("\n"):
         if z.startswith("name="):
             name = z[5:].strip()
-        elif z.startswith("fassung="):
+        elif z.startswith("version="):
+            revision = z[8:].strip()
+        elif z.startswith("fassung=") and revision is None:
             revision = z[8:].strip()
     if not name:
         raise SystemExit("veroeffentlichen: %s hat keinen Namen" % path_2)

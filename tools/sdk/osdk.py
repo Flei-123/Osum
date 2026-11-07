@@ -16,10 +16,10 @@ TEMPLATE = os.path.join(HERE, "template")
 
 SDK_MODULES = ["ulib", "actwire", "rpc", "actcli", "socsdk"]
 
-KEYS_V1 = ["name", "info", "exec", "icon", "keys", "fassung", "net"]
+KEYS_V1 = ["name", "info", "exec", "icon", "keys", "revision", "fassung", "net"]
 KEYS_V2 = ["manifest", "id", "version", "author", "license", "min_os", "perm",
            "service", "actions", "opens", "needs", "sandbox"]
-REQUIRED = ["name", "info", "fassung", "manifest", "id", "version"]
+REQUIRED = ["name", "info", "manifest", "id", "version"]
 
 PERMS = {
     "net": (True, "network access; build writes net=real, else net=none (netview, docs/NETVIEW.md)"),
@@ -106,7 +106,7 @@ def lint(info_path, project=None):
     last = -1
     pos = 0
     for raw in data.split(b"\n"):
-        for key in (b"name=", b"info=", b"keys=", b"fassung=", b"net=", b"exec=", b"icon="):
+        for key in (b"name=", b"info=", b"keys=", b"revision=", b"fassung=", b"net=", b"exec=", b"icon="):
             if raw.startswith(key):
                 last = max(last, pos + len(raw))
         pos += len(raw) + 1
@@ -132,8 +132,11 @@ def lint(info_path, project=None):
             rep.err(f["name"][1], "name: 1..31 characters")
     if "info" in f and not (1 <= len(f["info"][0]) <= 80):
         rep.err(f["info"][1], "info: 1..80 characters")
-    if "fassung" in f and not re.fullmatch(r"\d{1,6}", f["fassung"][0]):
-        rep.err(f["fassung"][1], "fassung: a whole number (raise it with every release)")
+    if "revision" not in f and "fassung" not in f:
+        rep.err(0, "missing required key 'revision'")
+    for rev_key in ("revision", "fassung"):
+        if rev_key in f and not re.fullmatch(r"\d{1,6}", f[rev_key][0]):
+            rep.err(f[rev_key][1], "%s: a whole number (raise it with every release)" % rev_key)
     if "min_os" in f and not re.fullmatch(r"\d{1,6}(\.\d{1,6}){0,2}", f["min_os"][0]):
         rep.err(f["min_os"][1], "min_os: 1-3 dotted numbers")
     elif "min_os" in f:
@@ -341,7 +344,7 @@ def cmd_build(args):
         info = open(os.path.join(proj, "INFO")).read().rstrip("\n")
         want_net = "real" if "net" in csv(f.get("perm", "")) else "none"
         if "net" not in f:
-            info = re.sub(r"^(fassung=.*)$", r"\1\nnet=" + want_net, info, count=1, flags=re.M)
+            info = re.sub(r"^((?:revision|fassung)=.*)$", r"\1\nnet=" + want_net, info, count=1, flags=re.M)
         open(os.path.join(bundle, "INFO"), "w").write(info + "\n")
         open(os.path.join(bundle, "data", "README"), "w").write(
             "%s %s -- built with osdk\n" % (f["id"], f["version"]))

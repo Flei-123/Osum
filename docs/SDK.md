@@ -20,7 +20,7 @@ No SYSTEM marker: a third-party app is labelled by the kernel.
 
 ## Manifest v2 = the INFO file (same file the launcher reads)
 
-Launcher keys stay on top (<1023 octets): `name info keys icon exec fassung net`.
+Launcher keys stay on top (<1023 octets): `name info keys icon exec revision net` (`fassung` is still read).
 v2 keys: `manifest=2` (required) `id` (reverse-DNS, last part = bundle name) `version` (X.Y.Z)
 `author license min_os perm service actions opens needs`; custom keys `x-...`.
 Lint refuses: unknown/duplicate keys, bad id/version, bundle name equal to a system app,

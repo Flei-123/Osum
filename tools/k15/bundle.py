@@ -21,7 +21,7 @@ INFO_LIMIT = 1023
 def angaben_stehen_vorn(file_path):
     roh = open(file_path, "rb").read()
     last_item = -1
-    for line_text in (b"name=", b"info=", b"keys=", b"fassung=", b"net=",
+    for line_text in (b"name=", b"info=", b"keys=", b"revision=", b"fassung=", b"net=",
                   b"exec=", b"icon="):
         p = roh.find(line_text)
         if p > last_item:
