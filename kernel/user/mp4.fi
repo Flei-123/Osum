@@ -11,7 +11,7 @@ export {
     mp4_item_size, mp4_item_dts, mp4_item_cts, mp4_item_key, mp4_width,
     mp4_height, mp4_rate, mp4_channels, mp4_bits, mp4_audio_codec,
     mp4_duration_ms, mp4_item_ms, mp4_nal_len_size, mp4_headers_annexb,
-    mp4_sample_annexb, mp4_sample_raw,
+    mp4_sample_annexb, mp4_sample_raw, mp4_aac_config,
     TRK_VIDEO, TRK_AUDIO, AC_NONE, AC_PCM_LE, AC_PCM_BE, AC_OTHER, AC_MP3, AC_AAC,
     ME_OK, ME_OPEN, ME_NO_MOOV, ME_TRUNC, ME_NO_TRACK, ME_TABLE, ME_BIG
 }
@@ -77,6 +77,9 @@ const FCC_MP4A: u64 = 0x6D703461
 const BOX_ESDS: u64 = 0x65736473
 const TAG_ES: u64 = 3
 const TAG_DECODER_CONFIG: u64 = 4
+const TAG_DECODER_SPECIFIC: u64 = 5
+const DECODER_CONFIG_FIXED: u64 = 13
+const ASC_CAP: u64 = 64
 const OTI_AAC: u64 = 0x40
 const OTI_MP3_V1: u64 = 0x6B
 const OTI_MP3_V2: u64 = 0x69
@@ -92,6 +95,8 @@ static mut it_key: [u8; 12288] = [0 as u8; 12288]
 static mut scratch: [u8; 524288] = [0 as u8; 524288]
 static mut avcc_copy: [u8; 4096] = [0 as u8; 4096]
 static mut avcc_len: u64 = 0
+static mut asc_copy: [u8; 64] = [0 as u8; 64]
+static mut asc_len: u64 = 0
 
 static mut last_err: u64 = 0
 static mut g_box: u64 = 0
@@ -387,6 +392,38 @@ fn skip_descriptor_len(at: u64) -> u64 {
     return p + 1
 }
 
+fn descriptor_len(at: u64) -> u64 {
+    var p: u64 = at
+    var len: u64 = 0
+    while p < at + 4 {
+        let b: u64 = media.src_byte(p)
+        len = (len << 7) | (b & 0x7F)
+        p = p + 1
+        if (b & 0x80) == 0 { break }
+    }
+    return len
+}
+
+fn capture_asc(config_at: u64) {
+    asc_len = 0
+    let p: u64 = config_at + DECODER_CONFIG_FIXED
+    if media.src_byte(p) != TAG_DECODER_SPECIFIC { return }
+    let len: u64 = descriptor_len(p + 1)
+    if len == 0 || len > ASC_CAP { return }
+    let data: u64 = skip_descriptor_len(p + 1)
+    var i: u64 = 0
+    while i < len {
+        asc_copy[(i) as usize] = media.src_byte(data + i) as u8
+        i = i + 1
+    }
+    asc_len = len
+}
+
+fn mp4_aac_config(dst: u64) -> u64 {
+    octets.copy(dst, (&asc_copy[(0) as usize]) as u64, asc_len)
+    return asc_len
+}
+
 fn esds_object_type(e: u64, entry_end: u64) -> u64 {
     var head: u64 = AUDIO_ENTRY_HEAD
     if media.be16(e + 16) == 1 { head = head + AUDIO_V1_EXTRA }
@@ -396,7 +433,9 @@ fn esds_object_type(e: u64, entry_end: u64) -> u64 {
     p = skip_descriptor_len(p + 1) + 3
     if media.src_byte(p) != TAG_DECODER_CONFIG { return 0 }
     p = skip_descriptor_len(p + 1)
-    return media.src_byte(p)
+    let oti: u64 = media.src_byte(p)
+    if oti == OTI_AAC { capture_asc(p) }
+    return oti
 }
 
 fn mp4a_codec(e: u64, entry_end: u64) -> u64 {
@@ -484,6 +523,7 @@ fn mp4_open(path: u64) -> bool {
     var i: u64 = 0
     while i < 32 { trk[(i) as usize] = 0; i = i + 1 }
     avcc_len = 0
+    asc_len = 0
     if !media.src_open(path) { return fail(ME_OPEN) }
     let size: u64 = media.src_size()
     if !box_next(0, size, BOX_MOOV) { return fail(ME_NO_MOOV) }

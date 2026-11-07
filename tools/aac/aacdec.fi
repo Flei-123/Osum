@@ -1,0 +1,64 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import media.audio.aac.aac_init
+import audio.aacplay
+
+fn push_text(b: *mut rt.Buf, s: str) {
+    rt.buf_push_bytes(b, s.p as u64, s.n)
+}
+
+fn main(start: u64) -> i32 {
+    if rt.arg_count(start) < 3 {
+        return 2
+    }
+    var input: rt.Buf = rt.buf_new()
+    if !rt.read_file(rt.arg_ptr(start, 1), &input) {
+        return 3
+    }
+    var out: rt.Buf = rt.buf_new()
+    let pcm: u64 = rt.heap_alloc(1024 * 2 * 2 + 64)
+    var dec: u64 = 0
+    var pos: usize = 0
+    var frames: i32 = 0
+    var bad: i32 = 0
+    while pos < input.len {
+        var rate_idx: u32 = 0
+        var chan_cfg: u32 = 0
+        var head_len: usize = 0
+        let frame_len: usize = aac_init.aac_adts_frame(input.ptr + pos as u64, input.len - pos, &rate_idx, &chan_cfg, &head_len)
+        if frame_len == 0 || pos + frame_len > input.len {
+            break
+        }
+        if dec == 0 {
+            dec = aacplay.aacplay_adts(rate_idx, chan_cfg)
+            if dec == 0 {
+                return 5
+            }
+        }
+        let n: u64 = aacplay.aacplay_decode(dec, input.ptr + (pos + head_len) as u64, frame_len - head_len, pcm)
+        if n > 0 {
+            frames = frames + 1
+        } else {
+            bad = bad + 1
+        }
+        rt.buf_push_bytes(&out, pcm, 1024 * (aacplay.aacplay_channels(dec) as usize) * 2)
+        pos = pos + frame_len
+    }
+    if dec == 0 {
+        return 6
+    }
+    var report: rt.Buf = rt.buf_new()
+    push_text(&report, "RATE ")
+    rt.buf_push_dec_u64(&report, aacplay.aacplay_hz(dec))
+    push_text(&report, " CH ")
+    rt.buf_push_dec_u64(&report, aacplay.aacplay_channels(dec))
+    push_text(&report, " FRAMES ")
+    rt.buf_push_dec_u64(&report, frames as u64)
+    push_text(&report, " BAD ")
+    rt.buf_push_dec_u64(&report, bad as u64)
+    push_text(&report, "\n")
+    rt.write_file(rt.arg_ptr(start, 2), out.ptr, out.len)
+    rt.write_everything(1, report.ptr, report.len)
+    aacplay.aacplay_free(dec)
+    return 0
+}
