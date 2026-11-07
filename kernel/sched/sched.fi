@@ -9,9 +9,11 @@ import arch.msr
 import gfx.fbmtrr
 import arch.x86_64.apic
 import apprights.policy
+import sched.hrt
+import sched.time
 
 export {
-    init, create, start, schedule, on_tick, yield_now, sleep_ticks, idle_wait,
+    init, create, start, schedule, on_tick, fast_tick, yield_now, sleep_ticks, sleep_fine, poll_sleep_fine, idle_wait,
     dead_sleeps,
     exit_task, reap, claim_zombie, reap_claimed, S_REAPING, lock_gone,
     kill_current, wake_pid, wait_sleep, stopped_child, stop_claim, find_pid, current, tget, tset, task_at,
@@ -1143,7 +1145,7 @@ fn switch_to(state: u64, from: u64, to: u64) {
     && !kstate.mode_on(state, kstate.M_APSLOW) {
         cpu.x_set(state, me, cpu.X_HALTED, 0)
         cpu.x_set(state, me, cpu.X_PEND, 0)
-        apic.timer_rate(state, 1)
+        hrt.rate_here(state, 1)
     }
     kstate.add(state, kstate.SWITCHES, 1)
     tset(state, to, T_RUNS, tget(state, to, T_RUNS) + 1)
@@ -1370,22 +1372,58 @@ fn kick_idle_cores(state: u64) {
     }
 }
 
+fn wake_due(state: u64) -> u64 {
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    var now_ns: u64 = 0
+    if hrt.pending_any() {
+        now_ns = time.mono_ns(state)
+    }
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var woke: u64 = 0
+    var fine_left: bool = false
+    var i: u64 = 0
+    while i < n {
+        let ts: u64 = tget(state, i, T_STATE)
+        if ts == S_SLEEP || ts == S_POLL {
+            if tget(state, i, T_WAKE) <= now || hrt.due(i, now_ns) {
+                if state_cas(state, i, ts, S_READY) {
+                    woke = woke + 1
+                }
+            } else if hrt.wake_of(i) != 0 {
+                fine_left = true
+            }
+        }
+        i = i + 1
+    }
+    if now_ns != 0 && !fine_left {
+        hrt.clear_pending()
+    }
+    return woke
+}
+
+fn fast_tick(state: u64) {
+    if !hrt.pending_any() {
+        hrt.relax_here(state)
+        return
+    }
+    let me: u64 = cpu.here(state)
+    atomic.lock_take(state, atomic.L_SCHED, me)
+    let woke: u64 = wake_due(state)
+    if woke == 0 || kstate.get(state, kstate.PREEMPT) == 0 {
+        atomic.lock_give(state, atomic.L_SCHED)
+        return
+    }
+    kick_idle_cores(state)
+    schedule_locked(state)
+}
+
 fn on_tick(state: u64) {
     let me: u64 = cpu.here(state)
     cpu.add(state, me, cpu.C_TICKS, 1)
     pat_here(state, me)
     fbmtrr.here(state, me)
     atomic.lock_take(state, atomic.L_SCHED, me)
-    let now: u64 = kstate.get(state, kstate.TICKS)
-    let n: u64 = kstate.get(state, kstate.TASKS)
-    var i: u64 = 0
-    while i < n {
-        let ts: u64 = tget(state, i, T_STATE)
-        if (ts == S_SLEEP || ts == S_POLL) && tget(state, i, T_WAKE) <= now {
-            state_cas(state, i, ts, S_READY)
-        }
-        i = i + 1
-    }
+    let _w: u64 = wake_due(state)
     let cur: u64 = current(state)
     var tick_to: u64 = cur
     var in_wait: bool = false
@@ -1556,6 +1594,24 @@ fn sleep_ticks(state: u64, ticks: u64) {
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
     let cur: u64 = current(state)
     tset(state, cur, T_WAKE, kstate.get(state, kstate.TICKS) + ticks)
+    hrt.set_wake(cur, 0)
+    tset(state, cur, T_STATE, S_SLEEP)
+    schedule_locked(state)
+    irq_restore(flags)
+}
+
+fn sleep_fine(state: u64, fine: u64) {
+    let flags: u64 = irq_save()
+    atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
+    let cur: u64 = current(state)
+    let now_ns: u64 = time.mono_ns(state)
+    var rel: u64 = 0
+    if fine > now_ns {
+        rel = fine - now_ns
+    }
+    tset(state, cur, T_WAKE, kstate.get(state, kstate.TICKS) + hrt.ticks_for(rel))
+    hrt.set_wake(cur, fine)
+    hrt.arm_here(state)
     tset(state, cur, T_STATE, S_SLEEP)
     schedule_locked(state)
     irq_restore(flags)
@@ -1677,6 +1733,10 @@ fn poll_kick_one(state: u64, task: u64) {
 }
 
 fn poll_sleep(state: u64, seen: u64, deadline: u64) {
+    poll_sleep_fine(state, seen, deadline, 0)
+}
+
+fn poll_sleep_fine(state: u64, seen: u64, deadline: u64, fine: u64) {
     let flags: u64 = irq_save()
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
     if kstate.get(state, kstate.POLLSEQ) != seen {
@@ -1687,6 +1747,10 @@ fn poll_sleep(state: u64, seen: u64, deadline: u64) {
     let cur: u64 = current(state)
     tset(state, cur, T_POLLSEQ, seen)
     tset(state, cur, T_WAKE, deadline)
+    hrt.set_wake(cur, fine)
+    if fine != 0 {
+        hrt.arm_here(state)
+    }
     tset(state, cur, T_STATE, S_POLL)
     schedule_locked(state)
     irq_restore(flags)

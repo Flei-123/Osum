@@ -1,0 +1,124 @@
+import lib.kstate
+import sched.time
+import arch.cpu
+import arch.x86_64.apic
+
+export {
+    FINE_MAX_NS, deadline_after, set_wake, wake_of, expired, due, pending_any, clear_pending, arm_here, partial,
+    mark_full, rate_here, relax_here, fine_enabled, ticks_for
+}
+
+const FINE_MAX_NS: u64 = 60000000
+const FAST_DIVIDER: u64 = 10
+const PARTIAL_PERCENT: u64 = 80
+const MAX_CPUS: u64 = 8
+const MAX_SLOTS: u64 = 256
+
+static mut wake_ns: [u64; 256] = [0 as u64; 256]
+static mut pending: u64 = 0
+static mut fast_cpu: [u64; 8] = [0 as u64; 8]
+static mut last_full: [u64; 8] = [0 as u64; 8]
+
+fn fine_enabled(state: u64) -> bool {
+    return time.khz(state) != 0 && !kstate.mode_on(state, kstate.M_NOHRT)
+}
+
+fn deadline_after(state: u64, rel_ns: u64) -> u64 {
+    if rel_ns == 0 || rel_ns > FINE_MAX_NS || !fine_enabled(state) {
+        return 0
+    }
+    return time.mono_ns(state) + rel_ns
+}
+
+fn ticks_for(rel_ns: u64) -> u64 {
+    return rel_ns / time.TICK_NS + 1
+}
+
+fn set_wake(me: u64, ns: u64) {
+    if me >= MAX_SLOTS {
+        return
+    }
+    wake_ns[me as usize] = ns
+    if ns != 0 {
+        pending = 1
+    }
+}
+
+fn wake_of(i: u64) -> u64 {
+    if i >= MAX_SLOTS {
+        return 0
+    }
+    return wake_ns[i as usize]
+}
+
+fn expired(state: u64, tick_deadline: u64, fine: u64) -> bool {
+    if tick_deadline != 0 && kstate.get(state, kstate.TICKS) >= tick_deadline {
+        return true
+    }
+    return fine != 0 && time.mono_ns(state) >= fine
+}
+
+fn due(i: u64, now_ns: u64) -> bool {
+    if now_ns == 0 || i >= MAX_SLOTS {
+        return false
+    }
+    let w: u64 = wake_ns[i as usize]
+    return w != 0 && now_ns >= w
+}
+
+fn pending_any() -> bool {
+    return pending != 0
+}
+
+fn clear_pending() {
+    pending = 0
+}
+
+fn arm_here(state: u64) {
+    let me: u64 = cpu.here(state)
+    if me >= MAX_CPUS || fast_cpu[me as usize] != 0 {
+        return
+    }
+    fast_cpu[me as usize] = 1
+    apic.timer_fast(state, FAST_DIVIDER)
+}
+
+fn relax_here(state: u64) {
+    let me: u64 = cpu.here(state)
+    if me >= MAX_CPUS || fast_cpu[me as usize] == 0 {
+        return
+    }
+    fast_cpu[me as usize] = 0
+    apic.timer_rate(state, 1)
+}
+
+fn rate_here(state: u64, mult: u64) {
+    let me: u64 = cpu.here(state)
+    if me < MAX_CPUS && fast_cpu[me as usize] != 0 {
+        apic.timer_fast(state, FAST_DIVIDER)
+        return
+    }
+    apic.timer_rate(state, mult)
+}
+
+fn mark_full(state: u64) {
+    let me: u64 = cpu.here(state)
+    if me < MAX_CPUS {
+        last_full[me as usize] = time.tsc()
+    }
+}
+
+fn partial(state: u64) -> bool {
+    let me: u64 = cpu.here(state)
+    if me >= MAX_CPUS || fast_cpu[me as usize] == 0 {
+        return false
+    }
+    let khz: u64 = time.khz(state)
+    if khz == 0 {
+        return false
+    }
+    let per_tick: u64 = khz *% (time.TICK_NS / 1000000)
+    let t: u64 = time.tsc()
+    let last: u64 = last_full[me as usize]
+    return t > last && (t - last) * 100 < per_tick * PARTIAL_PERCENT
+}

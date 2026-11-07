@@ -16,6 +16,7 @@ import ipc.uio
 import pwr.pmon
 import sched.signal
 import sched.time
+import sched.hrt
 import sched.clockstate
 import tz.rules
 import libc.clockabi
@@ -363,6 +364,23 @@ fn do_arch_prctl(state: u64, me: u64, code: u64, addr: u64) -> u64 {
 // so ten milliseconds are the grain -- anything shorter is a yield.
 const MAX_SLEEP_SEC: u64 = 4294967296
 
+const FINE_SLEEP_ROUNDS: u64 = 4096
+
+fn sleep_until_fine(state: u64, me: u64, fine: u64) -> u64 {
+    var rounds: u64 = 0
+    while rounds < FINE_SLEEP_ROUNDS {
+        if signal.interrupted(state, me) {
+            return sysuser.neg(errno.E_INTR)
+        }
+        if hrt.expired(state, 0, fine) {
+            return 0
+        }
+        sched.sleep_fine(state, fine)
+        rounds = rounds + 1
+    }
+    return 0
+}
+
 fn do_nanosleep(state: u64, me: u64, req: u64) -> u64 {
     if !proc.user_ok(state, me, req, 16) {
         return sysuser.neg(errno.E_FAULT)
@@ -374,6 +392,12 @@ fn do_nanosleep(state: u64, me: u64, req: u64) -> u64 {
     }
     if (sec >> 63) != 0 {
         return sysuser.neg(errno.E_INVAL)
+    }
+    if sec == 0 && nsec != 0 {
+        let fine: u64 = hrt.deadline_after(state, nsec)
+        if fine != 0 {
+            return sleep_until_fine(state, me, fine)
+        }
     }
     var capped: u64 = sec
     if capped > MAX_SLEEP_SEC {

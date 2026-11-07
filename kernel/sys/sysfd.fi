@@ -1919,7 +1919,7 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool) -> 
                 return sysuser.neg(errno.E_AGAIN)
             }
             waitw = waitw + 1
-            sched.sleep_ticks(state, 1)
+            sched.poll_sleep(state, sched.poll_seq(state), kstate.get(state, kstate.TICKS) + 1)
             free = unixsock.room(state, unixsock.sock_peer(state, si))
             if dg {
                 free = unixsock.dgram_room(state, unixsock.sock_peer(state, si))
@@ -1938,16 +1938,20 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool) -> 
         sched.poll_kick(state)
         return w
     }
-    var waited: u64 = 0
-    while unixsock.waiting(state, si) == 0 {
+    let read_deadline: u64 = kstate.get(state, kstate.TICKS) + sysconst.NET_ROUNDS
+    while true {
+        let seen: u64 = sched.poll_seq(state)
+        if unixsock.waiting(state, si) != 0 {
+            break
+        }
         if unixsock.peer_gone(state, si) {
             return 0
         }
-        if nonblock || waited >= sysconst.NET_ROUNDS {
+        let now: u64 = kstate.get(state, kstate.TICKS)
+        if nonblock || now >= read_deadline {
             return sysuser.neg(errno.E_AGAIN)
         }
-        waited = waited + 1
-        sched.sleep_ticks(state, 1)
+        sched.poll_sleep(state, seen, now + 1)
     }
     let r: u64 = wl_recv(state, me, si, buf, n, dg)
     if r == sysuser.neg(errno.E_FAULT) {
@@ -1956,6 +1960,7 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool) -> 
     if errno.is_error(r) {
         return sysuser.neg(r)
     }
+    sched.poll_kick(state)
     return r
 }
 

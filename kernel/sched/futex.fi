@@ -4,6 +4,7 @@ import sched.sched
 import sched.proc
 import sched.signal
 import sched.time
+import sched.hrt
 import sync.atomic
 import arch.cpu
 import arch.x86_64.guard
@@ -228,7 +229,7 @@ fn pi_waiting(state: u64, pkey: u64, vkey: u64) -> bool {
 }
 
 
-fn sleep_on(state: u64, me: u64, phys: u64, vkey: u64, expect: u64, bits: u64, deadline: u64,
+fn sleep_on(state: u64, me: u64, phys: u64, vkey: u64, expect: u64, bits: u64, deadline: u64, fine: u64,
     check_word: bool) -> u64 {
     if signal.interrupted(state, me) {
         return neg(errno.E_INTR)
@@ -239,7 +240,7 @@ fn sleep_on(state: u64, me: u64, phys: u64, vkey: u64, expect: u64, bits: u64, d
         return neg(errno.E_AGAIN)
     }
     let now: u64 = kstate.get(state, kstate.TICKS)
-    if deadline != 0 && deadline <= now {
+    if (deadline != 0 && deadline <= now) || (fine != 0 && time.mono_ns(state) >= fine) {
         unlock(state, flags)
         return neg(errno.E_TIMEDOUT)
     }
@@ -255,6 +256,10 @@ fn sleep_on(state: u64, me: u64, phys: u64, vkey: u64, expect: u64, bits: u64, d
         due = deadline
     }
     sched.tset(state, me, sched.T_WAKE, due)
+    hrt.set_wake(me, fine)
+    if fine != 0 {
+        hrt.arm_here(state)
+    }
     sched.tset(state, me, sched.T_STATE, sched.S_SLEEP)
     sched.schedule_locked(state)
     sched.irq_restore(flags)
@@ -271,7 +276,7 @@ fn sleep_on(state: u64, me: u64, phys: u64, vkey: u64, expect: u64, bits: u64, d
     if signal.interrupted(state, me) {
         return neg(errno.E_INTR)
     }
-    if deadline != 0 && kstate.get(state, kstate.TICKS) >= deadline {
+    if (deadline != 0 || fine != 0) && hrt.expired(state, deadline, fine) {
         return neg(errno.E_TIMEDOUT)
     }
     return 0
@@ -279,7 +284,8 @@ fn sleep_on(state: u64, me: u64, phys: u64, vkey: u64, expect: u64, bits: u64, d
 
 const DL_ERR: u64 = 0xF000000000000000
 
-fn deadline_of(state: u64, me: u64, ts: u64, absolute: bool, on_real: bool) -> u64 {
+fn deadline_of(state: u64, me: u64, ts: u64, absolute: bool, on_real: bool, fine: *mut u64) -> u64 {
+    *fine = 0
     if ts == 0 {
         return 0
     }
@@ -320,6 +326,7 @@ fn deadline_of(state: u64, me: u64, ts: u64, absolute: bool, on_real: bool) -> u
     if rest > 0x3FFFFFFF {
         rest = 0x3FFFFFFF
     }
+    *fine = hrt.deadline_after(state, ns)
     return kstate.get(state, kstate.TICKS) + rest
 }
 
@@ -331,7 +338,8 @@ fn lock_pi(state: u64, me: u64, uaddr: u64, ts: u64) -> u64 {
     }
     let vkey: u64 = vkey_of(state, me, uaddr)
     let tid: u64 = sched.tget(state, me, sched.T_PID) & TID_MASK
-    let deadline: u64 = deadline_of(state, me, ts, true, true)
+    var fine: u64 = 0
+    let deadline: u64 = deadline_of(state, me, ts, true, true, &fine)
     if deadline >= DL_ERR {
         return neg(deadline - DL_ERR)
     }
@@ -353,7 +361,7 @@ fn lock_pi(state: u64, me: u64, uaddr: u64, ts: u64) -> u64 {
             if (v & WAITERS_BIT) == 0 {
                 cas32(state, phys, v, v | WAITERS_BIT)
             }
-            let r: u64 = sleep_on(state, me, phys, vkey, v | WAITERS_BIT, PI_BITS, deadline, true)
+            let r: u64 = sleep_on(state, me, phys, vkey, v | WAITERS_BIT, PI_BITS, deadline, fine, true)
             if r != 0 && r != neg(errno.E_AGAIN) {
                 return r
             }
@@ -548,11 +556,12 @@ fn call(state: u64, me: u64, uaddr: u64, op: u64, val: u64, a3: u64, uaddr2: u64
         if rd32_phys(state, phys) != (val & 0xFFFFFFFF) {
             return neg(errno.E_AGAIN)
         }
-        let deadline: u64 = deadline_of(state, me, a3, cmd == OP_WAIT_BITSET, on_real)
+        var fine: u64 = 0
+        let deadline: u64 = deadline_of(state, me, a3, cmd == OP_WAIT_BITSET, on_real, &fine)
         if deadline >= DL_ERR {
             return neg(deadline - DL_ERR)
         }
-        return sleep_on(state, me, phys, vkey, val, wbits, deadline, true)
+        return sleep_on(state, me, phys, vkey, val, wbits, deadline, fine, true)
     }
     if cmd == OP_WAKE || cmd == OP_WAKE_BITSET {
         var bits: u64 = BITS_ANY
