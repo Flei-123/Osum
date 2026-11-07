@@ -61,6 +61,7 @@ for a, b in zip(pairs[::2], pairs[1::2]):
     s = s.replace(a, b)
 open(p, 'w').write(s)
 PYEOF
+    [ $? = 0 ] || { bad "mutant $tag does not apply"; return 1; }
     build_prog "$tree" vdec "v$tag" && ok "mutant $tag built" || { bad "mutant $tag does not build"; return 1; }
 }
 mutant noreorder h264.fi \
@@ -69,12 +70,12 @@ mutant noreorder h264.fi \
 mutant nomsb h264poc.fi "cur_msb = h264b.poc_msb(prev_msb, prev_lsb, cur_lsb, max_lsb)" "cur_msb = 0"
 mutant nodefault h264.fi "if s_poctype != 2 { s_reorder = 2 }" "if s_poctype != 2 { s_reorder = 0 }"
 mutant nobipred h264.fi "if p_bipred != 2 { return 32 }" "if p_bipred != 3 { return 32 }"
-mutant nocolzero h264.fi "!= (0 as u8)
-        let i: u64 = m * 16 + by * 4 + bx" "== (7 as u8)
-        let i: u64 = m * 16 + by * 4 + bx"
+mutant nocolzero h264direct.fi "+ cy * 4 + cx)) as usize] != (0 as u8)" "+ cy * 4 + cx)) as usize] == (7 as u8)"
 mutant noc8 h264.fi "if nb8 > cur_b8 {" "if nb8 > 9 {"
 mutant nobsmotion h264.fi "if pic_has_b { return bs_motion(mP * 16 + iP, mQ * 16 + iQ) }" ""
 mutant nol1order h264refs.fi "len1 = fill_list(1, cur, false)" "len1 = fill_list(1, cur, true)"
+mutant nomodify h264.fi \
+    "h264refs.refs_modify(sl_frame_num as i64, (1 << s_log2fn) as i64, sl_nref0, 0)" ""
 mutant novui h264.fi "        un(32)
         un(32)
         u1()
@@ -92,7 +93,7 @@ echo "== 3. root disk =="
 FILES=""
 for f in "$MED"/*.mp4; do FILES="$FILES /v/$(basename "$f")=$f"; done
 PROGS="/bin/sh=$TMPD/sh.elf /bin/vdec=$TMPD/vdec.elf"
-for m in vnoreorder vnodefault vnovui vnomsb vnobipred vnocolzero vnoc8 vnobsmotion vnol1order; do
+for m in vnoreorder vnodefault vnovui vnomsb vnobipred vnocolzero vnoc8 vnobsmotion vnol1order vnomodify; do
     [ -f "$TMPD/$m.elf" ] && PROGS="$PROGS /bin/$m=$TMPD/$m.elf"
 done
 bash tools/mkfsfi/mkfs.sh build "$TMPD/root.img" 32768 --inodes=128 /bin/ /v/ $PROGS $FILES \
@@ -158,11 +159,12 @@ rc=$(run_guest b_off "vdec /v/b_main.mp4")
 same "[b_main without the word] err=2" "2" "$(val "$TMPD/b_off.txt" err)"
 
 echo "== 6. counter-proofs =="
-for m in nobipred nocolzero noc8 nobsmotion nol1order; do
+for m in nobipred nocolzero noc8 nobsmotion nol1order nomodify; do
     clip=b_noise
     [ "$m" = nobipred ] && clip=b_main
     [ "$m" = noc8 ] && clip=b_part
     [ "$m" = nol1order ] && clip=b_pyr
+    [ "$m" = nomodify ] && clip=b_pyr
     if [ ! -f "$TMPD/v$m.elf" ]; then bad "COUNTER-PROOF $m: mutant missing"; continue; fi
     rc=$(run_guest "cp_$m" "v$m /v/$clip.mp4 main" 480)
     if python3 -I tools/bframes/checkb.py "$TMPD/cp_$m.txt" "$MED/$clip.yuv" 176 144 >/dev/null 2>&1; then

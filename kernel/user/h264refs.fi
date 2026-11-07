@@ -3,32 +3,91 @@
 profile kernel
 
 export {
-    refs_set_poc, refs_poc, refs_begin, refs_push, refs_build_p, refs_build_b,
-    refs_l0, refs_l1, refs_n0, refs_n1
+    refs_set_poc, refs_poc, refs_marked_reset, refs_is_marked, refs_mmco_clear, refs_mmco_add, refs_mark,
+    refs_build_p, refs_build_b,
+    refs_l0, refs_l1, refs_n0, refs_n1,
+    refs_set_fn, refs_mod_clear, refs_mod_add, refs_modify
 }
 
 const REF_MAX: u64 = 8
 const NONE: u64 = 0xFFFFFFFF
+const MOD_MAX: u64 = 8
 
 static mut all_slot: [u64; 8] = [0; 8]
 static mut all_n: u64 = 0
 static mut slot_poc: [i64; 8] = [0; 8]
-static mut list0: [u64; 8] = [0; 8]
-static mut list1: [u64; 8] = [0; 8]
+static mut list0: [u64; 9] = [0; 9]
+static mut list1: [u64; 9] = [0; 9]
 static mut len0: u64 = 0
 static mut len1: u64 = 0
+static mut mmco_n: u64 = 0
+static mut mmco_diff: [u64; 8] = [0; 8]
 static mut used: [u8; 8] = [0 as u8; 8]
+static mut slot_fn: [u64; 8] = [0; 8]
+static mut mod_op: [u64; 16] = [0; 16]
+static mut mod_val: [u64; 16] = [0; 16]
+static mut mod_n: [u64; 2] = [0; 2]
 
 fn refs_set_poc(slot: u64, poc: i64) { slot_poc[(slot) as usize] = poc }
 
 fn refs_poc(slot: u64) -> i64 { return slot_poc[(slot) as usize] }
 
-fn refs_begin() { all_n = 0 }
+fn refs_marked_reset() { all_n = 0 }
 
-fn refs_push(slot: u64) {
-    if all_n >= REF_MAX { return }
-    all_slot[(all_n) as usize] = slot
-    all_n = all_n + 1
+fn refs_is_marked(slot: u64) -> bool {
+    var i: u64 = 0
+    while i < all_n {
+        if all_slot[(i) as usize] == slot { return true }
+        i = i + 1
+    }
+    return false
+}
+
+fn refs_mmco_clear() { mmco_n = 0 }
+
+fn refs_mmco_add(diff: u64) {
+    if mmco_n >= MOD_MAX { return }
+    mmco_diff[(mmco_n) as usize] = diff
+    mmco_n = mmco_n + 1
+}
+
+fn drop_marked(i: u64) {
+    var j: u64 = i
+    while j + 1 < all_n {
+        all_slot[(j) as usize] = all_slot[((j + 1)) as usize]
+        j = j + 1
+    }
+    all_n = all_n - 1
+}
+
+fn apply_mmco(cur_fn: i64, max_fn: i64) {
+    var k: u64 = 0
+    while k < mmco_n {
+        let target: i64 = cur_fn - ((mmco_diff[(k) as usize] as i64) + 1)
+        var i: u64 = 0
+        while i < all_n {
+            var pn: i64 = slot_fn[((all_slot[(i) as usize])) as usize] as i64
+            if pn > cur_fn { pn = pn - max_fn }
+            if pn == target {
+                drop_marked(i)
+                i = all_n
+            } else {
+                i = i + 1
+            }
+        }
+        k = k + 1
+    }
+}
+
+fn refs_mark(slot: u64, frame_num: u64, max_fn: u64, cap: u64) {
+    apply_mmco(frame_num as i64, max_fn as i64)
+    var k: u64 = cap - 1
+    while k > 0 {
+        all_slot[(k) as usize] = all_slot[((k - 1)) as usize]
+        k = k - 1
+    }
+    all_slot[(0) as usize] = slot
+    if all_n < cap { all_n = all_n + 1 }
 }
 
 fn refs_l0(i: u64) -> u64 { return list0[(i) as usize] }
@@ -124,4 +183,105 @@ fn refs_build_b(cur: i64, act0: u64, act1: u64) {
     }
     if len0 > act0 { len0 = act0 }
     if len1 > act1 { len1 = act1 }
+}
+
+fn refs_set_fn(slot: u64, frame_num: u64) { slot_fn[(slot) as usize] = frame_num }
+
+fn refs_mod_clear() {
+    mod_n[(0) as usize] = 0
+    mod_n[(1) as usize] = 0
+}
+
+fn refs_mod_add(list: u64, op: u64, val: u64) -> bool {
+    let n: u64 = mod_n[(list) as usize]
+    if n >= MOD_MAX { return false }
+    mod_op[((list * MOD_MAX + n)) as usize] = op
+    mod_val[((list * MOD_MAX + n)) as usize] = val
+    mod_n[(list) as usize] = n + 1
+    return true
+}
+
+fn get_ref(list: u64, i: u64) -> u64 {
+    if list == 0 { return list0[(i) as usize] }
+    return list1[(i) as usize]
+}
+
+fn put_ref(list: u64, i: u64, slot: u64) {
+    if list == 0 { list0[(i) as usize] = slot }
+    else { list1[(i) as usize] = slot }
+}
+
+fn find_pic_num(pic_num: i64, cur_fn: i64, max_fn: i64) -> u64 {
+    var i: u64 = 0
+    while i < all_n {
+        let slot: u64 = all_slot[(i) as usize]
+        var p: i64 = slot_fn[(slot) as usize] as i64
+        if p > cur_fn { p = p - max_fn }
+        if p == pic_num { return slot }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn insert_ref(list: u64, idx: u64, act: u64, slot: u64) {
+    var j: u64 = act
+    while j > idx {
+        put_ref(list, j, get_ref(list, j - 1))
+        j = j - 1
+    }
+    put_ref(list, idx, slot)
+    var n: u64 = idx + 1
+    j = idx + 1
+    while j <= act {
+        if get_ref(list, j) != slot {
+            put_ref(list, n, get_ref(list, j))
+            n = n + 1
+        }
+        j = j + 1
+    }
+}
+
+fn modify_list(list: u64, len: u64, act: u64, cur_fn: i64, max_fn: i64) -> u64 {
+    var n: u64 = len
+    if n > act { n = act }
+    var f: u64 = n
+    while f <= act { put_ref(list, f, NONE); f = f + 1 }
+    var pred: i64 = cur_fn
+    var idx: u64 = 0
+    var k: u64 = 0
+    while k < mod_n[(list) as usize] && idx < act {
+        let diff: i64 = (mod_val[((list * MOD_MAX + k)) as usize] as i64) + 1
+        var no_wrap: i64 = 0
+        if mod_op[((list * MOD_MAX + k)) as usize] == 0 {
+            no_wrap = pred - diff
+            if no_wrap < 0 { no_wrap = no_wrap + max_fn }
+        } else {
+            no_wrap = pred + diff
+            if no_wrap >= max_fn { no_wrap = no_wrap - max_fn }
+        }
+        pred = no_wrap
+        var pic_num: i64 = no_wrap
+        if pic_num > cur_fn { pic_num = pic_num - max_fn }
+        let slot: u64 = find_pic_num(pic_num, cur_fn, max_fn)
+        if slot != NONE {
+            insert_ref(list, idx, act, slot)
+            idx = idx + 1
+        }
+        k = k + 1
+    }
+    var i: u64 = 0
+    while i < act {
+        if get_ref(list, i) == NONE { put_ref(list, i, get_ref(list, 0)) }
+        i = i + 1
+    }
+    return act
+}
+
+fn refs_modify(cur_fn: i64, max_fn: i64, act0: u64, act1: u64) {
+    var a0: u64 = act0
+    var a1: u64 = act1
+    if a0 > 8 { a0 = 8 }
+    if a1 > 8 { a1 = 8 }
+    if mod_n[(0) as usize] > 0 { len0 = modify_list(0, len0, a0, cur_fn, max_fn) }
+    if mod_n[(1) as usize] > 0 { len1 = modify_list(1, len1, a1, cur_fn, max_fn) }
 }
