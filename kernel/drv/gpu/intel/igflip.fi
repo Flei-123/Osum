@@ -1,0 +1,171 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import mm.mmframe
+import gfx.fb
+import gpu.intel.regs
+import gpu.intel.bits
+import gpu.intel.ggtt
+import gpu.intel.dbuf
+import drv.gpu.intel.mmio
+import drv.gpu.intel.probe
+
+export {
+    stage, status, pages, back_phys, back_addr, flips, rollbacks, shown_off, present, restore,
+    S_OFF, S_NO_GGTT, S_NO_FB, S_MISMATCH, S_NO_MEM, S_SETUP, S_FLIP_FAIL, S_OK
+}
+
+const S_OFF: u64 = 0
+const S_NO_GGTT: u64 = 1
+const S_NO_FB: u64 = 2
+const S_MISMATCH: u64 = 3
+const S_NO_MEM: u64 = 4
+const S_SETUP: u64 = 5
+const S_FLIP_FAIL: u64 = 6
+const S_OK: u64 = 7
+const PAGE: u64 = 0x1000
+const BACK_GGTT_OFFSET: u64 = 0x1000000
+const COPY_STEP: u64 = 8
+const MARK_ROWS: u64 = 48
+const MARK_WORD: u64 = 0xff00ff00ff00ff00
+const HOLD_STEPS: u64 = 40
+const HOLD_STEP_US: u64 = 10000
+const STRIDE_FIELD_MASK: u64 = 0x7ff
+const SIZE_ROWS_SHIFT: u64 = 16
+const SIZE_ROWS_MASK: u64 = 0xfff
+
+static mut g_status: u64 = 0
+static mut g_pages: u64 = 0
+static mut g_back_phys: u64 = 0
+static mut g_state: dbuf.Dbuf = dbuf.Dbuf { front_off: 0, back_off: 0, pages: 0, cur: 0, flips: 0, rollbacks: 0 }
+
+static mut s_say: [u8; 17] = "intelgpuflip: ok\0"
+static mut s_fail: [u8; 22] = "intelgpuflip: failed \0"
+
+fn status() -> u64 {
+    return g_status
+}
+
+fn pages() -> u64 {
+    return g_pages
+}
+
+fn back_phys() -> u64 {
+    return g_back_phys
+}
+
+fn back_addr() -> u64 {
+    return mmframe.kva(g_back_phys)
+}
+
+fn flips() -> u64 {
+    return g_state.flips
+}
+
+fn rollbacks() -> u64 {
+    return g_state.rollbacks
+}
+
+fn shown_off() -> u64 {
+    return dbuf.shown(&g_state)
+}
+
+fn present() -> u64 {
+    return dbuf.present(mmio.rd, mmio.wr, mmio.us, &g_state)
+}
+
+fn restore() -> u64 {
+    return dbuf.restore_front(mmio.rd, mmio.wr, mmio.us, &g_state)
+}
+
+fn copy_front(ks: u64, bytes: u64) {
+    let src: u64 = fb.addr(ks)
+    let dst: u64 = back_addr()
+    var i: u64 = 0
+    while i < bytes {
+        __mmio_write64((dst + i) as *mut u64, __mmio_read64((src + i) as *mut u64))
+        i = i + COPY_STEP
+    }
+}
+
+fn mark_back(ks: u64) {
+    let dst: u64 = back_addr()
+    let rows: u64 = MARK_ROWS * fb.pitch(ks)
+    var i: u64 = 0
+    while i < rows {
+        __mmio_write64((dst + i) as *mut u64, __mmio_read64((dst + i) as *mut u64) ^ MARK_WORD)
+        i = i + COPY_STEP
+    }
+}
+
+fn geometry_matches(ks: u64) -> bool {
+    let pitch: u64 = fb.pitch(ks)
+    let stride: u64 = (mmio.rd(regs.PLANE_STRIDE_1_A) & STRIDE_FIELD_MASK) * bits.PLANE_STRIDE_UNIT
+    let size: u64 = mmio.rd(regs.PLANE_SIZE_1_A)
+    let rows: u64 = ((size >> SIZE_ROWS_SHIFT) & SIZE_ROWS_MASK) + 1
+    return stride == pitch && rows == fb.height(ks) && fb.phys(ks) != 0
+}
+
+fn hold() {
+    var n: u64 = 0
+    while n < HOLD_STEPS {
+        mmio.us(HOLD_STEP_US)
+        n = n + 1
+    }
+}
+
+fn fail(code: u64) {
+    g_status = code
+    serial.puts((&s_fail[0]) as u64)
+    serial.dec(code)
+    serial.nl()
+}
+
+fn selftest() {
+    let r: u64 = present()
+    if r != dbuf.D_OK {
+        fail(S_FLIP_FAIL)
+        restore()
+        return
+    }
+    hold()
+    if restore() != dbuf.D_OK {
+        fail(S_FLIP_FAIL)
+        return
+    }
+    g_status = S_OK
+    serial.puts((&s_say[0]) as u64)
+    serial.nl()
+}
+
+fn stage(ks: u64) {
+    if !kstate.mode_on(ks, kstate.M_INTELGPUFLIP) || probe.result() != probe.R_OK {
+        return
+    }
+    if !mmio.ggtt_attached() {
+        fail(S_NO_GGTT)
+        return
+    }
+    if !geometry_matches(ks) {
+        fail(S_MISMATCH)
+        return
+    }
+    let bytes: u64 = fb.pitch(ks) * fb.height(ks)
+    g_pages = (bytes + PAGE - 1) / PAGE
+    g_back_phys = mmframe.frame_run(ks, g_pages)
+    if g_back_phys == 0 {
+        fail(S_NO_MEM)
+        return
+    }
+    copy_front(ks, bytes)
+    mark_back(ks)
+    mmio.permit_ggtt(BACK_GGTT_OFFSET, g_pages)
+    mmio.permit_plane()
+    if dbuf.setup(mmio.rd, mmio.rd64, mmio.wr64, &g_state, BACK_GGTT_OFFSET, g_back_phys, fb.phys(ks), g_pages) != dbuf.D_OK {
+        fail(S_SETUP)
+        return
+    }
+    selftest()
+}

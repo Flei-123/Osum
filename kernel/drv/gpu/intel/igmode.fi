@@ -1,0 +1,119 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import sched.time
+import gpu.intel.regs
+import gpu.intel.bits
+import gpu.intel.mode
+import gpu.intel.snap
+import gpu.intel.confirm
+import gpu.intel.modeset
+import drv.gpu.intel.mmio
+import drv.gpu.intel.probe
+import drv.gpu.intel.igflip
+
+export {
+    stage, status, reverts, apply_code, S_OFF, S_NO_PIPE, S_REFUSED, S_VERIFY, S_REVERTED, S_OK
+}
+
+const S_OFF: u64 = 0
+const S_NO_PIPE: u64 = 1
+const S_REFUSED: u64 = 2
+const S_VERIFY: u64 = 3
+const S_REVERTED: u64 = 4
+const S_OK: u64 = 5
+const WATCHDOG_MS: u64 = 5000
+const NS_PER_MS: u64 = 1000000
+const SETTLE_US: u64 = 50000
+const STABLE_CHECKS: u64 = 4
+const CHECK_US: u64 = 20000
+
+static mut g_status: u64 = 0
+static mut g_apply: u64 = 0
+static mut g_state: u64 = 0
+static mut g_wd: confirm.Watchdog = confirm.Watchdog { state: 0, deadline_ms: 0, reverts: 0 }
+static mut g_saved: modeset.Saved = modeset.Saved { htotal: 0, hsync: 0, vtotal: 0, vsync: 0, valid: false }
+
+static mut s_ok: [u8; 17] = "intelgpumode: ok\0"
+static mut s_fail: [u8; 22] = "intelgpumode: failed \0"
+
+fn status() -> u64 {
+    return g_status
+}
+
+fn reverts() -> u64 {
+    return g_wd.reverts
+}
+
+fn apply_code() -> u64 {
+    return g_apply
+}
+
+fn now_ms() -> u64 {
+    return time.mono_ns(g_state) / NS_PER_MS
+}
+
+fn do_revert() {
+    modeset.revert(mmio.wr, &g_saved)
+    igflip.restore()
+}
+
+fn stable(m: *mut mode.Mode) -> bool {
+    var n: u64 = 0
+    while n < STABLE_CHECKS {
+        mmio.us(CHECK_US)
+        var s: snap.State = snap.state_new()
+        snap.snapshot(mmio.rd, &s)
+        if !mode.same_timing(&s.mode, m) || (s.transconf_edp & bits.ENABLE) == 0 || (s.plane_ctl & bits.ENABLE) == 0 {
+            return false
+        }
+        n = n + 1
+    }
+    return true
+}
+
+fn fail(code: u64) {
+    g_status = code
+    serial.puts((&s_fail[0]) as u64)
+    serial.dec(code)
+    serial.nl()
+}
+
+fn stage(ks: u64) {
+    if !kstate.mode_on(ks, kstate.M_INTELGPUMODE) || probe.result() != probe.R_OK {
+        return
+    }
+    g_state = ks
+    var s: snap.State = snap.state_new()
+    snap.snapshot(mmio.rd, &s)
+    mmio.permit_timing()
+    confirm.arm(&g_wd, now_ms(), WATCHDOG_MS)
+    g_apply = modeset.apply_same(mmio.rd, mmio.wr, &s.mode, &g_saved)
+    if g_apply == modeset.M_NOT_RUNNING {
+        confirm.disarm(&g_wd)
+        fail(S_NO_PIPE)
+        return
+    }
+    if g_apply == modeset.M_MISMATCH {
+        confirm.disarm(&g_wd)
+        fail(S_REFUSED)
+        return
+    }
+    if g_apply != modeset.M_OK {
+        confirm.tick(&g_wd, now_ms() + WATCHDOG_MS, do_revert)
+        fail(S_VERIFY)
+        return
+    }
+    mmio.us(SETTLE_US)
+    if stable(&s.mode) {
+        confirm.confirm(&g_wd)
+        g_status = S_OK
+        serial.puts((&s_ok[0]) as u64)
+        serial.nl()
+        return
+    }
+    confirm.tick(&g_wd, now_ms() + WATCHDOG_MS, do_revert)
+    fail(S_REVERTED)
+}

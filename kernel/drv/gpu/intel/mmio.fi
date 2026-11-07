@@ -5,12 +5,19 @@ import lib.kstate
 import sched.time
 import arch.arch
 import arch.x86_64.apic
+import gpu.intel.regs
+import gpu.intel.ggtt
 
-export { attach, attached, rd, wr, us, writes_done, writes_denied, WINDOW_BYTES }
+export {
+    attach, attach_ggtt, attached, ggtt_attached, rd, wr, rd64, wr64, us, writes_done, writes_denied,
+    permit_plane, permit_timing, permit_ggtt, ptes_written, WINDOW_BYTES, GGTT_WINDOW_BYTES
+}
 
 const WINDOW_BYTES: u64 = 0x200000
 const AUX_FIRST: u64 = 0x64010
 const AUX_END: u64 = 0x64028
+const GGTT_WINDOW_BYTES: u64 = 0x200000
+const TIMING_REGS: u64 = 4
 const NS_PER_US: u64 = 1000
 const LOW_MASK: u64 = 0xFFFFFFFF
 
@@ -18,6 +25,12 @@ static mut g_state: u64 = 0
 static mut g_base: u64 = 0
 static mut g_writes: u64 = 0
 static mut g_denied: u64 = 0
+static mut g_ggtt_va: u64 = 0
+static mut g_allow_plane: bool = false
+static mut g_allow_timing: bool = false
+static mut g_pte_lo: u64 = 0
+static mut g_pte_hi: u64 = 0
+static mut g_ptes: u64 = 0
 
 fn attach(ks: u64, phys: u64) -> bool {
     if phys == 0 {
@@ -34,8 +47,53 @@ fn attach(ks: u64, phys: u64) -> bool {
     return true
 }
 
+fn attach_ggtt(ks: u64, bar0_phys: u64) -> bool {
+    if bar0_phys == 0 {
+        return false
+    }
+    let va: u64 = apic.map_range(ks, bar0_phys + ggtt.GGTT_BASE_OFFSET, GGTT_WINDOW_BYTES)
+    if va == 0 {
+        return false
+    }
+    g_ggtt_va = va
+    return true
+}
+
 fn attached() -> bool {
     return g_base != 0
+}
+
+fn ggtt_attached() -> bool {
+    return g_ggtt_va != 0
+}
+
+fn permit_plane() {
+    g_allow_plane = true
+}
+
+fn permit_timing() {
+    g_allow_timing = true
+}
+
+fn permit_ggtt(first_off: u64, pages: u64) {
+    g_pte_lo = ggtt.pte_offset(first_off)
+    g_pte_hi = g_pte_lo + pages * ggtt.PTE_BYTES
+}
+
+fn is_timing_reg(off: u64) -> bool {
+    let base: u64 = regs.TRANS_EDP
+    return off == base + regs.T_HTOTAL || off == base + regs.T_HSYNC || off == base + regs.T_VTOTAL
+        || off == base + regs.T_VSYNC
+}
+
+fn write_allowed(off: u64) -> bool {
+    if off >= AUX_FIRST && off < AUX_END {
+        return true
+    }
+    if g_allow_plane && off == regs.PLANE_SURF_1_A {
+        return true
+    }
+    return g_allow_timing && is_timing_reg(off)
 }
 
 fn rd(off: u64) -> u64 {
@@ -47,12 +105,38 @@ fn rd(off: u64) -> u64 {
 }
 
 fn wr(off: u64, value: u64) -> u64 {
-    if g_base == 0 || (off & 3) != 0 || off < AUX_FIRST || off >= AUX_END {
+    if g_base == 0 || (off & 3) != 0 || !write_allowed(off) {
         g_denied = g_denied + 1
         return 0
     }
     __mmio_write32((g_base + off) as *mut u32, (value & LOW_MASK) as u32)
     g_writes = g_writes + 1
+    return 0
+}
+
+fn pte_window_va(off: u64) -> u64 {
+    if g_ggtt_va == 0 || (off & 7) != 0 || off < ggtt.GGTT_BASE_OFFSET || off >= ggtt.GGTT_BASE_OFFSET + GGTT_WINDOW_BYTES {
+        return 0
+    }
+    return g_ggtt_va + (off - ggtt.GGTT_BASE_OFFSET)
+}
+
+fn rd64(off: u64) -> u64 {
+    let va: u64 = pte_window_va(off)
+    if va == 0 {
+        return 0
+    }
+    return __mmio_read64(va as *mut u64)
+}
+
+fn wr64(off: u64, value: u64) -> u64 {
+    let va: u64 = pte_window_va(off)
+    if va == 0 || off < g_pte_lo || off >= g_pte_hi {
+        g_denied = g_denied + 1
+        return 0
+    }
+    __mmio_write64(va as *mut u64, value)
+    g_ptes = g_ptes + 1
     return 0
 }
 
@@ -62,6 +146,10 @@ fn us(n: u64) -> u64 {
         arch.pause()
     }
     return 0
+}
+
+fn ptes_written() -> u64 {
+    return g_ptes
 }
 
 fn writes_done() -> u64 {
