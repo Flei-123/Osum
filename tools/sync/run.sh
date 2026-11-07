@@ -141,7 +141,7 @@ mkdir -p "$TMPD/daten/unter"
 printf 'die erste zeile\nGEHEIMNIS-4711 steht hier\n' > "$TMPD/daten/a.txt"
 head -c 9000 /dev/urandom > "$TMPD/daten/unter/b.bin"
 printf 'hallo\n' > "$TMPD/daten/klein.txt"
-SETTINGS_FILE=${SYNC_SETTINGS_FILE:-EINST}
+SETTINGS_FILE=${SYNC_SETTINGS_FILE:-SETTINGS}
 printf '100 farbe blau\n100 sprache de\n' > "$TMPD/daten/$SETTINGS_FILE"
 head -c 200000 /dev/urandom > "$TMPD/daten/gross.bin"
 mkdir -p "$TMPD/fremd"

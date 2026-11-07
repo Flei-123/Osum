@@ -389,16 +389,20 @@ hatnicht "$OUT/c3b.txt" "wrong length" "(c3) no wrong-length failure after the r
 dienst_aus
 
 H2=$(python3 -c "print(open('$OUT/netz2/INDEX').read().split(chr(9))[2])" 2>/dev/null)
-rc=$(lauf c3c "echo ==A==;opk generations;opk verify;mv /system/generations/1/GRUND /system/generations/1/REASON;mv /store/${H2:0:20}/PAKET /store/${H2:0:20}/PACKAGE;echo ==B==;opk generations;opk verify;exit")
+rc=$(lauf c3c "echo ==A==;ls /system/generations/1;ls /store/${H2:0:20};opk generations;opk verify;mv /system/generations/1/REASON /system/generations/1/GRUND;mv /store/${H2:0:20}/PACKAGE /store/${H2:0:20}/PAKET;echo ==B==;opk generations;opk verify;exit")
 sed -n '/==A==$/,/==B==$/p' "$OUT/c3c.txt" | grep -a -v '==' > "$OUT/c3c.a"
 sed -n '/==B==$/,$p' "$OUT/c3c.txt" | grep -a -v '==' | grep -a -v '^\(exit\|#\|/ \)' > "$OUT/c3c.b"
-hat "$OUT/c3c.a" "opk: ok" "(c3c) before the rename opk verify passes"
-hat "$OUT/c3c.b" "opk: ok" "(c3c) English member names PACKAGE and REASON: opk verify still finds the store entry"
+hat "$OUT/c3c.a" "REASON" "(c3c) the writer emits the English generation file REASON"
+hat "$OUT/c3c.a" "PACKAGE" "(c3c) the writer emits the English store member PACKAGE"
+hatnicht "$OUT/c3c.a" "GRUND" "(c3c) the writer no longer emits GRUND"
+hatnicht "$OUT/c3c.a" "PAKET" "(c3c) the writer no longer emits PAKET"
+hat "$OUT/c3c.a" "opk: ok" "(c3c) with the English names opk verify passes"
+hat "$OUT/c3c.b" "opk: ok" "(c3c) old member names PAKET and GRUND: opk verify still finds the store entry"
 hatnicht "$OUT/c3c.b" "store entry missing" "(c3c) no store entry reported missing"
 GA=$(grep -a 'generation 1' "$OUT/c3c.a" | head -n 1)
 GB=$(grep -a 'generation 1' "$OUT/c3c.b" | head -n 1)
 [ -n "$GA" ] && [ "$GA" = "$GB" ] \
-    && ok "(c3c) opk generations prints the same line for generation 1 with GRUND and with REASON: $GA" \
+    && ok "(c3c) opk generations prints the same line for generation 1 with REASON and with GRUND: $GA" \
     || bad "(c3c) generation line differs: '$GA' vs '$GB'"
 
 dienst "$OUT/netzvoll" || bad "Gegenstelle"
