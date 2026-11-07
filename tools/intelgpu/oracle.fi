@@ -11,6 +11,8 @@ import gpu.intel.edid
 import gpu.intel.aux
 import gpu.intel.snap
 import gpu.intel.dump
+import gpu.intel.flip
+import gpu.intel.regs
 
 const NOT_FOUND: u64 = 0xffff
 const REG_CAP: u64 = 128
@@ -40,6 +42,7 @@ static mut inj_defer: u64 = 0
 static mut inj_size0: u64 = 0
 static mut inj_big: u64 = 0
 static mut inj_short: u64 = 0
+static mut inj_nolatch: u64 = 0
 static mut edid_ptr: u64 = 0
 static mut edid_blk: [u8; 128] = [0 as u8; 128]
 static mut dpcd_blk: [u8; 272] = [0 as u8; 272]
@@ -49,6 +52,8 @@ static SKL_IDS: [u64; 25] = [0x1902, 0x1906, 0x190A, 0x190B, 0x190E, 0x1912, 0x1
     0x191B, 0x191D, 0x191E, 0x1921, 0x1923, 0x1926, 0x1927, 0x192A, 0x192B, 0x192D, 0x1932, 0x193A, 0x193B, 0x193D]
 static KBL_IDS: [u64; 22] = [0x5902, 0x5906, 0x5908, 0x590A, 0x590B, 0x590E, 0x5912, 0x5913, 0x5915, 0x5916, 0x5917,
     0x591A, 0x591B, 0x591C, 0x591D, 0x591E, 0x5921, 0x5923, 0x5926, 0x5927, 0x593B, 0x87C0]
+static HP_EDID_HEX: [u8; 257] = "00ffffffffffff0006af2d42000000001f1a0104951d117802c315935859922922505400000001010101010101010101010101010101143780b87038244010103e0025a510000018b82480b87038244010103e0025a51000001800000000000000000000000000000000000000000002001036ff0f3c961e0e249620202000fd\0"
+static HP_DPCD_HEX: [u8; 33] = "110a8241000001c0020000000f0b0000\0"
 static EXPECT: [u8; 1378] = "pipesrc_w=1920\npipesrc_h=1080\nhactive=1920\nhsync_start=1936\nhsync_end=1952\nhtotal=2104\nvactive=1080\nvsync_start=1083\nvsync_end=1097\nvtotal=1116\npclk_khz=141000\nrefresh_mhz=60049\nlink_symbol_khz=270000\ndata_tu=64\ndata_ratio_ppm=587500\ntransconf_edp=0xc0000000\nedp_enabled=1\npipeconf_a=0x00000000\npipeconf_b=0x00000000\nddi_func_edp=0x82200002\nddi_func_enabled=1\nddi_mode=2\nddi_bpc=6\nddi_pipe=0\nddi_lanes=2\nhsync_positive=0\nvsync_positive=0\nddi_func_a=0x00030000\nddi_buf_a=0x80000003\nddi_buf_enabled=1\nddi_buf_lanes=2\ndp_tp_ctl_a=0x80040300\ndp_tp_status_a=0x00000000\ndp_mst=0\ndp_enhanced=1\ndp_pattern=3\naux_ctl_a=0x0410023f\ndpll_ctrl1=0x00000003\ndpll_ctrl2=0x00a00001\ndpll_status=0x00000011\ndpll0_locked=1\nlcpll1_ctl=0xc0000000\nlcpll1_enabled=1\nlcpll1_locked=1\ncdclk_ctl=0x0c000544\ncdclk_khz=675000\ndssm=0x00000001\ndfsm=0x20400042\ncdclk_limit_khz=675000\nfuse_status=0x8e000000\nplane_ctl_1_a=0x84000000\nplane_enabled=1\nplane_format=4\nplane_tiling=0\nplane_stride_bytes=7680\nplane_width=1920\nplane_height=1080\nplane_surf=0x00000000\npp_status=0x80000008\npanel_on=1\npp_sequence=8\npp_control=0x00000007\npp_off_delay_100us=500\nblc_pch_ctl1=0x80000000\nblc_pwm_enabled=1\nblc_period=7500\nblc_duty=7500\nblc_cpu_ctl2=0x80000000\nblc_cpu_ctl=0x00000000\npwr_well_ctl1=0xf000000f\npwr_well_ctl2=0x50000005\npwr_well_ctl3=0x40000000\npwr_well_ctl4=0x50000005\ndc_state_en=0x00000000\ngmbus2=0x00000800\n\0"
 
 fn chk(name: str, cond: bool) {
@@ -235,6 +240,9 @@ fn m_wr(off: u64, v: u64) -> u64 {
         return 0
     }
     reg_set(off, v)
+    if off == 0x7019c && inj_nolatch == 0 {
+        reg_set(0x701ac, (v & 0xfffff000) | (reg_get(0x701ac) & 0xfff))
+    }
     return 0
 }
 
@@ -252,6 +260,7 @@ fn fresh() {
     inj_size0 = 0
     inj_big = 0
     inj_short = 0
+    inj_nolatch = 0
     edid_ptr = 0
     aux_calls = 0
     bad_send = 0
@@ -309,6 +318,8 @@ fn load_fixtures() {
     reg_set(0x4540c, 0x50000005)
     reg_set(0x45504, 0x0)
     reg_set(0xc5108, 0x800)
+    reg_set(0x7019c, 0x0)
+    reg_set(0x701ac, 0x20)
 }
 
 fn put_edid(i: u64, v: u64) {
@@ -583,6 +594,94 @@ fn test_aux_reads() {
     chk("short native replies still assemble 32 bytes", e == aux.E_OK && same_bytes(pd(), (&dpcd_blk[0]) as u64, 32))
 }
 
+fn hex_digit(c: u8) -> u64 {
+    let v: u64 = c as u64
+    if v >= 97 {
+        return v - 87
+    }
+    return v - 48
+}
+
+fn load_hp_edid() {
+    var i: u64 = 0
+    while i < 128 {
+        edid_blk[i as usize] = ((hex_digit(HP_EDID_HEX[(i * 2) as usize]) << 4) | hex_digit(HP_EDID_HEX[(i * 2 + 1) as usize])) as u8
+        i = i + 1
+    }
+}
+
+fn load_hp_dpcd() {
+    var i: u64 = 0
+    while i < 16 {
+        dpcd_blk[i as usize] = ((hex_digit(HP_DPCD_HEX[(i * 2) as usize]) << 4) | hex_digit(HP_DPCD_HEX[(i * 2 + 1) as usize])) as u8
+        i = i + 1
+    }
+}
+
+fn test_hp_real() {
+    load_hp_edid()
+    load_hp_dpcd()
+    fresh()
+    chk("real HP EDID (read over AUX on 07.11.) passes header and checksum", edid.block_ok(pe()))
+    chk("real HP panel manufacturer is AUO", edid.manufacturer_letter(pe(), 0) == 65 && edid.manufacturer_letter(pe(), 1) == 85
+        && edid.manufacturer_letter(pe(), 2) == 79)
+    chk("real HP panel product code 0x422d", edid.product_code(pe()) == 0x422d)
+    chk("real HP panel base size 290x170 mm, DTD size 293x165 mm", edid.base_width_mm(pe()) == 290
+        && edid.base_height_mm(pe()) == 170 && edid.dtd_width_mm(pe()) == 293 && edid.dtd_height_mm(pe()) == 165)
+    var em: mode.Mode = mode.mode_new()
+    chk("real HP EDID native mode parses", edid.native_mode(pe(), &em))
+    var hm: mode.Mode = mode.mode_new()
+    timing.read_mode(m_rd, 0x6f000, 270000, &hm)
+    chk("real HP EDID mode equals the firmware register readback (1920x1080, 2104x1116, 141000 kHz)",
+        mode.same_timing(&em, &hm) && em.pclk_khz == 141000 && em.htotal == 2104 && em.vtotal == 1116)
+    var e: u64 = read_edid()
+    chk("real HP EDID reads back byte-exact through the modeled AUX sink", e == aux.E_OK && same_bytes(pg(), pe(), 128))
+    e = aux.native_read(m_rd, m_wr, m_us, 0, pd(), 16)
+    chk("real HP DPCD: rev 1.1, max rate 0x0a (HBR), 2 lanes, enhanced framing", e == aux.E_OK && got_dpcd[0] == 0x11
+        && got_dpcd[1] == 0x0a && (got_dpcd[2] & 0x1f) == 2 && (got_dpcd[2] & 0x80) != 0)
+    chk("real HP DPCD bytes 3..15 round-trip", same_bytes(pd() + 3, (&dpcd_blk[3]) as u64, 13))
+    build_edid()
+    build_dpcd()
+    fresh()
+}
+
+fn test_flip() {
+    fresh()
+    reg_set(0x7019c, 0)
+    reg_set(0x701ac, 0x20)
+    let before: u64 = wr_count
+    var r: u64 = flip.flip(m_rd, m_wr, m_us, 0x1000)
+    chk("flip to 0x1000 succeeds (HP: SURF 0 -> 0x1000, SURFLIVE 0x20 -> 0x1020)", r == flip.F_OK
+        && reg_get(0x7019c) == 0x1000 && reg_get(0x701ac) == 0x1020)
+    chk("a flip is exactly one register write", wr_count - before == 1)
+    chk("flip back to 0 restores SURFLIVE 0x20", flip.flip(m_rd, m_wr, m_us, 0) == flip.F_OK && reg_get(0x701ac) == 0x20)
+    let w: u64 = wr_count
+    chk("unaligned surface is refused without a write", flip.flip(m_rd, m_wr, m_us, 0x1001) == flip.F_ARG && wr_count == w)
+    chk("surface above 4 GiB is refused without a write", flip.flip(m_rd, m_wr, m_us, 0x100000000) == flip.F_ARG
+        && wr_count == w)
+    chk("aligned helper", flip.aligned(0x2000) && !flip.aligned(0x2001) && !flip.aligned(0x100001000))
+    inj_nolatch = 1
+    delay_total = 0
+    chk("a surface that never latches times out", flip.flip(m_rd, m_wr, m_us, 0x3000) == flip.F_TIMEOUT)
+    chk("the timeout waited the full poll budget", delay_total >= flip.LIVE_POLLS * flip.LIVE_POLL_US)
+    reg_set(0x7019c, 0x5000)
+    reg_set(0x701ac, 0x5020)
+    fresh()
+    inj_nolatch = 1
+    reg_set(0x701ac, 0x5020)
+    reg_set(0x7019c, 0x5000)
+    let r2: u64 = flip.flip_checked(m_rd, m_wr, m_us, 0x6000, 0x5000)
+    chk("failed flip rolls back to the fallback surface", r2 == flip.F_ROLLED_BACK && reg_get(0x7019c) == 0x5000)
+    fresh()
+    reg_set(0x7019c, 0)
+    reg_set(0x701ac, 0x20)
+    chk("checked flip without fault is plain ok", flip.flip_checked(m_rd, m_wr, m_us, 0x7000, 0) == flip.F_OK
+        && reg_get(0x7019c) == 0x7000)
+    chk("surface register offsets match the HP", regs.PLANE_SURF_1_A == 0x7019c && regs.PLANE_SURFLIVE_1_A == 0x701ac)
+    reg_set(0x7019c, 0)
+    reg_set(0x701ac, 0x20)
+}
+
 fn test_aux_faults() {
     fresh()
     inj_defer = 2
@@ -665,6 +764,8 @@ fn main() -> i32 {
     test_dump()
     test_edid()
     test_aux_reads()
+    test_hp_real()
+    test_flip()
     test_aux_faults()
     return 0
 }

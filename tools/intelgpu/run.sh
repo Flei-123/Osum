@@ -14,7 +14,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 [ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 
-for m in ids regs bits mode timing edid aux snap dump; do
+for m in ids regs bits mode timing edid aux snap dump flip; do
     printf 'import gpu.intel.%s\nfn main() -> i32 {\n    return 0\n}\n' "$m" > "$T/k_$m.fi"
     "$FIRNC" --profile=kernel -c "$T/k_$m.fi" -o "$T/k_$m.o" 2> "$T/k.err" \
         && ok "gpu.intel.$m compiles with --profile=kernel" \
@@ -108,6 +108,13 @@ mutate bpc_table     snap   's/return 6$/return 7/'
 mutate lanes_plus    snap   's/bits.DDI_LANES_MASK) + 1/bits.DDI_LANES_MASK)/'
 mutate stride_unit   bits   's/PLANE_STRIDE_UNIT: u64 = 0x40/PLANE_STRIDE_UNIT: u64 = 0x20/'
 mutate pp_shift      bits   's/PP_DELAY_SHIFT: u64 = 0x10/PP_DELAY_SHIFT: u64 = 0x11/'
+mutate flip_align   flip   's/(surf \& PAGE_OFFSET_MASK) == 0/true/'
+mutate flip_wide    flip   's/ \&\& surf <= bits.PLANE_SURF_MASK//'
+mutate flip_nowait  flip   's/while n < LIVE_POLLS {/while n < 0 {/'
+mutate flip_always  flip   's/    return F_TIMEOUT$/    return F_OK/'
+mutate flip_nofall  flip   's/    wr(regs.PLANE_SURF_1_A, fallback)//'
+mutate flip_rb_ok   flip   's/    return F_ROLLED_BACK/    return F_TIMEOUT/'
+mutate flip_reg     regs   's/PLANE_SURFLIVE_1_A: u64 = 0x701ac/PLANE_SURFLIVE_1_A: u64 = 0x701a8/'
 
 echo "INTELGPU: $pass passed, $fail failed"
 [ "$fail" = 0 ]
