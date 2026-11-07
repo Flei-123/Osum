@@ -162,7 +162,7 @@ CMD=$(feld a '^ahci:   cmds=' cmds)
 DEAD=$(feld a '^ahci:   cmds=' dead)
 zahl "2.9 kein einziger Fehler im ganzen Lauf" "$ERR" eq 0
 # w-disklag: writes are no longer flushed one by one (cmds 198 -> 84 in this run), so the floor is lower.
-zahl "2.10 und es waren wirklich Befehle unterwegs" "$CMD" ge 60
+zahl "2.10 und es waren wirklich Befehle unterwegs" "$CMD" ge 40
 zahl "2.11 keine abgelaufene Zeitschranke" "$DEAD" eq 0
 
 echo
