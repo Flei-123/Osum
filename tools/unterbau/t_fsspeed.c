@@ -12,13 +12,17 @@
 #define FILE_COUNT 400
 #define SAMPLE_COUNT 40
 #define APPEND_COUNT 400
+#define SMALL_DIRS 6
+#define SMALL_DIR_FILES 20
+#define SMALL_ROUNDS 8
+#define SMALL_SCAN_LIMIT_US 400
 #define APPEND_BYTES 328
 #define LOOKUP_LIMIT_US 2500
-#define CREATE_LIMIT_US 30000
+#define CREATE_LIMIT_US 8000
 #define APPEND_LIMIT_US 3500
 #define APPEND_PAGE_LIMIT_US 8000
-#define RENAME_LIMIT_US 22000
-#define UNLINK_LIMIT_US 13000
+#define RENAME_LIMIT_US 6000
+#define UNLINK_LIMIT_US 4000
 
 static long now_us(void)
 {
@@ -213,6 +217,44 @@ static int listing_complete(void)
     return count;
 }
 
+static long small_dir_scan(void)
+{
+    char p[96];
+    static char buf[20480];
+    for (int d = 0; d < SMALL_DIRS; d++) {
+        snprintf(p, sizeof p, DIR_PATH "/sd%d", d);
+        mkdir(p, 0755);
+        for (int i = 0; i < SMALL_DIR_FILES; i++) {
+            snprintf(p, sizeof p, DIR_PATH "/sd%d/f%02d", d, i);
+            int fd = open(p, O_CREAT | O_WRONLY, 0644);
+            if (fd >= 0)
+                close(fd);
+        }
+    }
+    int big = open(DIR_PATH "/big", O_CREAT | O_RDWR, 0644);
+    if (big < 0)
+        return 1000000;
+    for (int i = 0; i < 4; i++)
+        write(big, buf, sizeof buf);
+    long total = 0;
+    int calls = 0;
+    struct stat st;
+    for (int r = 0; r < SMALL_ROUNDS; r++) {
+        for (int d = 0; d < SMALL_DIRS; d++) {
+            snprintf(p, sizeof p, DIR_PATH "/sd%d/f%02d", d, SMALL_DIR_FILES - 1 - r);
+            long t0 = now_us();
+            stat(p, &st);
+            total += now_us() - t0;
+            calls++;
+            lseek(big, (off_t)((r * SMALL_DIRS + d) % 4) * sizeof buf, SEEK_SET);
+            if (read(big, buf, sizeof buf) < 0)
+                break;
+        }
+    }
+    close(big);
+    return total / calls;
+}
+
 int main(void)
 {
     mkdir(DIR_PATH, 0755);
@@ -220,6 +262,7 @@ int main(void)
     if (fd >= 0)
         close(fd);
     long create_first = create_range(0, SAMPLE_COUNT);
+    long small_scan_us = small_dir_scan();
     create_range(SAMPLE_COUNT, FILE_COUNT - SAMPLE_COUNT);
     long create_last = create_range(FILE_COUNT - SAMPLE_COUNT, FILE_COUNT);
     long open_us = sample_calls(0);
@@ -230,8 +273,8 @@ int main(void)
     long rename_us = rename_calls();
     long unlink_us = unlink_calls();
     int listed = listing_complete();
-    PASS("metrics", "create_first=%ld create_last=%ld open=%ld stat=%ld access=%ld writev_small=%ld writev_page=%ld rename=%ld unlink=%ld",
-        create_first, create_last, open_us, stat_us, access_us, append_small, append_page, rename_us, unlink_us);
+    PASS("metrics", "small_scan=%ld create_first=%ld create_last=%ld open=%ld stat=%ld access=%ld writev_small=%ld writev_page=%ld rename=%ld unlink=%ld",
+        small_scan_us, create_first, create_last, open_us, stat_us, access_us, append_small, append_page, rename_us, unlink_us);
     CHECK("coherence_basic", coherence_basic(), "stale lookup after create/rename/unlink");
     CHECK("coherence_link", coherence_link(), "stale lookup after unlinking one hard link");
     CHECK("coherence_dir", coherence_dir(), "stale lookup below a renamed directory");
@@ -245,6 +288,7 @@ int main(void)
     CHECK("writev_small", append_small < APPEND_LIMIT_US, "us=%ld limit=%d", append_small, APPEND_LIMIT_US);
     CHECK("writev_page", append_page < APPEND_PAGE_LIMIT_US, "us=%ld limit=%d", append_page, APPEND_PAGE_LIMIT_US);
     CHECK("rename_over", rename_us < RENAME_LIMIT_US, "us=%ld limit=%d", rename_us, RENAME_LIMIT_US);
+    CHECK("small_dir_scan", small_scan_us < SMALL_SCAN_LIMIT_US, "us=%ld limit=%d", small_scan_us, SMALL_SCAN_LIMIT_US);
     CHECK("unlink", unlink_us < UNLINK_LIMIT_US, "us=%ld limit=%d", unlink_us, UNLINK_LIMIT_US);
     return 0;
 }
