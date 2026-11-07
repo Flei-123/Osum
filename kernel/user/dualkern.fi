@@ -12,7 +12,7 @@ export {
     T_UNKNOWN, T_ESP, T_DATA, T_LINUX, T_OSUM, T_MSR, T_RECOVERY,
     find_gap, gap_start, gap_end,
     find_esp, esp_big_enough, ESP_MIN,
-    write_beside, free_index, osum_target, delete_entry, p_nr,
+    write_beside, free_index, osum_target, delete_entry, trim_entry, p_nr,
     gpt_verify, sect_total,
     D_NONE, D_NO_GPT, D_BROKEN, D_FULL, D_TOO_LITTLE, D_NO_ESP, D_ESP_TOO_SMALL,
     D_WRITE, D_READ, D_HSIZE, D_HCRC, D_ESIZE, D_COUNT, D_TCRC,
@@ -776,6 +776,48 @@ fn delete_entry(fd: u64, i: u64) -> bool {
         return false
     }
     return seal_table(fd, p)
+}
+
+fn trim_entry(fd: u64, i: u64, new_end: u64) -> bool {
+    st_reason = D_NONE
+    if i >= e_count || e_typ[(i) as usize] != T_OSUM || e_fve[(i) as usize] != 0 {
+        st_reason = D_TOO_LITTLE
+        return false
+    }
+    let start: u64 = e_start[(i) as usize]
+    if new_end < start || new_end >= e_end[(i) as usize] {
+        st_reason = D_TOO_LITTLE
+        return false
+    }
+    let p: u64 = (&SE[0 as usize]) as u64
+    let slot: u64 = e_slot[(i) as usize]
+    let per_block: u64 = BS / g_esize
+    let sector_nr: u64 = slot / per_block
+    let insek: u64 = slot % per_block
+    if !instkern.read_at(fd, g_table + sector_nr, p, BS) {
+        st_reason = D_READ
+        return false
+    }
+    let e: u64 = p + insek * g_esize
+    if type_of(e) != T_OSUM || g64(e + 32) != start {
+        st_reason = D_TOO_LITTLE
+        return false
+    }
+    p64(e + 40, new_end)
+    let backup_table: u64 = g_sectors - 1 - ENTSECT
+    if !instkern.write_at(fd, backup_table + sector_nr, p, BS) {
+        st_reason = D_WRITE
+        return false
+    }
+    if !instkern.write_at(fd, g_table + sector_nr, p, BS) {
+        st_reason = D_WRITE
+        return false
+    }
+    if !seal_table(fd, p) {
+        return false
+    }
+    e_end[(i) as usize] = new_end
+    return true
 }
 
 fn p_nr(i: u64) -> u64 {
