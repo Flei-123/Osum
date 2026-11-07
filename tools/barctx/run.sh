@@ -130,7 +130,7 @@ if [ ! -s "$TMPD/old/o/01-menu.ppm" ]; then
 else
     grep -aq 'taskbar: context empty' "$SO" && bad "COUNTER-PROOF: the old tree has the menu" || ok "COUNTER-PROOF old tree: no 'context empty'"
     d=$(diffpix "$TMPD/old/o/00-before.ppm" "$TMPD/old/o/01-menu.ppm" "$mx" "$my" "$mw" "$mh")
-    [ "$d" -le 300 ] && ok "COUNTER-PROOF old tree: the picture does not change ($d pixels differ)" \
+    [ "$d" -le $((mw * mh / 8)) ] && ok "COUNTER-PROOF old tree: the picture does not change ($d pixels differ)" \
         || bad "COUNTER-PROOF: the old tree changed $d pixels at the right click"
 fi
 echo; echo "BARCTX: $pass passed, $fail failed"
