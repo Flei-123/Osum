@@ -25,6 +25,7 @@ export {
     cursor_usable, cursor_displayed, cursor_bewegen, cursor_aus, cursor_an,
     cursor_defs, cursor_moves, cursor_error,
     resize, host_pending, resizes, resize_errors, say_hw,
+    command, command_rsp, header, cmd_buf, rsp_buf, features, put64, scanout_resource, F_VIRGL,
     VGPU_OFF, VGPU_MAX
 }
 
@@ -162,6 +163,7 @@ const ST_FEATURES_OK: u64 = 8
 const ST_FAILED: u64 = 128
 const F_VERSION_1: u64 = 0
 const F_EDID: u64 = 1 // VIRTIO_GPU_F_EDID -- die Tafelkennung
+const F_VIRGL: u64 = 0
 const NO_VECTOR: u64 = 0xFFFF
 const D_NEXT: u64 = 1
 const D_WRITE: u64 = 2
@@ -312,6 +314,12 @@ fn reset(state: u64) -> bool {
     return false
 }
 
+fn cmd_buf(state: u64) -> u64 { return kstate.get(state, s(S_RING)) + CMD_OFF }
+fn rsp_buf(state: u64) -> u64 { return kstate.get(state, s(S_RING)) + RSP_OFF }
+fn features(state: u64) -> u64 { return kstate.get(state, s(S_FEAT)) }
+fn scanout_resource() -> u64 { return RES_ID }
+fn put64(b: u64, off: u64, v: u64) { wr64(b, off, v) }
+
 fn find(state: u64) -> u64 {
     let n: u64 = pci.count(state)
     var i: u64 = 0
@@ -336,7 +344,10 @@ fn negotiate(state: u64) -> bool {
     if (dev_hi & (1 << F_VERSION_1)) == 0 {
         return false
     }
-    let lo: u64 = dev_lo & (1 << F_EDID)
+    var lo: u64 = dev_lo & (1 << F_EDID)
+    if kstate.mode_on(state, kstate.M_VGPU3D) {
+        lo = lo | (dev_lo & (1 << F_VIRGL))
+    }
     let hi: u64 = 1 << F_VERSION_1
 
     regio.write32_at(b, C_GFSELECT, 0)
@@ -418,6 +429,10 @@ fn cursor_queue_setup(state: u64) -> bool {
 }
 
 fn command(state: u64, length: u64, erwartet: u64) -> bool {
+    return command_rsp(state, length, RSP_MAX, erwartet)
+}
+
+fn command_rsp(state: u64, length: u64, rsp_length: u64, erwartet: u64) -> bool {
     let r: u64 = kstate.get(state, s(S_RING))
     let desc: u64 = r + DESC_OFF
     let avail: u64 = r + AVAIL_OFF
@@ -432,7 +447,7 @@ fn command(state: u64, length: u64, erwartet: u64) -> bool {
     }
 
     desc_set(desc, 0, cmd, length, D_NEXT, 1)
-    desc_set(desc, 1, rsp, RSP_MAX, D_WRITE, 0)
+    desc_set(desc, 1, rsp, rsp_length, D_WRITE, 0)
 
     let vor: u64 = used_idx(used)
     var ai: u64 = kstate.get(state, s(S_AVAIL))
