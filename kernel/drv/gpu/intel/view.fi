@@ -1,0 +1,192 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.procw
+import hwinv.buf
+import gpu.intel.snap
+import gpu.intel.dump
+import gpu.intel.edid
+import gpu.intel.mode
+import drv.gpu.intel.mmio
+import drv.gpu.intel.probe
+
+export { render }
+
+const HEX8: u64 = 8
+const HEX4: u64 = 4
+const HEX2: u64 = 2
+const HEX16: u64 = 16
+
+static mut t_off: [u8; 14] = "intelgpu: off\0"
+static mut t_nodev: [u8; 20] = "intelgpu: no device\0"
+static mut t_badbar: [u8; 19] = "intelgpu: bad bar0\0"
+static mut t_idle: [u8; 21] = "intelgpu: not probed\0"
+static mut t_device: [u8; 8] = "device=\0"
+static mut t_gen: [u8; 5] = "gen=\0"
+static mut t_bdf: [u8; 5] = "bdf=\0"
+static mut t_bar0: [u8; 6] = "bar0=\0"
+static mut t_writes: [u8; 8] = "writes=\0"
+static mut t_denied: [u8; 8] = "denied=\0"
+static mut t_edid_status: [u8; 13] = "edid_status=\0"
+static mut t_aux_error: [u8; 11] = "aux_error=\0"
+static mut t_dpcd: [u8; 6] = "dpcd=\0"
+static mut t_mfg: [u8; 5] = "mfg=\0"
+static mut t_product: [u8; 9] = "product=\0"
+static mut t_size_mm: [u8; 9] = "size_mm=\0"
+static mut t_x: [u8; 2] = "x\0"
+static mut t_mode: [u8; 6] = "mode=\0"
+static mut t_pclk: [u8; 10] = "pclk_khz=\0"
+static mut t_total: [u8; 7] = "total=\0"
+static mut t_none: [u8; 5] = "none\0"
+static mut t_ok: [u8; 3] = "ok\0"
+static mut t_aux_fail: [u8; 9] = "aux_fail\0"
+static mut t_bad_block: [u8; 10] = "bad_block\0"
+static mut t_hex_prefix: [u8; 3] = "0x\0"
+
+fn line_dec(key: u64, v: u64) {
+    buf.put_s(key)
+    buf.put_dec(v)
+    buf.put_nl()
+}
+
+fn line_hex(key: u64, v: u64, digits: u64) {
+    buf.put_s(key)
+    buf.put_s((&t_hex_prefix[0]) as u64)
+    buf.put_hex(v, digits)
+    buf.put_nl()
+}
+
+fn line_text(key: u64, text: u64) {
+    buf.put_s(key)
+    buf.put_s(text)
+    buf.put_nl()
+}
+
+fn header() {
+    line_hex((&t_device[0]) as u64, probe.device_id(), HEX4)
+    line_dec((&t_gen[0]) as u64, probe.gen_x10())
+    line_hex((&t_bdf[0]) as u64, probe.bdf_of(), HEX4)
+    line_hex((&t_bar0[0]) as u64, probe.bar0_phys(), HEX16)
+}
+
+fn snapshot_text() {
+    var s: snap.State = snap.state_new()
+    snap.snapshot(mmio.rd, &s)
+    dump.dump(&s)
+}
+
+fn status_name(code: u64) -> u64 {
+    if code == probe.ES_OK {
+        return (&t_ok[0]) as u64
+    }
+    if code == probe.ES_AUX_FAIL {
+        return (&t_aux_fail[0]) as u64
+    }
+    if code == probe.ES_BAD_BLOCK {
+        return (&t_bad_block[0]) as u64
+    }
+    return (&t_none[0]) as u64
+}
+
+fn dpcd_text() {
+    buf.put_s((&t_dpcd[0]) as u64)
+    var i: u64 = 0
+    while i < probe.DPCD_BYTES {
+        buf.put_hex(kstate.get8(probe.dpcd_ptr() + i), HEX2)
+        i = i + 1
+    }
+    buf.put_nl()
+}
+
+fn edid_mode_text() {
+    let p: u64 = probe.edid_ptr()
+    buf.put_s((&t_mfg[0]) as u64)
+    var letters: [u8; 4] = [0 as u8; 4]
+    var k: u64 = 0
+    while k < 3 {
+        letters[k as usize] = edid.manufacturer_letter(p, k) as u8
+        k = k + 1
+    }
+    buf.put_s((&letters[0]) as u64)
+    buf.put_nl()
+    line_hex((&t_product[0]) as u64, edid.product_code(p), HEX4)
+    buf.put_s((&t_size_mm[0]) as u64)
+    buf.put_dec(edid.native_width_mm(p))
+    buf.put_s((&t_x[0]) as u64)
+    buf.put_dec(edid.native_height_mm(p))
+    buf.put_nl()
+    var m: mode.Mode = mode.mode_new()
+    if !edid.native_mode(p, &m) {
+        return
+    }
+    buf.put_s((&t_mode[0]) as u64)
+    buf.put_dec(m.hactive)
+    buf.put_s((&t_x[0]) as u64)
+    buf.put_dec(m.vactive)
+    buf.put_nl()
+    line_dec((&t_pclk[0]) as u64, m.pclk_khz)
+    buf.put_s((&t_total[0]) as u64)
+    buf.put_dec(m.htotal)
+    buf.put_s((&t_x[0]) as u64)
+    buf.put_dec(m.vtotal)
+    buf.put_nl()
+}
+
+fn edid_text() {
+    line_text((&t_edid_status[0]) as u64, status_name(probe.edid_status()))
+    if probe.edid_status() == probe.ES_AUX_FAIL {
+        line_dec((&t_aux_error[0]) as u64, probe.edid_aux_error())
+    }
+    if probe.edid_status() == probe.ES_NONE || probe.edid_status() == probe.ES_AUX_FAIL {
+        return
+    }
+    dpcd_text()
+    if probe.edid_status() == probe.ES_OK {
+        edid_mode_text()
+    }
+}
+
+fn build(ks: u64) {
+    buf.reset_out()
+    if !probe.wanted(ks) {
+        buf.put_s((&t_off[0]) as u64)
+        buf.put_nl()
+        return
+    }
+    if probe.result() == probe.R_NODEV {
+        buf.put_s((&t_nodev[0]) as u64)
+        buf.put_nl()
+        return
+    }
+    if probe.result() == probe.R_BADBAR {
+        buf.put_s((&t_badbar[0]) as u64)
+        buf.put_nl()
+        return
+    }
+    if probe.result() != probe.R_OK {
+        buf.put_s((&t_idle[0]) as u64)
+        buf.put_nl()
+        return
+    }
+    header()
+    snapshot_text()
+    if probe.edid_wanted(ks) {
+        edid_text()
+    }
+    line_dec((&t_writes[0]) as u64, mmio.writes_done())
+    line_dec((&t_denied[0]) as u64, mmio.writes_denied())
+}
+
+fn render(ks: u64, out: u64, cap: u64) -> u64 {
+    build(ks)
+    procw.begin(out, cap)
+    let src: u64 = buf.out_ptr()
+    let n: u64 = buf.out_len()
+    var i: u64 = 0
+    while i < n {
+        procw.put_c(kstate.get8(src + i))
+        i = i + 1
+    }
+    return procw.used()
+}

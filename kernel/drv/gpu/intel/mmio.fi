@@ -1,0 +1,73 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import sched.time
+import arch.arch
+import arch.x86_64.apic
+
+export { attach, attached, rd, wr, us, writes_done, writes_denied, WINDOW_BYTES }
+
+const WINDOW_BYTES: u64 = 0x200000
+const AUX_FIRST: u64 = 0x64010
+const AUX_END: u64 = 0x64028
+const NS_PER_US: u64 = 1000
+const LOW_MASK: u64 = 0xFFFFFFFF
+
+static mut g_state: u64 = 0
+static mut g_base: u64 = 0
+static mut g_writes: u64 = 0
+static mut g_denied: u64 = 0
+
+fn attach(ks: u64, phys: u64) -> bool {
+    if phys == 0 {
+        return false
+    }
+    let va: u64 = apic.map_range(ks, phys, WINDOW_BYTES)
+    if va == 0 {
+        return false
+    }
+    g_state = ks
+    g_base = va
+    g_writes = 0
+    g_denied = 0
+    return true
+}
+
+fn attached() -> bool {
+    return g_base != 0
+}
+
+fn rd(off: u64) -> u64 {
+    if g_base == 0 || off >= WINDOW_BYTES || (off & 3) != 0 {
+        return 0
+    }
+    let v: u32 = __mmio_read32((g_base + off) as *mut u32)
+    return v as u64
+}
+
+fn wr(off: u64, value: u64) -> u64 {
+    if g_base == 0 || (off & 3) != 0 || off < AUX_FIRST || off >= AUX_END {
+        g_denied = g_denied + 1
+        return 0
+    }
+    __mmio_write32((g_base + off) as *mut u32, (value & LOW_MASK) as u32)
+    g_writes = g_writes + 1
+    return 0
+}
+
+fn us(n: u64) -> u64 {
+    let until_ns: u64 = time.mono_ns(g_state) +% n * NS_PER_US
+    while time.mono_ns(g_state) < until_ns {
+        arch.pause()
+    }
+    return 0
+}
+
+fn writes_done() -> u64 {
+    return g_writes
+}
+
+fn writes_denied() -> u64 {
+    return g_denied
+}

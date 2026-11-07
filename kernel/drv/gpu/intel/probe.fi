@@ -1,0 +1,191 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import bus.pci
+import bus.drvreg
+import gpu.intel.ids
+import gpu.intel.aux
+import gpu.intel.edid
+import gpu.intel.mode
+import drv.gpu.intel.mmio
+
+export {
+    stage, wanted, edid_wanted, result, device_id, gen_x10, bdf_of, bar0_phys, edid_status, edid_aux_error,
+    dpcd_ptr, edid_ptr, DPCD_BYTES, EDID_BYTES, R_OFF, R_NODEV, R_BADBAR, R_OK,
+    ES_NONE, ES_OK, ES_AUX_FAIL, ES_BAD_BLOCK
+}
+
+const R_OFF: u64 = 0
+const R_NODEV: u64 = 1
+const R_BADBAR: u64 = 2
+const R_OK: u64 = 3
+const ES_NONE: u64 = 0
+const ES_OK: u64 = 1
+const ES_AUX_FAIL: u64 = 2
+const ES_BAD_BLOCK: u64 = 3
+const MAX_NTH: u64 = 4
+const DPCD_BYTES: u64 = 16
+const EDID_BYTES: u64 = 128
+const DPCD_LINK_ADDR: u64 = 0x100
+const DPCD_LINK_BYTES: u64 = 2
+const EDID_I2C_ADDR: u64 = 0x50
+const BAR_MMIO: u64 = 0
+const BAR_ADDR_MASK: u64 = 0xFFFFFFFFFFFFFFF0
+
+static mut g_result: u64 = 0
+static mut g_device: u64 = 0
+static mut g_gen: u64 = 0
+static mut g_bdf: u64 = 0
+static mut g_bar0: u64 = 0
+static mut g_edid_status: u64 = 0
+static mut g_edid_aux_error: u64 = 0
+static mut g_dpcd: [u8; 16] = [0 as u8; 16]
+static mut g_edid: [u8; 128] = [0 as u8; 128]
+
+static mut s_bound: [u8; 20] = "intelgpu: bound id=\0"
+static mut s_gen: [u8; 6] = " gen=\0"
+static mut s_bdf: [u8; 6] = " bdf=\0"
+static mut s_nodev: [u8; 20] = "intelgpu: no device\0"
+static mut s_badbar: [u8; 19] = "intelgpu: bad bar0\0"
+static mut s_edid_ok: [u8; 18] = "intelgpu: edid ok\0"
+static mut s_edid_fail: [u8; 23] = "intelgpu: edid failed \0"
+static mut s_edid_bad: [u8; 19] = "intelgpu: edid bad\0"
+
+fn wanted(ks: u64) -> bool {
+    return kstate.mode_on(ks, kstate.M_INTELGPU) || kstate.mode_on(ks, kstate.M_INTELGPUEDID)
+}
+
+fn edid_wanted(ks: u64) -> bool {
+    return kstate.mode_on(ks, kstate.M_INTELGPUEDID)
+}
+
+fn result() -> u64 {
+    return g_result
+}
+
+fn device_id() -> u64 {
+    return g_device
+}
+
+fn gen_x10() -> u64 {
+    return g_gen
+}
+
+fn bdf_of() -> u64 {
+    return g_bdf
+}
+
+fn bar0_phys() -> u64 {
+    return g_bar0
+}
+
+fn edid_status() -> u64 {
+    return g_edid_status
+}
+
+fn edid_aux_error() -> u64 {
+    return g_edid_aux_error
+}
+
+fn dpcd_ptr() -> u64 {
+    return (&g_dpcd[0]) as u64
+}
+
+fn edid_ptr() -> u64 {
+    return (&g_edid[0]) as u64
+}
+
+fn find_gen9(ks: u64) -> u64 {
+    var nth: u64 = 0
+    while nth < MAX_NTH {
+        let i: u64 = drvreg.find(ks, drvreg.D_INTEL_GPU, nth)
+        if i >= pci.MAX_DEV {
+            return pci.MAX_DEV
+        }
+        if ids.is_gen9(pci.get(ks, i, pci.E_VENDOR), pci.get(ks, i, pci.E_DEVICE)) {
+            return i
+        }
+        nth = nth + 1
+    }
+    return pci.MAX_DEV
+}
+
+fn bind(ks: u64) -> u64 {
+    let i: u64 = find_gen9(ks)
+    if i >= pci.MAX_DEV {
+        return R_NODEV
+    }
+    g_device = pci.get(ks, i, pci.E_DEVICE)
+    g_gen = ids.gen_x10(pci.get(ks, i, pci.E_VENDOR), g_device)
+    g_bdf = pci.get(ks, i, pci.E_BDF)
+    if pci.bar_is_io(ks, i, BAR_MMIO) {
+        return R_BADBAR
+    }
+    g_bar0 = pci.bar(ks, i, BAR_MMIO) & BAR_ADDR_MASK
+    if g_bar0 == 0 || pci.bar_size(ks, i, BAR_MMIO) < mmio.WINDOW_BYTES {
+        return R_BADBAR
+    }
+    if !mmio.attach(ks, g_bar0) {
+        return R_BADBAR
+    }
+    return R_OK
+}
+
+fn say_bound() {
+    serial.puts((&s_bound[0]) as u64)
+    serial.hex(g_device)
+    serial.puts((&s_gen[0]) as u64)
+    serial.dec(g_gen)
+    serial.puts((&s_bdf[0]) as u64)
+    serial.hex(g_bdf)
+    serial.nl()
+}
+
+fn say(p: u64) {
+    serial.puts(p)
+    serial.nl()
+}
+
+fn read_edid() {
+    var e: u64 = aux.native_read(mmio.rd, mmio.wr, mmio.us, 0, dpcd_ptr(), DPCD_BYTES)
+    if e == aux.E_OK {
+        e = aux.i2c_read(mmio.rd, mmio.wr, mmio.us, EDID_I2C_ADDR, 0, edid_ptr(), EDID_BYTES)
+    }
+    if e != aux.E_OK {
+        g_edid_status = ES_AUX_FAIL
+        g_edid_aux_error = e
+        serial.puts((&s_edid_fail[0]) as u64)
+        serial.dec(e)
+        serial.nl()
+        return
+    }
+    if !edid.block_ok(edid_ptr()) {
+        g_edid_status = ES_BAD_BLOCK
+        say((&s_edid_bad[0]) as u64)
+        return
+    }
+    g_edid_status = ES_OK
+    say((&s_edid_ok[0]) as u64)
+}
+
+fn stage(ks: u64) {
+    if !wanted(ks) {
+        return
+    }
+    g_result = bind(ks)
+    if g_result == R_NODEV {
+        say((&s_nodev[0]) as u64)
+        return
+    }
+    if g_result == R_BADBAR {
+        say((&s_badbar[0]) as u64)
+        return
+    }
+    drvreg.mark_ok(drvreg.D_INTEL_GPU)
+    say_bound()
+    if edid_wanted(ks) {
+        read_edid()
+    }
+}
