@@ -78,6 +78,7 @@ mkimg "$TMPD/k" "$TMPD/h.img" "$WORDS nvme s3nohooks" && ok "boot disk (counter-
 dd if=/dev/urandom of="$TMPD/nvme.img" bs=1M count=8 status=none
 dd if=/dev/urandom of="$TMPD/ahci.img" bs=1M count=8 status=none
 
+QX=()
 # lauf name img cycles
 lauf() {
     local name=$1 img=$2 cyc=$3
@@ -89,6 +90,7 @@ lauf() {
         -device ahci,id=ahci0 -drive "file=$TMPD/ahci.$1,format=raw,if=none,id=ah0" -device ide-hd,bus=ahci0.0,drive=ah0 \
         -device qemu-xhci,id=x0 -device usb-kbd,bus=x0.0 \
         -netdev user,id=n0 -device e1000,netdev=n0 \
+        ${QX[@]+"${QX[@]}"} \
         -audiodev none,id=snd0 -device intel-hda -device hda-duplex,audiodev=snd0 \
         -serial "file:$L" -display none -no-reboot -vga std \
         -monitor "unix:$sock,server,nowait" \
@@ -129,7 +131,7 @@ cnt() { grep -ac "$2" "$1" 2>/dev/null; }
 keys_ok() { tr -d '\r' < "$1" | grep -a 's3: usb keys=' | sed 's/.*keys=//' | awk '$1>=1{n++} END{print n+0}'; }
 rx_ok() { tr -d '\r' < "$1" | grep -a 's3: net arp rx=' | sed 's/.*rx=\([0-9]*\).*/\1/' | awk '$1>=1{n++} END{print n+0}'; }
 
-if [ "${S3DEV_ONLY:-}" != "tsc" ]; then
+if [ -z "${S3DEV_ONLY:-}" ]; then
 echo "== 2. three sleeps with the devices reset before the hooks run (NVMe machine) =="
 lauf dev "$TMPD/a.img" "$CYCLES"
 L="$TMPD/l-dev.txt"
@@ -165,6 +167,7 @@ num "network: without the hook nothing is received" "$(rx_ok "$L")" eq 0
 
 fi
 
+if [ -z "${S3DEV_ONLY:-}" ] || [ "$S3DEV_ONLY" = tsc ]; then
 echo "== 4. the TSC jumps back 3 s right before time.resume_fix (s3tscback): the system lives on =="
 mkimg "$TMPD/k" "$TMPD/t.img" "$WORDS nvme s3tscback" && ok "boot disk (TSC set back by 3 s after each wake-up)" || bad "boot disk (s3tscback)"
 lauf tsc "$TMPD/t.img" "$CYCLES"
@@ -179,6 +182,30 @@ num "network: the card came back, link up" "$(cnt "$L" 's3: dev net da=1 resume=
 num "network: it receives again (ARP reply from the gateway)" "$(rx_ok "$L")" eq "$CYCLES"
 num "every sleep returned rc=0" "$(cnt "$L" 's3: smp zyklus=[0-9] rc=0')" eq "$CYCLES"
 num "return code of the machine (isa-debug-exit)" "$RC" eq 21
+
+fi
+
+if [ -z "${S3DEV_ONLY:-}" ] || [ "$S3DEV_ONLY" = usbnet ]; then
+echo "== 5. USB Ethernet behind the xHCI: re-enumerated and picked up again after every wake-up =="
+QX=(-netdev user,id=n1 -device usb-net,bus=x0.0,netdev=n1,mac=52:54:00:aa:bb:cc)
+mkimg "$TMPD/k" "$TMPD/u.img" "$WORDS nvme usbpoll" && ok "boot disk (usb-net machine)" || bad "boot disk (usbnet)"
+lauf usbn "$TMPD/u.img" "$CYCLES"
+L="$TMPD/l-usbn.txt"
+num "the VM really slept" "$(echo "$STATES" | tr '|' '\n' | grep -ac suspended)" eq "$CYCLES"
+num "USB: controller came back" "$(cnt "$L" 's3: dev usb da=1 resume=1')" eq "$CYCLES"
+num "usbnet: the card is there and ready after every resume" "$(cnt "$L" 's3: dev usbnet da=1 resume=1')" eq "$CYCLES"
+num "usbnet: the card was attached again after every wake-up" "$(cnt "$L" 'nethot: usbnet attached')" eq "$CYCLES"
+num "no panic" "$(cnt "$L" 'panic')" eq 0
+num "every sleep returned rc=0" "$(cnt "$L" 's3: smp zyklus=[0-9] rc=0')" eq "$CYCLES"
+num "return code of the machine (isa-debug-exit)" "$RC" eq 21
+echo "== 5b. counter-check s3nohooks with the same machine: no re-attach =="
+mkimg "$TMPD/k" "$TMPD/uh.img" "$WORDS nvme usbpoll s3nohooks" || bad "boot disk (usbnet nohooks)"
+lauf usbnh "$TMPD/uh.img" 1
+L="$TMPD/l-usbnh.txt"
+num "slept" "$(echo "$STATES" | tr '|' '\n' | grep -ac suspended)" ge 1
+num "without the hooks the card is not attached again" "$(cnt "$L" 'nethot: usbnet attached')" eq 0
+QX=()
+fi
 
 echo
 echo "S3DEV: $pass OK, $fail FAIL"
