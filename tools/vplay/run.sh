@@ -37,7 +37,9 @@ bash tools/vplay/shot.sh "$D/mp3b" new "$D/m/clip_mp3.mov" 1 > "$D/mp3b.log" 2>&
 p7=$!
 bash tools/vplay/shot.sh "$D/mute" mute "$D/m/clip_mp3.mp4" 1 > "$D/mute.log" 2>&1 &
 p8=$!
-wait $p4 $p5 $p7 $p8
+bash tools/vplay/shot.sh "$D/aac" new "$D/m/clip_aac.mp4" 1 > "$D/aac.log" 2>&1 &
+p9=$!
+wait $p4 $p5 $p7 $p8 $p9
 python3 -I tools/vplay/check.py "$D/new" "$D/m/clip.yuv" | tee "$D/new.res"
 python3 -I tools/vplay/check.py "$D/nosync" "$D/m/clip.yuv" nosync | tee "$D/ns.res"
 python3 -I tools/vplay/check.py "$D/x2" "$D/m/clip.yuv" | grep -a "all .* shown frames\|reached the end" | sed 's/^  \(OK\|FAIL\)  /  \1    scale 2: /' | tee "$D/x2.res"
@@ -46,8 +48,10 @@ python3 -I tools/vplay/mp3check.py "$D/mp3a" | sed 's/^  \(OK\|FAIL\)  /  \1    
 python3 -I tools/vplay/check.py "$D/mp3b" "$D/m/clip_mp3.yuv" | grep -a "all .* shown frames\|reached the end\|audio clock vs frame" | sed 's/^  \(OK\|FAIL\)  /  \1    mp3 in mov: /' | tee "$D/mp3b.res"
 python3 -I tools/vplay/mp3check.py "$D/mp3b" | sed 's/^  \(OK\|FAIL\)  /  \1    mp3 in mov: /' | tee "$D/mp3b2.res"
 python3 -I tools/vplay/mp3check.py "$D/mute" mute | tee "$D/mute.res"
+python3 -I tools/vplay/check.py "$D/aac" "$D/m/clip_aac.yuv" | sed 's/^  \(OK\|FAIL\)  /  \1    aac in mp4: /' | tee "$D/aac1.res"
+python3 -I tools/vplay/aaccheck.py "$D/aac" "$D/m/clip_aac.ref" | sed 's/^  \(OK\|FAIL\)  /  \1    aac in mp4: /' | tee "$D/aac2.res"
 python3 -I tools/vplay/clickcheck.py "$D/click" | tee "$D/click.res"
 python3 -I tools/vplay/clickcheck.py "$D/stall" stall | tee "$D/stall.res"
-[ -n "$KEEP" ] && { mkdir -p "$KEEP"; cp -r "$D"/new "$D"/nosync "$D"/x2 "$D"/click "$D"/stall "$D"/mp3a "$D"/mp3b "$D"/mute "$KEEP/" 2>/dev/null; }
+[ -n "$KEEP" ] && { mkdir -p "$KEEP"; cp -r "$D"/new "$D"/nosync "$D"/x2 "$D"/click "$D"/stall "$D"/mp3a "$D"/mp3b "$D"/mute "$D"/aac "$KEEP/" 2>/dev/null; }
 n_ok=$(cat "$D"/*.res | grep -ac '^  OK'); n_bad=$(cat "$D"/*.res | grep -ac '^  FAIL')
 summary_emit $((pass + n_ok)) $((fail + n_bad)) 68

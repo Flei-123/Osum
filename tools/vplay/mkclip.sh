@@ -14,3 +14,9 @@ for ext in mp4 mov; do
         -c:a libmp3lame -b:a 128k -ar 44100 -ac 2 -t 20 "$OUT/clip_mp3.$ext" 2>>"$OUT/clip.log"
 done
 ffmpeg -y -v error -i "$OUT/clip_mp3.mp4" -an -f rawvideo -pix_fmt yuv420p "$OUT/clip_mp3.yuv"
+ffmpeg -y -v error -f lavfi -i "testsrc2=size=176x144:rate=10" \
+    -f lavfi -i "sine=frequency=440:sample_rate=44100" \
+    -c:v libx264 -profile:v baseline -pix_fmt yuv420p -g 10 -qp 26 \
+    -c:a aac -b:a 128k -ar 44100 -ac 2 -t 20 "$OUT/clip_aac.mp4" 2>>"$OUT/clip.log"
+ffmpeg -y -v error -i "$OUT/clip_aac.mp4" -an -f rawvideo -pix_fmt yuv420p "$OUT/clip_aac.yuv"
+ffmpeg -y -v error -ignore_editlist 1 -i "$OUT/clip_aac.mp4" -vn -f s16le -ac 2 "$OUT/clip_aac.ref"
