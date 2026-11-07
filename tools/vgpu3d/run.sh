@@ -59,11 +59,27 @@ echo "   red wrong=${RW:-?} fence=${RF:-?}  blue wrong=${BW:-?} fence=${BF:-?}  
 [ "${RF:-0}" = "1" ] && [ "${BF:-0}" = "1" ] && ok "fenced SUBMIT_3D: response echoes fence flag and id" || bad "fence not echoed"
 [ "${FC:-0}" -gt 0 ] && ok "fenced RESOURCE_FLUSH completed and echoed its fence" || bad "fenced flush failed"
 
+DS=$(field gl "draw setup" "setup"); DF=$(field gl "draw fence" "fence")
+DG=$(field gl "draw green" "green"); DO=$(field gl "draw other" "other")
+DC=$(grep -a "^vgpu3d: draw center=" "$T/gl.txt" | head -n1 | sed -n 's/.*center=\(0x[0-9a-f]*\).*/\1/p')
+echo "   draw setup=${DS:-?} fence=${DF:-?} green=${DG:-?} other=${DO:-?} center=${DC:-?}"
+[ "${DS:-x}" = "0" ] && ok "virgl states, shaders and vertex buffer accepted (setup 0)" || bad "draw setup failed (${DS:-none})"
+[ "${DF:-0}" = "1" ] && ok "draw SUBMIT_3D completed with its fence" || bad "draw fence missing"
+[ "${DG:-0}" -ge 1800 ] && [ "${DG:-0}" -le 2300 ] && ok "DRAW_VBO triangle: $DG green pixels (half of 4096 expected)" || bad "green pixel count out of range (${DG:-none})"
+[ "${DO:-x}" = "0" ] && ok "draw: every pixel is either clear red or shader green" || bad "draw: ${DO:-none} pixels of another colour"
+[ "${DC:-}" = "0xff00ff00" ] && ok "draw: center pixel is shader green 0xFF00FF00" || bad "draw: center pixel ${DC:-none}"
+
 echo "== control vgpu3dskip: second clear is not submitted -> the blue check must fail"
 run_case skip "vgpu3d vgpu3dskip" "virtio-gpu-gl-pci" "gtk,gl=on" "^vgpu3d: end"
 SB=$(field skip "blue wrong" "px"); SR=$(field skip "red wrong" "px")
 echo "   red wrong=${SR:-?} blue wrong=${SB:-?}"
 [ "${SB:-0}" = "4096" ] && [ "${SR:-x}" = "0" ] && ok "control: blue readback is 4096 pixels wrong while red stays exact (the blue check would FAIL)" || bad "control: skip not detected (${SB:-none})"
+
+echo "== control vgpu3dnodraw: draw not submitted -> the green checks must fail"
+run_case nodraw "vgpu3d vgpu3dnodraw" "virtio-gpu-gl-pci" "gtk,gl=on" "^vgpu3d: end"
+NG=$(field nodraw "draw green" "green"); NO=$(field nodraw "draw other" "other")
+echo "   green=${NG:-?} other=${NO:-?}"
+[ "${NG:-x}" = "0" ] && [ "${NO:-x}" = "0" ] && ok "control: without DRAW_VBO zero green pixels (the green check would FAIL)" || bad "control: nodraw not detected (${NG:-none})"
 
 echo "== control 2D-only device: no virgl offered"
 run_case flat "vgpu3d" "virtio-gpu-pci" "none" "^vgpu3d: (end|no virgl)"
@@ -77,4 +93,4 @@ if ! grep -aq "^vgpu: bdf" "$T/off.txt"; then bad "control: virtio-gpu did not c
 elif has off ""; then bad "control: vgpu3d lines without the word"
 else ok "control: word absent -> no vgpu3d output"; fi
 
-summary_emit "$pass" "$fail" 11
+summary_emit "$pass" "$fail" 17
