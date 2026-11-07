@@ -4,7 +4,7 @@ export MOZ_LOG="${FX_MOZ_LOG:-nsHostResolver:5,nsSocketTransport:5,nsHttp:4,pipn
 mkdir -p /tmp/p10
 echo 'user_pref("gfx.webrender.software", true);' > /tmp/p10/user.js
 : > /tmp/e.log
-tail -f /tmp/e.log | cut -c1-220 | sed 's/^/FX10L /' &
+tail -f /tmp/e.log &
 echo "FX10 begin firefox ${FX_URL:-https://example.com}"
 timeout ${FX_TMO:-600} /usr/bin/firefox --headless --screenshot /tmp/e.png --window-size=1024,768 --profile /tmp/p10 ${FX_URL:-https://example.com} >> /tmp/e.log 2>&1
 echo "FX10 rc=$? bytes=$(wc -c < /tmp/e.png 2>/dev/null)"
