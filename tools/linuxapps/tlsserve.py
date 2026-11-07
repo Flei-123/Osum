@@ -24,8 +24,16 @@ def build_page():
     ).encode()
 
 
+HANDSHAKE_TIMEOUT_S = 60
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     page = build_page()
+
+    def setup(self):
+        self.request.settimeout(HANDSHAKE_TIMEOUT_S)
+        self.request.do_handshake()
+        super().setup()
 
     def do_GET(self):
         body = self.page if self.path.split("?")[0] in ("/", "/index.html") else b"not found"
@@ -43,6 +51,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
+    tls_context = None
+
+    def get_request(self):
+        raw, addr = self.socket.accept()
+        return self.tls_context.wrap_socket(raw, server_side=True, do_handshake_on_connect=False), addr
 
 
 def main():
@@ -50,7 +63,7 @@ def main():
     srv = Server(("0.0.0.0", 0), Handler)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(cert, key)
-    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    srv.tls_context = ctx
     with open(port_file, "w") as f:
         f.write(str(srv.server_address[1]))
     srv.serve_forever()
