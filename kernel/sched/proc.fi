@@ -998,19 +998,59 @@ fn lazy_file_install(state: u64, cur: u64, page: u64, pt: u64, s: u64, e0: u64, 
     return result
 }
 
-fn lazy_file_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -> bool {
-    let e0: u64 = read_entry(pt, s)
-    if (e0 & PAGE_USER) == 0 {
-        return false
+const FAULT_AROUND_PAGES: u64 = 16
+const PTE_FILE_REF_MASK: u64 = PAGE_PRESENT | PAGE_LAZYF | PAGE_USER | PAGE_WRITE
+const PTE_FILE_REF_WANT: u64 = PAGE_LAZYF | PAGE_USER
+const PTE_FILE_INO_SHIFT: u64 = 12
+const PTE_FILE_PAGE_SHIFT: u64 = 32
+const PTE_FILE_FIELD_MASK: u64 = 0xFFFFF
+
+fn lazy_file_ino(e: u64) -> u64 {
+    return (e >> PTE_FILE_INO_SHIFT) & PTE_FILE_FIELD_MASK
+}
+
+fn lazy_file_pg(e: u64) -> u64 {
+    return (e >> PTE_FILE_PAGE_SHIFT) & PTE_FILE_FIELD_MASK
+}
+
+fn lazy_file_cache_page(state: u64, ino: u64, pg: u64, wide: bool) -> u64 {
+    let seen: u64 = fileshare.epoch()
+    let frame: u64 = mmframe.frame_alloc_user_low(state)
+    if frame == 0 {
+        return 0
     }
-    if (err & 2) != 0 && (e0 & PAGE_WRITE) == 0 {
-        return false
+    var got: u64 = 0
+    if wide {
+        got = fs.read_at_wide(state, ino, pg * mmframe.FRAME_SIZE, frame, mmframe.FRAME_SIZE)
+    } else {
+        got = fs.read_at(state, ino, pg * mmframe.FRAME_SIZE, frame, mmframe.FRAME_SIZE)
     }
-    if (err & 16) != 0 && (e0 & PAGE_LAZYX) == 0 {
-        return false
+    zero_tail(frame, got)
+    let kept: u64 = fileshare.insert(state, ino, pg, frame, seen)
+    if kept != frame {
+        mmframe.frame_free(state, frame)
     }
-    let ino: u64 = (e0 >> 12) & 0xFFFFF
-    let pg: u64 = (e0 >> 32) & 0xFFFFF
+    return kept
+}
+
+fn lazy_file_private_frame(state: u64, ino: u64, pg: u64) -> u64 {
+    var cached: u64 = fileshare.lookup(state, ino, pg)
+    if cached == 0 && fileshare.has_room(state) {
+        cached = lazy_file_cache_page(state, ino, pg, true)
+    }
+    if cached == 0 {
+        return 0
+    }
+    let frame: u64 = mmframe.frame_alloc_user_low(state)
+    if frame != 0 {
+        copy_frame_words(mmframe.kva(frame), mmframe.kva(cached))
+    }
+    return frame
+}
+
+fn lazy_file_page(state: u64, cur: u64, page: u64, pt: u64, s: u64, e0: u64) -> u64 {
+    let ino: u64 = lazy_file_ino(e0)
+    let pg: u64 = lazy_file_pg(e0)
     let share: bool = (e0 & PAGE_WRITE) == 0
     var frame: u64 = 0
     var shared: bool = false
@@ -1018,12 +1058,15 @@ fn lazy_file_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -
     if share {
         frame = fileshare.lookup(state, ino, pg)
         shared = frame != 0
+    } else {
+        frame = lazy_file_private_frame(state, ino, pg)
+        owned = frame != 0
     }
     if frame == 0 {
         let seen: u64 = fileshare.epoch()
         frame = mmframe.frame_alloc_user_low(state)
         if frame == 0 {
-            return false
+            return 0
         }
         owned = true
         let got: u64 = fs.read_at(state, ino, pg * mmframe.FRAME_SIZE, frame, mmframe.FRAME_SIZE)
@@ -1043,6 +1086,77 @@ fn lazy_file_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -
     let r: u64 = lazy_file_install(state, cur, page, pt, s, e0, frame, shared)
     if r != 1 && owned {
         mmframe.frame_free(state, frame)
+    }
+    return r
+}
+
+fn lazy_file_neighbor(e: u64, ino: u64, pg: u64) -> bool {
+    return (e & PTE_FILE_REF_MASK) == PTE_FILE_REF_WANT && lazy_file_ino(e) == ino && lazy_file_pg(e) == pg
+}
+
+fn lazy_file_readahead(state: u64, pt: u64, s: u64, e0: u64) -> u64 {
+    let ino: u64 = lazy_file_ino(e0)
+    let pg: u64 = lazy_file_pg(e0)
+    let first: u64 = s - s % FAULT_AROUND_PAGES
+    var cached: u64 = 0
+    var i: u64 = first
+    while i < first + FAULT_AROUND_PAGES {
+        var e: u64 = e0
+        if i != s {
+            e = read_entry(pt, i)
+        }
+        if (i == s || pg + i >= s) && lazy_file_neighbor(e, ino, pg + i - s) {
+            if fileshare.lookup(state, ino, pg + i - s) != 0 {
+                cached = cached | ((1 as u64) << (i - first))
+            } else if fileshare.has_room(state) {
+                let _k: u64 = lazy_file_cache_page(state, ino, pg + i - s, true)
+            }
+        }
+        i = i + 1
+    }
+    return cached
+}
+
+fn lazy_file_around(state: u64, cur: u64, page: u64, pt: u64, s: u64, e0: u64) -> u64 {
+    let first: u64 = s - s % FAULT_AROUND_PAGES
+    var cached: u64 = 0
+    if fileshare.has_room(state) {
+        cached = lazy_file_readahead(state, pt, s, e0)
+    }
+    let ino: u64 = lazy_file_ino(e0)
+    let pg: u64 = lazy_file_pg(e0)
+    var main: u64 = 0
+    var i: u64 = first
+    while i < first + FAULT_AROUND_PAGES {
+        if i == s {
+            main = lazy_file_page(state, cur, page, pt, s, e0)
+        } else if ((cached >> (i - first)) & 1) != 0 {
+            let e: u64 = read_entry(pt, i)
+            if lazy_file_neighbor(e, ino, pg + i - s) {
+                let _r: u64 = lazy_file_page(state, cur, page, pt, i, e)
+            }
+        }
+        i = i + 1
+    }
+    return main
+}
+
+fn lazy_file_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -> bool {
+    let e0: u64 = read_entry(pt, s)
+    if (e0 & PAGE_USER) == 0 {
+        return false
+    }
+    if (err & 2) != 0 && (e0 & PAGE_WRITE) == 0 {
+        return false
+    }
+    if (err & 16) != 0 && (e0 & PAGE_LAZYX) == 0 {
+        return false
+    }
+    var r: u64 = 0
+    if (e0 & PAGE_WRITE) == 0 {
+        r = lazy_file_around(state, cur, page, pt, s, e0)
+    } else {
+        r = lazy_file_page(state, cur, page, pt, s, e0)
     }
     if r != 0 {
         tlb_flush_if_current(state, cur)

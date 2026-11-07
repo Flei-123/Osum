@@ -49,7 +49,7 @@ import bus.drvreg
 export {
     dev_flushes,
     ram_init, use_ata, use_nvme, read, write, blocks, present,
-    read_raw, read_stream, write_raw, write_run, wb_begin, wb_end, wb_flush,
+    read_raw, read_stream, read_stream_span, S_SECTORS, S_SECTORS_WIDE, write_raw, write_run, wb_begin, wb_end, wb_flush,
     BLOCK_SIZE, DEV_RAM, DEV_ATA, DEV_NVME, DEV_ATA1, DEV_USB,
     removable,
     // ---- Runde K14 ----
@@ -1019,29 +1019,34 @@ const S_LBA: u64 = 0x280
 const S_N: u64 = 0x288
 const S_DEV: u64 = 0x290
 const S_SECTORS: u64 = 32
+const S_SECTORS_WIDE: u64 = 128
 
 fn stream_grow(state: u64) {
     if cg(state, S_TRIED) != 0 || kstate.get(state, kstate.BITMAP) == 0 {
         return
     }
     cs(state, S_TRIED, 1)
-    let b: u64 = mmframe.frame_run(state, S_SECTORS * BLOCK_SIZE / 4096)
+    let b: u64 = mmframe.frame_run(state, S_SECTORS_WIDE * BLOCK_SIZE / 4096)
     if b != 0 {
         cs(state, S_DATA, b)
     }
 }
 
 fn read_stream(state: u64, lba: u64, dst: u64) -> bool {
+    return read_stream_span(state, lba, dst, S_SECTORS)
+}
+
+fn read_stream_span(state: u64, lba: u64, dst: u64, span: u64) -> bool {
     let g: u64 = blkguard.enter(state)
     if g == blkguard.G_REFUSE {
         return false
     }
-    let ok: bool = read_stream_held(state, lba, dst)
+    let ok: bool = read_stream_held(state, lba, dst, span)
     blkguard.leave(state, g)
     return ok
 }
 
-fn read_stream_held(state: u64, lba: u64, dst: u64) -> bool {
+fn read_stream_held(state: u64, lba: u64, dst: u64, span: u64) -> bool {
     let dv: u64 = kstate.get(state, kstate.DISK_DEV)
     if krypto.active(state) || (dv != DEV_ATA && dv != DEV_ATA1 && dv != DEV_AHCI && !is_usb(dv)) || lba >= blocks(state) {
         return read(state, lba, dst)
@@ -1065,7 +1070,7 @@ fn read_stream_held(state: u64, lba: u64, dst: u64) -> bool {
         return read(state, lba, dst)
     }
     let ende: u64 = kstate.get(state, kstate.DISK_FIRST) + blocks(state)
-    var n: u64 = S_SECTORS
+    var n: u64 = span
     if ende > abs && ende - abs < n {
         n = ende - abs
     }
