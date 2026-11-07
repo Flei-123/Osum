@@ -1,0 +1,69 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import wlan.iwl_probe
+import wlan.iwl_fw
+import wlan.iwl_pwr
+import wlan.iwl_fh8000
+
+export { fh_load, CPU2_HDR_ADDR, CPU2_HDR_MEM_SPACE, RESET_RELEASE }
+
+const CPU2_HDR_ADDR: u64 = 0x1E7C
+const CPU2_HDR_MEM_SPACE: u64 = 0x420400
+const RESET_RELEASE: u64 = 0
+const DUAL_CPU: u64 = 2
+
+fn load_cpu(p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize, cpu: u64,
+            bounce: u64, bphys: u64, bsize: u64, st: *mut iwl_fh8000.FhStat) -> i64 {
+    var k: u64 = 0
+    while true {
+        let ix: i64 = iwl_fh8000.fh_sec_of(f, img, cpu, k)
+        if ix < 0 { break }
+        let r: i64 = iwl_fh8000.load_section(p, f, blob, img, ix as usize, bounce, bphys, bsize, st)
+        if r != 0 {
+            (*st).fail_sec = ix as u64
+            return r
+        }
+        k = k + 1
+        (*st).secs[(cpu - 1) as usize] = k
+    }
+    return 0
+}
+
+fn check_image(f: *mut iwl_fw.FwInfo, img: usize, bsize: u64, st: *mut iwl_fh8000.FhStat) -> i64 {
+    if bsize < 4096 { return iwl_fh8000.E_FH_BOUNCE }
+    if iwl_fw.fw_kind_count(f, img, iwl_fw.KIND_LMAC) == 0 { return iwl_fh8000.E_FH_NOCPU }
+    if iwl_fw.fw_kind_count(f, img, iwl_fw.KIND_LMAC) > iwl_fh8000.FH_CPU_MAX { return iwl_fh8000.E_FH_TOOMANY }
+    if iwl_fw.fw_kind_count(f, img, iwl_fw.KIND_UMAC) > iwl_fh8000.FH_CPU_MAX { return iwl_fh8000.E_FH_TOOMANY }
+    var i: usize = 0
+    let n: usize = iwl_fw.fw_sec_count(f, img)
+    while i < n {
+        if iwl_fw.fw_sec_kind(f, img, i) != iwl_fw.KIND_PAGING && iwl_fw.fw_sec_len(f, img, i) == 0 {
+            (*st).fail_sec = i as u64
+            return iwl_fh8000.E_FH_EMPTY
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn fh_load(p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blob: u64, img: usize,
+           bounce: u64, bphys: u64, bsize: u64, st: *mut iwl_fh8000.FhStat) -> i64 {
+    let keep_tr: u64 = (*st).tr
+    *st = iwl_fh8000.fhstat_new()
+    (*st).tr = keep_tr
+    var r: i64 = check_image(f, img, bsize, st)
+    if r != 0 { return r }
+    iwl_fh8000.wr(p, iwl_pwr.CSR_INT_MASK, iwl_fh8000.INT_FH_TX)
+    iwl_fh8000.wr(p, iwl_fh8000.CSR_UCODE_DRV_GP1_CLR, iwl_fh8000.SW_BIT_RFKILL)
+    iwl_fh8000.wr(p, iwl_fh8000.CSR_UCODE_DRV_GP1_CLR, iwl_fh8000.SW_BIT_RFKILL)
+    r = load_cpu(p, f, blob, img, 1, bounce, bphys, bsize, st)
+    if r != 0 { return r }
+    if (*f).num_cpu == DUAL_CPU {
+        r = iwl_fh8000.prph_w(p, CPU2_HDR_ADDR, CPU2_HDR_MEM_SPACE)
+        if r != 0 { return r }
+        r = load_cpu(p, f, blob, img, 2, bounce, bphys, bsize, st)
+        if r != 0 { return r }
+    }
+    iwl_fh8000.wr(p, iwl_pwr.CSR_INT_MASK, iwl_fh8000.INT_INI_SET_MASK)
+    iwl_fh8000.wr(p, iwl_probe.CSR_RESET, RESET_RELEASE)
+    return 0
+}

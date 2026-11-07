@@ -26,15 +26,15 @@ def data(n, seed):
     return bytes(((i * 7 + seed * 13) % 251) + 1 for i in range(n))      # never zero
 
 
-def build(secs):
-    b = hdr() + tlv(18, u32(0x11)) + tlv(27, u32(2)) + tlv(23, u32(0x00330018))
+def build(secs, ncpu=2):
+    b = hdr() + tlv(18, u32(0x11)) + tlv(27, u32(ncpu)) + tlv(23, u32(0x00330018))
     b += tlv(22, u32(1) + u32(0x1b8e00db) + u32(0)) + tlv(22, u32(0) + u32(0x088e10db) + u32(0x0b02909b))
     for a, d in secs:
         b += tlv(19, u32(a) + d)
     return b
 
 
-def expected(secs, bsize, mode, phys):
+def expected(secs, bsize, mode, phys, legacy=False, ncpu=2):
     out = []
     W = lambda off, v: out.append('W 0x%x 0x%x' % (off, v & MASK32))
     P = lambda a, v: out.append('P 0x%x 0x%x' % (a & 0xFFFFF, v & MASK32))
@@ -64,8 +64,9 @@ def expected(secs, bsize, mode, phys):
         return finish(out, guard, state, st, sram)
     W(0x00C, 0x08000000)
     W(0x05C, 2); W(0x05C, 2)
-    P(0xA030B4, 0x01010101)
-    P(0x300C, 0x01000000)
+    if not legacy:
+        P(0xA030B4, 0x01010101)
+        P(0x300C, 0x01000000)
 
     def load_section(i):
         a, d = secs[i]
@@ -95,6 +96,9 @@ def expected(secs, bsize, mode, phys):
 
     first = 0
     for cpuno in (1, 2):
+        if legacy and cpuno == 2:
+            if ncpu != 2: break
+            P(0x1E7C, 0x420400)
         shift = 0 if cpuno == 1 else 16
         if cpuno == 1: first = 0
         else: first += 1
@@ -106,16 +110,21 @@ def expected(secs, bsize, mode, phys):
             if a in (SEP_CPU, SEP_PAGING): break
             if not load_section(i):
                 return finish(out, state['rc'], state, st, sram)
-            state['status'] |= (secnum << shift) & MASK32
-            W(FH_STATUS, state['status'])
+            if not legacy:
+                state['status'] |= (secnum << shift) & MASK32
+                W(FH_STATUS, state['status'])
             secnum = (secnum << 1) | 1
             k += 1
             i += 1
         first = last
         st['cpu%d' % cpuno] = k
+        if not legacy:
+            W(0x00C, 0xBA00008F)
+            state['status'] = 0xFFFF if cpuno == 1 else 0xFFFFFFFF
+            W(FH_STATUS, state['status'])
+    if legacy:
         W(0x00C, 0xBA00008F)
-        state['status'] = 0xFFFF if cpuno == 1 else 0xFFFFFFFF
-        W(FH_STATUS, state['status'])
+        W(0x020, 0)
     return finish(out, 0, state, st, sram)
 
 
