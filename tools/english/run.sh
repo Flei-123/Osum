@@ -25,6 +25,10 @@ i, c, l = count.scan_fi('var s_k: [u8; 12] = "gesamt=\\0\\0\\0\\0\\0"\n')
 assert l == 1, l
 i, c, l = count.scan_fi('var s_k: [u8; 12] = "total=\\0\\0\\0\\0\\0\\0"\n')
 assert l == 0, l
+i, c, l = count.scan_fi('var s_k: [u8; 8] = "abstand=\\0"\n', None, "kernel/user/ota/otabase.fi")
+assert l == 0, l
+i, c, l = count.scan_fi('var s_k: [u8; 8] = "abstand=\\0"\n', None, "kernel/user/other.fi")
+assert l == 1, l
 PY
 
 echo "== 2. no file got more German =="

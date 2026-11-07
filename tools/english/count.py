@@ -92,6 +92,26 @@ def load_allow():
     return out
 
 
+def load_legacy():
+    p = os.path.join(HERE, "legacy.tsv")
+    out = {}
+    if os.path.exists(p):
+        for ln in open(p, encoding="utf-8"):
+            if ln.startswith("#") or not ln.strip():
+                continue
+            f = ln.rstrip("\n").split("\t")
+            if len(f) >= 3:
+                out.setdefault(f[0], set()).add(f[1])
+    return out
+
+
+LEGACY = load_legacy()
+
+
+def legacy_literal(path, body):
+    return path is not None and body.replace("\\0", "") in LEGACY.get(path, ())
+
+
 def segs(tok):
     s = re.sub(r"([a-z])([A-Z])", r"\1_\2", tok).lower()
     return [x for x in re.split(r"[_0-9]+", s) if len(x) >= 3]
@@ -128,7 +148,7 @@ def german_key(body):
     return any(w.lower() in GERMAN or w.lower() in KEY_WORDS for w in WORD.findall(t))
 
 
-def scan_fi(text, names=None):
+def scan_fi(text, names=None, path=None):
     ident = 0
     comment = 0
     logtext = 0
@@ -146,12 +166,14 @@ def scan_fi(text, names=None):
                     comment += 1
         elif kind == "str":
             body = seg[1:-1]
+            if legacy_literal(path, body):
+                continue
             if (" " in body and german_text(body) and not catalog_like(body)) or german_key(body):
                 logtext += 1
     return ident, comment, logtext
 
 
-def where_fi(text):
+def where_fi(text, path=None):
     rows = []
     line_of = lambda pos: text.count("\n", 0, pos) + 1
     for kind, a, b in spans(text):
@@ -168,6 +190,8 @@ def where_fi(text):
                 off += len(ln)
         elif kind == "str":
             body = seg[1:-1]
+            if legacy_literal(path, body):
+                continue
             if (" " in body and german_text(body) and not catalog_like(body)) or german_key(body):
                 rows.append((line_of(a), "logtext", body[:100]))
     return rows
@@ -236,7 +260,7 @@ def scan_all():
             continue
         nm = set()
         if ext in (".fi", ".s", ".S"):
-            i, c, l = scan_fi(text, nm) if ext == ".fi" else (0, scan_script(text.replace(";", "\n#"), ext)[1], 0)
+            i, c, l = scan_fi(text, nm, path) if ext == ".fi" else (0, scan_script(text.replace(";", "\n#"), ext)[1], 0)
         elif ext in (".py", ".sh", ".js", ".c", ".h"):
             i, c, l = scan_script(text, ext)
             if ext == ".py":
@@ -319,7 +343,7 @@ def diff_guard(base):
             body = ln[1:]
             hit = None
             if ext == ".fi" or ext == ".s":
-                i, c, l = scan_fi(body)
+                i, c, l = scan_fi(body, None, cur)
                 # while the tree still has German names, USING one is not a fault; DECLARING a new one is
                 declared = [m.group(2) for m in DECL.finditer(body)]
                 if any(german_ident(d) for d in declared):
@@ -354,7 +378,7 @@ def main():
         for path in a[1:]:
             text = open(os.path.join(ROOT, path), encoding="utf-8").read()
             seen = set()
-            for ln, kind, what in where_fi(text):
+            for ln, kind, what in where_fi(text, path):
                 if kind == "name":
                     if what in seen:
                         continue

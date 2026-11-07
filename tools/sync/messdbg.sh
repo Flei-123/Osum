@@ -55,14 +55,14 @@ hol() {
 }
 
 cat > "$TMPD/sM.sh" <<EOS
-sync neu /konto $PASS eigen /store $NP $RP
+sync new /konto $PASS own /store $NP $RP
 echo ==VOLL==
-sync abgleich /konto /daten $PASS
+sync merge /konto /daten $PASS
 echo ==NOCHMAL==
-sync abgleich /konto /daten $PASS
+sync merge /konto /daten $PASS
 echo ==KLEIN==
 echo eine-kleine-aenderung > /daten/m0.bin
-sync abgleich /konto /daten $PASS
+sync merge /konto /daten $PASS
 echo ==LS==
 ls /store
 echo ==END==

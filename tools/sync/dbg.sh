@@ -56,8 +56,8 @@ printf 'hallo\n' > "$TMPD/daten/klein.txt"
 printf '100 farbe blau\n100 sprache de\n' > "$TMPD/daten/EINST"
 
 cat > "$TMPD/sA.sh" <<EOS
-sync neu /konto $PASS eigen /store $NP $RP
-sync abgleich /konto /daten $PASS
+sync new /konto $PASS own /store $NP $RP
+sync merge /konto /daten $PASS
 echo ==END==
 EOS
 geraet "$TMPD/A.img" "$TMPD/sA.sh" - - "$TMPD/daten"
@@ -71,9 +71,9 @@ echo "--- BASIS ---"; cat "$TMPD/kontoA/BASIS" 2>/dev/null | cut -c1-90
 mkdir -p "$TMPD/kontoB" "$TMPD/leer"
 cp "$TMPD/kontoA/KOPF" "$TMPD/kontoB/KOPF"
 cat > "$TMPD/sG1.sh" <<EOS
-sync abgleich /konto /daten $PASS
+sync merge /konto /daten $PASS
 echo VON-B > /daten/a.txt
-sync abgleich /konto /daten $PASS
+sync merge /konto /daten $PASS
 echo ==END==
 EOS
 geraet "$TMPD/G1.img" "$TMPD/sG1.sh" "$TMPD/kontoB" "$TMPD/store1" "$TMPD/leer"
@@ -86,9 +86,9 @@ echo "--- B a.txt ---"; cat "$TMPD/datenG1/a.txt"
 cat > "$TMPD/sG2.sh" <<EOS
 echo VON-A > /daten/a.txt
 cat /daten/a.txt
-sync abgleich /konto /daten $PASS
+sync merge /konto /daten $PASS
 echo ==KONF==
-sync konflikte /konto
+sync conflicts /konto
 echo ==A==
 cat /daten/a.txt
 echo ==K==

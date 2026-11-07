@@ -20,7 +20,7 @@ bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS || exit 1
 cat > "$TMPD/s.sh" <<EOS
 echo ==NEU==
 date -u
-sync neu /konto $PASS eigen /store $NP $RP
+sync new /konto $PASS own /store $NP $RP
 date -u
 echo ==TRESORNEU==
 vault new /konto /tresor $PASS

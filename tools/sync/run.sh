@@ -148,9 +148,9 @@ printf 'diese datei hat er nicht\n' > "$TMPD/fremd/x.txt"
 
 cat > "$TMPD/sA.sh" <<EOS
 echo ==NEU==
-sync neu /konto $PASS eigen /store $NP $RP
+sync new /konto $PASS own /store $NP $RP
 echo ==AB==
-sync abgleich /konto /daten $PASS
+sync merge /konto /daten $PASS
 echo ==END==
 EOS
 geraet "$TMPD/A.img" "$TMPD/sA.sh" - - "$TMPD/daten" - \
@@ -158,16 +158,16 @@ geraet "$TMPD/A.img" "$TMPD/sA.sh" - - "$TMPD/daten" - \
 rc=$(lauf "$TMPD/A.img" A)
 is "Geraet A endet ordentlich" "$rc" "21"
 klar A > "$TMPD/A.log"
-hat "$TMPD/A.log" "wiederherstellungscode: " "A zeigt den Wiederherstellungscode"
+hat "$TMPD/A.log" "recovery code: " "A zeigt den Wiederherstellungscode"
 hat "$TMPD/A.log" "WARNING: without the passphrase AND without the recovery code" \
     "und die Warnung steht VOR dem Anlegen"
-CODE=$(grep -a '^wiederherstellungscode: ' "$TMPD/A.log" | tail -1 | sed 's/^wiederherstellungscode: //')
+CODE=$(grep -a '^recovery code: ' "$TMPD/A.log" | tail -1 | sed 's/^recovery code: //')
 note "Code: $CODE"
 is "der Code hat 65 Zeichen" "${#CODE}" "65"
-is "A meldet fertig" "$(klar A | grep -c '^fertig')" "1"
-A_DAT=$(feld "$TMPD/A.txt" dateien)
-A_BLK=$(feld "$TMPD/A.txt" bloecke)
-A_NEU=$(feld "$TMPD/A.txt" neubloecke)
+is "A meldet fertig" "$(klar A | grep -c '^done')" "1"
+A_DAT=$(feld "$TMPD/A.txt" files)
+A_BLK=$(feld "$TMPD/A.txt" blocks)
+A_NEU=$(feld "$TMPD/A.txt" newblocks)
 A_GEN=$(feld "$TMPD/A.txt" generation)
 is "A sieht 5 Dateien" "$A_DAT" "5"
 is "A legt alle Bloecke neu ab" "$A_NEU" "$A_BLK"
@@ -184,7 +184,7 @@ cp "$TMPD/kontoA/KOPF" "$TMPD/kontoB/KOPF"
 mkdir -p "$TMPD/leer"
 cat > "$TMPD/sB.sh" <<EOS
 echo ==AB==
-sync abgleich /konto /daten $PASS
+sync merge /konto /daten $PASS
 echo ==LS==
 ls /daten
 echo ==END==
@@ -195,13 +195,13 @@ geraet "$TMPD/B.img" "$TMPD/sB.sh" "$TMPD/kontoB" "$TMPD/store1" "$TMPD/leer" - 
 rc=$(lauf "$TMPD/B.img" B)
 is "Geraet B endet ordentlich" "$rc" "21"
 klar B > "$TMPD/B.log"
-B_RUNTER=$(feld "$TMPD/B.txt" heruntergel)
+B_RUNTER=$(feld "$TMPD/B.txt" downloaded)
 B_EINST=$(feld "$TMPD/B.txt" settings)
 is "B holt 4 Dokumente herunter" "$B_RUNTER" "4"
 [ -n "$B_EINST" ] && [ "$B_EINST" -gt 0 ] \
     && ok "and SETTINGS arrive through the settings path: $B_EINST keys merged" \
     || bad "B merged no setting: '$B_EINST'"
-is "B meldet fertig" "$(klar B | grep -c '^fertig')" "1"
+is "B meldet fertig" "$(klar B | grep -c '^done')" "1"
 
 hol "$TMPD/B.img" /daten "$TMPD/datenB"
 gleich=0
@@ -240,15 +240,15 @@ echo "== 6. (d) wrong passphrase, and the way back =="
 # =====================================================================
 cat > "$TMPD/sD.sh" <<EOS
 echo ==FALSCH==
-sync abgleich /konto /daten diesistfalsch
+sync merge /konto /daten diesistfalsch
 echo ==FASTRICHTIG==
-sync auf /konto ${PASS}x
+sync open /konto ${PASS}x
 echo ==CODE==
 sync code /konto $CODE
 echo ==CODEFALSCH==
 sync code /konto 00000-00000-00000-00000-00000-00000-00000-00000-00000-00000-00000
 echo ==RICHTIG==
-sync auf /konto $PASS
+sync open /konto $PASS
 echo ==END==
 EOS
 geraet "$TMPD/D.img" "$TMPD/sD.sh" "$TMPD/kontoB" "$TMPD/store1" "$TMPD/leer" -
@@ -259,7 +259,7 @@ absch() { sed -n "/^==$1==/,/^==/p" "$TMPD/D.log"; }
 absch FALSCH | grep -qa 'wrong passphrase' \
     && ok "(d) a wrong passphrase is rejected" \
     || bad "(d) a wrong passphrase is NOT rejected"
-absch FALSCH | grep -qa 'fertig' \
+absch FALSCH | grep -qa 'done' \
     && bad "(d) der Abgleich lief trotzdem" \
     || ok "(d) and NOTHING is synchronised"
 absch FASTRICHTIG | grep -qa 'wrong passphrase' \
@@ -281,7 +281,7 @@ echo "== 7. (e) ein boesartiger Server =="
 # =====================================================================
 cat > "$TMPD/sE.sh" <<EOS
 echo ==AB==
-sync abgleich /konto /daten $PASS
+sync merge /konto /daten $PASS
 echo ==LS==
 ls /daten
 echo ==END==
@@ -298,7 +298,7 @@ boese_lauf() { # <was> <erwarteter text> <name> [extra]
         ok "(e) $was is detected and rejected"
     else
         bad "(e) $was is NOT detected"
-        grep -a 'sync:\|error\|fertig' "$TMPD/E-$nm.log" | head -4 | sed 's/^/        /'
+        grep -a 'sync:\|error\|done' "$TMPD/E-$nm.log" | head -4 | sed 's/^/        /'
     fi
 }
 boese_lauf aendern      "sync: error" aendern
@@ -308,7 +308,7 @@ boese_lauf wurzelluege  "forged"  luege
 boese_lauf halbe        "forged"  halbe
 
 rm -rf "$TMPD/kontoR"; cp -r "$TMPD/kontoA" "$TMPD/kontoR"
-printf '9\n' > "$TMPD/kontoR/ZAEHLER"
+printf '9\n' > "$TMPD/kontoR/COUNTER"
 rm -rf "$TMPD/sb-rueck"; cp -r "$TMPD/store1" "$TMPD/sb-rueck"
 geraet "$TMPD/E-rueck.img" "$TMPD/sE.sh" "$TMPD/kontoR" "$TMPD/sb-rueck" "$TMPD/leer" -
 lauf "$TMPD/E-rueck.img" E-rueck > /dev/null
@@ -317,14 +317,14 @@ if grep -qa 'ROLLBACK' "$TMPD/E-rueck.log"; then
     ok "(e) THE ROLLBACK is detected (counter 9, store offers 1)"
 else
     bad "(e) THE ROLLBACK is NOT detected -- a server can slip in old data"
-    grep -a 'sync:\|generation' "$TMPD/E-rueck.log" | head -4 | sed 's/^/        /'
+    grep -a 'sync:\|error\|done\|generation' "$TMPD/E-rueck.log" | head -4 | sed 's/^/        /'
 fi
 rm -rf "$TMPD/kontoR2"; cp -r "$TMPD/kontoA" "$TMPD/kontoR2"
 printf '1\n' > "$TMPD/kontoR2/ZAEHLER"
 geraet "$TMPD/E-ok.img" "$TMPD/sE.sh" "$TMPD/kontoR2" "$TMPD/store1" "$TMPD/leer" -
 lauf "$TMPD/E-ok.img" E-ok > /dev/null
 klar E-ok > "$TMPD/E-ok.log"
-grep -qa 'fertig' "$TMPD/E-ok.log" \
+grep -qa 'done' "$TMPD/E-ok.log" \
     && ok "(e) CONTROL: with a matching counter the same store passes" \
     || bad "(e) CONTROL: even the intact store is rejected"
 
@@ -339,8 +339,8 @@ while [ $i -lt 12 ]; do
 done
 #
 cat > "$TMPD/sF.sh" <<EOS
-sync neu /konto $PASS eigen /store $NP $RP
-sync abgleich /konto /daten $PASS
+sync new /konto $PASS own /store $NP $RP
+sync merge /konto /daten $PASS
 echo ==ERSTER-DURCH==
 cp /daten/d0.bin /daten/n0.bin
 cp /daten/d1.bin /daten/n1.bin
@@ -348,7 +348,7 @@ cp /daten/d2.bin /daten/n2.bin
 cp /daten/d3.bin /daten/n3.bin
 cp /daten/d4.bin /daten/n4.bin
 cp /daten/d5.bin /daten/n5.bin
-sync abgleich /konto /daten $PASS
+sync merge /konto /daten $PASS
 echo ==END==
 EOS
 geraet "$TMPD/F0.img" "$TMPD/sF.sh" - - "$TMPD/gross" -
@@ -433,7 +433,7 @@ fi
 
 cat > "$TMPD/sF2.sh" <<EOS
 echo ==AB==
-sync abgleich /konto /daten $PASS
+sync merge /konto /daten $PASS
 echo ==END==
 EOS
 hol "$TMPD/F.img" /konto "$TMPD/kontoF"
@@ -442,7 +442,7 @@ if [ -f "$TMPD/kontoF/KOPF" ]; then
     geraet "$TMPD/F2.img" "$TMPD/sF2.sh" "$TMPD/kontoF" "$TMPD/storeF" "$TMPD/gross" -
     rc=$(lauf "$TMPD/F2.img" F2)
     klar F2 > "$TMPD/F2.log"
-    grep -qa 'fertig' "$TMPD/F2.log" \
+    grep -qa 'done' "$TMPD/F2.log" \
         && ok "(f) after the abort the sync resumes and finishes" \
         || bad "(f) after the abort the sync no longer completes"
     hol "$TMPD/F2.img" /store "$TMPD/storeF2"
@@ -458,10 +458,10 @@ if [ -f "$TMPD/kontoF/KOPF" ]; then
     done
     is "(f) und alle 12 Dateien kommen danach heil beim naechsten Geraet an" "$g" "12"
     if [ "$g" != 12 ]; then
-        klar F3 | grep -a 'sync\|fehler\|fertig\|heruntergel\|dateien\|^d[0-9]' \
+        klar F3 | grep -a 'sync\|fehler\|done\|downloaded\|files\|^d[0-9]' \
             | head -12 | sed 's/^/        F3: /'
         note "F3 /daten: $(ls "$TMPD/datenF3" 2>/dev/null | tr '\n' ' ')"
-        note "F2: $(klar F2 | grep -a 'dateien\|hochgel\|neubloecke\|generation' | tr '\n' ' ')"
+        note "F2: $(klar F2 | grep -a 'files\|uploaded\|newblocks\|generation' | tr '\n' ' ')"
         note "storeF2: $(ls -l "$TMPD/storeF2" 2>/dev/null | tr '\n' ';')"
         note "storeF ROOT: $(head -c 140 "$TMPD/storeF/ROOT" 2>/dev/null | tr '\n' ' ') | ROOT.T: $(head -c 140 "$TMPD/storeF/ROOT.T" 2>/dev/null | tr '\n' ' ')"
         note "storeF2 ROOT: $(head -c 140 "$TMPD/storeF2/ROOT" 2>/dev/null | tr '\n' ' ') | ROOT.T: $(head -c 140 "$TMPD/storeF2/ROOT.T" 2>/dev/null | tr '\n' ' ')"
@@ -510,8 +510,8 @@ while [ $i -lt 20 ]; do
 done
 cat > "$TMPD/sV.sh" <<EOS
 echo ==AB==
-sync neu /konto $PASS eigen /store $NP $RP
-sync abgleich /konto /daten $PASS
+sync new /konto $PASS own /store $NP $RP
+sync merge /konto /daten $PASS
 echo ==END==
 EOS
 BLOCKS_ALT=$BLOCKS
@@ -520,14 +520,14 @@ geraet "$TMPD/V.img" "$TMPD/sV.sh" - - "$TMPD/vollmess" -
 BLOCKS=$BLOCKS_ALT
 SYNC_TIMEOUT=900 lauf "$TMPD/V.img" V > /dev/null
 klar V > "$TMPD/V.log"
-grep -qa '^fertig' "$TMPD/V.log" \
+grep -qa '^done' "$TMPD/V.log" \
     && bad "der volle Datentraeger meldet trotzdem fertig" \
     || ok "a full disk does NOT report done"
 grep -qa '^sync: error' "$TMPD/V.log" \
     && ok "but an error: $(grep -a '^sync: error' "$TMPD/V.log" | tail -1)" \
     || bad "and it reports no error either -- the abort is silent"
-grep -qa '^sync: bei:' "$TMPD/V.log" \
-    && ok "and it names the file where it broke: $(grep -a '^sync: bei:' "$TMPD/V.log" | tail -1 | sed 's/^sync: bei:  *//')" \
+grep -qa '^sync: at:' "$TMPD/V.log" \
+    && ok "and it names the file where it broke: $(grep -a '^sync: at:' "$TMPD/V.log" | tail -1 | sed 's/^sync: at:  *//')" \
     || bad "but not WHERE it broke"
 is "und er schreibt KEINE Wurzel (Generation bleibt 0)" \
    "$(feld "$TMPD/V.txt" generation)" "0"
@@ -540,29 +540,29 @@ hol "$TMPD/V.img" /store "$TMPD/storeV"
 echo "== 9. (g) the conflict =="
 cat > "$TMPD/sG1.sh" <<EOS
 echo ==AB1==
-sync abgleich /konto /daten $PASS
+sync merge /konto /daten $PASS
 echo ==AENDERN==
 echo VON-B > /daten/a.txt
 echo ==AB2==
-sync abgleich /konto /daten $PASS
+sync merge /konto /daten $PASS
 echo ==END==
 EOS
 geraet "$TMPD/G1.img" "$TMPD/sG1.sh" "$TMPD/kontoB" "$TMPD/store1" "$TMPD/leer" -
 lauf "$TMPD/G1.img" G1 > /dev/null
 klar G1 > "$TMPD/G1.log"
 hol "$TMPD/G1.img" /store "$TMPD/store2"
-grep -qa 'fertig' "$TMPD/G1.log" && ok "(g) B changes a.txt and uploads" \
+grep -qa 'done' "$TMPD/G1.log" && ok "(g) B changes a.txt and uploads" \
                                  || bad "(g) B does not get through"
 
 cat > "$TMPD/sG2.sh" <<EOS
 echo ==AENDERN==
 echo VON-A > /daten/a.txt
 echo ==AB==
-sync abgleich /konto /daten $PASS
+sync merge /konto /daten $PASS
 echo ==LS==
 ls /daten
 echo ==KONF==
-sync konflikte /konto
+sync conflicts /konto
 echo ==A==
 cat /daten/a.txt
 echo ==K==
@@ -572,7 +572,7 @@ EOS
 geraet "$TMPD/G2.img" "$TMPD/sG2.sh" "$TMPD/kontoA" "$TMPD/store2" "$TMPD/daten" -
 lauf "$TMPD/G2.img" G2 > /dev/null
 klar G2 > "$TMPD/G2.log"
-G_KONF=$(feld "$TMPD/G2.txt" konflikte)
+G_KONF=$(feld "$TMPD/G2.txt" conflicts)
 is "(g) A meldet genau einen Konflikt" "$G_KONF" "1"
 hol "$TMPD/G2.img" /daten "$TMPD/datenG"
 [ -f "$TMPD/datenG/a.txt.konflikt" ] \
@@ -668,7 +668,7 @@ echo "== 11. (i) without an account everything continues =="
 # =====================================================================
 cat > "$TMPD/sI.sh" <<'EOS'
 echo ==KEINKONTO==
-sync abgleich /konto /daten egal
+sync merge /konto /daten egal
 echo ==ARBEIT==
 echo hallo > /daten/neu.txt
 cat /daten/neu.txt
@@ -847,18 +847,18 @@ if ! cmp -s "$TMPD/kaputt/sync-still.fi" kernel/user/sync.fi; then
         cp "$TMPD/binj4/sync.elf" "$TMPD/bin/sync.elf"
         mkdir -p "$TMPD/j4store" "$TMPD/j4leer"
         cat > "$TMPD/sJ4.sh" <<EOS
-sync neu /konto $PASS eigen /store $NP $RP
-sync abgleich /konto /daten $PASS
+sync new /konto $PASS own /store $NP $RP
+sync merge /konto /daten $PASS
 echo ==END==
 EOS
         geraet "$TMPD/J4a.img" "$TMPD/sJ4.sh" - - "$TMPD/daten" -
         lauf "$TMPD/J4a.img" J4a > /dev/null
         klar J4a > "$TMPD/J4a.log"
-        j4dat=$(feld "$TMPD/J4a.txt" dateien)
-        if grep -qa '^fertig' "$TMPD/J4a.log" && [ "$j4dat" = "4" ]; then
+        j4dat=$(feld "$TMPD/J4a.txt" files)
+        if grep -qa '^done' "$TMPD/J4a.log" && [ "$j4dat" = "4" ]; then
             ok "(j4) CONTROL: with the old 700-octet field gross.bin silently drops out of the sync -- $j4dat instead of 5 files, and the run still reports done"
         else
-            bad "(j4) the old version does not behave as expected: dateien=$j4dat, fertig=$(grep -ca '^fertig' "$TMPD/J4a.log")"
+            bad "(j4) the old version does not behave as expected: dateien=$j4dat, fertig=$(grep -ca '^done' "$TMPD/J4a.log")"
         fi
         cp "$TMPD/bin/sync.elf.sicher" "$TMPD/bin/sync.elf"
     else
@@ -874,7 +874,7 @@ echo "== 12b. the default cost of the key derivation =="
 cat > "$TMPD/sP.sh" <<EOS
 echo ==VOR==
 date -u
-sync neu /konto $PASS eigen /store
+sync new /konto $PASS own /store
 date -u
 vault new /konto /tresor $PASS
 date -u
@@ -928,14 +928,14 @@ while [ $i -lt 20 ]; do
     i=$((i+1))
 done
 cat > "$TMPD/sM.sh" <<EOS
-sync neu /konto $PASS eigen /store $NP $RP
+sync new /konto $PASS own /store $NP $RP
 echo ==VOLL==
-sync abgleich /konto /daten $PASS
+sync merge /konto /daten $PASS
 echo ==NOCHMAL==
-sync abgleich /konto /daten $PASS
+sync merge /konto /daten $PASS
 echo ==KLEIN==
 echo eine-kleine-aenderung > /daten/m0.bin
-sync abgleich /konto /daten $PASS
+sync merge /konto /daten $PASS
 echo ==END==
 EOS
 BLOCKS_ALT=$BLOCKS
@@ -950,18 +950,18 @@ grep -qa '^==END==' "$TMPD/M.log" \
     && ok "the measurement run really reached the end" \
     || bad "the measurement run did not finish -- the numbers below are worthless"
 M_GESAMT=$(( (t1 - t0) / 1000000 ))
-M_BLK=$(feld_n "$TMPD/M.txt" bloecke 1)
-M_NEU1=$(feld_n "$TMPD/M.txt" neubloecke 1)
-M_NEU2=$(feld_n "$TMPD/M.txt" neubloecke 2)
-M_NEU3=$(feld_n "$TMPD/M.txt" neubloecke 3)
+M_BLK=$(feld_n "$TMPD/M.txt" blocks 1)
+M_NEU1=$(feld_n "$TMPD/M.txt" newblocks 1)
+M_NEU2=$(feld_n "$TMPD/M.txt" newblocks 2)
+M_NEU3=$(feld_n "$TMPD/M.txt" newblocks 3)
 M_GES1=$(feld_n "$TMPD/M.txt" sent 1)
 M_GES3=$(feld_n "$TMPD/M.txt" sent 3)
-M_LES1=$(feld_n "$TMPD/M.txt" gelesen 1)
+M_LES1=$(feld_n "$TMPD/M.txt" read 1)
 note "1 MiB in 20 Dateien: $M_BLK Bloecke, erster Lauf $M_NEU1 neu ($M_GES1 Oktette gesendet)"
 note "zweiter Lauf: $M_NEU2 neue Bloecke; nach einer kleinen Aenderung: $M_NEU3"
 note "alle drei Laeufe samt Anlegen des Kontos und Systemstart: $M_GESAMT ms (accel=$OSUM_QEMU_ACCEL)"
-is "der Messlauf meldet dreimal fertig" "$(grep -ca '^fertig' "$TMPD/M.log")" "3"
-is "der volle Abgleich sieht alle 20 Dateien" "$(feld_n "$TMPD/M.txt" dateien 1)" "20"
+is "der Messlauf meldet dreimal fertig" "$(grep -ca '^done' "$TMPD/M.log")" "3"
+is "der volle Abgleich sieht alle 20 Dateien" "$(feld_n "$TMPD/M.txt" files 1)" "20"
 [ -n "$M_BLK" ] && [ "$M_BLK" -ge 300 ] \
     && ok "the full sync sees all blocks: $M_BLK (260 data + 40 name chains + directory)" \
     || bad "the full sync sees only $M_BLK blocks -- 302 expected"
