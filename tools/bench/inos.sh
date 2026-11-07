@@ -14,6 +14,7 @@
 #   BENCH_OLD_REF=<git ref>                     kernel source for counter-proof B (default: parent of the commit
 #                                               that added kernel/user/bench.fi)
 #   BENCH_JSON_OUT=<file>                       keep the BENCHJSON of the real run
+#   BENCH_PROC_OUT=<file>                       keep the raw /proc/bench text (boot.* lines) of the real run
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -144,6 +145,7 @@ run_bench() {
         sleep "$BENCH_HOLD"
     fi
     ODB_T=240 od exec "bench --json" >"$TMPD/$tag.out" 2>&1
+    [ -n "${BENCH_PROC_OUT:-}" ] && { ODB_T=60 od exec "cat /proc/bench" >"$BENCH_PROC_OUT" 2>&1; ODB_T=60 od exec "cat /proc/version" >>"$BENCH_PROC_OUT" 2>&1; }
     stop_qemu
     grep -a '^BENCHJSON ' "$TMPD/$tag.out" | tail -1 | sed 's/^BENCHJSON //' > "$TMPD/$tag.json"
     [ -s "$TMPD/$tag.json" ] || return 2

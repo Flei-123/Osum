@@ -42,6 +42,7 @@ run g1 12
 S=$OUT/g1/serial.txt
 hat "$S" "glogin: fUi scene tree" "the sign-in screen is a scene tree"
 hat "$S" "glogin: ready n=1" "and it is ready (one account)"
+num "first frame uptime line (ms)" "$(grep -aoE 'glogin: first up=[0-9]+' "$S" | head -1 | sed 's/.*=//')" gt 0
 num "password fields" "$(grep -aoE 'glogin: rect id=[0-9]+ kind=4 ' "$S" | sort -u | wc -l)" eq 1
 num "buttons (Anmelden, Anderer Benutzer, network, power)" "$(grep -aoE 'glogin: rect id=[0-9]+ kind=2 ' "$S" | sort -u | wc -l)" eq 4
 CLOCK=$(grep -aoE 'glogin: rect id=10 kind=1 x=[0-9]+ y=[0-9]+' "$S" | head -1)
