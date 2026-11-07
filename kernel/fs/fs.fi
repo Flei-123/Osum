@@ -56,6 +56,7 @@ import arch.cpu
 import fs.nidx
 import fs.dcache
 import fs.dirscan
+import fs.dirindex
 import fs.pcache
 import fs.ofsj
 import fs.ofsext
@@ -762,6 +763,7 @@ fn race_core(state: u64, index: u64, soll: u64, runden: u64,
 // the only way a new inode gets a clean state.
 fn inode_init(state: u64, ino: u64, kind: u64) -> bool {
     let flags: u64 = enter(state)
+    dirindex.touch(state, ino)
     if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
         leave(state, flags)
         return false
@@ -1297,6 +1299,7 @@ fn walk_level(state: u64, block: u64, k: u64, grow: bool) -> u64 {
 fn file_truncate(state: u64, ino: u64) {
     file_truncate_run(state, ino)
     pcache.drop_ino(state, ino)
+    dirindex.touch(state, ino)
 }
 
 fn file_truncate_run(state: u64, ino: u64) {
@@ -1560,6 +1563,7 @@ fn size_write(state: u64, ino: u64, new_size: u64, only_grow: bool) -> bool {
 fn set_size(state: u64, ino: u64, new_size: u64) -> bool {
     let ok: bool = set_size_run(state, ino, new_size)
     pcache.drop_ino(state, ino)
+    dirindex.touch(state, ino)
     return ok
 }
 
@@ -1618,6 +1622,7 @@ fn write_at(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
     let flushed: bool = blk.wb_end(state)
     unlock_only(state, flags)
     pcache.drop_ino(state, ino)
+    dirindex.touch(state, ino)
     if !flushed {
         return 0
     }
@@ -1718,27 +1723,86 @@ fn dir_chunk(state: u64, dir: u64, first: u64, total: u64) -> u64 {
     return read_at(state, dir, first * de, dirscan.buffer(), count * de) / de
 }
 
-fn dir_find(state: u64, dir: u64, name: u64) -> u64 {
-    let n: u64 = dir_entries(state, dir)
+fn dir_scan_slot(state: u64, dir: u64, name: u64, n: u64) -> u64 {
     let de: u64 = dirent_size(state)
     var i: u64 = 0
     while i < n {
         let got: u64 = dir_chunk(state, dir, i, n)
         if got == 0 {
-            return 0
+            return NO_SLOT
         }
         var k: u64 = 0
         while k < got {
             let e: u64 = dirscan.entry(k, de)
-            let ino: u64 = regio.read64(e)
-            if ino != 0 && name_eq(state, e + 8, name) {
-                return ino
+            if regio.read64(e) != 0 && name_eq(state, e + 8, name) {
+                copy(e, buf_nm(state), de)
+                return i + k
             }
             k = k + 1
         }
         i = i + got
     }
-    return 0
+    return NO_SLOT
+}
+
+fn dir_index_build(state: u64, dir: u64, n: u64) {
+    let de: u64 = dirent_size(state)
+    let nl: u64 = name_len(state)
+    let rec: u64 = dirindex.begin(state, dir)
+    var first_free: u64 = n
+    var i: u64 = 0
+    while i < n {
+        let got: u64 = dir_chunk(state, dir, i, n)
+        if got == 0 {
+            return
+        }
+        var k: u64 = 0
+        while k < got {
+            let e: u64 = dirscan.entry(k, de)
+            if regio.read64(e) != 0 {
+                dirindex.put(rec, dirindex.name_hash(e + 8, nl), i + k)
+            } else if first_free == n {
+                first_free = i + k
+            }
+            k = k + 1
+        }
+        i = i + got
+    }
+    dirindex.finish(rec, first_free)
+}
+
+fn dir_verify_slot(state: u64, dir: u64, slot: u64, name: u64) -> bool {
+    let ino: u64 = entry_read(state, dir, slot, buf_nm(state))
+    return ino != 0 && name_eq(state, buf_nm(state) + 8, name)
+}
+
+fn dir_slot_of(state: u64, dir: u64, name: u64) -> u64 {
+    let n: u64 = dir_entries(state, dir)
+    if n >= dirindex.INDEX_MIN && n <= dirindex.INDEX_MAX {
+        let h: u64 = dirindex.name_hash(name, name_len(state))
+        var slot: u64 = dirindex.lookup(state, dir, h)
+        if slot == dirindex.NOT_INDEXED {
+            dir_index_build(state, dir, n)
+            slot = dirindex.lookup(state, dir, h)
+        }
+        if slot == dirindex.ABSENT {
+            return NO_SLOT
+        }
+        if slot != dirindex.NOT_INDEXED {
+            if dir_verify_slot(state, dir, slot, name) {
+                return slot
+            }
+            dirindex.touch(state, dir)
+        }
+    }
+    return dir_scan_slot(state, dir, name, n)
+}
+
+fn dir_find(state: u64, dir: u64, name: u64) -> u64 {
+    if dir_slot_of(state, dir, name) == NO_SLOT {
+        return 0
+    }
+    return regio.read64(buf_nm(state))
 }
 
 // The `index`-th LIVE entry. `out` gets the 32 octets of the entry:
@@ -1805,6 +1869,10 @@ fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
     let n: u64 = dir_entries(state, dir)
     var slot: u64 = n
     var i: u64 = 0
+    let start: u64 = dirindex.hint(state, dir, n)
+    if start != dirindex.NO_HINT {
+        i = start
+    }
     while i < n {
         let got: u64 = dir_chunk(state, dir, i, n)
         if got == 0 {
@@ -1831,9 +1899,14 @@ fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
         kstate.set8(buf_nm(state) + 8 + k, kstate.get8(name + k) as u8)
         k = k + 1
     }
-    if write_at(state, dir, slot * de, buf_nm(state), de) != de {
+    dirindex.hold(true)
+    let wrote: u64 = write_at(state, dir, slot * de, buf_nm(state), de)
+    dirindex.hold(false)
+    if wrote != de {
+        dirindex.touch(state, dir)
         return false
     }
+    dirindex.note_add(state, dir, dirindex.name_hash(name, nl), slot)
     dcache.bump_add(state)
     if !punktname(name) {
         var kind: u64 = 0
@@ -1861,37 +1934,19 @@ fn punktname(p: u64) -> bool {
     return kstate.get8(p + 2) == 0
 }
 
-fn dir_remove_slot(state: u64, dir: u64, name: u64) -> u64 {
-    let n: u64 = dir_entries(state, dir)
-    let de: u64 = dirent_size(state)
-    var i: u64 = 0
-    while i < n {
-        let got: u64 = dir_chunk(state, dir, i, n)
-        if got == 0 {
-            return NO_SLOT
-        }
-        var k: u64 = 0
-        while k < got {
-            let e: u64 = dirscan.entry(k, de)
-            if regio.read64(e) != 0 && name_eq(state, e + 8, name) {
-                return i + k
-            }
-            k = k + 1
-        }
-        i = i + got
-    }
-    return NO_SLOT
-}
-
 fn dir_remove(state: u64, dir: u64, name: u64) -> u64 {
-    let slot: u64 = dir_remove_slot(state, dir, name)
+    let slot: u64 = dir_slot_of(state, dir, name)
     if slot == NO_SLOT {
         return 0
     }
     let de: u64 = dirent_size(state)
-    let ino: u64 = entry_read(state, dir, slot, buf_nm(state))
+    let ino: u64 = regio.read64(buf_nm(state))
+    let hash: u64 = dirindex.name_hash(name, name_len(state))
     octets.zero(buf_nm(state), de)
+    dirindex.hold(true)
     write_at(state, dir, slot * de, buf_nm(state), de)
+    dirindex.hold(false)
+    dirindex.note_remove(state, dir, hash, slot)
     var kind: u64 = 0
     var sz: u64 = 0
     if ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
@@ -2406,6 +2461,7 @@ fn format(state: u64) -> bool {
 fn format_as(state: u64, v: u64, inodes: u64) -> bool {
     ofsj.disable(state)
     let flags: u64 = enter(state)
+    dirindex.reset()
     kstate.set(state, kstate.K13_OFF + kstate.U_FSVER, v)
     let total: u64 = blk.blocks(state)
     var isz: u64 = INODE_SIZE
@@ -2549,6 +2605,7 @@ fn mount(state: u64) -> bool {
     var l_ok: [u8; 25] = "mounted, version/blocks \0"
     ofsj.disable(state)
     let flags: u64 = enter(state)
+    dirindex.reset()
     kstate.set(state, kstate.FS_READY, 0)
     geom_j(state, 0, 0)
     if !blk.read(state, 0, buf_sb(state)) {

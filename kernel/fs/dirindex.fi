@@ -1,0 +1,219 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+
+export { NOT_INDEXED, ABSENT, NO_HINT, INDEX_MIN, INDEX_MAX, name_hash, lookup, begin, put, finish, note_add, note_remove, hint, touch, hold, reset }
+
+const NOT_INDEXED: u64 = 0xFFFFFFFFFFFFFFFF
+const ABSENT: u64 = 0xFFFFFFFFFFFFFFFE
+const NO_HINT: u64 = 0xFFFFFFFFFFFFFFFF
+const INDEX_MIN: u64 = 32
+const INDEX_MAX: u64 = 2048
+const TABLE: u64 = 8192
+const TABLE_MASK: u64 = 8191
+const BUILD_LIMIT: u64 = 6144
+const OVERFLOW_LIMIT: u64 = 7168
+const DIRS: u64 = 8
+const FNV_OFFSET: u64 = 0xCBF29CE484222325
+const FNV_PRIME: u64 = 0x100000001B3
+const GEN_MIX: u64 = 0x9E3779B97F4A7C15
+
+static mut table_key: [u64; 8192] = [0 as u64; 8192]
+static mut table_val: [u64; 8192] = [0 as u64; 8192]
+static mut table_used: [u64; 1] = [0 as u64; 1]
+static mut next_gen: [u64; 1] = [1 as u64; 1]
+static mut next_victim: [u64; 1] = [0 as u64; 1]
+static mut held: [u64; 1] = [0 as u64; 1]
+static mut rec_dir: [u64; 8] = [0 as u64; 8]
+static mut rec_vol: [u64; 8] = [0 as u64; 8]
+static mut rec_gen: [u64; 8] = [0 as u64; 8]
+static mut rec_live: [u64; 8] = [0 as u64; 8]
+static mut rec_hint: [u64; 8] = [0 as u64; 8]
+static mut rec_done: [u64; 8] = [0 as u64; 8]
+
+fn volume(state: u64) -> u64 {
+    return kstate.get(state, kstate.DISK_DEV) * 1000003 + kstate.get(state, kstate.DISK_FIRST) + 1
+}
+
+fn name_hash(name: u64, limit: u64) -> u64 {
+    var h: u64 = FNV_OFFSET
+    var i: u64 = 0
+    while i < limit {
+        let c: u64 = kstate.get8(name + i)
+        if c == 0 {
+            return h
+        }
+        h = (h ^ c) *% FNV_PRIME
+        i = i + 1
+    }
+    return h
+}
+
+fn key_of(gen: u64, hash: u64) -> u64 {
+    return (hash ^ (gen *% GEN_MIX)) | 1
+}
+
+fn find_record(state: u64, dir: u64) -> u64 {
+    let v: u64 = volume(state)
+    var r: u64 = 0
+    while r < DIRS {
+        if rec_gen[r as usize] != 0 && rec_dir[r as usize] == dir && rec_vol[r as usize] == v {
+            return r
+        }
+        r = r + 1
+    }
+    return DIRS
+}
+
+fn complete_record(state: u64, dir: u64) -> u64 {
+    let r: u64 = find_record(state, dir)
+    if r < DIRS && rec_done[r as usize] == 0 {
+        return DIRS
+    }
+    return r
+}
+
+fn probe(key: u64) -> u64 {
+    var i: u64 = key & TABLE_MASK
+    var steps: u64 = 0
+    while steps < TABLE {
+        let k: u64 = table_key[i as usize]
+        if k == key || k == 0 {
+            return i
+        }
+        i = (i + 1) & TABLE_MASK
+        steps = steps + 1
+    }
+    return TABLE
+}
+
+fn lookup(state: u64, dir: u64, hash: u64) -> u64 {
+    let r: u64 = complete_record(state, dir)
+    if r >= DIRS {
+        return NOT_INDEXED
+    }
+    let i: u64 = probe(key_of(rec_gen[r as usize], hash))
+    if i >= TABLE || table_key[i as usize] == 0 || table_val[i as usize] == 0 {
+        return ABSENT
+    }
+    return table_val[i as usize] - 1
+}
+
+fn reset() {
+    var i: u64 = 0
+    while i < TABLE {
+        table_key[i as usize] = 0
+        table_val[i as usize] = 0
+        i = i + 1
+    }
+    var r: u64 = 0
+    while r < DIRS {
+        rec_gen[r as usize] = 0
+        r = r + 1
+    }
+    table_used[0] = 0
+}
+
+fn begin(state: u64, dir: u64) -> u64 {
+    if table_used[0] + INDEX_MAX > BUILD_LIMIT {
+        reset()
+    }
+    var r: u64 = find_record(state, dir)
+    if r >= DIRS {
+        r = next_victim[0] % DIRS
+        next_victim[0] = next_victim[0] + 1
+    }
+    rec_dir[r as usize] = dir
+    rec_vol[r as usize] = volume(state)
+    rec_gen[r as usize] = next_gen[0]
+    next_gen[0] = next_gen[0] + 1
+    rec_live[r as usize] = 0
+    rec_hint[r as usize] = 0
+    rec_done[r as usize] = 0
+    return r
+}
+
+fn store(gen: u64, hash: u64, slot: u64) {
+    let i: u64 = probe(key_of(gen, hash))
+    if i >= TABLE {
+        return
+    }
+    if table_key[i as usize] == 0 {
+        table_key[i as usize] = key_of(gen, hash)
+        table_used[0] = table_used[0] + 1
+    }
+    table_val[i as usize] = slot + 1
+}
+
+fn put(r: u64, hash: u64, slot: u64) {
+    store(rec_gen[r as usize], hash, slot)
+    rec_live[r as usize] = rec_live[r as usize] + 1
+}
+
+fn finish(r: u64, hint_slot: u64) {
+    rec_hint[r as usize] = hint_slot
+    rec_done[r as usize] = 1
+}
+
+fn note_add(state: u64, dir: u64, hash: u64, slot: u64) {
+    let r: u64 = complete_record(state, dir)
+    if r >= DIRS {
+        return
+    }
+    if table_used[0] > OVERFLOW_LIMIT {
+        reset()
+        return
+    }
+    store(rec_gen[r as usize], hash, slot)
+    rec_live[r as usize] = rec_live[r as usize] + 1
+    if slot == rec_hint[r as usize] {
+        rec_hint[r as usize] = slot + 1
+    }
+}
+
+fn note_remove(state: u64, dir: u64, hash: u64, slot: u64) {
+    let r: u64 = complete_record(state, dir)
+    if r >= DIRS {
+        return
+    }
+    let i: u64 = probe(key_of(rec_gen[r as usize], hash))
+    if i < TABLE && table_key[i as usize] != 0 {
+        table_val[i as usize] = 0
+    }
+    if rec_live[r as usize] > 0 {
+        rec_live[r as usize] = rec_live[r as usize] - 1
+    }
+    if slot < rec_hint[r as usize] {
+        rec_hint[r as usize] = slot
+    }
+}
+
+fn hint(state: u64, dir: u64, total: u64) -> u64 {
+    let r: u64 = complete_record(state, dir)
+    if r >= DIRS {
+        return NO_HINT
+    }
+    if rec_live[r as usize] >= total {
+        return total
+    }
+    return rec_hint[r as usize]
+}
+
+fn touch(state: u64, dir: u64) {
+    if held[0] != 0 {
+        return
+    }
+    let r: u64 = find_record(state, dir)
+    if r < DIRS {
+        rec_gen[r as usize] = 0
+    }
+}
+
+fn hold(on: bool) {
+    if on {
+        held[0] = 1
+    } else {
+        held[0] = 0
+    }
+}
