@@ -296,7 +296,7 @@ ZEILE="$OHNE" lauf zu ""
 has "$TMPD/zu.txt" "wm: hold" "der Schreibtisch steht auch ohne Plugintafel"
 has "$TMPD/zu.txt" "taskbar: geom " "die Leiste meldet ihre Lage wie immer"
 hasnot "$TMPD/zu.txt" "taskbar: plug nr=" "und hat kein Widget-Feld"
-has "$TMPD/zu.txt" "tafel= zu" "mit plugaus ist die Plugintafel zu"
+has "$TMPD/zu.txt" "table= closed" "mit plugaus ist die Plugintafel zu"
 
 for b in widget-an widget-aus widget-aus-laufzeit widget-eng-640x480; do
     if [ -s "$SHOTS/$b.ppm" ]; then
