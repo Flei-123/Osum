@@ -1,0 +1,173 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import ulib
+import libc.kcall
+import mp4
+
+const SYS_AUDGET: u64 = 1850
+const SYS_AUDSET: u64 = 1851
+const SYS_AUDOPEN: u64 = 1853
+const SYS_AUDSEND: u64 = 1854
+
+const A_READY: u64 = 0
+const A_RATE: u64 = 1
+const A_PLAYED: u64 = 5
+const A_REMAIN: u64 = 25
+
+const AS_CLOSE: u64 = 8
+
+const BUF_CAP: u64 = 524288
+const CHUNK_FRAMES: u64 = 1024
+const AHEAD_MS: u64 = 250
+const FEED_ROUNDS: u64 = 8
+
+static mut a_buf: [u8; 524288] = [0 as u8; 524288]
+static mut a_out: [u8; 4096] = [0 as u8; 4096]
+
+static mut a_active: bool = false
+static mut a_started: bool = false
+static mut a_ended: bool = false
+static mut a_stream: u64 = 0
+static mut a_item: u64 = 0
+static mut a_pos: u64 = 0
+static mut a_len: u64 = 0
+static mut a_base_ms: u64 = 0
+static mut a_sent: u64 = 0
+static mut a_played0: u64 = 0
+static mut a_dev_rate: u64 = 0
+
+fn audio_available() -> bool {
+    if !mp4.mp4_has(mp4.TRK_AUDIO) { return false }
+    if mp4.mp4_audio_codec() != mp4.AC_PCM_LE { return false }
+    if mp4.mp4_bits() != 16 { return false }
+    let ch: u64 = mp4.mp4_channels()
+    if ch != 1 && ch != 2 { return false }
+    return ulib.sys(SYS_AUDGET, A_READY, 0, 0) == 1
+}
+
+fn audio_active() -> bool { return a_active }
+
+fn audio_load(i: u64) -> bool {
+    let n: u64 = mp4.mp4_sample_raw(mp4.TRK_AUDIO, i, (&a_buf[(0) as usize]) as u64, BUF_CAP)
+    if n == 0 { return false }
+    a_item = i
+    a_pos = 0
+    a_len = n
+    return true
+}
+
+fn audio_item_at(ms: u64) -> u64 {
+    let n: u64 = mp4.mp4_items(mp4.TRK_AUDIO)
+    var i: u64 = 0
+    var best: u64 = 0
+    while i < n {
+        if mp4.mp4_item_ms(mp4.TRK_AUDIO, i) > ms { break }
+        best = i
+        i = i + 1
+    }
+    return best
+}
+
+fn audio_start(ms: u64) -> bool {
+    audio_stop()
+    if !audio_available() { return false }
+    let id: u64 = ulib.sys(SYS_AUDOPEN, mp4.mp4_rate(), 0, 0)
+    if ulib.bad(id) { return false }
+    a_stream = id
+    let idx: u64 = audio_item_at(ms)
+    if !audio_load(idx) {
+        ulib.sys(SYS_AUDSET, AS_CLOSE, a_stream, 0)
+        return false
+    }
+    let bpf: u64 = mp4.mp4_channels() * 2
+    let item_ms: u64 = mp4.mp4_item_ms(mp4.TRK_AUDIO, idx)
+    var skip: u64 = 0
+    if ms > item_ms { skip = (ms - item_ms) * mp4.mp4_rate() / 1000 }
+    if skip * bpf >= a_len { skip = 0 }
+    a_pos = skip * bpf
+    a_base_ms = item_ms + skip * 1000 / mp4.mp4_rate()
+    a_sent = 0
+    a_started = false
+    a_ended = false
+    a_dev_rate = ulib.sys(SYS_AUDGET, A_RATE, 0, 0)
+    if a_dev_rate == 0 { a_dev_rate = mp4.mp4_rate() }
+    a_active = true
+    return true
+}
+
+fn audio_stop() {
+    if a_active {
+        ulib.sys(SYS_AUDSET, AS_CLOSE, a_stream, 0)
+        a_active = false
+    }
+}
+
+fn remaining_ms() -> u64 {
+    return ulib.sys(SYS_AUDGET, A_REMAIN, 0, 0) * 1000 / a_dev_rate
+}
+
+fn convert_chunk(n: u64) {
+    let src: u64 = (&a_buf[(0) as usize]) as u64 + a_pos
+    let dst: u64 = (&a_out[(0) as usize]) as u64
+    if mp4.mp4_channels() == 2 {
+        var k: u64 = 0
+        while k < n * 4 {
+            __mmio_write8((dst + k) as *mut u8, __mmio_read8((src + k) as *mut u8))
+            k = k + 1
+        }
+        return
+    }
+    var f: u64 = 0
+    while f < n {
+        let lo: u8 = __mmio_read8((src + f * 2) as *mut u8)
+        let hi: u8 = __mmio_read8((src + f * 2 + 1) as *mut u8)
+        __mmio_write8((dst + f * 4) as *mut u8, lo)
+        __mmio_write8((dst + f * 4 + 1) as *mut u8, hi)
+        __mmio_write8((dst + f * 4 + 2) as *mut u8, lo)
+        __mmio_write8((dst + f * 4 + 3) as *mut u8, hi)
+        f = f + 1
+    }
+}
+
+fn audio_feed() {
+    if !a_active { return }
+    var round: u64 = 0
+    while round < FEED_ROUNDS {
+        round = round + 1
+        if a_started && remaining_ms() >= AHEAD_MS { return }
+        if a_pos >= a_len {
+            if !audio_load(a_item + 1) {
+                a_ended = true
+                return
+            }
+        }
+        let bpf: u64 = mp4.mp4_channels() * 2
+        var n: u64 = (a_len - a_pos) / bpf
+        if n > CHUNK_FRAMES { n = CHUNK_FRAMES }
+        if n == 0 {
+            a_pos = a_len
+            continue
+        }
+        convert_chunk(n)
+        let got: u64 = kcall.sys4(SYS_AUDSEND, a_stream, (&a_out[(0) as usize]) as u64, n, 0)
+        if ulib.bad(got) { return }
+        a_pos = a_pos + got * bpf
+        a_sent = a_sent + got
+        if got > 0 && !a_started {
+            a_started = true
+            a_played0 = ulib.sys(SYS_AUDGET, A_PLAYED, 0, 0)
+        }
+        if got < n { return }
+    }
+}
+
+fn audio_clock_ms() -> u64 {
+    if !a_started { return a_base_ms }
+    let played: u64 = ulib.sys(SYS_AUDGET, A_PLAYED, 0, 0)
+    if played < a_played0 { return a_base_ms }
+    return a_base_ms + (played - a_played0) * 1000 / a_dev_rate
+}
+
+fn audio_done() -> bool {
+    return a_active && a_ended && ulib.sys(SYS_AUDGET, A_REMAIN, 0, 0) == 0
+}

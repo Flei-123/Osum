@@ -1,0 +1,502 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile app
+
+import ulib
+import lineout
+import wlib
+import fuiscene
+import fuiapp
+import msg
+import libc.text
+import libc.regio
+import libc.clockapi
+import vplay.vpmedia
+import vplay.vpaudio
+import vplay.vpclock
+
+const K_IMG: u64 = 9001
+const K_PLAY: u64 = 9002
+const K_BACK: u64 = 9003
+const K_FWD: u64 = 9004
+const K_SEEK: u64 = 9005
+
+const SEEK_STEP_MS: u64 = 1000
+const UI_TICK_MS: u64 = 200
+const WALLCHECK_MS: u64 = 500
+const WAIT_SLEEP_MS: u64 = 1
+
+const ST_PAUSED: u64 = 0
+const ST_PLAYING: u64 = 1
+const ST_ENDED: u64 = 2
+
+static mut k_app: [u8; 6] = "vplay\0"
+static mut k_title: [u8; 12] = "vplay.title\0"
+static mut k_play: [u8; 11] = "vplay.play\0"
+static mut k_pause: [u8; 12] = "vplay.pause\0"
+static mut k_back: [u8; 11] = "vplay.back\0"
+static mut k_fwd: [u8; 10] = "vplay.fwd\0"
+static mut k_none: [u8; 11] = "vplay.none\0"
+static mut k_error: [u8; 12] = "vplay.error\0"
+static mut t_show: [u8; 12] = "vplay: show\0"
+static mut t_drop: [u8; 12] = "vplay: drop\0"
+static mut arg_trace: [u8; 3] = "-t\0"
+static mut arg_nosync: [u8; 3] = "-n\0"
+static mut arg_paused: [u8; 3] = "-p\0"
+
+static mut s_time: [u8; 40] = [0 as u8; 40]
+static mut s_status: [u8; 96] = [0 as u8; 96]
+
+static mut s_state: u64 = 0
+static mut s_loaded: bool = false
+static mut s_failed: bool = false
+static mut s_trace: bool = false
+static mut s_nosync: bool = false
+static mut s_pending: bool = false
+static mut s_pending_i: u64 = 0
+static mut s_pending_ms: u64 = 0
+static mut s_video_end: bool = false
+static mut s_slider_set: i64 = 0
+static mut s_ui_at: u64 = 0
+static mut s_wall_at: u64 = 0
+static mut s_rep_b: u64 = 0
+static mut s_shown: u64 = 0
+static mut s_dropped: u64 = 0
+static mut s_cur_ms: u64 = 0
+
+fn say(p: u64) { lineout.add_text(p) }
+
+fn say_num(v: u64) { lineout.add_num(v) }
+
+fn say_signed(a: u64, b: u64) {
+    if a >= b {
+        lineout.add_num(a - b)
+        return
+    }
+    var minus: [u8; 2] = "-\0"
+    lineout.add_text((&minus[0 as usize]) as u64)
+    lineout.add_num(b - a)
+}
+
+fn put_digits(v: u64, at: u64) -> u64 {
+    return text.digits(v, (&s_time[0 as usize]) as u64 + at, true)
+}
+
+fn put_char(c: u8, at: u64) -> u64 {
+    s_time[at as usize] = c
+    return at + 1
+}
+
+fn put_clock(ms: u64, at: u64) -> u64 {
+    let total: u64 = ms / 1000
+    var p: u64 = at
+    p = p + put_digits(total / 60, p)
+    p = put_char(58 as u8, p)
+    if total % 60 < 10 { p = put_char(48 as u8, p) }
+    p = p + put_digits(total % 60, p)
+    return p
+}
+
+fn time_text(pos_ms: u64, dur_ms: u64) {
+    var p: u64 = put_clock(pos_ms, 0)
+    p = put_char(32 as u8, p)
+    p = put_char(47 as u8, p)
+    p = put_char(32 as u8, p)
+    p = put_clock(dur_ms, p)
+    s_time[p as usize] = 0 as u8
+}
+
+fn status_copy(key: u64) {
+    regio.write8((&s_status[0 as usize]) as u64, 0)
+    let src: u64 = msg.get(key)
+    var i: u64 = 0
+    while i < 94 {
+        let c: u8 = __mmio_read8((src + i) as *mut u8)
+        s_status[i as usize] = c
+        if c == 0 as u8 { return }
+        i = i + 1
+    }
+    s_status[94] = 0 as u8
+}
+
+fn state_text() -> u64 {
+    if s_state == ST_PLAYING { return (&k_pause[0 as usize]) as u64 }
+    return (&k_play[0 as usize]) as u64
+}
+
+fn build() {
+    let col: usize = fuiscene.root()
+    var w: u64 = fuiscene.width()
+    var h: u64 = fuiscene.height()
+    if w > 24 { w = w - 24 } else { w = 160 }
+    if h > 110 { h = h - 110 } else { h = 120 }
+    let im: usize = fuiscene.image(col, K_IMG, w, h)
+    fuiscene.set_grow(im, 1)
+    let bar: usize = fuiscene.row(col)
+    fuiscene.set_gap(bar, 8)
+    let b0: usize = fuiscene.button(bar, msg.get(state_text()), K_PLAY)
+    fuiscene.set_noshrink(b0)
+    fuiscene.set_size(b0, 96, 36)
+    let b1: usize = fuiscene.button(bar, msg.get((&k_back[0 as usize]) as u64), K_BACK)
+    fuiscene.set_noshrink(b1)
+    fuiscene.set_size(b1, 72, 36)
+    let b2: usize = fuiscene.button(bar, msg.get((&k_fwd[0 as usize]) as u64), K_FWD)
+    fuiscene.set_noshrink(b2)
+    fuiscene.set_size(b2, 72, 36)
+    let sl: usize = fuiscene.slider(bar, K_SEEK, 240, s_slider_set)
+    fuiscene.set_grow(sl, 1)
+    let _t: usize = fuiscene.label(bar, (&s_time[0 as usize]) as u64)
+    let _s: usize = fuiscene.label(col, (&s_status[0 as usize]) as u64)
+}
+
+fn say_rect(name: u64, key: u64) {
+    let g: u64 = fuiscene.key_geom(key)
+    if g == 0 { return }
+    var s_a: [u8; 19] = "vplay: rect name=\0\0"
+    var s_x: [u8; 4] = " x=\0"
+    var s_y: [u8; 4] = " y=\0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_h: [u8; 4] = " h=\0"
+    var s_ax: [u8; 5] = " ax=\0"
+    var s_ay: [u8; 5] = " ay=\0"
+    let x: u64 = g >> 48
+    let y: u64 = (g >> 32) & 65535
+    let w0: u64 = fuiapp.win()
+    say((&s_a[0 as usize]) as u64)
+    say(name)
+    say((&s_x[0 as usize]) as u64)
+    say_num(x)
+    say((&s_y[0 as usize]) as u64)
+    say_num(y)
+    say((&s_w[0 as usize]) as u64)
+    say_num((g >> 16) & 65535)
+    say((&s_h[0 as usize]) as u64)
+    say_num(g & 65535)
+    say((&s_ax[0 as usize]) as u64)
+    say_num(wlib.win_cx(w0) + x)
+    say((&s_ay[0 as usize]) as u64)
+    say_num(wlib.win_cy(w0) + y)
+    lineout.end_line()
+}
+
+fn say_rects() {
+    var n_img: [u8; 6] = "image\0"
+    var n_play: [u8; 5] = "play\0"
+    var n_back: [u8; 5] = "back\0"
+    var n_fwd: [u8; 4] = "fwd\0"
+    var n_seek: [u8; 5] = "seek\0"
+    say_rect((&n_img[0 as usize]) as u64, K_IMG)
+    say_rect((&n_play[0 as usize]) as u64, K_PLAY)
+    say_rect((&n_back[0 as usize]) as u64, K_BACK)
+    say_rect((&n_fwd[0 as usize]) as u64, K_FWD)
+    say_rect((&n_seek[0 as usize]) as u64, K_SEEK)
+}
+
+fn say_state() {
+    var s_p: [u8; 15] = "vplay: state \0\0"
+    var s_play: [u8; 8] = "playing\0"
+    var s_paus: [u8; 7] = "paused\0"
+    var s_end: [u8; 6] = "ended\0"
+    say((&s_p[0 as usize]) as u64)
+    if s_state == ST_PLAYING {
+        say((&s_play[0 as usize]) as u64)
+    } else if s_state == ST_ENDED {
+        say((&s_end[0 as usize]) as u64)
+    } else {
+        say((&s_paus[0 as usize]) as u64)
+    }
+    lineout.end_line()
+}
+
+fn say_frame(tag: u64, i: u64, pts: u64, now: u64, hash: u64) {
+    var s_i: [u8; 4] = " i=\0"
+    var s_pts: [u8; 6] = " pts=\0"
+    var s_clk: [u8; 8] = " clock=\0"
+    var s_dr: [u8; 8] = " drift=\0"
+    var s_sha: [u8; 6] = " sha=\0"
+    var s_src: [u8; 6] = " src=\0"
+    var s_au: [u8; 6] = "audio\0"
+    var s_wa: [u8; 5] = "wall\0"
+    say(tag)
+    say((&s_i[0 as usize]) as u64)
+    say_num(i)
+    say((&s_pts[0 as usize]) as u64)
+    say_num(pts)
+    say((&s_clk[0 as usize]) as u64)
+    say_num(now)
+    say((&s_dr[0 as usize]) as u64)
+    say_signed(now, pts)
+    say((&s_src[0 as usize]) as u64)
+    if vpclock.clock_audio() { say((&s_au[0 as usize]) as u64) } else { say((&s_wa[0 as usize]) as u64) }
+    if hash != 0 {
+        say((&s_sha[0 as usize]) as u64)
+        say(hash)
+    }
+    lineout.end_line()
+}
+
+fn present_frame(i: u64, pts: u64, tag: u64) -> bool {
+    let px: u64 = vpmedia.media_convert()
+    if px == 0 { return false }
+    fuiscene.image_set(K_IMG, px, vpmedia.media_width(), vpmedia.media_height())
+    fuiscene.image_fit(K_IMG)
+    s_cur_ms = pts
+    var hash: u64 = 0
+    if s_trace { hash = vpmedia.media_argb_hash(px) }
+    say_frame(tag, i, pts, vpclock.clock_now(), hash)
+    return true
+}
+
+fn set_state(st: u64) {
+    if st == s_state { return }
+    s_state = st
+    say_state()
+    fuiscene.refresh()
+}
+
+fn start_playing() {
+    if s_state == ST_ENDED {
+        seek_ms(0)
+    }
+    vpclock.clock_start(s_cur_ms)
+    set_state(ST_PLAYING)
+}
+
+fn pause_playing() {
+    vpclock.clock_stop(s_cur_ms)
+    set_state(ST_PAUSED)
+}
+
+fn seek_ms(ms: u64) {
+    var s_sk: [u8; 16] = "vplay: seek ms=\0"
+    var s_at: [u8; 6] = " idx=\0"
+    var s_sha: [u8; 6] = " sha=\0"
+    var target: u64 = ms
+    let dur: u64 = vpmedia.media_duration_ms()
+    if dur > 0 && target >= dur { target = dur - 1 }
+    let idx: u64 = vpmedia.media_index_at(target)
+    s_pending = false
+    s_video_end = false
+    if !vpmedia.media_seek_to(idx) {
+        s_failed = true
+        status_copy((&k_error[0 as usize]) as u64)
+        fuiscene.refresh()
+        return
+    }
+    let pts: u64 = vpmedia.media_item_ms(idx)
+    let px: u64 = vpmedia.media_convert()
+    if px != 0 {
+        fuiscene.image_set(K_IMG, px, vpmedia.media_width(), vpmedia.media_height())
+        fuiscene.image_fit(K_IMG)
+    }
+    s_cur_ms = pts
+    say((&s_sk[0 as usize]) as u64)
+    say_num(ms)
+    say((&s_at[0 as usize]) as u64)
+    say_num(idx)
+    if s_trace && px != 0 {
+        say((&s_sha[0 as usize]) as u64)
+        say(vpmedia.media_argb_hash(px))
+    }
+    lineout.end_line()
+    if s_state == ST_PLAYING {
+        vpclock.clock_start(pts)
+    } else {
+        vpclock.clock_stop(pts)
+        if s_state == ST_ENDED { s_state = ST_PAUSED }
+    }
+    ui_update()
+}
+
+fn ui_update() {
+    let dur: u64 = vpmedia.media_duration_ms()
+    time_text(s_cur_ms, dur)
+    if dur > 0 {
+        s_slider_set = (s_cur_ms * 1000 / dur) as i64
+        fuiscene.set_value(K_SEEK, s_slider_set)
+    }
+    fuiscene.refresh()
+}
+
+fn step_playback() {
+    if !s_pending && !s_video_end {
+        let r: u64 = vpmedia.media_step()
+        if r == vpmedia.STEP_FRAME {
+            s_pending = true
+            s_pending_i = vpmedia.media_cur()
+            s_pending_ms = vpmedia.media_item_ms(s_pending_i)
+        } else if r == vpmedia.STEP_END {
+            s_video_end = true
+        } else if r == vpmedia.STEP_ERROR {
+            s_video_end = true
+            s_failed = true
+            status_copy((&k_error[0 as usize]) as u64)
+            fuiscene.refresh()
+        }
+    }
+    if s_pending {
+        let now: u64 = vpclock.clock_now()
+        let d: u64 = vpclock.sync_decide(s_pending_ms, now, s_nosync)
+        if d == vpclock.DECISION_WAIT {
+            clockapi.sleep_ms(WAIT_SLEEP_MS)
+        } else if d == vpclock.DECISION_DROP {
+            s_pending = false
+            s_dropped = s_dropped + 1
+            say_frame((&t_drop[0 as usize]) as u64, s_pending_i, s_pending_ms, now, 0)
+        } else {
+            s_pending = false
+            if present_frame(s_pending_i, s_pending_ms, (&t_show[0 as usize]) as u64) {
+                s_shown = s_shown + 1
+            }
+        }
+    }
+    if s_video_end && !s_pending && (!vpclock.clock_audio() || vpaudio.audio_done()) {
+        vpclock.clock_stop(s_cur_ms)
+        set_state(ST_ENDED)
+        ui_update()
+    }
+}
+
+fn tick_ui() {
+    var s_wc: [u8; 23] = "vplay: wallcheck wall=\0"
+    var s_ac: [u8; 9] = " aclock=\0"
+    let now: u64 = fuiapp.now_ms()
+    if now - s_ui_at >= UI_TICK_MS {
+        s_ui_at = now
+        ui_update()
+    }
+    if s_trace && s_state == ST_PLAYING && vpclock.clock_audio() && now - s_wall_at >= WALLCHECK_MS {
+        s_wall_at = now
+        say((&s_wc[0 as usize]) as u64)
+        say_num(vpclock.clock_wall_pos())
+        say((&s_ac[0 as usize]) as u64)
+        say_num(vpclock.clock_now())
+        lineout.end_line()
+    }
+}
+
+fn handle_key(key: u64) {
+    if key == K_PLAY {
+        if s_state == ST_PLAYING { pause_playing() } else { start_playing() }
+        fuiscene.refresh()
+    } else if key == K_BACK {
+        if s_cur_ms > SEEK_STEP_MS { seek_ms(s_cur_ms - SEEK_STEP_MS) } else { seek_ms(0) }
+    } else if key == K_FWD {
+        seek_ms(s_cur_ms + SEEK_STEP_MS)
+    } else if key == K_SEEK {
+        let v: i64 = fuiscene.value_of(K_SEEK)
+        let moved: i64 = v - s_slider_set
+        if moved > 4 || moved < -4 {
+            let dur: u64 = vpmedia.media_duration_ms()
+            seek_ms((v as u64) * dur / 1000)
+        }
+    }
+}
+
+fn parse_args(args: u64) -> u64 {
+    var path: u64 = 0
+    var i: u64 = 1
+    let n: u64 = ulib.arg_count(args)
+    while i < n {
+        let a: u64 = ulib.arg_at(args, i)
+        if ulib.streq(a, (&arg_trace[0 as usize]) as u64) {
+            s_trace = true
+        } else if ulib.streq(a, (&arg_nosync[0 as usize]) as u64) {
+            s_nosync = true
+        } else if ulib.streq(a, (&arg_paused[0 as usize]) as u64) {
+            s_state = ST_PAUSED
+        } else if path == 0 {
+            path = a
+        }
+        i = i + 1
+    }
+    return path
+}
+
+fn load(path: u64) -> bool {
+    var s_op: [u8; 13] = "vplay: open \0"
+    var s_fr: [u8; 9] = " frames=\0"
+    var s_du: [u8; 6] = " dur=\0"
+    var s_au: [u8; 8] = " audio=\0"
+    var s_wh: [u8; 3] = "w=\0"
+    var s_hh: [u8; 4] = " h=\0"
+    if path == 0 { return false }
+    if !vpmedia.media_open(path) { return false }
+    say((&s_op[0 as usize]) as u64)
+    say((&s_wh[0 as usize]) as u64)
+    say_num(vpmedia.media_width())
+    say((&s_hh[0 as usize]) as u64)
+    say_num(vpmedia.media_height())
+    say((&s_fr[0 as usize]) as u64)
+    say_num(vpmedia.media_items())
+    say((&s_du[0 as usize]) as u64)
+    say_num(vpmedia.media_duration_ms())
+    say((&s_au[0 as usize]) as u64)
+    if vpaudio.audio_available() { say_num(1) } else { say_num(0) }
+    lineout.end_line()
+    return true
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_bad: [u8; 20] = "vplay: no surface\0\0\0"
+    var s_go: [u8; 13] = "vplay: ready\0"
+    var s_sum: [u8; 15] = "vplay: summary\0"
+    var s_sh: [u8; 8] = " shown=\0"
+    var s_dr: [u8; 10] = " dropped=\0"
+    let _mi: u64 = msg.init()
+    s_state = ST_PLAYING
+    let path: u64 = parse_args(args)
+    s_loaded = load(path)
+    s_failed = !s_loaded
+    if s_failed {
+        status_copy((&k_none[0 as usize]) as u64)
+    }
+    time_text(0, vpmedia.media_duration_ms())
+    if !fuiscene.open(120, 80, 640, 480, msg.get((&k_title[0 as usize]) as u64), build) {
+        say((&s_bad[0 as usize]) as u64)
+        lineout.end_line()
+        return 1
+    }
+    fuiscene.set_app((&k_app[0 as usize]) as u64)
+    let want_play: bool = s_state == ST_PLAYING
+    s_state = ST_PAUSED
+    var first: bool = true
+    while fuiscene.alive() {
+        let key: u64 = fuiscene.pump()
+        if first {
+            first = false
+            say_rects()
+            say((&s_go[0 as usize]) as u64)
+            lineout.end_line()
+            if s_loaded {
+                seek_ms(0)
+                if want_play { start_playing() }
+            }
+        }
+        if fuiscene.builds() != s_rep_b {
+            s_rep_b = fuiscene.builds()
+            say_rects()
+        }
+        if s_loaded && !s_failed {
+            handle_key(key)
+            if s_state == ST_PLAYING {
+                vpaudio.audio_feed()
+                step_playback()
+            }
+            tick_ui()
+        }
+    }
+    say((&s_sum[0 as usize]) as u64)
+    say((&s_sh[0 as usize]) as u64)
+    say_num(s_shown)
+    say((&s_dr[0 as usize]) as u64)
+    say_num(s_dropped)
+    lineout.end_line()
+    vpclock.clock_stop(s_cur_ms)
+    vpmedia.media_close()
+    return 0
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}

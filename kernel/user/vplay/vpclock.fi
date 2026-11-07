@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import ulib
+import vplay.vpaudio
+
+const LATE_MS: u64 = 100
+const DECISION_SHOW: u64 = 0
+const DECISION_WAIT: u64 = 1
+const DECISION_DROP: u64 = 2
+
+static mut c_running: bool = false
+static mut c_base_ms: u64 = 0
+static mut c_wall0: u64 = 0
+
+fn wall_ms() -> u64 {
+    var ts: [u8; 16] = [0 as u8; 16]
+    let r: u64 = ulib.sys(228, 1, (&ts[(0) as usize]) as u64, 0)
+    if ulib.bad(r) { return 0 }
+    let s: u64 = __mmio_read64(((&ts[(0) as usize]) as u64) as *mut u64)
+    let ns: u64 = __mmio_read64((((&ts[(0) as usize]) as u64) + 8) as *mut u64)
+    return s * 1000 + ns / 1000000
+}
+
+fn clock_start(pos_ms: u64) -> bool {
+    c_base_ms = pos_ms
+    c_wall0 = wall_ms()
+    c_running = true
+    return vpaudio.audio_start(pos_ms)
+}
+
+fn clock_stop(pos_ms: u64) {
+    c_base_ms = pos_ms
+    c_running = false
+    vpaudio.audio_stop()
+}
+
+fn clock_running() -> bool { return c_running }
+
+fn clock_audio() -> bool { return vpaudio.audio_active() }
+
+fn clock_wall_pos() -> u64 {
+    if !c_running { return c_base_ms }
+    return c_base_ms + (wall_ms() - c_wall0)
+}
+
+fn clock_now() -> u64 {
+    if !c_running { return c_base_ms }
+    if vpaudio.audio_active() { return vpaudio.audio_clock_ms() }
+    return clock_wall_pos()
+}
+
+fn sync_decide(pts_ms: u64, now_ms: u64, nosync: bool) -> u64 {
+    if nosync { return DECISION_SHOW }
+    if pts_ms > now_ms { return DECISION_WAIT }
+    if now_ms - pts_ms > LATE_MS { return DECISION_DROP }
+    return DECISION_SHOW
+}
