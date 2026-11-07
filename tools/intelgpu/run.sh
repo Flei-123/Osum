@@ -14,7 +14,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 [ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 
-for m in ids regs bits mode timing edid aux state dump; do
+for m in ids regs bits mode timing edid aux snap dump; do
     printf 'import gpu.intel.%s\nfn main() -> i32 {\n    return 0\n}\n' "$m" > "$T/k_$m.fi"
     "$FIRNC" --profile=kernel -c "$T/k_$m.fi" -o "$T/k_$m.o" 2> "$T/k.err" \
         && ok "gpu.intel.$m compiles with --profile=kernel" \
@@ -103,9 +103,9 @@ mutate no_offset_mot aux    's/REQ_I2C_WRITE | REQ_MOT/REQ_I2C_WRITE/'
 mutate size_check    aux    's/if size == 0 || size > MAX_MSG {/if false {/'
 mutate busy_check    aux    's/return E_BUSY/return E_OK/'
 mutate short_reply   aux    's/var take: u64 = got - 1/var take: u64 = chunk/'
-mutate cdclk_table   state  's/return 450000$/return 450001/'
-mutate bpc_table     state  's/return 6$/return 7/'
-mutate lanes_plus    state  's/bits.DDI_LANES_MASK) + 1/bits.DDI_LANES_MASK)/'
+mutate cdclk_table   snap   's/return 450000$/return 450001/'
+mutate bpc_table     snap   's/return 6$/return 7/'
+mutate lanes_plus    snap   's/bits.DDI_LANES_MASK) + 1/bits.DDI_LANES_MASK)/'
 mutate stride_unit   bits   's/PLANE_STRIDE_UNIT: u64 = 0x40/PLANE_STRIDE_UNIT: u64 = 0x20/'
 mutate pp_shift      bits   's/PP_DELAY_SHIFT: u64 = 0x10/PP_DELAY_SHIFT: u64 = 0x11/'
 
