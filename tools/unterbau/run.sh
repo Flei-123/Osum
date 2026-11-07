@@ -157,7 +157,7 @@ pinned_counter_proofs() {
 run_all() { # run_all <kernel> <disk> <tag>
     for t in $TESTS; do
         local ka="" na=""
-        case "$t" in t_events|t_udpnet|t_netlink) ka="nic nip=10.0.2.15/24 ngw=10.0.2.2"; na="-netdev user,id=n0 -device virtio-net-pci,netdev=n0";; t_wakelat) ka="nic nip=10.0.2.15/24 ngw=10.0.2.2"; na="-netdev user,id=n0,guestfwd=tcp:10.0.2.100:7777-cmd:cat -device virtio-net-pci,netdev=n0";; esac
+        case "$t" in t_events|t_udpnet|t_netlink) ka="nic nip=10.0.2.15/24 ngw=10.0.2.2"; na="-netdev user,id=n0 -device virtio-net-pci,netdev=n0";; t_wakelat|t_pollmulti) ka="nic nip=10.0.2.15/24 ngw=10.0.2.2"; na="-netdev user,id=n0,guestfwd=tcp:10.0.2.100:7777-cmd:cat -device virtio-net-pci,netdev=n0";; esac
         local t0=$SECONDS tv="TMO_$t"
         TMO=${!tv:-$TMO} KARGS="$ka ${KARGS_EXTRA:-}" NETARGS="$na" boot "$1" "$2" "/bin/$t" "$D/$3-$t.ser"; rc=$?
         local el=$((SECONDS-t0))
