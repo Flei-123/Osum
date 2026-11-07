@@ -240,6 +240,9 @@ gleich "the NEW kernel runs (first serial line)" "$(commit_of "$OUT/g2.txt")" "$
 hat "$OUT/g2.txt" "ab: gen=" "ab_boot counted the trial"
 hat "$OUT/g2.txt" "system: pending trial of build" "status shows the pending trial"
 gleich "slot A still untouched before confirm" "$(esp_sha osum.mb)" "$OLDSHA"
+gzip -9 -n -c "$OUT/img-old/osum.mb" > "$OUT/stale.gz"
+esp_put "$OUT/stale.gz" osum.mb.gz
+esp_has osum.mb.gz && ok "precondition: stale osum.mb.gz planted next to slot A before confirm" || bad "could not plant the stale osum.mb.gz"
 rc=$(lauf g3 "ota system confirm;ota system status;cat /system/SYSVERSION;ls /system/old;ls /system;exit" keep)
 hat "$OUT/g3.txt" "system: overlay committed" "confirm commits the overlay"
 hatnicht "$OUT/g3.txt" "SYSOVL" "journal removed"
@@ -250,6 +253,7 @@ hatnicht "$OUT/g3.old" "gate-ovl.txt" "backups removed from /system/old"
 hatnicht "$OUT/g3.old" "ota" "no ota backup left in /system/old"
 hat "$OUT/g3.txt" "system: new kernel confirmed and promoted to slot A" "confirm promotes B -> A"
 gleich "slot A == new kernel" "$(esp_sha osum.mb)" "$KSHA"
+esp_has osum.mb.gz && bad "stale osum.mb.gz survived the kernel copy (kpublish.drop_gz)" || ok "stale osum.mb.gz removed by the kernel copy to slot A"
 gleich "limine default_entry back to 1" "$(conf_default)" "1"
 hat "$OUT/g3.txt" "00000200" "SYSVERSION is 200 (00000200)"
 hat "$OUT/g3.txt" "system: no update pending" "nothing pending any more"
@@ -639,9 +643,13 @@ esp_get limine.conf | sed -n '/^\/Windows Boot Manager/,$p' > "$OUT/d.win1"
 cmp -s "$OUT/d.win0" "$OUT/d.win1" && ok "Windows entry byte-identical" || bad "Windows entry changed"
 rc=$(lauf d2 "ota system status;exit" keep)
 gleich "trial boot runs the NEW kernel" "$(commit_of "$OUT/d2.txt")" "$NEW"
+gzip -9 -n -c "$OUT/img-old/osum.mb" > "$OUT/stale.gz"
+esp_put "$OUT/stale.gz" EFI/prod/osum.mb.gz
+esp_has EFI/prod/osum.mb.gz && ok "precondition: stale EFI/prod/osum.mb.gz planted before confirm" || bad "could not plant the stale gz in the subfolder"
 rc=$(lauf d3 "ota system confirm;ota system status;exit" keep)
 hat "$OUT/d3.txt" "system: new kernel confirmed and promoted to slot A" "confirm promotes B -> A in the subfolder"
 gleich "slot A == new kernel" "$(esp_sha EFI/prod/osum.mb)" "$KSHA"
+esp_has EFI/prod/osum.mb.gz && bad "stale EFI/prod/osum.mb.gz survived the kernel copy" || ok "stale gz in the subfolder removed by the kernel copy"
 gleich "limine default_entry back to 1" "$(conf_default)" "1"
 esp_get limine.conf | sed -n '/^\/Windows Boot Manager/,$p' > "$OUT/d.win2"
 cmp -s "$OUT/d.win0" "$OUT/d.win2" && ok "Windows entry still byte-identical after confirm" || bad "Windows entry changed by confirm"
