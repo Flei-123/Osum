@@ -24,8 +24,8 @@ public half of `/srv/store/osum/aktuell/schluessel.pub`). Its passphrase is kept
 
 ## 2. Acceptance in the VM BEFORE publishing
 
-    BOOT_KERNEL_COPY=1 OTA_ROOTS=<certs>/ca.pem OTA_CONF=<conf> PARTTAB=mbr FS_BLOCKS=122880 \
-        bash tools/usbimg/build.sh <image-dir>   # shipped image, local feed address (certs: tools/ota/mkcerts.py <dir> ota.test 10.0.2.2)
+    BOOT_KERNEL_COPY=1 OTA_ROOTS=<certs>/ca.pem OTA_CONF=<conf> PARTTAB=mbr \
+        bash tools/usbimg/build.sh <image-dir>   # shipped image, local feed address (conf `source=https://10.0.2.2:18555/osum/aktuell`, `name=ota.test`; do not set FS_BLOCKS, 122880 is too small: `mkfs: the disk is full`; certs: tools/ota/mkcerts.py <dir> ota.test 10.0.2.2)
     bash tools/ota/feedtest.sh <image-dir> /tmp/ota-feed [work-dir]
 
 `BOOT_KERNEL_COPY=1` is mandatory at BUILD time: the test boots with QEMU `-kernel/-initrd` (no boot
