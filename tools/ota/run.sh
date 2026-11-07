@@ -389,11 +389,11 @@ hatnicht "$OUT/c3b.txt" "wrong length" "(c3) no wrong-length failure after the r
 dienst_aus
 
 H2=$(python3 -c "print(open('$OUT/netz2/INDEX').read().split(chr(9))[2])" 2>/dev/null)
-rc=$(lauf c3c "echo ==A==;opk generations;opk check;mv /system/generations/1/GRUND /system/generations/1/REASON;mv /store/${H2:0:20}/PAKET /store/${H2:0:20}/PACKAGE;echo ==B==;opk generations;opk check;exit")
+rc=$(lauf c3c "echo ==A==;opk generations;opk verify;mv /system/generations/1/GRUND /system/generations/1/REASON;mv /store/${H2:0:20}/PAKET /store/${H2:0:20}/PACKAGE;echo ==B==;opk generations;opk verify;exit")
 sed -n '/==A==$/,/==B==$/p' "$OUT/c3c.txt" | grep -a -v '==' > "$OUT/c3c.a"
 sed -n '/==B==$/,$p' "$OUT/c3c.txt" | grep -a -v '==' | grep -a -v '^\(exit\|#\|/ \)' > "$OUT/c3c.b"
-hat "$OUT/c3c.a" "opk: ok" "(c3c) before the rename opk check passes"
-hat "$OUT/c3c.b" "opk: ok" "(c3c) English member names PACKAGE and REASON: opk check still finds the store entry"
+hat "$OUT/c3c.a" "opk: ok" "(c3c) before the rename opk verify passes"
+hat "$OUT/c3c.b" "opk: ok" "(c3c) English member names PACKAGE and REASON: opk verify still finds the store entry"
 hatnicht "$OUT/c3c.b" "store entry missing" "(c3c) no store entry reported missing"
 GA=$(grep -a 'generation 1' "$OUT/c3c.a" | head -n 1)
 GB=$(grep -a 'generation 1' "$OUT/c3c.b" | head -n 1)
