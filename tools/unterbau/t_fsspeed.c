@@ -29,6 +29,9 @@
 #define VEC_LIMIT_US 3000
 #define VEC_BIG_PIECE 1500
 #define VEC_BIG_PIECES 5
+#define ONE_BIG_BYTES 32768
+#define ONE_BIG_COUNT 20
+#define ONE_BIG_LIMIT_US 11000
 
 static long now_us(void)
 {
@@ -262,6 +265,30 @@ static long vec_calls(int *intact)
     return total / VEC_COUNT;
 }
 
+static long one_big_calls(int *intact)
+{
+    static char data[ONE_BIG_BYTES];
+    static char back[ONE_BIG_BYTES];
+    struct iovec iov = { data, ONE_BIG_BYTES };
+    int fd = open(DIR_PATH "/onebig", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    long total = 0;
+    *intact = fd >= 0;
+    fill_pattern(data, ONE_BIG_BYTES, 5);
+    for (int n = 0; n < ONE_BIG_COUNT && *intact; n++) {
+        long t0 = now_us();
+        long r = writev(fd, &iov, 1);
+        total += now_us() - t0;
+        *intact = r == ONE_BIG_BYTES;
+    }
+    if (*intact) {
+        *intact = pread(fd, back, ONE_BIG_BYTES, (off_t)ONE_BIG_BYTES * (ONE_BIG_COUNT - 1)) == ONE_BIG_BYTES
+            && memcmp(back, data, ONE_BIG_BYTES) == 0;
+    }
+    if (fd >= 0)
+        close(fd);
+    return total / ONE_BIG_COUNT;
+}
+
 static int vec_big_content(void)
 {
     static char piece[VEC_BIG_PIECES][VEC_BIG_PIECE];
@@ -366,8 +393,10 @@ int main(void)
     int listed = listing_complete();
     int vec_intact = 0;
     long vec_us = vec_calls(&vec_intact);
-    PASS("metrics", "small_scan=%ld create_first=%ld create_last=%ld open=%ld stat=%ld access=%ld writev_small=%ld writev_page=%ld writev_iov6=%ld rename=%ld unlink=%ld",
-        small_scan_us, create_first, create_last, open_us, stat_us, access_us, append_small, append_page, vec_us, rename_us, unlink_us);
+    int one_intact = 0;
+    long one_us = one_big_calls(&one_intact);
+    PASS("metrics", "small_scan=%ld create_first=%ld create_last=%ld open=%ld stat=%ld access=%ld writev_small=%ld writev_page=%ld writev_iov6=%ld writev_one32k=%ld rename=%ld unlink=%ld",
+        small_scan_us, create_first, create_last, open_us, stat_us, access_us, append_small, append_page, vec_us, one_us, rename_us, unlink_us);
     CHECK("coherence_basic", coherence_basic(), "stale lookup after create/rename/unlink");
     CHECK("coherence_link", coherence_link(), "stale lookup after unlinking one hard link");
     CHECK("coherence_dir", coherence_dir(), "stale lookup below a renamed directory");
@@ -382,6 +411,8 @@ int main(void)
     CHECK("writev_page", append_page < APPEND_PAGE_LIMIT_US, "us=%ld limit=%d", append_page, APPEND_PAGE_LIMIT_US);
     CHECK("writev_iov6", vec_us < VEC_LIMIT_US, "us=%ld limit=%d", vec_us, VEC_LIMIT_US);
     CHECK("writev_iov6_content", vec_intact, "appended vector content differs from the source pieces");
+    CHECK("writev_one32k", one_us < ONE_BIG_LIMIT_US, "us=%ld limit=%d", one_us, ONE_BIG_LIMIT_US);
+    CHECK("writev_one32k_content", one_intact, "single large iovec lost data");
     CHECK("writev_big_content", vec_big_content(), "vector write across block boundaries lost or reordered data");
     CHECK("writev_fault_partial", vec_fault_partial(), "bad iovec: expected the good prefix count, then -1 when first");
     CHECK("rename_over", rename_us < RENAME_LIMIT_US, "us=%ld limit=%d", rename_us, RENAME_LIMIT_US);
