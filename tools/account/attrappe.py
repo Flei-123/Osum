@@ -42,6 +42,7 @@ state = {
     "temp": {},
     "refresh_verweigern": False,
     "own_new_keys": False,
+    "own_old_only": False,
     "access_sekunden": 604800,
     "sperre": threading.Lock(),
 }
@@ -137,6 +138,7 @@ class Griff(BaseHTTPRequestHandler):
                 return self._reply(401, {"error": "Nicht angemeldet"})
             return self._reply(200, {"username": an.get("name"),
                                        "admin": False})
+        p = self.own_path(p)
         if p == "/konto/pruefen":
             tok = self._bearer()
             an = jwt_read(tok or "")
@@ -149,6 +151,7 @@ class Griff(BaseHTTPRequestHandler):
         self._mitschreiben()
         p = self.path.split("?")[0]
         b = self._koerper()
+        p = self.own_path(p)
         if p == "/api/auth/login":
             return self.xoffi_login(b)
         if p == "/api/auth/mfa/verify":
@@ -174,6 +177,15 @@ class Griff(BaseHTTPRequestHandler):
                 state["gesperrt"].add(tok)
             return self._reply(200, {"ok": True})
         return self._reply(404, {"fehler": "unbekannt"})
+
+    def own_path(self, p):
+        names = {"/account/login": "/konto/anmelden",
+                 "/account/renew": "/konto/erneuern",
+                 "/account/logout": "/konto/abmelden",
+                 "/account/check": "/konto/pruefen"}
+        if p in names:
+            return "/unknown" if state["own_old_only"] else names[p]
+        return p
 
     def bremse(self, kennung):
         now = time.time()
@@ -297,8 +309,15 @@ class Griff(BaseHTTPRequestHandler):
                                     % tok])
 
     def own_login(self, b):
-        kennung = b.get("kennung") or ""
-        if JARVIS.get(kennung) != (b.get("geheim") or ""):
+        protokoll({"pfad": "own-body", "kopfzeilen": {},
+                   "keys": sorted(b.keys())})
+        if state["own_old_only"]:
+            kennung = b.get("kennung") or ""
+            given_secret = b.get("geheim") or ""
+        else:
+            kennung = b.get("identity") or b.get("kennung") or ""
+            given_secret = b.get("secret") or b.get("geheim") or ""
+        if JARVIS.get(kennung) != given_secret:
             return self._reply(401, {"fehler": "falsch"})
         now = int(time.time())
         tok = jwt({"uid": "e_" + kennung, "type": "access", "iat": now,
@@ -320,7 +339,7 @@ class Griff(BaseHTTPRequestHandler):
     def own_refresh(self, b):
         if state["refresh_verweigern"]:
             return self._reply(401, {"fehler": "abgelehnt"})
-        an = jwt_read(b.get("erneuerung") or "")
+        an = jwt_read(b.get("renewal") or b.get("erneuerung") or "")
         if not an:
             return self._reply(401, {"fehler": "kein Token"})
         now = int(time.time())
@@ -328,7 +347,7 @@ class Griff(BaseHTTPRequestHandler):
                    "exp": now + 604800})
         return self._reply(200, {
             "subjekt": an.get("uid"), "anzeige": an.get("uid"),
-            "zugriff": tok, "erneuerung": b.get("erneuerung"),
+            "zugriff": tok, "erneuerung": b.get("renewal") or b.get("erneuerung"),
             "ablauf": now + 604800, "datenort": "eigen"})
 
 
@@ -340,12 +359,14 @@ def main():
     ap.add_argument("--directory", default=".")
     ap.add_argument("--kein-tls", action="store_true")
     ap.add_argument("--own-new-keys", action="store_true")
+    ap.add_argument("--own-old-only", action="store_true")
     ap.add_argument("--refresh-verweigern", action="store_true")
     ap.add_argument("--access-secs", type=int, default=604800)
     a = ap.parse_args()
     state["verzeichnis"] = a.directory
     state["refresh_verweigern"] = a.refresh_verweigern
     state["own_new_keys"] = a.own_new_keys
+    state["own_old_only"] = a.own_old_only
     state["access_sekunden"] = a.access_secs
     srv = ThreadingHTTPServer(("0.0.0.0", a.port), Griff)
     if not a.kein_tls:

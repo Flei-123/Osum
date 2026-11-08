@@ -15,16 +15,27 @@ export { push }
 
 const RUNDEN: u64 = 8192
 
-static mut p_an: [u8; 17] = "/konto/anmelden\0\0"
-static mut p_er: [u8; 17] = "/konto/erneuern\0\0"
-static mut p_ab: [u8; 17] = "/konto/abmelden\0\0"
-static mut p_pr: [u8; 16] = "/konto/pruefen\0\0"
+const OP_LOGIN: u32 = 0
+const OP_RENEW: u32 = 1
+const OP_LOGOUT: u32 = 2
+const OP_CHECK: u32 = 3
+
+static mut p_login: [u8; 15] = "/account/login\0"
+static mut p_renew: [u8; 15] = "/account/renew\0"
+static mut p_logout: [u8; 16] = "/account/logout\0"
+static mut p_check: [u8; 15] = "/account/check\0"
+static mut p_an_old: [u8; 17] = "/konto/anmelden\0\0"
+static mut p_er_old: [u8; 17] = "/konto/erneuern\0\0"
+static mut p_ab_old: [u8; 17] = "/konto/abmelden\0\0"
+static mut p_pr_old: [u8; 16] = "/konto/pruefen\0\0"
 
 static mut m_post: [u8; 5] = "POST\0"
 static mut m_get: [u8; 4] = "GET\0"
 
-static mut f_kennung: [u8; 8] = "kennung\0"
-static mut f_secret: [u8; 7] = "geheim\0"
+static mut f_kennung_old: [u8; 8] = "kennung\0"
+static mut f_identity: [u8; 9] = "identity\0"
+static mut f_secret_old: [u8; 7] = "geheim\0"
+static mut f_secret: [u8; 7] = "secret\0"
 static mut f_code: [u8; 5] = "code\0"
 static mut f_bereich_old: [u8; 8] = "bereich\0"
 static mut f_scope: [u8; 6] = "scope\0"
@@ -375,6 +386,106 @@ fn net_state(a: *mut knetz.Reply) -> u32 {
     return provider.S_ERROR
 }
 
+fn login_body(z: *mut provider.Access, legacy: bool, out: *mut rt.Buf) {
+    var key_identity: u64 = (&f_identity[0]) as u64
+    var key_secret: u64 = (&f_secret[0]) as u64
+    var key_scope: u64 = (&f_scope[0]) as u64
+    if legacy {
+        key_identity = (&f_kennung_old[0]) as u64
+        key_secret = (&f_secret_old[0]) as u64
+        key_scope = (&f_bereich_old[0]) as u64
+    }
+    var w: kjson.Writer = kjson.writer_new(out)
+    kjson.field(&w, key_identity, (*z).kennung, rt.c_length((*z).kennung))
+    kjson.field(&w, key_secret, (*z).secret, rt.c_length((*z).secret))
+    if (*z).code != 0 && rt.c_length((*z).code) > 0 {
+        kjson.field(&w, (&f_code[0]) as u64, (*z).code,
+            rt.c_length((*z).code))
+    }
+    if (*z).bereich != 0 && rt.c_length((*z).bereich) > 0 {
+        kjson.field(&w, key_scope, (*z).bereich, rt.c_length((*z).bereich))
+    }
+    kjson.field_free(&w)
+}
+
+fn renew_body(z: *mut provider.Access, legacy: bool, out: *mut rt.Buf) {
+    var key: u64 = (&f_erneuerung[0]) as u64
+    if legacy {
+        key = (&f_erneuerung_old[0]) as u64
+    }
+    var w: kjson.Writer = kjson.writer_new(out)
+    kjson.field(&w, key, (*z).erneuerung, rt.c_length((*z).erneuerung))
+    kjson.field_free(&w)
+}
+
+fn request_body(z: *mut provider.Access, op: u32, legacy: bool,
+    out: *mut rt.Buf) {
+    if op == OP_LOGIN {
+        login_body(z, legacy, out)
+    }
+    if op == OP_RENEW {
+        renew_body(z, legacy, out)
+    }
+}
+
+fn op_path(op: u32, legacy: bool) -> u64 {
+    if op == OP_LOGIN {
+        if legacy { return (&p_an_old[0]) as u64 }
+        return (&p_login[0]) as u64
+    }
+    if op == OP_RENEW {
+        if legacy { return (&p_er_old[0]) as u64 }
+        return (&p_renew[0]) as u64
+    }
+    if op == OP_LOGOUT {
+        if legacy { return (&p_ab_old[0]) as u64 }
+        return (&p_logout[0]) as u64
+    }
+    if legacy { return (&p_pr_old[0]) as u64 }
+    return (&p_check[0]) as u64
+}
+
+fn op_method(op: u32) -> u64 {
+    if op == OP_CHECK {
+        return (&m_get[0]) as u64
+    }
+    return (&m_post[0]) as u64
+}
+
+fn send_once(z: *mut provider.Access, zl: *mut knetz.Target, op: u32,
+    legacy: bool, a: *mut knetz.Reply) -> bool {
+    var body: rt.Buf = rt.buf_new()
+    request_body(z, op, legacy, &body)
+    var carrier: u64 = 0
+    var carrier_len: usize = 0
+    if op == OP_LOGOUT || op == OP_CHECK {
+        carrier = (*z).zugriff
+        carrier_len = rt.c_length(carrier)
+    }
+    var body_ptr: u64 = 0
+    if body.len > 0 {
+        body_ptr = body.ptr
+    }
+    let path: u64 = op_path(op, legacy)
+    let sent: bool = knetz.sende(zl, op_method(op), rt.c_length(op_method(op)),
+        path, rt.c_length(path), body_ptr, body.len, carrier, carrier_len,
+        0, 0, a)
+    if body.len > 0 {
+        rt.mem_set(body.ptr, 0 as u8, body.len)
+    }
+    rt.buf_free(&body)
+    return sent
+}
+
+fn call(z: *mut provider.Access, zl: *mut knetz.Target, op: u32,
+    a: *mut knetz.Reply) -> bool {
+    let sent: bool = send_once(z, zl, op, false, a)
+    if sent && (*a).code == 404 as u32 {
+        return send_once(z, zl, op, true, a)
+    }
+    return sent
+}
+
 fn net_sign_in(z: *mut provider.Access,
     s: *mut provider.Session) -> u32 {
     var zl: knetz.Target = knetz.target_new()
@@ -383,26 +494,8 @@ fn net_sign_in(z: *mut provider.Access,
         hinweis(s, (&h_status[0]) as u64)
         return (*s).stand
     }
-    var koerper: rt.Buf = rt.buf_new()
-    var w: kjson.Writer = kjson.writer_new(&koerper)
-    kjson.field(&w, (&f_kennung[0]) as u64, (*z).kennung,
-        rt.c_length((*z).kennung))
-    kjson.field(&w, (&f_secret[0]) as u64, (*z).secret,
-        rt.c_length((*z).secret))
-    if (*z).code != 0 && rt.c_length((*z).code) > 0 {
-        kjson.field(&w, (&f_code[0]) as u64, (*z).code,
-            rt.c_length((*z).code))
-    }
-    if (*z).bereich != 0 && rt.c_length((*z).bereich) > 0 {
-        kjson.field(&w, (&f_bereich_old[0]) as u64, (*z).bereich,
-            rt.c_length((*z).bereich))
-    }
-    kjson.field_free(&w)
     var a: knetz.Reply = knetz.reply_new()
-    let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4,
-        (&p_an[0]) as u64, 15, koerper.ptr, koerper.len, 0, 0, 0, 0, &a)
-    rt.mem_set(koerper.ptr, 0 as u8, koerper.len)
-    rt.buf_free(&koerper)
+    let da: bool = call(z, &zl, OP_LOGIN, &a)
     if !da {
         (*s).stand = net_state(&a)
         knetz.reply_free(&a)
@@ -541,16 +634,8 @@ fn erneuern(z: *mut provider.Access, s: *mut provider.Session) -> u32 {
         (*s).stand = provider.S_ERROR
         return (*s).stand
     }
-    var koerper: rt.Buf = rt.buf_new()
-    var w: kjson.Writer = kjson.writer_new(&koerper)
-    kjson.field(&w, (&f_erneuerung_old[0]) as u64, (*z).erneuerung,
-        rt.c_length((*z).erneuerung))
-    kjson.field_free(&w)
     var a: knetz.Reply = knetz.reply_new()
-    let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4,
-        (&p_er[0]) as u64, 15, koerper.ptr, koerper.len, 0, 0, 0, 0, &a)
-    rt.mem_set(koerper.ptr, 0 as u8, koerper.len)
-    rt.buf_free(&koerper)
+    let da: bool = call(z, &zl, OP_RENEW, &a)
     if !da {
         (*s).stand = net_state(&a)
         knetz.reply_free(&a)
@@ -576,9 +661,7 @@ fn do_sign_out(z: *mut provider.Access, s: *mut provider.Session) -> u32 {
         return (*s).stand
     }
     var a: knetz.Reply = knetz.reply_new()
-    let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4,
-        (&p_ab[0]) as u64, 15, 0, 0, (*z).zugriff,
-        rt.c_length((*z).zugriff), 0, 0, &a)
+    let da: bool = call(z, &zl, OP_LOGOUT, &a)
     var stand: u32 = provider.S_OK
     if !da {
         stand = net_state(&a)
@@ -604,9 +687,7 @@ fn check(z: *mut provider.Access, s: *mut provider.Session) -> u32 {
         return (*s).stand
     }
     var a: knetz.Reply = knetz.reply_new()
-    let da: bool = knetz.sende(&zl, (&m_get[0]) as u64, 3,
-        (&p_pr[0]) as u64, 14, 0, 0, (*z).zugriff,
-        rt.c_length((*z).zugriff), 0, 0, &a)
+    let da: bool = call(z, &zl, OP_CHECK, &a)
     var stand: u32 = provider.S_OK
     if !da {
         stand = net_state(&a)

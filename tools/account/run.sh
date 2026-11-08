@@ -316,6 +316,49 @@ lauf "$TMPD/d1.img" "konto anmelden --anbieter=eigen --kennung=justin < /pw_gut"
 is "eigen reads the new response keys" "$(kv "$TMPD/o_e1n.txt" stand)" "ok"
 is "eigen new keys: subject as with the old keys" "$(kv "$TMPD/o_e1n.txt" subjekt)" "$(kv "$TMPD/o_e1.txt" subjekt)"
 
+own_wire() {
+    python3 -I - "$1" <<'WIREPY'
+import json, sys
+out = []
+for line in open(sys.argv[1], encoding="utf-8"):
+    e = json.loads(line)
+    if e["pfad"].startswith(("/account/", "/konto/")):
+        out.append(e["pfad"])
+    if e["pfad"] == "own-body":
+        out.append("keys=" + ",".join(e["keys"]))
+print(" ".join(out))
+WIREPY
+}
+EKEN=$(kv "$TMPD/o_e1.txt" kennung)
+server_zu
+server_auf
+cp "$TMPD/d1.img" "$TMPD/de.img"
+rm -f "$TMPD/protokoll.jsonl"
+lauf "$TMPD/de.img" "konto anmelden --anbieter=eigen --kennung=justin < /pw_gut" "$TMPD/o_ew1.txt"
+lauf "$TMPD/de.img" "konto status --kennung=$EKEN" "$TMPD/o_ew2.txt"
+lauf "$TMPD/de.img" "konto abmelden --kennung=$EKEN" "$TMPD/o_ew3.txt"
+own_wire "$TMPD/protokoll.jsonl" > "$TMPD/ew.txt"
+has "$TMPD/ew.txt" "/account/login keys=identity,secret" "eigen login: English path and request keys"
+has "$TMPD/ew.txt" "/account/check" "eigen check: English path"
+has "$TMPD/ew.txt" "/account/logout" "eigen logout: English path"
+if grep -q "/konto/" "$TMPD/ew.txt"; then bad "eigen: old path used against a server that knows the new one"; else ok "eigen: no fallback to the old paths when the new ones answer"; fi
+
+server_zu
+server_auf --own-old-only
+cp "$TMPD/d1.img" "$TMPD/de.img"
+rm -f "$TMPD/protokoll.jsonl"
+lauf "$TMPD/de.img" "konto anmelden --anbieter=eigen --kennung=justin < /pw_gut" "$TMPD/o_eo1.txt"
+is "eigen against an old-spelling server: login still works" "$(kv "$TMPD/o_eo1.txt" stand)" "ok"
+lauf "$TMPD/de.img" "konto status --kennung=$EKEN" "$TMPD/o_eo2.txt"
+lauf "$TMPD/de.img" "konto abmelden --kennung=$EKEN" "$TMPD/o_eo3.txt"
+own_wire "$TMPD/protokoll.jsonl" > "$TMPD/eo.txt"
+has "$TMPD/eo.txt" "/account/login /konto/anmelden keys=geheim,kennung" "old server: new path tried, then old path with old keys"
+has "$TMPD/eo.txt" "/konto/pruefen" "old server: check falls back to the old path"
+has "$TMPD/eo.txt" "/konto/abmelden" "old server: logout falls back to the old path"
+rm -f "$TMPD/protokoll.jsonl"
+server_zu
+server_auf
+
 server_zu
 netz_zu
 lauf_ohne_netz "$TMPD/d1.img" "konto anmelden --anbieter=eigen --ziel=datei:///eigen --kennung=lokal < /pw_gut" "$TMPD/o_e2.txt"
