@@ -14,6 +14,7 @@ import mm.mmframe
 
 export {
     init, init_task, clear_task, close_all, inherit_task, inherit_std,
+    next_used_fd,
     owner, share_table, release_use, release_table,
     fd_of, fd_set, fd_alloc, fd_free,
     open_alloc, open_ref, open_unref, open_kind, open_ino, open_off,
@@ -253,20 +254,46 @@ fn init_task(state: u64, task: u64) {
     fd_set(state, task, 2, CON_ERR)
 }
 
+fn used_from(state: u64, table: u64, from: u64) -> u64 {
+    var fd: u64 = from
+    var p: u64 = state + slot_at(table, from)
+    while fd < MAX_FD {
+        if __mmio_read64(p as *mut u64) != (0 as u64) {
+            return fd
+        }
+        p = p + 8
+        fd = fd + 1
+    }
+    return MAX_FD
+}
+
+fn next_used_fd(state: u64, task: u64, from: u64) -> u64 {
+    if task >= kstate.MAX_TASKS || from >= MAX_FD {
+        return MAX_FD
+    }
+    return used_from(state, owner(state, task), from)
+}
+
 fn clear_task(state: u64, task: u64) {
     if task >= kstate.MAX_TASKS {
         return
     }
-    var fd: u64 = 0
+    var fd: u64 = used_from(state, task, 0)
     while fd < MAX_FD {
         fd_free_t(state, task, fd)
-        fd = fd + 1
+        fd = used_from(state, task, fd + 1)
+    }
+    let cx: u64 = kstate.CX_OFF + task * kstate.CX_BYTES
+    var w: u64 = 0
+    while w < kstate.CX_BYTES {
+        kstate.set(state, cx + w, 0)
+        w = w + 8
     }
 }
 
 fn inherit_task(state: u64, parent: u64, child: u64) {
     clear_task(state, child)
-    var fd: u64 = 0
+    var fd: u64 = next_used_fd(state, parent, 0)
     while fd < MAX_FD {
         let of: u64 = fd_of(state, parent, fd)
         if of < MAX_OPEN {
@@ -274,7 +301,7 @@ fn inherit_task(state: u64, parent: u64, child: u64) {
             fd_set_rights(state, child, fd, of,
                 fd_rights(state, parent, fd))
         }
-        fd = fd + 1
+        fd = next_used_fd(state, parent, fd + 1)
     }
 }
 
