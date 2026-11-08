@@ -337,6 +337,8 @@ class Griff(BaseHTTPRequestHandler):
             "datenort": "eigen"})
 
     def own_refresh(self, b):
+        protokoll({"pfad": "own-body", "kopfzeilen": {},
+                   "keys": sorted(b.keys())})
         if state["refresh_verweigern"]:
             return self._reply(401, {"fehler": "abgelehnt"})
         an = jwt_read(b.get("renewal") or b.get("erneuerung") or "")
