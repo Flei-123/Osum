@@ -426,8 +426,9 @@ abbild "$TMPD/dok.img" || true
 lauf "$TMPD/dok.img" "konto --kaputt=oldkeys anmelden --anbieter=jarvis --kennung=zweiter < /pw2" "$TMPD/o_ok.txt"
 is "old session keys: signed in" "$(kv "$TMPD/o_ok.txt" state)" "ok"
 OLDEXP=$(kv "$TMPD/o_ok.txt" expiry)
+OLDKEN=$(kv "$TMPD/o_ok.txt" identity)
 num "old session keys: expiry of the login" "${OLDEXP:-0}" gt 0
-lauf "$TMPD/dok.img" "konto status --ohne-netz --kennung=zweiter" "$TMPD/o_ok2.txt"
+lauf "$TMPD/dok.img" "konto status --ohne-netz --kennung=$OLDKEN" "$TMPD/o_ok2.txt"
 is "old session keys are still read: session" "$(kv "$TMPD/o_ok2.txt" session)" "1"
 is "old session keys are still read: expiry" "$(kv "$TMPD/o_ok2.txt" expiry)" "$OLDEXP"
 
