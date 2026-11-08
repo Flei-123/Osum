@@ -103,6 +103,8 @@ if [ -f "$XR_HOST_DIR/freeviewer-host" ] && [ -f "$XR_LIBS_DIR/lib/ld-musl-x86_6
     cp "$XR_HOST_DIR/freeviewer-host" pakete/xremote/bau/freeviewer-host
     cp "$XR_LIBS_DIR/lib/ld-musl-x86_64.so.1" pakete/xremote/bau/ld-musl-x86_64.so.1
     cp "$XR_LIBS_DIR/usr/lib/libgcc_s.so.1" pakete/xremote/bau/libgcc_s.so.1
+    python3 tools/sdk/osdk.py check pakete/xremote/INFO --strict | sed 's/^/   /' || exit 1
+    python3 tools/k15/icon.py pakete/xremote/symbol.txt pakete/xremote/bau/symbol | sed 's/^/   /'
 else
     echo "   xremote: host binary or musl libs missing, package skipped"
 fi

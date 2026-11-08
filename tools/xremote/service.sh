@@ -5,7 +5,8 @@
 #   /root/jarvis/bin/heavy bash tools/xremote/service.sh
 #
 # Env: XR_WD (linuxapps workdir, default /root/fxhp), XR_HOST (v2 musl host with --password-file etc.), XR_VIEWER (glibc viewer),
-#      XR_RELAY / XR_LIBS (relay dir / node_modules parent), XR_LIBGCC, KERNEL (prebuilt kernel), KEEP=1 keeps the output dir.
+#      XR_REAL_RELAY=1 adds phase G (no relay= line: the real wss relay, needs guest network), XR_RELAY / XR_LIBS (relay dir / node_modules parent), XR_LIBGCC, KERNEL (prebuilt kernel), KEEP=1 keeps the output dir.
+# The package is built and installed by the real opk tool; the guest gets the installed tree with the modes the installer writes (0644).
 # Phases in the guest: A disabled (no host, no password) -> B enabled (host up, password, ID) -> viewer with a wrong password
 #   is refused, viewer with the right password gets frames -> C disable kills the host (viewer gets nothing) -> D enabled but
 #   package missing (no host) -> E package back (host again, NEW password, old one refused) -> F disabled again.
@@ -44,19 +45,28 @@ cleanup() {
 trap cleanup EXIT
 OUT=${XR_OUT:-$T/out}
 mkdir -p "$OUT" "$T/relay" "$T/home" "$T/fx"
-sed -e "s/@RELAYPORT@/$RELAYPORT/g" -e "s/@HOSTSECS@/$HOSTSECS/g" -e "s/@WINDOW@/$WINDOW/g" -e "s/@WINDOW2@/$WINDOW2/g" -e "s/@AFTERSECS@/$AFTERSECS/g" tools/xremote/service-guest.sh > "$T/svc.sh"
+sed -e "s/@RELAYPORT@/$RELAYPORT/g" -e "s/@HOSTSECS@/$HOSTSECS/g" -e "s/@WINDOW@/$WINDOW/g" -e "s/@WINDOW2@/$WINDOW2/g" -e "s/@AFTERSECS@/$AFTERSECS/g" -e "s/@REALRELAY@/${XR_REAL_RELAY:-0}/g" tools/xremote/service-guest.sh > "$T/svc.sh"
 [ "${XR_DBG:-0}" = 1 ] && sed -i 's/^#DBG //' "$T/svc.sh"
 cp tools/xremote/service-guest-boot.sh "$T/fx.sh"
 grep -E '/@755$|^/(bin|sbin)/|^/usr/(bin|sbin)/[a-z0-9_.-]*->/bin/busybox|^/lib/(ld-musl|libc\.musl)' "$WD/fxrun/spec.txt" > "$T/fx/spec.txt"
-cp pakete/xremote/INFO "$T/xr.info"
+OPKPY=${OPK:-$(python3 tools/lib/opkpfad.py)}
+PKGSRC="$T/pkgsrc"; PKGROOT="$T/pkgroot"
+mkdir -p "$PKGSRC/bau" "$PKGROOT"
+cp pakete/xremote/INFO pakete/xremote/rezept "$PKGSRC/"
+cp "$HOSTBIN" "$PKGSRC/bau/freeviewer-host"
+cp "$LDMUSL" "$PKGSRC/bau/ld-musl-x86_64.so.1"
+cp "$LIBGCC" "$PKGSRC/bau/libgcc_s.so.1"
+python3 tools/k15/icon.py pakete/xremote/symbol.txt "$PKGSRC/bau/symbol" > /dev/null
+(cd "$PKGSRC" && python3 "$OPKPY" bauen rezept -o "$T/xremote.opk") > "$T/opkbuild.log" 2>&1 || { echo "XRSERVICE: opk build failed"; cat "$T/opkbuild.log"; exit 1; }
+python3 "$OPKPY" installieren --wurzel "$PKGROOT" "$T/xremote.opk" > "$T/opkinstall.log" 2>&1 || { echo "XRSERVICE: opk install failed"; cat "$T/opkinstall.log"; exit 1; }
+APPDIR="$PKGROOT/apps/xremote.osp"
+cp "$APPDIR/INFO" "$T/xr.info"
 printf 'xremote net\n' > "$T/xr.rights"
 {
-    echo "/apps/@755"; echo "/apps/xremote.prog/@755"; echo "/apps/xremote.prog/bin/@755"; echo "/apps/xremote.prog/lib/@755"
-    echo "/apps/xremote.prog/INFO=$T/xr.info@644"
+    echo "/apps/@755"; echo "/apps/xremote.osp/@755"
+    (cd "$APPDIR" && find . -mindepth 1 -type d | sort) | while read -r d; do echo "/apps/xremote.osp/${d#./}/@755"; done
+    (cd "$APPDIR" && find . -type f | sort) | while read -r f; do echo "/apps/xremote.osp/${f#./}=$APPDIR/${f#./}@644"; done
     echo "/etc/apprights.conf=$T/xr.rights@644"
-    echo "/apps/xremote.prog/bin/freeviewer-host=$HOSTBIN@755"
-    echo "/apps/xremote.prog/lib/ld-musl-x86_64.so.1=$LDMUSL@755"
-    echo "/apps/xremote.prog/lib/libgcc_s.so.1=$LIBGCC@755"
     [ "${XR_DBG:-0}" = 1 ] && { echo "/opt/@755"; echo "/opt/xr/@755"; echo "/opt/xr/freeviewer-old=$XRTOOLS/freeviewer-host@755"; echo "/usr/@755"; echo "/usr/lib/@755"; echo "/usr/lib/libgcc_s.so.1=$LIBGCC@755"; }
     echo "/run/@755"; echo "/var/@755"; echo "/var/log/@755"; echo "/etc/@755"
 } | awk '!seen[$0]++' >> "$T/fx/spec.txt"
@@ -143,6 +153,10 @@ FO2=$(grep -ac '^frame ' "$T/v_ok2.txt" 2>/dev/null)
 [ "${FO2:-0}" -ge 2 ] && ok "new password: viewer received $FO2 frames" || bad "new password: viewer received ${FO2:-0} frames"
 N=$(grep -ac 'xremoted: host started' "$C")
 [ "$N" -ge 2 ] && ok "xremoted logged $N host starts (B and E)" || bad "xremoted logged $N host starts, want 2"
+if [ "${XR_REAL_RELAY:-0}" = 1 ]; then
+    L=$(line 'SV-G ')
+    chk "$(has "$L" 'service=running id=[0-9]')" "phase G: default relay wss://freeviewer.fleitec.com/fv/ws registers a 9-digit ID from inside the guest ($L)"
+fi
 L=$(line 'SV-F ')
 chk "$(has "$L" 'service=disabled pw=0 state=0')" "phase F: disabled again -> host gone, files removed ($L)"
 AFTER=$(awk '/^SV-PKG/{f=1} f' "$C")

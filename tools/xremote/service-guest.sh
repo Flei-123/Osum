@@ -5,7 +5,7 @@ CONF=/etc/xremote.conf
 INFO=/run/xremote.info
 STATE=/run/xremote.state
 LOG=/var/log/xremote.log
-PKG=/apps/xremote.prog/bin/freeviewer-host
+PKG=/apps/xremote.osp/bin/freeviewer-host
 kv() { while IFS== read -r k v; do [ "$k" = "$2" ] && { echo "$v"; return; }; done < "$1"; }
 nap() { n=$1; while [ $n -gt 50 ]; do $B sleep 50; n=$((n - 50)); done; [ $n -gt 0 ] && $B sleep $n; }
 ex() { [ -e "$1" ] && echo 1 || echo 0; }
@@ -19,7 +19,7 @@ wait_id() {
         [ $((i % 30)) = 0 ] && { echo "SV-WAIT $i state=$(ex $STATE) log=$(ex $LOG)"; $B tail -n 4 $LOG 2>/dev/null; }
     done
 }
-echo "SV-PKG host=$(ex $PKG) ld=$(ex /apps/xremote.prog/lib/ld-musl-x86_64.so.1) gcc=$(ex /apps/xremote.prog/lib/libgcc_s.so.1)"
+echo "SV-PKG host=$(ex $PKG) ld=$(ex /apps/xremote.osp/lib/ld-musl-x86_64.so.1) gcc=$(ex /apps/xremote.osp/lib/libgcc_s.so.1)"
 echo "SV-BEFORE conf=$(ex $CONF) pw=$(ex /run/xremote.pw) info=$(ex $INFO) log=$(ex $LOG)"
 echo "SV-PHASE A"
 $B sleep 8
@@ -28,7 +28,7 @@ echo "SV-A service=$(kv $INFO service) password=$(kv $INFO password) pw=$(ex /ru
 #DBG $B nc -w 3 10.0.2.2 @RELAYPORT@ < /dev/null; echo "SV-DBG-NC rc=$?"
 #DBG ( export FV_RELAY=ws://10.0.2.2:@RELAYPORT@/fv/ws FV_ALLOW_INSECURE_RELAY=1 FV_NOP2P=1 FV_PASSWORD=oldpw123 HOME=/tmp/oldhome; $B mkdir -p /tmp/oldhome; /opt/xr/freeviewer-old --headless > /tmp/old.log 2>&1 & OP=$!; $B sleep 15; echo "SV-DBG-OLD"; $B cat /tmp/old.log; kill $OP )
 #DBG echo secretpw1 > /tmp/dbg.pw
-#DBG /apps/xremote.prog/lib/ld-musl-x86_64.so.1 --library-path /apps/xremote.prog/lib /apps/xremote.prog/bin/freeviewer-host --password-file /tmp/dbg.pw --state-file /tmp/dbg.state --home /tmp/dbghome --no-p2p --relay ws://10.0.2.2:@RELAYPORT@/fv/ws --insecure-relay > /tmp/dbg.log 2>&1 &
+#DBG /apps/xremote.osp/lib/ld-musl-x86_64.so.1 --library-path /apps/xremote.osp/lib /apps/xremote.osp/bin/freeviewer-host --password-file /tmp/dbg.pw --state-file /tmp/dbg.state --home /tmp/dbghome --no-p2p --relay ws://10.0.2.2:@RELAYPORT@/fv/ws --insecure-relay > /tmp/dbg.log 2>&1 &
 #DBG DP=$!
 #DBG $B sleep 25
 #DBG echo "SV-DBG-STATE $($B cat /tmp/dbg.state 2>&1 | $B tr '\n' ' ')"
@@ -76,4 +76,14 @@ nap @WINDOW2@
 echo "enabled=0" > $CONF
 $B sleep 8
 echo "SV-F service=$(kv $INFO service) pw=$(ex /run/xremote.pw) state=$(ex $STATE)"
+if [ @REALRELAY@ = 1 ]; then
+    echo "SV-PHASE G"
+    echo "enabled=1" > $CONF
+    $B sleep 3
+    wait_id
+    echo "SV-G service=$(kv $INFO service) id=$(kv $STATE id) status=$(kv $STATE status)"
+    $B tail -n 3 $LOG
+    echo "enabled=0" > $CONF
+    $B sleep 8
+fi
 echo SV-END
