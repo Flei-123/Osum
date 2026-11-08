@@ -606,19 +606,15 @@ class Fahrer:
             return (int(o.group(1)) + int(m.group(1)), int(o.group(2)) + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("ncrow") and name[5:].isdigit():
-            m = last_2(r"notifc: open n=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            m = last_2(r"notifc: card %s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % name[5:])
             if m is None:
                 return None
-            ox, oy, ow = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            k = ow / 400.0
-            return (ox + int(10 * k), oy + int((38 + 32 * int(name[5:])) * k), int((400 - 20) * k), int(28 * k))
+            return (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
         if name.startswith("ncsec") and name[5:].isdigit():
-            m = last_2(r"notifc: open n=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            m = last_2(r"notifc: btn %s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % name[5:])
             if m is None:
                 return None
-            ox, oy, ow = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            k = ow / 400.0
-            return (ox + int((400 - 10 - 96) * k), oy + int((38 + 32 * int(name[5:])) * k), int(96 * k), int(28 * k))
+            return (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
         if name == "toast":
             m = last_2(r"taskbar: toast \[.*\] x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
