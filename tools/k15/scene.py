@@ -36,7 +36,7 @@ def read_text(image, zoom):
     with tempfile.TemporaryDirectory() as tmp:
         png = Path(tmp) / "crop.png"
         gray.save(png)
-        run = subprocess.run(["tesseract", str(png), "-", "-l", "deu", "--psm", "7"],
+        run = subprocess.run(["tesseract", str(png), "-", "-l", "eng+deu", "--psm", "7"],
                              capture_output=True, text=True, check=False)
     return run.stdout.strip()
 
