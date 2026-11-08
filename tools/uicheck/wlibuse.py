@@ -12,7 +12,7 @@ DOC_END = "<!-- INVENTORY:END -->"
 
 WLIB_MODULES = ("wlib", "wlibkey", "wlax", "wlbase", "wldraw", "wlevent", "wlstate", "wlwidget")
 WLIBC_MODULES = ("wlibc", "wcbase", "wcgfx", "wcpaint", "wcpal", "wctheme")
-TOOLKIT_PATHS = ("kernel/user/wlib/", "kernel/user/wlibc/")
+TOOLKIT_PATHS = ("kernel/user/wlib/", "kernel/user/wlibc/", "kernel/user/fuiapp/")
 TOOLKIT_FILES = {"kernel/user/wlib.fi", "kernel/user/wlibc.fi", "kernel/user/wlibkey.fi"}
 IMPORT = re.compile(rb"^import ([A-Za-z0-9_.]+)", re.M)
 REF = re.compile(rb"\b(" + b"|".join(m.encode() for m in WLIB_MODULES + WLIBC_MODULES) + rb")\.([A-Za-z_][A-Za-z0-9_]*)")
