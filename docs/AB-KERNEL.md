@@ -1,7 +1,7 @@
 # Kernel A/B (r104) -- finding, 15.10.2026
 
 ## What exists
-- `kernel/lib/ab.fi` + `/system/ERPROBUNG`: trial counter for the USERLAND generation (3 boots without `opk trial ok` -> previous generation). Gate: `tools/update/run.sh` section 4, `tools/ota/run.sh`.
+- `kernel/lib/ab.fi` + `/system/TRIAL` (old name `/system/ERPROBUNG` is still read; generation file `/system/CURRENT`, old `/system/AKTUELL`; opk/ota write the new names and remove the old file, ab_boot rewrites whichever exists in place; a slot-B kernel older than this change only knows the old names): trial counter for the USERLAND generation (3 boots without `opk trial ok` -> previous generation). Gate: `tools/update/run.sh` section 4, `tools/ota/run.sh`.
 - `ota boot` / `ota watchdog`: confirm after a healthy desktop, reboot on a hang.
 
 ## What does NOT exist: a kernel that fails before `ab_boot`
