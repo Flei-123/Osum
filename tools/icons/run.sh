@@ -205,7 +205,7 @@ done
 python3 tools/k15/tree.py "$TMPD/baum" > /dev/null 2>&1
 bau_img() { # ziel [--noicons]
     local ziel=$1 mit=${2:-mit}
-    local ARGS=(build "$ziel" 16384 /lib/
+    local ARGS=(build "$ziel" 32768 /lib/
         "/lib/mono.ttf=assets/osum-mono.ttf"
         "/lib/sans.ttf=assets/osum-sans.ttf")
     [ "$mit" = mit ] && ARGS+=("/lib/icons.ttf=assets/osum-icons.ttf")
