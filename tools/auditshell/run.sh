@@ -32,7 +32,7 @@ run_case() {
         extra=termdump halt=$HALT_SECONDS drehbuch="$dreh" > "$OUT/$name.audit.log" 2>&1
 }
 
-run_case live1 1 1280x800 on &
+run_case live1 1 1280x800 on
 run_case live2 2 1920x1080 on &
 run_case dead1 1 1280x800 off &
 wait
