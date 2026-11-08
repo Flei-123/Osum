@@ -8,6 +8,8 @@ import bus.drvreg
 import arch.x86_64.apic
 import arch.cpu
 import sync.atomic
+import block.blkperf
+import lib.tscdelta
 import libc.regio
 
 export {
@@ -28,7 +30,8 @@ const CLB_AT: u64 = 0x000
 const FB_AT: u64 = 0x400
 const CT_AT: u64 = 0x800
 const CT_PRDT: u64 = 0x80
-const PRDT_MAX: u64 = 8
+const PRDT_MAX: u64 = 32
+const MAX_TRANSFER: u64 = (PRDT_MAX - 1) * PAGE
 
 // Skalare, Versaetze in AHCI_SC_OFF.
 const S_ABAR: u64 = 0x00
@@ -1035,6 +1038,7 @@ fn port_arm(state: u64, p: u64, cl: u64, fis: u64) -> bool {
 }
 
 fn port_setup(state: u64, p: u64) -> bool {
+    idle_known = false
     let pi: u64 = kstate.get(state, sc(S_PI))
     var quiet: u64 = 0
     var i: u64 = 0
@@ -1162,6 +1166,13 @@ fn build_prdt(ct: u64, addr: u64, len: u64) -> u64 {
     return n
 }
 
+static mut idle_known: bool = false
+
+fn clear_status(state: u64, p: u64) {
+    pwr(state, p, P_IS, prd(state, p, P_IS))
+    pwr(state, p, P_SERR, prd(state, p, P_SERR))
+}
+
 fn run(state: u64, cmd: u64, lba: u64, count: u64, addr: u64, len: u64,
     write: bool) -> bool {
     if write && !wlock.allowed(wlock.D_AHCI) {
@@ -1177,10 +1188,17 @@ fn run(state: u64, cmd: u64, lba: u64, count: u64, addr: u64, len: u64,
     let cl: u64 = state + AHCI_OFF + CLB_AT
     let ct: u64 = state + AHCI_OFF + CT_AT
 
-    if !await_idle(state, p) {
-        kstate.add(state, sc(S_ERRS), 1)
-        return false
+    let t_start: u64 = blkperf.now()
+    let known_idle: bool = idle_known
+    idle_known = false
+    if !known_idle {
+        clear_status(state, p)
+        if !await_idle(state, p) {
+            kstate.add(state, sc(S_ERRS), 1)
+            return false
+        }
     }
+    let t_idle: u64 = blkperf.now()
 
     var prdtl: u64 = 0
     if len > 0 {
@@ -1192,22 +1210,28 @@ fn run(state: u64, cmd: u64, lba: u64, count: u64, addr: u64, len: u64,
     build_hdr(cl, ct, write, prdtl)
     build_fis(ct, cmd, lba, count)
 
-    pwr(state, p, P_IS, prd(state, p, P_IS))
-    pwr(state, p, P_SERR, prd(state, p, P_SERR))
-
     pwr(state, p, P_CI, 1)
     kstate.add(state, sc(S_CMDS), 1)
 
     let bis: u64 = timeout(state, CMD_US)
+    let t_issued: u64 = blkperf.now()
     var spin: u64 = 0
     while !expired(bis, spin, SPIN_LIMIT) {
         if (prd(state, p, P_CI) & 1) == 0 {
             let tfd: u64 = prd(state, p, P_TFD)
+            let t_done: u64 = blkperf.now()
+            blkperf.add(blkperf.K_AHCI_CMDS, 1)
+            blkperf.add(blkperf.K_AHCI_POLLS, spin + 1)
+            blkperf.add(blkperf.K_AHCI_IDLE_CYCLES, tscdelta.between(t_start, t_idle))
+            blkperf.add(blkperf.K_AHCI_SETUP_CYCLES, tscdelta.between(t_idle, t_issued))
+            blkperf.add(blkperf.K_AHCI_WAIT_CYCLES, tscdelta.between(t_issued, t_done))
             kstate.set(state, sc(S_TFD), tfd)
             if (tfd & TFD_ERR) != 0 {
                 kstate.add(state, sc(S_ERRS), 1)
+                clear_status(state, p)
                 return false
             }
+            idle_known = (tfd & (TFD_BSY | TFD_DRQ)) == 0
             return true
         }
         if (prd(state, p, P_IS) & IS_TFES) != 0 {
@@ -1292,6 +1316,7 @@ fn lock_out(t: u64) {
 }
 
 fn recover(state: u64, p: u64) {
+    idle_known = false
     pwr(state, p, P_CMD, prd(state, p, P_CMD) & (~CMD_ST))
     let bis: u64 = timeout(state, RESET_US)
     var spin: u64 = 0
@@ -1446,7 +1471,7 @@ fn read_many_locked(state: u64, lba: u64, count: u64, dst: u64) -> bool {
     if !ready(state) || count == 0 {
         return false
     }
-    if count * SECTOR > PRDT_MAX * PAGE {
+    if count * SECTOR > MAX_TRANSFER {
         return false
     }
     return run(state, ATA_READ_DMA_EXT, lba, count, dst, count * SECTOR,
@@ -1467,7 +1492,7 @@ fn write_many_locked(state: u64, lba: u64, count: u64, src: u64) -> bool {
     if !ready(state) || count == 0 {
         return false
     }
-    if count * SECTOR > PRDT_MAX * PAGE {
+    if count * SECTOR > MAX_TRANSFER {
         return false
     }
     // w-disklag: no flush here either (see write_block).
@@ -1502,6 +1527,7 @@ fn flush_locked(state: u64) -> bool {
 // `kill`: power-loss simulation (HBA reset: ports, command lists and FIS
 // pointers are gone). `resume`: set the HBA up again like the first start.
 fn kill(state: u64) {
+    idle_known = false
     let b: u64 = kstate.get(state, sc(S_ABAR))
     if kstate.get(state, sc(S_MODE)) == MODE_AHCI && b != 0 {
         regio.write32_at(b, R_GHC, regio.read32_at(b, R_GHC) | GHC_HR)
