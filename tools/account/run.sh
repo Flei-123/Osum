@@ -285,36 +285,36 @@ server_auf
 
 abbild "$TMPD/d1.img" || true
 lauf "$TMPD/d1.img" "konto anbieter" "$TMPD/o_anb.txt"
-is "wie viele Ruecken angemeldet sind" "$(kv "$TMPD/o_anb.txt" anbieter_anzahl)" "4"
+is "wie viele Ruecken angemeldet sind" "$(kv "$TMPD/o_anb.txt" provider_count)" "4"
 for r in jarvis xoffi eigen fleitec; do
-    grep -qa "^konto: anbieter_name = $r$" "$TMPD/o_anb.txt" \
+    grep -qa "^konto: provider_name = $r$" "$TMPD/o_anb.txt" \
         && ok "der Ruecken '$r' ist da" || bad "der Ruecken '$r' fehlt"
 done
 
 # --- xoffi
 lauf "$TMPD/d1.img" "konto anmelden --anbieter=xoffi --kennung=mfa@example.test --bereich=alpha < /pw_gut" "$TMPD/o_x0.txt"
-is "xoffi ohne zweiten Faktor" "$(kv "$TMPD/o_x0.txt" stand)" "zweitfaktor"
-TEMP=$(kv "$TMPD/o_x0.txt" zwischen)
+is "xoffi ohne zweiten Faktor" "$(kv "$TMPD/o_x0.txt" state)" "mfa"
+TEMP=$(kv "$TMPD/o_x0.txt" continue)
 [ -n "$TEMP" ] && ok "a temp_token came back (${#TEMP} characters)" \
                 || bad "kein temp_token"
 lauf "$TMPD/d1.img" "konto anmelden --anbieter=xoffi --kennung=mfa@example.test --bereich=alpha --zwischen=$TEMP --code=123456 < /leer" "$TMPD/o_x1.txt"
-is "xoffi mit dem zweiten Faktor" "$(kv "$TMPD/o_x1.txt" stand)" "ok"
+is "xoffi mit dem zweiten Faktor" "$(kv "$TMPD/o_x1.txt" state)" "ok"
 lauf "$TMPD/d1.img" "konto anmelden --anbieter=xoffi --kennung=mfa@example.test --bereich=alpha --zwischen=$TEMP --code=123456 < /leer" "$TMPD/o_x2.txt"
-is "dasselbe temp_token ein zweites Mal" "$(kv "$TMPD/o_x2.txt" stand)" "abgelaufen"
+is "dasselbe temp_token ein zweites Mal" "$(kv "$TMPD/o_x2.txt" state)" "expired"
 ok "  (an intermediate token is valid once -- afterwards it is gone)"
 
 # --- jarvis
 lauf "$TMPD/d1.img" "konto anmelden --anbieter=jarvis --kennung=justin < /pw_gut" "$TMPD/o_j1.txt"
-is "jarvis anmelden" "$(kv "$TMPD/o_j1.txt" stand)" "ok"
-JKEN=$(kv "$TMPD/o_j1.txt" kennung)
+is "jarvis anmelden" "$(kv "$TMPD/o_j1.txt" state)" "ok"
+JKEN=$(kv "$TMPD/o_j1.txt" identity)
 
 lauf "$TMPD/d1.img" "konto anmelden --anbieter=eigen --kennung=justin < /pw_gut" "$TMPD/o_e1.txt"
-is "eigen ueber HTTPS anmelden" "$(kv "$TMPD/o_e1.txt" stand)" "ok"
+is "eigen ueber HTTPS anmelden" "$(kv "$TMPD/o_e1.txt" state)" "ok"
 server_zu
 server_auf --own-new-keys
 lauf "$TMPD/d1.img" "konto anmelden --anbieter=eigen --kennung=justin < /pw_gut" "$TMPD/o_e1n.txt"
-is "eigen reads the new response keys" "$(kv "$TMPD/o_e1n.txt" stand)" "ok"
-is "eigen new keys: subject as with the old keys" "$(kv "$TMPD/o_e1n.txt" subjekt)" "$(kv "$TMPD/o_e1.txt" subjekt)"
+is "eigen reads the new response keys" "$(kv "$TMPD/o_e1n.txt" state)" "ok"
+is "eigen new keys: subject as with the old keys" "$(kv "$TMPD/o_e1n.txt" subject)" "$(kv "$TMPD/o_e1.txt" subject)"
 
 own_wire() {
     python3 -I - "$1" <<'WIREPY'
@@ -329,7 +329,7 @@ for line in open(sys.argv[1], encoding="utf-8"):
 print(" ".join(out))
 WIREPY
 }
-EKEN=$(kv "$TMPD/o_e1.txt" kennung)
+EKEN=$(kv "$TMPD/o_e1.txt" identity)
 cp "$TMPD/protokoll.jsonl" "$TMPD/protokoll.keep"
 server_zu
 server_auf --access-secs 3600
@@ -349,7 +349,7 @@ server_auf --own-old-only --access-secs 3600
 cp "$TMPD/d1.img" "$TMPD/de.img"
 rm -f "$TMPD/protokoll.jsonl"
 lauf "$TMPD/de.img" "konto anmelden --anbieter=eigen --kennung=justin < /pw_gut" "$TMPD/o_eo1.txt"
-is "eigen against an old-spelling server: login still works" "$(kv "$TMPD/o_eo1.txt" stand)" "ok"
+is "eigen against an old-spelling server: login still works" "$(kv "$TMPD/o_eo1.txt" state)" "ok"
 lauf "$TMPD/de.img" "konto status --kennung=$EKEN" "$TMPD/o_eo2.txt"
 lauf "$TMPD/de.img" "konto abmelden --kennung=$EKEN" "$TMPD/o_eo3.txt"
 own_wire "$TMPD/protokoll.jsonl" > "$TMPD/eo.txt"
@@ -363,27 +363,27 @@ server_auf
 server_zu
 netz_zu
 lauf_ohne_netz "$TMPD/d1.img" "konto anmelden --anbieter=eigen --ziel=datei:///eigen --kennung=lokal < /pw_gut" "$TMPD/o_e2.txt"
-is "eigen als ORDNER, OHNE JEDES NETZ" "$(kv "$TMPD/o_e2.txt" stand)" "ok"
+is "eigen als ORDNER, OHNE JEDES NETZ" "$(kv "$TMPD/o_e2.txt" state)" "ok"
 ok "  (PBKDF2 in the guest matches the host's -- otherwise it would be 'falsch')"
 netz_auf
 server_auf
 
 lauf "$TMPD/d1.img" "konto liste" "$TMPD/o_li.txt"
-num "Konten nach vier Anmeldungen" "$(kv "$TMPD/o_li.txt" konten)" ge 4
+num "Konten nach vier Anmeldungen" "$(kv "$TMPD/o_li.txt" accounts)" ge 4
 
 # ======================================================================
 echo "== 5. the token is NEVER in plain text on the disk =="
 # ======================================================================
 cp "$TMPD/d1.img" "$TMPD/d5.img"
 lauf "$TMPD/d5.img" "konto uebergabe --kennung=$JKEN" "$TMPD/o_ub.txt"
-TOK=$(kv "$TMPD/o_ub.txt" zugriff)
+TOK=$(kv "$TMPD/o_ub.txt" access)
 if [ -n "$TOK" ] && [ ${#TOK} -gt 40 ]; then
     ok "the handover to SYNC names the token (${#TOK} characters)"
 else
     bad "the handover names no token"
 fi
-has "$TMPD/o_ub.txt" "konto: datenort = " "die Uebergabe nennt den Datenort"
-has "$TMPD/o_ub.txt" "konto: subjekt = " "die Uebergabe nennt das Subjekt"
+has "$TMPD/o_ub.txt" "konto: data_location = " "die Uebergabe nennt den Datenort"
+has "$TMPD/o_ub.txt" "konto: subject = " "die Uebergabe nennt das Subjekt"
 if [ -n "$TOK" ]; then
     TREFFER=$(grep -c -aF -- "$TOK" "$TMPD/d5.img" 2>/dev/null || true)
     is "das Token im ABBILD gesucht (Treffer)" "${TREFFER:-0}" "0"
@@ -406,9 +406,9 @@ fi
 
 abbild "$TMPD/dk.img" || true
 lauf "$TMPD/dk.img" "konto --kaputt=klartext anmelden --anbieter=jarvis --kennung=zweiter < /pw2" "$TMPD/o_kk.txt"
-is "Gegenprobe klartext: angemeldet" "$(kv "$TMPD/o_kk.txt" stand)" "ok"
-is "Gegenprobe klartext: gesiegelt" "$(kv "$TMPD/o_kk.txt" gesiegelt)" "0"
-KKEN=$(kv "$TMPD/o_kk.txt" kennung)
+is "Gegenprobe klartext: angemeldet" "$(kv "$TMPD/o_kk.txt" state)" "ok"
+is "Gegenprobe klartext: gesiegelt" "$(kv "$TMPD/o_kk.txt" sealed)" "0"
+KKEN=$(kv "$TMPD/o_kk.txt" identity)
 bash tools/mkfsfi/mkfs.sh cat "$TMPD/dk.img" "/state/session/konto/$KKEN" \
     > "$TMPD/kk_roh.bin" 2>/dev/null
 KTOK=$(tr -d '\0' < "$TMPD/kk_roh.bin" | head -c 400)
@@ -422,13 +422,22 @@ else
     bad "control plaintext: no token to search for"
 fi
 
+abbild "$TMPD/dok.img" || true
+lauf "$TMPD/dok.img" "konto --kaputt=oldkeys anmelden --anbieter=jarvis --kennung=zweiter < /pw2" "$TMPD/o_ok.txt"
+is "old session keys: signed in" "$(kv "$TMPD/o_ok.txt" state)" "ok"
+OLDEXP=$(kv "$TMPD/o_ok.txt" expiry)
+num "old session keys: expiry of the login" "${OLDEXP:-0}" gt 0
+lauf "$TMPD/dok.img" "konto status --ohne-netz --kennung=zweiter" "$TMPD/o_ok2.txt"
+is "old session keys are still read: session" "$(kv "$TMPD/o_ok2.txt" session)" "1"
+is "old session keys are still read: expiry" "$(kv "$TMPD/o_ok2.txt" expiry)" "$OLDEXP"
+
 # ======================================================================
 echo "== 6. reboot, log out, and the mark is REALLY gone =="
 # ======================================================================
 lauf "$TMPD/d5.img" "konto status --ohne-netz --kennung=$JKEN" "$TMPD/o_st.txt"
-is "die Sitzung ueberlebt den Neustart" "$(kv "$TMPD/o_st.txt" sitzung)" "1"
+is "die Sitzung ueberlebt den Neustart" "$(kv "$TMPD/o_st.txt" session)" "1"
 lauf "$TMPD/d5.img" "konto abmelden --kennung=$JKEN" "$TMPD/o_ab.txt"
-is "abgemeldet" "$(kv "$TMPD/o_ab.txt" abgemeldet)" "1"
+is "abgemeldet" "$(kv "$TMPD/o_ab.txt" signed_out)" "1"
 bash tools/mkfsfi/mkfs.sh where "$TMPD/d5.img" "$SPFAD" > "$TMPD/wo2.txt" 2>&1
 grep -qa "no such path" "$TMPD/wo2.txt" \
     && ok "the session file has vanished from the directory" \
@@ -450,7 +459,7 @@ PY
     num "und der Block ist ueberschrieben (Oktette != 0)" "$NN" le 64
 fi
 lauf "$TMPD/d5.img" "konto liste" "$TMPD/o_li2.txt"
-ok "the account list after logout: $(kv "$TMPD/o_li2.txt" konten) Eintraege"
+ok "the account list after logout: $(kv "$TMPD/o_li2.txt" accounts) Eintraege"
 
 # ======================================================================
 echo "== 7. no ambient cookies, the token as bearer =="
@@ -497,9 +506,9 @@ echo "== 8. falsches Kennwort, und zwanzig davon =="
 # ======================================================================
 abbild "$TMPD/d8.img" || true
 lauf "$TMPD/d8.img" "konto anmelden --anbieter=xoffi --kennung=justin@example.test --bereich=alpha < /pw_schlecht" "$TMPD/o_f1.txt"
-is "falsches Kennwort" "$(kv "$TMPD/o_f1.txt" stand)" "falsch"
+is "falsches Kennwort" "$(kv "$TMPD/o_f1.txt" state)" "wrong"
 lauf "$TMPD/d8.img" "konto liste" "$TMPD/o_f2.txt"
-is "danach: Konten auf dem Geraet" "$(kv "$TMPD/o_f2.txt" konten)" "0"
+is "danach: Konten auf dem Geraet" "$(kv "$TMPD/o_f2.txt" accounts)" "0"
 bash tools/mkfsfi/mkfs.sh where "$TMPD/d8.img" "/state/session/konto" > "$TMPD/wo3.txt" 2>&1
 hin "und /state/session/konto: $(head -1 "$TMPD/wo3.txt")"
 
@@ -507,21 +516,21 @@ SK=""
 T0=$(date +%s)
 for i in $(seq 1 20); do
     lauf "$TMPD/d8.img" "konto anmelden --anbieter=xoffi --kennung=justin@example.test --bereich=alpha < /pw_schlecht" "$TMPD/o_v$i.txt"
-    SK="$SK $(kv "$TMPD/o_v$i.txt" stand)"
+    SK="$SK $(kv "$TMPD/o_v$i.txt" state)"
 done
 T1=$(date +%s)
-GEB=$(echo "$SK" | tr ' ' '\n' | grep -c '^gebremst$' || true)
-FAL=$(echo "$SK" | tr ' ' '\n' | grep -c '^falsch$' || true)
-hin "zwanzig Versuche in $((T1-T0)) s: falsch=$FAL gebremst=$GEB"
+GEB=$(echo "$SK" | tr ' ' '\n' | grep -c '^throttled$' || true)
+FAL=$(echo "$SK" | tr ' ' '\n' | grep -c '^wrong$' || true)
+hin "zwanzig Versuche in $((T1-T0)) s: falsch=$FAL throttled=$GEB"
 num "der Server bremst nach einer Weile" "$GEB" ge 1
 num "und das Geraet ist nie stehengeblieben (Antworten)" "$((GEB+FAL))" eq 20
 lauf "$TMPD/d8.img" "konto liste" "$TMPD/o_v99.txt"
-is "nach zwanzig Fehlversuchen: Konten" "$(kv "$TMPD/o_v99.txt" konten)" "0"
+is "nach zwanzig Fehlversuchen: Konten" "$(kv "$TMPD/o_v99.txt" accounts)" "0"
 
 lauf "$TMPD/d8.img" "konto anmelden --anbieter=xoffi --kennung=gibtesnicht@example.test --bereich=alpha < /pw_schlecht" "$TMPD/o_g1.txt"
-A=$(kv "$TMPD/o_g1.txt" stand)
+A=$(kv "$TMPD/o_g1.txt" state)
 lauf "$TMPD/d8.img" "konto anmelden --anbieter=xoffi --kennung=admin@example.test --bereich=alpha < /pw_schlecht" "$TMPD/o_g2.txt"
-B=$(kv "$TMPD/o_g2.txt" stand)
+B=$(kv "$TMPD/o_g2.txt" state)
 if [ "$A" = "$B" ]; then
     ok "unknown name and wrong password give the SAME answer ($A)"
 else
@@ -533,14 +542,14 @@ echo "== 9. two organisations, the same address =="
 # ======================================================================
 abbild "$TMPD/d9.img" || true
 lauf "$TMPD/d9.img" "konto anmelden --anbieter=xoffi --kennung=justin@example.test < /pw_gut" "$TMPD/o_m0.txt"
-is "ohne Angabe des Mandanten wird GEFRAGT" "$(kv "$TMPD/o_m0.txt" stand)" "mehrdeutig"
-num "und die Auswahl wird genannt" "$(kvn "$TMPD/o_m0.txt" auswahl)" eq 2
+is "ohne Angabe des Mandanten wird GEFRAGT" "$(kv "$TMPD/o_m0.txt" state)" "ambiguous"
+num "und die Auswahl wird genannt" "$(kvn "$TMPD/o_m0.txt" choice)" eq 2
 lauf "$TMPD/d9.img" "konto anmelden --anbieter=xoffi --kennung=justin@example.test --bereich=alpha < /pw_gut" "$TMPD/o_m1.txt"
 lauf "$TMPD/d9.img" "konto anmelden --anbieter=xoffi --kennung=justin@example.test --bereich=beta < /pw_gut" "$TMPD/o_m2.txt"
-K1=$(kv "$TMPD/o_m1.txt" kennung)
-K2=$(kv "$TMPD/o_m2.txt" kennung)
-S1=$(kv "$TMPD/o_m1.txt" subjekt)
-S2=$(kv "$TMPD/o_m2.txt" subjekt)
+K1=$(kv "$TMPD/o_m1.txt" identity)
+K2=$(kv "$TMPD/o_m2.txt" identity)
+S1=$(kv "$TMPD/o_m1.txt" subject)
+S2=$(kv "$TMPD/o_m2.txt" subject)
 if [ -n "$K1" ] && [ -n "$K2" ] && [ "$K1" != "$K2" ]; then
     ok "two accounts, two identifiers: $K1 versus $K2"
 else
@@ -548,18 +557,18 @@ else
 fi
 is "und zwei verschiedene Subjekte" "$([ "$S1" != "$S2" ] && echo ja)" "ja"
 lauf "$TMPD/d9.img" "konto liste" "$TMPD/o_m3.txt"
-is "beide Konten stehen nebeneinander" "$(kv "$TMPD/o_m3.txt" konten)" "2"
+is "beide Konten stehen nebeneinander" "$(kv "$TMPD/o_m3.txt" accounts)" "2"
 lauf "$TMPD/d9.img" "konto uebergabe --kennung=$K1" "$TMPD/o_m4.txt"
 lauf "$TMPD/d9.img" "konto uebergabe --kennung=$K2" "$TMPD/o_m5.txt"
-T1T=$(kv "$TMPD/o_m4.txt" zugriff)
-T2T=$(kv "$TMPD/o_m5.txt" zugriff)
+T1T=$(kv "$TMPD/o_m4.txt" access)
+T2T=$(kv "$TMPD/o_m5.txt" access)
 if [ -n "$T1T" ] && [ "$T1T" != "$T2T" ]; then
     ok "every account has its own token"
 else
     bad "both accounts share a token"
 fi
-B1=$(kv "$TMPD/o_m4.txt" bereich)
-B2=$(kv "$TMPD/o_m5.txt" bereich)
+B1=$(kv "$TMPD/o_m4.txt" tenant)
+B2=$(kv "$TMPD/o_m5.txt" tenant)
 is "der Mandant des ersten" "$B1" "alpha"
 is "der Mandant des zweiten" "$B2" "beta"
 
@@ -567,8 +576,8 @@ is "der Mandant des zweiten" "$B2" "beta"
 abbild "$TMPD/d9b.img" || true
 lauf "$TMPD/d9b.img" "konto --kaputt=einemandant anmelden --anbieter=xoffi --kennung=justin@example.test --bereich=alpha < /pw_gut" "$TMPD/o_m6.txt"
 lauf "$TMPD/d9b.img" "konto liste" "$TMPD/o_m7.txt"
-KB1=$(kv "$TMPD/o_m6.txt" kennung)
-BB1=$(kv "$TMPD/o_m6.txt" bereich)
+KB1=$(kv "$TMPD/o_m6.txt" identity)
+BB1=$(kv "$TMPD/o_m6.txt" tenant)
 is "Gegenprobe einemandant: der Mandant faellt aus der Kennung" "$BB1" ""
 if [ "$KB1" != "$K1" ]; then
     ok "  and the identifier is therefore different from the one with tenant"
@@ -583,13 +592,13 @@ server_zu
 server_auf --access-secs 3600
 abbild "$TMPD/da.img" || true
 lauf "$TMPD/da.img" "konto anmelden --anbieter=xoffi --kennung=admin@example.test --bereich=alpha < /pw_gut" "$TMPD/o_r1.txt"
-is "angemeldet mit einem Token, das in einer Stunde ablaeuft" "$(kv "$TMPD/o_r1.txt" stand)" "ok"
-RK=$(kv "$TMPD/o_r1.txt" kennung)
-AB1=$(kv "$TMPD/o_r1.txt" ablauf)
+is "angemeldet mit einem Token, das in einer Stunde ablaeuft" "$(kv "$TMPD/o_r1.txt" state)" "ok"
+RK=$(kv "$TMPD/o_r1.txt" identity)
+AB1=$(kv "$TMPD/o_r1.txt" expiry)
 lauf "$TMPD/da.img" "konto status --kennung=$RK" "$TMPD/o_r2.txt"
-is "die Erneuerung war faellig" "$(kv "$TMPD/o_r2.txt" erneuern_faellig)" "1"
-is "und sie ist passiert" "$(kv "$TMPD/o_r2.txt" erneuert)" "1"
-AB2=$(kv "$TMPD/o_r2.txt" ablauf)
+is "die Erneuerung war faellig" "$(kv "$TMPD/o_r2.txt" renewal_due)" "1"
+is "und sie ist passiert" "$(kv "$TMPD/o_r2.txt" renewed)" "1"
+AB2=$(kv "$TMPD/o_r2.txt" expiry)
 if [ -n "$AB1" ] && [ -n "$AB2" ] && [ "$AB2" -ge "$AB1" ] 2>/dev/null; then
     ok "the new expiry is not earlier than the old ($AB1 -> $AB2)"
 else
@@ -599,9 +608,9 @@ fi
 server_zu
 server_auf --access-secs 3600 --refresh-verweigern
 lauf "$TMPD/da.img" "konto status --kennung=$RK" "$TMPD/o_r3.txt"
-is "Erneuerung abgelehnt -> sauber abgemeldet" "$(kv "$TMPD/o_r3.txt" abgemeldet)" "1"
+is "Erneuerung abgelehnt -> sauber abgemeldet" "$(kv "$TMPD/o_r3.txt" signed_out)" "1"
 lauf "$TMPD/da.img" "konto liste" "$TMPD/o_r4.txt"
-is "der KONTOEINTRAG bleibt (kein Datenverlust)" "$(kv "$TMPD/o_r4.txt" konten)" "1"
+is "der KONTOEINTRAG bleibt (kein Datenverlust)" "$(kv "$TMPD/o_r4.txt" accounts)" "1"
 bash tools/mkfsfi/mkfs.sh where "$TMPD/da.img" "/state/session/konto/$RK" > "$TMPD/wo4.txt" 2>&1
 grep -qa "no such path" "$TMPD/wo4.txt" \
     && ok "and the token is gone" || bad "the token is still there"
@@ -613,22 +622,22 @@ echo "== 11. NO NETWORK -- the most important promise of the round =="
 # ======================================================================
 abbild "$TMPD/dn.img" || true
 lauf "$TMPD/dn.img" "konto anmelden --anbieter=jarvis --kennung=justin < /pw_gut" "$TMPD/o_n0.txt"
-is "erst anmelden, mit Netz" "$(kv "$TMPD/o_n0.txt" stand)" "ok"
-NK=$(kv "$TMPD/o_n0.txt" kennung)
+is "erst anmelden, mit Netz" "$(kv "$TMPD/o_n0.txt" state)" "ok"
+NK=$(kv "$TMPD/o_n0.txt" identity)
 lauf_ohne_netz "$TMPD/dn.img" "konto status --kennung=$NK" "$TMPD/o_n1.txt"
-is "OHNE NETZ: die Sitzung ist noch da" "$(kv "$TMPD/o_n1.txt" sitzung)" "1"
-is "OHNE NETZ: der Stand ist ok" "$(kv "$TMPD/o_n1.txt" stand)" "ok"
+is "OHNE NETZ: die Sitzung ist noch da" "$(kv "$TMPD/o_n1.txt" session)" "1"
+is "OHNE NETZ: der Stand ist ok" "$(kv "$TMPD/o_n1.txt" state)" "ok"
 lauf_ohne_netz "$TMPD/dn.img" "konto liste" "$TMPD/o_n2.txt"
-is "OHNE NETZ: die Kontenliste steht" "$(kv "$TMPD/o_n2.txt" konten)" "1"
+is "OHNE NETZ: die Kontenliste steht" "$(kv "$TMPD/o_n2.txt" accounts)" "1"
 lauf_ohne_netz "$TMPD/dn.img" "konto uebergabe --kennung=$NK" "$TMPD/o_n3.txt"
-NT=$(kv "$TMPD/o_n3.txt" zugriff)
+NT=$(kv "$TMPD/o_n3.txt" access)
 [ -n "$NT" ] && ok "WITHOUT NETWORK: the handover to SYNC delivers the token" \
              || bad "WITHOUT NETWORK: the handover delivers nothing"
 lauf_ohne_netz "$TMPD/dn.img" "konto anmelden --anbieter=jarvis --kennung=zweiter < /pw_gut" "$TMPD/o_n4.txt"
-is "OHNE NETZ: eine NEUE Anmeldung schlaegt klar fehl" "$(kv "$TMPD/o_n4.txt" stand)" "keinnetz"
+is "OHNE NETZ: eine NEUE Anmeldung schlaegt klar fehl" "$(kv "$TMPD/o_n4.txt" state)" "offline"
 has "$TMPD/o_n4.txt" "konto: text = " "und sie sagt WARUM, aus dem Sprachkatalog"
 lauf_ohne_netz "$TMPD/dn.img" "konto liste" "$TMPD/o_n5.txt"
-is "OHNE NETZ: der Fehlversuch hat nichts kaputtgemacht" "$(kv "$TMPD/o_n5.txt" konten)" "1"
+is "OHNE NETZ: der Fehlversuch hat nichts kaputtgemacht" "$(kv "$TMPD/o_n5.txt" accounts)" "1"
 lauf_ohne_netz "$TMPD/dn.img" "ls /bin" "$TMPD/o_n6.txt"
 has "$TMPD/o_n6.txt" "konto" "OHNE NETZ: das System selbst laeuft weiter (ls /bin)"
 
@@ -638,10 +647,10 @@ server_zu
 server_auf_zert "$TMPD/certs/rogue.pem" "$TMPD/certs/rogue.key"
 abbild "$TMPD/dt.img" || true
 lauf "$TMPD/dt.img" "konto anmelden --anbieter=jarvis --kennung=justin < /pw_gut" "$TMPD/o_tls.txt"
-is "fremde Wurzel -> eigener Stand" "$(kv "$TMPD/o_tls.txt" stand)" "tls"
+is "fremde Wurzel -> eigener Stand" "$(kv "$TMPD/o_tls.txt" state)" "tls"
 has "$TMPD/o_tls.txt" "konto: text = " "und ein Satz aus dem Katalog dazu"
 lauf "$TMPD/dt.img" "konto liste" "$TMPD/o_tls2.txt"
-is "und es entsteht kein Konto" "$(kv "$TMPD/o_tls2.txt" konten)" "0"
+is "und es entsteht kein Konto" "$(kv "$TMPD/o_tls2.txt" accounts)" "0"
 server_zu
 server_auf
 
@@ -651,11 +660,11 @@ MAXA=$(grep -oE 'argv: \[u64; [0-9]+\]' kernel/user/sh.fi | grep -oE '[0-9]+' | 
 is "die Shell nimmt so viele Woerter" "$MAXA" "64"
 abbild "$TMPD/dw.img" || true
 lauf "$TMPD/dw.img" "konto anmelden --anbieter jarvis --kennung justin < /pw_gut" "$TMPD/o_w1.txt"
-is "die GETRENNTE Form (sechs Woerter) tut es auch" "$(kv "$TMPD/o_w1.txt" stand)" "ok"
-W1=$(kv "$TMPD/o_w1.txt" kennung)
+is "die GETRENNTE Form (sechs Woerter) tut es auch" "$(kv "$TMPD/o_w1.txt" state)" "ok"
+W1=$(kv "$TMPD/o_w1.txt" identity)
 abbild "$TMPD/dw2.img" || true
 lauf "$TMPD/dw2.img" "konto anmelden --anbieter=jarvis --kennung=justin < /pw_gut" "$TMPD/o_w2.txt"
-W2=$(kv "$TMPD/o_w2.txt" kennung)
+W2=$(kv "$TMPD/o_w2.txt" identity)
 is "und sie fuehrt zur GLEICHEN Kennung wie die angehaengte" "$W2" "$W1"
 lauf "$TMPD/dw2.img" "konto anmelden --anbieter xoffi --ziel $Z --name $N --kennung mfa@example.test --bereich alpha --code 1 < /pw_gut" "$TMPD/o_w3.txt"
 if grep -qa "too many arguments" "$TMPD/o_w3.txt"; then
@@ -673,19 +682,19 @@ echo "== 12. master_session und fremde Verwaltungsrechte =="
 # ======================================================================
 abbild "$TMPD/dm.img" || true
 lauf "$TMPD/dm.img" "konto anmelden --anbieter=xoffi --kennung=chef@example.test --bereich=alpha < /pw_gut" "$TMPD/o_ms.txt"
-is "eine Sitzung mit master_session wird ABGELEHNT" "$(kv "$TMPD/o_ms.txt" stand)" "abgelehnt"
+is "eine Sitzung mit master_session wird ABGELEHNT" "$(kv "$TMPD/o_ms.txt" state)" "refused"
 lauf "$TMPD/dm.img" "konto liste" "$TMPD/o_ms2.txt"
-is "und es entsteht kein Konto" "$(kv "$TMPD/o_ms2.txt" konten)" "0"
+is "und es entsteht kein Konto" "$(kv "$TMPD/o_ms2.txt" accounts)" "0"
 bash tools/mkfsfi/mkfs.sh where "$TMPD/dm.img" "/state/session/konto" > "$TMPD/wo5.txt" 2>&1
 hin "  /state/session/konto: $(head -1 "$TMPD/wo5.txt")"
 lauf "$TMPD/dm.img" "konto --kaputt=claimcheck anmelden --anbieter=xoffi --kennung=chef@example.test --bereich=alpha < /pw_gut" "$TMPD/o_ms3.txt"
-is "Gegenprobe claimcheck: jetzt geht sie durch" "$(kv "$TMPD/o_ms3.txt" stand)" "ok"
+is "Gegenprobe claimcheck: jetzt geht sie durch" "$(kv "$TMPD/o_ms3.txt" state)" "ok"
 ok "  (so section 12 measures the refusal and not a coincidence)"
 
 # is_admin / nexus_core_access
 abbild "$TMPD/dm2.img" || true
 lauf "$TMPD/dm2.img" "konto anmelden --anbieter=xoffi --kennung=admin@example.test --bereich=alpha < /pw_gut" "$TMPD/o_ad.txt"
-is "ein Token mit is_admin und nexus_core_access wird angenommen" "$(kv "$TMPD/o_ad.txt" stand)" "ok"
+is "ein Token mit is_admin und nexus_core_access wird angenommen" "$(kv "$TMPD/o_ad.txt" state)" "ok"
 bash tools/mkfsfi/mkfs.sh where "$TMPD/dm2.img" "/etc/konto.rechte" > "$TMPD/wo6.txt" 2>&1
 grep -qa "no such path" "$TMPD/wo6.txt" \
     && ok "and NO local permission arises (/etc/konto.rechte does not exist)" \
@@ -728,8 +737,8 @@ echo "== 14. THE PRINCIPLE: everything without an account =="
 abbild "$TMPD/dp.img" || true
 lauf_ohne_netz "$TMPD/dp.img" "echo hallo > /probe.txt;cat /probe.txt;ls /bin;konto liste;konto status" "$TMPD/o_p1.txt"
 has "$TMPD/o_p1.txt" "hallo" "ohne jedes Konto: schreiben und lesen geht"
-is "ohne jedes Konto: Konten" "$(kv "$TMPD/o_p1.txt" konten)" "0"
-is "ohne jedes Konto: konto status endet sauber" "$(kv "$TMPD/o_p1.txt" stand)" "ok"
+is "ohne jedes Konto: Konten" "$(kv "$TMPD/o_p1.txt" accounts)" "0"
+is "ohne jedes Konto: konto status endet sauber" "$(kv "$TMPD/o_p1.txt" state)" "ok"
 bash tools/mkfsfi/mkfs.sh where "$TMPD/dp.img" "/etc/konten" > "$TMPD/wo8.txt" 2>&1
 grep -qa "no such path" "$TMPD/wo8.txt" \
     && ok "and not a single account file arose" \
@@ -756,8 +765,11 @@ done
 for W in keinnetz abgelehnt; do
     num "ALIAS: altes Wort '$W' wird von der Seite noch ausgewertet" "$(grep -c "= \"$W\\\\0\"" $SF)" ge 1
 done
+for K in kf_zw_old kf_hint_old; do
+    num "ALIAS: the page still reads the old konto key ($K)" "$(grep -c "$K" $SF)" ge 1
+done
 num "ALIAS: altes Schluesselwort 'tausch' wird von der Seite noch gelesen" "$(grep -c 'kf_tausch: \[u8; 7\] = "tausch' $SF)" eq 1
-for A in geraet warten tauschen zwischen; do
+for A in geraet warten tauschen zwischen bereich lokal tenant local; do
     num "ALIAS: konto nimmt --$A weiter an" "$(grep -c "\"--$A\\\\0\"" kernel/app/account.fi)" eq 1
 done
 for K in konto.ui.book konto.ui.book.state konto.ui.book.on konto.ui.book.off konto.ui.book.ok \

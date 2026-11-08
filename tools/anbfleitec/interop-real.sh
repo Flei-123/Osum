@@ -342,7 +342,7 @@ abbild "$TMPD/base.img" || { echo "ANBREAL: $pass passed, $fail failed"; exit 1;
 : > "$TMPD/w/s2c.log"
 cp "$TMPD/base.img" "$TMPD/d_in.img"
 run_wait "$TMPD/d_in.img" "$TMPD/o_in.txt" allow
-is "device sign-in at the broker (konto)" "$(kv "$TMPD/o_in.txt" stand)" "ok"
+is "device sign-in at the broker (konto)" "$(kv "$TMPD/o_in.txt" state)" "ok"
 ST=$(wire_tokens access_token | head -1)
 IDT=$(wire_tokens id_token | head -1)
 is "the guest's access token carries the same account" "$(jwtc "$ST" uid)" "$UIDC"

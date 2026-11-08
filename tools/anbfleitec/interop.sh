@@ -232,7 +232,7 @@ run_wait_slow() { # <image> <out> <broker interval>
         sleep 0.2
     done
     if [ -z "$uc" ]; then bad "the guest never showed a user code"; else
-        local dc; dc=$(kv "$out" zwischen)
+        local dc; dc=$(kv "$out" continue)
         sleep "$(python3 -c "print($b - 1.6)")"
         hcurl -d grant_type=urn:ietf:params:oauth:grant-type:device_code -d client_id=orientos-device -d "device_code=$dc" \
             https://konto.test:8443/oidc/token | jf error > "$out.pre"
@@ -266,30 +266,30 @@ echo "== 2. device flow in two manual steps =="
 : > "$TMPD/w/s2c.log"; : > "$TMPD/w/c2s.log"
 cp "$TMPD/base.img" "$TMPD/d_man.img"
 lauf "$TMPD/d_man.img" "$CMD" "$TMPD/o_s1.txt"
-is "step 1: state" "$(kv "$TMPD/o_s1.txt" stand)" "device"
+is "step 1: state" "$(kv "$TMPD/o_s1.txt" state)" "device"
 UC=$(kv "$TMPD/o_s1.txt" code)
 echo "$UC" | grep -qE '^[A-Z0-9]{4}-[A-Z0-9]{4}$' && ok "step 1: user code shape ($UC)" || bad "step 1: user code '$UC'"
 is "step 1: URL is the broker's" "$(kv "$TMPD/o_s1.txt" url)" "$Z/oidc/device"
 has "$TMPD/o_s1.txt" "konto: url_complete = $Z/oidc/device?user_code=" "step 1: complete URL carries the code"
-DC=$(kv "$TMPD/o_s1.txt" zwischen)
+DC=$(kv "$TMPD/o_s1.txt" continue)
 [ -n "$DC" ] && ok "step 1: device code kept for step 2" || bad "step 1: no device code"
 is "step 1: interval from the broker" "$(kv "$TMPD/o_s1.txt" interval)" "1"
 sleep 1.2
 lauf "$TMPD/d_man.img" "$CMD --continue=$DC" "$TMPD/o_s2.txt"
-is "step 2 before approval: still waiting" "$(kv "$TMPD/o_s2.txt" stand)" "device"
+is "step 2 before approval: still waiting" "$(kv "$TMPD/o_s2.txt" state)" "device"
 lauf "$TMPD/d_man.img" "konto liste" "$TMPD/o_s2l.txt"
-is "nothing signed in after a pending answer" "$(kv "$TMPD/o_s2l.txt" konten)" "0"
+is "nothing signed in after a pending answer" "$(kv "$TMPD/o_s2l.txt" accounts)" "0"
 approve "$UC" allow > "$TMPD/ap1.txt" 2>&1 && ok "the person approved on the broker ($(cat "$TMPD/ap1.txt"))" || bad "approve: $(cat "$TMPD/ap1.txt")"
 sleep 1.2
 lauf "$TMPD/d_man.img" "$CMD --continue=$DC" "$TMPD/o_s3.txt"
-is "step 2 after approval: state" "$(kv "$TMPD/o_s3.txt" stand)" "ok"
-is "sealed" "$(kv "$TMPD/o_s3.txt" gesiegelt)" "1"
+is "step 2 after approval: state" "$(kv "$TMPD/o_s3.txt" state)" "ok"
+is "sealed" "$(kv "$TMPD/o_s3.txt" sealed)" "1"
 ACC=$(wire_tokens access_token | head -1)
-is "subject in the guest = sub of the broker's token" "$(kv "$TMPD/o_s3.txt" subjekt)" "$(jwtc "$ACC" sub)"
+is "subject in the guest = sub of the broker's token" "$(kv "$TMPD/o_s3.txt" subject)" "$(jwtc "$ACC" sub)"
 is "broker token: aud" "$(jwtc "$ACC" aud)" "orientos"
 is "broker token: iss" "$(jwtc "$ACC" iss)" "$Z"
-num "expiry in the guest = exp of the broker's token" "$(kv "$TMPD/o_s3.txt" ablauf)" ge "$(jwtc "$ACC" exp)"
-[ -n "$(kv "$TMPD/o_s3.txt" kennung)" ] && ok "account id $(kv "$TMPD/o_s3.txt" kennung)" || bad "no account id"
+num "expiry in the guest = exp of the broker's token" "$(kv "$TMPD/o_s3.txt" expiry)" ge "$(jwtc "$ACC" exp)"
+[ -n "$(kv "$TMPD/o_s3.txt" identity)" ] && ok "account id $(kv "$TMPD/o_s3.txt" identity)" || bad "no account id"
 # the same device code is single use (checked on the broker)
 sleep 1.2
 hcurl -d grant_type=urn:ietf:params:oauth:grant-type:device_code -d client_id=orientos-device -d "device_code=$DC" \
@@ -325,35 +325,35 @@ echo "== 3. --wait, the guest polls by itself =="
 # ======================================================================
 cp "$TMPD/base.img" "$TMPD/d_login.img"
 run_wait "$TMPD/d_login.img" "$TMPD/o_w.txt" allow
-is "wait: state" "$(kv "$TMPD/o_w.txt" stand)" "ok"
-is "wait: sealed" "$(kv "$TMPD/o_w.txt" gesiegelt)" "1"
+is "wait: state" "$(kv "$TMPD/o_w.txt" state)" "ok"
+is "wait: sealed" "$(kv "$TMPD/o_w.txt" sealed)" "1"
 num "wait: polls" "$(kv "$TMPD/o_w.txt" polls)" ge 1
-KEN=$(kv "$TMPD/o_w.txt" kennung)
-is "wait: display name" "$(kv "$TMPD/o_w.txt" anzeige)" "justin"
+KEN=$(kv "$TMPD/o_w.txt" identity)
+is "wait: display name" "$(kv "$TMPD/o_w.txt" display)" "justin"
 
 # ======================================================================
 echo "== 4. errors from the real broker =="
 # ======================================================================
 chk() { # <label> <image> <out> <state> <hint key>
-    is "$1: state" "$(kv "$3" stand)" "$4"
-    [ -n "$5" ] && is "$1: hint ($5)" "$(kv "$3" hinweis)" "$(msg "$5")"
+    is "$1: state" "$(kv "$3" state)" "$4"
+    [ -n "$5" ] && is "$1: hint ($5)" "$(kv "$3" hint)" "$(msg "$5")"
     lauf "$2" "konto liste" "$3.l"
-    is "$1: accounts on the device" "$(kv "$3.l" konten)" "0"
+    is "$1: accounts on the device" "$(kv "$3.l" accounts)" "0"
 }
 # denied
 cp "$TMPD/base.img" "$TMPD/d_deny.img"
 run_wait "$TMPD/d_deny.img" "$TMPD/o_deny.txt" deny
-chk "denied" "$TMPD/d_deny.img" "$TMPD/o_deny.txt" abgelehnt konto.hint.dev_denied
+chk "denied" "$TMPD/d_deny.img" "$TMPD/o_deny.txt" refused konto.hint.dev_denied
 # wrong audience (counter-probe: the SAME valid token is fine with the right one, see section 3)
 cp "$TMPD/base.img" "$TMPD/d_aud.img"
 run_wait "$TMPD/d_aud.img" "$TMPD/o_aud.txt" allow --aud=another-product
-chk "wrong --aud" "$TMPD/d_aud.img" "$TMPD/o_aud.txt" abgelehnt konto.hint.jwt_aud
+chk "wrong --aud" "$TMPD/d_aud.img" "$TMPD/o_aud.txt" refused konto.hint.jwt_aud
 # unknown client id
 cp "$TMPD/base.img" "$TMPD/d_cl.img"
 lauf "$TMPD/d_cl.img" "$CMD --client=nobody" "$TMPD/o_cl.txt"
-case "$(kv "$TMPD/o_cl.txt" stand)" in fehler|abgelehnt) ok "unknown client: refused ($(kv "$TMPD/o_cl.txt" stand))";; *) bad "unknown client: '$(kv "$TMPD/o_cl.txt" stand)'";; esac
+case "$(kv "$TMPD/o_cl.txt" state)" in error|refused) ok "unknown client: refused ($(kv "$TMPD/o_cl.txt" state))";; *) bad "unknown client: '$(kv "$TMPD/o_cl.txt" state)'";; esac
 lauf "$TMPD/d_cl.img" "konto liste" "$TMPD/o_cl.l"
-is "unknown client: accounts on the device" "$(kv "$TMPD/o_cl.l" konten)" "0"
+is "unknown client: accounts on the device" "$(kv "$TMPD/o_cl.l" accounts)" "0"
 
 # slow_down: broker interval 15; the host polls once, the guest polls right after
 broker_auf 15 600 || true
@@ -364,12 +364,12 @@ hcurl -d grant_type=urn:ietf:params:oauth:grant-type:device_code -d client_id=or
 is "slow_down: first (host) poll" "$(cat "$TMPD/sd0.txt")" "authorization_pending"
 cp "$TMPD/base.img" "$TMPD/d_sd.img"
 lauf "$TMPD/d_sd.img" "$CMD --continue=$SDC" "$TMPD/o_sd.txt"
-is "slow_down: the guest is told to slow down" "$(kv "$TMPD/o_sd.txt" stand)" "gebremst"
+is "slow_down: the guest is told to slow down" "$(kv "$TMPD/o_sd.txt" state)" "throttled"
 # (a single --continue poll prints no new interval; the +5 lives in the --wait loop, measured below)
 cp "$TMPD/base.img" "$TMPD/d_sdw.img"
 broker_auf 6 600 || true
 run_wait_slow "$TMPD/d_sdw.img" "$TMPD/o_sdw.txt" 6
-is "slow_down in the --wait loop: ends signed in" "$(kv "$TMPD/o_sdw.txt" stand)" "ok"
+is "slow_down in the --wait loop: ends signed in" "$(kv "$TMPD/o_sdw.txt" state)" "ok"
 num "slow_down in the --wait loop: polls (slow_down + final)" "$(kv "$TMPD/o_sdw.txt" polls)" ge 2
 num "slow_down in the --wait loop: interval grew by >= 5 (6 -> 11)" "$(kv "$TMPD/o_sdw.txt" interval)" ge 11
 
@@ -377,10 +377,10 @@ num "slow_down in the --wait loop: interval grew by >= 5 (6 -> 11)" "$(kv "$TMPD
 broker_auf 1 4 || true
 cp "$TMPD/base.img" "$TMPD/d_exp.img"
 lauf "$TMPD/d_exp.img" "$CMD" "$TMPD/o_e1.txt"
-EDC=$(kv "$TMPD/o_e1.txt" zwischen)
+EDC=$(kv "$TMPD/o_e1.txt" continue)
 sleep 5
 lauf "$TMPD/d_exp.img" "$CMD --continue=$EDC" "$TMPD/o_e2.txt"
-chk "expired" "$TMPD/d_exp.img" "$TMPD/o_e2.txt" abgelaufen konto.hint.dev_expired
+chk "expired" "$TMPD/d_exp.img" "$TMPD/o_e2.txt" expired konto.hint.dev_expired
 
 # ======================================================================
 echo "== 5. refresh rotation against the real broker =="
@@ -389,11 +389,11 @@ broker_auf 1 600 || true
 cp "$TMPD/base.img" "$TMPD/d_ref.img"
 : > "$TMPD/w/s2c.log"
 run_wait "$TMPD/d_ref.img" "$TMPD/o_r0.txt" allow
-RKEN=$(kv "$TMPD/o_r0.txt" kennung)
-is "refresh: sign-in" "$(kv "$TMPD/o_r0.txt" stand)" "ok"
+RKEN=$(kv "$TMPD/o_r0.txt" identity)
+is "refresh: sign-in" "$(kv "$TMPD/o_r0.txt" state)" "ok"
 lauf "$TMPD/d_ref.img" "konto erneuern --kennung=$RKEN" "$TMPD/o_r1.txt"
-is "renew: renewed" "$(kv "$TMPD/o_r1.txt" erneuert)" "1"
-is "renew: state" "$(kv "$TMPD/o_r1.txt" stand)" "ok"
+is "renew: renewed" "$(kv "$TMPD/o_r1.txt" renewed)" "1"
+is "renew: state" "$(kv "$TMPD/o_r1.txt" state)" "ok"
 R1=$(wire_tokens refresh_token | sed -n 1p); R2=$(wire_tokens refresh_token | sed -n 2p)
 if [ -n "$R1" ] && [ -n "$R2" ] && [ "$R1" != "$R2" ]; then ok "the broker rotated the refresh token"; else bad "no rotation on the wire ('$R1' / '$R2')"; fi
 A2=$(wire_tokens access_token | sed -n 2p)
@@ -402,10 +402,10 @@ replay() { hcurl -o /dev/null -w '%{http_code}' -d grant_type=refresh_token -d "
 is "replay of the OLD refresh token (broker)" "$(replay "$R1")" "400"
 is "after the replay the whole family is dead (new token too)" "$(replay "$R2")" "400"
 lauf "$TMPD/d_ref.img" "konto erneuern --kennung=$RKEN" "$TMPD/o_r2.txt"
-is "dead refresh token: renewed" "$(kv "$TMPD/o_r2.txt" erneuert)" "0"
-is "dead refresh token: session ended cleanly" "$(kv "$TMPD/o_r2.txt" abgemeldet)" "1"
+is "dead refresh token: renewed" "$(kv "$TMPD/o_r2.txt" renewed)" "0"
+is "dead refresh token: session ended cleanly" "$(kv "$TMPD/o_r2.txt" signed_out)" "1"
 lauf "$TMPD/d_ref.img" "konto liste" "$TMPD/o_r3.txt"
-is "dead refresh token: the account entry stays" "$(kv "$TMPD/o_r3.txt" konten)" "1"
+is "dead refresh token: the account entry stays" "$(kv "$TMPD/o_r3.txt" accounts)" "1"
 
 # ======================================================================
 echo "== 6. sign-out =="
@@ -413,10 +413,10 @@ echo "== 6. sign-out =="
 cp "$TMPD/base.img" "$TMPD/d_out.img"
 : > "$TMPD/w/s2c.log"; : > "$TMPD/w/c2s.log"
 run_wait "$TMPD/d_out.img" "$TMPD/o_o0.txt" allow
-OKEN=$(kv "$TMPD/o_o0.txt" kennung)
+OKEN=$(kv "$TMPD/o_o0.txt" identity)
 O1=$(wire_tokens refresh_token | sed -n 1p)
 lauf "$TMPD/d_out.img" "konto abmelden --kennung=$OKEN" "$TMPD/o_o1.txt"
-is "sign-out: done" "$(kv "$TMPD/o_o1.txt" abgemeldet)" "1"
+is "sign-out: done" "$(kv "$TMPD/o_o1.txt" signed_out)" "1"
 grep -aq 'POST /oidc/revoke' "$TMPD/w/c2s.log" && ok "POST /oidc/revoke reached the broker" || bad "no revoke call"
 is "the refresh token is dead after sign-out (broker)" "$(replay "$O1")" "400"
 bash tools/mkfsfi/mkfs.sh where "$TMPD/d_out.img" "/state/session/konto/$OKEN" > "$TMPD/wo_o.txt" 2>&1
@@ -449,7 +449,7 @@ if [ -n "$SOC_PROG" ]; then
     : > "$TMPD/w/s2c.log"
     cp "$TMPD/base.img" "$TMPD/d_soc0.img"
     run_wait "$TMPD/d_soc0.img" "$TMPD/o_soc0.txt" allow
-    is "bridge: device sign-in at the broker" "$(kv "$TMPD/o_soc0.txt" stand)" "ok"
+    is "bridge: device sign-in at the broker" "$(kv "$TMPD/o_soc0.txt" state)" "ok"
     ST=$(wire_tokens access_token | head -1)
     IDT=$(wire_tokens id_token | head -1)
     UIDC=$(jwtc "$ST" uid)
@@ -536,7 +536,7 @@ PY
     : > "$TMPD/ctl/book.log"; : > "$TMPD/w/s2c.log"
     cp "$TMPD/soc_base.img" "$TMPD/d_one.img"
     LW_AFTER="socfleitec v1 contacts;cat /etc/social/fleitec.conf" run_wait "$TMPD/d_one.img" "$TMPD/o_one.txt" allow --exchange
-    is "one step: sign-in" "$(kv "$TMPD/o_one.txt" stand)" "ok"
+    is "one step: sign-in" "$(kv "$TMPD/o_one.txt" state)" "ok"
     is "one step: swap reported" "$(kv "$TMPD/o_one.txt" exchange)" "ok"
     JW1=$(wire_tokens access_token | head -1)
     grep -aq "^account.$UIDC" "$TMPD/o_one.txt" && ok "one step: socfleitec reports account $UIDC" || bad "one step: no 'account $UIDC' line"
@@ -551,18 +551,18 @@ PY
     echo other-product > "$TMPD/ctl/aud"; : > "$TMPD/ctl/book.log"
     LW_AFTER="konto liste;cat /etc/social/fleitec.conf" run_wait "$TMPD/d_one.img" "$TMPD/o_one2.txt" allow --exchange
     echo orientos > "$TMPD/ctl/aud"
-    is "refused swap: sign-in still ok" "$(kv "$TMPD/o_one2.txt" stand)" "ok"
+    is "refused swap: sign-in still ok" "$(kv "$TMPD/o_one2.txt" state)" "ok"
     is "refused swap: reported" "$(kv "$TMPD/o_one2.txt" exchange)" "denied"
     is "refused swap: reason at the book" "$(grep -a 'swap' "$TMPD/ctl/book.log" | head -1)" "swap refused aud"
     has "$TMPD/o_one2.txt" "token=$FKT1" "refused swap: the old fkt1 stays in the configuration"
-    num "refused swap: still one account entry" "$(kv "$TMPD/o_one2.txt" konten)" eq 1
+    num "refused swap: still one account entry" "$(kv "$TMPD/o_one2.txt" accounts)" eq 1
     # book offline (address nobody answers): session stands, conf untouched
     printf 'url=%s\nname=konto.test\nroots=/etc/ssl/roots.pem\n' "https://10.9.0.77:8443" > "$TMPD/fl_off.conf"
     ABB_EXTRA=("/etc/social/fleitec.conf=$TMPD/fl_off.conf"); abbild "$TMPD/off_base.img" || bad "image for the offline case"; ABB_EXTRA=()
     cp "$TMPD/off_base.img" "$TMPD/d_off.img"
     # ALIAS CHECK: this run uses ONLY the old German spellings (--geraet --warten --tauschen)
     LW_OLD=1 LW_AFTER="cat /etc/social/fleitec.conf;konto anmelden --anbieter=fleitec --tauschen" run_wait "$TMPD/d_off.img" "$TMPD/o_off.txt" allow --tauschen
-    is "book offline: sign-in still ok" "$(kv "$TMPD/o_off.txt" stand)" "ok"
+    is "book offline: sign-in still ok" "$(kv "$TMPD/o_off.txt" state)" "ok"
     is "book offline: reported (old flags --geraet --warten --tauschen still work)" "$(kv "$TMPD/o_off.txt" exchange)" "offline"
     num "book offline: no token= written" "$(grep -ac '^token=' "$TMPD/o_off.txt")" eq 0
     has "$TMPD/o_off.txt" "--exchange needs --device" "--tauschen (old name) without --device is refused"

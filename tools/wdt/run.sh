@@ -41,7 +41,7 @@ script_hang > "$D/hang.sh"; mkimg hang
 script_lsproc > "$D/lsproc.sh"; mkimg lsproc
 printf 'gen=00000002 vor=00000001 v=00 ok=0\n' > "$D/erp.txt"
 printf '00000002\n' > "$D/akt.txt"
-cp "$D/busy.sh" "$D/trial.sh"; mkimg trial "/system/ERPROBUNG=$D/erp.txt" "/system/AKTUELL=$D/akt.txt"
+cp "$D/busy.sh" "$D/trial.sh"; mkimg trial "/system/TRIAL=$D/erp.txt" "/system/CURRENT=$D/akt.txt"
 runvm() {
     local name=$1 img=$2 secs=$3 words=$4
     cp "$D/$img.img" "$D/d-$name.img"

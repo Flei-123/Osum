@@ -257,30 +257,30 @@ scen() { printf '%s\n' "$1" > "$TMPD/idp/szenario"; }
 # 3a: the two manual steps (what the settings dialog does)
 scen approve
 lauf "$TMPD/base.img" "konto anmelden --anbieter=fleitec --device" "$TMPD/o_s1.txt"
-is "step 1: state" "$(kv "$TMPD/o_s1.txt" stand)" "device"
+is "step 1: state" "$(kv "$TMPD/o_s1.txt" state)" "device"
 is "step 1: user code" "$(kv "$TMPD/o_s1.txt" code)" "ABCD-EFGH"
 has "$TMPD/o_s1.txt" "konto: url = https://10.9.0.1:8443/device" "step 1: the URL is shown"
 has "$TMPD/o_s1.txt" "konto: url_complete = " "step 1: the complete URL is shown"
-DC=$(kv "$TMPD/o_s1.txt" zwischen)
+DC=$(kv "$TMPD/o_s1.txt" continue)
 case "$DC" in dc-approve-*) ok "step 1: device code kept for step 2 ($DC)";; *) bad "step 1: no device code ('$DC')";; esac
 is "step 1: interval" "$(kv "$TMPD/o_s1.txt" interval)" "1"
 lauf "$TMPD/base.img" "konto anmelden --anbieter=fleitec --geraet --zwischen=$DC" "$TMPD/o_s2.txt"
-is "step 2 (first poll, OLD flags --geraet --zwischen): still waiting" "$(kv "$TMPD/o_s2.txt" stand)" "device"
+is "step 2 (first poll, OLD flags --geraet --zwischen): still waiting" "$(kv "$TMPD/o_s2.txt" state)" "device"
 lauf "$TMPD/base.img" "konto liste" "$TMPD/o_s3.txt"
-is "nothing signed in after a pending answer" "$(kv "$TMPD/o_s3.txt" konten)" "0"
+is "nothing signed in after a pending answer" "$(kv "$TMPD/o_s3.txt" accounts)" "0"
 
 # 3b: approve (pending twice, then tokens), the wait loop in the guest
 scen approve
 cp "$TMPD/base.img" "$TMPD/d_login.img"
 lauf "$TMPD/d_login.img" "$CMD" "$TMPD/o_ok.txt"
-is "approve: state" "$(kv "$TMPD/o_ok.txt" stand)" "ok"
+is "approve: state" "$(kv "$TMPD/o_ok.txt" state)" "ok"
 is "approve: polls" "$(kv "$TMPD/o_ok.txt" polls)" "3"
-is "approve: sealed" "$(kv "$TMPD/o_ok.txt" gesiegelt)" "1"
-is "approve: subject" "$(kv "$TMPD/o_ok.txt" subjekt)" "0b6f1c1e-5a7e-4d2c-9a4b-2f1d3c4b5a69"
-is "approve: display name" "$(kv "$TMPD/o_ok.txt" anzeige)" "Justin"
-KEN=$(kv "$TMPD/o_ok.txt" kennung)
+is "approve: sealed" "$(kv "$TMPD/o_ok.txt" sealed)" "1"
+is "approve: subject" "$(kv "$TMPD/o_ok.txt" subject)" "0b6f1c1e-5a7e-4d2c-9a4b-2f1d3c4b5a69"
+is "approve: display name" "$(kv "$TMPD/o_ok.txt" display)" "Justin"
+KEN=$(kv "$TMPD/o_ok.txt" identity)
 [ -n "$KEN" ] && ok "approve: account id $KEN" || bad "approve: no account id"
-num "approve: expiry (unix, from the token)" "$(kv "$TMPD/o_ok.txt" ablauf)" gt 1700000000
+num "approve: expiry (unix, from the token)" "$(kv "$TMPD/o_ok.txt" expiry)" gt 1700000000
 
 # the wire: form bodies, no cookies, no Authorization on the token calls
 python3 - "$TMPD/idp/protokoll.jsonl" > "$TMPD/wire.txt" <<'PY'
@@ -311,7 +311,7 @@ scen slowdown
 cp "$TMPD/base.img" "$TMPD/d_slow.img"
 : > "$TMPD/idp/protokoll.jsonl"
 lauf "$TMPD/d_slow.img" "$CMD" "$TMPD/o_slow.txt"
-is "slow_down: state" "$(kv "$TMPD/o_slow.txt" stand)" "ok"
+is "slow_down: state" "$(kv "$TMPD/o_slow.txt" state)" "ok"
 is "slow_down: final interval (1 + 5)" "$(kv "$TMPD/o_slow.txt" interval)" "6"
 python3 - "$TMPD/idp/protokoll.jsonl" > "$TMPD/gap.txt" <<'PY'
 import json, sys
@@ -334,11 +334,11 @@ check_refused() { # <scenario> <state> <hint key> <label>
     scen "$1"
     cp "$TMPD/base.img" "$TMPD/d_$1.img"
     lauf "$TMPD/d_$1.img" "$CMD" "$TMPD/o_$1.txt"
-    is "$4: state" "$(kv "$TMPD/o_$1.txt" stand)" "$2"
+    is "$4: state" "$(kv "$TMPD/o_$1.txt" state)" "$2"
     local want; want=$(msg "$3")
-    is "$4: hint text ($3)" "$(kv "$TMPD/o_$1.txt" hinweis)" "$want"
+    is "$4: hint text ($3)" "$(kv "$TMPD/o_$1.txt" hint)" "$want"
     lauf "$TMPD/d_$1.img" "konto liste" "$TMPD/o_$1_l.txt"
-    is "$4: accounts on the device" "$(kv "$TMPD/o_$1_l.txt" konten)" "0"
+    is "$4: accounts on the device" "$(kv "$TMPD/o_$1_l.txt" accounts)" "0"
     bash tools/mkfsfi/mkfs.sh where "$TMPD/d_$1.img" "/state/session/konto" > "$TMPD/wo_$1.txt" 2>&1
     if grep -qa "no such path" "$TMPD/wo_$1.txt"; then ok "$4: no session directory on the disk"
     else
@@ -347,25 +347,25 @@ check_refused() { # <scenario> <state> <hint key> <label>
         is "$4: session files on the disk" "${N:-0}" "0"
     fi
 }
-check_refused deny abgelehnt konto.hint.dev_denied "denied on the other device"
-check_refused expired abgelaufen konto.hint.dev_expired "expired device code"
+check_refused deny refused konto.hint.dev_denied "denied on the other device"
+check_refused expired expired konto.hint.dev_expired "expired device code"
 
 # 3e: defective tokens
-check_refused bad_iss abgelehnt konto.hint.jwt_iss "wrong issuer"
-check_refused bad_aud abgelehnt konto.hint.jwt_aud "wrong audience"
-check_refused hs256 abgelehnt konto.hint.jwt_alg "HS256 with the public key (key confusion)"
-check_refused algnone abgelehnt konto.hint.jwt_alg "alg none"
-check_refused exp_old abgelehnt konto.hint.jwt_expired "expired token"
-check_refused bad_sig abgelehnt konto.hint.jwt_sig "flipped signature bit"
-check_refused bad_kid abgelehnt konto.hint.jwt_kid "unknown kid"
-check_refused id_other abgelehnt konto.hint.jwt_subject "id_token names another subject"
+check_refused bad_iss refused konto.hint.jwt_iss "wrong issuer"
+check_refused bad_aud refused konto.hint.jwt_aud "wrong audience"
+check_refused hs256 refused konto.hint.jwt_alg "HS256 with the public key (key confusion)"
+check_refused algnone refused konto.hint.jwt_alg "alg none"
+check_refused exp_old refused konto.hint.jwt_expired "expired token"
+check_refused bad_sig refused konto.hint.jwt_sig "flipped signature bit"
+check_refused bad_kid refused konto.hint.jwt_kid "unknown kid"
+check_refused id_other refused konto.hint.jwt_subject "id_token names another subject"
 
 # 3f: counter-probe: the SAME valid token with another audience on the device
 scen approve
 cp "$TMPD/base.img" "$TMPD/d_aud.img"
 lauf "$TMPD/d_aud.img" "$CMD --aud=another-product" "$TMPD/o_aud.txt"
-is "counter-probe: valid token, other --aud: state" "$(kv "$TMPD/o_aud.txt" stand)" "abgelehnt"
-is "counter-probe: hint" "$(kv "$TMPD/o_aud.txt" hinweis)" "$(msg konto.hint.jwt_aud)"
+is "counter-probe: valid token, other --aud: state" "$(kv "$TMPD/o_aud.txt" state)" "refused"
+is "counter-probe: hint" "$(kv "$TMPD/o_aud.txt" hint)" "$(msg konto.hint.jwt_aud)"
 
 # ======================================================================
 echo "== 4. tokens never in clear on the disk =="
@@ -395,7 +395,7 @@ scen approve
 cp "$TMPD/base.img" "$TMPD/d_kl.img"
 : > "$TMPD/idp/access.txt"
 lauf "$TMPD/d_kl.img" "konto --kaputt=klartext anmelden --anbieter=fleitec --device --wait" "$TMPD/o_kl.txt"
-is "counter-probe klartext: signed in" "$(kv "$TMPD/o_kl.txt" stand)" "ok"
+is "counter-probe klartext: signed in" "$(kv "$TMPD/o_kl.txt" state)" "ok"
 KT=$(tail -1 "$TMPD/idp/access.txt")
 KH=$(grep -c -aF -- "$KT" "$TMPD/d_kl.img" 2>/dev/null || true)
 num "counter-probe klartext: the access token IS found in the image" "${KH:-0}" ge 1
@@ -409,11 +409,11 @@ echo "== 5. refresh rotation =="
 scen approve
 cp "$TMPD/base.img" "$TMPD/d_ref.img"
 lauf "$TMPD/d_ref.img" "$CMD" "$TMPD/o_r0.txt"
-RKEN=$(kv "$TMPD/o_r0.txt" kennung)
+RKEN=$(kv "$TMPD/o_r0.txt" identity)
 R1=$(sed -n 1p "$TMPD/idp/refresh.txt")
 lauf "$TMPD/d_ref.img" "konto erneuern --kennung=$RKEN" "$TMPD/o_r1.txt"
-is "renew: renewed" "$(kv "$TMPD/o_r1.txt" erneuert)" "1"
-is "renew: state" "$(kv "$TMPD/o_r1.txt" stand)" "ok"
+is "renew: renewed" "$(kv "$TMPD/o_r1.txt" renewed)" "1"
+is "renew: state" "$(kv "$TMPD/o_r1.txt" state)" "ok"
 R2=$(sed -n 2p "$TMPD/idp/refresh.txt")
 if [ -n "$R1" ] && [ -n "$R2" ] && [ "$R1" != "$R2" ]; then ok "the refresh token rotated (new one differs)"
 else bad "refresh token did not rotate ('$R1' / '$R2')"; fi
@@ -427,20 +427,20 @@ is "replay of the OLD refresh token" "$(replay "$R1")" "400"
 is "after the replay the whole family is dead (new token too)" "$(replay "$R2")" "400"
 # the device holds the (now dead) new token: the next renew ends the SESSION, not the account
 lauf "$TMPD/d_ref.img" "konto erneuern --kennung=$RKEN" "$TMPD/o_r2.txt"
-is "dead refresh token: renewed" "$(kv "$TMPD/o_r2.txt" erneuert)" "0"
-is "dead refresh token: session ended cleanly" "$(kv "$TMPD/o_r2.txt" abgemeldet)" "1"
+is "dead refresh token: renewed" "$(kv "$TMPD/o_r2.txt" renewed)" "0"
+is "dead refresh token: session ended cleanly" "$(kv "$TMPD/o_r2.txt" signed_out)" "1"
 lauf "$TMPD/d_ref.img" "konto liste" "$TMPD/o_r3.txt"
-is "dead refresh token: the account entry stays" "$(kv "$TMPD/o_r3.txt" konten)" "1"
+is "dead refresh token: the account entry stays" "$(kv "$TMPD/o_r3.txt" accounts)" "1"
 # rotation without a new refresh token is refused
 scen norefresh
 cp "$TMPD/base.img" "$TMPD/d_nr.img"
 lauf "$TMPD/d_nr.img" "$CMD" "$TMPD/o_nr0.txt"
-NRK=$(kv "$TMPD/o_nr0.txt" kennung)
-is "norefresh: first sign-in works" "$(kv "$TMPD/o_nr0.txt" stand)" "ok"
+NRK=$(kv "$TMPD/o_nr0.txt" identity)
+is "norefresh: first sign-in works" "$(kv "$TMPD/o_nr0.txt" state)" "ok"
 lauf "$TMPD/d_nr.img" "konto erneuern --kennung=$NRK" "$TMPD/o_nr1.txt"
-is "norefresh: a rotation without a new refresh token is not accepted" "$(kv "$TMPD/o_nr1.txt" erneuert)" "0"
+is "norefresh: a rotation without a new refresh token is not accepted" "$(kv "$TMPD/o_nr1.txt" renewed)" "0"
 lauf "$TMPD/d_nr.img" "konto liste" "$TMPD/o_nr2.txt"
-is "norefresh: the account entry stays" "$(kv "$TMPD/o_nr2.txt" konten)" "1"
+is "norefresh: the account entry stays" "$(kv "$TMPD/o_nr2.txt" accounts)" "1"
 
 # ======================================================================
 echo "== 6. sign-out =="
@@ -449,11 +449,11 @@ scen approve
 cp "$TMPD/base.img" "$TMPD/d_out.img"
 : > "$TMPD/idp/refresh.txt"
 lauf "$TMPD/d_out.img" "$CMD" "$TMPD/o_o0.txt"
-OKEN=$(kv "$TMPD/o_o0.txt" kennung)
+OKEN=$(kv "$TMPD/o_o0.txt" identity)
 O1=$(sed -n 1p "$TMPD/idp/refresh.txt")
 : > "$TMPD/idp/protokoll.jsonl"
 lauf "$TMPD/d_out.img" "konto abmelden --kennung=$OKEN" "$TMPD/o_o1.txt"
-is "sign-out: done" "$(kv "$TMPD/o_o1.txt" abgemeldet)" "1"
+is "sign-out: done" "$(kv "$TMPD/o_o1.txt" signed_out)" "1"
 grep -q '"/oidc/revoke"' "$TMPD/idp/protokoll.jsonl" \
     && ok "sign-out: POST /oidc/revoke reached the service" || bad "sign-out: no revoke call"
 is "sign-out: the refresh token is dead afterwards" "$(replay "$O1")" "400"
@@ -483,7 +483,7 @@ dns_asked() { grep -c "^FRAGE $1 " "$TMPD/dns.log" 2>/dev/null || true; }
 scen approve
 : > "$TMPD/dns.log"; : > "$TMPD/idp/protokoll.jsonl"
 lauf "$TMPD/d_dns.img" "$CMD" "$TMPD/o_d1.txt"
-is "name target: full device flow signs in" "$(kv "$TMPD/o_d1.txt" stand)" "ok"
+is "name target: full device flow signs in" "$(kv "$TMPD/o_d1.txt" state)" "ok"
 is "name target: the DNS was asked ONCE for the whole run (cache)" "$(dns_asked konto.test)" "1"
 grep -q '"host": "konto.test"' "$TMPD/idp/protokoll.jsonl" \
     && ok "name target: the Host header carries the NAME" || bad "name target: Host header is not konto.test"
@@ -495,7 +495,7 @@ printf 'fleitec ziel=https://other.test:8443\n' > "$TMPD/konten.conf"
 abbild "$TMPD/d_dns2.img" "/etc/resolv.conf=$TMPD/resolv.conf" || true
 : > "$TMPD/dns.log"
 lauf "$TMPD/d_dns2.img" "$CMD" "$TMPD/o_d2.txt"
-is "other name -> same number: certificate is checked against the NAME (refused)" "$(kv "$TMPD/o_d2.txt" stand)" "tls"
+is "other name -> same number: certificate is checked against the NAME (refused)" "$(kv "$TMPD/o_d2.txt" state)" "tls"
 is "other name: the DNS was asked for other.test" "$(dns_asked other.test)" "1"
 
 # a name the DNS does not know
@@ -503,7 +503,7 @@ printf 'fleitec ziel=https://gibtsnicht.test:8443\n' > "$TMPD/konten.conf"
 abbild "$TMPD/d_dns3.img" "/etc/resolv.conf=$TMPD/resolv.conf" || true
 : > "$TMPD/dns.log"; : > "$TMPD/idp/protokoll.jsonl"
 lauf "$TMPD/d_dns3.img" "$CMD" "$TMPD/o_d3.txt"
-is "unknown name (NXDOMAIN): state keinnetz" "$(kv "$TMPD/o_d3.txt" stand)" "keinnetz"
+is "unknown name (NXDOMAIN): state offline" "$(kv "$TMPD/o_d3.txt" state)" "offline"
 is "unknown name: the DNS was asked" "$(dns_asked gibtsnicht.test)" "1"
 is "unknown name: no request reached the server" "$(grep -c . "$TMPD/idp/protokoll.jsonl")" "0"
 
@@ -512,7 +512,7 @@ printf 'fleitec ziel=https://10.9.0:8443\n' > "$TMPD/konten.conf"
 abbild "$TMPD/d_dns4.img" "/etc/resolv.conf=$TMPD/resolv.conf" || true
 : > "$TMPD/dns.log"
 lauf "$TMPD/d_dns4.img" "$CMD" "$TMPD/o_d4.txt"
-is "broken number 10.9.0: not keinnetz (refused as a target)" "$(kv "$TMPD/o_d4.txt" stand)" "fehler"
+is "broken number 10.9.0: not offline (refused as a target)" "$(kv "$TMPD/o_d4.txt" state)" "error"
 is "broken number: no DNS query at all" "$(grep -c '^FRAGE' "$TMPD/dns.log" 2>/dev/null || true)" "0"
 
 # DNS server gone: bounded wait, clear state, nothing reaches the broker
@@ -523,7 +523,7 @@ abbild "$TMPD/d_dns5.img" "/etc/resolv.conf=$TMPD/resolv.conf" || true
 T0=$(date +%s)
 lauf "$TMPD/d_dns5.img" "$CMD" "$TMPD/o_d5.txt"
 T1=$(date +%s)
-is "DNS server down: state keinnetz" "$(kv "$TMPD/o_d5.txt" stand)" "keinnetz"
+is "DNS server down: state offline" "$(kv "$TMPD/o_d5.txt" state)" "offline"
 num "DNS server down: the guest gave up in bounded time (s, boot included)" "$((T1 - T0))" le 60
 is "DNS server down: no request reached the broker" "$(grep -c . "$TMPD/idp/protokoll.jsonl")" "0"
 cp "$TMPD/konten.orig" "$TMPD/konten.conf"
@@ -534,15 +534,15 @@ echo "== 7. NO NETWORK: signed in stays signed in =="
 server_zu
 netz_zu
 lauf_ohne_netz "$TMPD/d_login.img" "konto status --ohne-netz --kennung=$KEN" "$TMPD/o_n1.txt"
-is "offline (--ohne-netz): session still there" "$(kv "$TMPD/o_n1.txt" sitzung)" "1"
+is "offline (--ohne-netz): session still there" "$(kv "$TMPD/o_n1.txt" session)" "1"
 lauf_ohne_netz "$TMPD/d_login.img" "konto status --kennung=$KEN" "$TMPD/o_n2.txt"
-is "offline: renewal due but no network: state" "$(kv "$TMPD/o_n2.txt" stand)" "ok"
-is "offline: not renewed, and not signed out" "$(kv "$TMPD/o_n2.txt" abgemeldet)" ""
+is "offline: renewal due but no network: state" "$(kv "$TMPD/o_n2.txt" state)" "ok"
+is "offline: not renewed, and not signed out" "$(kv "$TMPD/o_n2.txt" signed_out)" ""
 lauf_ohne_netz "$TMPD/d_login.img" "konto liste" "$TMPD/o_n3.txt"
-is "offline: the account is still listed" "$(kv "$TMPD/o_n3.txt" konten)" "1"
+is "offline: the account is still listed" "$(kv "$TMPD/o_n3.txt" accounts)" "1"
 lauf_ohne_netz "$TMPD/base.img" "konto anmelden --anbieter=fleitec --device" "$TMPD/o_n4.txt"
-S4=$(kv "$TMPD/o_n4.txt" stand)
-case "$S4" in keinnetz|fehler) ok "sign-in without network fails clearly ($S4)";; *) bad "sign-in without network: '$S4'";; esac
+S4=$(kv "$TMPD/o_n4.txt" state)
+case "$S4" in offline|error) ok "sign-in without network fails clearly ($S4)";; *) bad "sign-in without network: '$S4'";; esac
 lauf_ohne_netz "$TMPD/base.img" "echo hallo > /probe.txt;cat /probe.txt;konto status" "$TMPD/o_n5.txt"
 has "$TMPD/o_n5.txt" "hallo" "a device with no account works as before"
 
