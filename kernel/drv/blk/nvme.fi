@@ -41,6 +41,9 @@ const S_MSIX: u64 = 0x190
 const S_IDX: u64 = 0x198
 const S_NSN: u64 = 0x1A0
 const S_NSLIST: u64 = 0x1A8
+const S_WANT_CID: u64 = 0x1B0
+const S_GOT: u64 = 0x1B8
+const S_TIMEOUTS: u64 = 0x1C0
 const NS_TAB: u64 = 0x1200
 const MAX_NS: u64 = 8
 const N_ID: u64 = 0
@@ -88,6 +91,7 @@ const SECTOR: u64 = 512
 
 const SPIN_LIMIT: u64 = 4000000
 const TICK_LIMIT: u64 = 300
+const IO_SPIN_LIMIT: u64 = 200000000
 
 fn sc(off: u64) -> u64 {
     return pci.K2_SCALARS + off
@@ -288,6 +292,9 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
     kstate.set(state, sc(S_PHASE), 1)
     kstate.set(state, sc(S_IRQS), 0)
     kstate.set(state, sc(S_DONE), 0)
+    kstate.set(state, sc(S_GOT), 0)
+    kstate.set(state, sc(S_WANT_CID), 0xFFFFFFFF)
+    kstate.set(state, sc(S_TIMEOUTS), 0)
     kstate.set(state, sc(S_WAITS), 0)
     kstate.set(state, sc(S_CID), 0)
     regio.zero64(state + ASQ_OFF, PAGE)
@@ -578,7 +585,10 @@ fn drain(state: u64) -> u64 {
         if ((d3 >> 16) & 1) != phase {
             break
         }
-        kstate.set(state, sc(S_STATUS), (d3 >> 17) & 0x7FF)
+        if (d3 & 0xFFFF) == kstate.get(state, sc(S_WANT_CID)) {
+            kstate.set(state, sc(S_STATUS), (d3 >> 17) & 0x7FF)
+            kstate.set(state, sc(S_GOT), 1)
+        }
         head = head + 1
         if head >= QDEPTH {
             head = 0
@@ -613,8 +623,9 @@ fn run_io_ns(state: u64, opcode: u64, nsid: u64, lba: u64, count: u64,
     }
     let sq: u64 = state + IOSQ_OFF
     var tail: u64 = kstate.get(state, sc(S_SQ_TAIL))
-    let want: u64 = kstate.get(state, sc(S_DONE)) + 1
     let cid: u64 = next_cid(state)
+    kstate.set(state, sc(S_WANT_CID), cid)
+    kstate.set(state, sc(S_GOT), 0)
     command(sq, tail, opcode, cid, nsid, addr, prp2_of(addr, len),
         lba & 0xFFFFFFFF, lba >> 32, (count - 1) & 0xFFFF)
     tail = tail + 1
@@ -623,25 +634,34 @@ fn run_io_ns(state: u64, opcode: u64, nsid: u64, lba: u64, count: u64,
     }
     kstate.set(state, sc(S_SQ_TAIL), tail)
     doorbell(state, 1, 0, tail)
-    return await(state, want)
+    return await(state)
 }
 
-fn await(state: u64, want: u64) -> bool {
+static mut s_timeout: [u8; 22] = "nvme: command timeout\0"
+
+fn timed_out(state: u64) -> bool {
+    kstate.add(state, sc(S_TIMEOUTS), 1)
+    serial.puts((&s_timeout[0]) as u64)
+    serial.nl()
+    return false
+}
+
+fn await(state: u64) -> bool {
     if poll_mode(state) || !arch.irq_are_on() {
         var spin: u64 = 0
-        while spin < SPIN_LIMIT {
+        while spin < IO_SPIN_LIMIT {
             drain(state)
-            if kstate.get(state, sc(S_DONE)) >= want {
+            if kstate.get(state, sc(S_GOT)) != 0 {
                 return kstate.get(state, sc(S_STATUS)) == 0
             }
             spin = spin + 1
         }
-        return false
+        return timed_out(state)
     }
     let start: u64 = kstate.get(state, kstate.TICKS)
-    while kstate.get(state, sc(S_DONE)) < want {
+    while kstate.get(state, sc(S_GOT)) == 0 {
         if kstate.get(state, kstate.TICKS) - start > TICK_LIMIT {
-            return false
+            return timed_out(state)
         }
         kstate.add(state, sc(S_WAITS), 1)
         arch.idle()
