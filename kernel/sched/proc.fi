@@ -32,7 +32,7 @@ export {
     copy_space, swap_space, use_space, page_drop, ARG_RESUME,
     USER_DATA, USER_STACK, USER_SPAN, USER_TOP,
     IMAGE_BASE, IMAGE_END, ARGS_BASE, MAX_ARGS, STACK_FLOOR, grow_stack, stack_zone_has,
-    PRIV_SLOTS, MAIN_SLOTS, LAZY_BASE, LAZY_TOP, LAZY_ATOP, LAZYF_MAX, range_drop, lazy_mark, lazy_mark_image, lazy_mark_file, lazy_fault, lazy_zone, lazy_find, page_taken, BIG_TOP, BIG_FLOOR, SHM_ARENA_BASE, SHM_ARENA_TOP, demand_fault, pd_slot, pt_for, page_free,
+    PRIV_SLOTS, MAIN_SLOTS, LAZY_BASE, LAZY_TOP, LAZY_ATOP, LAZYF_MAX, range_drop, lazy_mark, lazy_mark_image, lazy_mark_file, prefill_file_page, page_cached, lazy_fault, lazy_zone, lazy_find, page_taken, BIG_TOP, BIG_FLOOR, SHM_ARENA_BASE, SHM_ARENA_TOP, demand_fault, pd_slot, pt_for, page_free,
     frame_count, frame_at,
     frame_virt_at, space_build_empty, map_restored
 }
@@ -717,7 +717,7 @@ fn lazy_is_file(state: u64, i: u64, addr: u64) -> bool {
 }
 
 fn lazy_mark_file(state: u64, i: u64, addr: u64, readable: bool, writable: bool, runnable: bool, ino: u64, pg: u64) -> bool {
-    if addr < LAZY_BASE || addr >= LAZY_TOP || ino >= LAZYF_MAX || pg >= LAZYF_MAX {
+    if !lazy_zone(addr) || ino >= LAZYF_MAX || pg >= LAZYF_MAX {
         return false
     }
     let s: u64 = pt_slot(addr)
@@ -730,6 +730,30 @@ fn lazy_mark_file(state: u64, i: u64, addr: u64, readable: bool, writable: bool,
     }
     write_entry(pt, s, lazy_bits(readable, writable, runnable) | PAGE_LAZYF | (ino << 12) | (pg << 32))
     return true
+}
+
+fn prefill_file_page(state: u64, i: u64, addr: u64, writable: bool, runnable: bool, ino: u64, pg: u64) -> bool {
+    if !lazy_mark_file(state, i, addr, true, writable, runnable, ino, pg) {
+        return false
+    }
+    let s: u64 = pt_slot(addr)
+    let pt: u64 = pt_for(state, i, addr, false)
+    if pt == 0 {
+        return false
+    }
+    if lazy_file_page(state, i, addr, pt, s, read_entry(pt, s)) == 1 {
+        return true
+    }
+    write_entry(pt, s, 0)
+    return false
+}
+
+fn page_cached(state: u64, i: u64, addr: u64) -> bool {
+    let pt: u64 = pt_for(state, i, addr, false)
+    if pt == 0 {
+        return false
+    }
+    return (read_entry(pt, pt_slot(addr)) & PAGE_PCACHE) != 0
 }
 
 fn range_drop(state: u64, i: u64, start: u64, end: u64) {

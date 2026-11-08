@@ -253,12 +253,19 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
     let runnable: bool = (flags & PF_X) != 0
     let zeroing: bool = !kstate.mode_on(state, kstate.M_NOBSS)
     let lazy_bss: bool = !kstate.mode_on(state, kstate.M_NOLAZY)
+    let share_pages: bool = lazy_bss
+    let data_end: u64 = filesz + offset
     var done: u64 = 0
     while done < span {
         let page: u64 = first + done
         var frame: u64 = 0
         if proc.page_free(state, t, page) && done > 0 && done >= filesz + offset && lazy_bss
                 && proc.lazy_mark_image(state, t, page, writable, runnable) {
+            done = done + PAGE
+            continue
+        }
+        if share_pages && proc.page_free(state, t, page) && (done > 0 || offset == 0) && data_end >= done + PAGE
+                && proc.prefill_file_page(state, t, page, writable, runnable, ino, (file_first + done) / PAGE) {
             done = done + PAGE
             continue
         }
@@ -273,6 +280,9 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
             }
         } else {
             if bias == 0 {
+                return R_OVERLAP
+            }
+            if proc.page_cached(state, t, page) {
                 return R_OVERLAP
             }
             frame = proc.translate(state, t, page)
