@@ -86,7 +86,7 @@ echo
 echo "== 2. no trial: the ESP stays untouched =="
 rc=$(lauf n1 "opk install /quelle1/hallo-1.opk;cp /erpseed /system/TRIAL;exit" two)
 gleich "boot 1 (arms the trial file)" "$rc" "21"
-hat "$OUT/n1.txt" "ab: keine erprobung" "no trial file yet -> kernel does nothing"
+hat "$OUT/n1.txt" "ab: no trial" "no trial file yet -> kernel does nothing"
 hatnicht "$OUT/n1.txt" "ab: esp:" "no ESP access without a failed trial"
 grep -qa '^default_entry: 2' "$OUT/n1.after" && ok "default_entry is still 2" || bad "ESP changed without a trial"
 
@@ -105,7 +105,7 @@ echo
 echo "== 4. counter-proof: confirmed generation -> no flip =="
 rc=$(lauf c1 "exit" two)
 gleich "boot 3" "$rc" "21"
-hat "$OUT/c1.txt" "ab: gen=0 bestaetigt" "nothing in trial any more"
+hat "$OUT/c1.txt" "ab: gen=0 confirmed" "nothing in trial any more"
 hatnicht "$OUT/c1.txt" "ab: esp:" "no ESP access"
 grep -qa '^default_entry: 2' "$OUT/c1.after" && ok "ESP stays at default_entry: 2" || bad "flipped without a failed trial"
 

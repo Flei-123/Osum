@@ -136,11 +136,11 @@ ist, sich einwandfrei installiert und dessen Programm sich mit Code 1
 beendet. Drei echte Neustarts in QEMU:
 
 ```
-Start 1   ab: gen=1 versuch=1 von 3     paket-hallo fassung 3 SCHEITERT
-Start 2   ab: gen=1 versuch=2 von 3     (kein Erfolgsvermerk)
+Start 1   ab: gen=1 attempt=1 of 3     paket-hallo fassung 3 SCHEITERT
+Start 2   ab: gen=1 attempt=2 of 3     (kein Erfolgsvermerk)
 Start 3   ab: ERPROBUNG gescheitert, zurueck auf 0
           paket-hallo fassung 1         ← die alte Fassung läuft wieder
-Start 4   ab: gen=0 bestaetigt
+Start 4   ab: gen=0 confirmed
 ```
 
 **Gegenprobe** mit einem Update, das läuft: im selben Start bestätigt, und

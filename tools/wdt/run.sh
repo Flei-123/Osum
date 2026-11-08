@@ -120,8 +120,8 @@ has lsplant "==END==" && bad "counter-proof wdtproc: script ended although hung"
 echo "  info  after the script ends the kernel halts; the watchdog then resets (boots in the busy run: $(boots busy))"
 echo "== g. A/B trial: watchdog resets count as failed starts =="
 grep -a '^ab: ' "$D/trial.klar" | head -6 | sed 's/^/        /'
-has trial "ab: gen=2 versuch=1 " && ok "first start counted" || bad "first start not counted"
-has trial "ab: gen=2 versuch=2 " && ok "watchdog reset counted as second start" || bad "second start not counted"
+has trial "ab: gen=2 attempt=1 " && ok "first start counted" || bad "first start not counted"
+has trial "ab: gen=2 attempt=2 " && ok "watchdog reset counted as second start" || bad "second start not counted"
 has trial "ab: TRIAL failed" && ok "next start after watchdog resets: trial declared failed" || bad "trial not declared failed"
 if [ -n "${WDT_DESK:-}" ]; then
     SECS="${WDT_DESK_SECS:-330}"

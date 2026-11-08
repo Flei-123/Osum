@@ -76,7 +76,7 @@ hat "$OUT/inst.txt" "install: done" "der Installer meldet sich fertig"
 
 rc=$(lauf erst "opk trial;exit")
 gleich "der erste Start von der Platte" "$rc" "21"
-hat "$OUT/erst.txt" "ab: keine erprobung" "ohne /system/ERPROBUNG sagt der Kern genau das und tut nichts"
+hat "$OUT/erst.txt" "ab: no trial" "ohne /system/ERPROBUNG sagt der Kern genau das und tut nichts"
 cp -f "$OUT/ziel.img" "$OUT/leer.img"
 
 # =====================================================================
@@ -139,12 +139,12 @@ hat "$OUT/ab1.txt" "opk: installed hallo" "und wird installiert"
 hat "$OUT/ab1.txt" "opk: in trial: 1 before 0" "Generation 1 steht in Erprobung, Rueckfall waere 0"
 
 rc=$(lauf ab2 "$START")
-hat "$OUT/ab2.txt" "ab: gen=1 versuch=1 von 3" "Start 1: der Kern zaehlt"
+hat "$OUT/ab2.txt" "ab: gen=1 attempt=1 of 3" "Start 1: der Kern zaehlt"
 hat "$OUT/ab2.txt" "SCHEITERT" "die neue Fassung meldet sich und faellt um"
 hatnicht "$OUT/ab2.txt" "opk: trial confirmed" "also KEIN Erfolgsvermerk"
 
 rc=$(lauf ab3 "$START")
-hat "$OUT/ab3.txt" "ab: gen=1 versuch=2 von 3" "Start 2: der Zaehler steht auf 2"
+hat "$OUT/ab3.txt" "ab: gen=1 attempt=2 of 3" "Start 2: der Zaehler steht auf 2"
 hatnicht "$OUT/ab3.txt" "opk: trial confirmed" "immer noch kein Erfolgsvermerk"
 
 rc=$(lauf ab4 "$START")
@@ -154,7 +154,7 @@ hat "$OUT/ab4.txt" "paket-hallo fassung 1" "und die alte, laufende Fassung ist w
 hatnicht "$OUT/ab4.txt" "SCHEITERT" "die kaputte Fassung laeuft nicht mehr"
 
 rc=$(lauf ab5 "opk trial;/apps/hallo.osp/start;exit")
-hat "$OUT/ab5.txt" "ab: gen=0 bestaetigt" "beim naechsten Start ist nichts mehr in Erprobung"
+hat "$OUT/ab5.txt" "ab: gen=0 confirmed" "beim naechsten Start ist nichts mehr in Erprobung"
 hat "$OUT/ab5.txt" "paket-hallo fassung 1" "und es bleibt bei der alten Fassung"
 
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
@@ -163,7 +163,7 @@ hat "$OUT/gab1.txt" "opk: in trial: 1 before 0" "GEGENPROBE: auch das gute Updat
 hat "$OUT/gab1.txt" "paket-hallo fassung 2" "es laeuft"
 hat "$OUT/gab1.txt" "opk: trial confirmed for 1" "und wird im selben Start bestaetigt"
 rc=$(lauf gab2 "$START")
-hat "$OUT/gab2.txt" "ab: gen=1 bestaetigt" "beim naechsten Start zaehlt der Kern nichts mehr hoch"
+hat "$OUT/gab2.txt" "ab: gen=1 confirmed" "beim naechsten Start zaehlt der Kern nichts mehr hoch"
 rc=$(lauf gab3 "$START")
 rc=$(lauf gab4 "$START")
 hat "$OUT/gab4.txt" "paket-hallo fassung 2" "und auch nach vier Starts laeuft noch die NEUE Fassung"

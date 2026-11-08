@@ -272,14 +272,14 @@ echo "$LSTMP" | grep -qa 'hallo-2' && bad "r542: the staged package is still in 
 
 rc=$(lauf gut3 "sh /start.sh;ota show;df;exit")
 gleich "der Neustart" "$rc" "21"
-hat "$OUT/gut3.txt" "ab: gen=1 versuch=1 von 3" "der Kern zaehlt den Erprobungsversuch"
+hat "$OUT/gut3.txt" "ab: gen=1 attempt=1 of 3" "der Kern zaehlt den Erprobungsversuch"
 hat "$OUT/gut3.txt" "paket-hallo fassung 2" "DIE NEW VERSION LAEUFT"
 hat "$OUT/gut3.txt" "opk: trial confirmed" "und wird bestaetigt"
 hat "$OUT/gut3.txt" "ota: version here 2" "der Fassungszaehler steht jetzt auf 2"
 GENBL=$(sed -n 's/.*blocks total=\([0-9]*\) free=\([0-9]*\).*/\2/p' "$OUT/gut3.txt" | tail -1)
 
 rc=$(lauf gut4 "sh /start.sh;exit")
-hat "$OUT/gut4.txt" "ab: gen=1 bestaetigt" "beim naechsten Start ist nichts mehr in Erprobung"
+hat "$OUT/gut4.txt" "ab: gen=1 confirmed" "beim naechsten Start ist nichts mehr in Erprobung"
 hat "$OUT/gut4.txt" "paket-hallo fassung 2" "und es bleibt bei der neuen Fassung"
 cp -f "$OUT/ziel.img" "$OUT/nach2.img"
 dienst_aus
