@@ -172,7 +172,7 @@ has "$G" "wm: trusted dialog answer=2" "Enter on the default focus = Ablehnen (n
 has "$TMPD/p1.txt" "value=300" "rejected: lock.idle stays 300"
 has "$G" "wm: trusted dialog answer=1" "Tab + Enter = Erlauben (yes)"
 has "$TMPD/p2.txt" "value=900" "after yes the change is done (900)"
-has "$G" "wm: trusted dialog refused injected input" "jarvisctl input key is REFUSED by the dialog"
+has "$G" "wm: trusted dialog refused injected input" "injected scancode (jarvisctl input scan) is REFUSED by the dialog"
 has "$TMPD/p4a.txt" "value=900" "injected key did not answer: lock.idle stays 900"
 has "$TMPD/p4b.txt" "value=1500" "a real key right after answers: lock.idle = 1500"
 if [ -s "$TMPD/flicker.txt" ]; then
