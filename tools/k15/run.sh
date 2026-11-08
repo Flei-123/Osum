@@ -249,10 +249,10 @@ box() {
     echo "$((CX + $(rect "$TMPD/ruhe.txt" widgetdemo "$id" x))) $((CY + $(rect "$TMPD/ruhe.txt" widgetdemo "$id" y))) $(rect "$TMPD/ruhe.txt" widgetdemo "$id" w) $(rect "$TMPD/ruhe.txt" widgetdemo "$id" h)"
 }
 scn "the headline is in the window" ocr "$TMPD/ruhe.ppm" $(box 2) "OSUM K15 WIDGETS"
-scn "the button carries its label" ocr "$TMPD/ruhe.ppm" $(box 5) "Knopf"
-scn "the first text field carries its text" ocr "$TMPD/ruhe.ppm" $(box 3) "Kopiermich"
-scn "the first tab carries its label" ocr "$TMPD/ruhe.ppm" $(box 1) "Formulare"
-scn "the choice shows its current entry" ocr "$TMPD/ruhe.ppm" $(box 8) "Klein"
+scn "the button carries its label" ocr "$TMPD/ruhe.ppm" $(box 5) "Button"
+scn "the first text field carries its text" ocr "$TMPD/ruhe.ppm" $(box 3) "CopyMe"
+scn "the first tab carries its label" ocr "$TMPD/ruhe.ppm" $(box 1) "Forms"
+scn "the choice shows its current entry" ocr "$TMPD/ruhe.ppm" $(box 8) "Small"
 RX=$(feld "$TMPD/ruhe.txt" "widgetdemo: rows" x)
 RB=$(feld "$TMPD/ruhe.txt" "widgetdemo: rows" base)
 ZH=$(feld "$TMPD/ruhe.txt" "widgetdemo: rows" zh)
@@ -306,7 +306,7 @@ EOT
 foto klick "gfx wm wig wmhold wiglong $GRUND" "$M"
 num "the kernel exits cleanly" "$RC" eq 21
 has "$TMPD/klick.txt" "widgetdemo: fired id=5 kind=2" "the button reports -- with its number and its kind"
-kl=$(feld "$TMPD/klick.txt" "widgetdemo: state" klicks)
+kl=$(feld "$TMPD/klick.txt" "widgetdemo: state" clicks)
 num "and exactly ONCE" "$kl" eq 1
 hasnot "$TMPD/ruhe.txt" "widgetdemo: fired" "without a click no widget reports"
 
@@ -364,17 +364,17 @@ EOT
 foto tast "gfx wm wig wmhold wiglong nobus $GRUND" "$M"
 num "the kernel exits cleanly" "$RC" eq 21
 e2=$(python3 tools/k15/fields.py "$TMPD/tast.txt" e2)
-gleich "what is in the second text field" "Kopiermich-ab" "$e2"
+gleich "what is in the second text field" "CopyMe-ab" "$e2"
 cs=$(feld "$TMPD/tast.txt" "wig: blits" clipset)
 cg=$(feld "$TMPD/tast.txt" "wig: blits" clipget)
 num "written to the clipboard" "$cs" ge 1
 num "and read from it" "$cg" ge 1
-scn "and it is in the second field in the picture" ocr "$TMPD/tast.ppm" $(box 4) "Kopiermich-ab"
-scn_not "in the run WITHOUT key presses there is NOTHING" ocr "$TMPD/ruhe.ppm" $(box 4) "Kopiermich-ab"
+scn "and it is in the second field in the picture" ocr "$TMPD/tast.ppm" $(box 4) "CopyMe-ab"
+scn_not "in the run WITHOUT key presses there is NOTHING" ocr "$TMPD/ruhe.ppm" $(box 4) "CopyMe-ab"
 foto noclip "gfx wm wig wignoclip wmhold wiglong $GRUND" "$M"
 e2n=$(python3 tools/k15/fields.py "$TMPD/noclip.txt" e2)
 gleich "with 'noclip' ONLY the typed text arrives" "-ab" "$e2n"
-scn_not "and the pasted text is then not in the picture" ocr "$TMPD/noclip.ppm" $(box 4) "Kopiermich-ab"
+scn_not "and the pasted text is then not in the picture" ocr "$TMPD/noclip.ppm" $(box 4) "CopyMe-ab"
 M="$TMPD/tab.mon"; : > "$M"
 zeiger "$M" "$E1X" $((CY + E1Y + E1H / 2))
 cat >> "$M" <<EOT
@@ -393,7 +393,7 @@ foto tabkey "gfx wm wig wmhold wiglong $GRUND" "$M"
 e2t=$(python3 tools/k15/fields.py "$TMPD/tabkey.txt" e2)
 gleich "after the tab key one types into the NEXT field" "xy" "$e2t"
 e1t=$(python3 tools/k15/fields.py "$TMPD/tabkey.txt" e1)
-gleich "and the previous one is unchanged" "Kopiermich" "$e1t"
+gleich "and the previous one is unchanged" "CopyMe" "$e1t"
 scn "the typed letters are in the second field in the picture" changed "$TMPD/ruhe.ppm" "$TMPD/tabkey.ppm" $(box 4) 12
 
 echo "== 8. menus and dialogs -- drawn by the host inside the window =="
@@ -422,13 +422,13 @@ num "and vertically (within the plate padding)" $(( (MNY > POPY - CY ? MNY - (PO
 num "it is as tall as three items need at least" "$MNH" ge 72
 IH=$(( (MNH - 8) / 3 ))
 i=0
-for punkt in Öffnen Umbenennen Entfernen; do
+for punkt in Open Rename Remove; do
     scn "menu item $i is in the menu: '$punkt'" ocr "$TMPD/pop.ppm" $((CX + MNX + 10)) $((CY + MNY + 4 + i * IH)) $((MNW - 20)) "$IH" "$punkt"
     i=$((i + 1))
 done
 scn "the menu changes the picture" changed "$TMPD/ruhe.ppm" "$TMPD/pop.ppm" $((CX + MNX)) $((CY + MNY)) "$MNW" "$MNH" 500
-scn_not "without the right button there is NO menu" ocr "$TMPD/ruhe.ppm" $((CX + MNX + 10)) $((CY + MNY + 4 + IH)) $((MNW - 20)) "$IH" "Umbenennen"
-scn_not "and another word is not there" ocr "$TMPD/pop.ppm" $((CX + MNX + 10)) $((CY + MNY + 4 + IH)) $((MNW - 20)) "$IH" "Schuetzen"
+scn_not "without the right button there is NO menu" ocr "$TMPD/ruhe.ppm" $((CX + MNX + 10)) $((CY + MNY + 4 + IH)) $((MNW - 20)) "$IH" "Rename"
+scn_not "and another word is not there" ocr "$TMPD/pop.ppm" $((CX + MNX + 10)) $((CY + MNY + 4 + IH)) $((MNW - 20)) "$IH" "Protect"
 M="$TMPD/popw.mon"; : > "$M"
 zeiger "$M" "$POPX" "$POPY"
 cat >> "$M" <<EOT
@@ -444,9 +444,9 @@ warte 0.6
 EOT
 foto popw "gfx wm wig wmhold wiglong $GRUND" "$M"
 has "$TMPD/popw.txt" "widgetdemo: fired id=11 kind=8" "a click on a menu item reports it to the owner"
-mn=$(feld "$TMPD/popw.txt" "widgetdemo: state" menues)
+mn=$(feld "$TMPD/popw.txt" "widgetdemo: state" menus)
 num "and the menu fired exactly ONCE" "$mn" ge 1
-scn_not "afterwards the menu is gone again" ocr "$TMPD/popw.ppm" $((CX + MNX + 10)) $((CY + MNY + 4 + IH)) $((MNW - 20)) "$IH" "Umbenennen"
+scn_not "afterwards the menu is gone again" ocr "$TMPD/popw.ppm" $((CX + MNX + 10)) $((CY + MNY + 4 + IH)) $((MNW - 20)) "$IH" "Rename"
 
 DEL=$(mitte 9)
 M="$TMPD/dlg.mon"; : > "$M"
@@ -467,9 +467,9 @@ num "and fits into the window" $((DX + DW)) le "$BW"
 num "it is centred in the window, horizontally" $(( (DX * 2 + DW > BW ? DX * 2 + DW - BW : BW - DX * 2 - DW) )) le 2
 num "and vertically" $(( (DY * 2 + DH > BH ? DY * 2 + DH - BH : BH - DY * 2 - DH) )) le 2
 scn "the dialog changes the picture" changed "$TMPD/ruhe.ppm" "$TMPD/dlg.ppm" $((CX + DX)) $((CY + DY)) "$DW" "$DH" 5000
-scn "its title is in it" ocr "$TMPD/dlg.ppm" $((CX + DX + 12)) $((CY + DY + 8)) 160 30 "Umbenennen"
-scn "its question is in it" ocr "$TMPD/dlg.ppm" $((CX + DX + 12)) $((CY + DY + 48)) 160 28 "Neuer Name"
-scn "its field carries the text it was opened with" ocr "$TMPD/dlg.ppm" $((CX + DX + 22)) $((CY + DY + 84)) 150 28 "Kopiermich"
+scn "its title is in it" ocr "$TMPD/dlg.ppm" $((CX + DX + 12)) $((CY + DY + 8)) 160 30 "Rename"
+scn "its question is in it" ocr "$TMPD/dlg.ppm" $((CX + DX + 12)) $((CY + DY + 48)) 160 28 "New name"
+scn "its field carries the text it was opened with" ocr "$TMPD/dlg.ppm" $((CX + DX + 22)) $((CY + DY + 84)) 150 28 "CopyMe"
 OKX=$(grep -a 'widgetdemo: dlgrect' "$TMPD/dlg.txt" | head -1 | grep -oE 'x=[0-9]+' | sed 's/.*=//')
 OKY=$(grep -a 'widgetdemo: dlgrect' "$TMPD/dlg.txt" | head -1 | grep -oE 'y=[0-9]+' | sed 's/.*=//')
 OKW=$(grep -a 'widgetdemo: dlgrect' "$TMPD/dlg.txt" | head -1 | grep -oE 'w=[0-9]+' | sed 's/.*=//')
@@ -490,8 +490,8 @@ EOT
 foto dlgok "gfx wm wig wmhold wiglong $GRUND" "$M"
 has "$TMPD/dlgok.txt" "widgetdemo: dlg state=2" "the dialog is confirmed with OK and returns its text"
 dt=$(grep -a 'widgetdemo: dlg state=2' "$TMPD/dlgok.txt" | tail -1 | sed 's/.*text=//')
-gleich "and the text is the one it was opened with" "Kopiermich" "$dt"
-scn_not "afterwards the dialog is gone too" ocr "$TMPD/dlgok.ppm" $((CX + DX + 12)) $((CY + DY + 48)) 160 28 "Neuer Name"
+gleich "and the text is the one it was opened with" "CopyMe" "$dt"
+scn_not "afterwards the dialog is gone too" ocr "$TMPD/dlgok.ppm" $((CX + DX + 12)) $((CY + DY + 48)) 160 28 "New name"
 
 echo "== 9. the file manager: /bin/explorer against the disk =="
 foto files "gfx wm wigfiles wmhold wiglong $GRUND"
@@ -664,13 +664,13 @@ if [ -n "$WMP" ] && [ -n "$WMPN" ] && [ "$WMPN" -gt "$WMP" ]; then
 else
     bad "without region tracking it does not get costlier: $WMP against $WMPN"
 fi
-hnd=$(feld "$TMPD/haken_nd.txt" "widgetdemo: state" haken)
+hnd=$(feld "$TMPD/haken_nd.txt" "widgetdemo: state" checks)
 gleich "and the application did the same in both runs" "1" "$hnd"
 
 echo "== 11. the counter-proofs =="
 foto nohit "gfx wm wig wignohit wmhold wiglong $GRUND" "$TMPD/haken.mon"
 hasnot "$TMPD/nohit.txt" "widgetdemo: fired" "with 'nohit' NO widget reports"
-nh=$(feld "$TMPD/nohit.txt" "widgetdemo: state" haken)
+nh=$(feld "$TMPD/nohit.txt" "widgetdemo: state" checks)
 gleich "and the checkbox stays empty" "0" "$nh"
 scn_not "also in the picture: the check mark is not there" changed "$TMPD/ruhe.ppm" "$TMPD/nohit.ppm" $HKBOX 12
 nhd=$(zahl2 "$TMPD/nohit.txt" 'downs=[0-9]+')
