@@ -36,5 +36,5 @@
 ## Other design notes
 
 - Transfers go through the driver's own page-aligned bounce buffer A for single blocks: the FAT writer's buffers are not always physically contiguous (QEMU q35 install, 27.09.2026, wrong bytes in scattered sectors).
-- No FLUSH CACHE after every write (w-disklag): durability is the caller's job at journal commit points, `sync` and shutdown (`blk.flush`). The test word `ahcislow` brings the per-write flush back.
+- No FLUSH CACHE after every write (w-disklag): durability is the caller's job at journal commit points, `sync` and shutdown (`blk.flush`). The test word `hddold` brings the per-write flush back.
 - Bring-up failures leave `why`: 1 no controller, 2 BAR5 not memory, 3 cannot map, 4 CAP unreadable, 5 BIOS handoff, 6 HBA reset, 7 no ports, 8 no ATA disk on any port, 9 port setup, 10 IDENTIFY.
