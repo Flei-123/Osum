@@ -11,6 +11,9 @@ export DESIGNBUILD="${DESIGNBUILD:-$OUT/build}"
 export AUDIT_TIMEOUT="${AUDIT_TIMEOUT:-1700}"
 MAX_PARALLEL=3
 HALT_SECONDS=200
+HOT_HALT_SECONDS=330
+HOT_WAIT=300
+HOT_SETTLE=6
 WIDE_RES=1920x1080
 NARROW_RES=1280x800
 FIRMWARE_PATH=/lib/firmware/intel/iwlwifi/iwlwifi-8265-36.ucode
@@ -47,12 +50,39 @@ else
     bad "mutant settings does not build: $(head -5 "$MUT/cc.log")"; echo "SETTINGSWIFI: $pass passed, $fail failed"; exit 1
 fi
 
+HOT_MUT="$OUT/hotmutant"
+mkdir -p "$HOT_MUT"
+cp -a kernel/user "$HOT_MUT/user"
+python3 -I - "$HOT_MUT/user/settings.fi" <<'PYEOF'
+import sys
+source = sys.argv[1]
+text = open(source, encoding="utf-8", errors="surrogateescape").read()
+call = "setwifi.tick(ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0))"
+if call not in text:
+    sys.exit("hot mutant anchor missing")
+open(source, "w", encoding="utf-8", errors="surrogateescape").write(text.replace(call, "false"))
+PYEOF
+if [ $? -ne 0 ] || cmp -s kernel/user/settings.fi "$HOT_MUT/user/settings.fi"; then
+    bad "hot mutant source is identical to the real source"; echo "SETTINGSWIFI: $pass passed, $fail failed"; exit 1
+fi
+if vendor/firn/bin/firnc -c "$HOT_MUT/user/settings.fi" -o "$HOT_MUT/settings.o" > "$HOT_MUT/cc.log" 2>&1 \
+   && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" -o "$HOT_MUT/settings.elf" "$HOT_MUT/settings.o" 2>>"$HOT_MUT/cc.log"; then
+    strip --strip-all "$HOT_MUT/settings.elf"
+    ok "hotplug mutant settings (no Wi-Fi poll) builds"
+else
+    bad "hotplug mutant settings does not build: $(head -5 "$HOT_MUT/cc.log")"; echo "SETTINGSWIFI: $pass passed, $fail failed"; exit 1
+fi
+
 run_case() {
     local name=$1 scale=$2 res=$3 builddir=${4:-$DESIGNBUILD} adapter=${5:-no}
-    local yres=${res#*x}
+    local yres=${res#*x} halt=$HALT_SECONDS
+    [ "$adapter" = hot ] && halt=$HOT_HALT_SECONDS
     local extra_arg=() mkfs_extra="/lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/"
     if [ "$adapter" = yes ]; then
         extra_arg=("extra=$ADAPTER_WORDS")
+        mkfs_extra="$mkfs_extra $FIRMWARE_PATH=$OUT/blobs/v7.bin"
+    elif [ "$adapter" = hot ]; then
+        extra_arg=("extra=wlanhot $ADAPTER_WORDS")
         mkfs_extra="$mkfs_extra $FIRMWARE_PATH=$OUT/blobs/v7.bin"
     fi
     local dir="$OUT/$name" dreh="$OUT/$name.txt"
@@ -64,21 +94,35 @@ run_case() {
         echo "warteauf settings: nav route=settings://personalization page=0 || 90"
         echo "taste ctrl-f"; echo "tippe wireless"; echo "warte 3"
         echo "taste ret"; echo "warte 8"
-        echo "foto wifi"
+        if [ "$adapter" = hot ]; then
+            echo "foto hot0"
+            echo "warteauf wlanhot: appear || $HOT_WAIT"; echo "warte $HOT_SETTLE"
+            echo "foto hot1"
+            echo "warteauf wlanhot: gone || $HOT_WAIT"; echo "warte $HOT_SETTLE"
+            echo "foto hot2"
+        else
+            echo "foto wifi"
+        fi
     } > "$dreh"
     DESIGNBUILD="$builddir" AUDIT_PROC=1 AUDIT_MKFS_EXTRA="$mkfs_extra" \
-        bash tools/design/audit.sh "$dir" accel=kvm uitrace=yes fs=an "${extra_arg[@]}" uiscale="$scale" res="$res" halt=$HALT_SECONDS drehbuch="$dreh" > "$OUT/$name.audit.log" 2>&1
+        bash tools/design/audit.sh "$dir" accel=kvm uitrace=yes fs=an "${extra_arg[@]}" uiscale="$scale" res="$res" halt=$halt drehbuch="$dreh" > "$OUT/$name.audit.log" 2>&1
 }
 
 MUT_BUILD="$OUT/build-mut"
 run_case real1 1 $NARROW_RES
 cp -a "$DESIGNBUILD" "$MUT_BUILD"
 cp "$MUT/settings.elf" "$MUT_BUILD/settings.elf"
+HOT_MUT_BUILD="$OUT/build-hotmut"
+cp -a "$DESIGNBUILD" "$HOT_MUT_BUILD"
+cp "$HOT_MUT/settings.elf" "$HOT_MUT_BUILD/settings.elf"
 SLOW=(
     "real2 2 $WIDE_RES $DESIGNBUILD no"
     "adapter1 1 $NARROW_RES $DESIGNBUILD yes"
     "adapter2 2 $WIDE_RES $DESIGNBUILD yes"
     "mut1 1 $NARROW_RES $MUT_BUILD no"
+    "hot1 1 $NARROW_RES $DESIGNBUILD hot"
+    "hot2 2 $WIDE_RES $DESIGNBUILD hot"
+    "muthot1 1 $NARROW_RES $HOT_MUT_BUILD hot"
 )
 running=0
 for spec in "${SLOW[@]}"; do
@@ -89,9 +133,9 @@ done
 wait
 
 judge() {
-    local name=$1 kind=$2 label=$3 expect=$4
-    local shot="$OUT/$name/wifi.ppm"
-    if [ ! -f "$shot" ]; then bad "$label: no screenshot ($name/wifi)"; return; fi
+    local name=$1 kind=$2 label=$3 expect=$4 photo=${5:-wifi}
+    local shot="$OUT/$name/$photo.ppm"
+    if [ ! -f "$shot" ]; then bad "$label: no screenshot ($name/$photo)"; return; fi
     local line status
     line=$(python3 -I tools/settingswifi/check.py "$kind" "$shot")
     status=$?
@@ -106,7 +150,20 @@ judge adapter1 adapter "with adapter, scale 1: Refresh and Connect shown, no mes
 judge adapter2 adapter "with adapter, scale 2: Refresh and Connect shown, no message" green
 judge mut1 noadapter "counter-probe: old always-on buttons without adapter" red
 
-for n in real1 real2 adapter1 mut1; do
+judge hot1 noadapter "hotplug scale 1, before the adapter appears: message shown, buttons hidden" green hot0
+judge hot1 adapter "hotplug scale 1, adapter appeared while the page is open: buttons shown, message gone" green hot1
+judge hot1 noadapter "hotplug scale 1, adapter vanished while the page is open: message back, buttons hidden" green hot2
+judge hot2 noadapter "hotplug scale 2, before the adapter appears: message shown, buttons hidden" green hot0
+judge hot2 adapter "hotplug scale 2, adapter appeared while the page is open: buttons shown, message gone" green hot1
+judge hot2 noadapter "hotplug scale 2, adapter vanished while the page is open: message back, buttons hidden" green hot2
+judge muthot1 adapter "counter-probe: page without the Wi-Fi poll never shows the appeared adapter" red hot1
+for n in hot1 hot2 muthot1; do
+    if ! grep -aq "wlanhot: appear" "$OUT/$n/serial.txt" 2>/dev/null || ! grep -aq "wlanhot: gone" "$OUT/$n/serial.txt" 2>/dev/null; then
+        bad "$n: kernel hotplug markers missing"
+    fi
+done
+
+for n in real1 real2 adapter1 mut1 hot1 hot2 muthot1; do
     c=$(grep -acE 'CRASH|EXCEPTION' "$OUT/$n/serial.txt" 2>/dev/null; true)
     [ "${c:-0}" = 0 ] || bad "$n: crash lines $c"
 done
