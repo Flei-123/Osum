@@ -16,10 +16,10 @@ Lengths are points at scale 1; the token functions multiply by the scale `s` (1 
 
 | group | tokens | value at scale 1 (scale 2 = x2) |
 |---|---|---|
-| radius | `R_SMALL` / `R_MEDIUM` / `R_LARGE` / `R_FULL` | 4 / **8** / 12 / pill. Default for everything = **8** (button, field, row, card, popup, dialog, window corner) |
+| radius | `R_SMALL` / `R_MEDIUM` / `R_LARGE` / `R_FULL` | 4 / **8** / 8 / pill. Default for everything = **8** (button, field, row, card, popup, dialog, window corner) |
 | spacing | `SP_1`..`SP_6` | 4 / 8 / 12 / 16 / 24 / 32 |
 | type | `T_CAPTION` / `T_BODY` / `T_STRONG` / `T_TITLE` / `T_DISPLAY` | 12 / 15 / 15 / 18 / 24 px |
-| icon | `I_INLINE` / `I_ROW` / `I_TRAY` / `I_BAR` / `I_TILE` / `I_HERO` | 16 / 16 / 20 / 24 / 32 / 48 px |
+| icon | `I_INLINE` / `I_ROW` / `I_TRAY` / `I_BAR` / `I_TILE` / `I_HERO` via `tokens.icon_px(role, s)` | 16 / 16 / 20 / 24 / 32 / 48 px |
 | elevation | `E_LOW` / `E_MID` / `E_HIGH` | card at rest / popup, flyout, toast / dialog |
 | motion | `D_FAST` / `D_NORMAL` / `D_SLOW` | 100 / 160 / 300 ms |
 | states | `ST_NORMAL` / `ST_HOVER` / `ST_PRESS` / `ST_FOCUS` / `ST_OFF` | one answer via `tokens.state_fill` |
@@ -71,7 +71,16 @@ move onto the canonical file (tracked by `tools/uicheck`, ratchet only shrinks).
 | taskbar preview | `taskbar/tbhover.preview_*` (only place) on `uisurface` kind `FLYOUT` | - | w-taskbar-preview-ram |
 | window chrome (frame, title, buttons, shadow) | `kernel/ui/wm/wmchrome.fi`, `wmshadow.fi` | - | (stable) |
 
-Status: `uikit/uisurface`, `uikit/uiflyout`, the `I_*` icon tokens and `tools/uicheck` land in the follow-up commits of the UI system owner; until then the canonical scene code is `fuiscene` (fsdraw/fsctl).
+## 2a. Shared component API (`kernel/user/uikit/`, landed)
+
+| module | API | notes |
+|---|---|---|
+| `uikit/uiplate.fi` (pure: painter + tokens, host-testable) | kinds `K_CARD`, `K_FLYOUT`, `K_TIP`, `K_TOAST`, `K_DIALOG`, `K_CHIP` (`KIND_COUNT`); `paint(z, kind, x, y, w, h, s, fill, stroke)`, `paint_window(z, x, y, w, h, server_r, fill, stroke)`, `radius_px(kind, w, h, s)`, `elevation(kind)`, `set_legacy(on)` | the look: stroke plate + fill plate inset 1 px with radius r-1 (no dark fringe); `paint_window` for top-level popup windows whose corners the window server cuts. Registry = `kind_radius` / `kind_elevation` tables; a new kind = one entry |
+| `uikit/uisurface.fi` (roles) | `paint(kind, x, y, w, h)` on the current fUi canvas, `paint_on(z, kind, ...)` for scene draw callbacks, `paint_window(kind, ...)`, `fill(kind)`, `stroke(kind)` | colours from `wlibc.theme` roles (card `T_PANEL`, dialog `T_DLG`, chip `T_BTN`, others `T_MENU`; stroke `T_LINE`); `wlibc.aa_old()` selects the legacy look (counter-proof) |
+| `uikit/uiflyout.fi` (pure placement) | `place(ax, ay, aw, ah, w, h, screen_w, screen_h, s)` then `x()`, `y()`, `side()` (`SIDE_ABOVE` / `SIDE_BELOW`) | centred on the anchor, above it (taskbar) if it fits else below, `SP_2` gap and screen margin |
+
+Usage in a canvas callback: `uisurface.paint_window(uisurface.K_TIP, x, y, w, h)` replaces a hand-made plate.
+Gate: `bash tools/uicheck/run.sh` (seconds, no QEMU).
 
 Layers: tokens (`lib/fui/tokens.fi`) -> roles (`wlibc.theme`, `fuiscene.R_*`) -> primitives
 (`fuiscene.cv_*`, `painter.*`, `wlibc.rect`) -> **components (`kernel/user/uikit/*`, `fuiscene`)** -> apps.

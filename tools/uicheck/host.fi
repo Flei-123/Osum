@@ -1,0 +1,122 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+import rt.rt
+import paint.canvas
+import fui.painter
+import fui.tokens
+import uikit.uiplate
+import uikit.uiflyout
+
+const ROW_CHECK: u64 = 0
+const ROW_SAMPLE: u64 = 1
+const ROW_PLACE: u64 = 2
+
+const FILL: u64 = 0xF9F9F9
+const STROKE: u64 = 0xD6D6D6
+const BACK: u32 = 4278190080 as u32
+
+static mut ob: [u8; 96] = [0 as u8; 96]
+
+fn put_num(at: u64, v: u64) -> u64 {
+    var digits: u64 = 1
+    var t: u64 = v
+    while t >= 10 {
+        t = t / 10
+        digits = digits + 1
+    }
+    var k: u64 = 0
+    var d: u64 = v
+    while k < digits {
+        __mmio_write8(((&ob[0 as usize]) as u64 + at + digits - 1 - k) as *mut u8, (48 + (d % 10)) as u8)
+        d = d / 10
+        k = k + 1
+    }
+    return at + digits
+}
+
+fn row(g: u64, a: u64, b: u64, v: u64) {
+    var at: u64 = put_num(0, g)
+    __mmio_write8(((&ob[0 as usize]) as u64 + at) as *mut u8, 32 as u8)
+    at = put_num(at + 1, a)
+    __mmio_write8(((&ob[0 as usize]) as u64 + at) as *mut u8, 32 as u8)
+    at = put_num(at + 1, b)
+    __mmio_write8(((&ob[0 as usize]) as u64 + at) as *mut u8, 32 as u8)
+    at = put_num(at + 1, v)
+    __mmio_write8(((&ob[0 as usize]) as u64 + at) as *mut u8, 10 as u8)
+    rt.write_everything(1, (&ob[0 as usize]) as u64, (at + 1) as usize)
+}
+
+fn crop_diff(a: *mut canvas.Canvas, ax: u64, ay: u64, b: *mut canvas.Canvas, bx: u64, by: u64, w: u64, h: u64) -> u64 {
+    var n: u64 = 0
+    var y: u64 = 0
+    while y < h {
+        var x: u64 = 0
+        while x < w {
+            let pa: u32 = canvas.canvas_get(a, (ax + x) as usize, (ay + y) as usize)
+            let pb: u32 = canvas.canvas_get(b, (bx + x) as usize, (by + y) as usize)
+            if pa != pb {
+                n = n + 1
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return n
+}
+
+fn rgb_at(c: *mut canvas.Canvas, x: u64, y: u64) -> u64 {
+    return (canvas.canvas_get(c, x as usize, y as usize) as u64) & 16777215
+}
+
+fn check_kind(kind: u64, s: u64, za: *mut painter.Painter, ca: *mut canvas.Canvas,
+    zb: *mut painter.Painter, cb: *mut canvas.Canvas) {
+    let w: u64 = 120 * s
+    let h: u64 = 60 * s
+    canvas.canvas_clear(ca, BACK)
+    canvas.canvas_clear(cb, BACK)
+    uiplate.set_legacy(false)
+    uiplate.paint(za, kind, 0, 0, w, h, s, FILL, STROKE)
+    uiplate.paint(zb, kind, 37, 21, w, h, s, FILL, STROKE)
+    row(ROW_CHECK, kind * 10 + s, 0, crop_diff(ca, 0, 0, cb, 37, 21, w, h))
+    row(ROW_SAMPLE, kind * 10 + s, 0, rgb_at(ca, 0, 0))
+    row(ROW_SAMPLE, kind * 10 + s, 1, rgb_at(ca, w / 2, h / 2))
+    row(ROW_SAMPLE, kind * 10 + s, 2, rgb_at(ca, w / 2, 0))
+    row(ROW_SAMPLE, kind * 10 + s, 3, uiplate.radius_px(kind, w, h, s))
+    canvas.canvas_clear(cb, BACK)
+    uiplate.set_legacy(true)
+    uiplate.paint(zb, kind, 37, 21, w, h, s, FILL, STROKE)
+    uiplate.set_legacy(false)
+    row(ROW_CHECK, kind * 10 + s, 1, crop_diff(ca, 0, 0, cb, 37, 21, w, h))
+}
+
+fn check_place() {
+    uiflyout.place(100, 1040, 40, 40, 300, 200, 1920, 1080, 1)
+    row(ROW_PLACE, 0, uiflyout.x(), uiflyout.y())
+    row(ROW_PLACE, 1, uiflyout.side(), 0)
+    uiflyout.place(1880, 1040, 40, 40, 300, 200, 1920, 1080, 1)
+    row(ROW_PLACE, 2, uiflyout.x(), uiflyout.y())
+    uiflyout.place(900, 10, 40, 40, 300, 200, 1920, 1080, 2)
+    row(ROW_PLACE, 3, uiflyout.x(), uiflyout.y())
+    row(ROW_PLACE, 4, uiflyout.side(), 0)
+}
+
+fn main() -> i32 {
+    var ca: canvas.Canvas = canvas.canvas_new()
+    var cb: canvas.Canvas = canvas.canvas_new()
+    if !canvas.canvas_init(&ca, 260, 140) || !canvas.canvas_init(&cb, 400, 300) {
+        return 2 as i32
+    }
+    var za: painter.Painter = painter.painter_new()
+    var zb: painter.Painter = painter.painter_new()
+    if !painter.painter_init(&za, &ca, 260, 140) || !painter.painter_init(&zb, &cb, 400, 300) {
+        return 3 as i32
+    }
+    var kind: u64 = 0
+    while kind < uiplate.KIND_COUNT {
+        check_kind(kind, 1, &za, &ca, &zb, &cb)
+        check_kind(kind, 2, &za, &ca, &zb, &cb)
+        kind = kind + 1
+    }
+    check_place()
+    return 0 as i32
+}
