@@ -24,7 +24,7 @@ warte 4
 foto 02-center
 SEOF
 run_one() {
-    bash tools/design/eh6.sh "$TMPD/$1" res=1280x800 accel=kvm uiscale=$SCALE progs="$PROGS" \
+    bash tools/design/eh6.sh "$TMPD/$1" res=1280x800 accel=kvm uiscale=$SCALE tafel=nein progs="$PROGS" \
         drehbuch="$TMPD/script.txt" tbextra="$2" > "$TMPD/$1.log" 2>&1
 }
 STATUS=0
