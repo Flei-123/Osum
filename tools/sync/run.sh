@@ -181,7 +181,8 @@ hol "$TMPD/A.img" /konto "$TMPD/kontoA"
 note "Speicher: PACK $(stat -c%s "$TMPD/store1/PACK" 2>/dev/null) Oktette, INDEX $(stat -c%s "$TMPD/store1/INDEX" 2>/dev/null), ROOT $(stat -c%s "$TMPD/store1/ROOT" 2>/dev/null)"
 
 mkdir -p "$TMPD/kontoB"
-cp "$TMPD/kontoA/KOPF" "$TMPD/kontoB/KOPF"
+sed -e 's/^salz /salt /' -e 's/^phuelle /penvelope /' -e 's/^rhuelle /renvelope /' "$TMPD/kontoA/KOPF" > "$TMPD/kontoB/KOPF"
+grep -q '^salt ' "$TMPD/kontoB/KOPF" && ok "device B gets the KOPF in the new spelling (salt, penvelope, renvelope); A keeps the old one" || bad "KOPF spelling conversion"
 mkdir -p "$TMPD/leer"
 cat > "$TMPD/sB.sh" <<EOS
 echo ==AB==
