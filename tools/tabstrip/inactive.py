@@ -32,14 +32,11 @@ def live_box(out):
             win = (int(m.group(1)), int(m.group(2)))
     mc = re.search(r" bar=\d+ capw=\d+ fr=(\d+)", ser)
     frame = int(mc.group(1)) if mc else 2
-    mm = re.search(r"taskbar: geom edge=\d+ x=\d+ y=\d+ w=\d+ h=(\d+)", ser)
-    scale = 2 if mm and int(mm.group(1)) >= 60 else 1
     if win is None or 50 not in rects or 60 not in rects:
         return None
     tab, drag = rects[50], rects[60]
     x0, y0 = win[0] + frame, win[1] + frame
-    return (x0 + (tab[0] + tab[2]) * scale, y0 + drag[1] * scale,
-            x0 + drag[0] * scale, y0 + (drag[1] + drag[3]) * scale)
+    return (x0 + tab[0] + tab[2], y0 + drag[1], x0 + drag[0], y0 + drag[1] + drag[3])
 
 
 def main():
