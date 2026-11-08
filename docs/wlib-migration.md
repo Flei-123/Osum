@@ -16,11 +16,23 @@ Spec: `docs/ui-system.md` (wins on conflict).
 fuiscene itself is built on wlibc today (`fscore` 32 refs, `fsrun` 10, `fsdraw` 8, `fuib` 60, `fuiapp` 5,
 `uikit/uisurface` 8). So wlibc cannot be deleted before its theme and platform parts have new homes.
 
+**The fUi host itself runs on wlib**: `fuiapp` (~50 distinct wlib symbols: window table, canvas widget, `step` event
+loop, keys, drop), `fsrun` (a11y roles `AXR_*`, focus, clipboard), `fscore`/`fsctl`/`fsdraw` (window position,
+keys `KEY_*`, `ICON_TAG`). A scene window is a wlib window with one canvas. So "delete wlib" = (a) apps stop
+calling wlib (they call `fuiscene` / `fuiapp` / `fuiapp/apphost`), (b) the host part of wlib (window table, canvas,
+event step, keys, a11y) moves into `kernel/user/fuiapp/` and `fuiscene/`, (c) the widget part (`wldraw`,
+`wlwidget` buttons/lists/fields) is deleted once no program builds wlib widgets.
+
+`kernel/user/fuiapp/apphost.fi` is the app-facing host facade (window origin, client origin, `paintdirect`,
+`key_mod`, `icon_id`). Today it forwards to wlib; the wlib host code moves behind it step by step. It is excluded
+from the wlib ratchet like the toolkit itself.
+
 ## Plan (dependency order)
 
 1. **Inventory + ratchet** (this file, `tools/uicheck/wlibuse.py`, baseline `tools/uicheck/wlib_baseline.tsv`):
    wlib score per file may only shrink; checked by `tools/uicheck/run.sh`.
-2. **Unused imports**: drop `import wlib` / `import wlibc` where no symbol is used (no pixel change).
+2. **Unused imports** (done 08.11.: 10 programs) and **single-symbol users** via `fuiapp/apphost` (done 08.11.:
+   osktest, scenedemo, diskact, backdrop, fvviewer): drop `import wlib` / `import wlibc` where no symbol is used (no pixel change).
 3. **Leaf programs** (P1, then P2): replace wlib widgets/events with fuiscene controls; one program per landing,
    gated by uicheck + the program's own gate + desktop quick (heavy, one at a time).
 4. **Theme module**: move `T_*` roles + `theme()` from `wctheme` into `uitheme`; `wlibc.theme` becomes a forwarder,
@@ -34,7 +46,7 @@ No colour literals, no raw draw outside components, English code, no comments.
 
 ## Unification decisions
 
-- (none yet)
+- 08.11.: no look change so far (both landings are call-for-call identical, pixel parity by construction).
 
 ## Inventory
 
