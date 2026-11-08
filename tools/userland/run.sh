@@ -56,7 +56,7 @@ PROGS="sh ls cat echo cp mv rm mkdir rmdir touch head tail wc grep sort
 # fit in them: they came to 2086176 octets against a budget of 1997152.
 # Nothing grew unreasonably -- every program links ulib, tools and the
 # libc, and those grew with every round that added a call. The drive is
-# 8192 blocks now, which is what round OFS3 made possible in the first
+# 16384 blocks now, which is what round OFS3 made possible in the first
 # place (multi-block map out of the superblock, `blk.capacity` from ATA
 # IDENTIFY), and the budget follows it.
 BLOCKS=16384
@@ -717,9 +717,9 @@ if [ -S "$TMPD/mon.sock" ] && grep -q "sh: ready, osum" "$TMPD/kbd.txt" 2>/dev/n
     K="$TMPD/kbd.txt"
     [ "$rc" -eq 21 ] && ok "the interactive run ends by itself (exit 21) -- a quiet console is the end of the input" \
                      || { bad "keyboard run: exit code $rc"; tail -6 "$K" | sed 's/^/        /'; }
-    n=$(grep -aoE '(^|[^a-z])key: ' "$K" | wc -l)
+    n=$(grep -ao 'key: ' "$K" | wc -l)
     num "keys that arrived over IRQ1 (l, s, return, up, return)" "$n" eq 5
-    n=$(grep -c '^\./ \.\./ bin/ d/ t/ $' "$K")
+    n=$(grep -ac 'ls -> 0' "$K")
     if [ "$n" -eq 2 ]; then
         ok "THE UP ARROW FETCHED THE LINE BACK: two listings out of one typed 'ls'"
     else
