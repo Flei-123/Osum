@@ -157,7 +157,7 @@ if [[ $OHNE_NTFS == 1 ]]; then
 fi
 weg ntfs-aus
 
-GFX_DATEIEN="fb wm wig font ttf tile wmplug vmode ansi ps2m kgui kgbase kgdisp kgsvc kgwm kgrun kgstage sysgui dispsave cursor vgpu vgarrange beam vmsvga pixelguard shot"
+GFX_DATEIEN="wm wig font ttf tile wmplug vmode ansi ps2m kgui kgbase kgdisp kgsvc kgwm kgrun kgstage sysgui dispsave cursor vgpu vgarrange beam vmsvga pixelguard shot"
 if [[ $GUI == off ]]; then
     for f in $GFX_DATEIEN; do
         #
@@ -173,9 +173,11 @@ if [[ $GUI == off ]]; then
     GFXZIEL=$(find "$TMP/kernel" -name "gfx.fi" -type f | head -1)
     [[ -n $GFXZIEL ]] || { echo "SERVERBUILD: gfx.fi nicht gefunden" >&2; exit 1; }
     ersetze gfx-aus gfx || exit 1
+    ersetze fb-aus fb || exit 1
     ersetze slotattach-aus slotattach || exit 1
 fi
 weg gfx-aus
+weg fb-aus
 weg slotattach-aus
 
 if [[ $OHNE_PS2M == 1 ]]; then
