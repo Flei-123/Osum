@@ -1,0 +1,175 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.octets
+import libc.text
+import services.svcrules
+
+export {
+    MODE_MESSAGE, MODE_CONFIRM, MODE_OPEN, MODE_SAVE, MODE_NONE,
+    ANSWER_CANCEL, ANSWER_OK, ANSWER_FAILED, HEAD_MAX,
+    mode_of, mode_name, reply_key, input_key, format_head, parse_head, ext_matches,
+}
+
+const MODE_MESSAGE: u64 = 0
+const MODE_CONFIRM: u64 = 1
+const MODE_OPEN: u64 = 2
+const MODE_SAVE: u64 = 3
+const MODE_NONE: u64 = 9
+
+const ANSWER_CANCEL: u64 = 0
+const ANSWER_OK: u64 = 1
+const ANSWER_FAILED: u64 = 2
+
+const HEAD_MAX: u64 = 96
+const NEWLINE: u64 = 10
+const ZERO_DIGIT: u64 = 48
+const DOT: u64 = 46
+const COMMA: u64 = 44
+const STAR: u64 = 42
+const PREFIX_LEN: u64 = 7
+const REPLY_SUFFIX_LEN: u64 = 6
+const INPUT_SUFFIX_LEN: u64 = 3
+const UPPER_MASK: u64 = 32
+
+static mut MODE_NAMES: [u8; 27] = "message\0confirm\0open\0save\0\0"
+static mut KEY_PREFIX: [u8; 8] = "dialog-\0"
+static mut REPLY_SUFFIX: [u8; 7] = ".reply\0"
+static mut INPUT_SUFFIX: [u8; 4] = ".in\0"
+
+fn mode_name(mode: u64) -> u64 {
+    var at: u64 = 0
+    var index: u64 = 0
+    let table: u64 = (&MODE_NAMES[0 as usize]) as u64
+    var wanted: u64 = mode
+    if wanted > MODE_SAVE {
+        wanted = MODE_SAVE
+    }
+    while index < wanted {
+        while octets.ld8(table, at) != 0 {
+            at = at + 1
+        }
+        at = at + 1
+        index = index + 1
+    }
+    return table + at
+}
+
+fn mode_of(p: u64) -> u64 {
+    var mode: u64 = MODE_MESSAGE
+    let n: u64 = text.length(p)
+    while mode <= MODE_SAVE {
+        let name: u64 = mode_name(mode)
+        if text.length(name) == n && text.equal_n(name, p, n) {
+            return mode
+        }
+        mode = mode + 1
+    }
+    return MODE_NONE
+}
+
+fn key_with(id: u64, suffix: u64, suffix_len: u64, out: u64, max: u64) -> u64 {
+    var digits: [u8; 26] = [0 as u8; 26]
+    let n: u64 = text.digits(id, (&digits[0 as usize]) as u64, false)
+    let total: u64 = PREFIX_LEN + n + suffix_len
+    if total + 1 > max {
+        return 0
+    }
+    octets.copy(out, (&KEY_PREFIX[0 as usize]) as u64, PREFIX_LEN)
+    octets.copy(out + PREFIX_LEN, (&digits[0 as usize]) as u64, n)
+    octets.copy(out + PREFIX_LEN + n, suffix, suffix_len)
+    octets.st8(out, total, 0)
+    return total
+}
+
+fn reply_key(id: u64, out: u64, max: u64) -> u64 {
+    return key_with(id, (&REPLY_SUFFIX[0 as usize]) as u64, REPLY_SUFFIX_LEN, out, max)
+}
+
+fn input_key(id: u64, out: u64, max: u64) -> u64 {
+    return key_with(id, (&INPUT_SUFFIX[0 as usize]) as u64, INPUT_SUFFIX_LEN, out, max)
+}
+
+fn format_head(answer: u64, name: u64, name_len: u64, out: u64, max: u64) -> u64 {
+    if 2 + name_len + 1 > max || name_len > svcrules.NAME_MAX {
+        return 0
+    }
+    octets.st8(out, 0, ZERO_DIGIT + answer)
+    octets.st8(out, 1, NEWLINE)
+    octets.copy(out + 2, name, name_len)
+    octets.st8(out, 2 + name_len, NEWLINE)
+    return 2 + name_len + 1
+}
+
+fn parse_head(buf: u64, n: u64, answer_out: u64, name_len_out: u64) -> u64 {
+    if n < 3 || octets.ld8(buf, 1) != NEWLINE {
+        return 0
+    }
+    let answer: u64 = octets.ld8(buf, 0) -% ZERO_DIGIT
+    if answer > ANSWER_FAILED {
+        return 0
+    }
+    var at: u64 = 2
+    while at < n && octets.ld8(buf, at) != NEWLINE {
+        at = at + 1
+    }
+    if at >= n {
+        return 0
+    }
+    octets.st32(answer_out, 0, answer)
+    octets.st32(name_len_out, 0, at - 2)
+    return at + 1
+}
+
+fn lower(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c | UPPER_MASK
+    }
+    return c
+}
+
+fn ext_start(name: u64, n: u64) -> u64 {
+    var at: u64 = n
+    while at > 0 {
+        at = at - 1
+        if octets.ld8(name, at) == DOT {
+            return at + 1
+        }
+    }
+    return n
+}
+
+fn same_ext(name: u64, from: u64, n: u64, accept: u64, a_from: u64, a_to: u64) -> bool {
+    if a_to - a_from != n - from {
+        return false
+    }
+    var i: u64 = 0
+    while i < n - from {
+        if lower(octets.ld8(name, from + i)) != lower(octets.ld8(accept, a_from + i)) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn ext_matches(accept: u64, name: u64, name_len: u64) -> bool {
+    let alen: u64 = text.length(accept)
+    if alen == 0 || (alen == 1 && octets.ld8(accept, 0) == STAR) {
+        return true
+    }
+    let from: u64 = ext_start(name, name_len)
+    if from >= name_len {
+        return false
+    }
+    var start: u64 = 0
+    var i: u64 = 0
+    while i <= alen {
+        if i == alen || octets.ld8(accept, i) == COMMA {
+            if i > start && same_ext(name, from, name_len, accept, start, i) {
+                return true
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    return false
+}

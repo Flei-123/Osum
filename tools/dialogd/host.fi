@@ -1,0 +1,123 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import services.dlgproto
+import services.svcrules
+
+struct T {
+    fails: i32,
+    checks: i32,
+}
+
+static mut cbuf: [u8; 4096] = [0 as u8; 4096]
+static mut cslot: usize = 0
+static mut outb: [u8; 256] = [0 as u8; 256]
+static mut ansb: [u8; 8] = [0 as u8; 8]
+static mut lenb: [u8; 8] = [0 as u8; 8]
+
+fn c(s: str) -> u64 {
+    let base: usize = (cslot % 16) * 256
+    cslot = cslot + 1
+    var i: usize = 0
+    while i < s.length() && i < 255 {
+        cbuf[base + i] = *((s.p as u64 + i as u64) as *mut u8)
+        i = i + 1
+    }
+    cbuf[base + i] = 0 as u8
+    return ((&cbuf[0 as usize]) as u64) + base as u64
+}
+
+fn check(t: *mut T, ok: bool, what: str) {
+    (*t).checks = (*t).checks + 1
+    if ok {
+        io.fmt_print(f"ok   {what}\n")
+    } else {
+        io.fmt_print(f"FAIL {what}\n")
+        (*t).fails = (*t).fails + 1
+    }
+}
+
+fn len_of(p: u64) -> u64 {
+    var n: u64 = 0
+    while rt.ld8(p, n as usize) != 0 as u8 {
+        n = n + 1
+    }
+    return n
+}
+
+fn is_s(p: u64, s: str) -> bool {
+    let q: u64 = c(s)
+    let n: u64 = len_of(p)
+    if n != len_of(q) {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        if rt.ld8(p, i as usize) != rt.ld8(q, i as usize) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn ext(accept: str, name: str) -> bool {
+    return dlgproto.ext_matches(c(accept), c(name), len_of(c(name)))
+}
+
+fn modes(t: *mut T) {
+    check(t, dlgproto.mode_of(c("message")) == dlgproto.MODE_MESSAGE, "mode message")
+    check(t, dlgproto.mode_of(c("confirm")) == dlgproto.MODE_CONFIRM, "mode confirm")
+    check(t, dlgproto.mode_of(c("open")) == dlgproto.MODE_OPEN, "mode open")
+    check(t, dlgproto.mode_of(c("save")) == dlgproto.MODE_SAVE, "mode save")
+    check(t, dlgproto.mode_of(c("saved")) == dlgproto.MODE_NONE && dlgproto.mode_of(c("")) == dlgproto.MODE_NONE, "unknown modes")
+    check(t, dlgproto.mode_of(c("ope")) == dlgproto.MODE_NONE, "prefix is not a mode")
+}
+
+fn keys(t: *mut T) {
+    let out: u64 = (&outb[0 as usize]) as u64
+    check(t, dlgproto.reply_key(7, out, 64) == 14 && is_s(out, "dialog-7.reply"), "reply key")
+    check(t, dlgproto.input_key(1234, out, 64) == 14 && is_s(out, "dialog-1234.in"), "input key")
+    check(t, dlgproto.reply_key(7, out, 14) == 0 && dlgproto.reply_key(7, out, 15) == 14, "reply key buffer bound exact")
+    check(t, svcrules.valid_key(c("dialog-7.reply"), 14), "reply key is a valid store key")
+}
+
+fn heads(t: *mut T) {
+    let out: u64 = (&outb[0 as usize]) as u64
+    let a: u64 = (&ansb[0 as usize]) as u64
+    let l: u64 = (&lenb[0 as usize]) as u64
+    let n: u64 = dlgproto.format_head(1, c("a.txt"), 5, out, 96)
+    check(t, n == 8, "head length")
+    check(t, rt.ld8(out, 0) == 49 as u8 && rt.ld8(out, 1) == 10 as u8 && rt.ld8(out, 7) == 10 as u8, "head bytes")
+    check(t, dlgproto.parse_head(out, n, a, l) == 8, "parse gives data offset")
+    check(t, rt.ld32(a, 0 as usize) == 1 && rt.ld32(l, 0 as usize) == 5, "parse answer and name length")
+    check(t, dlgproto.format_head(0, c(""), 0, out, 96) == 3 && dlgproto.parse_head(out, 3, a, l) == 3, "empty name head")
+    check(t, dlgproto.parse_head(c("9\nx\n"), 4, a, l) == 0, "answer 9 refused")
+    check(t, dlgproto.parse_head(c("1x"), 2, a, l) == 0, "missing newline refused")
+    check(t, dlgproto.parse_head(c("1\nabc"), 5, a, l) == 0, "unterminated name refused")
+    check(t, dlgproto.format_head(1, c("a"), 1, out, 3) == 0, "head buffer bound")
+    check(t, dlgproto.parse_head(c("1\nn\nDATA"), 8, a, l) == 4, "content starts after the name line")
+}
+
+fn accepts(t: *mut T) {
+    check(t, ext("", "a.txt") && ext("*", "a.txt") && ext("*", "noext"), "empty and star accept all")
+    check(t, ext("txt", "a.txt") && !ext("txt", "a.md"), "single extension")
+    check(t, ext("txt,md", "a.md") && ext("txt,md", "b.txt") && !ext("txt,md", "c.png"), "list")
+    check(t, ext("TXT", "a.txt") && ext("txt", "A.TXT"), "case-insensitive")
+    check(t, !ext("txt", "txt") && !ext("txt", "a."), "no extension never matches a list")
+    check(t, ext("gz", "a.tar.gz") && !ext("tar", "a.tar.gz"), "last extension only")
+    check(t, !ext("txt", "a.txtx") && !ext("txtx", "a.txt"), "length must match")
+}
+
+fn main() -> i32 {
+    var t: T = T { fails: 0, checks: 0 }
+    modes(&t)
+    keys(&t)
+    heads(&t)
+    accepts(&t)
+    io.fmt_print(f"dialogd-host: {t.checks - t.fails}/{t.fails} ok/fail\n")
+    if t.fails != 0 {
+        return 1
+    }
+    return 0
+}
