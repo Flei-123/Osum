@@ -78,7 +78,7 @@ def check_photos(out, scale):
     for name in ("msg", "confirm", "open-start", "open-sel", "save-start"):
         shots[name] = load(out, name)
         img = shots[name]
-        if name != "open-sel" and (scale == 1 or name in ("msg", "confirm")):
+        if name != "open-sel":
             verdict("accent_button_" + name.replace("-", "_"), img is not None and accent_pixels(img) >= minimum)
     if shots["open-start"] is not None and shots["open-sel"] is not None:
         verdict("end_key_moves_selection", changed_pixels(shots["open-start"], shots["open-sel"]) >= CHANGE_MIN_PIXELS)

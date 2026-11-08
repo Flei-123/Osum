@@ -167,7 +167,7 @@ fi
 # A program is not only its own file: every one of these imports wlib,
 # wlibc and now vorlage.  The newest file in kernel/user decides for all
 # of them -- round LOOK found that out the slow way.
-USERNEW=$(ls -t kernel/user/*.fi 2>/dev/null | head -1)
+USERNEW=$(bash tools/design/newest-source.sh)
 for p in $progs; do
     if [ -s "$BUILDD/$p.elf" ] && [ -z "${ALLTAGREBUILD:-}" ] \
        && [ "$BUILDD/$p.elf" -nt "kernel/user/$p.fi" ] \
