@@ -12,7 +12,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 guest() {
     local tree=$1 out=$2 scale=$3
-    ( cd "$tree" && ALLTAGREBUILD=1 ALLTAGBUILD="$out.build" bash tools/design/eh6.sh "$out" res=1920x1080 accel=kvm \
+    ( cd "$tree" && DESIGNREBUILD=1 DESIGNBUILD="$out.build" bash tools/design/eh6.sh "$out" res=1920x1080 accel=kvm \
         mode="$MODE" uiscale="$scale" lang=en drehbuch="$ROOT/tools/dialogd/script.txt" moreprogs="dialogd dialogdemo" ) > "$out.log" 2>&1
     rm -rf "$out.build"
     [ -f "$out/msg.ppm" ] && [ -s "$out/serial.txt" ]
