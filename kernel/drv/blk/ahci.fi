@@ -11,10 +11,12 @@ import sync.atomic
 import block.blkperf
 import lib.tscdelta
 import libc.regio
+import arch.arch
+import drv.blk.ahci_irq
 
 export {
     resume, kill, init, present, ide_mode, raid_mode, read_block, write_block, read_many,
-    write_many, flush, blocks, block_shift, bdf, port, mode,
+    write_many, flush, irq, irq_on, blocks, block_shift, bdf, port, mode,
     ports_seen, cmds, errs, last_tfd, buffer, ident, sig, slots, why,
     dead, alive, scan_us, lock_refused, lock_nested, stop_fails,
     MODE_NONE, MODE_AHCI, MODE_IDE
@@ -53,6 +55,10 @@ const S_SIG: u64 = 0x78
 const S_WHY: u64 = 0x80
 const S_QUIET: u64 = 0x88
 const S_DEAD: u64 = 0x90
+const S_IRQ_ON: u64 = 0xA8
+const S_IRQ_CPU: u64 = 0xB0
+const S_IRQ_MISS: u64 = 0xB8
+const S_IRQ_ERR: u64 = 0xC0
 
 // --------------------------------------------------- die HBA-Register
 
@@ -100,6 +106,18 @@ const CMD_FR: u64 = 0x4000 // FIS receive running
 const CMD_CR: u64 = 0x8000 // command list running
 
 const IS_TFES: u64 = 0x40000000 // task file error
+const IS_DHRS: u64 = 0x1
+const IS_PSS: u64 = 0x2
+const IS_SDBS: u64 = 0x8
+const IS_HBFS: u64 = 0x20000000
+const IS_HBDS: u64 = 0x10000000
+const IS_IFS: u64 = 0x8000000
+const IS_OFS: u64 = 0x1000000
+const IE_MASK: u64 = IS_DHRS | IS_PSS | IS_SDBS | IS_TFES | IS_HBFS | IS_HBDS | IS_IFS | IS_OFS
+const IRQ_MISS_LIMIT: u64 = 4
+const W_DONE: u64 = 0
+const W_FAULT: u64 = 1
+const W_TIMEOUT: u64 = 2
 
 const TFD_ERR: u64 = 0x01
 const TFD_DRQ: u64 = 0x08
@@ -516,6 +534,7 @@ fn init_inner(state: u64) -> bool {
     kstate.set(state, sc(S_SEEN), 0)
     kstate.set(state, sc(S_WHY), 0)
     kstate.set(state, sc(S_DEAD), 0)
+    kstate.set(state, sc(S_IRQ_ON), 0)
 
     if pci.rst_nvme_hidden(state) {
         var l_rst: [u8; 86] = "storage: Intel RST (RAID) mode, NVMe disks may be hidden. BIOS: set SATA mode to AHCI\0"
@@ -612,6 +631,7 @@ fn init_inner(state: u64) -> bool {
         kstate.set(state, sc(S_WHY), 10)
         return false
     }
+    irq_enable(state, b, p)
     kstate.set(state, sc(S_READY), 1)
     return true
 }
@@ -1174,6 +1194,121 @@ fn clear_status(state: u64, p: u64) {
     pwr(state, p, P_SERR, prd(state, p, P_SERR))
 }
 
+static mut wait_polls: u64 = 0
+static mut s_irq_up: [u8; 35] = "ahci: interrupts on, msi vector 41\0"
+static mut s_irq_lost: [u8; 36] = "ahci: interrupt lost, polling again\0"
+
+fn irq_on(state: u64) -> bool {
+    return kstate.get(state, sc(S_IRQ_ON)) != 0
+}
+
+fn irq_enable(state: u64, b: u64, p: u64) {
+    if kstate.mode_on(state, kstate.M_NOAHCIIRQ) || !have_clock(state) {
+        return
+    }
+    if !ahci_irq.msi_arm(state, bdf(state)) {
+        return
+    }
+    kstate.set(state, sc(S_IRQ_CPU), cpu.here(state))
+    kstate.set(state, sc(S_IRQ_MISS), 0)
+    kstate.set(state, sc(S_IRQ_ERR), 0)
+    clear_status(state, p)
+    regio.write32_at(b, R_IS, 0xFFFFFFFF)
+    if !kstate.mode_on(state, kstate.M_AHCIDEAF) {
+        pwr(state, p, P_IE, IE_MASK)
+    }
+    regio.write32_at(b, R_GHC, regio.read32_at(b, R_GHC) | GHC_IE)
+    kstate.set(state, sc(S_IRQ_ON), 1)
+    serial.puts((&s_irq_up[0]) as u64)
+    serial.nl()
+}
+
+fn irq_disable(state: u64) {
+    kstate.set(state, sc(S_IRQ_ON), 0)
+    let b: u64 = kstate.get(state, sc(S_ABAR))
+    if b == 0 {
+        return
+    }
+    pwr(state, port(state), P_IE, 0)
+    regio.write32_at(b, R_GHC, regio.read32_at(b, R_GHC) & (~GHC_IE))
+}
+
+fn irq(state: u64) {
+    blkperf.add(blkperf.K_AHCI_IRQS, 1)
+    let b: u64 = kstate.get(state, sc(S_ABAR))
+    if b == 0 || kstate.get(state, sc(S_IRQ_ON)) == 0 {
+        return
+    }
+    let p: u64 = port(state)
+    let pis: u64 = prd(state, p, P_IS)
+    pwr(state, p, P_IS, pis)
+    kstate.set(state, sc(S_IRQ_ERR), kstate.get(state, sc(S_IRQ_ERR)) | pis)
+    regio.write32_at(b, R_IS, regio.read32_at(b, R_IS))
+}
+
+fn can_sleep(state: u64, bis: u64) -> bool {
+    if bis == 0 || kstate.get(state, sc(S_IRQ_ON)) == 0 || !arch.irq_are_on() {
+        return false
+    }
+    return cpu.here(state) == kstate.get(state, sc(S_IRQ_CPU))
+}
+
+fn sleep_once(state: u64, p: u64) {
+    let saved: u64 = arch.irq_save()
+    if (prd(state, p, P_CI) & 1) == 0 {
+        arch.irq_restore(saved)
+        return
+    }
+    blkperf.add(blkperf.K_AHCI_SLEEPS, 1)
+    arch.irq_wait()
+}
+
+fn judge_interrupts(state: u64, sleeps0: u64, irqs0: u64) {
+    if blkperf.get(blkperf.K_AHCI_SLEEPS) == sleeps0 {
+        return
+    }
+    if blkperf.get(blkperf.K_AHCI_IRQS) != irqs0 {
+        kstate.set(state, sc(S_IRQ_MISS), 0)
+        return
+    }
+    kstate.add(state, sc(S_IRQ_MISS), 1)
+    if kstate.get(state, sc(S_IRQ_MISS)) >= IRQ_MISS_LIMIT {
+        irq_disable(state)
+        serial.puts((&s_irq_lost[0]) as u64)
+        serial.nl()
+    }
+}
+
+fn error_pending(state: u64, p: u64) -> bool {
+    return ((prd(state, p, P_IS) | kstate.get(state, sc(S_IRQ_ERR))) & IS_TFES) != 0
+}
+
+fn wait_done(state: u64, p: u64, bis: u64) -> u64 {
+    let sleepy: bool = can_sleep(state, bis)
+    let sleeps0: u64 = blkperf.get(blkperf.K_AHCI_SLEEPS)
+    let irqs0: u64 = blkperf.get(blkperf.K_AHCI_IRQS)
+    var spin: u64 = 0
+    while !expired(bis, spin, SPIN_LIMIT) {
+        if (prd(state, p, P_CI) & 1) == 0 {
+            wait_polls = spin + 1
+            if sleepy {
+                judge_interrupts(state, sleeps0, irqs0)
+            }
+            return W_DONE
+        }
+        if (sleepy || (spin & ERR_CHECK_MASK) == ERR_CHECK_MASK) && error_pending(state, p) {
+            return W_FAULT
+        }
+        if sleepy {
+            sleep_once(state, p)
+        } else {
+            atomic.pause()
+        }
+        spin = spin + 1
+    }
+    return W_TIMEOUT
+}
+
 fn run(state: u64, cmd: u64, lba: u64, count: u64, addr: u64, len: u64,
     write: bool) -> bool {
     if write && !wlock.allowed(wlock.D_AHCI) {
@@ -1211,41 +1346,36 @@ fn run(state: u64, cmd: u64, lba: u64, count: u64, addr: u64, len: u64,
     build_hdr(cl, ct, write, prdtl)
     build_fis(ct, cmd, lba, count)
 
+    kstate.set(state, sc(S_IRQ_ERR), 0)
     pwr(state, p, P_CI, 1)
     kstate.add(state, sc(S_CMDS), 1)
 
     let bis: u64 = timeout(state, CMD_US)
     let t_issued: u64 = blkperf.now()
-    var spin: u64 = 0
-    while !expired(bis, spin, SPIN_LIMIT) {
-        if (prd(state, p, P_CI) & 1) == 0 {
-            let tfd: u64 = prd(state, p, P_TFD)
-            let t_done: u64 = blkperf.now()
-            blkperf.add(blkperf.K_AHCI_CMDS, 1)
-            blkperf.add(blkperf.K_AHCI_POLLS, spin + 1)
-            blkperf.add(blkperf.K_AHCI_IDLE_CYCLES, tscdelta.between(t_start, t_idle))
-            blkperf.add(blkperf.K_AHCI_SETUP_CYCLES, tscdelta.between(t_idle, t_issued))
-            blkperf.add(blkperf.K_AHCI_WAIT_CYCLES, tscdelta.between(t_issued, t_done))
-            kstate.set(state, sc(S_TFD), tfd)
-            if (tfd & TFD_ERR) != 0 {
-                kstate.add(state, sc(S_ERRS), 1)
-                clear_status(state, p)
-                return false
-            }
-            idle_known = (tfd & (TFD_BSY | TFD_DRQ)) == 0
-            return true
-        }
-        if (spin & ERR_CHECK_MASK) == ERR_CHECK_MASK && (prd(state, p, P_IS) & IS_TFES) != 0 {
-            kstate.set(state, sc(S_TFD), prd(state, p, P_TFD))
+    let verdict: u64 = wait_done(state, p, bis)
+    if verdict == W_DONE {
+        let tfd: u64 = prd(state, p, P_TFD)
+        let t_done: u64 = blkperf.now()
+        blkperf.add(blkperf.K_AHCI_CMDS, 1)
+        blkperf.add(blkperf.K_AHCI_POLLS, wait_polls)
+        blkperf.add(blkperf.K_AHCI_IDLE_CYCLES, tscdelta.between(t_start, t_idle))
+        blkperf.add(blkperf.K_AHCI_SETUP_CYCLES, tscdelta.between(t_idle, t_issued))
+        blkperf.add(blkperf.K_AHCI_WAIT_CYCLES, tscdelta.between(t_issued, t_done))
+        kstate.set(state, sc(S_TFD), tfd)
+        if (tfd & TFD_ERR) != 0 {
             kstate.add(state, sc(S_ERRS), 1)
-            recover(state, p)
+            clear_status(state, p)
             return false
         }
-        atomic.pause()
-        spin = spin + 1
+        idle_known = (tfd & (TFD_BSY | TFD_DRQ)) == 0
+        return true
     }
     kstate.set(state, sc(S_TFD), prd(state, p, P_TFD))
     kstate.add(state, sc(S_ERRS), 1)
+    if verdict == W_FAULT {
+        recover(state, p)
+        return false
+    }
     kstate.add(state, sc(S_DEAD), 1)
     kstate.set(state, sc(S_READY), 0)
     recover(state, p)
@@ -1530,6 +1660,7 @@ fn flush_locked(state: u64) -> bool {
 // pointers are gone). `resume`: set the HBA up again like the first start.
 fn kill(state: u64) {
     idle_known = false
+    kstate.set(state, sc(S_IRQ_ON), 0)
     let b: u64 = kstate.get(state, sc(S_ABAR))
     if kstate.get(state, sc(S_MODE)) == MODE_AHCI && b != 0 {
         regio.write32_at(b, R_GHC, regio.read32_at(b, R_GHC) | GHC_HR)
