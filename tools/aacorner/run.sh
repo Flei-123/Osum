@@ -74,8 +74,8 @@ RADIUS=${RADIUS:-12}
 measure() {  # run name
     local o=$TMPD/$1 s=$TMPD/$1/serial.txt line x y w h SC=${1: -1}
     [ -s "$s" ] || { bad "$1: no serial"; return 1; }
-    # tooltip: `wlib: tip [..] x= y= w= h=`
-    line=$(grep -a 'wlib: tip \[' "$s" | head -1)
+    # tooltip over the clock (the one under the pointer when 01-tip is taken): `wlib: tip [HH:MM] x= y= w= h=`
+    line=$(grep -aE 'wlib: tip \[[0-9]{2}:[0-9]{2}\]' "$s" | head -1)
     x=$(sed -E 's/.* x=([0-9]+).*/\1/' <<<"$line"); y=$(sed -E 's/.* y=([0-9]+).*/\1/' <<<"$line")
     w=$(sed -E 's/.* w=([0-9]+).*/\1/' <<<"$line"); h=$(sed -E 's/.* h=([0-9]+).*/\1/' <<<"$line")
     w=$(( (w + SC - 1) / SC * SC )); h=$(( (h + SC - 1) / SC * SC ))
