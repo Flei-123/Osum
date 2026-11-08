@@ -1,6 +1,6 @@
 // ===================================================== DIE KOPFDATEI
-//     Passphrase --scrypt--> pass_key --oeffnet--> phuelle --> MK
-//     Code       --base32-->  rkey    --oeffnet--> rhuelle --> MK
+//     Passphrase --scrypt--> pass_key --opens--> penvelope --> MK
+//     Code       --base32-->  rkey    --opens--> renvelope --> MK
 // ================================================================ EHRLICH
 
 profile kernel
@@ -17,7 +17,7 @@ import libc.hexdigit
 
 export {
     kb_new, kb_open, kb_open_code, kb_da, kb_bund, kb_key,
-    kb_target, kb_provider, kb_close, kb_n, kb_r, kb_salz,
+    kb_target, kb_provider, kb_close, kb_n, kb_r, kb_salt,
     kb_code_letzt, kb_kopfpfad,
     hex_out, hex_in, path2, num_out, num_in,
     A_OWN, A_JARVIS, A_XOFFI, PFADMAX
@@ -32,12 +32,12 @@ const A_XOFFI: u64 = 2
 
 static mut bund: [u8; 160] = [0 as u8; 160]
 static mut opened: bool = false
-static mut c_salz: [u8; 16] = [0 as u8; 16]
+static mut c_salt: [u8; 16] = [0 as u8; 16]
 static mut c_check: [u8; 32] = [0 as u8; 32]
 static mut c_pnonce: [u8; 24] = [0 as u8; 24]
-static mut c_phuelle: [u8; 48] = [0 as u8; 48]
+static mut c_penvelope: [u8; 48] = [0 as u8; 48]
 static mut c_rnonce: [u8; 24] = [0 as u8; 24]
-static mut c_rhuelle: [u8; 48] = [0 as u8; 48]
+static mut c_renvelope: [u8; 48] = [0 as u8; 48]
 static mut c_n: u64 = 4096
 static mut c_r: u64 = 8
 static mut c_provider: u64 = 0
@@ -130,13 +130,13 @@ fn zufall(out: u64, n: u64) -> bool {
     return !ulib.bad(ulib.sys(SYS_GETRANDOM, out, n, 0))
 }
 
-fn ableiten(pw: u64, plen: u64, salz: u64, n: u64, r: u64, out32: u64) -> bool {
+fn ableiten(pw: u64, plen: u64, salt: u64, n: u64, r: u64, out32: u64) -> bool {
     let need: u64 = scrypt.scrypt_need(n, r, 1)
     let mp: u64 = mem.map_pages(need)
     if ulib.bad(mp) {
         return false
     }
-    let ok: bool = scrypt.scrypt(pw, plen, salz, chain.SALTLEN, n, r, 1,
+    let ok: bool = scrypt.scrypt(pw, plen, salt, chain.SALTLEN, n, r, 1,
         out32, chain.KEYLEN, mp, need)
     mem.unmap_pages(mp, need)
     return ok
@@ -200,20 +200,20 @@ fn header_write(verz: u64) -> bool {
     if ok && ulib.bad(io.write_all(fd, (&l_kdf[0]) as u64, at)) {
         ok = false
     }
-    var n_salz: [u8; 5] = "salz\0"
+    var n_salt: [u8; 5] = "salt\0"
     var n_pr: [u8; 6] = "check\0"
     var n_pn: [u8; 7] = "pnonce\0"
-    var n_ph: [u8; 8] = "phuelle\0"
+    var n_ph: [u8; 10] = "penvelope\0"
     var n_rn: [u8; 7] = "rnonce\0"
-    var n_rh: [u8; 8] = "rhuelle\0"
+    var n_rh: [u8; 10] = "renvelope\0"
     var n_an: [u8; 9] = "provider\0"
     var n_zi: [u8; 7] = "target\0"
-    if ok { ok = line_hex(fd, (&n_salz[0]) as u64, (&c_salz[0]) as u64, 16) }
+    if ok { ok = line_hex(fd, (&n_salt[0]) as u64, (&c_salt[0]) as u64, 16) }
     if ok { ok = line_hex(fd, (&n_pr[0]) as u64, (&c_check[0]) as u64, 32) }
     if ok { ok = line_hex(fd, (&n_pn[0]) as u64, (&c_pnonce[0]) as u64, 24) }
-    if ok { ok = line_hex(fd, (&n_ph[0]) as u64, (&c_phuelle[0]) as u64, 48) }
+    if ok { ok = line_hex(fd, (&n_ph[0]) as u64, (&c_penvelope[0]) as u64, 48) }
     if ok { ok = line_hex(fd, (&n_rn[0]) as u64, (&c_rnonce[0]) as u64, 24) }
-    if ok { ok = line_hex(fd, (&n_rh[0]) as u64, (&c_rhuelle[0]) as u64, 48) }
+    if ok { ok = line_hex(fd, (&n_rh[0]) as u64, (&c_renvelope[0]) as u64, 48) }
     var a_e: [u8; 4] = "own\0"
     var a_j: [u8; 7] = "jarvis\0"
     var a_x: [u8; 6] = "xoffi\0"
@@ -233,7 +233,7 @@ fn kb_new(verz: u64, pw: u64, plen: u64, n: u64, r: u64,
     c_r = r
     c_provider = provider
     ulib.strncpy((&c_target[0]) as u64, target, PFADMAX)
-    if !zufall((&c_salz[0]) as u64, 16) {
+    if !zufall((&c_salt[0]) as u64, 16) {
         return false
     }
     if !zufall((&c_pnonce[0]) as u64, 24) {
@@ -254,14 +254,14 @@ fn kb_new(verz: u64, pw: u64, plen: u64, n: u64, r: u64,
     if !zufall(rkp, 32) {
         return false
     }
-    if !ableiten(pw, plen, (&c_salz[0]) as u64, n, r, pkp) {
+    if !ableiten(pw, plen, (&c_salt[0]) as u64, n, r, pkp) {
         return false
     }
     chain.envelope_write(pkp, (&c_pnonce[0]) as u64, mkp,
-        (&c_phuelle[0]) as u64)
+        (&c_penvelope[0]) as u64)
     chain.envelope_write(rkp, (&c_rnonce[0]) as u64, mkp,
-        (&c_rhuelle[0]) as u64)
-    if !chain.bundle_off_main((&bund[0]) as u64, mkp, (&c_salz[0]) as u64) {
+        (&c_renvelope[0]) as u64)
+    if !chain.bundle_off_main((&bund[0]) as u64, mkp, (&c_salt[0]) as u64) {
         return false
     }
     var i: u64 = 0
@@ -347,17 +347,17 @@ fn kb_da(verz: u64) -> bool {
             c_n = num_in(b)
             c_r = num_in(after_word(b))
         } else if (word_is(zp, (&n_salt[0]) as u64) || word_is(zp, (&n_salz_old[0]) as u64)) {
-            if !hex_in(after_word(zp), 16, (&c_salz[0]) as u64) { gut = false }
+            if !hex_in(after_word(zp), 16, (&c_salt[0]) as u64) { gut = false }
         } else if (word_is(zp, (&n_pr[0]) as u64) || word_is(zp, (&n_pr_old[0]) as u64)) {
             if !hex_in(after_word(zp), 32, (&c_check[0]) as u64) { gut = false }
         } else if word_is(zp, (&n_pn[0]) as u64) {
             if !hex_in(after_word(zp), 24, (&c_pnonce[0]) as u64) { gut = false }
         } else if (word_is(zp, (&n_ph[0]) as u64) || word_is(zp, (&n_ph_old[0]) as u64)) {
-            if !hex_in(after_word(zp), 48, (&c_phuelle[0]) as u64) { gut = false }
+            if !hex_in(after_word(zp), 48, (&c_penvelope[0]) as u64) { gut = false }
         } else if word_is(zp, (&n_rn[0]) as u64) {
             if !hex_in(after_word(zp), 24, (&c_rnonce[0]) as u64) { gut = false }
         } else if (word_is(zp, (&n_rh[0]) as u64) || word_is(zp, (&n_rh_old[0]) as u64)) {
-            if !hex_in(after_word(zp), 48, (&c_rhuelle[0]) as u64) { gut = false }
+            if !hex_in(after_word(zp), 48, (&c_renvelope[0]) as u64) { gut = false }
         } else if (word_is(zp, (&n_an[0]) as u64) || word_is(zp, (&n_an_old[0]) as u64)) {
             let v: u64 = after_word(zp)
             c_provider = A_OWN
@@ -383,7 +383,7 @@ fn off_envelope(einpack: u64, nonce: u64, envelope: u64) -> bool {
         return false
     }
     let ok: bool = chain.bundle_off_main((&bund[0]) as u64, mkp,
-        (&c_salz[0]) as u64)
+        (&c_salt[0]) as u64)
     var i: u64 = 0
     while i < 32 {
         octets.st8(mkp, i, 0)
@@ -406,10 +406,10 @@ fn kb_open(verz: u64, pw: u64, plen: u64) -> bool {
     }
     var pkey: [u8; 32] = [0 as u8; 32]
     let pkp: u64 = (&pkey[0]) as u64
-    if !ableiten(pw, plen, (&c_salz[0]) as u64, c_n, c_r, pkp) {
+    if !ableiten(pw, plen, (&c_salt[0]) as u64, c_n, c_r, pkp) {
         return false
     }
-    let ok: bool = off_envelope(pkp, (&c_pnonce[0]) as u64, (&c_phuelle[0]) as u64)
+    let ok: bool = off_envelope(pkp, (&c_pnonce[0]) as u64, (&c_penvelope[0]) as u64)
     var i: u64 = 0
     while i < 32 {
         octets.st8(pkp, i, 0)
@@ -427,7 +427,7 @@ fn kb_open_code(verz: u64, code: u64) -> bool {
     if !chain.code_read(code, text.length(code), rkp) {
         return false
     }
-    let ok: bool = off_envelope(rkp, (&c_rnonce[0]) as u64, (&c_rhuelle[0]) as u64)
+    let ok: bool = off_envelope(rkp, (&c_rnonce[0]) as u64, (&c_renvelope[0]) as u64)
     var i: u64 = 0
     while i < 32 {
         octets.st8(rkp, i, 0)
@@ -460,8 +460,8 @@ fn kb_r() -> u64 {
     return c_r
 }
 
-fn kb_salz() -> u64 {
-    return (&c_salz[0]) as u64
+fn kb_salt() -> u64 {
+    return (&c_salt[0]) as u64
 }
 
 fn kb_code_letzt() -> u64 {

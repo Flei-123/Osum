@@ -181,8 +181,9 @@ hol "$TMPD/A.img" /konto "$TMPD/kontoA"
 note "Speicher: PACK $(stat -c%s "$TMPD/store1/PACK" 2>/dev/null) Oktette, INDEX $(stat -c%s "$TMPD/store1/INDEX" 2>/dev/null), ROOT $(stat -c%s "$TMPD/store1/ROOT" 2>/dev/null)"
 
 mkdir -p "$TMPD/kontoB"
-sed -e 's/^salz /salt /' -e 's/^phuelle /penvelope /' -e 's/^rhuelle /renvelope /' "$TMPD/kontoA/KOPF" > "$TMPD/kontoB/KOPF"
-grep -q '^salt ' "$TMPD/kontoB/KOPF" && ok "device B gets the KOPF in the new spelling (salt, penvelope, renvelope); A keeps the old one" || bad "KOPF spelling conversion"
+grep -q '^salt ' "$TMPD/kontoA/KOPF" && grep -q '^penvelope ' "$TMPD/kontoA/KOPF" && grep -q '^renvelope ' "$TMPD/kontoA/KOPF" && ! grep -q '^salz \|^phuelle \|^rhuelle ' "$TMPD/kontoA/KOPF" && ok "device A writes the KOPF in the new spelling (salt, penvelope, renvelope)" || bad "KOPF writer spelling"
+sed -e 's/^salt /salz /' -e 's/^penvelope /phuelle /' -e 's/^renvelope /rhuelle /' "$TMPD/kontoA/KOPF" > "$TMPD/kontoB/KOPF"
+grep -q '^salz ' "$TMPD/kontoB/KOPF" && grep -q '^rhuelle ' "$TMPD/kontoB/KOPF" && ok "device B gets the KOPF in the old spelling (salz, phuelle, rhuelle): old-name reader probe" || bad "KOPF old spelling conversion"
 mkdir -p "$TMPD/leer"
 cat > "$TMPD/sB.sh" <<EOS
 echo ==AB==

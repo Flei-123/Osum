@@ -104,18 +104,20 @@ def main():
             if len(t) == 2:
                 felder[t[0].decode("ascii", "replace")] = t[1].decode(
                     "ascii", "replace")
-    salz = bytes.fromhex(felder["salz"]) if "salz" in felder else None
-    if salz is None:
+    salt_hex = felder.get("salt", felder.get("salz"))
+    penvelope = felder.get("penvelope", felder.get("phuelle"))
+    salt = bytes.fromhex(salt_hex) if salt_hex else None
+    if salt is None:
         print("  no salt found -- (c) cannot be measured")
         return 1
-    pkey = hashlib.scrypt(passphrase.encode(), salt=salz, n=N, r=r, p=1,
+    pkey = hashlib.scrypt(passphrase.encode(), salt=salt, n=N, r=r, p=1,
                           dklen=32, maxmem=(128 * N * r * 2) + (1 << 22))
     mk = ask(["hopen %s %s %s" % (binascii.hexlify(pkey).decode(),
-                                  felder["pnonce"], felder["phuelle"])])[0]
+                                  felder["pnonce"], penvelope)])[0]
     if mk == "FAIL" or len(mk) != 64:
         print("  the envelope cannot be opened -- (c) measures nothing")
         return 1
-    bund = ask(["bundmk %s %s" % (mk, felder["salz"])])[0]
+    bund = ask(["bundmk %s %s" % (mk, salt_hex)])[0]
     if bund == "FAIL" or len(bund) != 320:
         print("  the bundle cannot be derived -- (c) measures nothing")
         return 1
