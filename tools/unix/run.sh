@@ -191,7 +191,7 @@ say "$F" "ignore" 0 "ein ueberhoertes Signal kommt nie an"
 echo "   -- and every way to be wrong"
 say "$F" "act kill" -22 "SIGKILL laesst sich nicht abfangen: -EINVAL"
 say "$F" "act zero" -22 "Signal 0 gibt es nicht: -EINVAL"
-say "$F" "act big" -22 "Signal 64 gibt es nicht: -EINVAL"
+say "$F" "act big" -22 "signal 65 does not exist (32..64 are real-time): -EINVAL"
 say "$F" "kill srch" -3 "ein Prozess, den es nicht gibt: -ESRCH"
 say "$F" "kill probe" 0 "kill(pid, 0) schickt nichts und sagt, dass es ihn gibt"
 
