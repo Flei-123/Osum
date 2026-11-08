@@ -298,7 +298,7 @@ Total: 652
 | `noacpiev` | bootargs.fi |  |  |
 | `noaesni` | bootargs.fi |  |  |
 | `noagen` | bootargs.fi |  |  |
-| `noahciirq` | bootwords_store.fi |  |  |
+| `noahciirq` | bootwords_store.fi | ahciirq | AHCI completion arrives as an MSI (vector 41, GHC.IE + PxIE) and is counted in /proc/bench; word noahciirq keeps the old pure polling and shows zero interrupts |
 | `noaml` | bootargs.fi |  |  |
 | `noanim` | bootargs.fi |  |  |
 | `noanmeldung` | bootargs.fi |  |  |
