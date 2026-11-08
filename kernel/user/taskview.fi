@@ -29,8 +29,9 @@ import lineout
 import wlibc
 import wlib
 import fuiscene
+import icons
 
-export { init, toggle, step, is_open, hit }
+export { init, toggle, step, is_open, hit, preview_open, preview_shut, preview_is_open }
 
 const TV_MAXR: u64 = 12
 const KEY0: u64 = 200
@@ -39,11 +40,20 @@ const ROW_H: u64 = 36
 const HEAD_H: u64 = 24
 const GAPP: u64 = 4
 const PADP: u64 = 8
+const MODE_CARD: u64 = 0
+const MODE_PREVIEW: u64 = 1
+const PV_W: u64 = 300
+const PV_MAXR: u64 = 8
+const PV_GAP: u64 = 6
+const KEYC0: u64 = 300
+const APP_LEN: u64 = 24
 
 static mut tv_win: u64 = 0xFFFFFFFFFFFFFFFF
 static mut tv_h: u64 = 0
 static mut tv_id: u64 = 0
 static mut open_: u64 = 0
+static mut mode_: u64 = 0
+static mut app_f: [u8; 24] = [0 as u8; 24]
 static mut n_rows: u64 = 0
 static mut row_id: [u64; 12] = [0 as u64; 12]
 static mut row_tit: [u8; 480] = [0 as u8; 480] // TV_MAXR x 40
@@ -56,6 +66,10 @@ static mut key_last: u64 = 0
 static mut t_title: [u8; 10] = "Task view\0"
 static mut t_head: [u8; 10] = "Task view\0"
 static mut t_none: [u8; 16] = "No open windows\0"
+static mut t_close: [u8; 6] = "Close\0"
+static mut s_pv: [u8; 21] = "taskview: preview n=\0"
+static mut s_app: [u8; 6] = " app=\0"
+static mut s_cl: [u8; 20] = "taskview: close id=\0"
 static mut s_open: [u8; 20] = "taskview: open n=\0\0\0"
 static mut s_xy: [u8; 4] = " x=\0"
 static mut s_yy: [u8; 4] = " y=\0"
@@ -80,7 +94,17 @@ fn rows_shown() -> u64 {
 }
 
 // the card in design points
+fn card_w() -> u64 {
+    if mode_ == MODE_PREVIEW {
+        return PV_W
+    }
+    return CARD_W
+}
+
 fn card_h() -> u64 {
+    if mode_ == MODE_PREVIEW {
+        return PADP + rows_shown() * (ROW_H + GAPP) + PADP
+    }
     return PADP + HEAD_H + GAPP + rows_shown() * (ROW_H + GAPP) + PADP
 }
 
@@ -88,9 +112,28 @@ fn say(p: u64) {
     let _s: u64 = lineout.add_text(p)
 }
 
+fn build_preview(r: usize) {
+    var i: u64 = 0
+    while i < n_rows {
+        let line: usize = fuiscene.row(r)
+        fuiscene.set_gap(line, GAPP)
+        let b: usize = fuiscene.button(line, (&row_tit[0 as usize]) as u64 + i * 40, KEY0 + i)
+        fuiscene.set_size(b, PV_W - 2 * PADP - ROW_H - GAPP, ROW_H)
+        let c: usize = fuiscene.icon_button(line, icons.WINDOW_CLOSE, (&t_close[0 as usize]) as u64,
+            KEYC0 + i)
+        fuiscene.flat(c)
+        fuiscene.set_size(c, ROW_H, ROW_H)
+        i = i + 1
+    }
+}
+
 fn build() {
     let r: usize = fuiscene.root()
     fuiscene.set_gap(r, GAPP)
+    if mode_ == MODE_PREVIEW && n_rows > 0 {
+        build_preview(r)
+        return
+    }
     let _h: usize = fuiscene.label(r, (&t_head[0 as usize]) as u64)
     if n_rows == 0 {
         let _n: usize = fuiscene.label(r, (&t_none[0 as usize]) as u64)
@@ -105,11 +148,40 @@ fn build() {
     }
 }
 
+fn app_matches(rec_base: u64) -> bool {
+    var k: u64 = 0
+    while k < APP_LEN - 1 {
+        let a: u8 = __mmio_read8((rec_base + wlibc.WL_APP + k) as *mut u8)
+        if a != app_f[k as usize] {
+            return false
+        }
+        if a == (0 as u8) {
+            return true
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn rows_limit() -> u64 {
+    if mode_ == MODE_PREVIEW {
+        return PV_MAXR
+    }
+    return TV_MAXR
+}
+
+fn row_wanted(b: u64, own: u64, layer: u64) -> bool {
+    if layer != wlibc.L_NORMAL || own == tv_id {
+        return false
+    }
+    return mode_ != MODE_PREVIEW || app_matches(b)
+}
+
 // the windows of the desktop, the way the bar's own list reads them
 fn read_windows() {
     n_rows = 0
     var slot: u64 = 0
-    while slot < 32 && n_rows < TV_MAXR {
+    while slot < 32 && n_rows < rows_limit() {
         let r: u64 = wlibc.win_list(slot, (&rec[0 as usize]) as u64)
         if ulib.bad(r) {
             slot = 32
@@ -118,7 +190,7 @@ fn read_windows() {
                 let b: u64 = (&rec[0 as usize]) as u64
                 let layer: u64 = __mmio_read64((b + wlibc.WL_LAYER) as *mut u64)
                 let own: u64 = __mmio_read64((b + wlibc.WL_ID) as *mut u64)
-                if layer == wlibc.L_NORMAL && own != tv_id {
+                if row_wanted(b, own, layer) {
                     row_id[n_rows as usize] = own
                     var k: u64 = 0
                     while k < 31 {
@@ -160,7 +232,7 @@ fn hit(x: u64, y: u64) -> bool {
     if open_ == 0 {
         return false
     }
-    return x >= px_ && x < px_ + CARD_W * wlibc.ui_scale() && y >= py_
+    return x >= px_ && x < px_ + card_w() * wlibc.ui_scale() && y >= py_
         && y < py_ + card_h() * wlibc.ui_scale()
 }
 
@@ -172,10 +244,68 @@ fn paint_now() {
     }
 }
 
+fn preview_place(cx: u64, bar_top: u64, bar_bot: u64, w: u64, h: u64) {
+    let gap: u64 = PV_GAP * wlibc.ui_scale()
+    let hx: u64 = wlibc.head_bx()
+    let hw: u64 = wlibc.head_bw()
+    px_ = hx
+    if cx > hx + w / 2 {
+        px_ = cx - w / 2
+    }
+    if hw > w && px_ + w > hx + hw {
+        px_ = hx + hw - w
+    }
+    if bar_top >= wlibc.head_by() + h + gap {
+        py_ = bar_top - h - gap
+    } else {
+        py_ = bar_bot + gap
+    }
+}
+
+fn preview_open(app: u64, cx: u64, bar_top: u64, bar_bot: u64) -> bool {
+    if open_ != 0 || tv_win == 0xFFFFFFFFFFFFFFFF {
+        return false
+    }
+    mode_ = MODE_PREVIEW
+    copy_app(app)
+    read_windows()
+    if n_rows == 0 {
+        mode_ = MODE_CARD
+        return false
+    }
+    preview_place(cx, bar_top, bar_bot, PV_W * wlibc.ui_scale(), card_h() * wlibc.ui_scale())
+    show_card()
+    return true
+}
+
+fn copy_app(app: u64) {
+    var k: u64 = 0
+    while k < APP_LEN - 1 {
+        let a: u8 = __mmio_read8((app + k) as *mut u8)
+        app_f[k as usize] = a
+        if a == (0 as u8) {
+            return
+        }
+        k = k + 1
+    }
+    app_f[(APP_LEN - 1) as usize] = 0 as u8
+}
+
+fn preview_is_open() -> bool {
+    return open_ != 0 && mode_ == MODE_PREVIEW
+}
+
+fn preview_shut() {
+    if preview_is_open() {
+        shut((&s_out[0 as usize]) as u64)
+    }
+}
+
 fn open_now() {
     if open_ != 0 || tv_win == 0xFFFFFFFFFFFFFFFF {
         return
     }
+    mode_ = MODE_CARD
     read_windows()
     let w: u64 = CARD_W * wlibc.ui_scale()
     let h: u64 = card_h() * wlibc.ui_scale()
@@ -190,6 +320,12 @@ fn open_now() {
     if sh > h + 80 {
         py_ = py_ + (sh - h - 40) / 2
     }
+    show_card()
+}
+
+fn show_card() {
+    let w: u64 = card_w() * wlibc.ui_scale()
+    let h: u64 = card_h() * wlibc.ui_scale()
     let _s: bool = fuiscene.win_select(tv_win)
     let _z: bool = fuiscene.win_size(w, h)
     fuiscene.refresh()
@@ -202,12 +338,22 @@ fn open_now() {
     open_ = 1
     btn_last = wlibc.mouse_btn() & 1
     let _a: u64 = wlibc.win_act(tv_id, wlibc.WA_RAISE)
-    let _k: u64 = wlibc.win_state(tv_h, wlibc.WS_KEYS, 1)
-    let _fs: bool = fuiscene.win_select(tv_win)
-    fuiscene.focus_canvas()
-    let _fu: bool = fuiscene.win_select(0)
-    say((&s_open[0 as usize]) as u64)
+    if mode_ == MODE_CARD {
+        let _k: u64 = wlibc.win_state(tv_h, wlibc.WS_KEYS, 1)
+        let _fs: bool = fuiscene.win_select(tv_win)
+        fuiscene.focus_canvas()
+        let _fu: bool = fuiscene.win_select(0)
+    }
+    if mode_ == MODE_PREVIEW {
+        say((&s_pv[0 as usize]) as u64)
+    } else {
+        say((&s_open[0 as usize]) as u64)
+    }
     lineout.add_num(n_rows)
+    if mode_ == MODE_PREVIEW {
+        say((&s_app[0 as usize]) as u64)
+        say((&app_f[0 as usize]) as u64)
+    }
     say((&s_xy[0 as usize]) as u64)
     lineout.add_num(px_)
     say((&s_yy[0 as usize]) as u64)
@@ -256,6 +402,17 @@ fn step() -> bool {
     // the events of the window ring go to the canvas of the tree
     let _st: u64 = wlib.step()
     let key: u64 = fuiscene.pump_aux(tv_win)
+    if key >= KEYC0 && key < KEYC0 + n_rows {
+        let id: u64 = row_id[(key - KEYC0) as usize]
+        let rc: u64 = wlibc.win_act(id, wlibc.WA_CLOSE)
+        say((&s_cl[0 as usize]) as u64)
+        lineout.add_num(id)
+        say((&s_rc[0 as usize]) as u64)
+        lineout.add_num(rc)
+        lineout.end_line()
+        shut((&s_pick[0 as usize]) as u64)
+        return true
+    }
     if key >= KEY0 && key < KEY0 + n_rows {
         let id: u64 = row_id[(key - KEY0) as usize]
         let rc: u64 = wlibc.win_act(id, wlibc.WA_RAISE)
