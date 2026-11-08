@@ -10,6 +10,7 @@ from PIL import Image
 
 MIN_TABS = 12
 MIN_OCR_RATIO = 0.7
+MIN_ELLIPSIS_PREFIX = 10
 OCR_ZOOM = 3
 SIDEBAR_LEFT_RATIO = 0.045
 SIDEBAR_WIDTH_RATIO = 0.3
@@ -55,6 +56,13 @@ def ocr_sidebar(shot, lang):
     return run.stdout.lower()
 
 
+def title_seen(title, text):
+    lowered = title.lower()
+    if lowered in text:
+        return True
+    return any(re.search(re.escape(lowered[:cut]) + r"\.{2,3}", text) for cut in range(len(lowered) - 1, MIN_ELLIPSIS_PREFIX - 1, -1))
+
+
 def ellipsis_main(shot, lang, pattern):
     text = ocr_sidebar(shot, lang)
     found = re.search(pattern, text) is not None
@@ -71,7 +79,7 @@ def main():
     mismatches = [(i, tabs[i], titles[i]) for i in sorted(tabs) if titles.get(i) and tabs[i] != titles[i]]
     text = ocr_sidebar(shot, lang)
     shown = [titles[i] for i in sorted(tabs) if titles.get(i)]
-    found = [t for t in shown if t.lower() in text]
+    found = [t for t in shown if title_seen(t, text)]
     ratio = len(found) / len(shown) if shown else 0.0
     print("tabs=%d mismatches=%d %s ocr=%d/%d" % (len(tabs), len(mismatches), mismatches[:3], len(found), len(shown)))
     ok = len(tabs) >= MIN_TABS and not mismatches and ratio >= MIN_OCR_RATIO

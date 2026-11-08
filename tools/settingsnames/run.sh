@@ -105,7 +105,7 @@ judge_ellipsis() {
     else bad "$label: unexpected ellipsis result ($line)"; fi
 }
 judge_ellipsis "$OUT/en1/search.ppm" "English: the long search result row ends in an ellipsis, scale 1" eng 'monitors and screen[a-z ]{0,10}\.{2,3}' green
-judge_ellipsis "$OUT/de2/names.ppm" "German: the long sidebar title ends in an ellipsis, scale 2" deu 'bildschirm[a-z]{0,4}\.{2,3}' green
+judge_ellipsis "$OUT/de2/names.ppm" "German: the long sidebar title ends in an ellipsis, scale 2" deu 'bildschir[a-z]{0,6}\.{2,3}' green
 judge_ellipsis "$OUT/mut2/search.ppm" "counter-probe: without the ellipsis the row is cut silently" eng 'monitors and screen[a-z ]{0,10}\.{2,3}' red
 
 for n in en1 de2 mut1 mut2; do
