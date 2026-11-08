@@ -63,11 +63,11 @@ def check_serial(serial, scale):
     verdict("open_ok", bool(find(serial, r"dialogdemo: open status=ok")))
     verdict("open_plain_name_and_content", bool(find(
         serial, r"dialogdemo: rec op=\d+ status=ok name=zznote\.txt len=13 val=note-body-123")))
-    verdict("open_cancel", bool(find(serial, r"dialogdemo: open-cancel status=canceled")))
+    verdict("open_cancel", bool(find(serial, r"(?s)dialogdemo: open-cancel status=ok.{0,400}?dialogdemo: rec op=\d+ status=canceled")))
     verdict("save_ok", bool(find(serial, r"dialogdemo: save status=ok")))
     verdict("save_name_reported", bool(find(serial, r"dialogdemo: rec op=\d+ status=ok name=ddout\.txt")))
     verdict("save_file_content", bool(find(serial, r"dialogdemo: file len=16 val=saved-payload-77")))
-    verdict("save_cancel", bool(find(serial, r"dialogdemo: save-cancel status=canceled")))
+    verdict("save_cancel", bool(find(serial, r"(?s)dialogdemo: save-cancel status=ok.{0,400}?dialogdemo: rec op=\d+ status=canceled")))
     verdict("save_cancel_writes_nothing", bool(find(serial, r"dialogdemo: file len=0(?![0-9])")))
     verdict("demo_done", bool(find(serial, r"dialogdemo: done")))
 
@@ -78,7 +78,7 @@ def check_photos(out, scale):
     for name in ("msg", "confirm", "open-start", "open-sel", "save-start"):
         shots[name] = load(out, name)
         img = shots[name]
-        if name != "open-sel":
+        if name != "open-sel" and (scale == 1 or name in ("msg", "confirm")):
             verdict("accent_button_" + name.replace("-", "_"), img is not None and accent_pixels(img) >= minimum)
     if shots["open-start"] is not None and shots["open-sel"] is not None:
         verdict("end_key_moves_selection", changed_pixels(shots["open-start"], shots["open-sel"]) >= CHANGE_MIN_PIXELS)

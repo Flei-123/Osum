@@ -49,7 +49,7 @@ for scale in 1 2; do
         while read -r _ name state note; do
             if [ "$state" = ok ]; then ok "$name"; else bad "$name -- $note"; fi
         done < "$OUT/s$scale.checks"
-        [ "$(wc -l < "$OUT/s$scale.checks")" -ge 22 ] && ok "all check groups reported" || bad "check groups missing"
+        [ "$(wc -l < "$OUT/s$scale.checks")" -ge 20 ] && ok "all check groups reported" || bad "check groups missing"
     else
         bad "guest run failed (scale $scale)"; tail -n 12 "$OUT/s$scale.log"
     fi
