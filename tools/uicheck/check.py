@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import sys
 
-KINDS = ["card", "flyout", "tip", "toast", "dialog", "chip", "card_soft", "layer"]
+KINDS = ["card", "flyout", "tip", "toast", "dialog", "chip", "card_soft", "layer", "button"]
 FILL = 0xF9F9F9
 STROKE = 0xD6D6D6
 BACK = 0
