@@ -1,0 +1,193 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import services.svcrules
+import services.svcqueue
+
+struct T {
+    fails: i32,
+    checks: i32,
+}
+
+static mut cbuf: [u8; 4096] = [0 as u8; 4096]
+static mut cslot: usize = 0
+static mut outb: [u8; 256] = [0 as u8; 256]
+static mut head: [u8; 28] = [0 as u8; 28]
+static mut nbuf: [u8; 128] = [0 as u8; 128]
+static mut dbuf: [u8; 128] = [0 as u8; 128]
+
+fn c(s: str) -> u64 {
+    let base: usize = (cslot % 16) * 256
+    cslot = cslot + 1
+    var i: usize = 0
+    while i < s.length() && i < 255 {
+        cbuf[base + i] = *((s.p as u64 + i as u64) as *mut u8)
+        i = i + 1
+    }
+    cbuf[base + i] = 0 as u8
+    return ((&cbuf[0 as usize]) as u64) + base as u64
+}
+
+fn check(t: *mut T, ok: bool, what: str) {
+    (*t).checks = (*t).checks + 1
+    if ok {
+        io.fmt_print(f"ok   {what}\n")
+    } else {
+        io.fmt_print(f"FAIL {what}\n")
+        (*t).fails = (*t).fails + 1
+    }
+}
+
+fn len_of(p: u64) -> u64 {
+    var n: u64 = 0
+    while rt.ld8(p, n as usize) != 0 as u8 {
+        n = n + 1
+    }
+    return n
+}
+
+fn is_s(p: u64, s: str) -> bool {
+    let q: u64 = c(s)
+    let n: u64 = len_of(p)
+    if n != len_of(q) {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        if rt.ld8(p, i as usize) != rt.ld8(q, i as usize) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn name_ok(s: str) -> bool {
+    return svcrules.valid_name(c(s), len_of(c(s)))
+}
+
+fn key_ok(s: str) -> bool {
+    return svcrules.valid_key(c(s), len_of(c(s)))
+}
+
+fn path_of(app: str, key: str) -> u64 {
+    let a: u64 = c(app)
+    let k: u64 = c(key)
+    let out: u64 = (&outb[0 as usize]) as u64
+    return svcrules.store_path(a, len_of(a), k, len_of(k), out, 160)
+}
+
+
+fn rules(t: *mut T) {
+    check(t, svcrules.OK == 0 && svcrules.CANCELED == 1 && svcrules.NO_BACKEND == 2 && svcrules.FAILED == 3, "status numbers 0-3 are the std.dialog ones")
+    check(t, svcrules.BUSY == 4 && svcrules.NOT_FOUND == 5 && svcrules.INVALID == 6, "status numbers 4-6")
+    check(t, is_s(svcrules.status_name(0), "ok"), "name ok")
+    check(t, is_s(svcrules.status_name(1), "canceled"), "name canceled")
+    check(t, is_s(svcrules.status_name(2), "no-backend"), "name no-backend")
+    check(t, is_s(svcrules.status_name(3), "failed"), "name failed")
+    check(t, is_s(svcrules.status_name(4), "busy"), "name busy")
+    check(t, is_s(svcrules.status_name(5), "not-found"), "name not-found")
+    check(t, is_s(svcrules.status_name(6), "invalid"), "name invalid")
+    check(t, is_s(svcrules.status_name(99), "failed"), "unknown status falls back to failed")
+    check(t, svcrules.CAP_FILE_OPEN == 1 && svcrules.CAP_FILE_SAVE == 2 && svcrules.CAP_CLIP_WRITE == 4 && svcrules.CAP_CLIP_READ == 8, "caps 1-8")
+    check(t, svcrules.CAP_DIALOG == 16 && svcrules.CAP_STORAGE == 32 && svcrules.CAP_ASYNC_HOST == 64, "caps 16-64")
+    check(t, svcrules.has(36, svcrules.CAP_STORAGE) && !svcrules.has(36, svcrules.CAP_DIALOG), "has tests single bit")
+    check(t, svcrules.has(36, 36) && !svcrules.has(36, 44), "has needs every bit")
+    check(t, name_ok("notes") && name_ok("My-App_1.2") && name_ok("app0") && name_ok("z9"), "plain names valid")
+    check(t, !name_ok(""), "empty name invalid")
+    check(t, !name_ok(".hidden") && !name_ok("..") && !name_ok("."), "dot-leading names invalid")
+    check(t, !name_ok("a/b") && !name_ok("a b") && !name_ok("a\\b") && !name_ok("ä"), "separator, space, backslash, non-ascii invalid")
+    check(t, name_ok("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "64 octets valid")
+    check(t, !name_ok("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "65 octets invalid")
+    check(t, key_ok("theme") && key_ok("a.b-c_d") && !key_ok(".x") && !key_ok("a/b") && !key_ok(""), "keys follow the same rule")
+    check(t, svcrules.VALUE_MAX == 65536 && svcrules.NAME_MAX == 64, "limits")
+}
+
+fn paths(t: *mut T) {
+    check(t, path_of("notes", "theme") == 26, "path length")
+    check(t, is_s((&outb[0 as usize]) as u64, "/data/notes/services/theme"), "path text")
+    check(t, path_of("..", "theme") == 0, "dotdot app gives no path")
+    check(t, path_of("notes", "../etc") == 0, "traversal key gives no path")
+    check(t, path_of("notes", ".hidden") == 0, "hidden key gives no path")
+    check(t, path_of("notes", "") == 0, "empty key gives no path")
+    let a: u64 = c("notes")
+    let out: u64 = (&outb[0 as usize]) as u64
+    check(t, svcrules.store_dir(a, 5, out, 160) == 20, "dir length")
+    check(t, is_s(out, "/data/notes/services"), "dir text")
+    check(t, svcrules.store_dir(a, 5, out, 20) == 0 && svcrules.store_dir(a, 5, out, 21) == 20, "dir buffer bound exact")
+    let k: u64 = c("theme")
+    check(t, svcrules.store_path(a, 5, k, 5, out, 26) == 0 && svcrules.store_path(a, 5, k, 5, out, 27) == 26, "path buffer bound exact")
+}
+
+fn push_rec(id: u64, op: u64, st: u64, idx: u64, name: str, data: str) -> bool {
+    let n: u64 = c(name)
+    let d: u64 = c(data)
+    return svcqueue.push(id, op, st, idx, n, len_of(n), d, len_of(d))
+}
+
+fn pop_rec() -> bool {
+    return svcqueue.pop((&head[0 as usize]) as u64, (&nbuf[0 as usize]) as u64, 128, (&dbuf[0 as usize]) as u64, 128)
+}
+
+fn field(off: u64) -> u64 {
+    let p: u64 = (&head[0 as usize]) as u64
+    return rt.ld8(p, (off) as usize) as u64 | (rt.ld8(p, (off + 1) as usize) as u64 << 8) | (rt.ld8(p, (off + 2) as usize) as u64 << 16) | (rt.ld8(p, (off + 3) as usize) as u64 << 24)
+}
+
+fn queue(t: *mut T) {
+    svcqueue.clear()
+    check(t, svcqueue.pending() == 0 && !pop_rec(), "empty queue pops nothing")
+    check(t, svcqueue.next_id() == 1 && svcqueue.next_id() == 2, "request ids start at 1 and grow")
+    check(t, push_rec(7, svcqueue.OP_FILE_ITEM, 0, 3, "a.txt", "hello"), "push item")
+    check(t, svcqueue.pending() == 1, "one pending")
+    check(t, svcqueue.queued_bytes() == 28 + 8 + 8, "record padded to 4 octets (5 -> 8, 5 -> 8)")
+    check(t, push_rec(8, svcqueue.OP_FILE_END, 1, 1, "", ""), "push end with empty name and data")
+    check(t, svcqueue.queued_bytes() == 44 + 28, "empty record is the bare head")
+    check(t, pop_rec() && field(4) == 7 && field(8) == 1 && field(12) == 0 && field(16) == 3, "first record head")
+    check(t, field(20) == 5 && field(24) == 5 && field(0) == 44, "first record lengths and total")
+    check(t, is_s((&nbuf[0 as usize]) as u64, "a.txt") && is_s((&dbuf[0 as usize]) as u64, "hello"), "first record name and data")
+    check(t, pop_rec() && field(4) == 8 && field(8) == 2 && field(12) == 1 && field(20) == 0 && field(24) == 0, "second record")
+    check(t, svcqueue.pending() == 0 && svcqueue.queued_bytes() == 0, "queue drained")
+    check(t, push_rec(9, svcqueue.OP_CLIP_TEXT, 0, 0, "abc", "defghijkl"), "odd lengths 3 and 9")
+    check(t, svcqueue.queued_bytes() == 28 + 4 + 12, "odd lengths padded")
+    let n: u64 = c("abc")
+    let d: u64 = c("defghijkl")
+    check(t, svcqueue.push(10, 3, 0, 0, n, 3, d, 9) && svcqueue.pending() == 2, "second odd record")
+    check(t, svcqueue.pop((&head[0 as usize]) as u64, (&nbuf[0 as usize]) as u64, 2, (&dbuf[0 as usize]) as u64, 4), "pop into small buffers")
+    check(t, field(20) == 2 && field(24) == 4, "truncated lengths reported as copied")
+    check(t, pop_rec() && field(4) == 10 && field(24) == 9 && is_s((&dbuf[0 as usize]) as u64, "defghijkl"), "record after a truncated pop is intact")
+    svcqueue.clear()
+    var filled: u64 = 0
+    var i: u64 = 0
+    let big: u64 = c("0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789")
+    while i < 1000 && svcqueue.push(i + 1, 1, 0, i, big, 100, big, 100) {
+        filled = filled + 1
+        i = i + 1
+    }
+    check(t, filled == 32768 / 228 && svcqueue.pending() == filled, "queue refuses when full")
+    check(t, pop_rec() && svcqueue.push(2000, 1, 0, 0, big, 100, big, 100), "space freed by a pop is reusable after compaction")
+    var drained: u64 = 0
+    var ordered: bool = true
+    var expect: u64 = 2
+    while pop_rec() {
+        drained = drained + 1
+        if drained <= filled - 1 && field(4) != expect {
+            ordered = false
+        }
+        expect = expect + 1
+    }
+    check(t, drained == filled && ordered, "order kept across compaction")
+    check(t, svcqueue.pending() == 0 && svcqueue.queued_bytes() == 0, "empty again")
+}
+
+fn main() -> i32 {
+    var t: T = T { fails: 0, checks: 0 }
+    rules(&t)
+    paths(&t)
+    queue(&t)
+    io.fmt_print(f"services-host: {t.checks - t.fails}/{t.fails} ok/fail\n")
+    if t.fails != 0 {
+        return 1
+    }
+    return 0
+}

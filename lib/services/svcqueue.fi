@@ -1,0 +1,130 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.octets
+
+export {
+    OP_FILE_ITEM, OP_FILE_END, OP_CLIP_TEXT, HEAD_BYTES, CAPACITY,
+    next_id, push, pop, pending, queued_bytes, clear,
+    H_TOTAL, H_ID, H_OP, H_STATUS, H_INDEX, H_NAME_LEN, H_DATA_LEN,
+}
+
+const OP_FILE_ITEM: u64 = 1
+const OP_FILE_END: u64 = 2
+const OP_CLIP_TEXT: u64 = 3
+
+const HEAD_BYTES: u64 = 28
+const CAPACITY: u64 = 32768
+
+const H_TOTAL: u64 = 0
+const H_ID: u64 = 4
+const H_OP: u64 = 8
+const H_STATUS: u64 = 12
+const H_INDEX: u64 = 16
+const H_NAME_LEN: u64 = 20
+const H_DATA_LEN: u64 = 24
+
+static mut ring: [u8; 32768] = [0 as u8; 32768]
+static mut read_at: u64 = 0
+static mut write_at: u64 = 0
+static mut count: u64 = 0
+static mut last_id: u64 = 0
+
+fn base() -> u64 {
+    return (&ring[0 as usize]) as u64
+}
+
+fn padded(n: u64) -> u64 {
+    return (n + 3) & 4294967292
+}
+
+fn next_id() -> u64 {
+    last_id = last_id + 1
+    if last_id > 4294967295 {
+        last_id = 1
+    }
+    return last_id
+}
+
+fn pending() -> u64 {
+    return count
+}
+
+fn queued_bytes() -> u64 {
+    return write_at - read_at
+}
+
+fn clear() {
+    read_at = 0
+    write_at = 0
+    count = 0
+}
+
+fn compact() {
+    let used: u64 = write_at - read_at
+    if read_at == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < used {
+        octets.st8(base(), i, octets.ld8(base(), read_at + i))
+        i = i + 1
+    }
+    read_at = 0
+    write_at = used
+}
+
+fn push(id: u64, op: u64, status: u64, index: u64, name: u64, name_len: u64, data: u64, data_len: u64) -> bool {
+    let total: u64 = HEAD_BYTES + padded(name_len) + padded(data_len)
+    if total > CAPACITY {
+        return false
+    }
+    if write_at + total > CAPACITY {
+        compact()
+    }
+    if write_at + total > CAPACITY {
+        return false
+    }
+    let at: u64 = base() + write_at
+    octets.zero(at, total)
+    octets.put32(at + H_TOTAL, total)
+    octets.put32(at + H_ID, id)
+    octets.put32(at + H_OP, op)
+    octets.put32(at + H_STATUS, status)
+    octets.put32(at + H_INDEX, index)
+    octets.put32(at + H_NAME_LEN, name_len)
+    octets.put32(at + H_DATA_LEN, data_len)
+    octets.copy(at + HEAD_BYTES, name, name_len)
+    octets.copy(at + HEAD_BYTES + padded(name_len), data, data_len)
+    write_at = write_at + total
+    count = count + 1
+    return true
+}
+
+fn pop(head: u64, name: u64, name_max: u64, data: u64, data_max: u64) -> bool {
+    if count == 0 {
+        return false
+    }
+    let at: u64 = base() + read_at
+    let total: u64 = octets.le32(at + H_TOTAL)
+    let name_len: u64 = octets.le32(at + H_NAME_LEN)
+    let data_len: u64 = octets.le32(at + H_DATA_LEN)
+    var name_out: u64 = name_len
+    var data_out: u64 = data_len
+    if name_out > name_max {
+        name_out = name_max
+    }
+    if data_out > data_max {
+        data_out = data_max
+    }
+    octets.copy(head, at, HEAD_BYTES)
+    octets.put32(head + H_NAME_LEN, name_out)
+    octets.put32(head + H_DATA_LEN, data_out)
+    octets.copy(name, at + HEAD_BYTES, name_out)
+    octets.copy(data, at + HEAD_BYTES + padded(name_len), data_out)
+    read_at = read_at + total
+    count = count - 1
+    if count == 0 {
+        read_at = 0
+        write_at = 0
+    }
+    return true
+}
