@@ -38,6 +38,13 @@ static mut s_caps: [u8; 7] = " caps=\0"
 static mut s_id: [u8; 5] = " id=\0"
 static mut s_op: [u8; 5] = " op=\0"
 static mut s_pend: [u8; 10] = " pending=\0"
+static mut c_msg: [u8; 4] = "msg\0"
+static mut c_confirm: [u8; 8] = "confirm\0"
+static mut c_open: [u8; 5] = "open\0"
+static mut c_save: [u8; 5] = "save\0"
+static mut c_rec: [u8; 4] = "rec\0"
+static mut s_ans: [u8; 6] = " ans=\0"
+static mut s_name: [u8; 7] = " name=\0"
 static mut s_use: [u8; 24] = "svcproof: usage error\0\0\0"
 
 fn value_ptr() -> u64 {
@@ -222,6 +229,87 @@ fn cmd_paste() -> u64 {
     return 0
 }
 
+fn print_answer(status: u64) {
+    finish_status(status)
+    field_num((&s_ans[0 as usize]) as u64, octets.le32((&out_buf[0 as usize]) as u64))
+    lineout.end_line()
+}
+
+fn cmd_ask(args: u64, confirm: bool) -> u64 {
+    var verb: u64 = (&c_msg[0 as usize]) as u64
+    if confirm {
+        verb = (&c_confirm[0 as usize]) as u64
+    }
+    start(verb)
+    if !bind_app(args) {
+        finish_status(svcrules.INVALID)
+        lineout.end_line()
+        return 1
+    }
+    let title: u64 = ulib.arg_at(args, 3)
+    let body: u64 = ulib.arg_at(args, 4)
+    octets.st32((&out_buf[0 as usize]) as u64, 0, 9)
+    var status: u64 = 0
+    if confirm {
+        status = svcosum.confirm(title, body, (&out_buf[0 as usize]) as u64)
+    } else {
+        status = svcosum.message(0, title, body, 0, (&out_buf[0 as usize]) as u64)
+    }
+    print_answer(status)
+    return 0
+}
+
+fn drain_queue() {
+    let head: u64 = (&head_buf[0 as usize]) as u64
+    let name: u64 = (&name_buf[0 as usize]) as u64
+    while svcosum.pending() > 0 {
+        octets.zero(name, NAME_BUF)
+        if !svcosum.poll(head, name, NAME_BUF - 1, value_ptr(), VALUE_BUF - 1) {
+            return
+        }
+        start((&c_rec[0 as usize]) as u64)
+        field_num((&s_op[0 as usize]) as u64, octets.le32(head + 8))
+        finish_status(octets.le32(head + 12))
+        say((&s_name[0 as usize]) as u64)
+        say(name)
+        field_num((&s_len[0 as usize]) as u64, octets.le32(head + 24))
+        say((&s_val[0 as usize]) as u64)
+        let _w: u64 = lineout.add_bytes(value_ptr(), octets.le32(head + 24))
+        lineout.end_line()
+        if octets.le32(head + 8) == svcqueue.OP_FILE_END {
+            return
+        }
+    }
+}
+
+fn cmd_file(args: u64, saving: bool) -> u64 {
+    var verb: u64 = (&c_open[0 as usize]) as u64
+    if saving {
+        verb = (&c_save[0 as usize]) as u64
+    }
+    start(verb)
+    if !bind_app(args) {
+        finish_status(svcrules.INVALID)
+        lineout.end_line()
+        return 1
+    }
+    let title: u64 = ulib.arg_at(args, 3)
+    let first: u64 = ulib.arg_at(args, 4)
+    var status: u64 = 0
+    if saving {
+        let data: u64 = ulib.arg_at(args, 5)
+        status = svcosum.file_save(title, first, data, text.length(data), (&out_buf[0 as usize]) as u64)
+    } else {
+        status = svcosum.file_open(title, first, (&out_buf[0 as usize]) as u64)
+    }
+    finish_status(status)
+    field_num((&s_id[0 as usize]) as u64, octets.le32((&out_buf[0 as usize]) as u64))
+    field_num((&s_pend[0 as usize]) as u64, svcosum.pending())
+    lineout.end_line()
+    drain_queue()
+    return 0
+}
+
 fn usage() -> u64 {
     say((&s_use[0 as usize]) as u64)
     lineout.end_line()
@@ -259,6 +347,18 @@ fn u_start(args: u64) -> u64 {
     }
     if text.equal(cmd, (&c_paste[0 as usize]) as u64) {
         return cmd_paste()
+    }
+    if text.equal(cmd, (&c_msg[0 as usize]) as u64) && ulib.arg_count(args) >= 5 {
+        return cmd_ask(args, false)
+    }
+    if text.equal(cmd, (&c_confirm[0 as usize]) as u64) && ulib.arg_count(args) >= 5 {
+        return cmd_ask(args, true)
+    }
+    if text.equal(cmd, (&c_open[0 as usize]) as u64) && ulib.arg_count(args) >= 4 {
+        return cmd_file(args, false)
+    }
+    if text.equal(cmd, (&c_save[0 as usize]) as u64) && ulib.arg_count(args) >= 6 {
+        return cmd_file(args, true)
     }
     return usage()
 }

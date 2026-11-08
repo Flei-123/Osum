@@ -8,9 +8,11 @@ import libc.kcall
 import libc.octets
 import services.svcrules
 import services.svcqueue
+import services.svcdlg
+import services.dlgproto
 
 export {
-    set_app, caps, copy_text, paste_text, message, confirm,
+    set_app, caps, copy_text, paste_text, message, confirm, file_open, file_save,
     store_set, store_get, store_remove, store_has,
     poll, pending,
 }
@@ -23,6 +25,7 @@ static mut app_name: [u8; 65] = [0 as u8; 65]
 static mut app_len: u64 = 0
 static mut path_buf: [u8; 160] = [0 as u8; 160]
 static mut tmp_buf: [u8; 176] = [0 as u8; 176]
+static mut dlg_key: [u8; 48] = [0 as u8; 48]
 static mut clip_buf: [u8; 16384] = [0 as u8; 16384]
 static mut TMP_SUFFIX: [u8; 6] = "/.tmp\0"
 
@@ -52,6 +55,9 @@ fn caps() -> u64 {
     var bits: u64 = svcrules.CAP_STORAGE | svcrules.CAP_ASYNC_HOST
     if xfer.available() {
         bits = bits | svcrules.CAP_CLIP_WRITE | svcrules.CAP_CLIP_READ
+    }
+    if svcdlg.available() {
+        bits = bits | svcrules.CAP_DIALOG | svcrules.CAP_FILE_OPEN | svcrules.CAP_FILE_SAVE
     }
     return bits
 }
@@ -89,12 +95,69 @@ fn paste_text(id_out: u64) -> u64 {
     return svcrules.OK
 }
 
+fn ask(mode: u64, title: u64, body: u64, yes_out: u64) -> u64 {
+    if !svcrules.has(caps(), svcrules.CAP_DIALOG) {
+        return svcrules.NO_BACKEND
+    }
+    let answer: u64 = svcdlg.run(svcqueue.next_id(), mode, app_ptr(), app_len, title, body)
+    if answer == dlgproto.ANSWER_FAILED {
+        return svcrules.FAILED
+    }
+    octets.st32(yes_out, 0, answer)
+    return svcrules.OK
+}
+
 fn message(kind: u64, title: u64, text: u64, buttons: u64, answer_out: u64) -> u64 {
-    return svcrules.NO_BACKEND
+    return ask(dlgproto.MODE_MESSAGE, title, text, answer_out)
 }
 
 fn confirm(title: u64, text: u64, yes_out: u64) -> u64 {
-    return svcrules.NO_BACKEND
+    return ask(dlgproto.MODE_CONFIRM, title, text, yes_out)
+}
+
+fn file_open(title: u64, accept: u64, id_out: u64) -> u64 {
+    if !svcrules.has(caps(), svcrules.CAP_FILE_OPEN) {
+        return svcrules.NO_BACKEND
+    }
+    let id: u64 = svcqueue.next_id()
+    let answer: u64 = svcdlg.run(id, dlgproto.MODE_OPEN, app_ptr(), app_len, title, accept)
+    octets.st32(id_out, 0, id)
+    return svcdlg.queue_result(id, answer, true)
+}
+
+fn stage_input(id: u64, data: u64, n: u64) -> u64 {
+    let key: u64 = (&dlg_key[0 as usize]) as u64
+    let key_len: u64 = dlgproto.input_key(id, key, 48)
+    if key_len == 0 {
+        return svcrules.INVALID
+    }
+    if n == 0 {
+        return svcrules.INVALID
+    }
+    return store_set(key, key_len, data, n)
+}
+
+fn drop_input(id: u64) {
+    let key: u64 = (&dlg_key[0 as usize]) as u64
+    let key_len: u64 = dlgproto.input_key(id, key, 48)
+    if key_len != 0 {
+        let _r: u64 = store_remove(key, key_len)
+    }
+}
+
+fn file_save(title: u64, name: u64, data: u64, n: u64, id_out: u64) -> u64 {
+    if !svcrules.has(caps(), svcrules.CAP_FILE_SAVE) {
+        return svcrules.NO_BACKEND
+    }
+    let id: u64 = svcqueue.next_id()
+    let staged: u64 = stage_input(id, data, n)
+    if staged != svcrules.OK {
+        return staged
+    }
+    let answer: u64 = svcdlg.run(id, dlgproto.MODE_SAVE, app_ptr(), app_len, title, name)
+    drop_input(id)
+    octets.st32(id_out, 0, id)
+    return svcdlg.queue_result(id, answer, false)
 }
 
 fn ensure_dirs() -> bool {
