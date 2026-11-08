@@ -3,17 +3,23 @@ import re
 import sys
 
 GEOM = re.compile(r"launcher: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
-TILE = r"launcher: tile i=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)\s+name=\[%s\]"
+LIST = re.compile(r"launcher: rect id=2 kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+ROWS = re.compile(r"launcher: rows x=\d+ base=\d+ zh=(\d+)")
+HIT = r"launcher: treffer i=(\d+) name=\[[^\]]*\] exec=\[%s\]"
 
 
-def locate(serial, name):
+def locate(serial, exec_path):
     geoms = GEOM.findall(serial)
-    tiles = re.findall(TILE % re.escape(name), serial)
-    if not geoms or not tiles:
+    lists = LIST.findall(serial)
+    rows = ROWS.findall(serial)
+    hits = re.findall(HIT % re.escape(exec_path), serial)
+    if not (geoms and lists and rows and hits):
         return None
     gx, gy = int(geoms[-1][0]), int(geoms[-1][1])
-    tx, ty, tw, th = (int(v) for v in tiles[-1])
-    return gx + tx + tw // 2, gy + ty + th // 2
+    lx, ly, lw, lh = (int(v) for v in lists[-1])
+    row_h = int(rows[-1])
+    index = int(hits[-1])
+    return gx + lx + lw // 2, gy + ly + index * row_h + row_h // 2
 
 
 def main():
