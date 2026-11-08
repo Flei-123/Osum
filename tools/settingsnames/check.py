@@ -11,6 +11,7 @@ from PIL import Image
 MIN_TABS = 12
 MIN_OCR_RATIO = 0.7
 OCR_ZOOM = 3
+SIDEBAR_LEFT_RATIO = 0.045
 SIDEBAR_WIDTH_RATIO = 0.3
 
 
@@ -44,7 +45,7 @@ def traced_tabs(serial):
 
 def ocr_sidebar(shot, lang):
     image = Image.open(shot).convert("RGB")
-    image = image.crop((0, 0, int(image.width * SIDEBAR_WIDTH_RATIO), image.height))
+    image = image.crop((int(image.width * SIDEBAR_LEFT_RATIO), 0, int(image.width * SIDEBAR_WIDTH_RATIO), image.height))
     image = image.resize((image.width * OCR_ZOOM, image.height * OCR_ZOOM), Image.LANCZOS)
     with tempfile.TemporaryDirectory() as tmp:
         png = Path(tmp) / "sidebar.png"

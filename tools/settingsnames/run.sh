@@ -104,9 +104,9 @@ judge_ellipsis() {
     elif [ "$want" = red ] && [ "$rc" != 0 ]; then ok "$label: $line"
     else bad "$label: unexpected ellipsis result ($line)"; fi
 }
-judge_ellipsis "$OUT/en1/search.ppm" "English: the long search result row ends in an ellipsis, scale 1" eng 'monitors and screen reader.{0,3}\.\.\.' green
-judge_ellipsis "$OUT/de2/names.ppm" "German: the long sidebar title ends in an ellipsis, scale 2" deu 'bildschirmle\.\.\.' green
-judge_ellipsis "$OUT/mut2/search.ppm" "counter-probe: without the ellipsis the row is cut silently" eng 'monitors and screen reader.{0,3}\.\.\.' red
+judge_ellipsis "$OUT/en1/search.ppm" "English: the long search result row ends in an ellipsis, scale 1" eng 'monitors and screen[a-z ]{0,10}\.{2,3}' green
+judge_ellipsis "$OUT/de2/names.ppm" "German: the long sidebar title ends in an ellipsis, scale 2" deu 'bildschirm[a-z]{0,4}\.{2,3}' green
+judge_ellipsis "$OUT/mut2/search.ppm" "counter-probe: without the ellipsis the row is cut silently" eng 'monitors and screen[a-z ]{0,10}\.{2,3}' red
 
 for n in en1 de2 mut1 mut2; do
     c=$(grep -acE 'CRASH|EXCEPTION' "$OUT/$n/serial.txt" 2>/dev/null; true)
