@@ -778,133 +778,146 @@ fn trace_fail(frame: u64, state: u64, number: u64, r: u64) {
     serial.nl()
 }
 
-fn entry(number: u64, frame: u64, state: u64) -> u64 {
-    if (number == 60 || number == 231 || number == 62 || number == 234) && kstate.mode_on(state, kstate.M_FREMDTRACE) {
-        var s_xk: [u8; 14] = "sys: EXITK nr\0"
-        serial.puts((&s_xk[0]) as u64)
+fn trace_before(number: u64, frame: u64, state: u64) {
+    if number != 60 && number != 231 && number != 62 && number != 234 {
+        return
+    }
+    var s_xk: [u8; 14] = "sys: EXITK nr\0"
+    serial.puts((&s_xk[0]) as u64)
+    serial.dec(number)
+    var s_xp: [u8; 6] = " pid \0"
+    serial.puts((&s_xp[0]) as u64)
+    serial.dec(sched.tget(state, sched.current(state), sched.T_PID))
+    var s_x0: [u8; 5] = " a0 \0"
+    serial.puts((&s_x0[0]) as u64)
+    serial.dec(regio.read64_at(frame, sysconst.F_RDI))
+    var s_x1: [u8; 5] = " a1 \0"
+    serial.puts((&s_x1[0]) as u64)
+    serial.dec(regio.read64_at(frame, F_RSI))
+    serial.nl()
+}
+
+fn trace_after(number: u64, frame: u64, state: u64, r: u64) {
+    if r == sysuser.neg(errno.E_NOSYS) && !is_tolerated_absent(number) {
+        var s_ns: [u8; 15] = "sys: ENOSYS nr\0"
+        serial.puts((&s_ns[0]) as u64)
         serial.dec(number)
-        var s_xp: [u8; 6] = " pid \0"
-        serial.puts((&s_xp[0]) as u64)
-        serial.dec(sched.tget(state, sched.current(state), sched.T_PID))
-        var s_x0: [u8; 5] = " a0 \0"
-        serial.puts((&s_x0[0]) as u64)
-        serial.dec(regio.read64_at(frame, sysconst.F_RDI))
-        var s_x1: [u8; 5] = " a1 \0"
-        serial.puts((&s_x1[0]) as u64)
-        serial.dec(regio.read64_at(frame, F_RSI))
         serial.nl()
     }
-    let r: u64 = dispatch(number, frame, state)
-    if kstate.mode_on(state, kstate.M_FREMDTRACE) {
-        if r == sysuser.neg(errno.E_NOSYS) && !is_tolerated_absent(number) {
-            var s_ns: [u8; 15] = "sys: ENOSYS nr\0"
-            serial.puts((&s_ns[0]) as u64)
+    // memory/thread calls that FAIL (mmap, mprotect, brk, mremap, madvise, clone): the number and the errno, so that a malloc
+    // returning NULL in a foreign program can be traced to the call that refused (r701, foot font threads)
+    if number == 9 && regio.read64_at(frame, F_RSI) >= 1048576 {
+        var s_eh: [u8; 13] = "sys: BIG nr9\0"
+        serial.puts((&s_eh[0]) as u64)
+        var s_ea2: [u8; 6] = " len \0"
+        serial.puts((&s_ea2[0]) as u64)
+        serial.dec(regio.read64_at(frame, F_RSI))
+        var s_eb2: [u8; 5] = " fl \0"
+        serial.puts((&s_eb2[0]) as u64)
+        serial.dec(regio.read64_at(frame, F_R10))
+        var s_er2: [u8; 4] = " r \0"
+        serial.puts((&s_er2[0]) as u64)
+        serial.dec(r)
+        serial.nl()
+    }
+    if number == 9 && regio.read64_at(frame, F_RSI) < 1048576 && (regio.read64_at(frame, F_R8) & 0xFFFFFFFF) != 0xFFFFFFFF && r < 0xFFFFFFFFFFFFF000 {
+        var s_fm: [u8; 14] = "sys: FMAP nr9\0"
+        serial.puts((&s_fm[0]) as u64)
+        var s_fa: [u8; 6] = " len \0"
+        serial.puts((&s_fa[0]) as u64)
+        serial.dec(regio.read64_at(frame, F_RSI))
+        var s_fb: [u8; 5] = " fl \0"
+        serial.puts((&s_fb[0]) as u64)
+        serial.dec(regio.read64_at(frame, F_R10))
+        var s_fo: [u8; 6] = " off \0"
+        serial.puts((&s_fo[0]) as u64)
+        serial.dec(regio.read64_at(frame, F_R9))
+        var s_fr: [u8; 4] = " r \0"
+        serial.puts((&s_fr[0]) as u64)
+        serial.dec(r)
+        serial.nl()
+    }
+    if number == 7 && regio.read64_at(frame, F_RSI) == 1 {
+        var s_po: [u8; 14] = "sys: POLL pid\0"
+        serial.puts((&s_po[0]) as u64)
+        var s_pp: [u8; 2] = " \0"
+        serial.puts((&s_pp[0]) as u64)
+        serial.dec(sched.tget(state, sched.current(state), sched.T_PID))
+        var s_pt: [u8; 6] = " tmo \0"
+        serial.puts((&s_pt[0]) as u64)
+        serial.dec(regio.read64_at(frame, F_RDX))
+        var s_pr: [u8; 4] = " r \0"
+        serial.puts((&s_pr[0]) as u64)
+        serial.dec(r)
+        var s_pk: [u8; 7] = " tick \0"
+        serial.puts((&s_pk[0]) as u64)
+        serial.dec(kstate.get(state, kstate.TICKS))
+        serial.nl()
+    }
+    if r >= 0xFFFFFFFFFFFFF000 && (4096 - (r & 0xFFF)) == 22 && number != 9 && number != 10 && number != 12 && number != 25 && number != 28 && number != 56 {
+        var s_ei: [u8; 15] = "sys: EINVAL nr\0"
+        serial.puts((&s_ei[0]) as u64)
+        serial.dec(number)
+        var s_ep2: [u8; 6] = " pid \0"
+        serial.puts((&s_ep2[0]) as u64)
+        serial.dec(sched.tget(state, sched.current(state), sched.T_PID))
+        var s_e0: [u8; 5] = " a0 \0"
+        serial.puts((&s_e0[0]) as u64)
+        serial.dec(regio.read64_at(frame, sysconst.F_RDI))
+        var s_e1: [u8; 5] = " a1 \0"
+        serial.puts((&s_e1[0]) as u64)
+        serial.dec(regio.read64_at(frame, F_RSI))
+        var s_e2: [u8; 5] = " a2 \0"
+        serial.puts((&s_e2[0]) as u64)
+        serial.dec(regio.read64_at(frame, F_RDX))
+        serial.nl()
+    }
+    trace_fail(frame, state, number, r)
+    if r >= 0xFFFFFFFFFFFFF000 && !(number == 25 && (4096 - (r & 0xFFF)) == 12 && regio.read64_at(frame, F_RSI) == 4096 && regio.read64_at(frame, F_RDX) == 8192) {
+        if number == 9 || number == 10 || number == 12 || number == 25 || number == 28 || number == 56 {
+            var s_er: [u8; 12] = "sys: ERR nr\0"
+            serial.puts((&s_er[0]) as u64)
             serial.dec(number)
-            serial.nl()
-        }
-        // memory/thread calls that FAIL (mmap, mprotect, brk, mremap, madvise, clone): the number and the errno, so that a malloc
-        // returning NULL in a foreign program can be traced to the call that refused (r701, foot font threads)
-        if number == 9 && regio.read64_at(frame, F_RSI) >= 1048576 {
-            var s_eh: [u8; 13] = "sys: BIG nr9\0"
-            serial.puts((&s_eh[0]) as u64)
-            var s_ea2: [u8; 6] = " len \0"
-            serial.puts((&s_ea2[0]) as u64)
+            var s_ee: [u8; 3] = " e\0"
+            serial.puts((&s_ee[0]) as u64)
+            serial.dec(4096 - (r & 0xFFF))
+            var s_ea: [u8; 6] = " len \0"
+            serial.puts((&s_ea[0]) as u64)
             serial.dec(regio.read64_at(frame, F_RSI))
-            var s_eb2: [u8; 5] = " fl \0"
-            serial.puts((&s_eb2[0]) as u64)
+            var s_eb: [u8; 5] = " fl \0"
+            serial.puts((&s_eb[0]) as u64)
             serial.dec(regio.read64_at(frame, F_R10))
-            var s_er2: [u8; 4] = " r \0"
-            serial.puts((&s_er2[0]) as u64)
-            serial.dec(r)
-            serial.nl()
-        }
-        if number == 9 && regio.read64_at(frame, F_RSI) < 1048576 && (regio.read64_at(frame, F_R8) & 0xFFFFFFFF) != 0xFFFFFFFF && r < 0xFFFFFFFFFFFFF000 {
-            var s_fm: [u8; 14] = "sys: FMAP nr9\0"
-            serial.puts((&s_fm[0]) as u64)
-            var s_fa: [u8; 6] = " len \0"
-            serial.puts((&s_fa[0]) as u64)
-            serial.dec(regio.read64_at(frame, F_RSI))
-            var s_fb: [u8; 5] = " fl \0"
-            serial.puts((&s_fb[0]) as u64)
-            serial.dec(regio.read64_at(frame, F_R10))
-            var s_fo: [u8; 6] = " off \0"
-            serial.puts((&s_fo[0]) as u64)
-            serial.dec(regio.read64_at(frame, F_R9))
-            var s_fr: [u8; 4] = " r \0"
-            serial.puts((&s_fr[0]) as u64)
-            serial.dec(r)
-            serial.nl()
-        }
-        if number == 7 && regio.read64_at(frame, F_RSI) == 1 {
-            var s_po: [u8; 14] = "sys: POLL pid\0"
-            serial.puts((&s_po[0]) as u64)
-            var s_pp: [u8; 2] = " \0"
-            serial.puts((&s_pp[0]) as u64)
-            serial.dec(sched.tget(state, sched.current(state), sched.T_PID))
-            var s_pt: [u8; 6] = " tmo \0"
-            serial.puts((&s_pt[0]) as u64)
-            serial.dec(regio.read64_at(frame, F_RDX))
-            var s_pr: [u8; 4] = " r \0"
-            serial.puts((&s_pr[0]) as u64)
-            serial.dec(r)
-            var s_pk: [u8; 7] = " tick \0"
-            serial.puts((&s_pk[0]) as u64)
-            serial.dec(kstate.get(state, kstate.TICKS))
-            serial.nl()
-        }
-        if r >= 0xFFFFFFFFFFFFF000 && (4096 - (r & 0xFFF)) == 22 && number != 9 && number != 10 && number != 12 && number != 25 && number != 28 && number != 56 {
-            var s_ei: [u8; 15] = "sys: EINVAL nr\0"
-            serial.puts((&s_ei[0]) as u64)
-            serial.dec(number)
-            var s_ep2: [u8; 6] = " pid \0"
-            serial.puts((&s_ep2[0]) as u64)
-            serial.dec(sched.tget(state, sched.current(state), sched.T_PID))
-            var s_e0: [u8; 5] = " a0 \0"
-            serial.puts((&s_e0[0]) as u64)
+            var s_ed: [u8; 7] = " addr \0"
+            serial.puts((&s_ed[0]) as u64)
             serial.dec(regio.read64_at(frame, sysconst.F_RDI))
-            var s_e1: [u8; 5] = " a1 \0"
-            serial.puts((&s_e1[0]) as u64)
-            serial.dec(regio.read64_at(frame, F_RSI))
-            var s_e2: [u8; 5] = " a2 \0"
-            serial.puts((&s_e2[0]) as u64)
-            serial.dec(regio.read64_at(frame, F_RDX))
-            serial.nl()
-        }
-        trace_fail(frame, state, number, r)
-        if r >= 0xFFFFFFFFFFFFF000 && !(number == 25 && (4096 - (r & 0xFFF)) == 12 && regio.read64_at(frame, F_RSI) == 4096 && regio.read64_at(frame, F_RDX) == 8192) {
-            if number == 9 || number == 10 || number == 12 || number == 25 || number == 28 || number == 56 {
-                var s_er: [u8; 12] = "sys: ERR nr\0"
-                serial.puts((&s_er[0]) as u64)
-                serial.dec(number)
-                var s_ee: [u8; 3] = " e\0"
-                serial.puts((&s_ee[0]) as u64)
-                serial.dec(4096 - (r & 0xFFF))
-                var s_ea: [u8; 6] = " len \0"
-                serial.puts((&s_ea[0]) as u64)
-                serial.dec(regio.read64_at(frame, F_RSI))
-                var s_eb: [u8; 5] = " fl \0"
-                serial.puts((&s_eb[0]) as u64)
-                serial.dec(regio.read64_at(frame, F_R10))
-                var s_ed: [u8; 7] = " addr \0"
-                serial.puts((&s_ed[0]) as u64)
-                serial.dec(regio.read64_at(frame, sysconst.F_RDI))
-                var s_ec: [u8; 5] = " fd \0"
-                serial.puts((&s_ec[0]) as u64)
-                serial.dec(regio.read64_at(frame, F_R8) & 0xFFFFFFFF)
-                var s_ep: [u8; 6] = " pid \0"
-                serial.puts((&s_ep[0]) as u64)
-                serial.dec(sched.tget(state, sched.current(state), sched.T_PID))
-                if number == 25 {
-                    var s_en: [u8; 5] = " nl \0"
-                    serial.puts((&s_en[0]) as u64)
-                    serial.dec(regio.read64_at(frame, F_RDX))
-                }
-                serial.nl()
+            var s_ec: [u8; 5] = " fd \0"
+            serial.puts((&s_ec[0]) as u64)
+            serial.dec(regio.read64_at(frame, F_R8) & 0xFFFFFFFF)
+            var s_ep: [u8; 6] = " pid \0"
+            serial.puts((&s_ep[0]) as u64)
+            serial.dec(sched.tget(state, sched.current(state), sched.T_PID))
+            if number == 25 {
+                var s_en: [u8; 5] = " nl \0"
+                serial.puts((&s_en[0]) as u64)
+                serial.dec(regio.read64_at(frame, F_RDX))
             }
+            serial.nl()
         }
     }
+}
+
+fn entry(number: u64, frame: u64, state: u64) -> u64 {
+    let traced: bool = kstate.mode_on(state, kstate.M_FREMDTRACE)
+    if traced {
+        trace_before(number, frame, state)
+    }
+    let me: u64 = sched.current(state)
+    let r: u64 = dispatch(number, frame, state, me)
+    if traced {
+        trace_after(number, frame, state, r)
+    }
     regio.write64_at(frame, sysconst.F_RAX, r)
-    signal.check_sys(state, sched.current(state), frame)
+    signal.check_sys(state, me, frame)
     return r
 }
 
@@ -936,23 +949,22 @@ fn trace_site(state: u64, me: u64, frame: u64, kind: u64, len: u64) {
     mmaptrace.note(me, kind, len, regio.read64_at(frame, sysconst.F_RIP), c1, c2)
 }
 
-fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
+fn dispatch(number: u64, frame: u64, state: u64, me: u64) -> u64 {
     wdt.sys_hook(state)
     kstate.add(state, kstate.SYSCALLS, 1)
-    stall.sys_note(number, sched.current(state))
-    svcwatch.note(state, sched.current(state))
-    let a0: u64 = regio.read64_at(frame, sysconst.F_RDI)
-    let a1: u64 = regio.read64_at(frame, F_RSI)
-    let a2: u64 = regio.read64_at(frame, F_RDX)
-    let a3: u64 = regio.read64_at(frame, F_R10)
-    let a4: u64 = regio.read64_at(frame, F_R8)
-    let a5: u64 = regio.read64_at(frame, F_R9)
+    stall.sys_note(number, me)
+    svcwatch.note(state, me)
+    let a0: u64 = *((frame + sysconst.F_RDI) as *mut u64)
+    let a1: u64 = *((frame + F_RSI) as *mut u64)
+    let a2: u64 = *((frame + F_RDX) as *mut u64)
+    let a3: u64 = *((frame + F_R10) as *mut u64)
+    let a4: u64 = *((frame + F_R8) as *mut u64)
+    let a5: u64 = *((frame + F_R9) as *mut u64)
     if kstate.get(state, kstate.EXCURSION) != 0 {
         if number == SYS_MARK || number == SYS_LEAVE {
             return user.handle(number, a0, state)
         }
     }
-    let me: u64 = sched.current(state)
     if number >= CAP_BASE {
         return native(state, me, number, a0, a1, a2, a3, a4)
     }
@@ -972,6 +984,19 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     if number == SYS_CLOSE {
         return sysfd.do_close(state, me, a0)
+    }
+    if number == SYS_GETPID {
+        let g: u64 = sched.tget(state, me, sched.T_TGID)
+        if g != 0 {
+            return g
+        }
+        return sched.tget(state, me, sched.T_PID)
+    }
+    if number == SYS_GETPPID {
+        return sysproc.do_getppid(state, me)
+    }
+    if number == SYS_GETTID {
+        return sched.tget(state, me, sched.T_PID)
     }
     if number == SYS_LSEEK {
         return sysfd.do_lseek(state, me, a0, a1, a2)
@@ -1363,16 +1388,6 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         trace_site(state, me, frame, mmaptrace.KIND_UNMAP, a1)
         return umr
     }
-    if number == SYS_GETPID {
-        let g: u64 = sched.tget(state, me, sched.T_TGID)
-        if g != 0 {
-            return g
-        }
-        return sched.tget(state, me, sched.T_PID)
-    }
-    if number == SYS_GETPPID {
-        return sysproc.do_getppid(state, me)
-    }
     if number == SYS_YIELD {
         sched.yield_now(state)
         return 0
@@ -1547,9 +1562,6 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     if number == SYS_SETSID {
         return signal.do_setsid(state, me)
-    }
-    if number == SYS_GETTID {
-        return sched.tget(state, me, sched.T_PID)
     }
     if number == SYS_IOCTL {
         return systerm.do_ioctl(state, me, a0, a1, a2)
