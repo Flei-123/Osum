@@ -62,11 +62,11 @@ TABLE = {
         calpop calev taskview notifc qs qsmodes runbox wmd freunde tiling backlum cliphist mbg modul elevate msgbox"""),
     'apps': _s("""explorer expakt exporte fileop expdlg expmodell massren trashbin settings term termfull nedit calc
         taskmgr store mail pdfview viewer fvviewer mp3 play charmap snip notes netview powermon theme jarvismini
-        install installer fas certus disks storage netmon wlan vpn"""),
+        install installer fas certus disks storage netmon wlan vpn dialogd"""),
     'test': _s("""k13t k14 k16 k17 shat h264t i18nt icont themetest hallo1 hallo2 hallo3 hello posix hurt wrace wspam
         wchurn stress crash burn execsmp shmtest ptytest bench compbench compdiff a11ydemo scenedemo widgetdemo
         plugboese plugpaar plugprobe plugregel plugspaet plugtempo pluguhr pollbr pollt sockt soclocal stab fftempo
-        cptempo ctr ctrkill presentlog nvcheck noise ofs3 netmeter sysstub mut"""),
+        cptempo ctr ctrkill presentlog nvcheck noise ofs3 netmeter sysstub mut dialogdemo svcproof"""),
 }
 ORDER = ['test', 'cmd', 'toolkit', 'services', 'shell', 'apps', 'base']
 
