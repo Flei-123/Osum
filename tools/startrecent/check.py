@@ -4,7 +4,7 @@ import re
 import subprocess
 import sys
 
-DISPLAY_NAMES = {"vplay": "Video Player", "charmap": "Character Map", "explorer": "File Explorer"}
+DISPLAY_NAMES = {"settings": "Settings", "terminal": "Terminal", "explorer": "File Explorer"}
 RECOMMENDED = re.compile(r"launcher: rec k=(\d+) name=\[([^\]]*)\]")
 SAVED = re.compile(r"launcher: recent file n=(\d+)((?: \[[^\]]*\])*)")
 OCR_SCALE = 2

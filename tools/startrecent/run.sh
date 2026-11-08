@@ -11,7 +11,7 @@ export DESIGNBUILD="${DESIGNBUILD:-$OUT/build}"
 export AUDIT_TIMEOUT="${AUDIT_TIMEOUT:-900}"
 HALT_SECONDS=200
 WIDE_RES=1920x1080
-RECENT_SEED="${RECENT_SEED:-vplay,charmap}"
+RECENT_SEED="${RECENT_SEED:-settings,terminal}"
 pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "  OK    $1"; }
 bad() { fail=$((fail+1)); echo "  FAIL  $1"; }
