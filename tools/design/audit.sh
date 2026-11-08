@@ -35,6 +35,7 @@ nurbau=nein
 vorherbild=nein
 #
 ton=nein
+kbd=off
 drehbuch=""
 lang=en
 dark_scheme=""
@@ -81,6 +82,7 @@ for a in "$@"; do
         nurbau=*) nurbau=${a#*=} ;;
         vorherbild=*) vorherbild=${a#*=} ;;
         ton=*) ton=${a#*=} ;;
+        kbd=*) kbd=${a#*=} ;;
         *) echo "unbekannt: $a" >&2; exit 2 ;;
     esac
 done
@@ -88,6 +90,8 @@ done
 [ "${battfake:-}" = ja ] && extra="$extra battfake"
 XRES=${res%x*}
 YRES=${res#*x}
+NOKBD="nokbd"
+[ "$kbd" = on ] && NOKBD=""
 SKAL=""
 if [ -n "$uiscale" ]; then SKAL="uiscale=$uiscale"; fi
 echo "uiscale ${uiscale:-1 (Vorgabe)}"
@@ -352,7 +356,7 @@ if [ -n "$zweite" ]; then
     ZWEITE=(-drive "file=$OUT/zweite.img,format=raw,if=ide,index=1")
 fi
 ( cd "$BUILDD" && exec timeout ${AUDIT_TIMEOUT:-600} qemu-system-x86_64 "${ACC[@]}" -kernel k0.mb -m ${AUDIT_MEM:-512} ${AUDIT_SMP:+-smp $AUDIT_SMP} \
-    -append "gfx fbres=${XRES}x${YRES} osum wm desk wmhold wighalt=$halt nokbd nosched $PROCFLAG $FSFLAG lang=$lang $SKAL $extra" \
+    -append "gfx fbres=${XRES}x${YRES} osum wm desk wmhold wighalt=$halt $NOKBD nosched $PROCFLAG $FSFLAG lang=$lang $SKAL $extra" \
     -serial "file:$OUT/serial.txt" -display none -no-reboot \
     "${GPUDEV[@]}" \
     -monitor "unix:$SOCK,server,nowait" \

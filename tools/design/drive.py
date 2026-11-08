@@ -415,9 +415,9 @@ class Fahrer:
             pass
         if m is None:
             return None
-        b, th = self.chrome()
         if prog == "launcher":
-            return (int(m.group(1)) + b, int(m.group(2)) + th)
+            return (int(m.group(1)), int(m.group(2)))
+        b, th = self.chrome()
         if re.search(r"%s: strip h=\d+" % prog, t):
             th = b
             k = t.rfind("wm: fenliste")

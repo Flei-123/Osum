@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-import os
 import re
 import sys
 
 from PIL import Image
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-import shapechrome
 
 d = sys.argv[1]
 expect = sys.argv[2]
@@ -22,8 +18,7 @@ rows = {}
 for m in re.finditer(r"launcher: rect id=2 kind=5 x=(\d+) y=(\d+) w=(\d+) h=(\d+)", ser):
     rows["list"] = tuple(int(v) for v in m.groups())
 lx, ly, lw, lh = rows["list"]
-inset_x, inset_y = shapechrome.client_inset(d)
-ox, oy = wx + inset_x, wy + inset_y
+ox, oy = wx, wy
 rowh = 52
 base = Image.open(d + "/01-menu.ppm").convert("RGB")
 bpx = base.load()
