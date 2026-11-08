@@ -77,6 +77,17 @@ No colour literals, no raw draw outside components, English code, no comments.
 - 08.11. (landing 11): winopts and a11ydemo reach windows, steps and a11y counters through `fuiapp/apphost`
   (window_opts, win_handle, ax_presses, ax_flush, MAXWN); pure forwards, the a11y counter-probe is unchanged.
 
+- 08.11. (landing 12, host part step 4): the boot flag files of the host (`/etc/paintlog`, `/etc/fulldamage`,
+  `/etc/paintdirect`, `/etc/nominsize`, `/etc/noglass`, `/etc/eyeold`) are one registry in `kernel/user/fuiapp/hostflags.fi`
+  (`on(flag)`, probed once, cached); `wlstate` and `fuiapp/apphost` read it (six copies of the same probe gone). First
+  apphost bodies that no longer go through wlib. Same files, same caching: no look change.
+- 08.11. (r3234 finding): a popup-window menu for taskbar_ctx/desktop cannot be a plain scene window yet: the window
+  manager dismisses popup-layer windows with EV_CLOSE, and the scene host's event step is still wlib's (`wlax` step:
+  EV_CLOSE on a non-menu window clears its handle). Needed first: a host flag "dismiss instead of close" in the moved
+  host step (r3233); then `uikit` popup menu = hidden `fuiscene.win_open_plain(.., L_POPUP, ..)` window whose tree is the
+  in-scene menu (`fuiscene.menu_open` at 0,0; picks via `menu_pick`, Esc via the scene popup), sized like the wlib menu
+  (rows text width + 24, min 60), placed with `uikit/uiflyout.clamp_axis`.
+
 ## Inventory
 
 Priority: **P1** leaf (no other file imports it) with unused imports or <= 10 refs, **P2** leaf, **P3** shared
