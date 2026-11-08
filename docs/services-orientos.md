@@ -35,6 +35,11 @@ Guest-tested: gate `servicesguest` (tools/servicesguest/run.sh) boots QEMU and r
 | `notify` (not in v1) | bus NOTIPOST (`notify.fi`, `notifc.fi`) | later `svcnotify` |
 | `svc.caps()` | `svcosum.caps` | storage + async host always; clipboard bits when `xfer.available()`; dialog and FILE bits only when `dialogd` exists |
 
+## Conformance (Firn `tools/services/conformance.fi` ported)
+
+Gate `svcconf` (tools/svcconf/run.sh): guest program `kernel/user/svcconf.fi` runs the Firn conformance checks against `svcosum` (status names, app/key rules, caps 127, storage incl. limit and empty-value remove, clipboard reply, file open/cancel/save with dialogd answered by the drehbuch, bad dialog kind, drained queue); `tools/svcconf/expected.txt` lists the check names; 2 mutated trees must go red.
+Deviations from native Firn: `file_save` also queues `OP_FILE_ITEM` (name) + `OP_FILE_END`; no multiple selection (one item for `multiple`); no BUSY (calls are synchronous).
+
 ## Gaps (in order)
 
 1. `dialogd`: multiple selection, mime in the accept list, sandbox=files inheritance for the picker.
