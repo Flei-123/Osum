@@ -99,7 +99,7 @@ ask_and_answer() {
     st=$(status_of)
     echo "       $tag status after the first action: [$st]"
     case "$st" in
-        *"click again"*|*"nochmal klicken"*|*"system confirmation"*|*"Bestaetigungsdialog"*) ok "$tag: the action asks for confirmation" ;;
+        *"click again"*|*"nochmal klicken"*|*"system confirmation"*|*"system dialog"*|*"Systemdialog"*|*"Bestaetigungsdialog"*) ok "$tag: the action asks for confirmation" ;;
         *) bad "$tag: the action did not ask (status [$st])" ;;
     esac
     if answer_dialog "$2"; then ok "$tag: the system dialog took the yes"; else bad "$tag: no trusted dialog answered"; fi
