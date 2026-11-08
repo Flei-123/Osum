@@ -304,10 +304,15 @@ warteauf 'taskbar: text noti' || 90
 foto 01-leiste-meldung
 DREH
 gui leiste "bus notidemo" "$TMPD/dreh1"
-if grep -qa 'Meldg' "$TMPD/leiste.txt"; then
-    ok "the bar shows the messages of the bus: $(grep -aom1 'Meldg [0-9]*' "$TMPD/leiste.txt")"
+if grep -qa 'taskbar: icon field=noti id=' "$TMPD/leiste.txt" && grep -qaE 'taskbar: text noti .* t=[0-9]+' "$TMPD/leiste.txt"; then
+    ok "the bar shows the bell with the message count of the bus: $(grep -aom1 'taskbar: text noti .* t=[0-9]*' "$TMPD/leiste.txt" | grep -aom1 ' t=[0-9]*')"
 else
-    bad "no message in the bar"
+    bad "no bell and count in the bar"
+fi
+if grep -qa 'Meldg' "$TMPD/leiste.txt"; then
+    bad "the bar still shows the text Meldg"
+else
+    ok "no Meldg text in the bar (counter-probe)"
 fi
 bild 01-leiste-meldung
 
