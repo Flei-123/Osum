@@ -79,3 +79,29 @@ use `jarvisctl swap <src> <dst>` / `swap --undo <dst>` (gate `tools/ctlswap/run.
 Limits to know: the Limine config (5 s menu timeout) and root-owned data files (`mouse.conf`, `power.conf`) change only with a new
 full image (`tools/vbox/run.sh build` -> `publish` -> laptop `bossswap.ps1`). A program that imports `wlibc` is
 functionally changed by r1277 (`platte_ink`), but overlaying every GUI program does not fit a 60 MiB root.
+
+## 5. HP dev feed: publish and device steps (08.11.2026)
+
+Publish (verified by `feed-dev.sh`: signature, every hash and size, package feed byte-identical, VERZEICHNIS below `VZ_MAX`):
+
+    HP_DEV=1 HP_REF=origin/main HP_BASE=/root/abbilder/hp-stick36-base HEAVY_TIMELIMIT=90 \
+        setsid nohup /root/jarvis/bin/heavy bash <worktree>/tools/ota/republish-hp.sh "<notes>" [--dry] > log 2>&1 &
+
+Run `--dry` first (prints programs, `verify OK ... N files`, VERZEICHNIS size), then without it; ~3 min plus queue wait.
+The stand name is `count` = `git rev-list --count <HP_REF>` at the moment the script fetches, so a main that moves during
+the queue wait publishes a later commit: read the `published:` line, not the commit you started from.
+
+Current stand: 5396 (main 2279a2cf4, content = 990a1b779 plus the dynlader gate fix; 141 overlay programs, 359 hashes, VERZEICHNIS 39865 B).
+All packages carry the new meta key `version`, so their hashes differ from earlier stands.
+
+Device steps after a power cycle (the HP runs trial 5373; the guard feed `wlanfirst` is NOT applied):
+
+    /bin/cat /proc/wlan
+    /bin/ota system status
+    /bin/grep last_boot /proc/watchdog
+    /bin/ls /var/crash
+    /bin/ota confirm
+    /bin/ota system apply bg      (then /bin/reboot, /bin/ota confirm)
+
+Before any HP reboot remove `wlanfirst` from `/etc/wlan.knobs` unless the feed that contains the wlanfirst guard (main ed6458c91) has been applied.
+Feed 5396 contains the guard. The `apply` is the owner's decision; nothing here touches the device.
