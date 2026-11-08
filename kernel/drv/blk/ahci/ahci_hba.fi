@@ -1,0 +1,99 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import klog
+import bus.pci
+import libc.regio
+import drv.blk.ahci.ahci_clock
+import drv.blk.ahci.ahci_defs
+import drv.blk.ahci.ahci_hook
+import drv.blk.ahci.ahci_state
+
+const R_CAP2: u64 = 0x24
+
+const R_BOHC: u64 = 0x28
+
+const CAP2_BOH: u64 = 1
+
+const BOHC_BOS: u64 = 1
+
+const BOHC_OOS: u64 = 2
+
+const BOHC_BB: u64 = 0x10
+
+fn log_storage(state: u64) {
+    var l_ctl: [u8; 42] = "storage controller seen (hex v d c s p): \0"
+    var l_none: [u8; 44] = "no storage controller at all on the PCI bus\0"
+    let n: u64 = pci.count(state)
+    var i: u64 = 0
+    var seen: u64 = 0
+    while i < n {
+        if pci.get(state, i, pci.E_CLASS) == pci.CLASS_STORAGE {
+            let v: u64 = (pci.get(state, i, pci.E_VENDOR) << 40) | (pci.get(state, i, pci.E_DEVICE) << 24) | (pci.get(state, i, pci.E_CLASS) << 16) | (pci.get(state, i, pci.E_SUBCLASS) << 8) | pci.get(state, i, pci.E_PROGIF)
+            klog.sayh(state, klog.L_WARN, ahci_state.lq(), (&l_ctl[0]) as u64, v)
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    if seen == 0 {
+        klog.say(state, klog.L_WARN, ahci_state.lq(), (&l_none[0]) as u64)
+    }
+}
+
+fn log_hba(state: u64, b: u64, pi: u64) {
+    var l_hcap: [u8; 9] = "hba CAP \0"
+    var l_hghc: [u8; 9] = "hba GHC \0"
+    var l_hpi: [u8; 8] = "hba PI \0"
+    var l_hvs: [u8; 8] = "hba VS \0"
+    klog.sayh(state, klog.L_INFO, ahci_state.lq(), (&l_hcap[0]) as u64, regio.read32_at(b, ahci_defs.R_CAP))
+    klog.sayh(state, klog.L_INFO, ahci_state.lq(), (&l_hghc[0]) as u64, regio.read32_at(b, ahci_defs.R_GHC))
+    klog.sayh(state, klog.L_INFO, ahci_state.lq(), (&l_hpi[0]) as u64, pi)
+    klog.sayh(state, klog.L_INFO, ahci_state.lq(), (&l_hvs[0]) as u64, regio.read32_at(b, ahci_defs.R_VS))
+}
+
+const PCS_REG: u64 = 0x92
+
+fn intel_ports_enable(state: u64, idx: u64, pi: u64) {
+    var l_pcs: [u8; 43] = "PCS enable bits were missing, PCS before: \0"
+    if pci.get(state, idx, pci.E_VENDOR) != pci.VENDOR_INTEL {
+        return
+    }
+    let dev_bdf: u64 = ahci_state.bdf(state)
+    let pcs: u64 = pci.cfg_read16(dev_bdf, PCS_REG)
+    let want: u64 = pi & 0x3F
+    if (pcs & want) != want {
+        klog.sayh(state, klog.L_INFO, ahci_state.lq(), (&l_pcs[0]) as u64, pcs)
+        pci.cfg_write16(dev_bdf, PCS_REG, pcs | want)
+    }
+}
+
+fn handoff(state: u64, b: u64) -> bool {
+    let cap2: u64 = regio.read32_at(b, R_CAP2)
+    if (cap2 & CAP2_BOH) == 0 {
+        return true
+    }
+    regio.write32_at(b, R_BOHC, regio.read32_at(b, R_BOHC) | BOHC_OOS)
+    let bis: u64 = ahci_clock.timeout(state, ahci_defs.RESET_US)
+    var spin: u64 = 0
+    while !ahci_clock.expired(bis, spin, ahci_defs.RESET_LIMIT) {
+        let v: u64 = regio.read32_at(b, R_BOHC)
+        if (v & BOHC_BOS) == 0 && (v & BOHC_BB) == 0 {
+            return true
+        }
+        spin = spin + 1
+    }
+    return false
+}
+
+fn hba_reset(state: u64, b: u64) -> bool {
+    regio.write32_at(b, ahci_defs.R_GHC, regio.read32_at(b, ahci_defs.R_GHC) | ahci_defs.GHC_HR)
+    let bis: u64 = ahci_clock.timeout(state, ahci_defs.RESET_US)
+    var spin: u64 = 0
+    while !ahci_clock.expired(bis, spin, ahci_defs.RESET_LIMIT) {
+        if (regio.read32_at(b, ahci_defs.R_GHC) & ahci_defs.GHC_HR) == 0 {
+            regio.write32_at(b, ahci_defs.R_GHC, regio.read32_at(b, ahci_defs.R_GHC) | ahci_defs.GHC_AE)
+            ahci_hook.hook_hba_reset(state)
+            return true
+        }
+        spin = spin + 1
+    }
+    return false
+}

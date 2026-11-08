@@ -1,0 +1,150 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import lib.kstate
+import libc.regio
+import drv.blk.ahci.ahci_clock
+import drv.blk.ahci.ahci_defs
+import drv.blk.ahci.ahci_hook
+import drv.blk.ahci.ahci_reg
+import drv.blk.ahci.ahci_state
+
+const IPM_ACTIVE: u64 = 1
+
+const SIG_ATA: u64 = 0x00000101
+
+const STUCK_US: u64 = 2000000
+
+const SIGWAIT_US: u64 = 300000
+
+const SIGFINAL_US: u64 = 1000000
+
+const SCTL_RESET: u64 = 0x301
+
+const SCTL_IDLE: u64 = 0x300
+
+const S_JUNK: u64 = 0x98
+
+const V_EMPTY: u64 = 1
+
+const PS_BASE: u64 = 0x200
+
+fn pget(state: u64, p: u64, f: u64) -> u64 {
+    return kstate.get(state, ahci_state.sc(PS_BASE + p * 32 + f))
+}
+
+fn pset(state: u64, p: u64, f: u64, v: u64) {
+    kstate.set(state, ahci_state.sc(PS_BASE + p * 32 + f), v)
+}
+
+fn udelay(state: u64, us: u64) {
+    let b: u64 = ahci_state.abar(state)
+    var junk: u64 = 0
+    if ahci_clock.have_clock(state) {
+        let end: u64 = ahci_clock.usec(state) + us
+        while ahci_clock.usec(state) < end {
+            junk = junk + regio.read32_at(b, ahci_defs.R_VS)
+        }
+    } else {
+        var i: u64 = 0
+        while i < us * 4 {
+            junk = junk + regio.read32_at(b, ahci_defs.R_VS)
+            i = i + 1
+        }
+    }
+    kstate.set(state, ahci_state.sc(S_JUNK), junk)
+}
+
+fn comreset_assert(state: u64, p: u64) {
+    ahci_reg.pwr(state, p, ahci_defs.P_SCTL, SCTL_RESET)
+    let flush: u64 = ahci_reg.prd(state, p, ahci_defs.P_SCTL)
+    kstate.set(state, ahci_state.sc(S_JUNK), flush)
+}
+
+fn comreset_release(state: u64, p: u64, now: u64) {
+    ahci_reg.pwr(state, p, ahci_defs.P_SCTL, SCTL_IDLE)
+    ahci_reg.pwr(state, p, ahci_defs.P_SERR, ahci_reg.prd(state, p, ahci_defs.P_SERR))
+    pset(state, p, ahci_defs.F_T0, now + 1)
+    pset(state, p, ahci_defs.F_TLINK, 0)
+    pset(state, p, ahci_defs.F_RESETS, pget(state, p, ahci_defs.F_RESETS) + 1)
+    ahci_hook.hook_comreset(state, p)
+}
+
+fn comreset_one(state: u64, p: u64, now: u64) {
+    comreset_assert(state, p)
+    udelay(state, ahci_defs.COMRESET_US)
+    comreset_release(state, p, now)
+}
+
+fn scan_port(state: u64, p: u64, now: u64, legacy: bool) {
+    if pget(state, p, ahci_defs.F_STATE) != ahci_defs.V_PENDING {
+        return
+    }
+    let ssts: u64 = ahci_reg.prd(state, p, ahci_defs.P_SSTS)
+    let det: u64 = ssts & 0xF
+    let ipm: u64 = (ssts >> 8) & 0xF
+    let t0: u64 = pget(state, p, ahci_defs.F_T0)
+    var age: u64 = 0
+    if now > t0 {
+        age = now - t0
+    }
+    let resets: u64 = pget(state, p, ahci_defs.F_RESETS)
+
+    if det == ahci_defs.DET_PRESENT && ipm == IPM_ACTIVE {
+        var tl: u64 = pget(state, p, ahci_defs.F_TLINK)
+        if tl == 0 {
+            tl = now + 1
+            pset(state, p, ahci_defs.F_TLINK, tl)
+            ahci_reg.pwr(state, p, ahci_defs.P_SERR, ahci_reg.prd(state, p, ahci_defs.P_SERR))
+        }
+        var up: u64 = 0
+        if now > tl {
+            up = now - tl
+        }
+        let sig: u64 = ahci_reg.prd(state, p, ahci_defs.P_SIG)
+        let tfd: u64 = ahci_reg.prd(state, p, ahci_defs.P_TFD)
+        let busy: bool = (tfd & (ahci_defs.TFD_BSY | ahci_defs.TFD_DRQ)) != 0
+        if sig != 0 && sig != 0xFFFFFFFF {
+            if sig == SIG_ATA {
+                if !busy {
+                    pset(state, p, ahci_defs.F_STATE, ahci_defs.V_ATA)
+                } else if up > ahci_defs.READY_US {
+                    pset(state, p, ahci_defs.F_STATE, ahci_defs.V_BROKEN)
+                }
+            } else {
+                pset(state, p, ahci_defs.F_STATE, ahci_defs.V_OTHER)
+            }
+            return
+        }
+
+        if busy {
+            if up > ahci_defs.READY_US {
+                pset(state, p, ahci_defs.F_STATE, ahci_defs.V_BROKEN)
+            }
+        } else if up > SIGWAIT_US && resets < 3 && !legacy {
+            comreset_one(state, p, now)
+        } else if up > SIGFINAL_US {
+            pset(state, p, ahci_defs.F_STATE, ahci_defs.V_NOSIG)
+        }
+        return
+    }
+
+    pset(state, p, ahci_defs.F_TLINK, 0)
+    if det == 1 || det == 3 {
+
+        if age > STUCK_US && !legacy {
+            if resets < 3 {
+                comreset_one(state, p, now)
+            } else {
+                pset(state, p, ahci_defs.F_STATE, ahci_defs.V_BROKEN)
+            }
+        }
+        return
+    }
+
+    var cut: u64 = ahci_defs.EMPTY_US
+    if legacy {
+        cut = ahci_defs.PROBE_US
+    }
+    if age > cut {
+        pset(state, p, ahci_defs.F_STATE, V_EMPTY)
+    }
+}

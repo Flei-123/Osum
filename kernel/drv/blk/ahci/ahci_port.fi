@@ -1,0 +1,114 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import lib.kstate
+import libc.regio
+import drv.blk.ahci.ahci_clock
+import drv.blk.ahci.ahci_defs
+import drv.blk.ahci.ahci_reg
+import drv.blk.ahci.ahci_state
+
+const S_QUIET: u64 = 0x88
+
+const P_CLB: u64 = 0x00
+
+const P_CLBU: u64 = 0x04
+
+const P_FB: u64 = 0x08
+
+const P_FBU: u64 = 0x0C
+
+const CMD_SUD: u64 = 0x0002
+
+const CMD_POD: u64 = 0x0004
+
+const CMD_FRE: u64 = 0x0010
+
+const CMD_FR: u64 = 0x4000
+
+fn port_arm(state: u64, p: u64, cl: u64, fis: u64) -> bool {
+    if !port_stop(state, p) {
+        return false
+    }
+    ahci_reg.pwr(state, p, P_CLB, cl & 0xFFFFFFFF)
+    ahci_reg.pwr(state, p, P_CLBU, cl >> 32)
+    ahci_reg.pwr(state, p, P_FB, fis & 0xFFFFFFFF)
+    ahci_reg.pwr(state, p, P_FBU, fis >> 32)
+    ahci_reg.pwr(state, p, ahci_defs.P_SERR, ahci_reg.prd(state, p, ahci_defs.P_SERR))
+    ahci_reg.pwr(state, p, ahci_defs.P_IS, ahci_reg.prd(state, p, ahci_defs.P_IS))
+    ahci_reg.pwr(state, p, ahci_defs.P_IE, 0)
+    ahci_reg.pwr(state, p, ahci_defs.P_CMD, ahci_reg.prd(state, p, ahci_defs.P_CMD) | CMD_SUD | CMD_POD)
+    ahci_reg.pwr(state, p, ahci_defs.P_CMD, ahci_reg.prd(state, p, ahci_defs.P_CMD) | CMD_FRE)
+    let bis: u64 = ahci_clock.timeout(state, ahci_defs.RESET_US)
+    var spin: u64 = 0
+    while !ahci_clock.expired(bis, spin, ahci_defs.RESET_LIMIT) {
+        if (ahci_reg.prd(state, p, ahci_defs.P_CMD) & CMD_FR) != 0 {
+            return true
+        }
+        spin = spin + 1
+    }
+    return false
+}
+
+fn port_setup(state: u64, p: u64) -> bool {
+    ahci_defs.idle_known = false
+    let pi: u64 = kstate.get(state, ahci_state.sc(ahci_defs.S_PI))
+    var quiet: u64 = 0
+    var i: u64 = 0
+    while i < 32 {
+        if i != p && ((pi >> i) & 1) != 0 {
+            if port_stop(state, i) {
+                quiet = quiet + 1
+            }
+        }
+        i = i + 1
+    }
+    kstate.set(state, ahci_state.sc(S_QUIET), quiet)
+
+    let cl: u64 = state + ahci_defs.AHCI_OFF + ahci_defs.CLB_AT
+    let fis: u64 = state + ahci_defs.AHCI_OFF + ahci_defs.FB_AT
+    regio.zero64(state + ahci_defs.AHCI_OFF + ahci_defs.CT_AT, 1024)
+    if !port_arm(state, p, cl, fis) {
+        return false
+    }
+    ahci_reg.pwr(state, p, ahci_defs.P_CMD, ahci_reg.prd(state, p, ahci_defs.P_CMD) | ahci_defs.CMD_ST)
+    return await_idle(state, p)
+}
+
+fn port_stop(state: u64, p: u64) -> bool {
+    ahci_reg.pwr(state, p, ahci_defs.P_CMD, ahci_reg.prd(state, p, ahci_defs.P_CMD) & (~ahci_defs.CMD_ST))
+    let bis: u64 = ahci_clock.timeout(state, ahci_defs.RESET_US)
+    var spin: u64 = 0
+    var raus: bool = false
+    while !raus && !ahci_clock.expired(bis, spin, ahci_defs.RESET_LIMIT) {
+        if (ahci_reg.prd(state, p, ahci_defs.P_CMD) & ahci_defs.CMD_CR) == 0 {
+            raus = true
+        } else {
+            spin = spin + 1
+        }
+    }
+    if !raus {
+        return false
+    }
+    ahci_reg.pwr(state, p, ahci_defs.P_CMD, ahci_reg.prd(state, p, ahci_defs.P_CMD) & (~CMD_FRE))
+    spin = 0
+    while !ahci_clock.expired(bis, spin, ahci_defs.RESET_LIMIT) {
+        if (ahci_reg.prd(state, p, ahci_defs.P_CMD) & CMD_FR) == 0 {
+            return true
+        }
+        spin = spin + 1
+    }
+    return false
+}
+
+fn await_idle(state: u64, p: u64) -> bool {
+    let bis: u64 = ahci_clock.timeout(state, ahci_defs.CMD_US)
+    var spin: u64 = 0
+    while !ahci_clock.expired(bis, spin, ahci_defs.SPIN_LIMIT) {
+        let tfd: u64 = ahci_reg.prd(state, p, ahci_defs.P_TFD)
+        if (tfd & (ahci_defs.TFD_BSY | ahci_defs.TFD_DRQ)) == 0 {
+            return true
+        }
+        spin = spin + 1
+    }
+    kstate.set(state, ahci_state.sc(ahci_defs.S_TFD), ahci_reg.prd(state, p, ahci_defs.P_TFD))
+    return false
+}

@@ -1,0 +1,163 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import drv.blk.ahci_irq
+import arch.arch
+import sync.atomic
+import block.blkperf
+import arch.cpu
+import lib.kstate
+import libc.regio
+import serial
+import drv.blk.ahci.ahci_clock
+import drv.blk.ahci.ahci_defs
+import drv.blk.ahci.ahci_reg
+import drv.blk.ahci.ahci_state
+
+const S_IRQ_CPU: u64 = 0xB0
+
+const S_IRQ_MISS: u64 = 0xB8
+
+const R_IS: u64 = 0x08
+
+const GHC_IE: u64 = 2
+
+const IS_TFES: u64 = 0x40000000
+
+const IS_DHRS: u64 = 0x1
+
+const IS_PSS: u64 = 0x2
+
+const IS_SDBS: u64 = 0x8
+
+const IS_HBFS: u64 = 0x20000000
+
+const IS_HBDS: u64 = 0x10000000
+
+const IS_IFS: u64 = 0x8000000
+
+const IS_OFS: u64 = 0x1000000
+
+const IE_MASK: u64 = IS_DHRS | IS_PSS | IS_SDBS | IS_TFES | IS_HBFS | IS_HBDS | IS_IFS | IS_OFS
+
+const IRQ_MISS_LIMIT: u64 = 4
+
+const W_TIMEOUT: u64 = 2
+
+const ERR_CHECK_MASK: u64 = 15
+
+fn clear_status(state: u64, p: u64) {
+    ahci_reg.pwr(state, p, ahci_defs.P_IS, ahci_reg.prd(state, p, ahci_defs.P_IS))
+    ahci_reg.pwr(state, p, ahci_defs.P_SERR, ahci_reg.prd(state, p, ahci_defs.P_SERR))
+}
+
+static mut s_irq_up: [u8; 35] = "ahci: interrupts on, msi vector 41\0"
+
+static mut s_irq_lost: [u8; 36] = "ahci: interrupt lost, polling again\0"
+
+fn irq_on(state: u64) -> bool {
+    return kstate.get(state, ahci_state.sc(ahci_defs.S_IRQ_ON)) != 0
+}
+
+fn irq_enable(state: u64, b: u64, p: u64) {
+    if kstate.mode_on(state, kstate.M_NOAHCIIRQ) || !ahci_clock.have_clock(state) {
+        return
+    }
+    if !ahci_irq.msi_arm(state, ahci_state.bdf(state)) {
+        return
+    }
+    kstate.set(state, ahci_state.sc(S_IRQ_CPU), cpu.here(state))
+    kstate.set(state, ahci_state.sc(S_IRQ_MISS), 0)
+    kstate.set(state, ahci_state.sc(ahci_defs.S_IRQ_ERR), 0)
+    clear_status(state, p)
+    regio.write32_at(b, R_IS, 0xFFFFFFFF)
+    ahci_reg.pwr(state, p, ahci_defs.P_IE, IE_MASK)
+    regio.write32_at(b, ahci_defs.R_GHC, regio.read32_at(b, ahci_defs.R_GHC) | GHC_IE)
+    kstate.set(state, ahci_state.sc(ahci_defs.S_IRQ_ON), 1)
+    serial.puts((&s_irq_up[0]) as u64)
+    serial.nl()
+}
+
+fn irq_disable(state: u64) {
+    kstate.set(state, ahci_state.sc(ahci_defs.S_IRQ_ON), 0)
+    let b: u64 = kstate.get(state, ahci_state.sc(ahci_defs.S_ABAR))
+    if b == 0 {
+        return
+    }
+    ahci_reg.pwr(state, ahci_state.port(state), ahci_defs.P_IE, 0)
+    regio.write32_at(b, ahci_defs.R_GHC, regio.read32_at(b, ahci_defs.R_GHC) & (~GHC_IE))
+}
+
+fn irq(state: u64) {
+    blkperf.add(blkperf.K_AHCI_IRQS, 1)
+    let b: u64 = kstate.get(state, ahci_state.sc(ahci_defs.S_ABAR))
+    if b == 0 || kstate.get(state, ahci_state.sc(ahci_defs.S_IRQ_ON)) == 0 {
+        return
+    }
+    let p: u64 = ahci_state.port(state)
+    let pis: u64 = ahci_reg.prd(state, p, ahci_defs.P_IS)
+    ahci_reg.pwr(state, p, ahci_defs.P_IS, pis)
+    kstate.set(state, ahci_state.sc(ahci_defs.S_IRQ_ERR), kstate.get(state, ahci_state.sc(ahci_defs.S_IRQ_ERR)) | pis)
+    regio.write32_at(b, R_IS, regio.read32_at(b, R_IS))
+}
+
+fn can_sleep(state: u64, bis: u64) -> bool {
+    if bis == 0 || kstate.get(state, ahci_state.sc(ahci_defs.S_IRQ_ON)) == 0 || !arch.irq_are_on() {
+        return false
+    }
+    return cpu.here(state) == kstate.get(state, ahci_state.sc(S_IRQ_CPU))
+}
+
+fn sleep_once(state: u64, p: u64) {
+    let saved: u64 = arch.irq_save()
+    if (ahci_reg.prd(state, p, ahci_defs.P_CI) & 1) == 0 {
+        arch.irq_restore(saved)
+        return
+    }
+    blkperf.add(blkperf.K_AHCI_SLEEPS, 1)
+    arch.irq_wait()
+}
+
+fn judge_interrupts(state: u64, sleeps0: u64, irqs0: u64) {
+    if blkperf.get(blkperf.K_AHCI_SLEEPS) == sleeps0 {
+        return
+    }
+    if blkperf.get(blkperf.K_AHCI_IRQS) != irqs0 {
+        kstate.set(state, ahci_state.sc(S_IRQ_MISS), 0)
+        return
+    }
+    kstate.add(state, ahci_state.sc(S_IRQ_MISS), 1)
+    if kstate.get(state, ahci_state.sc(S_IRQ_MISS)) >= IRQ_MISS_LIMIT {
+        irq_disable(state)
+        serial.puts((&s_irq_lost[0]) as u64)
+        serial.nl()
+    }
+}
+
+fn error_pending(state: u64, p: u64) -> bool {
+    return ((ahci_reg.prd(state, p, ahci_defs.P_IS) | kstate.get(state, ahci_state.sc(ahci_defs.S_IRQ_ERR))) & IS_TFES) != 0
+}
+
+fn wait_done(state: u64, p: u64, bis: u64) -> u64 {
+    let sleepy: bool = can_sleep(state, bis)
+    let sleeps0: u64 = blkperf.get(blkperf.K_AHCI_SLEEPS)
+    let irqs0: u64 = blkperf.get(blkperf.K_AHCI_IRQS)
+    var spin: u64 = 0
+    while !ahci_clock.expired(bis, spin, ahci_defs.SPIN_LIMIT) {
+        if (ahci_reg.prd(state, p, ahci_defs.P_CI) & 1) == 0 {
+            ahci_defs.wait_polls = spin + 1
+            if sleepy {
+                judge_interrupts(state, sleeps0, irqs0)
+            }
+            return ahci_defs.W_DONE
+        }
+        if (sleepy || (spin & ERR_CHECK_MASK) == ERR_CHECK_MASK) && error_pending(state, p) {
+            return ahci_defs.W_FAULT
+        }
+        if sleepy {
+            sleep_once(state, p)
+        } else {
+            atomic.pause()
+        }
+        spin = spin + 1
+    }
+    return W_TIMEOUT
+}

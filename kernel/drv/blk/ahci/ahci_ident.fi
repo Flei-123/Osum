@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import lib.kstate
+import libc.regio
+import drv.blk.ahci.ahci_defs
+import drv.blk.ahci.ahci_run
+import drv.blk.ahci.ahci_state
+
+const ATA_IDENTIFY: u64 = 0xEC
+
+fn identify(state: u64) -> bool {
+    let buf: u64 = state + ahci_defs.AHCI_ID_OFF
+    regio.zero64(buf, 512)
+    if !ahci_run.run(state, ATA_IDENTIFY, 0, 0, buf, 512, false) {
+        return false
+    }
+    let w83: u64 = w(buf, 83)
+    var n: u64 = 0
+    if (w83 & 0x400) != 0 {
+        n = w(buf, 100) | (w(buf, 101) << 16) | (w(buf, 102) << 32)
+            | (w(buf, 103) << 48)
+    }
+    if n == 0 {
+        n = w(buf, 60) | (w(buf, 61) << 16)
+    }
+    if n == 0 {
+        return false
+    }
+    var shift: u64 = 9
+    let w106: u64 = w(buf, 106)
+    if (w106 & 0x4000) != 0 && (w106 & 0x8000) == 0 && (w106 & 0x1000) != 0 {
+        let words: u64 = w(buf, 117) | (w(buf, 118) << 16)
+        var sz: u64 = words * 2
+        var s: u64 = 0
+        while sz > 1 {
+            sz = sz >> 1
+            s = s + 1
+        }
+        if s >= 9 && s <= 16 {
+            shift = s
+        }
+    }
+    kstate.set(state, ahci_state.sc(ahci_defs.S_BLOCKS), n)
+    kstate.set(state, ahci_state.sc(ahci_defs.S_LBASZ), shift)
+    return true
+}
+
+fn w(buf: u64, i: u64) -> u64 {
+    return regio.read8(buf + i * 2) | (regio.read8(buf + i * 2 + 1) << 8)
+}
