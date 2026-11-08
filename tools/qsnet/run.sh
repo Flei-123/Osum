@@ -16,7 +16,7 @@ taste meta_l-a
 warteauf 'qs: open' || 30
 warte 2
 foto 01-open
-klickauf qskachel0
+klickauf qskachel1
 warteauf 'qsnet: page open' || 30
 warte 3
 foto 02-net
