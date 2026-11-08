@@ -1,0 +1,268 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import lineout
+import libc.text
+import libc.octets
+import services.svcrules
+import services.svcqueue
+import services.svcosum
+
+export { u_start }
+
+const VALUE_BUF: u64 = 65600
+const NAME_BUF: u64 = 128
+const SUM_MOD: u64 = 1000003
+
+static mut value_buf: [u8; 65600] = [0 as u8; 65600]
+static mut name_buf: [u8; 128] = [0 as u8; 128]
+static mut head_buf: [u8; 28] = [0 as u8; 28]
+static mut out_buf: [u8; 8] = [0 as u8; 8]
+static mut c_caps: [u8; 5] = "caps\0"
+static mut c_set: [u8; 4] = "set\0"
+static mut c_gen: [u8; 4] = "gen\0"
+static mut c_get: [u8; 4] = "get\0"
+static mut c_sum: [u8; 4] = "sum\0"
+static mut c_has: [u8; 4] = "has\0"
+static mut c_rm: [u8; 3] = "rm\0"
+static mut c_copy: [u8; 5] = "copy\0"
+static mut c_paste: [u8; 6] = "paste\0"
+static mut s_pre: [u8; 11] = "svcproof: \0"
+static mut s_status: [u8; 9] = " status=\0"
+static mut s_len: [u8; 6] = " len=\0"
+static mut s_val: [u8; 6] = " val=\0"
+static mut s_sum: [u8; 6] = " sum=\0"
+static mut s_has: [u8; 6] = " has=\0"
+static mut s_caps: [u8; 7] = " caps=\0"
+static mut s_id: [u8; 5] = " id=\0"
+static mut s_op: [u8; 5] = " op=\0"
+static mut s_pend: [u8; 10] = " pending=\0"
+static mut s_use: [u8; 24] = "svcproof: usage error\0\0\0"
+
+fn value_ptr() -> u64 {
+    return (&value_buf[0 as usize]) as u64
+}
+
+fn say(p: u64) {
+    let _n: u64 = lineout.add_text(p)
+}
+
+fn start(verb: u64) {
+    say((&s_pre[0 as usize]) as u64)
+    say(verb)
+}
+
+fn finish_status(status: u64) {
+    say((&s_status[0 as usize]) as u64)
+    say(svcrules.status_name(status))
+}
+
+fn field_num(label: u64, v: u64) {
+    say(label)
+    lineout.add_num(v)
+}
+
+fn bind_app(args: u64) -> bool {
+    let app: u64 = ulib.arg_at(args, 2)
+    return svcosum.set_app(app, text.length(app)) == svcrules.OK
+}
+
+fn cmd_caps() -> u64 {
+    start((&c_caps[0 as usize]) as u64)
+    field_num((&s_caps[0 as usize]) as u64, svcosum.caps())
+    lineout.end_line()
+    return 0
+}
+
+fn cmd_set(args: u64) -> u64 {
+    start((&c_set[0 as usize]) as u64)
+    if !bind_app(args) {
+        finish_status(svcrules.INVALID)
+        lineout.end_line()
+        return 1
+    }
+    let key: u64 = ulib.arg_at(args, 3)
+    let value: u64 = ulib.arg_at(args, 4)
+    finish_status(svcosum.store_set(key, text.length(key), value, text.length(value)))
+    lineout.end_line()
+    return 0
+}
+
+fn fill_pattern(n: u64) {
+    var i: u64 = 0
+    while i < n {
+        octets.st8(value_ptr(), i, 97 + (i % 26))
+        i = i + 1
+    }
+}
+
+fn cmd_gen(args: u64) -> u64 {
+    start((&c_gen[0 as usize]) as u64)
+    if !bind_app(args) {
+        finish_status(svcrules.INVALID)
+        lineout.end_line()
+        return 1
+    }
+    let key: u64 = ulib.arg_at(args, 3)
+    let n: u64 = text.number(ulib.arg_at(args, 4))
+    if n > VALUE_BUF {
+        finish_status(svcrules.INVALID)
+        lineout.end_line()
+        return 1
+    }
+    fill_pattern(n)
+    finish_status(svcosum.store_set(key, text.length(key), value_ptr(), n))
+    field_num((&s_len[0 as usize]) as u64, n)
+    lineout.end_line()
+    return 0
+}
+
+fn checksum(n: u64) -> u64 {
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        sum = (sum * 31 + octets.ld8(value_ptr(), i)) % SUM_MOD
+        i = i + 1
+    }
+    return sum
+}
+
+fn read_value(args: u64, len_out: u64) -> u64 {
+    if !bind_app(args) {
+        return svcrules.INVALID
+    }
+    let key: u64 = ulib.arg_at(args, 3)
+    return svcosum.store_get(key, text.length(key), value_ptr(), VALUE_BUF - 1, len_out)
+}
+
+fn cmd_get(args: u64, with_sum: bool) -> u64 {
+    var verb: u64 = (&c_get[0 as usize]) as u64
+    if with_sum {
+        verb = (&c_sum[0 as usize]) as u64
+    }
+    start(verb)
+    octets.st32((&out_buf[0 as usize]) as u64, 0, 0)
+    let status: u64 = read_value(args, (&out_buf[0 as usize]) as u64)
+    finish_status(status)
+    if status != svcrules.OK {
+        lineout.end_line()
+        return 1
+    }
+    let n: u64 = octets.le32((&out_buf[0 as usize]) as u64)
+    field_num((&s_len[0 as usize]) as u64, n)
+    if with_sum {
+        field_num((&s_sum[0 as usize]) as u64, checksum(n))
+    } else {
+        say((&s_val[0 as usize]) as u64)
+        let _w: u64 = lineout.add_bytes(value_ptr(), n)
+    }
+    lineout.end_line()
+    return 0
+}
+
+fn cmd_has(args: u64) -> u64 {
+    start((&c_has[0 as usize]) as u64)
+    if !bind_app(args) {
+        finish_status(svcrules.INVALID)
+        lineout.end_line()
+        return 1
+    }
+    let key: u64 = ulib.arg_at(args, 3)
+    var yes: u64 = 0
+    if svcosum.store_has(key, text.length(key)) {
+        yes = 1
+    }
+    field_num((&s_has[0 as usize]) as u64, yes)
+    lineout.end_line()
+    return 0
+}
+
+fn cmd_rm(args: u64) -> u64 {
+    start((&c_rm[0 as usize]) as u64)
+    if !bind_app(args) {
+        finish_status(svcrules.INVALID)
+        lineout.end_line()
+        return 1
+    }
+    let key: u64 = ulib.arg_at(args, 3)
+    finish_status(svcosum.store_remove(key, text.length(key)))
+    lineout.end_line()
+    return 0
+}
+
+fn cmd_copy(args: u64) -> u64 {
+    start((&c_copy[0 as usize]) as u64)
+    let value: u64 = ulib.arg_at(args, 2)
+    finish_status(svcosum.copy_text(value, text.length(value)))
+    lineout.end_line()
+    return 0
+}
+
+fn cmd_paste() -> u64 {
+    start((&c_paste[0 as usize]) as u64)
+    let status: u64 = svcosum.paste_text((&out_buf[0 as usize]) as u64)
+    finish_status(status)
+    field_num((&s_pend[0 as usize]) as u64, svcosum.pending())
+    if status != svcrules.OK {
+        lineout.end_line()
+        return 1
+    }
+    let head: u64 = (&head_buf[0 as usize]) as u64
+    if !svcosum.poll(head, (&name_buf[0 as usize]) as u64, NAME_BUF, value_ptr(), VALUE_BUF) {
+        lineout.end_line()
+        return 1
+    }
+    field_num((&s_id[0 as usize]) as u64, octets.le32(head + 4))
+    field_num((&s_op[0 as usize]) as u64, octets.le32(head + 8))
+    finish_status(octets.le32(head + 12))
+    say((&s_val[0 as usize]) as u64)
+    let _w: u64 = lineout.add_bytes(value_ptr(), octets.le32(head + 24))
+    lineout.end_line()
+    return 0
+}
+
+fn usage() -> u64 {
+    say((&s_use[0 as usize]) as u64)
+    lineout.end_line()
+    return 2
+}
+
+fn u_start(args: u64) -> u64 {
+    if ulib.arg_count(args) < 2 {
+        return usage()
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    if text.equal(cmd, (&c_caps[0 as usize]) as u64) {
+        return cmd_caps()
+    }
+    if text.equal(cmd, (&c_set[0 as usize]) as u64) && ulib.arg_count(args) >= 5 {
+        return cmd_set(args)
+    }
+    if text.equal(cmd, (&c_gen[0 as usize]) as u64) && ulib.arg_count(args) >= 5 {
+        return cmd_gen(args)
+    }
+    if text.equal(cmd, (&c_get[0 as usize]) as u64) && ulib.arg_count(args) >= 4 {
+        return cmd_get(args, false)
+    }
+    if text.equal(cmd, (&c_sum[0 as usize]) as u64) && ulib.arg_count(args) >= 4 {
+        return cmd_get(args, true)
+    }
+    if text.equal(cmd, (&c_has[0 as usize]) as u64) && ulib.arg_count(args) >= 4 {
+        return cmd_has(args)
+    }
+    if text.equal(cmd, (&c_rm[0 as usize]) as u64) && ulib.arg_count(args) >= 4 {
+        return cmd_rm(args)
+    }
+    if text.equal(cmd, (&c_copy[0 as usize]) as u64) && ulib.arg_count(args) >= 3 {
+        return cmd_copy(args)
+    }
+    if text.equal(cmd, (&c_paste[0 as usize]) as u64) {
+        return cmd_paste()
+    }
+    return usage()
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}
