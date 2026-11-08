@@ -59,7 +59,7 @@ PROGS="sh ls cat echo cp mv rm mkdir rmdir touch head tail wc grep sort
 # 8192 blocks now, which is what round OFS3 made possible in the first
 # place (multi-block map out of the superblock, `blk.capacity` from ATA
 # IDENTIFY), and the budget follows it.
-BLOCKS=8192
+BLOCKS=16384
 
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT

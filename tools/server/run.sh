@@ -57,12 +57,14 @@ if [ -f "$TMPD/gui.mb.elf" ] && [ -f "$TMPD/srv.mb.elf" ]; then
         g=$(nm "$TMPD/gui.mb.elf" 2>/dev/null | grep -c "_F0\.${m}__")
         v=$(nm "$TMPD/srv.mb.elf" 2>/dev/null | grep -c "_F0\.${m}__")
         gsum=$((gsum + g)); ssum=$((ssum + v))
-        [ "$v" != 0 ] && schlecht="$schlecht $m=$v"
+        want=0
+        [ "$m" = fb ] && want=$(grep -c '^fn ' kernel/gfx/fb-aus.fi)
+        [ "$v" != "$want" ] && schlecht="$schlecht $m=$v"
         [ "$g" = 0 ] && schlecht="$schlecht $m-fehlt-im-GUI-Bau"
     done
     echo "        Symbole der Oberflaeche: gui=$gsum  srv=$ssum"
     [ -z "$schlecht" ] \
-        && ok "the server image contains NO function of the eleven graphics files ($gsum in the GUI build, 0 here)" \
+        && ok "the server image contains no function of the eleven graphics files except the fb stub ($gsum in the GUI build)" \
         || bad "the symbol table says otherwise:$schlecht"
     ng=$(nm "$TMPD/gui.mb.elf" | grep -c "_F0\.gfx__")
     ns=$(nm "$TMPD/srv.mb.elf" | grep -c "_F0\.gfx__")
