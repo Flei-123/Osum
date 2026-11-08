@@ -336,10 +336,17 @@ fi
 
 echo "== 9. Modularitaet: abschaltbar und separat ausgeliefert =="
 
-if grep -q 'ld-musl' tools/usbimg/build.sh 2>/dev/null; then
-    bad "tools/usbimg/build.sh names ld-musl -- the interpreter would be in the base image"
+. "$(dirname "${BASH_SOURCE[0]}")/baseimage.sh"
+if base_image_has_musl; then
+    bad "tools/usbimg/build.sh puts ld-musl into the public image -- the interpreter would be in the base image"
 else
-    ok "the standard image (tools/usbimg/build.sh) names neither ld-musl nor busybox"
+    ok "ld-musl and busybox only enter the image behind BBSH=1 (personal profile opt-in), never in the public image"
+fi
+sed 's|^if \[ "\$BBSH" = 1 \]; then$|if true; then|' tools/usbimg/build.sh > "$TMPD/build-unguarded.sh"
+if BUILD_SCRIPT="$TMPD/build-unguarded.sh" base_image_has_musl; then
+    ok "counter-check: a build script that adds ld-musl unconditionally is flagged"
+else
+    bad "counter-check: an unguarded ld-musl line was not detected"
 fi
 
 OPKPY=${OPKPY:-$(python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/opkpfad.py")}   # A-025: der alte Ordner war ein Arbeitsbaum

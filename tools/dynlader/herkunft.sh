@@ -73,13 +73,15 @@ echo "   no copied relocation code -- the foreign loader is"
 echo "   BENUTZT, nicht nachgebaut."
 echo
 echo "4. WHAT IS IN THE BASE IMAGE"
-if grep -q 'ld-musl' tools/usbimg/build.sh 2>/dev/null; then
-    echo "   ACHTUNG: tools/usbimg/build.sh nennt ld-musl -- der Interpreter"
-    echo "   would then be in the standard image. That contradicts rule 3."
+. "$(dirname "${BASH_SOURCE[0]}")/baseimage.sh"
+if base_image_has_musl; then
+    echo "   WARNING: tools/usbimg/build.sh puts ld-musl into the public image."
+    echo "   That contradicts rule 3."
 else
-    echo "   NICHTS davon. tools/usbimg/build.sh nennt weder ld-musl noch"
-    echo "   a dynamic busybox; both come as a package (.opk)."
-    echo "   Checked with: grep ld-musl tools/usbimg/build.sh -> no hit."
+    echo "   The public image carries none of it. tools/usbimg/build.sh names"
+    echo "   ld-musl and a dynamic busybox only behind BBSH=1, which is on by"
+    echo "   default for the personal profile only; both otherwise come as a"
+    echo "   package (.opk)."
 fi
 echo
 echo "=================================================================="
