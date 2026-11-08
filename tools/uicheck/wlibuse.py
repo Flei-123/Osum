@@ -262,8 +262,8 @@ def write_doc(rows):
 
 def selftest(counts, base):
     probe = dict(counts)
-    victim = sorted(counts)[0]
-    probe[victim] += 1
+    victim = sorted(counts)[0] if counts else "kernel/user/selftest_probe.fi"
+    probe[victim] = probe.get(victim, 0) + 1
     grown = compare(probe, base) > 0
     sample = b"wlib.button(1)\nwlibc.theme(wlibc.T_BG)\nfuiscene.label(x)\nwlstate.focus()\n"
     found = len([m for m in REF.findall(sample) if m[0].decode() in WLIB_MODULES])
