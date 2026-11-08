@@ -31,6 +31,7 @@ echo "== 1. build =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 mkdir -p "$TMPD/bin"
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS store > "$TMPD/b.txt" 2>&1; then
+    [ -z "${STORE_ELF:-}" ] || cp "$STORE_ELF" "$TMPD/bin/store.elf"
     ok "firnc0 builds $(echo $PROGS store | wc -w) programs (stored $(stat -c%s "$TMPD/bin/stored.elf") B, store $(stat -c%s "$TMPD/bin/store.elf") B, opk $(stat -c%s "$TMPD/bin/opk.elf") B)"
 else
     bad "the programs do not build"; sed 's/^/        /' "$TMPD/b.txt" | head -20
@@ -367,9 +368,10 @@ EXTRA+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/de/ /usr/share/lo
 PROGS_SAVE=$PROGS; PROGS="$PROGS store"
 image "$TMPD/W.img" "$TMPD/sW.sh" "$P0"
 PROGS=$PROGS_SAVE
+SCALE_WORD=${STORE_SCALE:+uiscale=$STORE_SCALE}
 SOCK="$TMPD/mon.sock"; rm -f "$SOCK"
 timeout 2200 $QEMU_X86 -cpu "$OSUM_CPU" -smp 1 -kernel "$TMPD/k0.img" -m 768 \
-    -append "gfx disp fbres=$RES wm wmdauer wmshell osum vfs bus nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0 script=sh /t/s.sh;exit" \
+    -append "gfx disp fbres=$RES $SCALE_WORD wm wmdauer wmshell osum vfs bus nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0 script=sh /t/s.sh;exit" \
     -serial "file:$TMPD/w.txt" -display none -no-reboot -device "VGA,edid=on,xres=${RES%x*},yres=${RES#*x},vgamem_mb=32" \
     -monitor "unix:$SOCK,server,nowait" \
     -netdev user,id=n0 -device e1000,netdev=n0,mac=52:54:00:0a:0b:0c \
@@ -453,6 +455,7 @@ if waitfor "==S-WAIT==" 150; then
     differs s3-detail s4-ask && ok "Installieren asks first: a question window opens (picture differs)" || bad "no question window"
     key esc; sleep 3
     sawjob && bad "Abbrechen started a job" || ok "the question answered with Abbrechen: no job"
+    if [ -z "${STORE_ASK_ONLY:-}" ]; then
     echo "  -- install gruss"
     mark; D0=$(dlgn); tapt "Installieren"; sleep 1; key ret; dlgyes "$D0"
     i=0; while [ $i -lt 30 ] && ! sawjob; do sleep 1; i=$((i + 1)); done
@@ -495,6 +498,7 @@ if waitfor "==S-WAIT==" 150; then
     has "$TMPD/e.txt" "item=hallo|2.0.0|" "the catalog says hallo is at 2.0.0"
     has "$TMPD/e.txt" "|aktuell" "hallo is up to date after the update through the window"
     has "$TMPD/e.txt" "item=gruss|1.0.0|" "gruss is in the catalog again"
+    fi
     [ -n "$SHOTS" ] && { cp "$TMPD/w.txt" "$SHOTS/serial-$MODE-$RES.txt" 2>/dev/null; note "pictures: $SHOTS"; }
 else
     bad "the script never reached the window part"; wclean | tail -20 | sed 's/^/        /'
