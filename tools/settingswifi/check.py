@@ -9,8 +9,8 @@ from pathlib import Path
 from PIL import Image
 
 OCR_ZOOM = 3
-PANE_LEFT_FRACTION = 0.3
-PANE_TOP_FRACTION = 0.1
+PANE_LEFT_FRACTION = 0.2
+PANE_TOP_FRACTION = 0.18
 MESSAGE = r"no\s+wi-?fi\s+adapter\s+found"
 REFRESH = r"\bRefresh\b"
 CONNECT = r"\bConnect\b"

@@ -50,10 +50,10 @@ fi
 run_case() {
     local name=$1 scale=$2 res=$3 builddir=${4:-$DESIGNBUILD} adapter=${5:-no}
     local yres=${res#*x}
-    local extra_arg=() mkfs_extra=""
+    local extra_arg=() mkfs_extra="/lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/"
     if [ "$adapter" = yes ]; then
         extra_arg=("extra=$ADAPTER_WORDS")
-        mkfs_extra="/lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ $FIRMWARE_PATH=$OUT/blobs/v7.bin"
+        mkfs_extra="$mkfs_extra $FIRMWARE_PATH=$OUT/blobs/v7.bin"
     fi
     local dir="$OUT/$name" dreh="$OUT/$name.txt"
     mkdir -p "$dir"
@@ -66,8 +66,8 @@ run_case() {
         echo "taste ret"; echo "warte 8"
         echo "foto wifi"
     } > "$dreh"
-    DESIGNBUILD="$builddir" AUDIT_MKFS_EXTRA="$mkfs_extra" \
-        bash tools/design/audit.sh "$dir" accel=kvm uitrace=yes "${extra_arg[@]}" uiscale="$scale" res="$res" halt=$HALT_SECONDS drehbuch="$dreh" > "$OUT/$name.audit.log" 2>&1
+    DESIGNBUILD="$builddir" AUDIT_PROC=1 AUDIT_MKFS_EXTRA="$mkfs_extra" \
+        bash tools/design/audit.sh "$dir" accel=kvm uitrace=yes fs=an "${extra_arg[@]}" uiscale="$scale" res="$res" halt=$HALT_SECONDS drehbuch="$dreh" > "$OUT/$name.audit.log" 2>&1
 }
 
 MUT_BUILD="$OUT/build-mut"
