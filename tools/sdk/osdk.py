@@ -301,9 +301,7 @@ def cmd_build(args):
     work = tempfile.mkdtemp(prefix="osdk-")
     try:
         gui = bool(re.search(r"^profile app\b", open(main_src).read(), re.M))
-        mods = list(SDK_MODULES)
-        if gui:
-            mods = import_closure(["ulib", "wlib", "fuiapp", "fuiscene"])
+        mods = import_closure(["ulib", "wlib", "fuiapp", "fuiscene"] if gui else SDK_MODULES)
         for m in mods:
             shutil.copyfile(os.path.join(ROOT, "kernel", "user", m + ".fi"), os.path.join(work, m + ".fi"))
         for n in os.listdir(os.path.join(proj, "src")):
