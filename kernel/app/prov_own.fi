@@ -26,16 +26,26 @@ static mut m_get: [u8; 4] = "GET\0"
 static mut f_kennung: [u8; 8] = "kennung\0"
 static mut f_secret: [u8; 7] = "geheim\0"
 static mut f_code: [u8; 5] = "code\0"
-static mut f_bereich: [u8; 8] = "bereich\0"
-static mut f_subjekt: [u8; 8] = "subjekt\0"
-static mut f_anzeige: [u8; 8] = "anzeige\0"
-static mut f_zugriff: [u8; 8] = "zugriff\0"
-static mut f_erneuerung: [u8; 11] = "erneuerung\0"
-static mut f_ablauf: [u8; 7] = "ablauf\0"
-static mut f_datenort: [u8; 9] = "datenort\0"
-static mut f_zweit: [u8; 12] = "zweitfaktor\0"
-static mut f_between: [u8; 9] = "zwischen\0"
-static mut f_bereiche: [u8; 9] = "bereiche\0"
+static mut f_bereich_old: [u8; 8] = "bereich\0"
+static mut f_scope: [u8; 6] = "scope\0"
+static mut f_subjekt_old: [u8; 8] = "subjekt\0"
+static mut f_subjekt: [u8; 8] = "subject\0"
+static mut f_anzeige_old: [u8; 8] = "anzeige\0"
+static mut f_anzeige: [u8; 13] = "display_name\0"
+static mut f_zugriff_old: [u8; 8] = "zugriff\0"
+static mut f_zugriff: [u8; 7] = "access\0"
+static mut f_erneuerung_old: [u8; 11] = "erneuerung\0"
+static mut f_erneuerung: [u8; 8] = "renewal\0"
+static mut f_ablauf_old: [u8; 7] = "ablauf\0"
+static mut f_ablauf: [u8; 11] = "expires_at\0"
+static mut f_datenort_old: [u8; 9] = "datenort\0"
+static mut f_datenort: [u8; 10] = "data_home\0"
+static mut f_zweit_old: [u8; 12] = "zweitfaktor\0"
+static mut f_zweit: [u8; 14] = "second_factor\0"
+static mut f_between_old: [u8; 9] = "zwischen\0"
+static mut f_between: [u8; 8] = "interim\0"
+static mut f_bereiche_old: [u8; 9] = "bereiche\0"
+static mut f_bereiche: [u8; 7] = "scopes\0"
 
 static mut h_form: [u8; 20] = "konto.hint.badjson\0\0"
 static mut h_folder: [u8; 22] = "konto.hint.no_folder\0\0"
@@ -384,7 +394,7 @@ fn net_sign_in(z: *mut provider.Access,
             rt.c_length((*z).code))
     }
     if (*z).bereich != 0 && rt.c_length((*z).bereich) > 0 {
-        kjson.field(&w, (&f_bereich[0]) as u64, (*z).bereich,
+        kjson.field(&w, (&f_bereich_old[0]) as u64, (*z).bereich,
             rt.c_length((*z).bereich))
     }
     kjson.field_free(&w)
@@ -401,6 +411,25 @@ fn net_sign_in(z: *mut provider.Access,
     let r: u32 = net_read(z, s, &a)
     knetz.reply_free(&a)
     return r
+}
+
+fn text_either(d: *mut kjson.Json, w: u32, fresh: u64, old: u64, out: *mut rt.Buf) -> bool {
+    if kjson.text(d, w, fresh, out) {
+        return true
+    }
+    return kjson.text(d, w, old, out)
+}
+
+fn true_either(d: *mut kjson.Json, w: u32, fresh: u64, old: u64) -> bool {
+    return kjson.is_true(d, w, fresh) || kjson.is_true(d, w, old)
+}
+
+fn int_either(d: *mut kjson.Json, w: u32, fresh: u64, old: u64, found: *mut bool) -> i64 {
+    let v: i64 = kjson.int(d, w, fresh, found)
+    if *found {
+        return v
+    }
+    return kjson.int(d, w, old, found)
 }
 
 fn net_read(z: *mut provider.Access, s: *mut provider.Session,
@@ -425,8 +454,12 @@ fn net_read(z: *mut provider.Access, s: *mut provider.Session,
         return (*s).stand
     }
     let w: u32 = kjson.json_root(&d)
-    if kjson.hat(&d, w, (&f_bereiche[0]) as u64) {
-        let arr: u32 = kjson.json_get_c(&d, w, (&f_bereiche[0]) as u64)
+    var scopes_key: u64 = (&f_bereiche[0]) as u64
+    if !kjson.hat(&d, w, scopes_key) {
+        scopes_key = (&f_bereiche_old[0]) as u64
+    }
+    if kjson.hat(&d, w, scopes_key) {
+        let arr: u32 = kjson.json_get_c(&d, w, scopes_key)
         if kjson.json_kind(&d, arr) == kjson.JSON_ARRAY
             && kjson.json_count(&d, arr) > 1 {
             var kind: u32 = kjson.json_child(&d, arr)
@@ -443,8 +476,8 @@ fn net_read(z: *mut provider.Access, s: *mut provider.Session,
             return (*s).stand
         }
     }
-    if kjson.is_true(&d, w, (&f_zweit[0]) as u64) {
-        if kjson.text(&d, w, (&f_between[0]) as u64, &(*s).temp) {
+    if true_either(&d, w, (&f_zweit[0]) as u64, (&f_zweit_old[0]) as u64) {
+        if text_either(&d, w, (&f_between[0]) as u64, (&f_between_old[0]) as u64, &(*s).temp) {
             kjson.json_free(&d)
             (*s).stand = provider.S_ZWEITFAKTOR
             return (*s).stand
@@ -461,23 +494,27 @@ fn net_read(z: *mut provider.Access, s: *mut provider.Session,
         hinweis(s, (&h_status[0]) as u64)
         return (*s).stand
     }
-    if !kjson.text(&d, w, (&f_zugriff[0]) as u64, &(*s).zugriff) {
+    if !text_either(&d, w, (&f_zugriff[0]) as u64, (&f_zugriff_old[0]) as u64, &(*s).zugriff) {
         kjson.json_free(&d)
         (*s).stand = provider.S_ERROR
         hinweis(s, (&h_form[0]) as u64)
         return (*s).stand
     }
-    let _e: bool = kjson.text(&d, w, (&f_erneuerung[0]) as u64,
-        &(*s).erneuerung)
-    let _s: bool = kjson.text(&d, w, (&f_subjekt[0]) as u64, &(*s).subjekt)
-    let _n: bool = kjson.text(&d, w, (&f_anzeige[0]) as u64, &(*s).anzeige)
-    let _b: bool = kjson.text(&d, w, (&f_bereich[0]) as u64, &(*s).bereich)
-    if !kjson.text(&d, w, (&f_datenort[0]) as u64, &(*s).datenort) {
+    let _e: bool = text_either(&d, w, (&f_erneuerung[0]) as u64,
+        (&f_erneuerung_old[0]) as u64, &(*s).erneuerung)
+    let _s: bool = text_either(&d, w, (&f_subjekt[0]) as u64,
+        (&f_subjekt_old[0]) as u64, &(*s).subjekt)
+    let _n: bool = text_either(&d, w, (&f_anzeige[0]) as u64,
+        (&f_anzeige_old[0]) as u64, &(*s).anzeige)
+    let _b: bool = text_either(&d, w, (&f_scope[0]) as u64,
+        (&f_bereich_old[0]) as u64, &(*s).bereich)
+    if !text_either(&d, w, (&f_datenort[0]) as u64,
+        (&f_datenort_old[0]) as u64, &(*s).datenort) {
         rt.buf_push_bytes(&(*s).datenort, (*z).endpoint,
             rt.c_length((*z).endpoint))
     }
     var da: bool = false
-    let ab: i64 = kjson.int(&d, w, (&f_ablauf[0]) as u64, &da)
+    let ab: i64 = int_either(&d, w, (&f_ablauf[0]) as u64, (&f_ablauf_old[0]) as u64, &da)
     if da && ab > 0 {
         (*s).ablauf = ab as u64
     }
@@ -506,7 +543,7 @@ fn erneuern(z: *mut provider.Access, s: *mut provider.Session) -> u32 {
     }
     var koerper: rt.Buf = rt.buf_new()
     var w: kjson.Writer = kjson.writer_new(&koerper)
-    kjson.field(&w, (&f_erneuerung[0]) as u64, (*z).erneuerung,
+    kjson.field(&w, (&f_erneuerung_old[0]) as u64, (*z).erneuerung,
         rt.c_length((*z).erneuerung))
     kjson.field_free(&w)
     var a: knetz.Reply = knetz.reply_new()

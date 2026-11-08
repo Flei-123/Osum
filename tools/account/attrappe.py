@@ -41,6 +41,7 @@ state = {
     "fehlversuche": {},
     "temp": {},
     "refresh_verweigern": False,
+    "own_new_keys": False,
     "access_sekunden": 604800,
     "sperre": threading.Lock(),
 }
@@ -304,6 +305,12 @@ class Griff(BaseHTTPRequestHandler):
                    "exp": now + state["access_sekunden"]})
         erneu = jwt({"uid": "e_" + kennung, "type": "refresh", "iat": now,
                      "exp": now + 2592000})
+        if state["own_new_keys"]:
+            return self._reply(200, {
+                "subject": "e_" + kennung, "display_name": kennung,
+                "access": tok, "renewal": erneu,
+                "expires_at": now + state["access_sekunden"],
+                "data_home": "eigen"})
         return self._reply(200, {
             "subjekt": "e_" + kennung, "anzeige": kennung,
             "zugriff": tok, "erneuerung": erneu,
@@ -332,11 +339,13 @@ def main():
     ap.add_argument("--key")
     ap.add_argument("--directory", default=".")
     ap.add_argument("--kein-tls", action="store_true")
+    ap.add_argument("--own-new-keys", action="store_true")
     ap.add_argument("--refresh-verweigern", action="store_true")
     ap.add_argument("--access-secs", type=int, default=604800)
     a = ap.parse_args()
     state["verzeichnis"] = a.directory
     state["refresh_verweigern"] = a.refresh_verweigern
+    state["own_new_keys"] = a.own_new_keys
     state["access_sekunden"] = a.access_secs
     srv = ThreadingHTTPServer(("0.0.0.0", a.port), Griff)
     if not a.kein_tls:

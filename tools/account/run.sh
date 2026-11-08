@@ -310,6 +310,11 @@ JKEN=$(kv "$TMPD/o_j1.txt" kennung)
 
 lauf "$TMPD/d1.img" "konto anmelden --anbieter=eigen --kennung=justin < /pw_gut" "$TMPD/o_e1.txt"
 is "eigen ueber HTTPS anmelden" "$(kv "$TMPD/o_e1.txt" stand)" "ok"
+server_zu
+server_auf --own-new-keys
+lauf "$TMPD/d1.img" "konto anmelden --anbieter=eigen --kennung=justin < /pw_gut" "$TMPD/o_e1n.txt"
+is "eigen reads the new response keys" "$(kv "$TMPD/o_e1n.txt" stand)" "ok"
+is "eigen new keys: subject as with the old keys" "$(kv "$TMPD/o_e1n.txt" subjekt)" "$(kv "$TMPD/o_e1.txt" subjekt)"
 
 server_zu
 netz_zu
