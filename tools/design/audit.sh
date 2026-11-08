@@ -260,6 +260,7 @@ while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
 # r126: AUDIT_MKFS_EXTRA="/bin/x=/path/x.elf ..." puts extra files on the disk (a stub program for a click test)
 # (an entry for a target that is already on the list REPLACES it: mkfs refuses duplicates)
 for ex in ${AUDIT_MKFS_EXTRA:-}; do
+    case "$ex" in *=*) ;; *) continue ;; esac
     tgt=${ex%%=*}; keep=()
     for a in "${ARGS[@]}"; do case "$a" in "$tgt="*) ;; *) keep+=("$a");; esac; done
     ARGS=("${keep[@]}" "$ex")
