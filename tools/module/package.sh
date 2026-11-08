@@ -25,7 +25,7 @@ bash tools/module/build.sh "$OUT/ps2maus.omod" --name ps2maus --abi 1 \
 echo "== 2. make a package from it =="
 cat > "$OUT/ps2maus.rezept" <<REZEPT
 name=ps2maus
-fassung=$FASSUNG
+version=$FASSUNG
 titel=Zeigegeraet (PS/2, 8042)
 info=Nachladbarer Kerntreiber fuer die Maus am zweiten Anschluss des 8042. Braucht einen Kern mit Modulschnittstelle 1.
 keys=maus,zeiger,ps2,8042,treiber,modul

@@ -75,7 +75,7 @@ python3 tools/sdk/osdk.py check pakete/fvviewer/INFO --strict > "$OUT/osdk.log" 
     && ok "osdk check --strict: $(tail -1 "$OUT/osdk.log")" || { bad "osdk check --strict"; cat "$OUT/osdk.log"; }
 # 1.0.1 = same ELF, new recipe version (and INFO version, so the manifest differs)
 mkdir -p "$OUT/r101" && cp -r pakete/fvviewer/. "$OUT/r101/"
-sed -i 's/^fassung=.*/fassung=1.0.1/' "$OUT/r101/rezept"
+sed -i 's/^version=.*/version=1.0.1/' "$OUT/r101/rezept"
 sed -i 's/1\.0\.0/1.0.1/' "$OUT/r101/INFO"
 python3 tools/sdk/osdk.py check "$OUT/r101/INFO" --strict > /dev/null 2>&1 && ok "1.0.1 INFO passes osdk --strict" || bad "1.0.1 INFO"
 ( cd "$OUT/r101" && python3 "$OPK" bauen rezept -o "$OUT/pk/fvviewer-1.0.1.opk" > "$OUT/b101.log" 2>&1 ) \

@@ -68,7 +68,7 @@ rm -rf "$OUT/netzvoll" "$OUT/grossbau"
 mkdir -p "$OUT/netzvoll" "$OUT/grossbau"
 cat > "$OUT/gross.rezept" <<EOF
 name=gross
-fassung=1.0.0
+version=1.0.0
 titel=Gross
 info=Ein Paket, das nicht auf die Platte passt -- fuer den Fall "kein Platz"
 keys=gross,test

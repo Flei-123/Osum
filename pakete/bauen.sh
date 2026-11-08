@@ -69,7 +69,7 @@ paket() { # verzeichnis
     local nm
     nm=$(sed -n 's/^name=//p' "$d/rezept" | head -1)
     local fs
-    fs=$(sed -n 's/^fassung=//p' "$d/rezept" | head -1)
+    fs=$(sed -n 's/^version=//p' "$d/rezept" | head -1)
     python3 "$OPK" bauen "$d/rezept" -o "$OUT/$nm-$fs.opk" | sed 's/^/   /'
 }
 

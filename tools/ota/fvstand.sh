@@ -18,5 +18,5 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 bash pakete/bauen.sh "$T" > "$T/log" 2>&1
 OPKF=$(ls "$T"/fvviewer-*.opk 2>/dev/null | head -1)
 [ -n "$OPKF" ] || { echo "== fvviewer package not built:"; grep -i fvviewer "$T/log"; exit 1; }
-FASSUNG=$(sed -n 's/^fassung=//p' pakete/fvviewer/rezept | head -1)
+FASSUNG=$(sed -n 's/^version=//p' pakete/fvviewer/rezept | head -1)
 cp "$OPKF" "$STAND/fvviewer-${FASSUNG%%.*}.opk" && echo "ok: $STAND/fvviewer-${FASSUNG%%.*}.opk"

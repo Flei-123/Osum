@@ -61,7 +61,7 @@ open(o + "/harm.elf", "wb").write(bytes(b))
 PY
 cat > "$OUT/hallo-arm.rezept" <<EOF
 name=hallo-arm
-fassung=1.0.0
+version=1.0.0
 titel=Hallo (AArch64)
 info=Dasselbe Programm, uebersetzt fuer eine andere Maschine
 keys=hallo,arm
@@ -71,7 +71,7 @@ EOF
 printf 'nur text, kein programm\n' > "$OUT/daten.txt"
 cat > "$OUT/daten.rezept" <<EOF
 name=daten
-fassung=1.0.0
+version=1.0.0
 titel=Daten
 info=Kein ELF -- passt auf jede Maschine
 keys=daten

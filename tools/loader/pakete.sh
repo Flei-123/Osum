@@ -37,7 +37,7 @@ while IFS='|' read -r paket programm fassung titel info keys art; do
     {
         echo "# Round LOADER, generated from tools/loader/apps.tab -- do not edit by hand."
         echo "name=$paket"
-        echo "fassung=$fassung"
+        echo "version=$fassung"
         echo "titel=$titel"
         echo "info=$info"
         echo "keys=$keys"

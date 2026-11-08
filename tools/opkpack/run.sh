@@ -21,7 +21,7 @@ cp "$T/bin/echo.elf" "$T/h/payload/bin/prog"
 cat > "$T/h/p.rezept" <<'EOS'
 # comment line
 name = demo
-fassung = 1.0.0
+version = 1.0.0
 titel = Demo # trailing comment
 info=Demo package
 braucht=zeta
@@ -35,6 +35,16 @@ datei = bin/prog payload/bin/prog
 EOS
 printf 'name=broken\nfassung=1\ndatei = x.txt payload/missing.txt\n' > "$T/h/bad.rezept"
 printf 'name=kernel\nfassung=1\ndatei = x.txt payload/a.txt\n' > "$T/h/res.rezept"
+sed 's/^version =/fassung =/' "$T/h/p.rezept" > "$T/h/old.rezept"
+mkdir -p "$T/lg"; printf 'x\n' > "$T/lg/f"
+python3 - "$OPK" "$T/lg" "$T/legacy.opk" <<'EOP'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("opk", sys.argv[1])
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+meta = b"name=legacy\nfassung=7.7.7\ntitel=L\ninfo=i\nkeys=k\narch=any\n"
+raw, _ = mod.paket_packen(meta, mod.archiv_bauen(sys.argv[2]))
+open(sys.argv[3], "wb").write(raw)
+EOP
 cp "$T/h/p.rezept" "$T/h/q.rezept"; echo 'datei = extra.txt payload/a.txt' >> "$T/h/q.rezept"
 python3 "$OPK" schluessel "$T/keys" > /dev/null 2>&1
 python3 "$OPK" bauen "$T/h/p.rezept" -o "$T/src/demo-1.0.0.opk" > "$T/host-build.txt" 2>&1 || { bad "host build"; cat "$T/host-build.txt"; }
@@ -51,6 +61,9 @@ echo ==A==
 opk build /t/p.rezept -o /tmp/src/demo-1.0.0.opk
 shasum /tmp/src/demo-1.0.0.opk
 opk show /tmp/src/demo-1.0.0.opk
+opk build /t/old.rezept -o /tmp/old.opk
+shasum /tmp/old.opk
+opk show /t/legacy.opk
 echo ==B==
 opk source /tmp/src --key /t/key
 opk sign /tmp/src/demo-1.0.0.opk --key /t/key
@@ -66,7 +79,7 @@ sleep 3
 EOS
 bash tools/mkfsfi/mkfs.sh build "$T/d.img" 20000 /bin/ /t/ /tmp/ /tmp/src/ /proc/ /dev/ /etc/ /var/ /t/payload/ /t/payload/bin/ /t/payload/sub/ \
     $(for p in $PROGS; do echo "/bin/$p=$T/bin/$p.elf"; done) \
-    "/t/p.rezept=$T/h/p.rezept" "/t/bad.rezept=$T/h/bad.rezept" "/t/res.rezept=$T/h/res.rezept" "/t/key=$T/keys/geheim.key" "/t/corrupt.opk=$T/corrupt.opk" "/t/s0.sh=$T/s0.sh" \
+    "/t/p.rezept=$T/h/p.rezept" "/t/old.rezept=$T/h/old.rezept" "/t/legacy.opk=$T/legacy.opk" "/t/bad.rezept=$T/h/bad.rezept" "/t/res.rezept=$T/h/res.rezept" "/t/key=$T/keys/geheim.key" "/t/corrupt.opk=$T/corrupt.opk" "/t/s0.sh=$T/s0.sh" \
     "/t/payload/a.txt=$T/h/payload/a.txt" "/t/payload/start=$T/h/payload/start" "/t/payload/sub/b.txt=$T/h/payload/sub/b.txt" "/t/payload/bin/prog=$T/bin/echo.elf" > "$T/mkfs.txt" 2>&1 || tail -3 "$T/mkfs.txt"
 ACC=tcg; [ -e /dev/kvm ] && ACC=kvm
 timeout 400 qemu-system-x86_64 -accel "$ACC" -smp 1 -kernel "$T/k0.img" -m 512 \
@@ -81,6 +94,9 @@ part A B; part B C; part C END
 has "$T/p.A" "$H_PKG  /tmp/src/demo-1.0.0.opk" "A: guest package = host package (same bytes)"
 grep -aqF -- "$H_OTHER" "$T/p.A" && bad "A: guest package equals a DIFFERENT host package" || ok "A: control: a different recipe gives a different hash"
 has "$T/p.A" "name demo" "A: show prints the name"
+has "$T/p.A" "version 1.0.0" "A: show prints the version key"
+has "$T/p.A" "$H_PKG  /tmp/old.opk" "A: old recipe spelling (fassung=) builds the same bytes"
+has "$T/p.A" "version 7.7.7" "A: show reads a package whose meta still says fassung"
 has "$T/p.A" "arch x86_64" "A: arch measured out of the ELF"
 has "$T/p.A" "braucht alpha" "A: show lists braucht"
 has "$T/p.B" "$H_IDX  /tmp/src/INDEX" "B: INDEX equals host INDEX"

@@ -22,7 +22,7 @@ META = {
 }
 
 RECIPE = """name=firefox
-fassung={version}
+version={version}
 titel=Firefox
 info=Web browser
 keys=firefox,browser,web,internet

@@ -50,7 +50,7 @@ rm -f "$OUT/dsrc"/*
 mkrez() { # name deps
     {
         echo "name=$1"
-        echo "fassung=1.0.0"
+        echo "version=1.0.0"
         echo "titel=$1"
         echo "info=dependency probe"
         echo "keys=$1,probe"

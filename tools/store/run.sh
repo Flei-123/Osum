@@ -58,7 +58,7 @@ bash tools/install/pakete.sh "$TMPD/pk" > "$TMPD/pk.log" 2>&1 && ok "hallo 1.0.0
 OPK=$(python3 tools/lib/opkpfad.py)
 KEY="$TMPD/pk/geheim.key"
 # `gruss` 1.0.0: the same program under another name
-sed -e 's/^name=hallo/name=gruss/' -e 's/^fassung=.*/fassung=1.0.0/' -e 's/^titel=.*/titel=Gruss/' -e "s#H1ELF#$TMPD/pk/h1.elf#" tools/install/hallo1.rezept > "$TMPD/gruss.rezept"
+sed -e 's/^name=hallo/name=gruss/' -e 's/^version=.*/version=1.0.0/' -e 's/^titel=.*/titel=Gruss/' -e "s#H1ELF#$TMPD/pk/h1.elf#" tools/install/hallo1.rezept > "$TMPD/gruss.rezept"
 python3 "$OPK" bauen "$TMPD/gruss.rezept" -o "$TMPD/pk/pak/gruss-1.opk" > "$TMPD/gruss.log" 2>&1 && ok "gruss 1.0.0 built" || { bad "gruss"; tail -3 "$TMPD/gruss.log"; }
 mkstore() { # dir  keyfile  [list of opk files]
     local d=$1 k=$2; shift 2
