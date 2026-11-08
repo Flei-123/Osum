@@ -1,0 +1,353 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import lineout
+import libc.io
+import libc.errno
+import libc.text
+import libc.octets
+import libc.kcall
+import services.svcrules
+import services.svcqueue
+import services.dlgproto
+import services.svcosum
+
+export { u_start }
+
+const L_APP: u64 = 0
+const L_HIDDEN: u64 = 16
+const L_SLASHED: u64 = 24
+const L_GREETING: u64 = 28
+const L_HELLO: u64 = 37
+const L_SECOND: u64 = 50
+const L_DOTS: u64 = 57
+const L_DOTKEY: u64 = 62
+const L_BIG: u64 = 65
+const L_CLIP: u64 = 69
+const L_OUTNAME: u64 = 87
+const L_BODY: u64 = 95
+const L_TITLE: u64 = 113
+const L_HI: u64 = 122
+const L_SURE: u64 = 128
+const L_ACCEPT: u64 = 134
+const L_OUTPATH: u64 = 143
+const L_NOTENAME: u64 = 157
+const L_NOTEBODY: u64 = 168
+const L_NOTEPATH: u64 = 182
+const L_SKIPPATH: u64 = 199
+const L_SKIPBODY: u64 = 216
+const L_EMPTY: u64 = 221
+const L_ST0: u64 = 222
+const L_ST1: u64 = 225
+const L_ST2: u64 = 234
+const L_ST3: u64 = 245
+const L_ST4: u64 = 252
+const L_ST5: u64 = 257
+const L_ST6: u64 = 267
+const L_PFX_OK: u64 = 275
+const L_PFX_FAIL: u64 = 290
+const L_SUMMARY: u64 = 305
+const L_COLON: u64 = 338
+const L_CHECKS: u64 = 341
+const L_FAILURES: u64 = 351
+const L_W_OPEN: u64 = 361
+const L_W_CANCEL: u64 = 380
+const L_W_SAVE: u64 = 401
+const L_W_MSG: u64 = 420
+const L_W_CONFIRM: u64 = 442
+const L_DONE: u64 = 464
+const L_COUNT: u64 = 42
+const POOL_BYTES: u64 = 479
+static mut POOL: [u8; 479] = "svc-conformance\0.hidden\0a/b\0greeting\0héllo world\0second\0../x\0.k\0big\0services clip ✓\0out.txt\0saved by services\0Services\0hello\0sure?\0.txt,.md\0/data/out.txt\0zznote.txt\0note-body-123\0/data/zznote.txt\0/data/zzskip.bin\0skip\0\0ok\0canceled\0no-backend\0failed\0busy\0not-found\0invalid\0svcconf: ok   \0svcconf: FAIL \0svcconf: services orientos caps \0: \0 checks, \0 failures\0svcconf: wait-open\0svcconf: wait-cancel\0svcconf: wait-save\0svcconf: wait-message\0svcconf: wait-confirm\0svcconf: done\0\0"
+const CHECK_COUNT: u64 = 30
+static mut CHECK_NAMES: [u8; 502] = "status names\0app name rules\0storage everywhere\0async host on OrientOS\0all capability bits\0storage absent key\0storage set\0storage get\0storage overwrite\0storage has\0storage empty value removes\0storage remove absent is ok\0storage bad keys\0storage value limit\0clipboard copy\0clipboard paste request\0clipboard reply\0file open request\0file item\0file end\0file open again\0file canceled\0file save bad name\0file save\0file save reply\0file save content\0dialog bad kind\0dialog message\0dialog confirm\0queue drained\0\0"
+
+const VALUE_BUF: u64 = 65600
+const NAME_BUF: u64 = 128
+const BAD_KIND: u64 = 9
+const LIMIT_PROBE: u64 = 65537
+const CAPS_ALL: u64 = 127
+const ID_AT: u64 = 4
+const OP_AT: u64 = 8
+const STATUS_AT: u64 = 12
+const INDEX_AT: u64 = 16
+
+static mut value_buf: [u8; 65600] = [0 as u8; 65600]
+static mut name_buf: [u8; 128] = [0 as u8; 128]
+static mut head_buf: [u8; 28] = [0 as u8; 28]
+static mut out_buf: [u8; 8] = [0 as u8; 8]
+static mut checks: u64 = 0
+static mut failures: u64 = 0
+
+fn lit(offset: u64) -> u64 {
+    return (&POOL[0 as usize]) as u64 + offset
+}
+
+fn size_of_text(p: u64) -> u64 {
+    return text.length(p)
+}
+
+fn check_name(n: u64) -> u64 {
+    if n >= CHECK_COUNT {
+        return lit(L_EMPTY)
+    }
+    var at: u64 = 0
+    var index: u64 = 0
+    let table: u64 = (&CHECK_NAMES[0 as usize]) as u64
+    while index < n {
+        while octets.ld8(table, at) != 0 {
+            at = at + 1
+        }
+        at = at + 1
+        index = index + 1
+    }
+    return table + at
+}
+
+fn say(p: u64) {
+    let _n: u64 = lineout.add_text(p)
+}
+
+fn mark(p: u64) {
+    say(p)
+    lineout.end_line()
+}
+
+fn check(ok: bool) {
+    if ok {
+        say(lit(L_PFX_OK))
+    } else {
+        failures = failures + 1
+        say(lit(L_PFX_FAIL))
+    }
+    say(check_name(checks))
+    lineout.end_line()
+    checks = checks + 1
+}
+
+fn write_file(path: u64, body: u64) {
+    let fd: u64 = io.create(path)
+    if errno.failed(fd) {
+        return
+    }
+    let _w: u64 = io.write_all(fd, body, size_of_text(body))
+    let _c: u64 = io.close(fd)
+}
+
+fn read_file(path: u64) -> u64 {
+    octets.zero(value_buf_ptr(), VALUE_BUF)
+    let size: u64 = io.size_of(path)
+    if errno.failed(size) || size >= VALUE_BUF {
+        return 0
+    }
+    let fd: u64 = io.open(path, kcall.O_RDONLY)
+    if errno.failed(fd) {
+        return 0
+    }
+    let got: u64 = io.read_full(fd, value_buf_ptr(), size)
+    let _c: u64 = io.close(fd)
+    if errno.failed(got) {
+        return 0
+    }
+    return got
+}
+
+fn value_buf_ptr() -> u64 {
+    return (&value_buf[0 as usize]) as u64
+}
+
+fn head_ptr() -> u64 {
+    return (&head_buf[0 as usize]) as u64
+}
+
+fn out_ptr() -> u64 {
+    return (&out_buf[0 as usize]) as u64
+}
+
+fn name_ptr() -> u64 {
+    return (&name_buf[0 as usize]) as u64
+}
+
+fn set_app(app: u64) -> u64 {
+    return svcosum.set_app(app, size_of_text(app))
+}
+
+fn put(key: u64, value: u64) -> u64 {
+    return svcosum.store_set(key, size_of_text(key), value, size_of_text(value))
+}
+
+fn fetch(key: u64) -> u64 {
+    octets.zero(out_ptr(), 8)
+    octets.zero(value_buf_ptr(), VALUE_BUF)
+    return svcosum.store_get(key, size_of_text(key), value_buf_ptr(), VALUE_BUF - 1, out_ptr())
+}
+
+fn stored(key: u64, want: u64) -> bool {
+    let status: u64 = fetch(key)
+    return status == svcrules.OK && octets.le32(out_ptr()) == size_of_text(want) && text.equal(value_buf_ptr(), want)
+}
+
+fn next_reply() -> bool {
+    octets.zero(name_ptr(), NAME_BUF)
+    octets.zero(value_buf_ptr(), VALUE_BUF)
+    return svcosum.poll(head_ptr(), name_ptr(), NAME_BUF - 1, value_buf_ptr(), VALUE_BUF - 1)
+}
+
+fn reply_is(id: u64, op: u64, status: u64) -> bool {
+    let head: u64 = head_ptr()
+    return octets.le32(head + ID_AT) == id && octets.le32(head + OP_AT) == op && octets.le32(head + STATUS_AT) == status
+}
+
+fn reply_index() -> u64 {
+    return octets.le32(head_ptr() + INDEX_AT)
+}
+
+fn check_status_names() {
+    var expected: u64 = lit(L_ST0)
+    var status: u64 = 0
+    var same: bool = true
+    while status <= svcrules.INVALID {
+        if !text.equal(svcrules.status_name(status), expected) {
+            same = false
+        }
+        expected = expected + size_of_text(expected) + 1
+        status = status + 1
+    }
+    check(same)
+}
+
+fn check_app_names() {
+    let empty: u64 = set_app(lit(L_EMPTY))
+    let hidden: u64 = set_app(lit(L_HIDDEN))
+    let slashed: u64 = set_app(lit(L_SLASHED))
+    check(empty == svcrules.INVALID && hidden == svcrules.INVALID && slashed == svcrules.INVALID && set_app(lit(L_APP)) == svcrules.OK)
+}
+
+fn check_caps() {
+    let bits: u64 = svcosum.caps()
+    check(svcrules.has(bits, svcrules.CAP_STORAGE))
+    check(svcrules.has(bits, svcrules.CAP_ASYNC_HOST))
+    check(bits == CAPS_ALL)
+}
+
+fn check_storage() {
+    let key: u64 = lit(L_GREETING)
+    let _r: u64 = svcosum.store_remove(key, size_of_text(key))
+    check(fetch(key) == svcrules.NOT_FOUND && octets.le32(out_ptr()) == 0)
+    check(put(key, lit(L_HELLO)) == svcrules.OK)
+    check(stored(key, lit(L_HELLO)))
+    check(put(key, lit(L_SECOND)) == svcrules.OK && stored(key, lit(L_SECOND)))
+    check(svcosum.store_has(key, size_of_text(key)))
+    check(put(key, lit(L_EMPTY)) == svcrules.OK && !svcosum.store_has(key, size_of_text(key)))
+    check(svcosum.store_remove(key, size_of_text(key)) == svcrules.OK)
+    check_bad_keys()
+    check_value_limit()
+}
+
+fn check_bad_keys() {
+    let dots: u64 = lit(L_DOTS)
+    let dot_key: u64 = lit(L_DOTKEY)
+    let empty: u64 = lit(L_EMPTY)
+    let set_bad: u64 = put(dots, lit(L_HI))
+    let get_bad: u64 = svcosum.store_get(empty, 0, value_buf_ptr(), VALUE_BUF - 1, out_ptr())
+    let remove_bad: u64 = svcosum.store_remove(dot_key, size_of_text(dot_key))
+    check(set_bad == svcrules.INVALID && get_bad == svcrules.INVALID && remove_bad == svcrules.INVALID)
+}
+
+fn check_value_limit() {
+    let big: u64 = lit(L_BIG)
+    var at: u64 = 0
+    while at < LIMIT_PROBE {
+        octets.st8(value_buf_ptr(), at, 120)
+        at = at + 1
+    }
+    check(svcosum.store_set(big, size_of_text(big), value_buf_ptr(), LIMIT_PROBE) == svcrules.INVALID)
+}
+
+fn check_clipboard() {
+    let clip: u64 = lit(L_CLIP)
+    check(svcosum.copy_text(clip, size_of_text(clip)) == svcrules.OK)
+    octets.zero(out_ptr(), 8)
+    let requested: u64 = svcosum.paste_text(out_ptr())
+    let id: u64 = octets.le32(out_ptr())
+    check(requested == svcrules.OK && id != 0)
+    check(next_reply() && reply_is(id, svcqueue.OP_CLIP_TEXT, svcrules.OK) && text.equal(value_buf_ptr(), clip))
+}
+
+fn open_dialog() -> u64 {
+    octets.zero(out_ptr(), 8)
+    return svcosum.file_open(lit(L_TITLE), lit(L_ACCEPT), out_ptr())
+}
+
+fn check_file_open() {
+    mark(lit(L_W_OPEN))
+    let requested: u64 = open_dialog()
+    let id: u64 = octets.le32(out_ptr())
+    check(requested == svcrules.OK && id != 0)
+    check(next_reply() && reply_is(id, svcqueue.OP_FILE_ITEM, svcrules.OK) && reply_index() == 0
+        && text.equal(name_ptr(), lit(L_NOTENAME)) && text.equal(value_buf_ptr(), lit(L_NOTEBODY)))
+    check(next_reply() && reply_is(id, svcqueue.OP_FILE_END, svcrules.OK) && reply_index() == 1)
+    mark(lit(L_W_CANCEL))
+    check(open_dialog() == svcrules.OK)
+    let again: u64 = octets.le32(out_ptr())
+    check(next_reply() && reply_is(again, svcqueue.OP_FILE_END, svcrules.CANCELED) && reply_index() == 0)
+}
+
+fn save_dialog(name: u64) -> u64 {
+    octets.zero(out_ptr(), 8)
+    let body: u64 = lit(L_BODY)
+    return svcosum.file_save(lit(L_TITLE), name, body, size_of_text(body), out_ptr())
+}
+
+fn check_file_save() {
+    check(save_dialog(lit(L_EMPTY)) == svcrules.INVALID)
+    mark(lit(L_W_SAVE))
+    check(save_dialog(lit(L_OUTNAME)) == svcrules.OK)
+    let id: u64 = octets.le32(out_ptr())
+    check(next_reply() && reply_is(id, svcqueue.OP_FILE_ITEM, svcrules.OK) && text.equal(name_ptr(), lit(L_OUTNAME))
+        && next_reply() && reply_is(id, svcqueue.OP_FILE_END, svcrules.OK))
+    check(read_file(lit(L_OUTPATH)) == size_of_text(lit(L_BODY)) && text.equal(value_buf_ptr(), lit(L_BODY)))
+}
+
+fn check_dialogs() {
+    octets.zero(out_ptr(), 8)
+    check(svcosum.message(BAD_KIND, lit(L_TITLE), lit(L_HI), 0, out_ptr()) == svcrules.INVALID)
+    mark(lit(L_W_MSG))
+    check(svcosum.message(0, lit(L_TITLE), lit(L_HI), 0, out_ptr()) == svcrules.OK && octets.le32(out_ptr()) == dlgproto.ANSWER_OK)
+    mark(lit(L_W_CONFIRM))
+    octets.st32(out_ptr(), 0, 9)
+    check(svcosum.confirm(lit(L_TITLE), lit(L_SURE), out_ptr()) == svcrules.OK && octets.le32(out_ptr()) == dlgproto.ANSWER_OK)
+}
+
+fn report() {
+    check(svcosum.pending() == 0)
+    say(lit(L_SUMMARY))
+    lineout.add_num(svcosum.caps())
+    say(lit(L_COLON))
+    lineout.add_num(checks)
+    say(lit(L_CHECKS))
+    lineout.add_num(failures)
+    say(lit(L_FAILURES))
+    lineout.end_line()
+    mark(lit(L_DONE))
+}
+
+fn u_start(args: u64) -> u64 {
+    write_file(lit(L_NOTEPATH), lit(L_NOTEBODY))
+    write_file(lit(L_SKIPPATH), lit(L_SKIPBODY))
+    check_status_names()
+    check_app_names()
+    check_caps()
+    check_storage()
+    check_clipboard()
+    check_file_open()
+    check_file_save()
+    check_dialogs()
+    report()
+    return failures
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}
