@@ -91,7 +91,7 @@ Run `--dry` first (prints programs, `verify OK ... N files`, VERZEICHNIS size), 
 The stand name is `count` = `git rev-list --count <HP_REF>` at the moment the script fetches, so a main that moves during
 the queue wait publishes a later commit: read the `published:` line, not the commit you started from.
 
-Current stand: 5396 (main 2279a2cf4, content = 990a1b779 plus the dynlader gate fix; 141 overlay programs, 359 hashes, VERZEICHNIS 39865 B).
+Current stand: 5405 (main b3a0d17db, includes CURRENT/TRIAL files, tscdelta, fb-aus gui-off; 141 overlay programs, 359 hashes, VERZEICHNIS 39865 B).
 All packages carry the new meta key `version`, so their hashes differ from earlier stands.
 
 Device steps after a power cycle (the HP runs trial 5373; the guard feed `wlanfirst` is NOT applied):
@@ -104,4 +104,4 @@ Device steps after a power cycle (the HP runs trial 5373; the guard feed `wlanfi
     /bin/ota system apply bg      (then /bin/reboot, /bin/ota confirm)
 
 Before any HP reboot remove `wlanfirst` from `/etc/wlan.knobs` unless the feed that contains the wlanfirst guard (main ed6458c91) has been applied.
-Feed 5396 contains the guard. The `apply` is the owner's decision; nothing here touches the device.
+Feed 5405 contains the guard. The `apply` is the owner's decision; nothing here touches the device.
