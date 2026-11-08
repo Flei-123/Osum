@@ -62,7 +62,7 @@ act call settings.get key=lock.idle
 echo ==T4==
 act call settings.set key=lock.idle value=1500 --as helper
 sleep 5
-jarvisctl input key 36 0
+jarvisctl input scan 36
 sleep 3
 act call settings.get key=lock.idle
 echo ==T4MID==
