@@ -527,6 +527,14 @@ class Fahrer:
             return (int(g.group(1)) + int(m.group(1)),
                     int(g.group(2)) + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
+        if name.startswith("qsnetkey"):
+            key = int(name[8:])
+            m = last_2(r"qsnet: box k=%d x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % key)
+            g = last_2(r"qs: geo x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            if m is None or g is None:
+                return None
+            return (int(g.group(1)) + int(m.group(1)), int(g.group(2)) + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
         if name in ("qsmprev", "qsmplay", "qsmnext"):
             word = {"qsmprev": "mprev", "qsmplay": "mplay", "qsmnext": "mnext"}[name]
             m = last_2(r"qs: %s +x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % word)

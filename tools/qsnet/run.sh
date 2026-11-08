@@ -72,5 +72,6 @@ for sc in $SCALES; do
     if grep -aq 'qs: closed by escape' "$S"; then ok "scale $sc: Escape still closes the panel"
     else bad "scale $sc: Escape did not close the panel"; fi
 done
+bash tools/qsnet/wifi.sh ${SCALES%% *} || fail=$((fail+1))
 echo; echo "QSNET: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
