@@ -11,8 +11,8 @@ export DESIGNBUILD="${DESIGNBUILD:-$OUT/build}"
 export AUDIT_TIMEOUT="${AUDIT_TIMEOUT:-1700}"
 MAX_PARALLEL=3
 HALT_SECONDS=200
-HOT_HALT_SECONDS=330
-HOT_WAIT=300
+HOT_HALT_SECONDS=460
+HOT_WAIT=420
 HOT_SETTLE=6
 WIDE_RES=1920x1080
 NARROW_RES=1280x800
@@ -99,7 +99,7 @@ run_case() {
             echo "warteauf wlanhot: appear || $HOT_WAIT"; echo "warte $HOT_SETTLE"
             echo "foto hot1"
             echo "warteauf wlanhot: gone || $HOT_WAIT"; echo "warte $HOT_SETTLE"
-            echo "foto hot2"
+            echo "foto hot2"; echo "warte 20"; echo "foto hot3"
         else
             echo "foto wifi"
         fi
