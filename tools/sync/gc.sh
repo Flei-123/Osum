@@ -41,3 +41,4 @@ esac
 [ "${OSUM_INLINE:-0}" = 1 ] || OPTL="$OPTL --no-pass=inline"
 OPTL1=${OPTL/--no-pass=inline/}
 export OPTL OPTL1
+export FIRN_RA_MMIO=${FIRN_RA_MMIO:-1}

@@ -66,6 +66,7 @@ OHNE_TUNNEL=0
 [[ $TUNNEL == off ]] && OHNE_TUNNEL=1
 
 export FIRNLIB="${KERNEL_FIRNLIB:-$ROOT/lib}"
+export FIRN_RA_MMIO=${FIRN_RA_MMIO:-1}
 bash vendor/firn/fetch-firnc.sh >/dev/null || {
     echo "vendor/firn/fetch-firnc.sh fehlgeschlagen" >&2; exit 1; }
 
