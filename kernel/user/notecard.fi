@@ -1,0 +1,531 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import libc.memcopy
+import libc.text
+import libc.regio
+import ulib
+import wlibc
+import fuiscene
+import msg
+import notetext
+
+export {
+    KIND_INFO, KIND_WARNING, KIND_ERROR, KIND_PROGRESS, KIND_ACTION, TOAST_SLOT, CARD_W,
+    set_old, from_bus, fill, set_buttons, set_progress, text_ptr, card_h_pt, card_h, width_px,
+    plate, draw_card, hit_dismiss, hit_button, button_rect_x, button_rect_y, button_w, button_h,
+    dismiss_range, is_dismissed, counter_text, is_media, is_crash, center_title, center_clear,
+    center_empty
+}
+
+const KIND_INFO: u64 = 0
+const KIND_WARNING: u64 = 1
+const KIND_ERROR: u64 = 2
+const KIND_PROGRESS: u64 = 3
+const KIND_ACTION: u64 = 4
+const KIND_COUNT: u64 = 5
+
+const RULE_DEFAULT: u64 = 0
+const RULE_USB_IN: u64 = 1
+const RULE_USB_OUT: u64 = 2
+const RULE_CRASH: u64 = 3
+const RULE_COUNT: u64 = 4
+
+const SLOTS: u64 = 10
+const TOAST_SLOT: u64 = 0
+const TEXT_BYTES: u64 = 96
+const APP_BYTES: u64 = 32
+const TITLE_BYTES: u64 = 40
+const LABEL_BYTES: u64 = 24
+const TIME_BYTES: u64 = 8
+const STAMPS: u64 = 16
+const DISMISSED: u64 = 32
+
+const CARD_W: u64 = 360
+const PAD: u64 = 12
+const ICON: u64 = 18
+const HEAD_H: u64 = 20
+const TITLE_H: u64 = 22
+const TEXT_H: u64 = 20
+const PROGRESS_H: u64 = 10
+const BAR_H: u64 = 4
+const BUTTON_H: u64 = 28
+const BUTTON_W: u64 = 104
+const GAP: u64 = 4
+const DISMISS_W: u64 = 20
+const ICON_GAP: u64 = 8
+const LEGACY_PAD: u64 = 10
+const LEGACY_STRIPE: u64 = 3
+
+static mut ready: bool = false
+static mut old_layout: bool = false
+
+static mut slot_kind: [u64; 10] = [0 as u64; 10]
+static mut slot_pct: [u64; 10] = [0 as u64; 10]
+static mut slot_buttons: [u64; 10] = [0 as u64; 10]
+static mut slot_prio: [u64; 10] = [0 as u64; 10]
+static mut slot_text: [u8; 960] = [0 as u8; 960]
+static mut slot_app: [u8; 320] = [0 as u8; 320]
+static mut slot_title: [u8; 400] = [0 as u8; 400]
+static mut slot_label1: [u8; 240] = [0 as u8; 240]
+static mut slot_label2: [u8; 240] = [0 as u8; 240]
+static mut slot_time: [u8; 80] = [0 as u8; 80]
+
+static mut stamp_seq: [u64; 16] = [0 as u64; 16]
+static mut stamp_min: [u64; 16] = [0 as u64; 16]
+static mut dismissed_seq: [u64; 32] = [0 as u64; 32]
+static mut dismissed_at: u64 = 0
+
+static mut kind_role: [u64; 5] = [0 as u64; 5]
+static mut kind_title_key: [u64; 5] = [0 as u64; 5]
+static mut rule_kind: [u64; 4] = [0 as u64; 4]
+static mut rule_app_key: [u64; 4] = [0 as u64; 4]
+static mut rule_title_key: [u64; 4] = [0 as u64; 4]
+
+static mut kind_glyphs: [u8; 6] = "i!x%>\0"
+static mut glyph_buf: [u8; 2] = [0 as u8; 2]
+static mut dismiss_glyph: [u8; 2] = "x\0"
+
+static mut k_app_system: [u8; 16] = "note.app.system\0"
+static mut k_app_devices: [u8; 17] = "note.app.devices\0"
+static mut k_title_info: [u8; 16] = "note.title.info\0"
+static mut k_title_warning: [u8; 19] = "note.title.warning\0"
+static mut k_title_error: [u8; 17] = "note.title.error\0"
+static mut k_title_progress: [u8; 20] = "note.title.progress\0"
+static mut k_title_action: [u8; 18] = "note.title.action\0"
+static mut k_title_usb_in: [u8; 18] = "note.title.usb_in\0"
+static mut k_title_usb_out: [u8; 19] = "note.title.usb_out\0"
+static mut k_title_crash: [u8; 17] = "note.title.crash\0"
+static mut k_counter: [u8; 13] = "note.counter\0"
+static mut k_center: [u8; 12] = "note.center\0"
+static mut k_clear: [u8; 11] = "note.clear\0"
+static mut k_empty: [u8; 11] = "note.empty\0"
+
+fn scale() -> u64 {
+    return wlibc.ui_scale()
+}
+
+fn slot_at(base: u64, bytes: u64, slot: u64) -> u64 {
+    return base + slot * bytes
+}
+
+fn text_ptr(slot: u64) -> u64 {
+    return slot_at((&slot_text[0 as usize]) as u64, TEXT_BYTES, slot)
+}
+
+fn app_ptr(slot: u64) -> u64 {
+    return slot_at((&slot_app[0 as usize]) as u64, APP_BYTES, slot)
+}
+
+fn title_ptr(slot: u64) -> u64 {
+    return slot_at((&slot_title[0 as usize]) as u64, TITLE_BYTES, slot)
+}
+
+fn label1_ptr(slot: u64) -> u64 {
+    return slot_at((&slot_label1[0 as usize]) as u64, LABEL_BYTES, slot)
+}
+
+fn label2_ptr(slot: u64) -> u64 {
+    return slot_at((&slot_label2[0 as usize]) as u64, LABEL_BYTES, slot)
+}
+
+fn time_ptr(slot: u64) -> u64 {
+    return slot_at((&slot_time[0 as usize]) as u64, TIME_BYTES, slot)
+}
+
+fn copy_into(dst: u64, src: u64, max: u64) {
+    var n: u64 = text.length(src)
+    if n > max {
+        n = max
+    }
+    memcopy.copy(dst, src, n)
+    __mmio_write8((dst + n) as *mut u8, 0 as u8)
+}
+
+fn register_kind(kind: u64, role: u64, title_key: u64) {
+    kind_role[kind as usize] = role
+    kind_title_key[kind as usize] = title_key
+}
+
+fn register_rule(rule: u64, kind: u64, app_key: u64, title_key: u64) {
+    rule_kind[rule as usize] = kind
+    rule_app_key[rule as usize] = app_key
+    rule_title_key[rule as usize] = title_key
+}
+
+fn tables() {
+    if ready {
+        return
+    }
+    ready = true
+    register_kind(KIND_INFO, wlibc.C_ACCENT, (&k_title_info[0 as usize]) as u64)
+    register_kind(KIND_WARNING, wlibc.C_WARNING, (&k_title_warning[0 as usize]) as u64)
+    register_kind(KIND_ERROR, wlibc.C_DANGER, (&k_title_error[0 as usize]) as u64)
+    register_kind(KIND_PROGRESS, wlibc.C_ACCENT, (&k_title_progress[0 as usize]) as u64)
+    register_kind(KIND_ACTION, wlibc.C_ACCENT, (&k_title_action[0 as usize]) as u64)
+    register_rule(RULE_DEFAULT, KIND_COUNT, (&k_app_system[0 as usize]) as u64, 0)
+    register_rule(RULE_USB_IN, KIND_INFO, (&k_app_devices[0 as usize]) as u64,
+        (&k_title_usb_in[0 as usize]) as u64)
+    register_rule(RULE_USB_OUT, KIND_INFO, (&k_app_devices[0 as usize]) as u64,
+        (&k_title_usb_out[0 as usize]) as u64)
+    register_rule(RULE_CRASH, KIND_ERROR, (&k_app_system[0 as usize]) as u64,
+        (&k_title_crash[0 as usize]) as u64)
+}
+
+fn set_old(on: bool) {
+    old_layout = on
+}
+
+fn is_media(raw: u64, n: u64) -> bool {
+    return n > 5 && regio.read8_at(raw, 0) == 117 && regio.read8_at(raw, 1) == 115
+        && regio.read8_at(raw, 2) == 98 && regio.read8_at(raw, 4) == 32
+}
+
+fn is_crash(raw: u64, n: u64) -> bool {
+    return n > 6 && regio.read8_at(raw, 0) == 99 && regio.read8_at(raw, 1) == 114
+        && regio.read8_at(raw, 5) == 32
+}
+
+fn rule_of(raw: u64, n: u64) -> u64 {
+    if is_crash(raw, n) {
+        return RULE_CRASH
+    }
+    if is_media(raw, n) {
+        if regio.read8_at(raw, 3) == 43 {
+            return RULE_USB_IN
+        }
+        return RULE_USB_OUT
+    }
+    return RULE_DEFAULT
+}
+
+fn minute_of_day() -> u64 {
+    let h: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_HOUR, 0, 0)
+    let m: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_MIN, 0, 0)
+    return h * 60 + m
+}
+
+fn stamp(seq: u64) -> u64 {
+    let i: u64 = seq % STAMPS
+    if stamp_seq[i as usize] != seq + 1 {
+        stamp_seq[i as usize] = seq + 1
+        stamp_min[i as usize] = minute_of_day()
+    }
+    return stamp_min[i as usize]
+}
+
+fn put_two(p: u64, v: u64) {
+    __mmio_write8(p as *mut u8, (48 + (v / 10) % 10) as u8)
+    __mmio_write8((p + 1) as *mut u8, (48 + v % 10) as u8)
+}
+
+fn set_time(slot: u64, seq: u64) {
+    let minute: u64 = stamp(seq)
+    let p: u64 = time_ptr(slot)
+    put_two(p, (minute / 60) % 24)
+    __mmio_write8((p + 2) as *mut u8, 58 as u8)
+    put_two(p + 3, minute % 60)
+    __mmio_write8((p + 5) as *mut u8, 0 as u8)
+}
+
+fn fill(slot: u64, kind: u64, app: u64, title: u64, body: u64, prio: u64, seq: u64) {
+    tables()
+    slot_kind[slot as usize] = kind
+    slot_prio[slot as usize] = prio
+    slot_pct[slot as usize] = 0
+    slot_buttons[slot as usize] = 0
+    copy_into(app_ptr(slot), app, APP_BYTES - 2)
+    copy_into(title_ptr(slot), title, TITLE_BYTES - 2)
+    copy_into(text_ptr(slot), body, TEXT_BYTES - 2)
+    set_time(slot, seq)
+}
+
+fn from_bus(slot: u64, raw: u64, n: u64, prio: u64, seq: u64) {
+    tables()
+    var kind: u64 = KIND_INFO
+    if prio >= 2 {
+        kind = KIND_WARNING
+    }
+    var body: [u8; 96] = [0 as u8; 96]
+    let bp: u64 = (&body[0 as usize]) as u64
+    var len: u64 = n
+    if len > TEXT_BYTES - 4 {
+        len = TEXT_BYTES - 4
+    }
+    memcopy.copy(bp, raw, len)
+    __mmio_write8((bp + len) as *mut u8, 0 as u8)
+    let _h: u64 = notetext.humanize(bp, len, TEXT_BYTES - 4)
+    let rule: u64 = rule_of(raw, n)
+    var title_key: u64 = rule_title_key[rule as usize]
+    if rule != RULE_DEFAULT {
+        kind = rule_kind[rule as usize]
+    } else {
+        title_key = kind_title_key[kind as usize]
+    }
+    fill(slot, kind, msg.get(rule_app_key[rule as usize]), msg.get(title_key), bp, prio, seq)
+}
+
+fn set_buttons(slot: u64, first: u64, second: u64) {
+    slot_buttons[slot as usize] = 0
+    if first != 0 {
+        copy_into(label1_ptr(slot), first, LABEL_BYTES - 2)
+        slot_buttons[slot as usize] = 1
+    }
+    if second != 0 {
+        copy_into(label2_ptr(slot), second, LABEL_BYTES - 2)
+        slot_buttons[slot as usize] = 2
+    }
+}
+
+fn set_progress(slot: u64, pct: u64) {
+    slot_kind[slot as usize] = KIND_PROGRESS
+    slot_pct[slot as usize] = pct
+}
+
+fn card_h_pt(slot: u64) -> u64 {
+    var h: u64 = PAD + HEAD_H + GAP + TITLE_H + TEXT_H + PAD
+    if slot_kind[slot as usize] == KIND_PROGRESS {
+        h = h + GAP + PROGRESS_H
+    }
+    if slot_buttons[slot as usize] != 0 {
+        h = h + GAP + BUTTON_H
+    }
+    return h
+}
+
+fn card_h(slot: u64) -> u64 {
+    return card_h_pt(slot) * scale()
+}
+
+fn width_px() -> u64 {
+    return CARD_W * scale()
+}
+
+fn button_rect_x(which: u64) -> u64 {
+    return (PAD + which * (BUTTON_W + GAP)) * scale()
+}
+
+fn button_rect_y(slot: u64) -> u64 {
+    var y: u64 = PAD + HEAD_H + GAP + TITLE_H + TEXT_H + GAP
+    if slot_kind[slot as usize] == KIND_PROGRESS {
+        y = y + GAP + PROGRESS_H
+    }
+    return y * scale()
+}
+
+fn button_w() -> u64 {
+    return BUTTON_W * scale()
+}
+
+fn button_h() -> u64 {
+    return BUTTON_H * scale()
+}
+
+fn inside(lx: u64, ly: u64, x: u64, y: u64, w: u64, h: u64) -> bool {
+    return lx >= x && ly >= y && lx < x + w && ly < y + h
+}
+
+fn hit_dismiss(lx: u64, ly: u64) -> bool {
+    let s: u64 = scale()
+    return inside(lx, ly, (CARD_W - PAD - DISMISS_W) * s, PAD * s, DISMISS_W * s, HEAD_H * s)
+}
+
+fn hit_button(slot: u64, lx: u64, ly: u64) -> u64 {
+    var which: u64 = 0
+    while which < slot_buttons[slot as usize] {
+        if inside(lx, ly, button_rect_x(which), button_rect_y(slot), button_w(), button_h()) {
+            return which + 1
+        }
+        which = which + 1
+    }
+    return 0
+}
+
+fn dismiss_range(low: u64, high: u64) {
+    var seq: u64 = low
+    while seq <= high {
+        dismissed_seq[(dismissed_at % DISMISSED) as usize] = seq + 1
+        dismissed_at = dismissed_at + 1
+        seq = seq + 1
+    }
+}
+
+fn is_dismissed(seq: u64) -> bool {
+    var i: u64 = 0
+    while i < DISMISSED {
+        if dismissed_seq[i as usize] == seq + 1 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn plate(x: u64, y: u64, w: u64, h: u64) {
+    if wlibc.aa_old() || w < 3 || h < 3 {
+        let r: u64 = fuiscene.rb_px()
+        fuiscene.cv_round_rgb(x, y, w, h, r, wlibc.theme(wlibc.T_MENU))
+        fuiscene.cv_ring_rgb(x, y, w, h, r, 1, wlibc.theme(wlibc.T_LINE))
+        return
+    }
+    var ri: u64 = wlibc.win_round(w, h)
+    if ri > 0 {
+        ri = ri - 1
+    }
+    fuiscene.cv_round_rgb(x, y, w, h, 0, wlibc.theme(wlibc.T_LINE))
+    fuiscene.cv_round_rgb(x + 1, y + 1, w - 2, h - 2, ri, wlibc.theme(wlibc.T_MENU))
+}
+
+fn band_base(y: u64, h: u64, px: u64) -> u64 {
+    return y + (h + wlibc.ascent_of(wlibc.F_UI, px)) / 2
+}
+
+fn caption_px() -> u64 {
+    return wlibc.type_px(wlibc.TY_CAPTION)
+}
+
+fn draw_text(x: u64, y: u64, h: u64, w: u64, p: u64, px: u64, bold: bool, role: u64) {
+    fuiscene.cv_text_rgb(x, band_base(y, h, px), w, p, px, bold, wlibc.theme(role))
+}
+
+fn draw_centered(x: u64, y: u64, w: u64, h: u64, p: u64, px: u64, bold: bool, role: u64) {
+    let tw: u64 = wlibc.text_w(wlibc.F_UI, px, p, text.length(p))
+    var off: u64 = 0
+    if w > tw {
+        off = (w - tw) / 2
+    }
+    draw_text(x + off, y, h, w, p, px, bold, role)
+}
+
+fn draw_icon(x: u64, y: u64, slot: u64) {
+    let s: u64 = scale()
+    let top: u64 = y + (HEAD_H - ICON) * s / 2
+    let kind: u64 = slot_kind[slot as usize]
+    fuiscene.cv_round_rgb(x, top, ICON * s, ICON * s, ICON * s / 2, wlibc.theme(kind_role[kind as usize]))
+    glyph_buf[0] = kind_glyphs[kind as usize]
+    glyph_buf[1] = 0 as u8
+    draw_centered(x, top, ICON * s, ICON * s, (&glyph_buf[0 as usize]) as u64, caption_px(), true,
+        wlibc.C_ON_ACCENT)
+}
+
+fn draw_head(x: u64, y: u64, w: u64, slot: u64) {
+    let s: u64 = scale()
+    let top: u64 = y + PAD * s
+    let left: u64 = x + PAD * s
+    draw_icon(left, top, slot)
+    let app_x: u64 = left + (ICON + ICON_GAP) * s
+    draw_text(app_x, top, HEAD_H * s, w, app_ptr(slot), caption_px(), false, wlibc.T_DIM)
+    let tp: u64 = time_ptr(slot)
+    let tw: u64 = wlibc.text_w(wlibc.F_UI, caption_px(), tp, text.length(tp))
+    let time_x: u64 = x + w - (PAD + DISMISS_W + GAP) * s - tw
+    draw_text(time_x, top, HEAD_H * s, tw + s, tp, caption_px(), false, wlibc.T_DIM)
+    draw_centered(x + w - (PAD + DISMISS_W) * s, top, DISMISS_W * s, HEAD_H * s,
+        (&dismiss_glyph[0 as usize]) as u64, caption_px(), false, wlibc.T_DIM)
+}
+
+fn draw_body(x: u64, y: u64, w: u64, slot: u64) {
+    let s: u64 = scale()
+    let left: u64 = x + PAD * s
+    let inner: u64 = w - 2 * PAD * s
+    let title_y: u64 = y + (PAD + HEAD_H + GAP) * s
+    draw_text(left, title_y, TITLE_H * s, inner, title_ptr(slot), wlibc.px_ui(), true, wlibc.T_FG)
+    draw_text(left, title_y + TITLE_H * s, TEXT_H * s, inner, text_ptr(slot), wlibc.px_ui(), false,
+        wlibc.T_FG)
+}
+
+fn draw_progress(x: u64, y: u64, w: u64, slot: u64) {
+    if slot_kind[slot as usize] != KIND_PROGRESS {
+        return
+    }
+    let s: u64 = scale()
+    let track: u64 = w - 2 * PAD * s
+    let top: u64 = y + (PAD + HEAD_H + GAP + TITLE_H + TEXT_H + GAP) * s + (PROGRESS_H - BAR_H) * s / 2
+    fuiscene.cv_round_rgb(x + PAD * s, top, track, BAR_H * s, BAR_H * s / 2, wlibc.theme(wlibc.T_LINE))
+    var pct: u64 = slot_pct[slot as usize]
+    if pct > 100 {
+        pct = 100
+    }
+    if pct > 0 {
+        fuiscene.cv_round_rgb(x + PAD * s, top, track * pct / 100 + 1, BAR_H * s, BAR_H * s / 2,
+            wlibc.theme(wlibc.C_ACCENT))
+    }
+}
+
+fn draw_button(x: u64, y: u64, label: u64) {
+    let w: u64 = button_w()
+    let h: u64 = button_h()
+    let r: u64 = fuiscene.rb_px()
+    fuiscene.cv_round_rgb(x, y, w, h, r, wlibc.theme(wlibc.T_BTN))
+    fuiscene.cv_ring_rgb(x, y, w, h, r, 1, wlibc.theme(wlibc.T_LINE))
+    draw_centered(x, y, w, h, label, wlibc.px_ui(), false, wlibc.T_FG)
+}
+
+fn draw_buttons(x: u64, y: u64, slot: u64) {
+    let n: u64 = slot_buttons[slot as usize]
+    if n == 0 {
+        return
+    }
+    let by: u64 = y + button_rect_y(slot)
+    draw_button(x + button_rect_x(0), by, label1_ptr(slot))
+    if n > 1 {
+        draw_button(x + button_rect_x(1), by, label2_ptr(slot))
+    }
+}
+
+fn draw_legacy(x: u64, y: u64, w: u64, h: u64, slot: u64) {
+    var stripe: u64 = wlibc.theme(wlibc.T_LINE)
+    if slot_prio[slot as usize] >= 2 {
+        stripe = wlibc.theme(wlibc.T_ACCENT)
+    }
+    let s: u64 = scale()
+    fuiscene.cv_round_rgb(x, y, LEGACY_STRIPE * s, h, 0, stripe)
+    draw_text(x + LEGACY_PAD * s, y, h, w - 2 * LEGACY_PAD * s, text_ptr(slot), wlibc.px_ui(), false,
+        wlibc.T_FG)
+}
+
+fn draw_card(x: u64, y: u64, w: u64, h: u64, slot: u64) {
+    tables()
+    plate(x, y, w, h)
+    if old_layout && slot == TOAST_SLOT {
+        draw_legacy(x, y, w, h, slot)
+        return
+    }
+    draw_head(x, y, w, slot)
+    draw_body(x, y, w, slot)
+    draw_progress(x, y, w, slot)
+    draw_buttons(x, y, slot)
+}
+
+fn counter_text(out: u64, count: u64) -> u64 {
+    copy_into(out, msg.get((&k_counter[0 as usize]) as u64), 12)
+    var at: u64 = text.length(out)
+    __mmio_write8((out + at) as *mut u8, 32 as u8)
+    at = at + 1
+    var digits: u64 = 1
+    var t: u64 = count / 10
+    while t > 0 {
+        digits = digits + 1
+        t = t / 10
+    }
+    var k: u64 = digits
+    t = count
+    while k > 0 {
+        k = k - 1
+        __mmio_write8((out + at + k) as *mut u8, (48 + t % 10) as u8)
+        t = t / 10
+    }
+    __mmio_write8((out + at + digits) as *mut u8, 0 as u8)
+    return at + digits
+}
+
+fn center_title() -> u64 {
+    return msg.get((&k_center[0 as usize]) as u64)
+}
+
+fn center_clear() -> u64 {
+    return msg.get((&k_clear[0 as usize]) as u64)
+}
+
+fn center_empty() -> u64 {
+    return msg.get((&k_empty[0 as usize]) as u64)
+}
