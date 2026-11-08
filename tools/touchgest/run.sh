@@ -107,7 +107,7 @@ mutate nopalmsize  's/if d_palm\[d\] != 0 \&\& size >= d_palm\[d\] {/if false {/
 mutate notyping    's/f_now - d_last_key\[d\] < TYPING_MS/f_now < 0/'
 mutate notypingopt 's/if get_opt(dev, O_TYPING) != 0 \&\& d_have_key/if d_have_key/'
 mutate noenabled  's/if get_opt(f_dev, O_ENABLED) == 0 { return }//'
-mutate noslop      's/if geom.absv(x - c_lx\[k\]) + geom.absv(y - c_ly\[k\]) > sl2 {/if geom.absv(x - c_lx[k]) + geom.absv(y - c_ly[k]) > 0 {/'
+mutate noslop      's/if numeric.iabs(x - c_lx\[k\]) + numeric.iabs(y - c_ly\[k\]) > sl2 {/if numeric.iabs(x - c_lx[k]) + numeric.iabs(y - c_ly[k]) > 0 {/'
 mutate nopinch     's/if dd > tr {/if false {/'
 mutate swipeagain  's/if d_fired\[d\] == 0 {/if true {/'
 mutate noedge      's/if c_edge\[k\] == 1 {/if false {/'
@@ -115,7 +115,7 @@ mutate rightclick  's/emit(EV_CLICK, 2, 0)/emit(EV_CLICK, 1, 0)/'
 mutate nobutton    's/d_btn\[d\] == 0 \&\&//'
 mutate noedgemotion 's/if qx != 0 || qy != 0 { emit(EV_MOVE, qx, qy) }//'
 mutate edgeheld    's/if c_edge\[k\] == 0 \&\& ((d_pbtn\[d\] \& 1) != 0 || d_drag\[d\] != 0) {/if c_edge[k] == 0 {/'
-mutate edgeinward  's/dir \* move_d < 0 \&\& geom.absv(move_d) > slop_v \/ 4/false/'
+mutate edgeinward  's/dir \* move_d < 0 \&\& numeric.iabs(move_d) > slop_v \/ 4/false/'
 mutate edgeliftoff 's/if n != 1 { d_em\[d\] = 0 }//'
 mutate onedev      's/let d: usize = dev as usize/let d: usize = 0/g'
 
@@ -139,12 +139,12 @@ OD=tools/touchgest/oracle_direct.fi
 LD=direct.fi
 mutate dlongtime   's/if get_opt(dev, O_LONG) != 0 \&\& now >= d_t0\[d\] + get_opt(dev, O_LONG_MS) {/if false {/' $OD $LD
 mutate dticklong   's/d_n\[d\] == 1 \&\& now >= d_t0\[d\] + get_opt(dev, O_LONG_MS)/d_n[d] == 1 \&\& now >= d_t0[d] + 100000/' $OD $LD
-mutate dnoslop     's/geom.absv(d_lx\[d\] - d_sx\[d\]) > slop/geom.absv(d_lx[d] - d_sx[d]) > 0/' $OD $LD
+mutate dnoslop     's/numeric.iabs(d_lx\[d\] - d_sx\[d\]) > slop/numeric.iabs(d_lx[d] - d_sx[d]) > 0/' $OD $LD
 mutate ddragstart  's/emit(EV_DRAG_BEGIN, d_sx\[d\], d_sy\[d\], 0)/emit(EV_DRAG_BEGIN, d_lx[d], d_ly[d], 0)/' $OD $LD
 mutate ddragend    's/emit(EV_DRAG_END, d_lx\[d\], d_ly\[d\], 0)/emit(EV_DRAG_END, d_sx[d], d_sy[d], 0)/' $OD $LD
 mutate dtapchain   's/n = d_tap_n\[d\] + 1/n = 1/' $OD $LD
 mutate ddtapwin    's/now - d_tap_t\[d\] <= get_opt(dev, O_DTAP_MS)/now - d_tap_t[d] <= 100000/' $OD $LD
-mutate ddtapnear   's/geom.absv(x - d_tap_x\[d\]) <= near/true/' $OD $LD
+mutate ddtapnear   's/numeric.iabs(x - d_tap_x\[d\]) <= near/true/' $OD $LD
 mutate dnopalm     's/if palm != 0 \&\& size >= palm { return }//' $OD $LD
 mutate dnoenabled  's/if get_opt(dev, O_ENABLED) == 0 {$/if false {/' $OD $LD
 mutate dwheelsign  's/vv = 0 - qy/vv = qy/' $OD $LD

@@ -20,6 +20,9 @@ OWN = set(g + ".fi" for g in GRAFIK) | {
     "shot.fi",
     "pixelguard.fi",
     "vmsvga.fi",
+    "igback.fi",
+    "igflip.fi",
+    "igalias.fi",
     "drucke.fi",
     "fuiglyph.fi"}
 MUSTER = re.compile(
