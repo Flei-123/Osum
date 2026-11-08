@@ -4,7 +4,6 @@ import os
 import re
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
-import brand
 
 WOERTER = [
     "Einstellungen", "Darstellung", "Bildschirm", "Benutzer",
@@ -109,8 +108,6 @@ def erlaubt(text):
     if re.match(r"^[a-z0-9]+: ", t):
         return True
     if re.match(r"^[a-z0-9_]+(\.[a-z0-9_]+)+(\\0)*$", t):
-        return True
-    if t.startswith(brand.PRODUKT + " - Bestaetigung"):
         return True
     if re.match(r"^[ ]?[a-z0-9_]+=", t):
         return True

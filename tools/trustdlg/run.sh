@@ -8,7 +8,8 @@
 # Checks: the serial layout line (body end <= hint row < button row < dialog bottom: no overlap),
 # the default focus is "Ablehnen" (Enter alone = no), Tab moves the focus, Enter on "Erlauben" =
 # yes, the change happens only after yes, a rejected one is not done. Photos in the workdir.
-# Counter-proof: KERNEL_REF=<commit before the layout rework> must FAIL (no layout line).
+# Injected input (jarvisctl input key) must be refused (serial line) and must not answer; a real key afterwards does.
+# SCALE=2 runs the dialog at uiscale=2. Counter-proof: KERNEL_REF=<commit before the guard> must FAIL (injection answers).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -23,7 +24,8 @@ TMPD=${1:-$(mktemp -d)}
 . tools/lib/tmpdir.sh
 osum_tmp_guard "${1:-}" "$TMPD"
 mkdir -p "$TMPD/bin"
-PROGS="sh ls cat echo sleep orientbus act settingsd settings"
+PROGS="sh ls cat echo sleep orientbus act settingsd settings jarvisctl"
+SCALE=${SCALE:-1}
 echo "== 1. build =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1 && ok "programs build" \
@@ -57,6 +59,16 @@ echo ==T2==
 act call settings.set key=lock.idle value=900 --as helper
 sleep 14
 act call settings.get key=lock.idle
+echo ==T4==
+act call settings.set key=lock.idle value=1500 --as helper
+sleep 5
+jarvisctl input key 36 0
+sleep 3
+act call settings.get key=lock.idle
+echo ==T4MID==
+sleep 14
+act call settings.get key=lock.idle
+echo ==T4END==
 echo ==TEND==
 act call settings.set key=lock.idle value=1200 --as helper
 act call settings.set key=lock.idle value=1200 --as helper
@@ -79,6 +91,8 @@ A=(build "$TMPD/disk.img" 32768 /lib/ "/lib/mono.ttf=assets/osum-mono.ttf"
    "/t/g.sh=$TMPD/g.sh")
 [ -f assets/osum-icons.ttf ] && A+=("/lib/icons.ttf=assets/osum-icons.ttf")
 [ -f assets/osum-sans-bold.ttf ] && A+=("/lib/bold.ttf=assets/osum-sans-bold.ttf")
+cp assets/jarvis/rechte-justin.conf "$TMPD/permissions.conf"
+A+=(/etc/jarvis/ /var/jarvis/ "/etc/jarvis/permissions.conf=$TMPD/permissions.conf")
 A+=(/etc/schemas/)
 for s in assets/schemes/*.scheme; do A+=("/etc/schemas/$(basename "$s" .scheme)=$s"); done
 for p in $PROGS; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
@@ -89,7 +103,7 @@ echo "== 2. boot =="
 SOCK="$TMPD/mon.sock"; rm -f "$SOCK"
 ACC=(); [ -w /dev/kvm ] && ACC=(-accel kvm -cpu host)
 timeout 300 qemu-system-x86_64 "${ACC[@]}" -kernel "$TMPD/k0.img" -m 512 \
-    -append "gfx disp wm wmdauer wmshell osum vfs bus script=sh /t/g.sh;exit" \
+    -append "gfx disp wm wmdauer wmshell osum vfs bus uiscale=$SCALE script=sh /t/g.sh;exit" \
     -serial "file:$TMPD/ser.txt" -display none -no-reboot -vga std \
     -monitor "unix:$SOCK,server,nowait" \
     -drive "file=$TMPD/disk.img,format=raw,if=ide,index=0" \
@@ -122,6 +136,14 @@ if waitn 60 2; then
     key ret
     sleep 2; shot "$TMPD/4-done.ppm"
 fi
+if waitn 60 3; then
+    sleep 1.5; shot "$TMPD/5-inject-up.ppm"
+    waitfor "refused injected input" 30
+    shot "$TMPD/6-inject-refused.ppm"
+    sleep 2.5
+    key j
+    sleep 1; shot "$TMPD/7-real-key.ppm"
+fi
 waitfor "==FERTIG==" 60 || echo "        no FERTIG before the time limit"
 printf 'quit\n' | socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
 wait "$QPID" 2>/dev/null
@@ -138,7 +160,8 @@ if [ -z "$L" ]; then bad "no layout line (old dialog)"; else
   [ "${B1:-0}" -le "${H:-0}" ] && [ "${H:-0}" -lt "${BT:-0}" ] && ok "layout: body end $B1 <= hint $H < buttons $BT (no overlap)" || bad "layout overlaps: $L"
   [ "${BT:-0}" -lt $(( ${Y:-0} + ${HH:-0} )) ] && ok "buttons inside the dialog (bottom $((Y+HH)))" || bad "buttons outside the dialog: $L"
 fi
-part "$G" T1 T2 > "$TMPD/p1.txt"; part "$G" T2 TEND > "$TMPD/p2.txt"; part "$G" TEND T3END > "$TMPD/p3.txt"
+part "$G" T1 T2 > "$TMPD/p1.txt"; part "$G" T2 TEND > "$TMPD/p2.txt"; part "$G" T4 T4MID > "$TMPD/p4a.txt"; part "$G" T4MID T4END > "$TMPD/p4b.txt"
+part "$G" TEND T3END > "$TMPD/p3.txt"
 has "$G" "wm: trusted dialog details open=1" "key D opens the details"
 has "$G" "wm: trusted dialog details open=0" "key D closes them again"
 has "$G" "wm: trusted dialog up no=" "dialog text parsed"
@@ -149,11 +172,14 @@ has "$G" "wm: trusted dialog answer=2" "Enter on the default focus = Ablehnen (n
 has "$TMPD/p1.txt" "value=300" "rejected: lock.idle stays 300"
 has "$G" "wm: trusted dialog answer=1" "Tab + Enter = Erlauben (yes)"
 has "$TMPD/p2.txt" "value=900" "after yes the change is done (900)"
+has "$G" "wm: trusted dialog refused injected input" "jarvisctl input key is REFUSED by the dialog"
+has "$TMPD/p4a.txt" "value=900" "injected key did not answer: lock.idle stays 900"
+has "$TMPD/p4b.txt" "value=1500" "a real key right after answers: lock.idle = 1500"
 if [ -s "$TMPD/flicker.txt" ]; then
   FL=$(grep -a '^flicker:' "$TMPD/flicker.txt" | tail -1); echo "        $FL"
   O=$(echo "$FL" | sed -nE 's/.*odd=([0-9]+).*/\1/p'); S=$(echo "$FL" | sed -nE 's/.*samples=([0-9]+).*/\1/p')
   [ "${S:-0}" -ge 10 ] && [ "${O:-1}" -eq 0 ] && ok "no flicker: $S screendumps, dialog area identical" || bad "flicker / too few samples: $FL"
 else bad "no flicker measurement"; fi
-for f in 1-up 2-up 2d-open 3-tab 4-done; do [ -s "$TMPD/$f.png" ] && ok "photo $TMPD/$f.png" || bad "no photo $f"; done
+for f in 1-up 2-up 2d-open 3-tab 4-done 5-inject-up 6-inject-refused 7-real-key; do [ -s "$TMPD/$f.png" ] && ok "photo $TMPD/$f.png" || bad "no photo $f"; done
 echo "TRUSTDLG: $pass passed, $fail failed"
 [ "$fail" = 0 ]
