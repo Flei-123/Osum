@@ -368,11 +368,11 @@ fi
 PID=$!
 i=0
 while [ $i -lt 2400 ]; do
-    grep -qaE '^wm: hold' "$OUT/serial.txt" 2>/dev/null && break
+    grep -qaE '^wm: (hold|dauer)' "$OUT/serial.txt" 2>/dev/null && break
     kill -0 "$PID" 2>/dev/null || break
     sleep 0.15; i=$((i+1))
 done
-if ! grep -qaE '^wm: hold' "$OUT/serial.txt" 2>/dev/null; then
+if ! grep -qaE '^wm: (hold|dauer)' "$OUT/serial.txt" 2>/dev/null; then
     echo "FAIL: the window server never got to 'wm: hold' gekommen"
     tail -20 "$OUT/serial.txt" 2>/dev/null
 fi

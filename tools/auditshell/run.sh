@@ -27,9 +27,10 @@ run_case() {
         echo "taste ret"
         echo "warte 10"
         echo "foto shell"
+        echo "monitor quit"
     } > "$dreh"
     bash tools/design/audit.sh "$dir" accel=kvm uitrace=yes kbd="$kbd" uiscale="$scale" res="$res" \
-        extra=termdump halt=$HALT_SECONDS drehbuch="$dreh" > "$OUT/$name.audit.log" 2>&1
+        extra="termdump wmshell wmdauer" halt=$HALT_SECONDS drehbuch="$dreh" > "$OUT/$name.audit.log" 2>&1
 }
 
 run_case live1 1 1280x800 on
