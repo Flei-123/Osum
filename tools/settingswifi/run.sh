@@ -27,22 +27,22 @@ fi
 MUT="$OUT/mutant"
 mkdir -p "$MUT"
 cp -a kernel/user "$MUT/user"
-python3 -I - "$MUT/user/settings/setwifi.fi" <<'PY'
+python3 -I - "$MUT/user/settings.d/builtin.settings" <<'PY'
 import sys
 source = sys.argv[1]
 text = open(source, encoding="utf-8").read()
-real = "    return welcome_net.link_state() != welcome_net.LINK_NO_DRIVER\n"
-if real not in text:
+condition = "when wifi-adapter\n"
+if condition not in text:
     sys.exit("mutant anchor missing")
-open(source, "w", encoding="utf-8").write(text.replace(real, "    return true\n", 1))
+open(source, "w", encoding="utf-8").write(text.replace(condition, ""))
 PY
-if [ $? -ne 0 ] || cmp -s kernel/user/settings/setwifi.fi "$MUT/user/settings/setwifi.fi"; then
+if [ $? -ne 0 ] || cmp -s kernel/user/settings.d/builtin.settings "$MUT/user/settings.d/builtin.settings"; then
     bad "mutant source is identical to the real source"; echo "SETTINGSWIFI: $pass passed, $fail failed"; exit 1
 fi
 if vendor/firn/bin/firnc -c "$MUT/user/settings.fi" -o "$MUT/settings.o" > "$MUT/cc.log" 2>&1 \
    && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" -o "$MUT/settings.elf" "$MUT/settings.o" 2>>"$MUT/cc.log"; then
     strip --strip-all "$MUT/settings.elf"
-    ok "mutant settings (adapter check always true) builds"
+    ok "mutant settings (Wi-Fi fields without the adapter condition) builds"
 else
     bad "mutant settings does not build: $(head -5 "$MUT/cc.log")"; echo "SETTINGSWIFI: $pass passed, $fail failed"; exit 1
 fi
