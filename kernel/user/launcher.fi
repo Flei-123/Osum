@@ -20,6 +20,7 @@ import appdir
 import appreg
 import ctxreg
 import nidx
+import namelist
 import startnav
 import pw
 import nv
@@ -99,6 +100,9 @@ static mut pin_tok: [u8; 576] = [0 as u8; 576] // 24 names of 24 bytes
 static mut pin_tn: u64 = 0
 static mut lp_pins: [u8; 20] = "/etc/startpins.conf\0"
 static mut lk_pins: [u8; 5] = "pins\0"
+static mut lp_recent: [u8; 22] = "/etc/startrecent.conf\0"
+static mut lk_recent: [u8; 7] = "recent\0"
+static mut rec_tok: [u8; 144] = [0 as u8; 144]
 static mut lp_tbconf: [u8; 18] = "/etc/taskbar.conf\0"
 // The context menu of a pinned tile (right click): start, unpin from Start, pin to the taskbar.
 static mut ctx_menu: u64 = 0
@@ -432,6 +436,7 @@ fn starten_app(a: u64) {
     sayn(pid)
     nl()
     mru_push(a)
+    mru_save()
     zumachen()
 }
 
@@ -454,89 +459,17 @@ fn app_token(a: u64, out: u64) {
 
 // `/etc/startpins.conf`: the line `pins=a,b,c`. A missing file keeps the directory order.
 fn pins_read() {
-    var buf: [u8; 600] = [0 as u8; 600]
-    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&lp_pins[0 as usize]) as u64, 0, 0)
-    if ulib.bad(fd) {
+    let found: u64 = namelist.read((&lp_pins[0 as usize]) as u64, (&lk_pins[0 as usize]) as u64,
+        (&pin_tok[0 as usize]) as u64, 24)
+    if found == namelist.MISSING {
         return
     }
-    let b: u64 = (&buf[0 as usize]) as u64
-    let n: u64 = ulib.sys(ulib.SYS_READ, fd, b, 599)
-    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
-    if ulib.bad(n) || n < 6 {
-        return
-    }
-    var i: u64 = 0
-    while i + 5 <= n {
-        var k: u64 = 0
-        while k < 4 && __mmio_read8((b + i + k) as *mut u8) == lk_pins[(k) as usize] {
-            k = k + 1
-        }
-        if k == 4 && __mmio_read8((b + i + 4) as *mut u8) == 61 as u8 && (i == 0 || __mmio_read8((b + i - 1) as *mut u8) == 10 as u8) {
-            g_pins_set = true
-            pin_tn = 0
-            var q: u64 = i + 5
-            while q < n && __mmio_read8((b + q) as *mut u8) != 10 as u8 && pin_tn < 24 {
-                var l: u64 = 0
-                let zp: u64 = (&pin_tok[0 as usize]) as u64 + pin_tn * 24
-                while q < n && l < 23 {
-                    let ch: u8 = __mmio_read8((b + q) as *mut u8)
-                    if ch == 44 as u8 || ch == 10 as u8 {
-                        break
-                    }
-                    __mmio_write8((zp + l) as *mut u8, ch)
-                    l = l + 1
-                    q = q + 1
-                }
-                __mmio_write8((zp + l) as *mut u8, 0 as u8)
-                if l > 0 {
-                    pin_tn = pin_tn + 1
-                }
-                if q < n && __mmio_read8((b + q) as *mut u8) == 44 as u8 {
-                    q = q + 1
-                }
-            }
-            return
-        }
-        i = i + 1
-    }
+    g_pins_set = true
+    pin_tn = found - 1
 }
 
 fn pins_write() {
-    var buf: [u8; 600] = [0 as u8; 600]
-    let b: u64 = (&buf[0 as usize]) as u64
-    var at: u64 = 0
-    var k: u64 = 0
-    while k < 5 {
-        __mmio_write8((b + at) as *mut u8, lk_pins[(k) as usize])
-        if k == 4 {
-            __mmio_write8((b + at) as *mut u8, 61 as u8)
-        }
-        at = at + 1
-        k = k + 1
-    }
-    var t: u64 = 0
-    while t < pin_tn {
-        if t > 0 {
-            __mmio_write8((b + at) as *mut u8, 44 as u8)
-            at = at + 1
-        }
-        let zp: u64 = (&pin_tok[0 as usize]) as u64 + t * 24
-        var j: u64 = 0
-        while j < 23 && __mmio_read8((zp + j) as *mut u8) != 0 as u8 {
-            __mmio_write8((b + at) as *mut u8, __mmio_read8((zp + j) as *mut u8))
-            at = at + 1
-            j = j + 1
-        }
-        t = t + 1
-    }
-    __mmio_write8((b + at) as *mut u8, 10 as u8)
-    at = at + 1
-    let fd: u64 = io.create((&lp_pins[0 as usize]) as u64)
-    if ulib.bad(fd) {
-        return
-    }
-    let _w: u64 = io.write_all(fd, b, at)
-    io.close(fd)
+    namelist.write((&lp_pins[0 as usize]) as u64, (&lk_pins[0 as usize]) as u64, (&pin_tok[0 as usize]) as u64, pin_tn)
 }
 
 // "Unpin from Start": the list of names is made explicit (first time: the directory order) and loses `a`.
@@ -765,6 +698,43 @@ fn mru_push(a: u64) {
         k = k - 1
     }
     mru[0 as usize] = a
+}
+
+fn mru_resolve(tok: u64, keep: u64, n: u64) {
+    var probe: [u8; 24] = [0 as u8; 24]
+    mru_n = 0
+    var k: u64 = 0
+    while k < keep {
+        var j: u64 = 0
+        while j < n {
+            app_token(j, (&probe[0 as usize]) as u64)
+            if ulib.streq((&probe[0 as usize]) as u64, tok + k * 24) {
+                mru[(mru_n) as usize] = j
+                mru_n = mru_n + 1
+                break
+            }
+            j = j + 1
+        }
+        k = k + 1
+    }
+}
+
+fn mru_save() {
+    var k: u64 = 0
+    while k < mru_n {
+        app_token(mru[(k) as usize], (&rec_tok[0 as usize]) as u64 + k * 24)
+        k = k + 1
+    }
+    namelist.write((&lp_recent[0 as usize]) as u64, (&lk_recent[0 as usize]) as u64, (&rec_tok[0 as usize]) as u64, mru_n)
+}
+
+fn mru_load(n: u64) {
+    let found: u64 = namelist.read((&lp_recent[0 as usize]) as u64, (&lk_recent[0 as usize]) as u64,
+        (&rec_tok[0 as usize]) as u64, 6)
+    if found == namelist.MISSING {
+        return
+    }
+    mru_resolve((&rec_tok[0 as usize]) as u64, found - 1, n)
 }
 
 // r402: how many pinned and recommended rows fit, and how high the window is (design points).
@@ -1032,7 +1002,6 @@ fn apps_refresh() -> bool {
     }
     g_fp = fp
     var tok: [u8; 144] = [0 as u8; 144]
-    var probe: [u8; 24] = [0 as u8; 24]
     var empty_q: [u8; 2] = [0 as u8; 2]
     let keep: u64 = mru_n
     var k: u64 = 0
@@ -1042,21 +1011,7 @@ fn apps_refresh() -> bool {
     }
     let n: u64 = appdir.load((&t_dir[0 as usize]) as u64, g_nokeys)
     all_n = appdir.search((&empty_q[0 as usize]) as u64, (&all_app[0 as usize]) as u64, 24)
-    mru_n = 0
-    k = 0
-    while k < keep {
-        var j: u64 = 0
-        while j < n {
-            app_token(j, (&probe[0 as usize]) as u64)
-            if ulib.streq((&probe[0 as usize]) as u64, (&tok[0 as usize]) as u64 + k * 24) {
-                mru[(mru_n) as usize] = j
-                mru_n = mru_n + 1
-                break
-            }
-            j = j + 1
-        }
-        k = k + 1
-    }
+    mru_resolve((&tok[0 as usize]) as u64, keep, n)
     pins_read()
     new_find()
     say((&s_reload[0 as usize]) as u64)
@@ -1462,6 +1417,7 @@ fn u_start(args: u64) -> u64 {
     var empty_q: [u8; 2] = [0 as u8; 2]
     all_n = appdir.search((&empty_q[0 as usize]) as u64, (&all_app[0 as usize]) as u64, 24)
     pins_read()
+    mru_load(n)
     user_refresh()
     say((&s_n[0 as usize]) as u64)
     sayn(n)
