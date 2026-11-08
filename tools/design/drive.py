@@ -21,8 +21,8 @@ import socket
 import sys
 import time
 
-BORDER = 2
-TITLE_H = 22
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+import shapechrome
 
 
 SERIAL_SPLICE = re.compile(r"(?<=[^\n])wm: schlieren grow=\d+ alpha=\d+ blur=\d+ aus=\d+ unterpx=\d+\n")
@@ -415,9 +415,9 @@ class Fahrer:
             pass
         if m is None:
             return None
-        if prog == "launcher":
-            return (int(m.group(1)) + BORDER, int(m.group(2)) + TITLE_H)
         b, th = self.chrome()
+        if prog == "launcher":
+            return (int(m.group(1)) + b, int(m.group(2)) + th)
         if re.search(r"%s: strip h=\d+" % prog, t):
             th = b
             k = t.rfind("wm: fenliste")
@@ -430,19 +430,7 @@ class Fahrer:
     def chrome(self):
         if getattr(self, "_chrome", None):
             return self._chrome
-        shape = "osum"
-        for z in read_2(os.path.join(self.out, "theme.conf")).splitlines():
-            if z.startswith("shape="):
-                shape = z[6:].strip()
-        bar, frame = 19, 2
-        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        for z in read_2(os.path.join(root, "assets", "shapes", shape + ".shape")).splitlines():
-            m = re.match(r"\s*(title_bar|frame)\s*=\s*(\d+)", z)
-            if m and m.group(1) == "title_bar":
-                bar = int(m.group(2))
-            elif m:
-                frame = int(m.group(2))
-        self._chrome = (frame, frame + bar + 1)
+        self._chrome = shapechrome.client_inset(self.out)
         return self._chrome
 
     def fenstergeom(self, wid):

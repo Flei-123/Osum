@@ -567,8 +567,8 @@ import re, sys
 txt = open(sys.argv[1], 'rb').read().decode('latin1')
 cut = txt.rfind('settings: rect name=waa ')
 tail = txt[cut:] if cut >= 0 else txt
-win = re.findall(r'settings: rect name=win x=(\d+) y=(\d+)', txt)
-ox, oy = (int(win[-1][0]) + 2, int(win[-1][1]) + 22) if win else (22, 25)
+win = re.findall(r'settings: rect name=win x=\d+ y=\d+ w=\d+ h=\d+ ax=(\d+) ay=(\d+)', txt)
+ox, oy = (int(win[-1][0]), int(win[-1][1])) if win else (22, 25)
 seen = set()
 for m in re.finditer(r'wlib: kachelbalken x=\d+ y=\d+ w=\d+ h=\d+'
                      r' kx=(\d+) ky=(\d+) kw=(\d+) kh=(\d+)', tail):
@@ -646,7 +646,9 @@ echo "== 10. the images are measured, not looked at =="
 WX=$(grep -ao 'name=win x=[0-9]*' "$SE" | tail -1 | cut -d= -f3)
 WY=$(grep -ao 'name=win x=[0-9]* y=[0-9]*' "$SE" | tail -1 | grep -oE 'y=[0-9]+' | cut -d= -f2)
 WW=$(grep -ao 'name=win x=[0-9]* y=[0-9]* w=[0-9]*' "$SE" | tail -1 | grep -oE 'w=[0-9]+' | cut -d= -f2)
-IX=$(( ${WX:-50} + 2 )); IY=$(( ${WY:-3} + 22 ))
+WAX=$(grep -aoE 'name=win x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+ ax=[0-9]+' "$SE" | tail -1 | grep -oE 'ax=[0-9]+' | cut -d= -f2)
+WAY=$(grep -aoE 'name=win x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+ ax=[0-9]+ ay=[0-9]+' "$SE" | tail -1 | grep -oE 'ay=[0-9]+' | cut -d= -f2)
+IX=${WAX:-$(( ${WX:-50} + 2 ))}; IY=${WAY:-$(( ${WY:-3} + 22 ))}
 IW=${WW:-700}
 for pair in "set:Darstellung" "setv:Vorlagen"; do
     d=${pair%%:*}; nm=${pair##*:}
@@ -898,7 +900,7 @@ num "GEGENPROBE: bei Radius 0 ist keine der vier Ecken rund" "$ECK0" eq 0
 KART=$(python3 - "$TMPD/rad0/serial.txt" <<'PYK2'
 import re, sys
 roh = open(sys.argv[1], 'rb').read().decode('latin1')
-w = re.findall(r'settings: rect name=win x=(\d+) y=(\d+)', roh)
+w = re.findall(r'settings: rect name=win x=\d+ y=\d+ w=\d+ h=\d+ ax=(\d+) ay=(\d+)', roh)
 rects = re.findall(r'settings: rect name=(kart[a-z]*) x=(\d+) y=(\d+)'
                    r' w=(\d+) h=(\d+)', roh)
 gesehen = {}
@@ -908,7 +910,7 @@ for nm in sorted(gesehen):
     x, y, bw, bh = gesehen[nm]
     if not w:
         break
-    print(nm, int(w[-1][0]) + 2 + x, int(w[-1][1]) + 22 + y, bw, bh)
+    print(nm, int(w[-1][0]) + x, int(w[-1][1]) + y, bw, bh)
 PYK2
 )
 KARTN=0
