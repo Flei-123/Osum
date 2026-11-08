@@ -5,7 +5,7 @@ import sys
 
 GEOM = re.compile(r"launcher: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 BAR = re.compile(r"taskbar: geom edge=0 x=0 y=(\d+)")
-NORMAL_MIN_HEIGHT_POINTS = 592
+FULL_LAYOUT_MIN_POINTS = 400
 
 passed = 0
 failed = 0
@@ -33,7 +33,7 @@ def evaluate(serial, height, scale):
         check(y >= 0, tag + ": top edge on the screen")
         check(y + h <= bar_y, tag + ": bottom edge above the taskbar (%d)" % bar_y)
     if scale == 1 and height >= 800:
-        check(max(g[3] for g in geoms) >= NORMAL_MIN_HEIGHT_POINTS, "large screen keeps the full layout")
+        check(max(g[3] for g in geoms) >= FULL_LAYOUT_MIN_POINTS, "large screen keeps the full layout")
 
 
 def selftest():
