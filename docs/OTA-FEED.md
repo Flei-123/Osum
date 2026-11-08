@@ -91,7 +91,7 @@ Run `--dry` first (prints programs, `verify OK ... N files`, VERZEICHNIS size), 
 The stand name is `count` = `git rev-list --count <HP_REF>` at the moment the script fetches, so a main that moves during
 the queue wait publishes a later commit: read the `published:` line, not the commit you started from.
 
-Current stand: 5405 (main b3a0d17db, includes CURRENT/TRIAL files, tscdelta, fb-aus gui-off; 141 overlay programs, 359 hashes, VERZEICHNIS 39865 B).
+Current stand: 5411 (main 6d3d8e658, includes CURRENT/TRIAL files, English wire keys (prov_own, kbund KOPF writer), ab_boot English serial texts, tscdelta, fb-aus gui-off; 141 overlay programs, 359 hashes, VERZEICHNIS 39865 B).
 All packages carry the new meta key `version`, so their hashes differ from earlier stands.
 
 Device steps after a power cycle (the HP runs trial 5373; the guard feed `wlanfirst` is NOT applied):
@@ -103,5 +103,8 @@ Device steps after a power cycle (the HP runs trial 5373; the guard feed `wlanfi
     /bin/ota confirm
     /bin/ota system apply bg      (then /bin/reboot, /bin/ota confirm)
 
+Steps in order: 1. remove `wlanfirst` from `/etc/wlan.knobs` (unless the guard feed is applied); 2. `/bin/ota system apply bg`;
+3. `/bin/reboot`; 4. confirm: `/bin/ota system status` shows stand 5411, `/bin/cat /proc/wlan` shows the link, then `/bin/ota confirm`.
+
 Before any HP reboot remove `wlanfirst` from `/etc/wlan.knobs` unless the feed that contains the wlanfirst guard (main ed6458c91) has been applied.
-Feed 5405 contains the guard. The `apply` is the owner's decision; nothing here touches the device.
+Feed 5411 contains the guard. The `apply` is the owner's decision; nothing here touches the device.
