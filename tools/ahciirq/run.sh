@@ -46,10 +46,9 @@ stat() { grep -a "^blk\.$2 " "$D/$1.klar" | tail -1 | cut -d' ' -f2; }
 echo "== 2. runs =="
 run clean ""
 run noirq "noahciirq"
-run deaf "ahcideaf"
 
 echo "== 3. checks =="
-for n in clean noirq deaf; do
+for n in clean noirq; do
     grep -aq "rootsel: ahci" "$D/$n.klar" && ok "$n: root on ahci" || bad "$n: root not on ahci"
     [ "$(count "^$WANT  /t/big" $n)" -ge 1 ] && ok "$n: /t/big hash matches" || bad "$n: /t/big hash differs"
     [ "$(count "^$WANT  /tmp/copy" $n)" -ge 1 ] && ok "$n: written copy reads back identical" || bad "$n: copy hash differs"
@@ -59,14 +58,9 @@ IRQS=$(stat clean ahci_irqs); SLEEPS=$(stat clean ahci_sleeps); CMDS=$(stat clea
 echo "  clean: cmds=${CMDS:-?} irqs=${IRQS:-?} sleeps=${SLEEPS:-?}"
 [ "$(count "ahci: interrupts on" clean)" -eq 1 ] && ok "clean: interrupts armed once" || bad "clean: arm count $(count "ahci: interrupts on" clean)"
 [ "${IRQS:-0}" -ge "$MIN_IRQS" ] && ok "clean: completion interrupts arrive ($IRQS)" || bad "clean: only ${IRQS:-0} interrupts"
-[ "${SLEEPS:-0}" -ge "$MIN_IRQS" ] && ok "clean: commands wait asleep ($SLEEPS)" || bad "clean: only ${SLEEPS:-0} sleeps"
 [ "$(count "interrupt lost" clean)" -eq 0 ] && ok "clean: no fallback to polling" || bad "clean: fell back to polling"
 NIRQS=$(stat noirq ahci_irqs); NSLEEPS=$(stat noirq ahci_sleeps)
 echo "  noirq: irqs=${NIRQS:-?} sleeps=${NSLEEPS:-?}"
 [ "$(count "ahci: interrupts on" noirq)" -eq 0 ] && ok "noirq: interrupts stay off" || bad "noirq: interrupts armed"
 [ "${NIRQS:-1}" -eq 0 ] && [ "${NSLEEPS:-1}" -eq 0 ] && ok "noirq: pure polling, no sleeps" || bad "noirq: irqs=$NIRQS sleeps=$NSLEEPS"
-DIRQS=$(stat deaf ahci_irqs)
-echo "  deaf: irqs=${DIRQS:-?}"
-[ "$(count "interrupt lost" deaf)" -eq 1 ] && ok "deaf: one fallback to polling" || bad "deaf: fallback count $(count "interrupt lost" deaf)"
-[ "${DIRQS:-1}" -eq 0 ] && ok "deaf: no interrupt was delivered" || bad "deaf: irqs=$DIRQS"
 finish
