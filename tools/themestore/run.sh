@@ -673,12 +673,19 @@ for pair in "set:Darstellung" "setv:Vorlagen"; do
         printf '%s\n' "$out" | sed 's/^/        /' | head -12
 done
 #
-TABNV=$(python3 - locale/de/messages "$SEF" <<'PY'
+TABNV=$(python3 - locale/de/messages "$SEF" kernel/user/settings.d/settings.pagemap <<'PY'
 import re, sys
-want = []
+msgs = {}
 for zeile in open(sys.argv[1], 'rb').read().decode('utf-8').splitlines():
-    if zeile.startswith('settings.tabs'):
-        want = want + zeile.split('=', 1)[1].strip().split('\\n')
+    if ' = ' in zeile:
+        k, v = zeile.split(' = ', 1)
+        msgs[k] = v
+want = []
+for zeile in open(sys.argv[3], 'rb').read().decode('utf-8').splitlines():
+    f = zeile.split()
+    if len(f) == 3 and f[0] == 'page':
+        slug = f[2][len('settings://'):].replace('/', '-')
+        want.append(msgs.get('settings.page.%s.title' % slug, ''))
 if not want:
     print(99)
     raise SystemExit
