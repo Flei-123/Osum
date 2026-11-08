@@ -37,12 +37,13 @@ python3 -I tools/iwlfh/ref.py gen "$TMPD/blobs" > "$TMPD/blobs.log" 2>&1 || { ba
 } > "$TMPD/script.txt"
 
 D="$TMPD/out"
+mkdir -p "$D"
 AUDIT_PROC=1 AUDIT_MKFS_EXTRA="/lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ $FIRMWARE_PATH=$TMPD/blobs/v7.bin" \
     bash tools/design/audit.sh "$D" accel=kvm uitrace=yes fs=an extra="iwlfhtest iwlfhbind" uiscale="$SCALE" res="$RES" halt=400 \
     drehbuch="$TMPD/script.txt" > "$TMPD/audit.log" 2>&1
 S="$D/serial.txt"
 if [ -n "${QSNET_OUT:-}" ]; then mkdir -p "$QSNET_OUT/w$SCALE"; cp "$D"/*.ppm "$S" "$QSNET_OUT/w$SCALE/" 2>/dev/null; fi
-if [ ! -s "$S" ]; then bad "no serial output"; echo "QSNETWIFI: $pass passed, $fail failed"; exit 1; fi
+if [ ! -s "$S" ]; then bad "no serial output: $(tail -3 "$TMPD/audit.log" | tr "\n" " ")"; echo "QSNETWIFI: $pass passed, $fail failed"; exit 1; fi
 
 ocr() { python3 -I -c "
 import sys
