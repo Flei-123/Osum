@@ -193,7 +193,7 @@ printf '  ZAHL  file.fd_of %s Zyklen (Median) | getpid %s | lseek %s | fork+exit
 num "file.fd_of bleibt unter 250 Zyklen" "$FDOF" lt 250
 num "lseek aus Ring 3 bleibt unter 700 Zyklen" "$LS" lt 700
 num "getpid (von dieser Runde unberuehrt) bleibt unter 450 Zyklen" "$GP" lt 450
-num "fork+exit+wait bleibt unter 600000 Zyklen (alter Kern: 780000-925000)" "$FW" lt 600000
+num "fork+exit+wait bleibt unter 320000 Zyklen (alter Kern: 780000-925000)" "$FW" lt 320000
 
 echo "== 5. Gegenprobe 'nogen': der io_uring-Fehler, absichtlich wieder eingebaut =="
 run_kernel "$TMPD/k0.mb" "handle nogen" "$TMPD/nogen.txt"

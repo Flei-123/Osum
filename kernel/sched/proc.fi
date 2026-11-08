@@ -181,6 +181,10 @@ fn free_pt(state: u64, pt: u64) -> u64 {
     var freed: u64 = 0
     var k: u64 = 0
     while k < 512 {
+        k = k + arch.zero_run(pt + k * 8, 512 - k)
+        if k >= 512 {
+            break
+        }
         let e: u64 = read_entry(pt, k)
         if (e & PAGE_PRESENT) != 0 {
             if (e & PAGE_SHARED) == 0 {
@@ -218,6 +222,10 @@ fn free_space(state: u64, i: u64) -> u64 {
     if pd != 0 {
         var k: u64 = 1
         while k < MAIN_SLOTS {
+            k = k + arch.zero_run(pd + k * 8, MAIN_SLOTS - k)
+            if k >= MAIN_SLOTS {
+                break
+            }
             let e: u64 = read_entry(pd, k)
             if (e & PAGE_PRESENT) != 0 {
                 if (e & PAGE_HUGE) == 0 {
@@ -239,6 +247,10 @@ fn free_space(state: u64, i: u64) -> u64 {
                 let pdx: u64 = e2 & ADDR_MASK
                 var q: u64 = 0
                 while q < 512 {
+                    q = q + arch.zero_run(pdx + q * 8, 512 - q)
+                    if q >= 512 {
+                        break
+                    }
                     let eq: u64 = read_entry(pdx, q)
                     if (eq & PAGE_PRESENT) != 0 && (eq & PAGE_HUGE) == 0 {
                         freed = freed + free_pt(state, eq & ADDR_MASK)
@@ -1981,17 +1993,64 @@ fn tlb_flush_if_current(state: u64, i: u64) {
     }
 }
 
-fn copy_space(state: u64, from: u64, to: u64) -> u64 {
-    var n: u64 = 0
-    var kachel: u64 = 0
-    while kachel < PRIV_SLOTS {
-        if kachel >= 512 && (kachel & 511) == 0 {
-            let pdpt_from: u64 = sched.tget(state, from, sched.T_PDPT)
-            if pdpt_from == 0 || (read_entry(pdpt_from, 1 + (kachel >> 9)) & PAGE_PRESENT) == 0 {
-                kachel = kachel + 512
-                continue
+fn next_pt_entry(table: u64, from: u64) -> u64 {
+    var j: u64 = from
+    while j < 512 {
+        j = j + arch.zero_run(table + j * 8, 512 - j)
+        if j >= 512 {
+            return 512
+        }
+        let e: u64 = read_entry(table, j)
+        if (e & PAGE_PRESENT) != 0 && (e & PAGE_HUGE) == 0 {
+            return j
+        }
+        j = j + 1
+    }
+    return 512
+}
+
+fn next_priv_slot(state: u64, from: u64, start: u64) -> u64 {
+    var k: u64 = start
+    if k == 0 {
+        if sched.tget(state, from, sched.T_PT) != 0 {
+            return 0
+        }
+        k = 1
+    }
+    if k < 512 {
+        let pd: u64 = sched.tget(state, from, sched.T_PD)
+        if pd != 0 {
+            let j: u64 = next_pt_entry(pd, k)
+            if j < 512 {
+                return j
             }
         }
+        k = 512
+    }
+    let pdpt: u64 = sched.tget(state, from, sched.T_PDPT)
+    if pdpt == 0 {
+        return PRIV_SLOTS
+    }
+    var group: u64 = k >> 9
+    var idx: u64 = k & 511
+    while (group << 9) < PRIV_SLOTS {
+        let pe: u64 = read_entry(pdpt, 1 + group)
+        if (pe & PAGE_PRESENT) != 0 {
+            let j: u64 = next_pt_entry(pe & ADDR_MASK, idx)
+            if j < 512 {
+                return (group << 9) + j
+            }
+        }
+        group = group + 1
+        idx = 0
+    }
+    return PRIV_SLOTS
+}
+
+fn copy_space(state: u64, from: u64, to: u64) -> u64 {
+    var n: u64 = 0
+    var kachel: u64 = next_priv_slot(state, from, 0)
+    while kachel < PRIV_SLOTS {
         let a: u64 = USER_DATA + kachel * USER_SPAN
         let s2: u64 = pt_for(state, from, a, false)
         if s2 != 0 {
@@ -2007,7 +2066,7 @@ fn copy_space(state: u64, from: u64, to: u64) -> u64 {
             }
             n = n + m
         }
-        kachel = kachel + 1
+        kachel = next_priv_slot(state, from, kachel + 1)
     }
     return n
 }
@@ -2028,6 +2087,10 @@ fn copy_pt(state: u64, src: u64, dst: u64) -> u64 {
     var n: u64 = 0
     var k: u64 = 0
     while k < 512 {
+        k = k + arch.zero_run(src + k * 8, 512 - k)
+        if k >= 512 {
+            break
+        }
         let e: u64 = read_entry(src, k)
         if (e & PAGE_PRESENT) == 0 && (e & PAGE_LAZY) != 0 {
             write_entry(dst, k, e)
