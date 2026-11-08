@@ -9,6 +9,7 @@ SNAPSHOT = os.path.join(ROOT, "assets", "palette", "dark.tsv")
 PRIMITIVES = os.path.join(ROOT, "assets", "palette", "primitives.tsv")
 OUT_FI = os.path.join(ROOT, "kernel", "user", "wlibc", "wcpal.fi")
 OUT_CSS = os.path.join(ROOT, "reports", "mockups", "palette-dark.css")
+OUT_WM = os.path.join(ROOT, "kernel", "ui", "wm", "wmrole.fi")
 ORBIT_TOKENS = os.environ.get(
     "ORBIT_TOKENS", "/root/jarvis/projects/u_DiS4in7esMF1/firnchat/src/gui/tokens.fi")
 
@@ -158,6 +159,15 @@ def render_fi(rows):
     return "\n".join(out)
 
 
+def render_wm(rows):
+    pal = {r: h for r, h, _ in rows}
+    out = ["// SPDX-License-Identifier: GPL-2.0-only", "profile kernel", ""]
+    for role, _ in ROLE_SOURCE:
+        out.append("const ROLE_%s: u64 = 0x%s" % (role.upper(), pal[role]))
+        out.append("")
+    return "\n".join(out)
+
+
 def render_css(rows):
     out = [":root[data-theme=\"xoffi-dark\"] {"]
     for role, hexs, _ in rows:
@@ -174,14 +184,15 @@ def main():
         write_snapshot(extract_orbit(ORBIT_TOKENS))
         return
     rows = read_snapshot()
-    fi, css = render_fi(rows), render_css(rows)
+    fi, css, wm = render_fi(rows), render_css(rows), render_wm(rows)
     if args.mode == "write":
         open(OUT_FI, "w", encoding="utf-8").write(fi)
         os.makedirs(os.path.dirname(OUT_CSS), exist_ok=True)
         open(OUT_CSS, "w", encoding="utf-8").write(css)
+        open(OUT_WM, "w", encoding="utf-8").write(wm)
         return
     bad = 0
-    for path, want in ((OUT_FI, fi), (OUT_CSS, css)):
+    for path, want in ((OUT_FI, fi), (OUT_CSS, css), (OUT_WM, wm)):
         have = open(path, encoding="utf-8").read() if os.path.exists(path) else None
         if have != want:
             print("DRIFT %s" % os.path.relpath(path, ROOT))
