@@ -73,6 +73,17 @@ else
     bad "hotplug mutant settings does not build: $(head -5 "$HOT_MUT/cc.log")"; echo "SETTINGSWIFI: $pass passed, $fail failed"; exit 1
 fi
 
+if python3 -I tools/settingswifi/ids.py . > "$OUT/ids.log" 2>&1; then
+    ok "Wi-Fi bindings: pass/scan/connect/nets/presets/about ids and buffers line up with the adapter tables"
+else
+    bad "Wi-Fi bindings do not line up with the adapter tables: $(head -3 "$OUT/ids.log" | tr '\n' ' ')"
+fi
+if python3 -I tools/settingswifi/ids.py . 1 > /dev/null 2>&1; then
+    bad "counter-probe: shifted binding indexes were accepted"
+else
+    ok "counter-probe: shifted binding indexes are rejected (Connect would trigger Refresh)"
+fi
+
 run_case() {
     local name=$1 scale=$2 res=$3 builddir=${4:-$DESIGNBUILD} adapter=${5:-no}
     local yres=${res#*x} halt=$HALT_SECONDS
