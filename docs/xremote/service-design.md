@@ -17,3 +17,4 @@ No Android FreeViewer source or build exists on this server (searched /root/proj
 
 ## 4. Test plan still open
 1. `cargo build` musl host with the new flags (heavy), 2. Firn `xremoted` + gate `tools/xremote/service.sh` (disabled = no relay traffic; enable via schema write; ID in state file; viewer frames; disable kills host), 3. full image: `usbimg` with the package files injected, XR_DESKTOP-like run with login, 4. gates xremote 26/34/28, linuxapps F3-F5, wayland, desktop quick, k15, drvstore, ota --kurz.
+- Gates: `tools/xremote/package.sh` (host only: opk build, install layout, metadata, counter-probes); `tools/xremote/service.sh` installs the real opk tree (files 0644, xremoted makes the host executable), `XR_REAL_RELAY=1` adds phase G (default relay `wss://freeviewer.fleitec.com/fv/ws` from inside the guest).

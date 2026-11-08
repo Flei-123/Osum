@@ -5,8 +5,7 @@
 #   /root/jarvis/bin/heavy bash tools/xremote/service.sh
 #
 # Env: XR_WD (linuxapps workdir, default /root/fxhp), XR_HOST (v2 musl host with --password-file etc.), XR_VIEWER (glibc viewer),
-#      XR_REAL_RELAY=1 adds phase G (no relay= line: the real wss relay, needs guest network), XR_RELAY / XR_LIBS (relay dir / node_modules parent), XR_LIBGCC, KERNEL (prebuilt kernel), KEEP=1 keeps the output dir.
-# The package is built and installed by the real opk tool; the guest gets the installed tree with the modes the installer writes (0644).
+#      XR_RELAY / XR_LIBS (relay dir / node_modules parent), XR_LIBGCC, KERNEL (prebuilt kernel), KEEP=1 keeps the output dir.
 # Phases in the guest: A disabled (no host, no password) -> B enabled (host up, password, ID) -> viewer with a wrong password
 #   is refused, viewer with the right password gets frames -> C disable kills the host (viewer gets nothing) -> D enabled but
 #   package missing (no host) -> E package back (host again, NEW password, old one refused) -> F disabled again.
@@ -67,6 +66,7 @@ printf 'xremote net\n' > "$T/xr.rights"
     (cd "$APPDIR" && find . -mindepth 1 -type d | sort) | while read -r d; do echo "/apps/xremote.osp/${d#./}/@755"; done
     (cd "$APPDIR" && find . -type f | sort) | while read -r f; do echo "/apps/xremote.osp/${f#./}=$APPDIR/${f#./}@644"; done
     echo "/etc/apprights.conf=$T/xr.rights@644"
+    [ "${XR_REAL_RELAY:-0}" = 1 ] && echo "/etc/resolv.conf=$WD/fx-root/etc/resolv.conf@644"
     [ "${XR_DBG:-0}" = 1 ] && { echo "/opt/@755"; echo "/opt/xr/@755"; echo "/opt/xr/freeviewer-old=$XRTOOLS/freeviewer-host@755"; echo "/usr/@755"; echo "/usr/lib/@755"; echo "/usr/lib/libgcc_s.so.1=$LIBGCC@755"; }
     echo "/run/@755"; echo "/var/@755"; echo "/var/log/@755"; echo "/etc/@755"
 } | awk '!seen[$0]++' >> "$T/fx/spec.txt"

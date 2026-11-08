@@ -54,7 +54,7 @@ HOSTPATH=$(sed -n 's/^static mut P_HOST: .*= "\(.*\)\\0"$/\1/p' kernel/user/xrpa
 [ "$HOSTPATH" = "/apps/xremote.osp/bin/freeviewer-host" ] && ok "xremoted looks where the installer puts the host" || bad "xremoted host path is $HOSTPATH"
 LDPATH=$(sed -n 's/^static mut P_LD: .*= "\(.*\)\\0"$/\1/p' kernel/user/xrpath.fi)
 [ "$LDPATH" = "/apps/xremote.osp/lib/ld-musl-x86_64.so.1" ] && ok "xremoted looks where the installer puts the loader" || bad "xremoted loader path is $LDPATH"
-grep -q 'chmod' kernel/user/xrhost.fi && ok "xremoted makes the package files executable (the installer writes 0644)" || bad "xremoted never chmods the host"
+grep -q 'SYS_CHMOD' kernel/user/xrhost.fi && ok "xremoted makes the package files executable (the installer writes 0644)" || bad "xremoted never chmods the host"
 
 echo "== 3. counter-probes =="
 stage "$T/mut1"
