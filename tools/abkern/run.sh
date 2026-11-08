@@ -84,7 +84,7 @@ gleich "install onto empty disk" "$(cat "$OUT/inst.rc" 2>/dev/null)" "21"
 
 echo
 echo "== 2. no trial: the ESP stays untouched =="
-rc=$(lauf n1 "opk install /quelle1/hallo-1.opk;cp /erpseed /system/ERPROBUNG;exit" two)
+rc=$(lauf n1 "opk install /quelle1/hallo-1.opk;cp /erpseed /system/TRIAL;exit" two)
 gleich "boot 1 (arms the trial file)" "$rc" "21"
 hat "$OUT/n1.txt" "ab: keine erprobung" "no trial file yet -> kernel does nothing"
 hatnicht "$OUT/n1.txt" "ab: esp:" "no ESP access without a failed trial"
@@ -111,11 +111,20 @@ grep -qa '^default_entry: 2' "$OUT/c1.after" && ok "ESP stays at default_entry: 
 
 echo
 echo "== 5. ESP config without default_entry =="
-rc=$(lauf z1 "cp /erpseed /system/ERPROBUNG;exit" none)
+rc=$(lauf z1 "cp /erpseed /system/TRIAL;exit" none)
 rc=$(lauf z2 "exit" none)
 hat "$OUT/z2.txt" "ab: TRIAL failed, back to 0" "rollback happens again"
 hat "$OUT/z2.txt" "ab: esp: no default_entry" "kernel says there is no default_entry line"
 cmp -s "$OUT/z2.before" "$OUT/z2.after" && ok "config untouched" || bad "config was modified"
+
+echo
+echo "== 6. old spelling: /system/ERPROBUNG is still read when /system/TRIAL is absent =="
+rc=$(lauf o1 "rm /system/TRIAL;cp /erpseed /system/ERPROBUNG;exit" two)
+gleich "boot 1 (seeds the old trial file)" "$rc" "21"
+rc=$(lauf o2 "exit" two)
+gleich "boot 2" "$rc" "21"
+hat "$OUT/o2.txt" "ab: TRIAL failed, back to 0" "the kernel reads the old trial file and rolls back"
+grep -qa '^default_entry: 1' "$OUT/o2.after" && ok "ESP flipped from the old trial file" || bad "ESP not flipped"
 
 echo
 echo "abkern: $pass/$fail OK/FAIL"
