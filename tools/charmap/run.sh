@@ -21,4 +21,7 @@ bash tools/charmap/shot.sh "$D/nocheck" nocheck > "$D/nc.log" 2>&1
 python3 -I tools/charmap/check.py "$D/nocheck" nocheck | tee "$D/nc.res"
 python3 -I tools/charmap/check.py "$D/new" new "$D/nocheck" | grep -a "nocheck run" | tee "$D/cmp.res"
 [ -n "$KEEP" ] && { mkdir -p "$KEEP"; cp -r "$D"/new "$D"/nocheck "$KEEP/" 2>/dev/null; }
-cat "$D"/*.res | grep -a -c '^  FAIL' | { read n; echo "CHARMAP: $((pass + $(grep -ac '^  OK' "$D"/*.res | awk -F: '{s+=$2} END{print s}'))) ok, $((fail + n)) fail"; [ "$n" = 0 ] && [ "$fail" = 0 ]; }
+n=$(cat "$D"/*.res | grep -a -c '^  FAIL' || true)
+ok=$(grep -ac '^  OK' "$D"/*.res | awk -F: '{s+=$2} END{print s}')
+echo "CHARMAP: $((pass + ok)) ok, $((fail + n)) fail"
+[ "$n" = 0 ] && [ "$fail" = 0 ]
