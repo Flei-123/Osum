@@ -67,7 +67,7 @@ else
 fi
 S1="$TMPD/b1/serial.txt"
 has "$S1" "desk: start /bin/taskmgr" "der Aufgabenverwalter startet auf dem Schreibtisch"
-has "$S1" "name=[Aufgabenverwaltung]" "und er steht im Startmenue (/apps/taskmgr.osp)"
+has "$S1" "name=[Task-Manager]" "und er steht im Startmenue (/apps/taskmgr.osp)"
 
 # ================================================ 2. die neuen Kennzahlen
 echo
