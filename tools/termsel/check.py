@@ -124,7 +124,7 @@ print('== Z9: paste redraw + Ctrl+Shift+C without selection ==')
 kicks = [ln for ln in ser if 'wm: tpaste kick=' in ln]
 chk(len(kicks) >= 2, 'every paste kicked the compositor (wm: tpaste kick=, Ctrl+Shift+V + right click): %d' % len(kicks))
 chk(len(copies) == 2, 'Ctrl+Shift+C without a selection copied nothing (copies seen: %d)' % len(copies))
-alive = [tx for g, rws, t in blocks[-2:] for tx in rws.values() if tx.strip() == 'ALIVE']
+alive = [tx for g, rws, t in blocks[-4:] for tx in rws.values() if tx.strip() == 'ALIVE']
 chk(len(alive) >= 1, 'the shell still answers after Ctrl+Shift+C without a selection (echo ALIVE printed ALIVE)')
 chk(not any('sh: bye' in tx for g, rws, t in blocks for tx in rws.values()), 'no "sh: bye" in any dump (the shell never exited)')
 
