@@ -7,8 +7,8 @@ svcproof get proofapp greeting
 svcproof set proofapp greeting second
 svcproof get proofapp greeting
 ls /data/proofapp/services
-svcproof set otherapp greeting foreign
-svcproof get otherapp greeting
+svcproof set proofbpp greeting foreign
+svcproof get proofbpp greeting
 svcproof get proofapp greeting
 svcproof gen proofapp big 65536
 svcproof sum proofapp big
