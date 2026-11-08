@@ -15,7 +15,7 @@ Manifest side: docs/manifest-v2.md (perm -> service call).
 
 Module names are deliberately NOT `svc svcfile svcclip svcdialog svcstore svcos` (Firn module names are global by last component; the Firn names stay free for the pin lift).
 Deviation from the contract: app names starting with `.` are refused (`..` would escape `/data`).
-Not run-tested: `svcosum.fi` storage and clipboard in a guest (compile-checked only; needs QEMU).
+Guest-tested: gate `servicesguest` (tools/servicesguest/run.sh) boots QEMU and runs `kernel/user/svcproof.fi`: storage round trip, 64 KiB limit, key/app rules, app isolation, clipboard copy/paste, 4 mutated trees must go red. `svcosum.ensure_dirs` creates `/data` itself (fresh images have none).
 
 ## Call -> existing OrientOS code
 
@@ -39,4 +39,4 @@ Not run-tested: `svcosum.fi` storage and clipboard in a guest (compile-checked o
 3. Pin lift of `vendor/firn` once `lib/services` is in Firn main (then rename or wrap: `svcosum` gets the Firn `svcos` function names).
 4. Async host events: `svc.host_event(kind,status,id,q,p,n)` fed from the bus loop of the app (native replies are queued at once today).
 5. Certus does not answer the `firn_web_*` service imports yet (Firn contract note), so web-side conformance needs Certus capability `services`.
-6. Guest test of `svcosum` (storage round trip, clipboard) once a proof app imports it.
+6. `dialogd` GUI test with a proof app (message/confirm answered by scripted Enter/Esc, picker open/save); building blocks: `kernel/user/busy.fi` (`alert`/`confirm`), `fuiscene.table`/`entry`, `libc.io.dir_*`.
