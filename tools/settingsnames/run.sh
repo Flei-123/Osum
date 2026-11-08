@@ -34,12 +34,14 @@ fi
 run_case() {
     local name=$1 lang=$2 scale=$3 builddir=${4:-$DESIGNBUILD} res=${5:-1280x800}
     local yres=${res#*x}
+    local entry=start_Settings
+    [ "$lang" = de ] && entry=start_Einstellungen
     local dir="$OUT/$name" dreh="$OUT/$name.txt"
     mkdir -p "$dir"
     {
         echo "warte 12"
         echo "klick 24,$((yres-20))"; echo "warte 3"
-        echo "klickauf start_Settings"; echo "warte 12"
+        echo "klickauf $entry"; echo "warte 12"
         echo "warteauf settings: nav route=settings://personalization page=0 || 90"
         echo "warte 3"
         echo "foto names"
