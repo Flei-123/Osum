@@ -55,6 +55,7 @@ for n in off many; do
     [ "$(grep -ac "^$WANT  /t/big" "$D/$n.klar")" -ge 1 ] && ok "$n: /t/big hash matches" || bad "$n: /t/big hash differs"
     [ "$(grep -ac "^$WANT  /tmp/copy" "$D/$n.klar")" -ge 1 ] && ok "$n: written copy reads back identical" || bad "$n: copy hash differs"
     grep -aq "==END==" "$D/$n.klar" && ok "$n: script finished" || bad "$n: script did not finish"
+    grep -aq "nvme: noirq\|nvme: command timeout" "$D/$n.klar" && bad "$n: nvme mode flags or timeout leaked into the log" || ok "$n: no spurious noirq or command timeout"
 done
 echo "  nvme read commands: off=${reads[off]} many=${reads[many]}; sectors: off=${sectors[off]} many=${sectors[many]}"
 [ "${reads[many]}" -gt 0 ] && [ $(( reads[many] * MIN_RATIO )) -le "${reads[off]}" ] \
