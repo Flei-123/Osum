@@ -46,6 +46,7 @@ bc_common_key() {
     local firnc=$1 work=$2 stufe=$3
     {
         echo "format=$BC_FORMAT stufe=$stufe"
+        echo "ra_mmio=${FIRN_RA_MMIO:-}"
         sha256sum "$firnc" | cut -d' ' -f1
         cat "$ROOT/vendor/firn/.gebaut" 2>/dev/null
         (cd "$work" && bc_tree_hash kernel)
