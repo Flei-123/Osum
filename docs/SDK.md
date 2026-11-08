@@ -18,6 +18,8 @@ gate `tools/sdk/gui.sh`; see the window without a VM: docs/HOST-PREVIEW.md). `bu
 `DIR/apps/<short>.osp/{INFO,symbol,data/}` and `DIR/mkfs.lines` (arguments for tools/osum/mkfs.py).
 No SYSTEM marker: a third-party app is labelled by the kernel.
 
+Full spec: docs/manifest-v2.md (kind, outputs, web.*, service-mapped permissions, `--strict`, `migrate`, schema).
+
 ## Manifest v2 = the INFO file (same file the launcher reads)
 
 Launcher keys stay on top (<1023 octets): `name info keys icon exec revision net` (`fassung` is still read).

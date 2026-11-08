@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 import argparse
+import json
 import os
 import re
 import shutil
@@ -9,6 +10,8 @@ import sys
 import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import brand
+import migrate
+from manifest import PERMS, csv, short_of, lint, normalize, page
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -16,189 +19,16 @@ TEMPLATE = os.path.join(HERE, "template")
 
 SDK_MODULES = ["ulib", "actwire", "rpc", "actcli", "socsdk"]
 
-KEYS_V1 = ["name", "info", "exec", "icon", "keys", "revision", "fassung", "net"]
-KEYS_V2 = ["manifest", "id", "version", "author", "license", "min_os", "perm",
-           "service", "actions", "opens", "needs", "sandbox"]
-REQUIRED = ["name", "info", "manifest", "id", "version"]
 
-PERMS = {
-    "net": (True, "network access; build writes net=real, else net=none (netview, docs/NETVIEW.md)"),
-    "notify": (True, "post notifications (bus NOTIPOST)"),
-    "clipboard.read": (True, "read the clipboard (bus CLIPGET)"),
-    "clipboard.write": (True, "write the clipboard (bus CLIPSET)"),
-    "mic": (True, "record from the microphone (SYS_OSUM_AUDREAD)"),
-    "fs.home": (True, "read/write outside the app data folder; only needed by an app that says sandbox=files"),
-    "audio.play": (True, "play sound"),
-    "hotkey": (True, "a global shortcut: hotkeyd binds a key (from /etc/hotkeys.conf) to one of the app's named bus actions; the app never sees the keys"),
-    "window.float": (True, "a window above the normal ones (layer L_FLOAT, never above the lock screen or task bar)"),
-}
-
-SYSTEM_APPS_DIR = os.path.join(ROOT, "assets", "apps")
-
-
-class Report:
-    def __init__(self):
-        self.errors = []
-        self.warnings = []
-
-    def err(self, line, msg):
-        self.errors.append("line %d: %s" % (line, msg) if line else msg)
-
-    def warn(self, line, msg):
-        self.warnings.append("line %d: %s" % (line, msg) if line else msg)
-
-
-def parse_info(text, rep):
-    out = {}
-    for no, raw in enumerate(text.split("\n"), 1):
-        line = raw.rstrip("\r")
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        if "=" not in line:
-            rep.err(no, "not a key=value line: %r" % line[:40])
-            continue
-        k, v = line.split("=", 1)
-        k = k.strip()
-        if k in out:
-            rep.err(no, "duplicate key '%s' (first at line %d)" % (k, out[k][1]))
-            continue
-        out[k] = (v.strip(), no)
-    return out
-
-
-def short_of(app_id):
-    return app_id.rsplit(".", 1)[-1]
-
-
-def system_names():
-    try:
-        return {n[:-4] for n in os.listdir(SYSTEM_APPS_DIR) if n.endswith(".osp")}
-    except OSError:
-        return set()
-
-
-def csv(v):
-    return [x.strip() for x in v.split(",") if x.strip()]
-
-
-def lint(info_path, project=None):
-    rep = Report()
-    try:
-        data = open(info_path, "rb").read()
-    except OSError as e:
-        rep.err(0, "cannot read %s: %s" % (info_path, e))
-        return rep, {}
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        rep.err(0, "INFO is not UTF-8")
-        return rep, {}
-    f = parse_info(text, rep)
-    known = set(KEYS_V1 + KEYS_V2)
-    for k, (v, no) in f.items():
-        if k not in known and not k.startswith("x-"):
-            rep.err(no, "unknown key '%s' (custom keys start with x-)" % k)
-    for k in REQUIRED:
-        if k not in f:
-            rep.err(0, "missing required key '%s'" % k)
-    if "manifest" in f and f["manifest"][0] != "2":
-        rep.err(f["manifest"][1], "manifest=%s: this tool reads manifest=2" % f["manifest"][0])
-    last = -1
-    pos = 0
-    for raw in data.split(b"\n"):
-        for key in (b"name=", b"info=", b"keys=", b"revision=", b"fassung=", b"net=", b"exec=", b"icon="):
-            if raw.startswith(key):
-                last = max(last, pos + len(raw))
-        pos += len(raw) + 1
-    if last >= 1023:
-        rep.err(0, "launcher keys end at octet %d; appdir reads 1023 -- move comments behind them" % last)
-    short = None
-    if "id" in f:
-        v, no = f["id"]
-        if not re.fullmatch(r"[a-z][a-z0-9]*(\.[a-z][a-z0-9-]*){1,5}", v):
-            rep.err(no, "id '%s': reverse-DNS, lower case, 2-6 parts (org.example.app)" % v)
-        else:
-            short = short_of(v)
-            if not re.fullmatch(r"[a-z][a-z0-9]{0,15}", short):
-                rep.err(no, "last part of id ('%s') is the bundle name: [a-z][a-z0-9]{0,15}" % short)
-                short = None
-            elif short in system_names():
-                rep.err(no, "bundle name '%s' collides with a system app" % short)
-    if "version" in f and not re.fullmatch(r"\d{1,4}\.\d{1,4}\.\d{1,4}", f["version"][0]):
-        rep.err(f["version"][1], "version '%s': MAJOR.MINOR.PATCH" % f["version"][0])
-    if "name" in f:
-        n = f["name"][0]
-        if not (1 <= len(n) <= 31):
-            rep.err(f["name"][1], "name: 1..31 characters")
-    if "info" in f and not (1 <= len(f["info"][0]) <= 80):
-        rep.err(f["info"][1], "info: 1..80 characters")
-    if "revision" not in f and "fassung" not in f:
-        rep.err(0, "missing required key 'revision'")
-    for rev_key in ("revision", "fassung"):
-        if rev_key in f and not re.fullmatch(r"\d{1,6}", f[rev_key][0]):
-            rep.err(f[rev_key][1], "%s: a whole number (raise it with every release)" % rev_key)
-    if "min_os" in f and not re.fullmatch(r"\d{1,6}(\.\d{1,6}){0,2}", f["min_os"][0]):
-        rep.err(f["min_os"][1], "min_os: 1-3 dotted numbers")
-    elif "min_os" in f:
-        rep.warn(f["min_os"][1], "min_os is declared only: the OS has no version number to compare yet")
-    if "sandbox" in f and f["sandbox"][0] != "files":
-        rep.err(f["sandbox"][1], "sandbox: files")
-    if "net" in f:
-        if f["net"][0] not in ("real", "filtered", "faked", "none"):
-            rep.err(f["net"][1], "net: real|filtered|faked|none")
-        if "perm" in f and ("net" in csv(f["perm"][0])) != (f["net"][0] != "none"):
-            rep.err(f["net"][1], "net=%s contradicts perm" % f["net"][0])
-    if "perm" in f:
-        seen = set()
-        for p in csv(f["perm"][0]):
-            if p not in PERMS:
-                rep.err(f["perm"][1], "unknown permission '%s' (osdk.py perms)" % p)
-            elif p in seen:
-                rep.err(f["perm"][1], "permission '%s' twice" % p)
-            elif not PERMS[p][0]:
-                rep.warn(f["perm"][1], "perm '%s' is declared only: the system does not enforce it yet" % p)
-            seen.add(p)
-    if "service" in f:
-        for s in csv(f["service"][0]):
-            if len(s) > 16:
-                rep.err(f["service"][1], "service '%s': a bus name has at most 16 octets" % s)
-            elif not re.fullmatch(r"[a-z][a-z0-9.]*", s):
-                rep.err(f["service"][1], "service '%s': [a-z][a-z0-9.]*" % s)
-            elif short and s != short and not s.startswith(short + "."):
-                rep.err(f["service"][1], "service '%s' is outside the app's namespace '%s'" % (s, short))
-    if "opens" in f:
-        for e in csv(f["opens"][0]):
-            if not re.fullmatch(r"[a-z0-9]{1,8}", e):
-                rep.err(f["opens"][1], "opens '%s': a file extension, 1..8 of [a-z0-9]" % e)
-    if "needs" in f:
-        for n in csv(f["needs"][0]):
-            if not re.fullmatch(r"(os|app:[a-z][a-z0-9.-]*)>=\d{1,6}(\.\d{1,6}){0,2}", n):
-                rep.err(f["needs"][1], "needs '%s': os>=N or app:<id>>=N" % n)
-    if "actions" in f:
-        rel = f["actions"][0]
-        if project:
-            p = os.path.join(project, rel)
-            if ".." in rel or os.path.isabs(rel):
-                rep.err(f["actions"][1], "actions: a path inside the project")
-            elif not os.path.isfile(p):
-                rep.err(f["actions"][1], "actions file '%s' missing" % rel)
-            else:
-                r = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "actionbus", "manifest.py"),
-                                    "check", p], capture_output=True, text=True)
-                if r.returncode != 0:
-                    rep.err(f["actions"][1], "actions file refused: " + (r.stdout + r.stderr).strip().split("\n")[-1])
-                elif short:
-                    m = re.search(r"^app\s+(\S+)", open(p).read(), re.M)
-                    if not m or m.group(1) != short:
-                        rep.err(f["actions"][1], "ACTIONS 'app' must be '%s'" % short)
-    return rep, {k: v[0] for k, v in f.items()}
+def info_and_project(path):
+    info = os.path.join(path, "INFO") if os.path.isdir(path) else path
+    project = path if os.path.isdir(path) else os.path.dirname(os.path.abspath(path))
+    return info, project
 
 
 def cmd_check(args):
-    p = args.path
-    info = os.path.join(p, "INFO") if os.path.isdir(p) else p
-    proj = p if os.path.isdir(p) else os.path.dirname(os.path.abspath(p))
-    rep, f = lint(info, proj)
+    info, proj = info_and_project(args.path)
+    rep, f = lint(info, proj, strict=args.strict, system=args.system)
     for w in rep.warnings:
         print("warning: " + w)
     for e in rep.errors:
@@ -207,6 +37,38 @@ def cmd_check(args):
         print("osdk: %s refused (%d error(s), %d warning(s))" % (info, len(rep.errors), len(rep.warnings)))
         return 1
     print("osdk: %s ok (id %s, version %s, %d warning(s))" % (info, f.get("id"), f.get("version"), len(rep.warnings)))
+    return 0
+
+
+def cmd_manifest(args):
+    info, proj = info_and_project(args.path)
+    rep, f = lint(info, proj, system=args.system)
+    if rep.errors:
+        print("\n".join("error: " + e for e in rep.errors))
+        return 1
+    m = normalize(f)
+    if args.format == "page":
+        if "web" not in m:
+            print("osdk: outputs has no web")
+            return 1
+        sys.stdout.write(page(m))
+        return 0
+    print(json.dumps(m, indent=1, sort_keys=True))
+    return 0
+
+
+def cmd_migrate(args):
+    changed = 0
+    for path in args.paths:
+        info, _ = info_and_project(path)
+        old = open(info, encoding="utf-8").read()
+        new = migrate.migrate_text(old, os.path.basename(os.path.dirname(os.path.abspath(info))), args.kind)
+        if new != old:
+            changed += 1
+            print("osdk: %s would change" % info if not args.write else "osdk: %s migrated" % info)
+            if args.write:
+                open(info, "w", encoding="utf-8").write(new)
+    print("osdk: %d of %d INFO file(s) %s" % (changed, len(args.paths), "migrated" if args.write else "need migration"))
     return 0
 
 
@@ -243,13 +105,16 @@ def cmd_new(args):
     extra = ""
     if args.kind == "service":
         extra = "service=%s" % short
-    sub = {"PRODUCT": brand.PRODUKT, "ID": app_id, "SHORT": short, "NAME": name, "PERM": perm, "EXTRA": extra}
+    sub = {"PRODUCT": brand.PRODUKT, "ID": app_id, "SHORT": short, "NAME": name, "PERM": perm, "EXTRA": extra,
+           "KIND": args.kind, "OUTPUTS": args.outputs, "AUTHOR": args.author}
     os.makedirs(os.path.join(d, "src"))
     for src, dst in (("INFO.in", "INFO"), ("README.md.in", "README.md"),
                      ("main-%s.fi.in" % args.kind, os.path.join("src", "main.fi"))):
         t = open(os.path.join(TEMPLATE, src)).read()
         open(os.path.join(d, dst), "w").write(expand(t, sub))
     shutil.copyfile(os.path.join(TEMPLATE, "symbol.txt"), os.path.join(d, "symbol.txt"))
+    if "web" in csv(args.outputs):
+        shutil.copyfile(os.path.join(TEMPLATE, "symbol.svg"), os.path.join(d, "symbol.svg"))
     rep, _ = lint(os.path.join(d, "INFO"), d)
     if rep.errors:
         print("osdk: the template produced a refused manifest: " + "; ".join(rep.errors))
@@ -370,8 +235,8 @@ def cmd_build(args):
 
 
 def cmd_perms(_):
-    for k, (enf, text) in PERMS.items():
-        print("%-16s %-10s %s" % (k, "enforced" if enf else "declared", text))
+    for k, (level, call, text) in PERMS.items():
+        print("%-16s %-9s %-15s %s" % (k, level, call or "-", text))
     return 0
 
 
@@ -384,11 +249,24 @@ def main(argv):
     a.add_argument("--dir")
     a.add_argument("--name")
     a.add_argument("--perm")
+    a.add_argument("--outputs", default="native")
+    a.add_argument("--author", default="unknown")
     a.set_defaults(fn=cmd_new)
     a = sp.add_parser("check")
     a.add_argument("path")
     a.add_argument("--strict", action="store_true")
+    a.add_argument("--system", action="store_true")
     a.set_defaults(fn=cmd_check)
+    a = sp.add_parser("manifest")
+    a.add_argument("path")
+    a.add_argument("--format", choices=["json", "page"], default="json")
+    a.add_argument("--system", action="store_true")
+    a.set_defaults(fn=cmd_manifest)
+    a = sp.add_parser("migrate")
+    a.add_argument("paths", nargs="+")
+    a.add_argument("--kind", choices=["app", "gui"], default="gui")
+    a.add_argument("--write", action="store_true")
+    a.set_defaults(fn=cmd_migrate)
     a = sp.add_parser("build")
     a.add_argument("path")
     a.add_argument("--out", required=True)
