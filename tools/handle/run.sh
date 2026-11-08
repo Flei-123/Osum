@@ -187,11 +187,13 @@ num "bench-fdok (der Eintrag hinter Deskriptor 1 -- 64 hiesse: die Messung misst
 FDOF=$(zahl "$B" bench-fd-of); LEER=$(zahl "$B" bench-leer); KHZ=$(zahl "$B" bench-khz)
 GP=$(sed -n 's/^hbench: getpid=\([0-9]*\).*/\1/p' "$B" | head -1)
 LS=$(sed -n 's/^hbench: lseek=\([0-9]*\).*/\1/p' "$B" | head -1)
-printf '  ZAHL  file.fd_of %s Zyklen (Median) | getpid %s | lseek %s | Leerschleife %s | TSC %s kHz\n' \
-    "$FDOF" "$GP" "$LS" "$LEER" "$KHZ"
+FW=$(sed -n 's/^hbench: forkwait=\([0-9]*\).*/\1/p' "$B" | head -1)
+printf '  ZAHL  file.fd_of %s Zyklen (Median) | getpid %s | lseek %s | fork+exit+wait %s | Leerschleife %s | TSC %s kHz\n' \
+    "$FDOF" "$GP" "$LS" "$FW" "$LEER" "$KHZ"
 num "file.fd_of bleibt unter 250 Zyklen" "$FDOF" lt 250
 num "lseek aus Ring 3 bleibt unter 700 Zyklen" "$LS" lt 700
 num "getpid (von dieser Runde unberuehrt) bleibt unter 450 Zyklen" "$GP" lt 450
+num "fork+exit+wait bleibt unter 600000 Zyklen (alter Kern: 780000-925000)" "$FW" lt 600000
 
 echo "== 5. Gegenprobe 'nogen': der io_uring-Fehler, absichtlich wieder eingebaut =="
 run_kernel "$TMPD/k0.mb" "handle nogen" "$TMPD/nogen.txt"
