@@ -22,9 +22,9 @@ python3 -I tools/iwlfh/ref.py gen "$TMPD/blobs" > "$TMPD/blobs.log" 2>&1 || { ba
     echo "taste meta_l-a"
     echo "warteauf 'qs: open' || 30"
     echo "warte 2"
+    echo "foto early"
     echo "klickauf qskachel1"
     echo "warteauf 'qsnet: page open' || 30"
-    echo "foto early"
     echo "warteauf 'qsnet: state=[0-9]+ kind=[0-9]+ rows=[1-9]' || 150"
     echo "warte 4"
     echo "foto list"
@@ -54,8 +54,8 @@ im.save(sys.argv[2])" "$1" "$TMPD/ocr.png" && tesseract "$TMPD/ocr.png" - 2>/dev
 
 if [ -s "$D/list.ppm" ] && ocr "$D/list.ppm" | grep -qi "OrientFake"; then ok "scale $SCALE: the scanned list shows OrientFake"
 else bad "scale $SCALE: OrientFake not visible in the list picture"; fi
-if [ -s "$D/early.ppm" ] && ocr "$D/early.ppm" | grep -qi "OrientFake"; then bad "scale $SCALE: counter-proof broken: the name is visible before the scan"
-else ok "scale $SCALE: counter-proof -- no network name before the scan result"; fi
+if [ -s "$D/early.ppm" ] && ocr "$D/early.ppm" | grep -qi "OrientFake"; then bad "scale $SCALE: counter-proof broken: the name is visible with the page closed"
+else ok "scale $SCALE: counter-proof -- no network name while the page is closed"; fi
 [ "$(grep -ac 'qsnet: pick=' "$S")" -ge 3 ] && ok "scale $SCALE: three rows were picked" || bad "scale $SCALE: fewer than three picks"
 grep -aq 'qsnet: box k=41 ' "$S" && ok "scale $SCALE: a secured network opens the password row" || bad "scale $SCALE: no password row appeared"
 grep -aq 'qsnet: password short' "$S" && ok "scale $SCALE: a 3 character password is rejected" || bad "scale $SCALE: short password not rejected"
