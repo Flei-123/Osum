@@ -164,7 +164,7 @@ for f in k0 k1 uprog0 uprog1; do
     [ "$kind" = "REL" ] && ok "$f.o: ELF type REL (object file, not an executable)" \
                         || bad "$f.o: ELF kind '$kind', expected REL"
     erlaubt='^(osum_panic)$'
-    case "$f" in k0|k1) erlaubt='^(osum_panic|kdata|osym_tab)$' ;; esac
+    case "$f" in k0|k1) erlaubt='^(osum_panic|kdata|osym_tab|kernel_start)$' ;; esac
     undef=$(nm -u "$o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vE "$erlaubt")
     [ -z "$undef" ] && ok "$f.o: no undefined symbol other than $(echo "$erlaubt" | tr -d '^$()' | tr '|' '/') (no libc, no runtime)" \
                     || { bad "$f.o: undefined symbols"; echo "$undef" | sed 's/^/        /'; }

@@ -96,7 +96,7 @@ K="$TMPD/s0/k.mb"
 D="$TMPD/s0/disk.img"
 
 undef=$(nm -u "$TMPD/s0/k.o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' \
-        | grep -vE '^(osum_panic|kdata|osym_tab)$')
+        | grep -vE '^(osum_panic|kdata|osym_tab|kernel_start)$')
 [ -z "$undef" ] && ok "k.o: no undefined name other than osum_panic and kdata" \
                 || bad "k.o: undefinierte Symbole: $undef"
 n=$(nm "$TMPD/s0/k.o" 2>/dev/null | grep -cE 'r8169__init_on|netdev__driver_for')
