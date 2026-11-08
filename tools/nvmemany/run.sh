@@ -46,8 +46,8 @@ run() {
 declare -A reads sectors
 
 echo "== 2. runs =="
-run off ""
-run many "nvmemany"
+run off "nonvmemany"
+run many ""
 
 echo "== 3. checks =="
 for n in off many; do
@@ -58,7 +58,7 @@ for n in off many; do
 done
 echo "  nvme read commands: off=${reads[off]} many=${reads[many]}; sectors: off=${sectors[off]} many=${sectors[many]}"
 [ "${reads[many]}" -gt 0 ] && [ $(( reads[many] * MIN_RATIO )) -le "${reads[off]}" ] \
-    && ok "nvmemany needs at least ${MIN_RATIO}x fewer read commands (${reads[off]} -> ${reads[many]})" \
-    || bad "nvmemany command ratio too small (${reads[off]} -> ${reads[many]})"
-[ "${reads[off]}" -ge $(( BIG_BYTES / 512 )) ] && ok "off: one command per sector (${reads[off]})" || bad "off: fewer commands than sectors (${reads[off]})"
+    && ok "default needs at least ${MIN_RATIO}x fewer read commands (${reads[off]} -> ${reads[many]})" \
+    || bad "default command ratio too small (${reads[off]} -> ${reads[many]})"
+[ "${reads[off]}" -ge $(( BIG_BYTES / 512 )) ] && ok "nonvmemany: one command per sector (${reads[off]})" || bad "nonvmemany: fewer commands than sectors (${reads[off]})"
 finish

@@ -395,6 +395,7 @@ Total: 650
 | `nonat` | netmon.fi |  |  |
 | `nonetmon` | netmon.fi |  |  |
 | `nonpt` | hv.fi |  |  |
+| `nonvmemany` | bootwords_store.fi | nvmemany | NVMe reads go through the read-ahead cache and stream with up to 8 sectors per command by default; counter-proof = same kernel with word nonvmemany (one command |
 | `nooom` | bootargs.fi |  |  |
 | `nopart` | bootargs.fi |  |  |
 | `nopci` | hw.fi |  |  |
@@ -464,7 +465,6 @@ Total: 650
 | `nozreap` | fbpanel.fi |  |  |
 | `nurboot` | bootargs.fi |  |  |
 | `nvme` | hw.fi |  |  |
-| `nvmemany` | bootwords_store.fi | nvmemany | nvmemany word: NVMe reads go through the read-ahead cache and stream with up to 8 sectors per command; counter-proof = same kernel without the word (one command |
 | `nvpoll` | hw.fi |  |  |
 | `odb=1` | bootwords_hw.fi |  |  |
 | `ofs3fmt` | bootargs.fi |  |  |
@@ -543,7 +543,7 @@ Total: 650
 | `termdump` | fbpanel.fi |  |  |
 | `themegui` | bootargs.fi |  |  |
 | `themeshot` | bootargs.fi |  |  |
-| `tile` | bootargs.fi | menutheme, startctx, traylayout, vmsvgabig | r1139 host hint over the framebuffer tile limit (word vmsvgabig: 2496x1507) ends directly in the shrunk 2340x1412: one mode switch, no failed switch, no rollbac |
+| `tile` | bootargs.fi | menutheme, qsnet, startctx, traylayout | control center network tile opens the network page (state, Wi-Fi list, password row), picture changes, Escape closes |
 | `tilefuzz` | bootargs.fi |  |  |
 | `tilerot` | bootargs.fi |  |  |
 | `tileshot` | bootargs.fi |  |  |
@@ -556,7 +556,7 @@ Total: 650
 | `tzrule=eu` | bootargs.fi |  |  |
 | `tzrule=nz` | bootargs.fi |  |  |
 | `tzrule=us` | bootargs.fi |  |  |
-| `uiscale=` | bootargs.fi, fbpanel.fi |  |  |
+| `uiscale=` | bootargs.fi, fbpanel.fi | startsmall |  |
 | `unix` | bootargs.fi | unix |  |
 | `unplug` | bootargs.fi | usbhot, usbreplug, usbevents |  |
 | `usb` | bootargs.fi | nethot, info, netui, ps2hid | 10 broken-library controls |

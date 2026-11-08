@@ -12,12 +12,12 @@ python3 -I tools/bootwords/gen.py --check && ok "docs/bootwords.md matches the k
 count=$(grep -c '^| `' docs/bootwords.md)
 [ "$count" -ge 600 ] && ok "doc lists $count words" || bad "doc lists only $count words"
 
-for word in vfs nofs nokbd osum fastboot nvmemany intelgpuback; do
+for word in vfs nofs nokbd osum fastboot nonvmemany intelgpuback; do
     grep -q "^| \`$word\` " docs/bootwords.md && ok "word $word documented" || bad "word $word missing"
 done
 
 mkdir -p "$tmp/docs"
-grep -v '^| `nvmemany` ' docs/bootwords.md > "$tmp/docs/bootwords.md"
+grep -v '^| `nonvmemany` ' docs/bootwords.md > "$tmp/docs/bootwords.md"
 BOOTWORDS_DOC="$tmp/docs/bootwords.md" python3 -I tools/bootwords/gen.py --check && bad "counter-proof: doc without a word was accepted" || ok "counter-proof: doc without a word is rejected"
 echo "BOOTWORDS: $pass passed, $fail failed"
 [ $fail -eq 0 ]
