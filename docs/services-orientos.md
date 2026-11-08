@@ -11,7 +11,7 @@ Manifest side: docs/manifest-v2.md (perm -> service call).
 | `lib/services/svcrules.fi` | status 0-6, capability bits 1-64, name/key rules, `store_dir`/`store_path` (`/data/<app>/services/<key>`), `status_name` |
 | `lib/services/svcqueue.fi` | reply queue, 28-octet 4-aligned record heads (total, id, op, status, index, name_len, data_len), compaction, request ids |
 | `kernel/user/services/svcosum.fi` | backend skeleton: `set_app caps copy_text paste_text message confirm store_set store_get store_remove store_has poll pending` |
-| `tools/services/{host.fi,run.sh}` | host test (53 checks) + 21 mutations + profile-kernel compile checks |
+| `tools/services/{host.fi,run.sh}` | host test (54 checks) + 21 mutations + profile-kernel compile checks |
 
 Module names are deliberately NOT `svc svcfile svcclip svcdialog svcstore svcos` (Firn module names are global by last component; the Firn names stay free for the pin lift).
 Deviation from the contract: app names starting with `.` are refused (`..` would escape `/data`).
