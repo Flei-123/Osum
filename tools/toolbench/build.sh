@@ -32,6 +32,7 @@ progs="desktop taskbar settings launcher theme explorer taskmgr sh echo ls cat s
 extra=""
 lang=de
 second=""
+bare=""
 flaky=""
 svcstate=""
 for a in "$@"; do
@@ -53,6 +54,7 @@ for a in "$@"; do
         extra=*) extra=${a#*=} ;;
         lang=*) lang=${a#*=} ;;
         second=*) second=${a#*=} ;;
+        bare=*) bare=${a#*=} ;;
         flaky=*) flaky=${a#*=} ;;
         svcstate=*) svcstate=${a#*=} ;;
         *) echo "unbekannte Option: $a" >&2; exit 2 ;;
@@ -198,6 +200,9 @@ else
     APPEND="gfx wm wig wmhold wiglong wmdauer wigapp=$app nokbd nosched noproc nofs $extra"
     WAITFOR='^wm: hold|^k15: start'
 fi
+case " $extra " in
+    *" vfs "*) case " $APPEND " in *" osum "*) ;; *) [ -z "$bare" ] && APPEND="osum $APPEND" ;; esac ;;
+esac
 T0=$(date +%s%N)
 SECOND=()
 if [ -n "$second" ]; then

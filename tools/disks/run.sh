@@ -107,5 +107,9 @@ if [ -s "$D/win/allein.ppm" ] && [ -n "${BW:-}" ]; then
 else
     bad "no picture of the window"
 fi
+bash tools/toolbench/build.sh "$D/bare" app=/bin/disks progs="disks explorer sh echo ls cat" second="$D/gpt.img" extra="vfs nopart" bare=yes \
+    wait=12 last=140 accel=kvm > "$D/bare.log" 2>&1
+grep -qa '^disks: ready n=0 ' "$D/bare/serial.txt" && ok "counter-proof: a window boot without the osum stage mounts no /dev, the window sees no disk" \
+    || bad "counter-proof: the window without the osum stage still found disks"
 echo "DISKS: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
