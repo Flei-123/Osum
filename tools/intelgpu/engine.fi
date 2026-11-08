@@ -1,0 +1,505 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import std.io
+import libc.octets
+import gpu.intel.engregs
+import gpu.intel.fwake
+import gpu.intel.micmd
+import gpu.intel.ring
+import gpu.intel.lrc
+import gpu.intel.elsp
+import gpu.intel.ereset
+import gpu.intel.engine
+import gpu.intel.submit
+
+const PAGE: u64 = 0x1000
+const RING_BYTES: u64 = 0x1000
+const GGTT_BASE: u64 = 0x100000
+const RING_AT: u64 = 0x0
+const CTX_AT: u64 = 0x1000
+const HWS_AT: u64 = 0x3000
+const POOL_BYTES: u64 = 0x4000
+const REG_CAP: u64 = 64
+const NOT_FOUND: u64 = 0xffff
+const STEP_CAP: u64 = 4096
+const BAD_DWORD: u64 = 0x7fffffff
+const LOW32: u64 = 0xffffffff
+const HANG_BUDGET_US: u64 = 15000
+
+static mut pool: [u32; 8192] = [0; 8192]
+static mut base_cpu: u64 = 0
+static mut reg_off: [u64; 64] = [0; 64]
+static mut reg_val: [u64; 64] = [0; 64]
+static mut reg_n: u64 = 0
+static mut wr_count: u64 = 0
+static mut elsp_count: u64 = 0
+static mut elsp_buf: [u64; 4] = [0; 4]
+static mut elsp_last: [u64; 4] = [0; 4]
+static mut elsp_n: u64 = 0
+static mut gdrst_writes: u64 = 0
+static mut gdrst_last: u64 = 0
+static mut gdrst_val: u64 = 0
+static mut fw_state: u64 = 0
+static mut mode_val: u64 = 0
+static mut mi_mode_val: u64 = 0x100
+static mut reset_ctl: u64 = 0
+static mut hws_pga: u64 = 0
+static mut hung: bool = false
+static mut csb: [u64; 6] = [0; 6]
+static mut csb_w: u64 = 7
+static mut csb_r: u64 = 7
+static mut total_us: u64 = 0
+static mut executed: u64 = 0
+static mut inj_noack: bool = false
+static mut inj_nomode: bool = false
+static mut inj_notready: bool = false
+static mut inj_stuck: bool = false
+static mut inj_drop_store: bool = false
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn cpu_of(ggtt: u64) -> u64 {
+    return base_cpu + (ggtt - GGTT_BASE)
+}
+
+fn reg_find(off: u64) -> u64 {
+    var i: u64 = 0
+    while i < reg_n {
+        if reg_off[i as usize] == off {
+            return i
+        }
+        i = i + 1
+    }
+    return NOT_FOUND
+}
+
+fn reg_set(off: u64, v: u64) {
+    var i: u64 = reg_find(off)
+    if i == NOT_FOUND {
+        if reg_n >= REG_CAP {
+            return
+        }
+        i = reg_n
+        reg_off[i as usize] = off
+        reg_n = reg_n + 1
+    }
+    reg_val[i as usize] = v
+}
+
+fn reg_get(off: u64) -> u64 {
+    let i: u64 = reg_find(off)
+    if i == NOT_FOUND {
+        return 0
+    }
+    return reg_val[i as usize]
+}
+
+fn apply_masked(old: u64, v: u64) -> u64 {
+    let mask: u64 = (v >> 16) & 0xffff
+    return (old & (~mask) & 0xffff) | (v & mask)
+}
+
+fn csb_push(st: u64) {
+    if csb_w >= 5 {
+        csb_w = 0
+    } else {
+        csb_w = csb_w + 1
+    }
+    csb[csb_w as usize] = st
+}
+
+fn mem_st(ggtt: u64, v: u64) {
+    octets.st32(cpu_of(ggtt), 0, v)
+}
+
+fn ring_dw(start: u64, head: u64) -> u64 {
+    return octets.ld32(cpu_of(start), head)
+}
+
+fn run_ring(state: u64) {
+    let start: u64 = octets.ld32(state, lrc.CTX_RING_START * 4)
+    let ctl: u64 = octets.ld32(state, lrc.CTX_RING_CTL * 4)
+    let size: u64 = (ctl & 0x1ff000) + PAGE
+    var head: u64 = octets.ld32(state, lrc.CTX_RING_HEAD * 4)
+    let tail: u64 = octets.ld32(state, lrc.CTX_RING_TAIL * 4)
+    var steps: u64 = 0
+    while head != tail && steps < STEP_CAP {
+        let dw: u64 = ring_dw(start, head)
+        if dw == micmd.MI_NOOP || dw == micmd.MI_USER_INTERRUPT {
+            head = (head + 4) % size
+        } else if dw == micmd.store_dword_ggtt() {
+            let addr: u64 = ring_dw(start, (head + 4) % size)
+            let val: u64 = ring_dw(start, (head + 12) % size)
+            if !inj_drop_store {
+                mem_st(addr, val)
+            }
+            head = (head + 16) % size
+        } else {
+            hung = true
+            return
+        }
+        steps = steps + 1
+    }
+    octets.st32(state, lrc.CTX_RING_HEAD * 4, head)
+    csb_push(elsp.ST_COMPLETE | elsp.ST_ACTIVE_IDLE)
+}
+
+fn execute(desc: u64) {
+    executed = executed + 1
+    if hung || (desc & lrc.DESC_VALID) == 0 || (mode_val & engregs.RUN_LIST_ENABLE) == 0 || (mi_mode_val & engregs.STOP_RING) != 0 {
+        return
+    }
+    let state: u64 = cpu_of(desc & 0xfffff000) + lrc.STATE_OFFSET
+    if octets.ld32(state, 4) != micmd.lri_header(14, true) || (octets.ld32(state, lrc.CTX_RING_CTL * 4) & 1) == 0 {
+        hung = true
+        return
+    }
+    csb_push(elsp.ST_IDLE_ACTIVE)
+    run_ring(state)
+}
+
+fn on_elsp(v: u64) {
+    elsp_count = elsp_count + 1
+    elsp_buf[elsp_n as usize] = v & LOW32
+    elsp_n = elsp_n + 1
+    if elsp_n < 4 {
+        return
+    }
+    elsp_n = 0
+    var i: u64 = 0
+    while i < 4 {
+        elsp_last[i as usize] = elsp_buf[i as usize]
+        i = i + 1
+    }
+    execute((elsp_buf[2] << 32) | elsp_buf[3])
+}
+
+fn on_gdrst(v: u64) {
+    gdrst_writes = gdrst_writes + 1
+    gdrst_last = v
+    if inj_stuck {
+        gdrst_val = v
+        return
+    }
+    if (v & engregs.GRDOM_BLT) != 0 {
+        hung = false
+        mode_val = 0
+        mi_mode_val = engregs.STOP_RING
+        csb_w = 7
+        csb_r = 7
+    }
+    gdrst_val = 0
+}
+
+fn mwr(off: u64, v: u64) -> u64 {
+    wr_count = wr_count + 1
+    let b: u64 = engregs.BCS_BASE
+    if off == engregs.FORCEWAKE_GT {
+        fw_state = apply_masked(fw_state, v)
+    } else if off == b + engregs.RING_MODE {
+        if !inj_nomode {
+            mode_val = apply_masked(mode_val, v)
+        }
+    } else if off == b + engregs.RING_MI_MODE {
+        mi_mode_val = apply_masked(mi_mode_val, v)
+    } else if off == b + engregs.RING_HWS_PGA {
+        hws_pga = v
+    } else if off == b + engregs.RING_ELSP {
+        on_elsp(v)
+    } else if off == b + engregs.RING_RESET_CTL {
+        reset_ctl = apply_masked(reset_ctl, v)
+    } else if off == engregs.GDRST {
+        on_gdrst(v)
+    } else if off == b + engregs.RING_CSB_PTR {
+        csb_r = (apply_masked(csb_r << 8, v) >> 8) & 7
+    } else {
+        reg_set(off, v)
+    }
+    return 0
+}
+
+fn mrd(off: u64) -> u64 {
+    let b: u64 = engregs.BCS_BASE
+    if off == engregs.FORCEWAKE_ACK_GT {
+        if inj_noack {
+            return 0
+        }
+        return fw_state & engregs.FORCEWAKE_KERNEL
+    }
+    if off == b + engregs.RING_MODE {
+        return mode_val
+    }
+    if off == b + engregs.RING_RESET_CTL {
+        if (reset_ctl & engregs.RESET_REQUEST) != 0 && !inj_notready {
+            return reset_ctl | engregs.RESET_READY
+        }
+        return reset_ctl
+    }
+    if off == engregs.GDRST {
+        return gdrst_val
+    }
+    if off == b + engregs.RING_CSB_PTR {
+        return (csb_r << 8) | csb_w
+    }
+    if off >= b + engregs.RING_CSB_BUF && off < b + engregs.RING_CSB_BUF + 48 {
+        return csb[((off - b - engregs.RING_CSB_BUF) / 8) as usize]
+    }
+    return reg_get(off)
+}
+
+fn mus(n: u64) -> u64 {
+    total_us = total_us + n
+    return 0
+}
+
+fn model_reset() {
+    reg_n = 0
+    wr_count = 0
+    elsp_count = 0
+    elsp_n = 0
+    gdrst_writes = 0
+    gdrst_last = 0
+    gdrst_val = 0
+    fw_state = 0
+    mode_val = 0
+    mi_mode_val = engregs.STOP_RING
+    reset_ctl = 0
+    hws_pga = 0
+    hung = false
+    csb_w = 7
+    csb_r = 7
+    total_us = 0
+    executed = 0
+    inj_noack = false
+    inj_nomode = false
+    inj_notready = false
+    inj_stuck = false
+    inj_drop_store = false
+    var i: u64 = 0
+    while i < POOL_BYTES {
+        octets.st32(base_cpu, i, 0xdeadbeef)
+        i = i + 4
+    }
+}
+
+fn layout() -> engine.Layout {
+    return engine.layout_new(engregs.BCS_BASE, engregs.GRDOM_BLT,
+        base_cpu + RING_AT, GGTT_BASE + RING_AT, RING_BYTES,
+        base_cpu + CTX_AT, GGTT_BASE + CTX_AT,
+        base_cpu + HWS_AT, GGTT_BASE + HWS_AT)
+}
+
+fn fresh() -> engine.Engine {
+    model_reset()
+    return engine.engine_new(layout())
+}
+
+fn hws_seqno() -> u64 {
+    return octets.ld32(base_cpu + HWS_AT, 0x400)
+}
+
+fn ready() -> engine.Engine {
+    var e: engine.Engine = fresh()
+    engine.setup(mrd, mwr, mus, &e)
+    return e
+}
+
+fn test_encoders() {
+    chk("mi noop is 0", micmd.mi(micmd.OP_NOOP, 0) == micmd.MI_NOOP)
+    chk("mi user interrupt is 0x01000000", micmd.mi(micmd.OP_USER_INTERRUPT, 0) == 0x01000000)
+    chk("mi batch buffer end is 0x05000000", micmd.mi(micmd.OP_BATCH_BUFFER_END, 0) == 0x05000000)
+    chk("store dword imm ggtt is 0x10400002", micmd.store_dword_ggtt() == 0x10400002)
+    chk("lri 14 posted is 0x1100101b", micmd.lri_header(14, true) == 0x1100101b)
+    chk("lri 1 not posted is 0x11000001", micmd.lri_header(1, false) == 0x11000001)
+    chk("masked on run list = 0x80008000", engregs.masked_on(engregs.RUN_LIST_ENABLE) == 0x80008000)
+    chk("masked off stop ring = 0x01000000", engregs.masked_off(engregs.STOP_RING) == 0x01000000)
+    chk("bcs elsp at 0x22230", engregs.eng(engregs.BCS_BASE, engregs.RING_ELSP) == 0x22230)
+    chk("bcs csb ptr at 0x223a0", engregs.eng(engregs.BCS_BASE, engregs.RING_CSB_PTR) == 0x223a0)
+    chk("gt forcewake ack at 0x130044", engregs.FORCEWAKE_ACK_GT == 0x130044)
+}
+
+fn test_ring() {
+    chk("ring ctl 4 KiB = 0x1", ring.ring_ctl(0x1000) == 0x1)
+    chk("ring ctl 32 KiB = 0x7001", ring.ring_ctl(0x8000) == 0x7001)
+    chk("ring size 4 KiB valid", ring.valid_size(0x1000))
+    chk("ring size 6 KiB invalid", !ring.valid_size(0x1800))
+    chk("ring size 4 MiB invalid", !ring.valid_size(0x400000))
+    var r: ring.Ring = ring.ring_new(base_cpu, GGTT_BASE, RING_BYTES)
+    chk("empty ring space = size - 8", ring.space(&r, 0) == RING_BYTES - 8)
+    r.tail = 0xff0
+    chk("space after wrap with head 0x10", ring.space(&r, 0x10) == 0x18)
+    chk("fits 5 dwords in 0x18", ring.fits(&r, 0x10, 5))
+    chk("does not fit 6 dwords in 0x18", !ring.fits(&r, 0x10, 6))
+    r.tail = 0xffc
+    ring.emit(&r, 7)
+    chk("emit wraps tail to 0", r.tail == 0)
+}
+
+fn test_lrc() {
+    model_reset()
+    let st: u64 = base_cpu + CTX_AT + lrc.STATE_OFFSET
+    chk("lrc init ok", lrc.init_xcs(st, engregs.BCS_BASE, GGTT_BASE, RING_BYTES))
+    chk("lrc image is 69 dwords", lrc.image_dwords() == 69)
+    chk("lrc dword 0 noop", octets.ld32(st, 0) == 0)
+    chk("lrc dword 1 lri 14 posted", octets.ld32(st, 4) == 0x1100101b)
+    chk("lrc ctx control reg absolute 0x22244", octets.ld32(st, 8) == 0x22244)
+    chk("lrc ring head reg 0x22034", octets.ld32(st, 16) == 0x22034)
+    chk("lrc ring tail reg 0x22030", octets.ld32(st, 24) == 0x22030)
+    chk("lrc ring start reg 0x22038", octets.ld32(st, 32) == 0x22038)
+    chk("lrc ring ctl reg 0x2203c", octets.ld32(st, 40) == 0x2203c)
+    chk("lrc ctx control value 0x000f0009", octets.ld32(st, 12) == 0x000f0009)
+    chk("lrc ring start = ring ggtt", octets.ld32(st, 36) == GGTT_BASE)
+    chk("lrc ring ctl = valid 4 KiB", octets.ld32(st, 44) == 1)
+    chk("lrc block 2 header at dword 33", octets.ld32(st, 33 * 4) == micmd.lri_header(9, true))
+    chk("lrc block 2 first reg timestamp 0x223a8", octets.ld32(st, 34 * 4) == 0x223a8)
+    chk("lrc block 3 header at dword 65", octets.ld32(st, 65 * 4) == micmd.lri_header(1, true))
+    chk("lrc ends with batch buffer end", octets.ld32(st, 68 * 4) == micmd.MI_BATCH_BUFFER_END)
+    chk("lrc refuses unaligned ring", !lrc.init_xcs(st, engregs.BCS_BASE, GGTT_BASE + 8, RING_BYTES))
+    lrc.set_tail(st, 0x1234f)
+    chk("set tail masks to qword", lrc.tail(st) == 0x12348)
+    chk("descriptor 0x101000 id 1", lrc.descriptor(0x101000, 1) == 0x0000000100101109)
+    chk("descriptor id masked to 21 bits", (lrc.descriptor(0x101000, 0x3fffff) >> 32) == 0x1fffff)
+}
+
+fn test_setup() {
+    var e: engine.Engine = fresh()
+    chk("setup ok", engine.setup(mrd, mwr, mus, &e) == engine.S_OK)
+    chk("setup: engine ready", e.status == engine.E_READY)
+    chk("setup: run list enabled", (mode_val & engregs.RUN_LIST_ENABLE) != 0)
+    chk("setup: stop ring cleared", (mi_mode_val & engregs.STOP_RING) == 0)
+    chk("setup: hws pga = hws ggtt", hws_pga == GGTT_BASE + HWS_AT)
+    chk("setup: forcewake released", fw_state == 0)
+    chk("setup: seqno cleared", hws_seqno() == 0)
+    chk("setup: no elsp write", elsp_count == 0)
+    e = fresh()
+    inj_noack = true
+    chk("setup no ack: S_NO_WAKE", engine.setup(mrd, mwr, mus, &e) == engine.S_NO_WAKE)
+    chk("setup no ack: engine off", e.status == engine.E_OFF)
+    chk("setup no ack: request withdrawn", fw_state == 0)
+    chk("setup no ack: only two forcewake writes", wr_count == 2)
+    chk("setup no ack: bounded wait", total_us <= fwake.ACK_POLLS * fwake.ACK_POLL_US)
+    e = fresh()
+    inj_nomode = true
+    chk("setup mode refused: S_MODE", engine.setup(mrd, mwr, mus, &e) == engine.S_MODE)
+    chk("setup mode refused: engine off", e.status == engine.E_OFF)
+    chk("setup mode refused: forcewake released", fw_state == 0)
+    model_reset()
+    var bad: engine.Layout = layout()
+    bad.ring_ggtt = bad.ring_ggtt + 0x40
+    var e2: engine.Engine = engine.engine_new(bad)
+    chk("setup misaligned: S_ARG", engine.setup(mrd, mwr, mus, &e2) == engine.S_ARG)
+    chk("setup misaligned: zero writes", wr_count == 0)
+}
+
+fn test_store() {
+    var e: engine.Engine = ready()
+    let w0: u64 = wr_count
+    chk("store: S_OK", submit.run_store(mrd, mwr, mus, &e) == engine.S_OK)
+    chk("store: seqno 1 in hws", hws_seqno() == 1)
+    chk("store: one execution", executed == 1)
+    chk("store: elsp order 0 0 hi lo", elsp_last[0] == 0 && elsp_last[1] == 0 && elsp_last[2] == 1 && elsp_last[3] == 0x101109)
+    chk("store: tail qword aligned", (e.ring.tail & 7) == 0)
+    chk("store: tail 24 bytes", e.ring.tail == 24)
+    chk("store: context head = tail", lrc.head(engine.state_page(&e)) == e.ring.tail)
+    chk("store: csb completion seen", e.csb.completes == 1)
+    chk("store: csb read pointer acked", csb_r == csb_w)
+    chk("store: forcewake released", fw_state == 0)
+    chk("store: no reset", gdrst_writes == 0)
+    chk("store: writes bounded", wr_count - w0 <= 12)
+    var n: u64 = 0
+    var oks: u64 = 0
+    while n < 300 {
+        if submit.run_store(mrd, mwr, mus, &e) == engine.S_OK {
+            oks = oks + 1
+        }
+        n = n + 1
+    }
+    chk("store x300 across ring wraps: all ok", oks == 300)
+    chk("store x300: seqno 301", hws_seqno() == 301)
+    chk("store x300: completions 301", e.csb.completes == 301)
+    chk("store x300: no hang", e.hangs == 0)
+}
+
+fn test_hang() {
+    var e: engine.Engine = ready()
+    var cmd: [u32; 2] = [0x7fffffff, 0]
+    let t0: u64 = total_us
+    chk("bad command: S_HUNG", submit.run_dwords(mrd, mwr, mus, &e, (&cmd[0]) as u64, 1) == engine.S_HUNG)
+    chk("bad command: time bounded", total_us - t0 <= HANG_BUDGET_US)
+    chk("bad command: hang counted", e.hangs == 1)
+    chk("bad command: reset done", e.resets == 1)
+    chk("bad command: gdrst blt only", gdrst_writes == 1 && gdrst_last == engregs.GRDOM_BLT)
+    chk("bad command: reset request withdrawn", (reset_ctl & engregs.RESET_REQUEST) == 0)
+    chk("bad command: engine ready again", e.status == engine.E_READY)
+    chk("bad command: run list re-enabled", (mode_val & engregs.RUN_LIST_ENABLE) != 0)
+    chk("bad command: bad dwords skipped", lrc.head(engine.state_page(&e)) == e.ring.tail)
+    chk("bad command: forcewake released", fw_state == 0)
+    chk("after hang: store ok", submit.run_store(mrd, mwr, mus, &e) == engine.S_OK)
+    chk("after hang: seqno 2", hws_seqno() == 2)
+    chk("after hang: completion counted", e.csb.completes == 1)
+    chk("after hang: store ok again", submit.run_store(mrd, mwr, mus, &e) == engine.S_OK)
+    chk("after hang: completions 2", e.csb.completes == 2)
+}
+
+fn test_reset_paths() {
+    var e: engine.Engine = ready()
+    var cmd: [u32; 2] = [0x7fffffff, 0]
+    inj_notready = true
+    chk("not ready: still S_HUNG", submit.run_dwords(mrd, mwr, mus, &e, (&cmd[0]) as u64, 1) == engine.S_HUNG)
+    chk("not ready: gdrst issued anyway", gdrst_writes == 1)
+    chk("not ready: reset result forced", ereset.reset(mrd, mwr, mus, engregs.BCS_BASE, engregs.GRDOM_BLT) == ereset.R_FORCED)
+    e = ready()
+    inj_stuck = true
+    chk("gdrst stuck: S_DEAD_RESET", submit.run_dwords(mrd, mwr, mus, &e, (&cmd[0]) as u64, 1) == engine.S_DEAD_RESET)
+    chk("gdrst stuck: engine dead", e.status == engine.E_DEAD)
+    chk("gdrst stuck: forcewake released", fw_state == 0)
+    let w: u64 = wr_count
+    chk("dead engine: store refused", submit.run_store(mrd, mwr, mus, &e) == engine.S_DEAD)
+    chk("dead engine: zero writes", wr_count == w)
+    e = ready()
+    inj_drop_store = true
+    chk("dropped store: not reported ok", submit.run_store(mrd, mwr, mus, &e) == engine.S_HUNG)
+    inj_drop_store = false
+    chk("dropped store: recovers", submit.run_store(mrd, mwr, mus, &e) == engine.S_OK)
+}
+
+fn test_guards() {
+    var e: engine.Engine = ready()
+    let w: u64 = wr_count
+    chk("oversize: S_ARG", submit.run_dwords(mrd, mwr, mus, &e, base_cpu, submit.MAX_USER_DWORDS + 1) == engine.S_ARG)
+    chk("oversize: zero writes", wr_count == w)
+    let st: u64 = engine.state_page(&e)
+    lrc.set_head(st, (e.ring.tail + 16) % RING_BYTES)
+    let el: u64 = elsp_count
+    chk("ring full: S_FULL", submit.run_store(mrd, mwr, mus, &e) == engine.S_FULL)
+    chk("ring full: no elsp write", elsp_count == el)
+    chk("ring full: forcewake released", fw_state == 0)
+    lrc.set_head(st, e.ring.tail)
+    inj_noack = true
+    chk("run no ack: S_NO_WAKE", submit.run_store(mrd, mwr, mus, &e) == engine.S_NO_WAKE)
+    chk("run no ack: no elsp write", elsp_count == el)
+    inj_noack = false
+    chk("run after no ack: ok", submit.run_store(mrd, mwr, mus, &e) == engine.S_OK)
+    var off: engine.Engine = fresh()
+    chk("not set up: refused", submit.run_store(mrd, mwr, mus, &off) == engine.S_DEAD && wr_count == 0)
+}
+
+fn main() -> i32 {
+    base_cpu = (((&pool[0]) as u64) + PAGE - 1) & (~(PAGE - 1))
+    test_encoders()
+    test_ring()
+    test_lrc()
+    test_setup()
+    test_store()
+    test_hang()
+    test_reset_paths()
+    test_guards()
+    return 0
+}

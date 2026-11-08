@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.octets
+import gpu.intel.engregs
+import gpu.intel.fwake
+import gpu.intel.micmd
+import gpu.intel.ring
+import gpu.intel.lrc
+import gpu.intel.elsp
+import gpu.intel.ereset
+import gpu.intel.engine
+
+export { run_store, run_dwords, recover, WAIT_POLLS, WAIT_POLL_US, FENCE_DWORDS, MAX_USER_DWORDS }
+
+const WAIT_POLLS: u64 = 100
+const WAIT_POLL_US: u64 = 100
+const FENCE_DWORDS: u64 = 6
+const MAX_USER_DWORDS: u64 = 256
+const DWORD: u64 = 4
+const LOW32: u64 = 0xffffffff
+
+fn emit_fence(e: *mut engine.Engine, seqno: u64) {
+    let r: *mut ring.Ring = &(*e).ring
+    ring.emit(r, micmd.store_dword_ggtt())
+    ring.emit(r, ((*e).lay.hws_ggtt + engine.SEQNO_OFFSET) & LOW32)
+    ring.emit(r, 0)
+    ring.emit(r, seqno)
+    ring.emit(r, micmd.MI_USER_INTERRUPT)
+    ring.pad_qword(r)
+}
+
+fn wait_seqno(us: fn(u64) -> u64, e: *mut engine.Engine, seqno: u64) -> bool {
+    var n: u64 = 0
+    while n < WAIT_POLLS {
+        if engine.seqno_seen(e) == seqno {
+            return true
+        }
+        us(WAIT_POLL_US)
+        n = n + 1
+    }
+    return false
+}
+
+fn recover(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, e: *mut engine.Engine) -> u64 {
+    (*e).hangs = (*e).hangs + 1
+    if ereset.reset(rd, wr, us, (*e).lay.base, (*e).lay.domain) == ereset.R_STUCK {
+        (*e).status = engine.E_DEAD
+        return engine.S_DEAD_RESET
+    }
+    (*e).resets = (*e).resets + 1
+    lrc.set_head(engine.state_page(e), (*e).ring.tail)
+    if !engine.enable_execlists(rd, wr, e) {
+        (*e).status = engine.E_DEAD
+        return engine.S_DEAD_RESET
+    }
+    return engine.S_HUNG
+}
+
+fn kick(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, e: *mut engine.Engine, src: u64, n: u64) -> u64 {
+    let state: u64 = engine.state_page(e)
+    if !ring.fits(&(*e).ring, lrc.head(state), n + FENCE_DWORDS) {
+        return engine.S_FULL
+    }
+    var i: u64 = 0
+    while i < n {
+        ring.emit(&(*e).ring, octets.ld32(src, i * DWORD))
+        i = i + 1
+    }
+    let seqno: u64 = ((*e).seqno + 1) & LOW32
+    emit_fence(e, seqno)
+    lrc.set_tail(state, (*e).ring.tail)
+    elsp.submit(wr, (*e).lay.base, engine.descriptor(e))
+    (*e).submits = (*e).submits + 1
+    (*e).seqno = seqno
+    if !wait_seqno(us, e, seqno) {
+        return recover(rd, wr, us, e)
+    }
+    elsp.drain(rd, wr, (*e).lay.base, &(*e).csb)
+    return engine.S_OK
+}
+
+fn run_dwords(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, e: *mut engine.Engine, src: u64, n: u64) -> u64 {
+    if (*e).status != engine.E_READY {
+        return engine.S_DEAD
+    }
+    if n > MAX_USER_DWORDS {
+        return engine.S_ARG
+    }
+    if fwake.get(rd, wr, us, engregs.FORCEWAKE_GT, engregs.FORCEWAKE_ACK_GT) != fwake.W_OK {
+        return engine.S_NO_WAKE
+    }
+    let r: u64 = kick(rd, wr, us, e, src, n)
+    fwake.put(rd, wr, us, engregs.FORCEWAKE_GT, engregs.FORCEWAKE_ACK_GT)
+    return r
+}
+
+fn run_store(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, e: *mut engine.Engine) -> u64 {
+    return run_dwords(rd, wr, us, e, 0, 0)
+}
