@@ -31,6 +31,8 @@ fi
 
 python3 tools/uicheck/ratchet.py check || fail=1
 python3 tools/uicheck/ratchet.py selftest || fail=1
+python3 tools/uicheck/wlibuse.py check || fail=1
+python3 tools/uicheck/wlibuse.py selftest || fail=1
 python3 tools/palette/ratchet.py check || fail=1
 if [ "$fail" = 0 ]; then
     echo "UICHECK: passed"
