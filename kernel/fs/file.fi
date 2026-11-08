@@ -167,6 +167,7 @@ fn fd_set_rights(state: u64, task0: u64, fd: u64, open: u64,
         return false
     }
     kstate.set(state, slot_at(task, fd), h)
+    high_raise(state, task, fd + 1)
     return true
 }
 
@@ -229,6 +230,7 @@ fn fd_pass(state: u64, from0: u64, to0: u64, fd: u64, mask: u64,
     }
     open_ref(state, of)
     kstate.set(state, slot_at(to, tofd), nh)
+    high_raise(state, to, tofd + 1)
     return tofd
 }
 
@@ -254,10 +256,39 @@ fn init_task(state: u64, task: u64) {
     fd_set(state, task, 2, CON_ERR)
 }
 
+const FD_HIGH_FIELD: u64 = 24
+
+fn high_addr(state: u64, table: u64) -> u64 {
+    return state + kstate.TCPU_OFF + table * kstate.TCPU_BYTES + FD_HIGH_FIELD
+}
+
+fn high_mark(state: u64, table: u64) -> u64 {
+    let n: u64 = __mmio_read64(high_addr(state, table) as *mut u64)
+    if n > MAX_FD {
+        return MAX_FD
+    }
+    return n
+}
+
+fn high_raise(state: u64, table: u64, n: u64) {
+    let a: u64 = high_addr(state, table)
+    while true {
+        let cur: u64 = __mmio_read64(a as *mut u64)
+        if cur >= n || atomic.cas(a, cur, n) == cur {
+            return
+        }
+    }
+}
+
+fn high_reset(state: u64, table: u64) {
+    __mmio_write64(high_addr(state, table) as *mut u64, 0)
+}
+
 fn used_from(state: u64, table: u64, from: u64) -> u64 {
+    let limit: u64 = high_mark(state, table)
     var fd: u64 = from
     var p: u64 = state + slot_at(table, from)
-    while fd < MAX_FD {
+    while fd < limit {
         if __mmio_read64(p as *mut u64) != (0 as u64) {
             return fd
         }
@@ -289,6 +320,7 @@ fn clear_task(state: u64, task: u64) {
         kstate.set(state, cx + w, 0)
         w = w + 8
     }
+    high_reset(state, task)
 }
 
 fn inherit_task(state: u64, parent: u64, child: u64) {
@@ -341,7 +373,7 @@ fn release_table(state: u64, t: u64) {
     if t >= kstate.MAX_TASKS {
         return
     }
-    var fd: u64 = 0
+    var fd: u64 = used_from(state, t, 0)
     while fd < MAX_FD {
         let a: u64 = state + slot_at(t, fd)
         let h: u64 = __mmio_read64(a as *mut u64)
@@ -354,8 +386,9 @@ fn release_table(state: u64, t: u64) {
             let cxo: u64 = kstate.CX_OFF + t * kstate.CX_BYTES + (fd >> 6) * 8
             kstate.set(state, cxo, kstate.get(state, cxo) & (0xFFFFFFFFFFFFFFFF -% (1 << (fd & 63))))
         }
-        fd = fd + 1
+        fd = used_from(state, t, fd + 1)
     }
+    high_reset(state, t)
 }
 
 const FDOWN_SLOT: u64 = 0xFFFF
