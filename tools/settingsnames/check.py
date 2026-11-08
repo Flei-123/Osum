@@ -54,7 +54,16 @@ def ocr_sidebar(shot, lang):
     return run.stdout.lower()
 
 
+def ellipsis_main(shot, lang, pattern):
+    text = ocr_sidebar(shot, lang)
+    found = re.search(pattern, text) is not None
+    print("ellipsis pattern %r %s" % (pattern, "found" if found else "missing"))
+    sys.exit(0 if found else 1)
+
+
 def main():
+    if sys.argv[1] == "ellipsis":
+        ellipsis_main(*sys.argv[2:5])
     serial, messages_path, pagemap, shot, lang = sys.argv[1:6]
     titles = route_titles(pagemap, read_messages(messages_path))
     tabs = traced_tabs(serial)
