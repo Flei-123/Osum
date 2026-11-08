@@ -983,6 +983,12 @@ def main():
             for k in range(n):
                 sg = 1 if (k // 20) % 2 == 0 else -1
                 f.cmd("mouse_move %d %d" % (sg * sdx, sg * sdy))
+        elif b in ("moveby", "clickby"):
+            x, y = (int(v) for v in arg.split(","))
+            if b == "moveby":
+                f.fahre_nahe(x, y)
+            else:
+                f.klick_nahe(x, y)
         elif b == "fahreauf":
             r = f.rechteck(arg)
             if r is None:
