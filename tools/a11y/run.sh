@@ -47,7 +47,7 @@ PROGS="sh ls cat echo sleep orientbus act axd a11ydemo"
 
 echo "== 1. build =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-python3 tools/a11y/fields.py && ok "the node packing agrees in kernel, wlib and axd" || bad "the node packing differs (tools/a11y/fields.py)"
+python3 tools/a11y/fields.py && ok "the node packing agrees in kernel, fuiapp/hostax and axd" || bad "the node packing differs (tools/a11y/fields.py)"
 python3 tools/actionbus/manifest.py check etc/actions.d/a11y.actions > "$TMPD/lint.txt" 2>&1 \
     && ok "host reader takes the manifest ($(cut -d' ' -f3- "$TMPD/lint.txt"))" || bad "manifest: $(cat "$TMPD/lint.txt")"
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then
