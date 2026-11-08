@@ -20,7 +20,7 @@ build_and_run "$T/real" || exit 1
 python3 -I tools/uicheck/check.py "$T/real/rows.txt" || fail=1
 
 cp kernel/user/uikit/*.fi "$T/mutant/uikit/"
-sed -i 's/if legacy_look || w < 3 || h < 3 {/if true {/' "$T/mutant/uikit/uiplate.fi"
+sed -i -e 's/if legacy_look || w < 3 || h < 3 {/if true {/' -e 's/if legacy_look || translucent(kind) || w < 3.0 || h < 3.0 {/if true {/' "$T/mutant/uikit/uiplate.fi"
 build_and_run "$T/mutant" || exit 1
 if python3 -I tools/uicheck/check.py "$T/mutant/rows.txt" > "$T/mutant.out" 2>&1; then
     echo "FAIL  counter-probe: old plate look passed the component check"

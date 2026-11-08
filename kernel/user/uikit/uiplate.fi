@@ -16,13 +16,27 @@ const K_DIALOG: u64 = 4
 
 const K_CHIP: u64 = 5
 
-const KIND_COUNT: u64 = 6
+const K_CARD_SOFT: u64 = 6
 
-const OPAQUE: u32 = 4278190080 as u32
+const K_LAYER: u64 = 7
 
-static mut kind_radius: [u64; 6] = [1, 1, 1, 1, 1, 3]
+const KIND_COUNT: u64 = 8
 
-static mut kind_elevation: [u64; 6] = [1, 2, 2, 2, 3, 0]
+const ALPHA_SHIFT: u64 = 24
+
+const SHADOW_NEAR: u32 = (8 << 24) as u32
+
+const SHADOW_MID: u32 = (10 << 24) as u32
+
+const SHADOW_FAR: u32 = (6 << 24) as u32
+
+static mut kind_radius: [u64; 8] = [1, 1, 1, 1, 1, 3, 1, 1]
+
+static mut kind_elevation: [u64; 8] = [1, 2, 2, 2, 3, 0, 2, 1]
+
+static mut kind_fill_alpha: [u64; 8] = [255, 255, 255, 255, 255, 255, 255, 153]
+
+static mut kind_stroke_alpha: [u64; 8] = [255, 255, 255, 255, 255, 255, 255, 90]
 
 static mut legacy_look: bool = false
 
@@ -35,6 +49,10 @@ fn valid(kind: u64) -> u64 {
 
 fn elevation(kind: u64) -> u64 {
     return kind_elevation[valid(kind) as usize]
+}
+
+fn translucent(kind: u64) -> bool {
+    return kind_fill_alpha[valid(kind) as usize] < 255
 }
 
 fn radius_px(kind: u64, w: u64, h: u64, s: u64) -> u64 {
@@ -57,39 +75,64 @@ fn swap_rb(rgb: u64) -> u32 {
     return (((rgb & 255) << 16) | (rgb & 65280) | ((rgb >> 16) & 255)) as u32
 }
 
-fn paint_legacy(z: *mut painter.Painter, x: u64, y: u64, w: u64, h: u64, r: u64, fill: u64, stroke: u64) {
-    painter.round_rect(z, x as f64, y as f64, w as f64, h as f64, r as f64, swap_rb(fill) | OPAQUE)
-    painter.round_ring(z, x as f64, y as f64, w as f64, h as f64, r as f64, 1.0, swap_rb(stroke) | OPAQUE)
+fn tint(rgb: u64, alpha: u64) -> u32 {
+    return swap_rb(rgb) | ((alpha & 255) << ALPHA_SHIFT) as u32
 }
 
-fn paint_rimmed(z: *mut painter.Painter, x: u64, y: u64, w: u64, h: u64, outer_r: u64, inner_r: u64,
-    fill: u64, stroke: u64) {
-    painter.round_rect(z, x as f64, y as f64, w as f64, h as f64, outer_r as f64, swap_rb(stroke) | OPAQUE)
-    painter.round_rect(z, (x + 1) as f64, (y + 1) as f64, (w - 2) as f64, (h - 2) as f64, inner_r as f64,
-        swap_rb(fill) | OPAQUE)
+fn inner_radius(r: f64) -> f64 {
+    if r >= 1.0 {
+        return r - 1.0
+    }
+    return 0.0
+}
+
+fn paint_ring(z: *mut painter.Painter, x: f64, y: f64, w: f64, h: f64, r: f64, fill: u32, stroke: u32) {
+    painter.round_rect(z, x, y, w, h, r, fill)
+    painter.round_ring(z, x, y, w, h, r, 1.0, stroke)
+}
+
+fn paint_rim(z: *mut painter.Painter, x: f64, y: f64, w: f64, h: f64, outer_r: f64, inner_r: f64,
+    fill: u32, stroke: u32) {
+    painter.round_rect(z, x, y, w, h, outer_r, stroke)
+    painter.round_rect(z, x + 1.0, y + 1.0, w - 2.0, h - 2.0, inner_r, fill)
+}
+
+fn shadow(z: *mut painter.Painter, level: u64, x: f64, y: f64, w: f64, h: f64, r: f64) {
+    if level >= 3 {
+        painter.round_rect(z, x - 2.0, y + 1.0, w + 4.0, h + 4.0, r + 2.0, SHADOW_FAR)
+    }
+    if level >= 2 {
+        painter.round_rect(z, x - 1.0, y, w + 2.0, h + 2.0, r + 1.0, SHADOW_MID)
+        painter.round_rect(z, x, y + 1.0, w, h + 1.0, r, SHADOW_NEAR)
+    }
+}
+
+fn paint_f(z: *mut painter.Painter, kind: u64, x: f64, y: f64, w: f64, h: f64, r: f64, fill: u64, stroke: u64) {
+    let k: usize = valid(kind) as usize
+    let fc: u32 = tint(fill, kind_fill_alpha[k])
+    let sc: u32 = tint(stroke, kind_stroke_alpha[k])
+    if legacy_look || translucent(kind) || w < 3.0 || h < 3.0 {
+        paint_ring(z, x, y, w, h, r, fc, sc)
+        return
+    }
+    paint_rim(z, x, y, w, h, r, inner_radius(r), fc, sc)
+}
+
+fn paint_raised(z: *mut painter.Painter, kind: u64, x: f64, y: f64, w: f64, h: f64, r: f64, fill: u64, stroke: u64) {
+    shadow(z, elevation(kind), x, y, w, h, r)
+    paint_f(z, kind, x, y, w, h, r, fill, stroke)
 }
 
 fn paint(z: *mut painter.Painter, kind: u64, x: u64, y: u64, w: u64, h: u64, s: u64, fill: u64, stroke: u64) {
     let r: u64 = radius_px(kind, w, h, s)
-    if legacy_look || w < 3 || h < 3 {
-        paint_legacy(z, x, y, w, h, r, fill, stroke)
-        return
-    }
-    var ri: u64 = r
-    if ri > 0 {
-        ri = ri - 1
-    }
-    paint_rimmed(z, x, y, w, h, r, ri, fill, stroke)
+    paint_f(z, kind, x as f64, y as f64, w as f64, h as f64, r as f64, fill, stroke)
 }
 
 fn paint_window(z: *mut painter.Painter, x: u64, y: u64, w: u64, h: u64, server_r: u64, fill: u64, stroke: u64) {
     if legacy_look || w < 3 || h < 3 {
-        paint_legacy(z, x, y, w, h, server_r, fill, stroke)
+        paint_ring(z, x as f64, y as f64, w as f64, h as f64, server_r as f64, tint(fill, 255), tint(stroke, 255))
         return
     }
-    var ri: u64 = server_r
-    if ri > 0 {
-        ri = ri - 1
-    }
-    paint_rimmed(z, x, y, w, h, 0, ri, fill, stroke)
+    paint_rim(z, x as f64, y as f64, w as f64, h as f64, 0.0, inner_radius(server_r as f64),
+        tint(fill, 255), tint(stroke, 255))
 }
