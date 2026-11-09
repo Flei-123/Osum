@@ -29,7 +29,7 @@ Lengths are points at scale 1; the token functions multiply by the scale `s` (1 
 Colours are ROLES resolved at run time from the system theme (light/dark/contrast + user accent).
 There are three role namespaces today; they map onto each other and must not grow:
 
-| meaning | scene code (`fuiscene.R_*`, `role_col`) | wlibc code (`wlibc.theme(T_*)`) | tokens neutral |
+| meaning | scene code (`fuiscene.R_*`, `role_col`) | theme code (`uitheme.theme(T_*)`) | tokens neutral |
 |---|---|---|---|
 | window / page base | `R_SURFACE` | `T_BG` | `N_BASE` |
 | card, popup, flyout, toast, dialog body | `R_SURFACE` raised (`theme.Colors.surface_raised`) | `T_MENU` / `T_DLG` / `T_PANEL` | `N_RAISED` |
@@ -39,9 +39,9 @@ There are three role namespaces today; they map onto each other and must not gro
 | secondary text | `R_MUTED` | `T_DIM` | `N_MUTED` |
 | accent fill | `R_ACCENT` | `T_ACCENT` / `T_SEL` | `acc_*` derived |
 | text on accent | `R_ONFILL` | `T_SELFG` | `acc_on` |
-| status | `R_SUCCESS` / `R_WARN` / `R_ERR` | (status binds in `wlibc/wcpal.fi`) | - |
+| status | `R_SUCCESS` / `R_WARN` / `R_ERR` | (status binds in `uitheme/thdark.fi`) | - |
 
-Dark values live in `kernel/user/wlibc/wcpal.fi` (only allowed literal file, skipped by the palette ratchet).
+Dark values live in `kernel/user/uitheme/thdark.fi` (only allowed literal file, skipped by the palette ratchet).
 Contrast rules: text >= 4.5:1, UI strokes >= 3:1 (checked by `tools/tokens/run.sh`, `tools/palette/run.sh`).
 
 ### Scale
@@ -82,8 +82,8 @@ move onto the canonical file (tracked by `tools/uicheck`, ratchet only shrinks).
 Usage in a canvas callback: `uisurface.paint_window(uisurface.K_TIP, x, y, w, h)` replaces a hand-made plate.
 Gate: `bash tools/uicheck/run.sh` (seconds, no QEMU).
 
-Layers: tokens (`lib/fui/tokens.fi`) -> roles (`wlibc.theme`, `fuiscene.R_*`) -> primitives
-(`fuiscene.cv_*`, `painter.*`, `wlibc.rect`) -> **components (`kernel/user/uikit/*`, `fuiscene`)** -> apps.
+Layers: tokens (`lib/fui/tokens.fi`) -> roles (`uitheme.theme`, `fuiscene.R_*`) -> primitives
+(`fuiscene.cv_*`, `painter.*`, `uidraw.rect`) -> **components (`kernel/user/uikit/*`, `fuiscene`)** -> apps.
 Apps call components only. Primitives outside component files are counted by `tools/uicheck`.
 
 ## 3. Rules for every UI change

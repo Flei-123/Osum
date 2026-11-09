@@ -1,5 +1,7 @@
 # wlib / wlibc -> fuiscene migration (M4, Osum r41)
 
+Status: closed. `wlib`/`wlibc` are deleted (`docs/wlibc-migration.md` step 12); the module names below are historical and map to `uitheme/th*`, `fuiapp/hostui/host*`, `uikit/*`.
+
 Goal: one UI toolkit. Apps use `fuiscene` + `kernel/user/uikit` only; the old widget toolkit `wlib`
 is deleted; `wlibc` shrinks to the platform layer below fuiscene and then disappears under a new name.
 Spec: `docs/ui-system.md` (wins on conflict).

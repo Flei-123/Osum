@@ -82,13 +82,14 @@ jarvismini 56, a11ydemo 54, fuib 52, notifc 50. All others <= 50.
 10. **DONE** Raw draw: `uikit/uidraw.fi` owns the clip rectangle (`clip_set clip_x0 clip_y0 clip_x1 clip_y1`), `px get blend mix8 rect hline vline frame frame3`, the vector path helpers (`v_*`, `vrect vkreis vring`), `rrect rframe rring`, `drop_shadow shadow_edge divider` (bodies out of `wcpaint`; imports `corner`, `hosthead`, `wcbase`).
    wlibc no longer exports them (no forwards, `aa_pixels` forward gone too: `setcore` calls `corner.aa_px`); 13 files switch by script (`wcgfx`, `uiicon`, `uiwallpaper`, `fuib`, `icont`, `desktop`, `tbpaint`, `tbhover`, `setcore`, `wlib/*`); `fuib` and `icont` have no wlibc import left. Certus staging copies `uidraw` flat and seds its import. wlibc ratchet 35 files / 184 -> 31 / 141. Left in `wcpaint`/`wlibc`: glyph cache + `text_at`, `plate`, cursor shape, `mix`, `sys5`/`sys3w`, screen forwards.
 11. **DONE (apphost + wlibc bodies)** `fuiapp/apphost` no longer imports `wlib.fi`: its 100 forwards call the wlib parts directly (`wlstate`, `wlevent`, `wlwidget`, `wldraw`, `wlax`, `wlbase`), `CT_TEXT`/`CT_PATH` are literals. `wlibc/wcpaint.fi` is deleted: `uikit/uisys.fi` owns `sys5`/`sys3w`, `uikit/uiglyph.fi` owns the glyph cache, `text` pen/fit/back/chars, `push`, `cursor_*`, `px_mono`, `WIG_*`, `uitheme/thcolor.fi` owns the colour math (`mix`, `contrast`, `ramp_*`, `pick_on`, `pairs_init`, `shadow_*`, `drag_value`). 29 files switch `wlibc.sys5/sys3w` to `uisys.*` (11 drop `import wlibc`); `wlibc.fi` no longer exports `sys5`/`sys3w`. Certus staging: `uiglyph`, `uisys` in MOVED, `entkern.py` rewrites `uisys` asm. wlibc ratchet 31 files / 141 -> 18 / 60. `wlib.fi` + `wlib/*` stay (Certus `osum.fi` still imports `wlib`); they are deleted with step 12.
-12. **Delete wlibc**: `wlibc.fi`, `wlibc/*`; remove the Certus staging sed in `kernel/user/certus/build.sh`; update
-    `splitstems.py`, `layers.tsv`, `i18n/scan.py`, gates.tsv paths, SDK template.
+12. **DONE** Delete wlibc: `wlib.fi`, `wlibc.fi`, `wlibc/`, `fuiapp/wlib/` are gone. `wcbase wcgfx wcpal` -> `uitheme/thtokens thengine thdark`; `wlbase wlstate wlevent wlwidget wldraw wlax` -> `fuiapp/hostui/hostbase hoststate hostevent hostwidget hostdraw hostaxtree`; `text_at plate plate_ink PLATE` -> `uikit/uitextat.fi`; `F_HIDDEN F_NODECO EV_*` -> `fuiapp/hostwinp`. Certus staging (`build.sh`, `entkern.py`, `inlineconsts.py`, `splitstems.py`, `ensure.sh`) copies `hostui`/`uitheme`. `tools/uicheck/wlibuse.py` and both baselines are deleted (the draw ratchet `tools/uicheck/ratchet.py` stays). Gate scripts, tests and tools (`themestore`, `i18n`, `look`, `tabstrip`, `snip*`, `clip2`, `paint`, `glyph`, `k15`, `certus`, `check-ui`, `design/count.py`, `fui/share.py`) point at the new paths.
+
+Migration complete: no `wlib`/`wlibc` module is left; log lines keep the `wlib:` prefix because gates grep them.
 
 Rules: every step is call-for-call identical (pixel parity); gate per step = buildall, uicheck, palette, k15 (scene programs),
-desktop quick, plus the touched program's own gate; `python3 tools/uicheck/wlibuse.py update` after the step.
+desktop quick, plus the touched program's own gate.
 
-## Certus dependency (not changed from here)
+## Certus dependency (resolved in step 11; historical note)
 
 `/root/certus-ui/lib/window/osum.fi` imports `wlib` and `wlibc` directly (907 lines). `kernel/user/certus/build.sh` stages
 `fuiapp/wlib*` back under the old names with sed, so steps 1-10 do not break it, but steps 11 and 12 need Certus off wlib.
