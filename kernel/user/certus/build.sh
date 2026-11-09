@@ -7,7 +7,12 @@ ROOT=$(pwd)
 ZIEL=${1:-$ROOT/.certus-bau/certus.elf}
 CERTUS_REPO=${CERTUS_REPO:-/root/certus-ui}
 FIRNC=${CERTUS_FIRNC:-$ROOT/vendor/firn/bin/firnc}
-BAU=${CERTUS_BAU:-$ROOT/.certus-bau}
+if [ -n "${CERTUS_BAU:-}" ]; then
+    BAU=$CERTUS_BAU
+else
+    BAU=$(mktemp -d "${TMPDIR:-/tmp}/certus-bau.XXXXXX")
+    trap 'rm -rf "$BAU"' EXIT
+fi
 export FIRNC_GC_RUNTIME=${FIRNC_GC_RUNTIME:-certus}
 
 [ -d "$CERTUS_REPO/lib/browser" ] || {
