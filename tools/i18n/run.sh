@@ -346,7 +346,7 @@ if [ -n "${alt:-}" ] && [ -n "${neu:-}" ] && [ "$alt" -gt 0 ]; then
     ad=${d#-}
     proz=$(( ad * 100 / alt ))
     vz="+"; [ "$d" -lt 0 ] && vz="-"
-    if [ "$proz" -lt 15 ]; then
+    if [ "$d" -le 0 ] || [ "$proz" -lt 15 ]; then
         ok "1000 lines of 40 characters: ${alt} us octet by octet, ${neu} us character by character (${vz}${proz}%, in the noise)"
         ok "per line: $(( alt / 1000 )) us against $(( neu / 1000 )) us -- and fetching the 40 glyphs costs $(( gl / 1000 )) us"
     else
