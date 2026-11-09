@@ -51,7 +51,9 @@ jarvismini 56, a11ydemo 54, fuib 52, notifc 50. All others <= 50.
    and `widgetboard` drop `import wlibc`. wlibc ratchet added (73 files, score 1673).
 2. **DONE** Scale: `uiscale.fi` (leaf, imports only `ulib`) owns `ui_scale`, `px_ui`, `px_ui_at`, `win_scale_pct`, `PX_UI0`;
    wlibc no longer exports them (no forwards: Certus does not use them); 38 files switch; wlibc ratchet 74 -> 72 files, score 1673 -> 1490.
-3. **Window protocol constants** to `fuiapp/hostwinp.fi`; wlibc forwards; 40 files switch.
+3. **DONE** Window protocol constants (`L_* WS_* WM_* WI_* WA_* WE_* WL_* WO_*`, 97 names incl. `WS_SCALE`, `WI_SCALEPCT`) in `fuiapp/hostwinp.fi`
+   (leaf, wire constants only); wlibc and its parts no longer define or export them (no forwards: Certus does not use them);
+   `uiscale` drops its private copies; 48 files switch; Certus staging seds `import fuiapp.hostwinp` to `import hostwinp`.
 4. **Text metrics**: `text_w/text_h/ascent_of/F_*/ink_*` into a `uitext` module (bodies from `wcgfx`/`wcpaint`); controls in
    `fscore` keep calling it; apps move to `fuiscene` labels where they only measure for layout.
 5. **Icons**: replace `wlibc.icon_*`/`app_icon` by direct `icons`/`appicon` imports (7 files, no body move).
