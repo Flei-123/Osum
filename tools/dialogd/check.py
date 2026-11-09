@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
+import os
 import re
+import subprocess
 import sys
+import tempfile
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 ACCENT = (37, 99, 235)
 ACCENT_TOLERANCE = 40
@@ -12,6 +15,12 @@ CHANGE_MIN_PIXELS = 300
 REGION_TOP = 400
 REGION_BOTTOM = 1000
 OPEN_ROW_MIN = 5
+TASKBAR_LOGICAL_H = 40
+BUTTON_MIN_LOGICAL_H = 30
+BUTTON_ROW_MIN_PIXELS = 40
+BUTTON_GAP_LOGICAL = 11
+LABEL_PAD_LOGICAL = 15
+OCR_ZOOM = 2
 
 
 def verdict(name, cond, note=""):
@@ -32,6 +41,64 @@ def accent_pixels(img):
                     and abs(b - ACCENT[2]) <= ACCENT_TOLERANCE):
                 count += 1
     return count
+
+
+def is_accent(pixel):
+    return all(abs(pixel[i] - ACCENT[i]) <= ACCENT_TOLERANCE for i in range(3))
+
+
+def primary_button(img, scale):
+    px = img.load()
+    limit = img.height - TASKBAR_LOGICAL_H * scale
+    rows = []
+    for y in range(REGION_TOP, limit):
+        if sum(1 for x in range(img.width) if is_accent(px[x, y])) >= BUTTON_ROW_MIN_PIXELS * scale:
+            rows.append(y)
+    if not rows:
+        return None
+    run = [rows[-1]]
+    for y in reversed(rows[:-1]):
+        if y != run[-1] - 1:
+            break
+        run.append(y)
+    top, bottom = run[-1], run[0]
+    middle = (top + bottom) // 2
+    xs = [x for x in range(img.width) if is_accent(px[x, middle])]
+    return {"left": min(xs), "right": max(xs), "top": top, "bottom": bottom, "limit": limit}
+
+
+def button_complete(button, scale):
+    if button is None:
+        return False
+    tall_enough = button["bottom"] - button["top"] + 1 >= BUTTON_MIN_LOGICAL_H * scale
+    return tall_enough and button["bottom"] < button["limit"] - 1
+
+
+def ocr_label(img, box, invert):
+    pad = LABEL_PAD_LOGICAL * (box[3] - box[1]) // BUTTON_MIN_LOGICAL_H // 2
+    crop = img.crop((box[0] + pad * 2, box[1] + pad, box[2] - pad * 2, box[3] - pad))
+    crop = crop.resize((crop.width * OCR_ZOOM, crop.height * OCR_ZOOM))
+    gray = ImageOps.autocontrast(crop.convert("L"))
+    if invert:
+        gray = ImageOps.invert(gray)
+    handle, path = tempfile.mkstemp(suffix=".png")
+    os.close(handle)
+    try:
+        gray.save(path)
+        done = subprocess.run(["tesseract", path, "-", "--psm", "7"], capture_output=True, text=True)
+        return done.stdout.strip()
+    except OSError:
+        return ""
+    finally:
+        os.unlink(path)
+
+
+def button_labels(img, button, scale, primary_text):
+    width = button["right"] - button["left"] + 1
+    gap = BUTTON_GAP_LOGICAL * scale
+    primary = (button["left"], button["top"], button["right"] + 1, button["bottom"] + 1)
+    secondary = (button["right"] + 1 + gap, button["top"], button["right"] + 1 + gap + width, button["bottom"] + 1)
+    return ocr_label(img, primary, True) == primary_text and ocr_label(img, secondary, False) == "Cancel"
 
 
 def changed_pixels(a, b):
@@ -80,6 +147,11 @@ def check_photos(out, scale):
         img = shots[name]
         if name != "open-sel":
             verdict("accent_button_" + name.replace("-", "_"), img is not None and accent_pixels(img) >= minimum)
+    for name, text in (("open-start", "Open"), ("save-start", "Save")):
+        button = primary_button(shots[name], scale) if shots[name] is not None else None
+        label = name.replace("-", "_")
+        verdict("button_fully_visible_" + label, button_complete(button, scale), "" if button is None else "bottom=%d limit=%d" % (button["bottom"], button["limit"]))
+        verdict("button_labels_" + label, button is not None and button_labels(shots[name], button, scale, text))
     if shots["open-start"] is not None and shots["open-sel"] is not None:
         verdict("end_key_moves_selection", changed_pixels(shots["open-start"], shots["open-sel"]) >= CHANGE_MIN_PIXELS)
     else:

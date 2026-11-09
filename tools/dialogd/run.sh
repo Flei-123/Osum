@@ -58,16 +58,16 @@ done
 echo
 echo "== 3. COUNTER-PROBES: mutated trees =="
 mutant() {
-    local name=$1 file=$2 expr=$3
+    local name=$1 file=$2 expr=$3 scale=${MUTANT_SCALE:-1}
     shift 3
     local T="$OUT/mut-$name"
     mkdir -p "$T"
     tar -C "$ROOT" --exclude=.git -cf - . | tar -C "$T" -xf -
     sed -i "$expr" "$T/$file"
     if cmp -s "$T/$file" "$ROOT/$file"; then bad "mutant $name: the sed expression changed nothing"; rm -rf "$T"; return; fi
-    if guest "$T" "$OUT/m-$name" 1; then
+    if guest "$T" "$OUT/m-$name" "$scale"; then
         ok "mutant $name booted"
-        verdicts "$OUT/m-$name" 1
+        verdicts "$OUT/m-$name" "$scale"
         local c
         for c in "$@"; do expect "$OUT/m-$name" "$c" fail; done
     else
@@ -79,6 +79,8 @@ mutant escyes kernel/user/dialogd.fi 's/} else if busy.confirm(title, body) {/} 
     confirm_esc_no
 mutant pathname kernel/user/dialogd/dlgpicker.fi 's/remember_name(dlgdir.name_of(row))/remember_name(dlgdir.path_of(row))/' \
     open_plain_name_and_content
+MUTANT_SCALE=2 mutant nofit kernel/user/dialogd/dlgpicker.fi 's/let over: u64 = fuiscene.work_overflow()/let over: u64 = 0/' \
+    button_fully_visible_open_start button_fully_visible_save_start
 
 echo "DIALOGD: $pass passed, $fail failed"
 [ "$fail" = 0 ]
