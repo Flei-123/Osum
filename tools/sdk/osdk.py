@@ -134,7 +134,7 @@ def import_closure(roots):
         m = todo.pop()
         if m in seen:
             continue
-        f = os.path.join(ROOT, "kernel", "user", m + ".fi")
+        f = os.path.join(ROOT, "kernel", "user", m.replace(".", "/") + ".fi")
         if not os.path.isfile(f):
             continue
         seen.append(m)
@@ -166,9 +166,11 @@ def cmd_build(args):
     work = tempfile.mkdtemp(prefix="osdk-")
     try:
         gui = bool(re.search(r"^profile app\b", open(main_src).read(), re.M))
-        mods = import_closure(["ulib", "wlib", "fuiapp", "fuiscene"] if gui else SDK_MODULES)
+        mods = import_closure(["ulib", "fuiapp.wlib", "fuiapp", "fuiscene"] if gui else SDK_MODULES)
         for m in mods:
-            shutil.copyfile(os.path.join(ROOT, "kernel", "user", m + ".fi"), os.path.join(work, m + ".fi"))
+            rel = m.replace(".", "/") + ".fi"
+            os.makedirs(os.path.dirname(os.path.join(work, rel)), exist_ok=True)
+            shutil.copyfile(os.path.join(ROOT, "kernel", "user", rel), os.path.join(work, rel))
         for n in os.listdir(os.path.join(proj, "src")):
             if n.endswith(".fi"):
                 if n[:-3] in mods:
