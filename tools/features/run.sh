@@ -4,7 +4,7 @@
 #
 #   bash tools/features/run.sh        (start it through /root/jarvis/bin/heavy)
 #
-# 1. NOTIFICATION CENTRE (kernel/user/notifc.fi), on the machine of the stick (tools/design/eh6.sh):
+# 1. NOTIFICATION CENTRE (kernel/user/notify/notifc.fi), on the machine of the stick (tools/design/eh6.sh):
 #      two `notify` posts in the terminal -> the bell (`taskbar: field noti`) -> a click on it opens
 #      the card with both rows, newest first (`notifc: open n>=2`, `row 0 ... second message`)
 #      -> Tab + Enter on "Clear all" empties it (`notifc: clear n>=2`, `open n=0`) -> Escape closes

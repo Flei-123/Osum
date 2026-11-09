@@ -326,7 +326,7 @@ jede Tafelsuche, die nichts findet, bricht den Makroblock ab.
 EINE der acht Seiten, mit Zaehlern; die Bildpuffer liegen
 ausdruecklich NICHT dort (ein CIF-Bild ist 152 KiB und passte nicht
 einmal in den ganzen Bereich), sondern als statische Felder in
-`kernel/user/h264.fi`. Die Abnahme rechnet das nach.
+`kernel/user/codec/h264.fi`. Die Abnahme rechnet das nach.
 
 Dass der Bereich wirklich BESCHRIEBEN wird und nicht nur zugeteilt
 ist, prueft die Abnahme, indem sie die Zahlen aus dem KERN zurueckliest
@@ -385,9 +385,9 @@ Ehrlich und einzeln, statt einer Zusage:
 ## 7. WAS DIE RUNDE GEKOSTET HAT
 
 ```
-kernel/user/h264.fi     2678 Zeilen   der Dekodierer
-kernel/user/h264tab.fi   677 Zeilen   die Tafeln (ERZEUGT)
-kernel/user/h264t.fi     204 Zeilen   das Messgeraet
+kernel/user/codec/h264.fi     2678 Zeilen   der Dekodierer
+kernel/user/codec/h264tab.fi   677 Zeilen   die Tafeln (ERZEUGT)
+kernel/user/codec/h264t.fi     204 Zeilen   das Messgeraet
 kernel/codecstat.fi       71 Zeilen   die Zaehler in kdata
 tools/codec/             ~900 Zeilen  Abnahme, Erzeuger, Pruefer
 tools/codec/ref264.py   1364 Zeilen   das Versuchsgeraet (nicht im Kern)

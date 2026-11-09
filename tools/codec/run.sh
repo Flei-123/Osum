@@ -89,10 +89,10 @@ fi
 
 echo "== 2. the number tables: generated, not typed =="
 if python3 tools/codec/mktab.py > "$TMPD/h264tab.fi" 2>"$TMPD/tab.err"; then
-    if cmp -s "$TMPD/h264tab.fi" kernel/user/h264tab.fi; then
-        ok "kernel/user/h264tab.fi is exactly what mktab.py generates"
+    if cmp -s "$TMPD/h264tab.fi" kernel/user/codec/h264tab.fi; then
+        ok "kernel/user/codec/h264tab.fi is exactly what mktab.py generates"
     else
-        bad "kernel/user/h264tab.fi differs from mktab.py -- edited by hand?"
+        bad "kernel/user/codec/h264tab.fi differs from mktab.py -- edited by hand?"
     fi
 else
     bad "tools/codec/mktab.py scheitert"
@@ -140,7 +140,7 @@ else
     bad "firnc1 does not build this round"
 fi
 
-for f in kernel/user/h264.fi kernel/user/h264tab.fi; do
+for f in kernel/user/codec/h264.fi kernel/user/codec/h264tab.fi; do
     sed 's://.*::' "$f" > "$TMPD/ohnekomm.fi"
     if grep -qaE '\b(f32|f64)\b|allow_fp|std\.math' "$TMPD/ohnekomm.fi"; then
         bad "$f contains floating point -- bit equality is not possible"

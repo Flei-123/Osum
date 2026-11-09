@@ -166,19 +166,19 @@ Was inzwischen **auf anderem Weg** gekommen ist:
   `kernel/drv/snd/hda.fi` (2359 Zeilen, Intel HD-Audio) und
   `kernel/mix.fi`. Der Zweig-Kommentar "ein zweiter Tontreiber wäre ein
   zweiter Fehler" ist damit eingelöst — aber von der anderen Seite.
-* **MP3** ist auf `main`: `kernel/user/mp3.fi` (45 566 Oktette) und
-  `kernel/user/mp3tab.fi`, gekommen über die Runde HDA.
+* **MP3** ist auf `main`: `kernel/user/codec/mp3.fi` (45 566 Oktette) und
+  `kernel/user/codec/mp3tab.fi`, gekommen über die Runde HDA.
 * `/bin/play` auf `main` (`kernel/user/play.fi`) spielt WAV und MP3,
   über Mischer **und** Einstromweg.
 
 Was **fehlt**: die Behälter. Auf `main` gibt es **kein**
-`kernel/user/mp4.fi`, **kein** `mkv.fi`, **kein** `omc.fi`, **kein**
+`kernel/user/codec/mp4.fi`, **kein** `mkv.fi`, **kein** `omc.fi`, **kein**
 `srt.fi`, **kein** `vol.fi`, **kein** `demuxt.fi`. `media.fi` nennt MP4
 und Matroska nur in Kommentaren und kennt `C_MPEG4V` als *Name*, nicht
 als Leser.
 
 **Setzt er auf?** 10 Konflikte, 2 `modify/delete`, darunter
-`kernel/user/play.fi` und `kernel/user/mp3.fi` — also genau die zwei
+`kernel/user/play.fi` und `kernel/user/codec/mp3.fi` — also genau die zwei
 Dateien, die inzwischen aus einer **anderen** Runde stammen. Ein Merge
 würde die HDA-Fassung von `play.fi` gegen die MEDIA1-Fassung tauschen
 und damit den Mischerweg verlieren.

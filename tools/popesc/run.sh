@@ -7,7 +7,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 TMPD=$(mktemp -d)
-FILES="kernel/user/notifc.fi kernel/user/taskview.fi kernel/user/qs.fi"
+FILES="kernel/user/notify/notifc.fi kernel/user/taskview.fi kernel/user/qs.fi"
 trap 'git checkout -q -- $FILES 2>/dev/null; rm -rf "$TMPD"' EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
