@@ -14,7 +14,7 @@ DOC_END = "<!-- INVENTORY:END -->"
 WLIB_MODULES = ("wlib", "wlax", "wlbase", "wldraw", "wlevent", "wlstate", "wlwidget")
 WLIBC_MODULES = ("wlibc", "wcbase", "wcgfx", "wcpaint", "wcpal")
 TOOLKIT_PATHS = ("kernel/user/wlibc/", "kernel/user/uitheme/", "kernel/user/fuiapp/")
-TOOLKIT_FILES = {"kernel/user/fuiapp/wlib.fi", "kernel/user/wlibc.fi", "kernel/user/uitheme.fi", "kernel/user/uitext.fi", "kernel/user/uiicon.fi"}
+TOOLKIT_FILES = {"kernel/user/fuiapp/wlib.fi", "kernel/user/wlibc.fi", "kernel/user/uitheme.fi", "kernel/user/uikit/uitext.fi", "kernel/user/uikit/uiicon.fi"}
 IMPORT = re.compile(rb"^import ([A-Za-z0-9_.]+)", re.M)
 REF = re.compile(rb"\b(" + b"|".join(m.encode() for m in WLIB_MODULES + WLIBC_MODULES) + rb")\.([A-Za-z_][A-Za-z0-9_]*)")
 
