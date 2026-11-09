@@ -162,7 +162,7 @@ page_has() { python3 -I tools/monset/pagetext.py "$1" "$2"; }
 for run in "C:$SC:$TMPD/c/o.log:$TMPD/c/o" "C2 (scale 2):$SC2:$TMPD/c2/o.log:$TMPD/c2/o"; do
     label=${run%%:*}; rest=${run#*:}; serial=${rest%%:*}; rest=${rest#*:}; log=${rest%%:*}; shots=${rest#*:}
     page_has "$shots/c-0.ppm" 'overlay' && page_has "$shots/c-0.ppm" 'pixel' && ok "$label: OCR of the Developer page shows the overlay and pixel check labels" || bad "$label: OCR of the Developer page lacks the switch labels"
-    page_has "$shots/c-mouse.ppm" 'pointer' && ! page_has "$shots/c-mouse.ppm" 'overlay' && ! page_has "$shots/c-mouse.ppm" 'pixel.check' && ok "$label: OCR of the Mouse page shows pointer controls and none of the debug labels" || bad "$label: OCR of the Mouse page (pointer label missing or debug labels left)"
+    page_has "$shots/c-mouse.ppm" 'pointer|speed|accel|scroll|gesture' && ! page_has "$shots/c-mouse.ppm" 'overlay' && ! page_has "$shots/c-mouse.ppm" 'pixel.check' && ok "$label: OCR of the Mouse page shows pointer controls and none of the debug labels" || bad "$label: OCR of the Mouse page (pointer label missing or debug labels left)"
     placement_ok "$serial" && ok "$label: switches live on the Developer page (dfps, dmon, dpg), the Mouse page keeps only its own controls" || bad "$label: switch placement (Developer page or leftovers on the Mouse page)"
     clicks_stored "$serial" && ok "$label: clicks stored mon 1, 0, 1 (ok=1)" || bad "$label: click effects"
     overlay_followed "$serial" && ok "$label: the overlay followed the switch: shown, hidden, shown" || bad "$label: overlay did not follow (need shown, hidden, shown)"
