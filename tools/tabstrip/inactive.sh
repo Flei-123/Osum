@@ -20,7 +20,7 @@ python3 - "$TMPD/mut/fuiscene/fsdraw.fi" <<'PY'
 import sys
 p = sys.argv[1]
 s = open(p, encoding="utf-8").read()
-old = "col = theme_rgb(wlibc.C_TITLEBAR_OFF_TEXT)"
+old = "col = theme_rgb(uitheme.C_TITLEBAR_OFF_TEXT)"
 assert old in s
 open(p, "w", encoding="utf-8").write(s.replace(old, "col = (*t).text_on_accent"))
 PY

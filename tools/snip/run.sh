@@ -109,7 +109,7 @@ num "region pixels equal to the host crop (promille; 972 measured, a transient w
 
 echo
 echo "== 5. rules =="
-Z=$(grep -ac 'wlibc\.\(px\|rect\|rrect\|frame\|hline\|vline\|text\|glyph\|blit\)(' kernel/user/snip.fi || true)
+Z=$(grep -ac 'uidraw\.\(px\|rect\|rrect\|frame\|hline\|vline\|text\|glyph\|blit\)(' kernel/user/snip.fi || true)
 num "direct draw calls outside wlib in snip.fi" "$Z" eq 0
 
 echo

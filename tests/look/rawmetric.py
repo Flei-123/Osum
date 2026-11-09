@@ -5,27 +5,28 @@ import re
 import sys
 
 ALLOWED_FN = {
-    "kernel/user/wlibc.fi": (
+    "kernel/user/uitheme/thengine.fi": (
         "fn metrics_classic",
         "fn shape_key",
-        "fn corner_cov",
+        "fn cap",
+    ),
+    "kernel/user/uikit/uidraw.fi": (
         "fn rrect",
         "fn rframe",
         "fn drop_shadow",
         "fn divider",
-        "fn cap",
     ),
-    "kernel/user/fuiapp/wlib.fi": (
+    "kernel/user/fuiapp/hostui/hoststate.fi": (
         "fn ctrl_small",
         "fn ctrl_thin",
         "fn inset",
-        "fn zeilen_hoehe",
     ),
 }
 
 FILES = [
-    "kernel/user/wlibc.fi",
-    "kernel/user/fuiapp/wlib.fi",
+    "kernel/user/uitheme/thengine.fi",
+    "kernel/user/uikit/uidraw.fi",
+    "kernel/user/fuiapp/hostui/hoststate.fi",
 ]
 
 CALLS = {

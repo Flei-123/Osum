@@ -6,7 +6,7 @@ RULES = {
     "kernel/sched/proc.fi":       ["head"],
     "kernel/sys/sys.fi":        ["union", "both", "bothclose"],
     "lib/libc/kcall.fi":    ["union", "both"],
-    "kernel/user/fuiapp/wlib.fi":  ["union", "both", "keysdel", "both", "both", "both"],
+    "kernel/user/fuiapp/hostui/hostdraw.fi":  ["union", "both", "keysdel", "both", "both", "both"],
     "tools/loader/apps.tab": ["both"],
     "tools/loader/build.sh": ["buildsh"],
 }
@@ -66,7 +66,7 @@ def resolve(path, rules):
         text = text.replace("//   1850  osum_sperre", "//   1870  osum_sperre")
         text = text.replace("SYS_OSUM_SPERRE: kernel 1850", "SYS_OSUM_SPERRE: kernel 1870")
         text = text.replace("RUNDE ALLTAG: 1850, DIE SPERRE", "RUNDE ALLTAG: 1870, DIE SPERRE (1850 gehoert seit Runde TON dem AUDGET)")
-    if path == "kernel/user/fuiapp/wlib.fi":
+    if path == "kernel/user/fuiapp/hostui/hostdraw.fi":
         text = text.replace("const K_BILD: u64 = 15", "const K_BILD: u64 = 16")
         text = text.replace("const K_SLIDER: u64 = 16", "const K_SLIDER: u64 = 17")
     open(os.path.join(ROOT, path), "w", encoding="utf-8").write(text)

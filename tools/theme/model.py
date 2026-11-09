@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """tools/theme/model.py -- THE SECOND IMPLEMENTATION OF THE TOKEN SYSTEM.
 
-`kernel/user/wlibc.fi` resolves the three token layers inside Osum, in
+`kernel/user/uitheme/thengine.fi` resolves the three token layers inside Osum, in
 Firn, with 64-bit integers and no floating point.  This file resolves
 the same three layers in Python.  Neither knows about the other; the
 test runner (`tests/theme/run.sh`) prints both and compares them token

@@ -193,7 +193,7 @@ echo
 echo "-- 7. 'vier Zeichen' zaehlt Zeichen und nicht Oktette"
 hat kernel/user/passwd.fi "utf8.chars((&a[0]) as u64, n) < 4" \
     "passwd zaehlt Zeichen"
-hat <(bash tools/structure/catprog.sh kernel/user/settings.fi) "wlibc.chars((&e_pw1[0 as usize]) as u64," \
+hat <(bash tools/structure/catprog.sh kernel/user/settings.fi) "uiglyph.chars((&e_pw1[0 as usize]) as u64," \
     "die Einstellungen zaehlen Zeichen"
 
 echo

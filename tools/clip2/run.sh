@@ -33,11 +33,11 @@ fi
 # =================================================== 1. der Quelltext
 #
 echo "== 1. Quelltext =="
-grep -qE '^const K_DROP: u64 = [0-9]+' <(bash tools/structure/catprog.sh kernel/user/fuiapp/wlib.fi) \
+grep -qE '^const K_DROP: u64 = [0-9]+' kernel/user/fuiapp/hostui/hostaxtree.fi \
     && ok "wlib kennt K_DROP" || bad "wlib kennt kein K_DROP"
-grep -qE 'fire\(d, K_DROP, line, w\)' <(bash tools/structure/catprog.sh kernel/user/fuiapp/wlib.fi) \
+grep -qE 'fire\(d, K_DROP, line, w\)' kernel/user/fuiapp/hostui/hostaxtree.fi \
     && ok "on_up feuert K_DROP" || bad "on_up feuert kein K_DROP"
-grep -qE 'fn drop_an\(' <(bash tools/structure/catprog.sh kernel/user/fuiapp/wlib.fi) \
+grep -qE 'fn drop_an\(' kernel/user/fuiapp/hostui/hostwidget.fi \
     && ok "wlib has drop_an (a window registers as a target)" \
     || bad "wlib has no drop_an"
 grep -qE 'fuiscene\.drop_accept\(true\)' <(bash tools/structure/srcview.sh kernel/user/explorer.fi) \
@@ -54,10 +54,10 @@ if grep -qE 'io\.(create|write_all|unlink)\(' <(bash tools/structure/srcview.sh 
 else
     ok "explorer.fi does not touch any file itself"
 fi
-if grep -qE 'wlibc\.drag_take' <(bash tools/structure/srcview.sh kernel/user/explorer.fi); then
-    bad "the file manager calls wlibc.drag_take past the library"
+if grep -qE 'hostevent\.drag_take' <(bash tools/structure/srcview.sh kernel/user/explorer.fi); then
+    bad "the file manager calls hostevent.drag_take past the library"
 else
-    ok "negative test: no wlibc.drag_take in the file manager"
+    ok "negative test: no hostevent.drag_take in the file manager"
 fi
 
 # ======================================================== 2. der Bau

@@ -423,7 +423,7 @@ echo
 echo "== 10. the rules of this round =="
 Z=0
 for f in calc trashbin viewer snip lock korb bild jpeg zip; do
-    n=$(grep -ac 'wlibc\.\(px\|rect\|rrect\|frame\|frame3\|hline\|vline\|text\|glyph\|blit\|rring\|divider\|drop_shadow\)(' \
+    n=$(grep -ac 'uidraw\.\(px\|rect\|rrect\|frame\|frame3\|hline\|vline\|text\|glyph\|blit\|rring\|divider\|drop_shadow\)(' \
         "kernel/user/$f.fi" 2>/dev/null || true)
     Z=$((Z + n))
 done

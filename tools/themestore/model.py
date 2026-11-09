@@ -4,7 +4,7 @@
 
 `tools/theme/model.py` is the second implementation of the token
 system: it resolves the same three layers in Python that
-`kernel/user/wlibc.fi` resolves in Firn, and the two are compared token
+`kernel/user/uitheme/thengine.fi` resolves in Firn, and the two are compared token
 for token.  This file adds the one step a PRESET needs on top: read the
 seven keys, pick the scheme file they name, and hand the answer to that
 same resolver.

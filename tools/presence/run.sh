@@ -173,14 +173,14 @@ echo "== 8. Justin's rule: only wlib, no fixed colors =="
 UI=kernel/user/freunde.fi
 CODE="$TMPD/ui-ohne-kommentar.fi"
 sed 's|//.*$||' "$UI" > "$CODE"
-ZEICH=$(grep -cE '(wlibc|uidraw)\.(rect|fill|text|blit|line|pixel|rring|glyph)' "$CODE" || true)
+ZEICH=$(grep -cE 'uidraw\.(rect|fill|text|blit|line|pixel|rring|glyph)' "$CODE" || true)
 is "direkte Zeichenaufrufe in freunde.fi" "$ZEICH" "0"
 MAL=$(grep -cE 'mal_flaeche|mal_text|mal_balken|mal_punkt|mal_linie|draw_area|draw_text|draw_bar|draw_point|draw_line' "$CODE" || true)
 is "direkte mal_*-Aufrufe in freunde.fi" "$MAL" "0"
 FARB=$(grep -cE '0x[0-9a-fA-F]{6}' "$CODE" || true)
 is "feste Farbwerte in freunde.fi" "$FARB" "0"
 printf 'fn x() { uidraw.rect(1,2,3,4, 0xff00ff) }\n' > "$TMPD/gegen.fi"
-GZ=$(grep -cE '(wlibc|uidraw)\.(rect|fill|text|blit|line|pixel|rring|glyph)' "$TMPD/gegen.fi" || true)
+GZ=$(grep -cE 'uidraw\.(rect|fill|text|blit|line|pixel|rring|glyph)' "$TMPD/gegen.fi" || true)
 GF=$(grep -cE '0x[0-9a-fA-F]{6}' "$TMPD/gegen.fi" || true)
 if [ "$GZ" -ge 1 ] && [ "$GF" -ge 1 ]; then
     ok "control run: the guard detects a real violation"

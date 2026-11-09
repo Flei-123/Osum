@@ -9,7 +9,7 @@ Layers (a file may import its own layer and the layers listed here; lib/ is laye
   lib       lib/**                      imports lib only
   base      runtime + data helpers      -> lib, base          (ulib, msg, pw, sha, images, codecs, bus clients)
   cmd       CLI programs (ls, cp ...)   -> lib, base
-  toolkit   window + widget stack       -> lib, base, toolkit (wlibc, wlib, fui*, winopts ...)
+  toolkit   window + widget stack       -> lib, base, toolkit (fui*, winopts ...)
   services  headless daemons            -> lib, base, services
   shell     desktop, bar, start menu,   -> lib, base, toolkit, shell
             lock, login, popups
@@ -54,7 +54,7 @@ TABLE = {
         tail tar tee top touch tr true umount uname uniq wc wget which whoami xargs zip host ping netstat
         sh edit sysinfo eject accountcli pinctl jarvisctl fsck log privacy notify apprights backup dualcli
         firun basename lspci pcicfg regdump prphread wlanctl"""),
-    'toolkit': _s("""appdir wlibc wlib fuib fuiglyph fuiapp fuiscene fuied winopts winfloat backdrop template"""),
+    'toolkit': _s("""appdir fuib fuiglyph fuiapp fuiscene fuied winopts winfloat backdrop template"""),
     'services': _s("""orientbus odbd settingsd stored social sshd wayd powerd hotkeyd wmplug dhcp sntp svc rpc rpcc
         rpcd init ota opk presence proxy dnswt fsrv fsrw fsrlim fremdfs stickwr standby power
         melder autorun diskctl drvctl dispctl ebpfctl axd bsect modeapply"""),

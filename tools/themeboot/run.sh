@@ -41,7 +41,7 @@ if [ -z "$BASE" ]; then bad "no base commit for the counter-probe"; else
     OLD="$TMPD/old"
     git worktree add --detach "$OLD" "$BASE" > "$TMPD/wt.log" 2>&1 || bad "worktree for the counter-probe failed: $(tail -2 "$TMPD/wt.log")"
     if [ -d "$OLD" ]; then
-        python3 tools/themeboot/oldhook.py "$ROOT/kernel/user/wlibc.fi" "$OLD/kernel/user/wlibc.fi" > "$TMPD/hook.log" 2>&1 \
+        python3 tools/themeboot/oldhook.py "$ROOT/kernel/user/uitheme/thengine.fi" "$OLD/kernel/user/wlibc.fi" > "$TMPD/hook.log" 2>&1 \
             || bad "hook patch failed: $(tail -2 "$TMPD/hook.log")"
         cp tools/toolbench/build.sh "$OLD/tools/toolbench/build.sh"
         ( cd "$OLD" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1

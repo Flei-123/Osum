@@ -67,7 +67,7 @@ def funde(root):
         rel = os.path.relpath(path_2, root).replace(os.sep, '/')
         txt = open(path_2, encoding='utf-8').read()
         rows = txt.split('\n')
-        window = ('import wlib' in txt) or ('import wlibc' in txt)
+        window = ('import fuiapp.hostui' in txt) or ('import uitheme' in txt)
         kern = not rel.startswith('kernel/user/')
         for nr, z in enumerate(rows, 1):
             if z.lstrip().startswith('//'):

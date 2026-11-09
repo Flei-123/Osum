@@ -46,9 +46,9 @@ if awk '/^fn glyph\(/,/^}/' kernel/gfx/ttf.fi \
    && awk '/^fn glyph\(/,/^}/' kernel/gfx/ttf.fi | grep -q 'irq_an('; then
     ok "and stops interrupts while doing so (the tag is a core number)"
 else bad "ttf.glyph does not stop interrupts"; fi
-if awk '/^fn gload\(/,/^}/' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi) | grep -q 'gw > GMAX'; then
-    ok "wlibc.gload checks the header before it 'gw * gh' rechnet"
-else bad "wlibc.gload does not check the header"; fi
+if awk '/^fn gload\(/,/^}/' kernel/user/uikit/uiglyph.fi | grep -q 'gw > GMAX'; then
+    ok "uiglyph.gload checks the header before it 'gw * gh' rechnet"
+else bad "uiglyph.gload does not check the header"; fi
 
 echo
 echo "== 2. bauen: Kern, Programme, Platte =="

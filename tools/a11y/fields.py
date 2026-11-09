@@ -22,7 +22,7 @@ def same(what, a, b):
         bad.append(f"{what}: {a} != {b}")
 
 for k in ("PUSH", "READ", "EVENT", "PERM", "INFO", "SET", "PRESS"):
-    same(f"AX_{k} sys/wlibc", sy.get("AX_" + k), wl.get("AX_" + k))
+    same(f"AX_{k} sys/host", sy.get("AX_" + k), wl.get("AX_" + k))
 for k in ("READ", "PERM", "INFO", "SET", "PRESS"):
     same(f"AX_{k} sys/axd", sy.get("AX_" + k), ad.get("AX_" + k))
 same("NODE_BYTES ax/host", ax["NODE_BYTES"], wl["AXN_BYTES"])

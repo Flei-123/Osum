@@ -9,12 +9,11 @@ BASELINE = os.path.join(ROOT, "tools", "uicheck", "draw_baseline.tsv")
 PRIMITIVE = re.compile(
     rb"\b(?:painter\.(?:round_rect|round_ring|round_rect_grad|round_rect_radial|surface)"
     rb"|(?:fuiscene|fscore)\.cv_(?:rgb|rect|round|ring|round_rgb|ring_rgb|round_a|ring_a|round_raw|ring_raw)"
-    rb"|(?:wlibc|uidraw)\.(?:rect|frame|frame3|hline|vline|plate)"
+    rb"|uidraw\.(?:rect|frame|frame3|hline|vline|plate)"
     rb"|fuib\.(?:rect|rrect|ring|rring|frame|rframe|board|area|hline|dot)"
-    rb"|wlib\.draw_(?:board|area|bar|frame|edge3|line|point))\s*\(")
-COMPONENT_DIRS = ("kernel/user/uikit/", "kernel/user/fuiscene/", "kernel/user/fuiapp/", "kernel/user/wlibc/")
-COMPONENT_FILES = {"kernel/user/fuiscene.fi", "kernel/user/wlibc.fi", "kernel/user/fuiapp/wlib.fi",
-                   "kernel/user/fuib.fi", "kernel/user/fuiapp.fi"}
+    rb"|hostdraw\.draw_(?:board|area|bar|frame|edge3|line|point))\s*\(")
+COMPONENT_DIRS = ("kernel/user/uikit/", "kernel/user/fuiscene/", "kernel/user/fuiapp/", "kernel/user/uitheme/")
+COMPONENT_FILES = {"kernel/user/fuiscene.fi", "kernel/user/fuib.fi", "kernel/user/fuiapp.fi"}
 
 
 def is_component(rel):

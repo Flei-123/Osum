@@ -62,7 +62,7 @@ for name, files, force in PARTS:
             continue
         n += ln
         fu += count(t, r"fuiscene\.")
-        wc += count(t, r"wlibc\.(px|rect|rrect|text_at|hline|vline|frame|blit)\w*\(|\bfb\.(fill|pixel|text)\w*\(")
+        wc += count(t, r"(?:uidraw|uitextat)\.(px|rect|rrect|text_at|hline|vline|frame|blit)\w*\(|\bfb\.(fill|pixel|text)\w*\(")
         cls_set.add("OWN" if f in OWN_WINDOW else "SCENE")
     if not n:
         continue

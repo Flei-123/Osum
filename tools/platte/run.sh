@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/platte/run.sh -- r1062 gate: the text plate follows the ink (wlibc.platte_ink).
-# Settings is a fUi program: its labels go through fuiscene -> fuiapp.plate_ink (r1311), not wlibc.text_at.
+# tools/platte/run.sh -- r1062 gate: the text plate follows the ink (uitextat.plate_ink).
+# Settings is a fUi program: its labels go through fuiscene -> fuiapp.plate_ink (r1311), not uitextat.text_at.
 # Same settings window at window_alpha=20 and 100 (themestore build.sh, wallpaper=hell). Label pixels within 2 px of ink must be equal
 # in both (opaque halo); the ground inside the label rect must differ (mixed with the backdrop). COUNTER-PROOF: the same tree with the fUi ink
 # plate switched off (BASE=<rev>, default HEAD with fuiapp.plate_ink patched to the full-rectangle plate) must show (almost) no differing ground.

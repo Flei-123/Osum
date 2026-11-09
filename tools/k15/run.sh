@@ -139,14 +139,14 @@ baue 0 && ok "firnc0: $(echo $PROGS | wc -w) programs built, /bin/explorer with 
 baue 1 && ok "firnc1: the same from the compiler written in Firn" \
     || bad "firnc1: the programs of this round do not build"
 if nm "$TMPD/explorer0.elf" 2>/dev/null | grep -q . ; then :; fi
-for sym in wlib__button wlib__step wlibc__text_at; do
+for sym in hostwidget__button hostwidget__step uitextat__text_at; do
     if nm -a "$TMPD/k0.mb.elf" 2>/dev/null | grep -q "$sym"; then
         bad "the kernel carries $sym -- the library belongs in ring 3"
     else
         ok "the kernel does NOT carry $sym (the library lives in ring 3)"
     fi
 done
-wigzeilen=$(cat kernel/user/fuiapp/wlib.fi kernel/user/wlibc.fi kernel/user/fuiapp/wlib/*.fi kernel/user/wlibc/*.fi kernel/user/uitheme/*.fi | wc -l)
+wigzeilen=$(cat kernel/user/fuiapp/hostui/*.fi kernel/user/uitheme/*.fi kernel/user/uikit/*.fi | wc -l)
 kernzeilen=$(grep -vc -e '^[[:space:]]*//' -e '^[[:space:]]*$' kernel/ui/wig.fi)
 num "library lines in ring 3" "$wigzeilen" gt 1500
 num "seam lines in the kernel (no comments/blank) -- as little kernel as possible" "$kernzeilen" lt 600

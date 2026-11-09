@@ -7,7 +7,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SNAPSHOT = os.path.join(ROOT, "assets", "palette", "dark.tsv")
 PRIMITIVES = os.path.join(ROOT, "assets", "palette", "primitives.tsv")
-OUT_FI = os.path.join(ROOT, "kernel", "user", "wlibc", "thdark.fi")
+OUT_FI = os.path.join(ROOT, "kernel", "user", "uitheme", "thdark.fi")
 OUT_CSS = os.path.join(ROOT, "reports", "mockups", "palette-dark.css")
 OUT_WM = os.path.join(ROOT, "kernel", "ui", "wm", "wmrole.fi")
 ORBIT_TOKENS = os.environ.get(
