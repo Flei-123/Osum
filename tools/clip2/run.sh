@@ -10,7 +10,7 @@ if [ -n "${1:-}" ]; then
     OUT=$1
 else
     OUT=$(mktemp -d)
-    trap 'rm -rf "$OUT" /tmp/osum-clip2-gegen' EXIT
+    trap 'rm -rf "$OUT"' EXIT
 fi
 mkdir -p "$OUT"
 SHOTS=${CLIP2_SHOTS:-$ROOT/.clip2-shots}
@@ -62,7 +62,7 @@ fi
 
 # ======================================================== 2. der Bau
 echo "== 2. bauen =="
-export DESIGNBUILD=${DESIGNBUILD:-/tmp/osum-clip2-build}
+export DESIGNBUILD=${DESIGNBUILD:-$OUT/designbuild}
 bash tools/design/capture.sh "$OUT/bau" nurbau=ja res="$RES" \
     > "$OUT/bau.log" 2>&1 \
     || { echo "FEHLGESCHLAGEN: der Bau"; tail -20 "$OUT/bau.log"; exit 1; }
@@ -181,7 +181,7 @@ else
         "$GBAUM"/kernel/user/explorer/*.fi
     if grep -qE '^\s*fuiscene\.drop_accept\(false\)' "$GBAUM"/kernel/user/explorer/*.fi; then
         ok "negative test: the registration is set to false"
-        export DESIGNBUILD=/tmp/osum-clip2-gegen
+        export DESIGNBUILD="$GEG/designbuild"
         bash "$GBAUM/tools/design/capture.sh" "$GEG/bau" nurbau=ja res="$RES" \
             > "$GEG/bau.log" 2>&1
         if [ $? -ne 0 ]; then

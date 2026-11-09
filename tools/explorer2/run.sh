@@ -30,7 +30,7 @@ python3 -c "import PIL" 2>/dev/null || {
 
 # ------------------------------------------------------------ 1. bauen
 echo "== 1. bauen =="
-export DESIGNBUILD=${DESIGNBUILD:-/tmp/osum-explorer2-build}
+export DESIGNBUILD=${DESIGNBUILD:-$OUT/build}
 bash tools/design/capture.sh "$OUT/bau" nurbau=ja res="$RES" \
     > "$OUT/bau.log" 2>&1 \
     || { echo "FEHLGESCHLAGEN: der Bau"; tail -20 "$OUT/bau.log"; exit 1; }
