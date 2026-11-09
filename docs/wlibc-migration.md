@@ -15,11 +15,13 @@ Ratchet: `python3 tools/uicheck/wlibuse.py check` (families `wlib` and `wlibc`, 
 | `wlibc/wcpal.fi` | 108 | dark palette values |
 | `wlibc/wcgfx.fi` | 1860 | metrics, type scale, shapes, transparency, spacing, text measuring, window-info calls |
 | `wlibc/wcpaint.fi` | 1943 | surface, heads/screens, mouse, window protocol calls, clipboard/drag/notify/bus, raw drawing, a11y channel, `ui_scale` |
-| `wlibc/wcstart.fi` | 70 | `start`, head bounds, start-menu head, band (surface bring-up; goes with step 9) |
-| `uitheme/th*.fi` | 1130 | former `wctheme`: `thbase` shared state, `thquery` reads, `thfile` file parsing, `thapply` apply + setters, `thload` reload/poll, `thprobe` probes, `thpush` decoration/form/ansi push, `thedge` edges/work area |
+| `fuiapp/hosthead.fi` | 280 | screen size, heads, display mode, mouse, surface/band state and `map_surface` (host side, step 9) |
+| `fuiapp/hostwin.fi` | 230 | `win_*`, `work_*`, `edge_*`, `shm_*`, `layer_rank` window protocol calls (host side, step 9) |
+| `fuiapp/hoststart.fi` | 40 | `start` (surface bring-up) |
+| `uitheme/th*.fi` | 1130 | former `wctheme`: `thbase` shared state, `thquery` reads, `thfile` file parsing, `thapply` apply + setters, `thload` reload/poll, `thprobe` probes, `thpush` decoration/form/ansi push |
 
 Import graph: `wcbase` <- `wcpal` <- `wcgfx`; `wcgfx` imports `wcpaint`; `uitheme` imports `wcbase`, `wcgfx`;
-`wlibc` imports `uitheme`, the `uitheme/th*` modules and `wcstart`; `th*` order: `thquery` < `thfile` < `thapply` < `thload` < `thprobe` < `thpush` < `thedge`, `wcstart` on top. Bodies must move out of `wcgfx`/`wcpaint`/`wctheme` into their new homes before
+`wlibc` imports `uitheme`, the `uitheme/th*` modules and `fuiapp/hosthead`; `th*` order: `thquery` < `thfile` < `thapply` < `thload` < `thprobe` < `thpush`; `wcpaint`/`wcgfx` import `hosthead`/`hostwin`, `hoststart` sits on top of `thload`. Bodies must move out of `wcgfx`/`wcpaint`/`wctheme` into their new homes before
 the facade can go; forwards come first so each step is pixel-neutral.
 
 ## Measured use (09.11., main 6b9430b48 + step 1)
@@ -69,9 +71,11 @@ jarvismini 56, a11ydemo 54, fuib 52, notifc 50. All others <= 50.
    `wctheme.fi` deleted, `wlibc.fi` forwards to the new modules; no other file imported `wctheme`. Dis proof: `themetest` and `desktop`
    disassembly before/after identical per function (map `wctheme__x` -> `<module>__x`, 7113 / 7291 functions, 0 body diffs). Certus staging copies `uitheme/`.
    Open follow-up: `uitheme` can now own the bodies (drop forwards in `wlibc.fi`), `settings*`, `template`, `theme`, `themetest`, `taskbar*`, `desktop`, `fuib`, `fsdraw` switch to `uitheme`/`thquery` calls.
-9. **Window/head calls**: bodies of `win_*`, `head_*`, `screen_*`, `mouse_*`, `work_*`, `shm_*`, `surface*` out of
-   `wcpaint`/`wcgfx` into `fuiapp/hostwin.fi` + `fuiapp/hosthead.fi`; `apphost` calls them; popups and taskbar modules switch
-   (largest group, split per program: taskbar family, settings family, popups, tools).
+9. **DONE (host part)** Window/head calls: `hosthead.fi` owns the surface/band/screen/head/mouse state (`s_surf s_sw s_srows s_scap s_band s_pinned s_scr_* s_ready s_hb_*`, `WIG_SCREEN`, `SURF_*`) and `screen_* head_* display_mode_* mouse_* surf_* band_y set_band set_head_bounds start_head_* map_surface ready`;
+   `hostwin.fi` owns `win_*` (protocol calls), `work_*`, `edge_*`, `shm_*`, `layer_rank`, `MFD_FRAMES` and the panel flag `s_panel`; `hoststart.fi` owns `start` (was `wlibc/wcstart.fi`); `uitheme/thedge.fi` folded into `hostwin`.
+   Bodies out of `wcpaint`/`wcgfx`/`wcstart`/`wcbase`; wlibc no longer exports them (only the `screen_w`/`screen_h` forwards stay: `lib/window/osum.fi` in Firn/Certus calls `wlibc.screen_w/h`); 54 files switch by script;
+   `ulib.sys` replaces the private `sys3w` in the new modules. Certus staging copies `hosthead`/`hostwin`/`hoststart`, seds the `fuiapp.hosthead` import and runs `wlibc_asm`+`EXT` over them. wlibc ratchet 60 files / score 900 -> 43 / 341.
+   Open: `uitheme` takes the `th*` bodies and the theme importers (`settings*`, `template`, `theme`, `themetest`, `taskbar*`, `desktop`, `fuib`, `fsdraw`) switch to `uitheme.*`; `apphost` calls `hostwin`/`hosthead` directly.
 10. **Raw draw**: components only; `fuib` uses `uikit/uisurface` primitives; `wmd`, `snip*`, `icont`, `desktop` get `uidraw`.
 11. **wlib host bodies**: replace the forward bodies in `fuiapp/apphost` with the moved wlib host code (see wlib-migration.md),
     delete `wlib.fi`, `wlib/`.

@@ -95,8 +95,8 @@ while todo:
                 todo.append(mod)
                 break
 PYEOF
-for f in "$BAU/wlib.fi" "$BAU/wlibc.fi" "$BAU/uiscale.fi" "$BAU/hosthead.fi" "$BAU/hostwin.fi" "$BAU/hoststart.fi" "$BAU"/wlib/*.fi "$BAU"/wlibc/*.fi "$BAU"/uitheme/*.fi; do
-    [ -f "$f" ] && sed -i -e 's/^import fuiapp\.hostwinp$/import hostwinp/' -e 's/^import fuiapp\.hostax$/import hostax/' -e 's/^import fuiapp\.hosthead$/import hosthead/' "$f"
+for f in "$BAU/wlib.fi" "$BAU/wlibc.fi" "$BAU/uiscale.fi" "$BAU/hosthead.fi" "$BAU/hostwin.fi" "$BAU/hoststart.fi" "$BAU/fuib.fi" "$BAU/fuiglyph.fi" "$BAU"/wlib/*.fi "$BAU"/wlibc/*.fi "$BAU"/uitheme/*.fi; do
+    [ -f "$f" ] && sed -i -e 's/^import fuiapp\.hostwinp$/import hostwinp/' -e 's/^import fuiapp\.hostax$/import hostax/' -e 's/^import fuiapp\.hosthead$/import hosthead/' -e 's/^import fuiapp\.hostwin$/import hostwin/' -e 's/^import fuiapp\.hoststart$/import hoststart/' "$f"
 done
 if [ -f "$BAU/msg.fi" ]; then
     mv "$BAU/msg.fi" "$BAU/osmsg.fi"
