@@ -91,7 +91,7 @@ BEREICHE = [
     ("VMSVGA",     "kstate.fi", "VMSVGA_OFF",     "VMSVGA_MAX"),
     ("USOCK",      "unixsock.fi", "USOCK_OFF",   "USOCK_MAX * USOCK_BYTES"),
     ("UNAME",      "unixsock.fi", "UNAME_OFF",   "UNAME_MAX * UNAME_BYTES"),
-    ("UCNT",       "unixsock.fi", "UCNT_OFF",    "0x40"),
+    ("UCNT",       "mmlock.fi",   "LOCK_BASE",   "0x40"),
     ("USHM",       "unixsock.fi", "USHM_OFF",    "USHM_MAX * USHM_BYTES"),
     ("USHMPG",     "unixsock.fi", "USHMPG_OFF",  "USHM_PAGED * SHM_PAGES_MAX * 8"),
     ("UMAP",       "unixsock.fi", "UMAP_OFF",    "UMAP_MAX * UMAP_BYTES"),
@@ -342,7 +342,7 @@ def main():
               "rootsel.fi", "ehci.fi", "blkdev.fi",
               "hidrep.fi", "hidin.fi", "i2chid.fi",
               "r3dsoft.fi",
-              "unixsock.fi", "sys.fi", "sysconst.fi"):
+              "unixsock.fi", "mmlock.fi", "sys.fi", "sysconst.fi"):
         p = None
         for stamm, verz, names in os.walk(kdir):
             verz[:] = [v for v in verz if v not in ("user", "app")]
