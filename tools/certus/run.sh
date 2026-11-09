@@ -141,7 +141,7 @@ grep -q 'fn canvas_event' <(bash tools/structure/catprog.sh kernel/user/fuiapp/w
 grep -aqE 'import libc\.mem([^a-z]|$)' <({ bash tools/structure/catprog.sh kernel/user/wlibc.fi; cat kernel/user/uitheme/*.fi; }) \
     && bad 'wlibc binds libc.mem -- two modules mem in one program (single-core rule)' \
     || ok 'wlibc gets by without libc.mem (no second module mem next to html.mem)'
-grep -q 'fn gmem' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi) \
+grep -q 'fn gmem' kernel/user/uikit/uiglyph.fi \
     && ok "the glyph memory comes from its own 64 KiB pieces (gmem)" \
     || bad "gmem fehlt"
 grep -q 'apphost.canvas(' "$CERTUS_REPO/lib/window/osum.fi" \
