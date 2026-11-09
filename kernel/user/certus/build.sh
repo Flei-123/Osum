@@ -33,10 +33,14 @@ mkdir -p "$BAU"
 for d in "$CERTUS_REPO"/lib/*; do
     ln -sfn "$d" "$BAU/$(basename "$d")"
 done
+SUPPORT_REPO=${CERTUS_SUPPORT:-/root/certus-ui}
 for pair in rt:.rt-win std:.std-win; do
-    if [ -d "$CERTUS_REPO/${pair#*:}" ]; then
-        ln -sfn "$CERTUS_REPO/${pair#*:}" "$BAU/${pair%%:*}"
-    fi
+    for base in "$CERTUS_REPO" "$SUPPORT_REPO"; do
+        if [ -d "$base/${pair#*:}" ]; then
+            ln -sfn "$base/${pair#*:}" "$BAU/${pair%%:*}"
+            break
+        fi
+    done
 done
 FIRN_SHARED=${FIRN_SHARED:-$ROOT/vendor/firn}
 if [ -d "$FIRN_SHARED/lib" ]; then
