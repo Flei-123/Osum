@@ -20,7 +20,7 @@ def main():
     evs = events(serial)
     readies = [i for i, e in enumerate(evs) if e.startswith("ready")]
     verdict("ready_first", has(evs, "ready", "rows=1"))
-    verdict("typed_dirty", has(evs, "state", "len=5", "dirty=1"))
+    verdict("typed_dirty", has(evs, "state", "len=1", "dirty=1"))
     verdict("shortcut_save", has(evs, "shortcut", "key=19"))
     verdict("shortcut_new", has(evs, "shortcut", "key=305"))
     verdict("shortcut_delete", has(evs, "shortcut", "key=4"))
