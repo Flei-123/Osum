@@ -6,19 +6,19 @@ import libc.text
 import services.svcosum
 import services.svcrules
 import npstr
+import npnote
 
 export {
-    pad_index_load, pad_index_store, pad_index_add, pad_index_drop, pad_index_retitle,
+    pad_index_load, pad_index_add, pad_index_drop, pad_index_retitle,
     pad_index_id, pad_index_rows, pad_index_blob, pad_index_next_id, pad_index_title,
     PAD_INDEX_MAX,
 }
 
 const PAD_INDEX_MAX: u64 = 32
 const TITLE_CAP: u64 = 48
-const WIRE_CAP: u64 = 2048
+const WIRE_CAP: u64 = 4096
 const NEWLINE: u64 = 10
 const CARRIAGE: u64 = 13
-const SPACE: u64 = 32
 const ZERO_DIGIT: u64 = 48
 const CONT_MASK: u64 = 192
 const CONT_BITS: u64 = 128
@@ -27,7 +27,7 @@ const RESULT_BYTES: u64 = 8
 static mut idx_ids: [u64; 32] = [0 as u64; 32]
 static mut idx_titles: [u8; 1536] = [0 as u8; 1536]
 static mut idx_blob: [u8; 1664] = [0 as u8; 1664]
-static mut idx_wire: [u8; 2048] = [0 as u8; 2048]
+static mut idx_wire: [u8; 4096] = [0 as u8; 4096]
 static mut idx_result: [u8; 8] = [0 as u8; 8]
 static mut idx_rows: u64 = 0
 
@@ -153,71 +153,85 @@ fn pad_index_drop(row: u64) {
     rebuild_blob()
 }
 
-fn parse_line(start: u64, n: u64) -> u64 {
-    var at: u64 = start
-    var id: u64 = 0
-    while at < n && text.is_digit(octets.ld8(wire_ptr(), at)) {
-        id = id * 10 + octets.ld8(wire_ptr(), at) - ZERO_DIGIT
-        at = at + 1
+fn insert_sorted(id: u64) {
+    var at: u64 = idx_rows
+    while at > 0 && idx_ids[(at - 1) as usize] > id {
+        idx_ids[(at) as usize] = idx_ids[(at - 1) as usize]
+        at = at - 1
     }
-    if at < n && octets.ld8(wire_ptr(), at) == SPACE {
-        at = at + 1
-    }
-    let first: u64 = at
-    while at < n && octets.ld8(wire_ptr(), at) != NEWLINE {
-        at = at + 1
-    }
-    if id > 0 {
-        idx_ids[(idx_rows) as usize] = id
-        put_title(idx_rows, wire_ptr() + first, at - first)
-        idx_rows = idx_rows + 1
-    }
-    if at < n {
-        at = at + 1
-    }
-    return at
+    idx_ids[(at) as usize] = id
+    idx_rows = idx_rows + 1
 }
 
-fn pad_index_load() -> u64 {
+fn has_prefix(at: u64, prefix: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if octets.ld8(wire_ptr(), at + i) != octets.ld8(prefix, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn parse_key(at: u64, end: u64) -> u64 {
+    let prefix: u64 = npstr.pad_note_prefix()
+    let prefix_len: u64 = text.length(prefix)
+    if at + prefix_len >= end || !has_prefix(at, prefix, prefix_len) {
+        return 0
+    }
+    var id: u64 = 0
+    var i: u64 = at + prefix_len
+    while i < end {
+        let c: u64 = octets.ld8(wire_ptr(), i)
+        if !text.is_digit(c) {
+            return 0
+        }
+        id = id * 10 + c - ZERO_DIGIT
+        i = i + 1
+    }
+    return id
+}
+
+fn collect_ids(n: u64) {
+    var at: u64 = 0
+    while at < n {
+        var end: u64 = at
+        while end < n && octets.ld8(wire_ptr(), end) != NEWLINE {
+            end = end + 1
+        }
+        let id: u64 = parse_key(at, end)
+        if id > 0 && idx_rows < PAD_INDEX_MAX {
+            insert_sorted(id)
+        }
+        at = end + 1
+    }
+}
+
+fn load_titles(buf: u64, cap: u64) {
+    var row: u64 = 0
+    while row < idx_rows {
+        octets.zero(result_ptr(), RESULT_BYTES)
+        let status: u64 = npnote.pad_note_read(idx_ids[(row) as usize], buf, cap, result_ptr())
+        if status == svcrules.OK {
+            let n: u64 = octets.le32(result_ptr())
+            put_title(row, buf, line_end(buf, n))
+        } else {
+            put_title(row, 0, 0)
+        }
+        row = row + 1
+    }
+}
+
+fn pad_index_load(buf: u64, cap: u64) -> u64 {
     idx_rows = 0
     octets.zero(wire_ptr(), WIRE_CAP)
     octets.zero(result_ptr(), RESULT_BYTES)
-    let key: u64 = npstr.pad_index_key()
-    let status: u64 = svcosum.store_get(key, text.length(key), wire_ptr(), WIRE_CAP - 1, result_ptr())
-    if status != svcrules.OK {
-        rebuild_blob()
-        return status
-    }
-    let n: u64 = octets.le32(result_ptr())
-    var at: u64 = 0
-    while at < n && idx_rows < PAD_INDEX_MAX {
-        at = parse_line(at, n)
+    let status: u64 = svcosum.store_keys(wire_ptr(), WIRE_CAP, result_ptr())
+    if status == svcrules.OK {
+        collect_ids(octets.le32(result_ptr()))
+        load_titles(buf, cap)
     }
     rebuild_blob()
-    return svcrules.OK
-}
-
-fn put_number(at: u64, value: u64) -> u64 {
-    var digits: [u8; 26] = [0 as u8; 26]
-    let ptr: u64 = (&digits[0 as usize]) as u64
-    let n: u64 = text.digits(value, ptr, false)
-    octets.copy(wire_ptr() + at, ptr, n)
-    return at + n
-}
-
-fn pad_index_store() -> u64 {
-    octets.zero(wire_ptr(), WIRE_CAP)
-    var at: u64 = 0
-    var row: u64 = 0
-    while row < idx_rows {
-        at = put_number(at, idx_ids[(row) as usize])
-        octets.st8(wire_ptr(), at, SPACE)
-        let n: u64 = text.length(pad_index_title(row))
-        octets.copy(wire_ptr() + at + 1, pad_index_title(row), n)
-        octets.st8(wire_ptr(), at + 1 + n, NEWLINE)
-        at = at + n + 2
-        row = row + 1
-    }
-    let key: u64 = npstr.pad_index_key()
-    return svcosum.store_set(key, text.length(key), wire_ptr(), at)
+    return status
 }

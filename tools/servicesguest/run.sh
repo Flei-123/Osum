@@ -36,7 +36,7 @@ python3 -I "$ROOT/tools/servicesguest/check.py" "$S" > "$OUT/main.checks" 2>&1
 while read -r _ name state note; do
     if [ "$state" = ok ]; then ok "$name"; else bad "$name -- $note"; fi
 done < "$OUT/main.checks"
-[ "$(wc -l < "$OUT/main.checks")" -ge 25 ] && ok "all check groups reported" || bad "check groups missing"
+[ "$(wc -l < "$OUT/main.checks")" -ge 31 ] && ok "all check groups reported" || bad "check groups missing"
 
 echo
 echo "== 2. COUNTER-PROBES: mutated trees =="
@@ -64,6 +64,8 @@ mutant nolimit kernel/user/services/svcosum.fi 's/n > svcrules.VALUE_MAX {/n > s
     value_over_limit_rejected
 mutant sharedstore kernel/user/services/svcosum.fi 's/svcrules.store_path(app_ptr(), app_len, key, key_len, path_ptr(), 160)/svcrules.store_path(app_ptr(), 5, key, key_len, path_ptr(), 160)/' \
     isolation_first_app_intact
+mutant nokeyfilter kernel/user/services/svcosum.fi 's/if svcrules.valid_key(name, text.length(name)) {/if true {/' \
+    keys_empty_store keys_empty_again
 
 echo "SERVICESGUEST: $pass passed, $fail failed"
 [ "$fail" = 0 ]

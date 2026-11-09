@@ -24,6 +24,21 @@ svcproof get proofapp greeting
 svcproof rm proofapp greeting
 svcproof rm proofapp big
 ls /data/proofapp/services
+echo MARK-keys
+svcproof keys proofapp
+svcproof set proofapp beta 1
+svcproof set proofapp alpha 2
+svcproof set proofapp note-12 3
+svcproof keys proofapp
+svcproof set proofbpp other x
+svcproof keys proofapp
+svcproof rm proofapp beta
+svcproof keys proofapp
+svcproof keys bad/app
+svcproof rm proofapp alpha
+svcproof rm proofapp note-12
+svcproof rm proofbpp other
+svcproof keys proofapp
 echo MARK-clip
 svcproof copy clipboardtext
 svcproof paste

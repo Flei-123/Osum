@@ -14,7 +14,7 @@ import services.dlgproto
 
 export {
     set_app, caps, copy_text, paste_text, message, confirm, file_open, file_save,
-    store_set, store_get, store_remove, store_has,
+    store_set, store_get, store_remove, store_has, store_keys,
     poll, pending,
 }
 
@@ -23,6 +23,9 @@ const KIND_MAX: u64 = 3
 const BUTTONS_MAX: u64 = 3
 const DATA_ROOT_LEN: u64 = 6
 const TMP_SUFFIX_LEN: u64 = 6
+const DENT_BYTES: u64 = 1024
+const KEY_SEPARATOR: u64 = 10
+const KEYS_FULL: u64 = 4294967295
 
 static mut app_name: [u8; 65] = [0 as u8; 65]
 static mut app_len: u64 = 0
@@ -30,6 +33,7 @@ static mut path_buf: [u8; 160] = [0 as u8; 160]
 static mut tmp_buf: [u8; 176] = [0 as u8; 176]
 static mut dlg_key: [u8; 48] = [0 as u8; 48]
 static mut clip_buf: [u8; 16384] = [0 as u8; 16384]
+static mut dent_buf: [u8; 1024] = [0 as u8; 1024]
 static mut TMP_SUFFIX: [u8; 6] = "/.tmp\0"
 
 fn app_ptr() -> u64 {
@@ -38,6 +42,10 @@ fn app_ptr() -> u64 {
 
 fn path_ptr() -> u64 {
     return (&path_buf[0 as usize]) as u64
+}
+
+fn dent_ptr() -> u64 {
+    return (&dent_buf[0 as usize]) as u64
 }
 
 fn tmp_ptr() -> u64 {
@@ -266,6 +274,54 @@ fn store_get(key: u64, key_len: u64, out: u64, max: u64, len_out: u64) -> u64 {
         return svcrules.FAILED
     }
     octets.st32(len_out, 0, got)
+    return svcrules.OK
+}
+
+fn append_key(name: u64, out: u64, max: u64, used: u64) -> u64 {
+    let n: u64 = text.length(name)
+    if used + n + 2 > max {
+        return KEYS_FULL
+    }
+    octets.copy(out + used, name, n)
+    octets.st8(out, used + n, KEY_SEPARATOR)
+    octets.st8(out, used + n + 1, 0)
+    return used + n + 1
+}
+
+fn collect_keys(block: u64, bytes: u64, out: u64, max: u64, start: u64) -> u64 {
+    var used: u64 = start
+    var at: u64 = 0
+    while at < bytes && used != KEYS_FULL {
+        let name: u64 = io.dir_name(block + at)
+        if svcrules.valid_key(name, text.length(name)) {
+            used = append_key(name, out, max, used)
+        }
+        at = at + io.dir_reclen(block + at)
+    }
+    return used
+}
+
+fn store_keys(out: u64, max: u64, len_out: u64) -> u64 {
+    octets.st32(len_out, 0, 0)
+    if max == 0 || svcrules.store_dir(app_ptr(), app_len, path_ptr(), 160) == 0 {
+        return svcrules.INVALID
+    }
+    octets.st8(out, 0, 0)
+    let fd: u64 = io.dir_open(path_ptr())
+    if errno.failed(fd) {
+        return svcrules.OK
+    }
+    var used: u64 = 0
+    var got: u64 = io.dir_read(fd, dent_ptr(), DENT_BYTES)
+    while !errno.failed(got) && got > 0 && used != KEYS_FULL {
+        used = collect_keys(dent_ptr(), got, out, max, used)
+        got = io.dir_read(fd, dent_ptr(), DENT_BYTES)
+    }
+    io.close(fd)
+    if used == KEYS_FULL || errno.failed(got) {
+        return svcrules.FAILED
+    }
+    octets.st32(len_out, 0, used)
     return svcrules.OK
 }
 

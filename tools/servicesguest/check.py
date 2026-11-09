@@ -78,6 +78,24 @@ def check_store(lines):
             verdict(name, got == want, got)
 
 
+def key_set(row, length):
+    prefix = "svcproof: keys status=ok len=%d val=" % length
+    if not row.startswith(prefix):
+        return None
+    return sorted(k for k in row[len(prefix):].split(",") if k)
+
+
+def check_keys(lines):
+    rows = [r.strip() for r in proof_lines(lines)]
+    rows += [""] * (14 - len(rows))
+    verdict("keys_empty_store", rows[0] == "svcproof: keys status=ok len=0 val=", rows[0])
+    verdict("keys_after_three_sets", key_set(rows[4], 19) == ["alpha", "beta", "note-12"], rows[4])
+    verdict("keys_isolated_per_app", key_set(rows[6], 19) == ["alpha", "beta", "note-12"], rows[6])
+    verdict("keys_after_remove", key_set(rows[8], 14) == ["alpha", "note-12"], rows[8])
+    verdict("keys_bad_app_rejected", rows[9] == "svcproof: keys status=invalid", rows[9])
+    verdict("keys_empty_again", rows[13] == "svcproof: keys status=ok len=0 val=", rows[13])
+
+
 def check_clip(lines):
     rows = proof_lines(lines)
     text = "\n".join(rows)
@@ -91,7 +109,7 @@ def check_clip(lines):
 def main():
     data = open(sys.argv[1], errors="replace").read()
     parts = sections(data)
-    verdict("markers_present", all(k in parts for k in ("caps", "store", "clip", "end")), " ".join(parts))
+    verdict("markers_present", all(k in parts for k in ("caps", "store", "keys", "clip", "end")), " ".join(parts))
     caps_rows = proof_lines(parts.get("caps", []))
     caps = re.search(r"caps=(\d+)", caps_rows[0]) if caps_rows else None
     value = int(caps.group(1)) if caps else -1
@@ -99,6 +117,7 @@ def main():
     verdict("caps_clipboard", value >= 0 and (value & 12) == 12, str(value))
     verdict("caps_no_dialog_without_dialogd", value >= 0 and (value & 16) == 0, str(value))
     check_store(parts.get("store", []))
+    check_keys(parts.get("keys", []))
     check_clip(parts.get("clip", []))
 
 

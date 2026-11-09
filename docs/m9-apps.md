@@ -17,7 +17,7 @@ Goal (ecosystem roadmap L3 + M9): file manager, settings, notes (and later the t
 
 | call | needed by | state |
 |---|---|---|
-| `store` key listing | notepad (needed an own index key), later explorer view state | missing: `store_*` has get/set/has/remove only; app keeps an index value |
+| `store` key listing | notepad, later explorer view state | DONE: `svcosum.store_keys(out, max, &len)`, synchronous, newline-separated; notepad lists `note-<id>` keys, titles come from the first line of each note |
 | `notify` | explorer (copy progress, done), settings (restart needed) | missing in contract v1; bus `NOTIPOST` exists (`notify.fi`) |
 | clipboard file list (uri-list) | explorer copy/paste | missing: `svcosum.copy_text` is text only, 16 KiB |
 | confirm with custom buttons / progress | explorer delete + replace dialogs | `message` has kind/buttons, no progress |
@@ -43,6 +43,6 @@ Goal (ecosystem roadmap L3 + M9): file manager, settings, notes (and later the t
 
 ## notepad design
 
-- Storage: app folder `/data/notepad/services/`: key `index` (lines `<id> <title>`, max 32 notes) and key `note-<id>` (UTF-8 text, max 64 KiB).
+- Storage: app folder `/data/notepad/services/`: key `note-<id>` (UTF-8 text, max 64 KiB, max 32 notes shown); the list comes from `store_keys`, a blank unsaved note is not persisted.
 - Keys: Ctrl+N new, Ctrl+S save, Ctrl+D delete (confirm dialog via `dialogd`); switching notes and creating a note autosave a modified note.
 - Serial events (`notepad: ...`): `ready rows=`, `state`, `saved id= status= len= title=`, `new`, `select`, `delete status= answer= rows=`, `shortcut`.

@@ -10,7 +10,7 @@ Manifest side: docs/manifest-v2.md (perm -> service call).
 |---|---|
 | `lib/services/svcrules.fi` | status 0-6, capability bits 1-64, name/key rules, `store_dir`/`store_path` (`/data/<app>/services/<key>`), `status_name` |
 | `lib/services/svcqueue.fi` | reply queue, 28-octet 4-aligned record heads (total, id, op, status, index, name_len, data_len), compaction, request ids |
-| `kernel/user/services/svcosum.fi` | backend backend: `set_app caps copy_text paste_text message confirm file_open file_save store_set store_get store_remove store_has poll pending` |
+| `kernel/user/services/svcosum.fi` | backend backend: `set_app caps copy_text paste_text message confirm file_open file_save store_set store_get store_remove store_has store_keys poll pending` |
 | `kernel/user/services/svcdlg.fi` | spawn `/bin/dialogd`, read `<app folder>/services/dialog-<id>.reply`, queue the file result |
 | `kernel/user/dialogd.fi`, `dialogd/{dlgdir,dlgpicker}.fi`, `lib/services/dlgproto.fi` | dialog window program: message/confirm/open/save, directory model, picker window, reply protocol (answer line, name line, content) |
 | `kernel/user/dialogdemo.fi`, `tools/dialogd/{host.fi,run.sh,check.py,script.txt}` | proof app + host test + guest gate |
@@ -18,7 +18,7 @@ Manifest side: docs/manifest-v2.md (perm -> service call).
 
 Module names are deliberately NOT `svc svcfile svcclip svcdialog svcstore svcos` (Firn module names are global by last component; the Firn names stay free for the pin lift).
 Deviation from the contract: app names starting with `.` are refused (`..` would escape `/data`).
-Guest-tested: gate `servicesguest` (tools/servicesguest/run.sh) boots QEMU and runs `kernel/user/svcproof.fi`: storage round trip, 64 KiB limit, key/app rules, app isolation, clipboard copy/paste, 4 mutated trees must go red. `svcosum.ensure_dirs` creates `/data` itself (fresh images have none).
+Guest-tested: gate `servicesguest` (tools/servicesguest/run.sh) boots QEMU and runs `kernel/user/svcproof.fi`: storage round trip, key listing (`store_keys`: newline-separated valid key names, own app only, dot names and `.tmp` skipped), 64 KiB limit, key/app rules, app isolation, clipboard copy/paste, 4 mutated trees must go red. `svcosum.ensure_dirs` creates `/data` itself (fresh images have none).
 
 ## Call -> existing OrientOS code
 
