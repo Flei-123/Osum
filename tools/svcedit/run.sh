@@ -42,7 +42,6 @@ if guest "$ROOT" "$OUT/main"; then
         if [ "$state" = ok ]; then ok "$name"; else bad "$name -- $note"; fi
     done < "$OUT/main.checks"
     [ "$(wc -l < "$OUT/main.checks")" -ge 12 ] && ok "all check groups reported" || bad "check groups missing"
-    [ -n "${SVCEDIT_KEEP:-}" ] && ls "$OUT/main" | grep -c png | sed 's/^/  photos: /'
 else
     bad "guest run failed"; tail -n 12 "$OUT/main.log"
 fi
