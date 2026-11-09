@@ -387,7 +387,7 @@ Ehrlich und einzeln, statt einer Zusage:
 ```
 kernel/user/codec/h264.fi     2678 Zeilen   der Dekodierer
 kernel/user/codec/h264tab.fi   677 Zeilen   die Tafeln (ERZEUGT)
-kernel/user/codec/h264t.fi     204 Zeilen   das Messgeraet
+kernel/user/h264t.fi     204 Zeilen   das Messgeraet
 kernel/codecstat.fi       71 Zeilen   die Zaehler in kdata
 tools/codec/             ~900 Zeilen  Abnahme, Erzeuger, Pruefer
 tools/codec/ref264.py   1364 Zeilen   das Versuchsgeraet (nicht im Kern)
