@@ -220,7 +220,7 @@ fi
 
 echo
 echo "== 6. a page with JavaScript =="
-lauf_wig js "http://10.0.2.2:$PORT/j.htm" ",--dump=/tmp/j.ppm" 45
+lauf_wig js "http://10.0.2.2:$PORT/j.htm" ",--tailwait=1,--dump=/tmp/j.ppm" 45
 bash tools/mkfsfi/mkfs.sh cat "$OUT/js.img" /tmp/j.ppm > "$OUT/js.ppm" 2>/dev/null
 if [ -s "$OUT/js.ppm" ]; then
     python3 tools/certus/pixel.py "$OUT/js.ppm" --json "$OUT/js.json" | sed 's/^/        /'
@@ -242,7 +242,7 @@ echo "== 7. time to picture =="
 cp --sparse=always -f "$OUT/platte/disk.img" "$OUT/zeit.img"
 LADEN_PLATTE="$OUT/zeit.img" LADEN_KILL=ja LADEN_WARTE=45 \
     bash tools/loader/lauf.sh zeit \
-    "$WM $NETZ wigapp=/bin/certus,http://10.0.2.2:$PORT/i.htm,-,1,--laut=1" \
+    "$WM $NETZ wigapp=/bin/certus,http://10.0.2.2:$PORT/i.htm,-,1,--tailwait=1,--laut=1" \
     "${CERTUS_LIMIT:-1500}" "HOEHE" > "$OUT/zeit.lauf" 2>&1 &
 zpid=$!
 t_start=0; t_bild=0
