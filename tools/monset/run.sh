@@ -158,14 +158,18 @@ placement_ok() {
     for r in mfps mmon mpgd; do grep -aq "settings: rect name=$r " "$1" && return 1; done
     return 0
 }
-for run in "C:$SC:$TMPD/c/o.log" "C2 (scale 2):$SC2:$TMPD/c2/o.log"; do
-    label=${run%%:*}; rest=${run#*:}; serial=${rest%%:*}; log=${rest#*:}
+page_has() { python3 -I tools/monset/pagetext.py "$1" "$2"; }
+for run in "C:$SC:$TMPD/c/o.log:$TMPD/c/o" "C2 (scale 2):$SC2:$TMPD/c2/o.log:$TMPD/c2/o"; do
+    label=${run%%:*}; rest=${run#*:}; serial=${rest%%:*}; rest=${rest#*:}; log=${rest%%:*}; shots=${rest#*:}
+    page_has "$shots/c-0.ppm" 'overlay' && page_has "$shots/c-0.ppm" 'pixel' && ok "$label: OCR of the Developer page shows the overlay and pixel check labels" || bad "$label: OCR of the Developer page lacks the switch labels"
+    page_has "$shots/c-mouse.ppm" 'pointer' && ! page_has "$shots/c-mouse.ppm" 'overlay' && ! page_has "$shots/c-mouse.ppm" 'pixel.check' && ok "$label: OCR of the Mouse page shows pointer controls and none of the debug labels" || bad "$label: OCR of the Mouse page (pointer label missing or debug labels left)"
     placement_ok "$serial" && ok "$label: switches live on the Developer page (dfps, dmon, dpg), the Mouse page keeps only its own controls" || bad "$label: switch placement (Developer page or leftovers on the Mouse page)"
     clicks_stored "$serial" && ok "$label: clicks stored mon 1, 0, 1 (ok=1)" || bad "$label: click effects"
     overlay_followed "$serial" && ok "$label: the overlay followed the switch: shown, hidden, shown" || bad "$label: overlay did not follow (need shown, hidden, shown)"
     grep -aq 'klickauf srectdmon -> KEIN' "$log" && bad "$label: click on dmon had no target" || ok "$label: every click found its widget"
 done
 sed -e 's/name=dmon /name=mmon /' "$SC" > "$TMPD/doctored.txt"
+page_has "$TMPD/c/o/c-mouse.ppm" 'overlay' && bad "OCR COUNTER-PROOF: the Mouse picture matched the Developer label" || ok "OCR COUNTER-PROOF: the Mouse picture does not match the Developer label (the check tells the pages apart)"
 placement_ok "$TMPD/doctored.txt" && bad "PLACEMENT COUNTER-PROOF: a log with the old mmon rect still passed" || ok "PLACEMENT COUNTER-PROOF: a log with the switch back on the Mouse page fails the placement check"
 clicks_stored "$SM" && ok "M COUNTER-PROOF: the mutant still stores mon 1, 0, 1" || bad "M COUNTER-PROOF: mutant did not take the clicks"
 overlay_followed "$SM" && bad "M COUNTER-PROOF: the overlay followed although the value never reached the bus or the file" || ok "M COUNTER-PROOF: without the value on the bus or in the file the overlay does not follow"
