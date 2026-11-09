@@ -2,6 +2,7 @@
 profile kernel
 
 import corner
+import fuiapp.hosthead
 import fuiapp.hostwinp
 import libc.memcopy
 import uiscale
@@ -17,25 +18,6 @@ const WIG_GLYPH: u64 = 1801
 const WIG_KERN: u64 = 1802
 
 const WIG_CURSOR: u64 = 1806
-
-const MFD_FRAMES: u64 = 0x40000000
-
-const SYS_MEMFD_CREATE: u64 = 319
-
-const SYS_FTRUNCATE: u64 = 77
-
-const SYS_MUNMAP: u64 = 11
-
-const SYS_CLOSE_FD: u64 = 3
-
-const MAP_SHARED_FLAG: u64 = 1
-
-fn layer_rank(l: u64) -> u64 {
-    if l == hostwinp.L_FLOAT {
-        return 3
-    }
-    return l * 2
-}
 
 const SYS_MMAP: u64 = 9
 
@@ -69,237 +51,8 @@ fn sys3w(number: u64, a0: u64, a1: u64, a2: u64) -> u64 {
         clobber("memory"))
 }
 
-fn map_surface(bytes: u64) -> u64 {
-    let no: u64 = 0 -% 1
-    return asm("syscall", out("rax"), in("rax") SYS_MMAP, in("rdi") 0,
-        in("rsi") bytes, in("rdx") PROT_RW, in("r10") MAP_ANON_PRIV,
-        in("r8") no, in("r9") 0, clobber("rcx"), clobber("r11"),
-        clobber("memory"))
-}
-
-static mut s_shfd: u64 = 0
-
-fn shm_last_fd() -> u64 {
-    return s_shfd
-}
-
-fn shm_close(fd: u64) {
-    let _r: u64 = sys3w(SYS_CLOSE_FD, fd, 0, 0)
-}
-
-fn shm_unmap(p: u64, bytes: u64) {
-    let _r: u64 = sys3w(SYS_MUNMAP, p, bytes, 0)
-}
-
-fn shm_buffer(bytes: u64) -> u64 {
-    if bytes == 0 {
-        return 0
-    }
-    let fd: u64 = sys3w(SYS_MEMFD_CREATE, 0, MFD_FRAMES, 0)
-    if ulib.bad(fd) {
-        return 0
-    }
-    if ulib.bad(sys3w(SYS_FTRUNCATE, fd, bytes, 0)) {
-        shm_close(fd)
-        return 0
-    }
-    let p: u64 = asm("syscall", out("rax"), in("rax") SYS_MMAP, in("rdi") 0,
-        in("rsi") bytes, in("rdx") PROT_RW, in("r10") MAP_SHARED_FLAG,
-        in("r8") fd, in("r9") 0, clobber("rcx"), clobber("r11"),
-        clobber("memory"))
-    if ulib.bad(p) || p == 0 {
-        shm_close(fd)
-        return 0
-    }
-    s_shfd = fd
-    return p
-}
-
-fn ready() -> bool {
-    return wcbase.s_ready != 0
-}
-
 fn px_mono() -> u64 {
     return PX_MONO0 * uiscale.ui_scale()
-}
-
-fn surface() -> u64 {
-    return wcbase.s_surf
-}
-
-fn surf_w() -> u64 {
-    return wcbase.s_sw
-}
-
-fn surf_rows() -> u64 {
-    return wcbase.s_srows
-}
-
-fn band_y() -> u64 {
-    return wcbase.s_band
-}
-
-fn screen_w() -> u64 {
-    if wcbase.s_ready != 0 {
-        let _r: bool = screen_refresh()
-    }
-    return wcbase.s_scr_w
-}
-
-fn screen_h() -> u64 {
-    if wcbase.s_ready != 0 {
-        let _r: bool = screen_refresh()
-    }
-    return wcbase.s_scr_h
-}
-
-fn screen_refresh() -> bool {
-    let w: u64 = sys3w(wcbase.WIG_SCREEN, 0, 0, 0)
-    let h: u64 = sys3w(wcbase.WIG_SCREEN, 1, 0, 0)
-    if ulib.bad(w) || w == 0 || ulib.bad(h) || h == 0 {
-        return false
-    }
-    if w == wcbase.s_scr_w && h == wcbase.s_scr_h {
-        return false
-    }
-    wcbase.s_scr_w = w
-    wcbase.s_scr_h = h
-    band_remake()
-    return true
-}
-
-fn band_remake() {
-    if wcbase.s_ready == 0 || wcbase.s_pinned != 0 || wcbase.s_scr_w == 0 || wcbase.s_scr_w > wcbase.SURF_W_MAX {
-        return
-    }
-    var rows: u64 = wcbase.SURF_BUDGET / (wcbase.s_scr_w *% 4)
-    if rows == 0 {
-        return
-    }
-    if rows > wcbase.s_scr_h {
-        rows = wcbase.s_scr_h
-    }
-    let need: u64 = wcbase.s_scr_w *% rows *% 4
-    if need > wcbase.s_scap {
-        let p: u64 = map_surface(wcbase.SURF_BUDGET)
-        if ulib.bad(p) || p == 0 {
-            return
-        }
-        wcbase.s_surf = p
-        wcbase.s_scap = wcbase.SURF_BUDGET
-    }
-    wcbase.s_sw = wcbase.s_scr_w
-    wcbase.s_srows = rows
-    wcbase.s_band = 0
-}
-
-fn head_bx() -> u64 {
-    return wcbase.s_hb_x
-}
-
-fn head_by() -> u64 {
-    return wcbase.s_hb_y
-}
-
-fn head_bw() -> u64 {
-    if wcbase.s_hb_w == 0 {
-        return screen_w()
-    }
-    return wcbase.s_hb_w
-}
-
-fn head_bh() -> u64 {
-    if wcbase.s_hb_h == 0 {
-        return screen_h()
-    }
-    return wcbase.s_hb_h
-}
-
-fn head_count() -> u64 {
-    let n: u64 = sys3w(wcbase.WIG_SCREEN, hostwinp.WS_HEADS, 0, 0)
-    if ulib.bad(n) || n == 0 {
-        return 1
-    }
-    return n
-}
-
-fn head_field(hd: u64, field: u64) -> u64 {
-    return sys3w(wcbase.WIG_SCREEN, hostwinp.WS_HEAD, hd, field)
-}
-
-fn display_mode_raw() -> u64 {
-    let r: u64 = sys3w(wcbase.WIG_SCREEN, hostwinp.WS_DISPMODE, 0, 0)
-    if ulib.bad(r) {
-        return 0
-    }
-    return r
-}
-
-fn display_mode_mirrored() -> bool {
-    return ((display_mode_raw() >> 8) & 1) != 0
-}
-
-fn display_mode_connected() -> u64 {
-    return display_mode_raw() & 255
-}
-
-fn display_mode_set(mirror: bool) -> bool {
-    var m: u64 = 0
-    if mirror {
-        m = 1
-    }
-    return !ulib.bad(sys3w(wcbase.WIG_SCREEN, hostwinp.WS_DISPMODE, 1, m))
-}
-
-fn head_place(hd: u64, x: u64, y: u64) -> bool {
-    return !ulib.bad(sys3w(wcbase.WIG_SCREEN, hostwinp.WS_HEADPOS, hd, (x & 0xFFFF) | ((y & 0xFFFF) << 16)))
-}
-
-fn head_scale_set(hd: u64, pct: u64) -> bool {
-    return !ulib.bad(sys3w(wcbase.WIG_SCREEN, hostwinp.WS_HEADSCALE, hd, pct))
-}
-
-fn head_hot(hd: u64) -> bool {
-    return !ulib.bad(sys3w(wcbase.WIG_SCREEN, hostwinp.WS_HEADHOT, hd, 0))
-}
-
-fn head_scale(hd: u64) -> u64 {
-    let v: u64 = head_field(hd, 5)
-    if ulib.bad(v) || v < 100 || v > 300 {
-        return 100
-    }
-    return v
-}
-
-fn head_present(hd: u64) -> bool {
-    return head_field(hd, 4) == 1
-}
-
-fn mouse_x() -> u64 {
-    return sys3w(wcbase.WIG_SCREEN, 2, 0, 0)
-}
-
-fn mouse_y() -> u64 {
-    return sys3w(wcbase.WIG_SCREEN, 3, 0, 0)
-}
-
-fn mouse_btn() -> u64 {
-    return sys3w(wcbase.WIG_SCREEN, 4, 0, 0)
-}
-
-fn surf_use(p: u64, rows: u64) {
-    wcbase.s_surf = p
-    wcbase.s_srows = rows
-    wcbase.s_band = 0
-    wcbase.s_pinned = 1
-}
-
-fn surf_wide(p: u64, w: u64, rows: u64) {
-    wcbase.s_surf = p
-    wcbase.s_sw = w
-    wcbase.s_srows = rows
-    wcbase.s_band = 0
-    wcbase.s_pinned = 1
 }
 
 fn clip_set(x0: u64, y0: u64, x1: u64, y1: u64) {
@@ -329,26 +82,26 @@ fn px(x: u64, y: u64, color: u64) {
     if x < s_cx0 || x >= s_cx1 || y < s_cy0 || y >= s_cy1 {
         return
     }
-    if x >= wcbase.s_sw || y < wcbase.s_band {
+    if x >= hosthead.s_sw || y < hosthead.s_band {
         return
     }
-    let r: u64 = y - wcbase.s_band
-    if r >= wcbase.s_srows {
+    let r: u64 = y - hosthead.s_band
+    if r >= hosthead.s_srows {
         return
     }
-    __mmio_write32((wcbase.s_surf +% (r *% wcbase.s_sw +% x) *% 4) as *mut u32,
+    __mmio_write32((hosthead.s_surf +% (r *% hosthead.s_sw +% x) *% 4) as *mut u32,
         color as u32)
 }
 
 fn get(x: u64, y: u64) -> u64 {
-    if x >= wcbase.s_sw || y < wcbase.s_band {
+    if x >= hosthead.s_sw || y < hosthead.s_band {
         return 0
     }
-    let r: u64 = y - wcbase.s_band
-    if r >= wcbase.s_srows {
+    let r: u64 = y - hosthead.s_band
+    if r >= hosthead.s_srows {
         return 0
     }
-    return __mmio_read32((wcbase.s_surf +% (r *% wcbase.s_sw +% x) *% 4)
+    return __mmio_read32((hosthead.s_surf +% (r *% hosthead.s_sw +% x) *% 4)
         as *mut u32) as u64
 }
 
@@ -1104,7 +857,7 @@ fn gmem(n: u64) -> u64 {
         return 0
     }
     if g_arena == 0 || g_arena_rest < m {
-        let p: u64 = map_surface(G_CHUNK)
+        let p: u64 = hosthead.map_surface(G_CHUNK)
         if ulib.bad(p) || p == 0 {
             return 0
         }
@@ -1293,22 +1046,22 @@ fn push(h: u64, x: u64, y: u64, w: u64, hh: u64) -> u64 {
     if w == 0 || hh == 0 {
         return 0
     }
-    if y < wcbase.s_band {
+    if y < hosthead.s_band {
         return 0
     }
-    let r: u64 = y -% wcbase.s_band
-    if r >= wcbase.s_srows {
+    let r: u64 = y -% hosthead.s_band
+    if r >= hosthead.s_srows {
         return 0
     }
     var hn: u64 = hh
-    if r +% hn > wcbase.s_srows {
-        hn = wcbase.s_srows -% r
+    if r +% hn > hosthead.s_srows {
+        hn = hosthead.s_srows -% r
     }
     if hn == 0 {
         return 0
     }
-    let src: u64 = wcbase.s_surf +% r *% wcbase.s_sw *% 4 +% x *% 4
-    return sys5(WIG_BLIT, h, (x << 16) | y, (w << 16) | hn, src, wcbase.s_sw)
+    let src: u64 = hosthead.s_surf +% r *% hosthead.s_sw *% 4 +% x *% 4
+    return sys5(WIG_BLIT, h, (x << 16) | y, (w << 16) | hn, src, hosthead.s_sw)
 }
 
 fn push_rect(h: u64, x: u64, y: u64, w: u64, hh: u64) -> u64 {

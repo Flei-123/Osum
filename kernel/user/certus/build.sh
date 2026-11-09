@@ -64,12 +64,13 @@ cp "$ROOT/kernel/user/ulib.fi" "$ROOT/kernel/user/wlibc.fi" \
    "$ROOT/kernel/user/fuiapp/wlib.fi" "$BAU/"
 rm -rf "$BAU/wlib" "$BAU/wlibc" "$BAU/uitheme"
 cp -r "$ROOT/kernel/user/fuiapp/wlib" "$ROOT/kernel/user/wlibc" "$ROOT/kernel/user/uitheme" "$BAU/"
-cp "$ROOT/kernel/user/fuiapp/hostwinp.fi" "$ROOT/kernel/user/fuiapp/hostax.fi" "$BAU/"
+cp "$ROOT/kernel/user/fuiapp/hostwinp.fi" "$ROOT/kernel/user/fuiapp/hostax.fi" "$ROOT/kernel/user/fuiapp/hosthead.fi" \
+   "$ROOT/kernel/user/fuiapp/hostwin.fi" "$ROOT/kernel/user/fuiapp/hoststart.fi" "$BAU/"
 sed -i -E 's/^import fuiapp\.(wlib(\.[a-z]+)?)$/import \1/' "$BAU/wlib.fi" "$BAU"/wlib/*.fi
 python3 - "$ROOT" "$BAU" <<'PYEOF'
 import os, re, shutil, sys
 root, bau = sys.argv[1], sys.argv[2]
-todo = ['wlib', 'wlibc', 'ulib']
+todo = ['wlib', 'wlibc', 'ulib', 'hoststart']
 seen = set(todo)
 def sources(name):
     paths = [os.path.join(bau, name + '.fi')]
@@ -94,8 +95,8 @@ while todo:
                 todo.append(mod)
                 break
 PYEOF
-for f in "$BAU/wlib.fi" "$BAU/wlibc.fi" "$BAU/uiscale.fi" "$BAU"/wlib/*.fi "$BAU"/wlibc/*.fi "$BAU"/uitheme/*.fi; do
-    [ -f "$f" ] && sed -i -e 's/^import fuiapp\.hostwinp$/import hostwinp/' -e 's/^import fuiapp\.hostax$/import hostax/' "$f"
+for f in "$BAU/wlib.fi" "$BAU/wlibc.fi" "$BAU/uiscale.fi" "$BAU/hosthead.fi" "$BAU/hostwin.fi" "$BAU/hoststart.fi" "$BAU"/wlib/*.fi "$BAU"/wlibc/*.fi "$BAU"/uitheme/*.fi; do
+    [ -f "$f" ] && sed -i -e 's/^import fuiapp\.hostwinp$/import hostwinp/' -e 's/^import fuiapp\.hostax$/import hostax/' -e 's/^import fuiapp\.hosthead$/import hosthead/' "$f"
 done
 if [ -f "$BAU/msg.fi" ]; then
     mv "$BAU/msg.fi" "$BAU/osmsg.fi"

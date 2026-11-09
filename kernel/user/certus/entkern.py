@@ -188,6 +188,12 @@ def main():
         write_2(p, text)
     for p in split_files(bau, 'uitheme'):
         write_2(p, profil_gone(read_2(p), os.path.basename(p)))
+    for name in ('hosthead.fi', 'hostwin.fi', 'hoststart.fi'):
+        p = os.path.join(bau, name)
+        text = profil_gone(read_2(p), name)
+        if name != 'hoststart.fi':
+            text = wlibc_asm(text) + EXT
+        write_2(p, text)
     for p in split_files(bau, 'wlib'):
         write_2(p, schlicht(read_2(p), os.path.basename(p)))
     for name in ('ulib.fi', 'wlib.fi', 'icons.fi', 'utf8.fi'):

@@ -1,0 +1,260 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import fuiapp.hostwinp
+import ulib
+
+const SYS_MMAP: u64 = 9
+
+const PROT_RW: u64 = 3
+
+const MAP_ANON_PRIV: u64 = 34
+
+const WIG_SCREEN: u64 = 1805
+
+const SURF_BUDGET: u64 = 1048576
+
+const SURF_W_MAX: u64 = 8192
+
+static mut s_surf: u64 = 0
+
+static mut s_sw: u64 = 0
+
+static mut s_srows: u64 = 0
+
+static mut s_scap: u64 = 0
+
+static mut s_band: u64 = 0
+
+static mut s_pinned: u64 = 0
+
+static mut s_scr_w: u64 = 0
+
+static mut s_scr_h: u64 = 0
+
+static mut s_ready: u64 = 0
+
+static mut s_hb_x: u64 = 0
+
+static mut s_hb_y: u64 = 0
+
+static mut s_hb_w: u64 = 0
+
+static mut s_hb_h: u64 = 0
+
+fn map_surface(bytes: u64) -> u64 {
+    let no: u64 = 0 -% 1
+    return asm("syscall", out("rax"), in("rax") SYS_MMAP, in("rdi") 0,
+        in("rsi") bytes, in("rdx") PROT_RW, in("r10") MAP_ANON_PRIV,
+        in("r8") no, in("r9") 0, clobber("rcx"), clobber("r11"),
+        clobber("memory"))
+}
+
+fn ready() -> bool {
+    return s_ready != 0
+}
+
+fn surface() -> u64 {
+    return s_surf
+}
+
+fn surf_w() -> u64 {
+    return s_sw
+}
+
+fn surf_rows() -> u64 {
+    return s_srows
+}
+
+fn band_y() -> u64 {
+    return s_band
+}
+
+fn screen_w() -> u64 {
+    if s_ready != 0 {
+        let _r: bool = screen_refresh()
+    }
+    return s_scr_w
+}
+
+fn screen_h() -> u64 {
+    if s_ready != 0 {
+        let _r: bool = screen_refresh()
+    }
+    return s_scr_h
+}
+
+fn screen_refresh() -> bool {
+    let w: u64 = ulib.sys(WIG_SCREEN, 0, 0, 0)
+    let h: u64 = ulib.sys(WIG_SCREEN, 1, 0, 0)
+    if ulib.bad(w) || w == 0 || ulib.bad(h) || h == 0 {
+        return false
+    }
+    if w == s_scr_w && h == s_scr_h {
+        return false
+    }
+    s_scr_w = w
+    s_scr_h = h
+    band_remake()
+    return true
+}
+
+fn band_remake() {
+    if s_ready == 0 || s_pinned != 0 || s_scr_w == 0 || s_scr_w > SURF_W_MAX {
+        return
+    }
+    var rows: u64 = SURF_BUDGET / (s_scr_w *% 4)
+    if rows == 0 {
+        return
+    }
+    if rows > s_scr_h {
+        rows = s_scr_h
+    }
+    let need: u64 = s_scr_w *% rows *% 4
+    if need > s_scap {
+        let p: u64 = map_surface(SURF_BUDGET)
+        if ulib.bad(p) || p == 0 {
+            return
+        }
+        s_surf = p
+        s_scap = SURF_BUDGET
+    }
+    s_sw = s_scr_w
+    s_srows = rows
+    s_band = 0
+}
+
+fn head_bx() -> u64 {
+    return s_hb_x
+}
+
+fn head_by() -> u64 {
+    return s_hb_y
+}
+
+fn head_bw() -> u64 {
+    if s_hb_w == 0 {
+        return screen_w()
+    }
+    return s_hb_w
+}
+
+fn head_bh() -> u64 {
+    if s_hb_h == 0 {
+        return screen_h()
+    }
+    return s_hb_h
+}
+
+fn head_count() -> u64 {
+    let n: u64 = ulib.sys(WIG_SCREEN, hostwinp.WS_HEADS, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return 1
+    }
+    return n
+}
+
+fn head_field(hd: u64, field: u64) -> u64 {
+    return ulib.sys(WIG_SCREEN, hostwinp.WS_HEAD, hd, field)
+}
+
+fn display_mode_raw() -> u64 {
+    let r: u64 = ulib.sys(WIG_SCREEN, hostwinp.WS_DISPMODE, 0, 0)
+    if ulib.bad(r) {
+        return 0
+    }
+    return r
+}
+
+fn display_mode_mirrored() -> bool {
+    return ((display_mode_raw() >> 8) & 1) != 0
+}
+
+fn display_mode_connected() -> u64 {
+    return display_mode_raw() & 255
+}
+
+fn display_mode_set(mirror: bool) -> bool {
+    var m: u64 = 0
+    if mirror {
+        m = 1
+    }
+    return !ulib.bad(ulib.sys(WIG_SCREEN, hostwinp.WS_DISPMODE, 1, m))
+}
+
+fn head_place(hd: u64, x: u64, y: u64) -> bool {
+    return !ulib.bad(ulib.sys(WIG_SCREEN, hostwinp.WS_HEADPOS, hd, (x & 0xFFFF) | ((y & 0xFFFF) << 16)))
+}
+
+fn head_scale_set(hd: u64, pct: u64) -> bool {
+    return !ulib.bad(ulib.sys(WIG_SCREEN, hostwinp.WS_HEADSCALE, hd, pct))
+}
+
+fn head_hot(hd: u64) -> bool {
+    return !ulib.bad(ulib.sys(WIG_SCREEN, hostwinp.WS_HEADHOT, hd, 0))
+}
+
+fn head_scale(hd: u64) -> u64 {
+    let v: u64 = head_field(hd, 5)
+    if ulib.bad(v) || v < 100 || v > 300 {
+        return 100
+    }
+    return v
+}
+
+fn head_present(hd: u64) -> bool {
+    return head_field(hd, 4) == 1
+}
+
+fn mouse_x() -> u64 {
+    return ulib.sys(WIG_SCREEN, 2, 0, 0)
+}
+
+fn mouse_y() -> u64 {
+    return ulib.sys(WIG_SCREEN, 3, 0, 0)
+}
+
+fn mouse_btn() -> u64 {
+    return ulib.sys(WIG_SCREEN, 4, 0, 0)
+}
+
+fn surf_use(p: u64, rows: u64) {
+    s_surf = p
+    s_srows = rows
+    s_band = 0
+    s_pinned = 1
+}
+
+fn surf_wide(p: u64, w: u64, rows: u64) {
+    s_surf = p
+    s_sw = w
+    s_srows = rows
+    s_band = 0
+    s_pinned = 1
+}
+
+fn set_head_bounds(x: u64, y: u64, w: u64, h: u64) {
+    s_hb_x = x
+    s_hb_y = y
+    s_hb_w = w
+    s_hb_h = h
+}
+
+fn start_head_set(hd: u64) {
+    let _r: u64 = ulib.sys(WIG_SCREEN, hostwinp.WS_STARTHEAD, 1, hd)
+}
+
+fn start_head_get() -> u64 {
+    let r: u64 = ulib.sys(WIG_SCREEN, hostwinp.WS_STARTHEAD, 0, 0)
+    if ulib.bad(r) {
+        return 0
+    }
+    return r
+}
+
+fn set_band(y: u64) {
+    if s_pinned != 0 {
+        return
+    }
+    s_band = y
+}
