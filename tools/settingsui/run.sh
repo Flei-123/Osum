@@ -5,7 +5,7 @@
 #   /root/jarvis/bin/heavy bash tools/settingsui/run.sh [<outdir>] [mode=light|dark] [scale=1|2]
 #
 # It boots the design-audit machine (tools/design/audit.sh), opens Settings,
-# clicks every sidebar page (rect names taba..tas), types into the search field
+# clicks every sidebar page (and the Developer page below System) (rect names taba..tas), types into the search field
 # (Ctrl+F), and takes a picture each time. Checks (serial log):
 #   1. the sidebar tiles are reported (20 `tab?` rects);
 #   2. the search field is reported and the window is up;
@@ -34,6 +34,8 @@ for a in "$@"; do case "$a" in res=*) r=${a#res=}; YRES=${r#*x} ;; esac; done
   echo "klickauf srecttab27"; echo "warte 2"; echo "foto page-B"
   echo "klickauf srecttab28"; echo "warte 2"; echo "foto page-C"
   echo "klickauf srecttab29"; echo "warte 2"; echo "foto page-D"
+  echo "klicksuche srecttabl 140,300"; echo "warte 2"
+  echo "klicksuche srecttab34 140,300"; echo "warte 2"; echo "foto page-dev"
   echo "taste ctrl-f"; echo "tippe zzzz"; echo "warte 2"; echo "foto search-empty"
 } > "$DREH"
 bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=900 drehbuch="$DREH" "$@" > "$OUT.log" 2>&1
@@ -47,6 +49,12 @@ grep -aq 'settings: ready' "$S" && ok "window up" || bad "window up"
 # the segmented control (K_SEG0 = 180..182 -> wgy wgz wha) and the eight swatches (183..190) are real nodes
 for r in wgy wgz wha; do
   grep -aq "settings: rect name=$r " "$S" && ok "segment $r reported" || bad "segment $r reported"
+done
+for r in dfps dmon dpg; do
+  grep -aq "settings: rect name=$r " "$S" && ok "developer switch $r reported" || bad "developer switch $r reported"
+done
+for r in mfps mmon mpgd; do
+  grep -aq "settings: rect name=$r " "$S" && bad "mouse page still reports $r" || ok "mouse page has no $r"
 done
 grep -aq 'settings: rect name=wdu ' "$S" && ok "search field reported" || bad "search field reported"
 grep -aq 'settings: rect name=w[a-z][a-z] ' "$S" && ok "controls reported (incl. search field)" || bad "controls reported"

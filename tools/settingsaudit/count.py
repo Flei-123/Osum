@@ -19,6 +19,7 @@ PAGES = [
     ("password", "R_PASSW", "page_passw", "Accounts"), ("pin", "R_PIN", "page_pin", "Accounts"),
     ("transfer", "R_VTRANS", "page_vtrans", "Personalisation"),
     ("sound", "R_SOUND", "page_sound", "System"),
+    ("developer", "R_DEV", "page_developer", "System"),
 ]
 INTERACTIVE = ("button", "button_main", "toggle", "choice", "entry", "slider", "table_list")
 

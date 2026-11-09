@@ -18,6 +18,9 @@ TASKBAR = "settings://personalization/taskbar"
 EFFECTS = "settings://personalization/effects"
 WIFI = "settings://network/wifi"
 USBNET = "settings://network/usb"
+INPUT = "settings://input"
+SYSTEM = "settings://system"
+DEVELOPER = "settings://system/developer"
 
 
 def parse(txt):
@@ -70,6 +73,8 @@ def judge(txt, quiet=False):
     ok(subseq(navs, [lambda n: n[8] >= 1, lambda n: n[0] == POWER and n[1] == 16]), "Enter opens the best hit: %s on page 16" % POWER)
     ok(subseq(navs, [lambda n: n[0] == DISPLAY and n[1] == 1, lambda n: n[0] == DISPADV and n[1] == 19, lambda n: n[0] == POWER]),
        "sidebar: Display (page 1) and Advanced display (page 19, SET-7) open their own pages")
+    ok(subseq(navs, [lambda n: n[0] == INPUT and n[1] == 15, lambda n: n[0] == SYSTEM and n[1] == 11, lambda n: n[0] == DEVELOPER and n[1] == 34]),
+       "sidebar: Input (page 15), System (page 11) and Developer (page 34, child of System) open their own pages")
     for want in ("navback", "navfwd", "navcrumba", "navcrumbb"):
         ok(want in names, "rect %s reported" % want)
     tabs = [n for n in names if re.fullmatch(r"tab[a-z]", n)]
@@ -78,6 +83,7 @@ def judge(txt, quiet=False):
     for m in CTL.finditer(txt):
         ctl[int(m.group(1))] = max(ctl.get(int(m.group(1)), 0), int(m.group(2)))
     ok(len(ctl) >= 2, "controls per page reported (%d pages)" % len(ctl))
+    ok(ctl.get(34) == 3, "Developer page lists exactly its three switches (controls=%s)" % ctl.get(34))
     base = {}
     if os.path.exists(BASE):
         for ln in open(BASE):
@@ -114,6 +120,9 @@ mut = {
     "raw keys": raw.replace("rawkeys=0", "rawkeys=2"),
     "no crumbs": raw.replace("crumbs=3", "crumbs=1"),
     "no search": re.sub(r"hits=[1-9][0-9]*", "hits=0", raw),
+    "no developer page": "\n".join(l for l in raw.splitlines() if "page=34" not in l),
+    "no developer controls": re.sub(r"(settings: controls page=34 n=)\d+", r"\g<1>0", raw),
+    "switches back on input": re.sub(r"(settings: controls page=15 n=)\d+", r"\g<1>8", raw),
     "no controls": "\n".join(l for l in raw.splitlines() if not l.startswith("settings: controls ")),
     "more controls": re.sub(r"(settings: controls page=\d+ n=)\d+", r"\g<1>99", raw),
 }

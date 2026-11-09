@@ -6,7 +6,7 @@
 #
 # Run A: /etc/mouse.conf has mon=true at boot, no key pressed -> the overlay appears (`fpsov: shown`), its rectangle differs from run B.
 # Run B (counter-proof): no mon line -> no fpsov line, no monov line.
-# Run C: Settings -> Mouse -> click the switch (mmon) on, off, on: `settings: mouse ... mon=1/0/1 ok=1`, `fpsov: shown/hidden/shown` follow within seconds, at scale 1 (1280x800) and scale 2 (1920x1080).
+# Run C: Settings -> System -> Developer -> click the switch (dmon) on, off, on: `settings: mouse ... mon=1/0/1 ok=1`, `fpsov: shown/hidden/shown` follow within seconds, at scale 1 (1280x800) and scale 2 (1920x1080).
 # Run M (counter-proof): settings built so the switch value never reaches the bus or /etc/mouse.conf -> the clicks are stored but the overlay never follows.
 # eh6 boots without the `vfs` word and without /proc: both are added (EH_MKFS_EXTRA, extra=).
 set -uo pipefail
@@ -34,14 +34,19 @@ klickauf start_Settings
 warte 12
 klickauf srecttabp
 warte 3
+foto c-mouse
+klicksuche srecttabl 140,300
+warte 3
+klicksuche srecttab34 140,300
+warte 3
 foto c-0
-klickauf srectmmon
+klickauf srectdmon
 warte 5
 foto c-on
-klickauf srectmmon
+klickauf srectdmon
 warte 5
 foto c-off
-klickauf srectmmon
+klickauf srectdmon
 warte 5
 foto c-on2
 DEOF
@@ -147,12 +152,21 @@ if ev[:3] != ["shown", "hidden", "shown"]:
     sys.exit(1)
 PY
 }
+placement_ok() {
+    grep -aq 'settings: nav route=settings://system/developer page=34' "$1" || return 1
+    for r in dfps dmon dpg mspeed; do grep -aq "settings: rect name=$r " "$1" || return 1; done
+    for r in mfps mmon mpgd; do grep -aq "settings: rect name=$r " "$1" && return 1; done
+    return 0
+}
 for run in "C:$SC:$TMPD/c/o.log" "C2 (scale 2):$SC2:$TMPD/c2/o.log"; do
     label=${run%%:*}; rest=${run#*:}; serial=${rest%%:*}; log=${rest#*:}
+    placement_ok "$serial" && ok "$label: switches live on the Developer page (dfps, dmon, dpg), the Mouse page keeps only its own controls" || bad "$label: switch placement (Developer page or leftovers on the Mouse page)"
     clicks_stored "$serial" && ok "$label: clicks stored mon 1, 0, 1 (ok=1)" || bad "$label: click effects"
     overlay_followed "$serial" && ok "$label: the overlay followed the switch: shown, hidden, shown" || bad "$label: overlay did not follow (need shown, hidden, shown)"
-    grep -aq 'klickauf srectmmon -> KEIN' "$log" && bad "$label: click on mmon had no target" || ok "$label: every click found its widget"
+    grep -aq 'klickauf srectdmon -> KEIN' "$log" && bad "$label: click on dmon had no target" || ok "$label: every click found its widget"
 done
+sed -e 's/name=dmon /name=mmon /' "$SC" > "$TMPD/doctored.txt"
+placement_ok "$TMPD/doctored.txt" && bad "PLACEMENT COUNTER-PROOF: a log with the old mmon rect still passed" || ok "PLACEMENT COUNTER-PROOF: a log with the switch back on the Mouse page fails the placement check"
 clicks_stored "$SM" && ok "M COUNTER-PROOF: the mutant still stores mon 1, 0, 1" || bad "M COUNTER-PROOF: mutant did not take the clicks"
 overlay_followed "$SM" && bad "M COUNTER-PROOF: the overlay followed although the value never reached the bus or the file" || ok "M COUNTER-PROOF: without the value on the bus or in the file the overlay does not follow"
 n=$(grep -ac 'CRASH\|EXCEPTION\|panic' "$SA" "$SB" "$SC" "$SC2" | awk -F: '{s+=$2} END{print s+0}')
