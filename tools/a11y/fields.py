@@ -14,7 +14,6 @@ def consts(path):
 
 ax = consts("kernel/ui/ax.fi")
 sy = consts("kernel/sys/sys.fi")
-wc = consts("kernel/user/wlibc.fi")
 wl = consts("kernel/user/fuiapp/hostax.fi")
 ad = consts("kernel/user/axd.fi")
 bad = []
@@ -23,7 +22,7 @@ def same(what, a, b):
         bad.append(f"{what}: {a} != {b}")
 
 for k in ("PUSH", "READ", "EVENT", "PERM", "INFO", "SET", "PRESS"):
-    same(f"AX_{k} sys/wlibc", sy.get("AX_" + k), wc.get("AX_" + k))
+    same(f"AX_{k} sys/wlibc", sy.get("AX_" + k), wl.get("AX_" + k))
 for k in ("READ", "PERM", "INFO", "SET", "PRESS"):
     same(f"AX_{k} sys/axd", sy.get("AX_" + k), ad.get("AX_" + k))
 same("NODE_BYTES ax/host", ax["NODE_BYTES"], wl["AXN_BYTES"])
@@ -41,15 +40,15 @@ for k, v in ax.items():
         same(k + " ax/host", v, wl.get("AXS_" + k[2:]))
         same(k + " ax/axd", v, ad.get(k))
     if k.startswith("AI_") and k != "AI_FIELDS":
-        same(k + " ax/hostc", v, wc.get("AXI_" + k[3:]))
+        same(k + " ax/hostc", v, wl.get("AXI_" + k[3:]))
         if k in ad:
             same(k + " ax/axd", v, ad[k])
     if k.startswith("C_") and k != "C_FIELDS":
-        same(k + " ax/hostc", v, wc.get("AXC_" + k[2:]))
-same("AX_DUMP", sy.get("AX_DUMP"), wc.get("AXC_DUMP"))
-same("P_READ", ax["P_READ"], wc["AXP_READ"])
-same("P_ACT", ax["P_ACT"], wc["AXP_ACT"])
-same("E_AXPRESS", consts("kernel/ui/wm/wmlayout.fi").get("E_AXPRESS"), wc.get("EV_AXPRESS"))
+        same(k + " ax/hostc", v, wl.get("AXC_" + k[2:]))
+same("AX_DUMP", sy.get("AX_DUMP"), wl.get("AXC_DUMP"))
+same("P_READ", ax["P_READ"], wl["AXP_READ"])
+same("P_ACT", ax["P_ACT"], wl["AXP_ACT"])
+same("E_AXPRESS", consts("kernel/ui/wm/wmlayout.fi").get("E_AXPRESS"), wl.get("EV_AXPRESS"))
 if bad:
     print("fields: " + "; ".join(bad))
     sys.exit(1)
