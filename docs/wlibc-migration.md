@@ -60,7 +60,8 @@ jarvismini 56, a11ydemo 54, fuib 52, notifc 50. All others <= 50.
    can move to `fuiscene` labels later.
 5. **DONE** Icons: `uiicon.fi` owns `icon_*` and `app_icon` (bodies out of `wctheme`; imports `icons`, `appicon`, `uitheme`, `uiscale`, `uitext`);
    wlibc no longer forwards them (Certus does not use them); 10 files switch.
-6. **a11y channel**: `ax_*` to `fuiapp/hostax`; `a11ydemo` follows.
+6. **DONE** a11y channel: `ax_*` (10 calls), `AX_* AXI_* AXP_* AXC_*` and `EV_AXPRESS` live in `fuiapp/hostax.fi` (bodies out of `wcpaint`, constants out of `wlibc`; `hostax` imports `ulib`);
+   wlibc no longer exports them (no forwards: Certus does not use them); `a11ydemo`, `wlax`, `wctheme` switch; Certus staging copies `hostax` and seds its import.
 7. **Services**: clipboard, drag, notify, bus bodies out of `wcpaint` into the services module; 14 files.
 8. **Theme state**: split `wctheme` (1647 lines) into `uitheme/` submodules by responsibility (file, accent+mode, probes,
    edges+work area, tb alpha/blur, shapes); breaks the `wctheme -> uitheme` import so `uitheme` can own the bodies;

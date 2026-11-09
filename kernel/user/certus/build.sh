@@ -64,7 +64,7 @@ cp "$ROOT/kernel/user/ulib.fi" "$ROOT/kernel/user/wlibc.fi" \
    "$ROOT/kernel/user/fuiapp/wlib.fi" "$BAU/"
 rm -rf "$BAU/wlib" "$BAU/wlibc"
 cp -r "$ROOT/kernel/user/fuiapp/wlib" "$ROOT/kernel/user/wlibc" "$BAU/"
-cp "$ROOT/kernel/user/fuiapp/hostwinp.fi" "$BAU/"
+cp "$ROOT/kernel/user/fuiapp/hostwinp.fi" "$ROOT/kernel/user/fuiapp/hostax.fi" "$BAU/"
 sed -i -E 's/^import fuiapp\.(wlib(\.[a-z]+)?)$/import \1/' "$BAU/wlib.fi" "$BAU"/wlib/*.fi
 python3 - "$ROOT" "$BAU" <<'PYEOF'
 import os, re, shutil, sys
@@ -95,7 +95,7 @@ while todo:
                 break
 PYEOF
 for f in "$BAU/wlib.fi" "$BAU/wlibc.fi" "$BAU/uiscale.fi" "$BAU"/wlib/*.fi "$BAU"/wlibc/*.fi; do
-    [ -f "$f" ] && sed -i 's/^import fuiapp\.hostwinp$/import hostwinp/' "$f"
+    [ -f "$f" ] && sed -i -e 's/^import fuiapp\.hostwinp$/import hostwinp/' -e 's/^import fuiapp\.hostax$/import hostax/' "$f"
 done
 if [ -f "$BAU/msg.fi" ]; then
     mv "$BAU/msg.fi" "$BAU/osmsg.fi"
