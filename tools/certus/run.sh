@@ -77,7 +77,7 @@ trap 'kill $SRVPID 2>/dev/null' EXIT
 sleep 1
 
 echo "== 1. build: /bin/certus, with the compiler of the Certus tree =="
-bash tools/loader/build.sh "$OUT" > "$OUT/build.log" 2>&1 \
+CERTUS_DBG_OUT="$OUT/certus.dbg" bash tools/loader/build.sh "$OUT" > "$OUT/build.log" 2>&1 \
     && ok "Kern und $(wc -l < "$OUT/proglist") Programme uebersetzt" \
     || { bad "build.sh"; tail -20 "$OUT/build.log"; exit 1; }
 grep -q '^   browser' "$OUT/build.log" \
@@ -88,7 +88,7 @@ if [ -x "$OUT/bin/certus" ]; then
     kind=$(readelf -h "$OUT/bin/certus" | awk -F: '/^  Type:/ {print $2}' | awk '{print $1}')
     [ "$kind" = EXEC ] && ok "certus is ET_EXEC (static, no interpreter)" \
                        || bad "certus: ELF-Art '$kind'"
-    u=$(nm -u "$OUT/.certus-bau/certus.dbg" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
+    u=$(nm -u "$OUT/certus.dbg" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
     [ -z "$u" ] && ok "certus has not a single undefined name (no libc)" \
                 || bad "undefinierte Namen: $u"
     seg=$(readelf -l "$OUT/bin/certus" | grep -c '^  LOAD')

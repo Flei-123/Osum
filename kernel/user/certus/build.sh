@@ -155,6 +155,7 @@ ld -T "$ROOT/kernel/user/user.ld" -o "$BAU/certus.dbg" \
     "$BAU/certus.o" "$BAU/sysstub.o"
 mkdir -p "$(dirname "$ZIEL")"
 cp "$BAU/certus.dbg" "$ZIEL"
+[ -z "${CERTUS_DBG_OUT:-}" ] || cp "$BAU/certus.dbg" "$CERTUS_DBG_OUT"
 strip --strip-all "$ZIEL"
 
 echo "certus: $(stat -c%s "$ZIEL") Oktette -> $ZIEL"
