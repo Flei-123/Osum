@@ -47,6 +47,7 @@ else
     bad "guest run failed"; tail -n 12 "$OUT/main.log"
 fi
 
+[ -n "${SVCEDIT_NOMUT:-}" ] && { echo "SVCEDIT: $pass passed, $fail failed"; [ "$fail" = 0 ]; exit; }
 echo
 echo "== 2. COUNTER-PROBES: mutated trees =="
 mutant() {
