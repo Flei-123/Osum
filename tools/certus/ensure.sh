@@ -3,7 +3,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 CERTUS_REPO=${CERTUS_REPO:-/root/certus-ui}
-CERTUS_FIRNC=${CERTUS_FIRNC:-/root/firnc-gc/compiler/target/release/firnc}
+CERTUS_FIRNC=${CERTUS_FIRNC:-$ROOT/vendor/firn/bin/firnc}
 CACHE=${CERTUS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/osum/certus}
 
 [ -d "$CERTUS_REPO/lib/browser" ] && [ -x "$CERTUS_FIRNC" ] || exit 0

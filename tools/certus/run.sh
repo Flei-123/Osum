@@ -13,7 +13,7 @@ OUT=${1:-/tmp/certus}
 export OUT
 mkdir -p "$OUT"
 SHOTS=${CERTUS_SHOTS:-docs/shots/certus}
-CERTUS_REPO=${CERTUS_REPO:-/root/certus-sammeln}
+CERTUS_REPO=${CERTUS_REPO:-/root/certus-ui}
 SOAK=${CERTUS_SOAK:-20}
 [ "$SCHNELL" = 1 ] && SOAK=3
 OPK=${OPK:-$(python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/opkpfad.py")}   # A-025: der alte Ordner war ein Arbeitsbaum
@@ -35,9 +35,8 @@ for t in qemu-system-x86_64 python3; do
 done
 [ -d "$CERTUS_REPO/lib/browser" ] || {
     echo "CERTUS: skipped, no Certus tree in $CERTUS_REPO"; exit 0; }
-[ -x "$CERTUS_REPO/compiler/target/release/firnc" ] || {
-    echo "CERTUS: uebersprungen, $CERTUS_REPO/compiler/target/release/firnc fehlt"
-    echo "        (cd $CERTUS_REPO/compiler && cargo build --release)"; exit 0; }
+[ -x "$ROOT/vendor/firn/bin/firnc" ] || {
+    echo "CERTUS: skipped, vendor/firn/bin/firnc missing (run vendor/firn/fetch-firnc.sh)"; exit 0; }
 
 # ------------------------------------------------------------ der Server
 WWW="$OUT/www"
