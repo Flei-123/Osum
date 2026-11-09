@@ -16,7 +16,8 @@
 # repeat CYCLES times (default 34 -- more than the free slots). Every start
 # must work: CYCLES lines `launcher: start ... pid=N`, no `launcher: start refused`.
 # Then `ps` must show no pile of corpses. COUNTER-PROOF with the kernel word
-# `nozreap` (corpses stay): the starts run out of slots and the menu says so.
+# `nozreap` (corpses stay): the corpses pile up in `ps` (and once the table is
+# full the menu refuses starts).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 CYC=${1:-34}
@@ -72,11 +73,16 @@ else bad "only $n of $CYC starts worked ($lost lost input)"; fi
 [ "$r" -eq 0 ] && ok "no start was refused" || bad "$r starts were refused"
 [ "$z" -ge 1 ] && ok "the kernel took corpses away ($z lines 'kgui: zombie reaped')" || bad "no corpse was reaped"
 python3 tools/zreap/check.py "$S" fix | sed 's/^/        /'
+zfix=$(python3 tools/zreap/check.py "$S" fix | tail -1 | sed -n 's/.*, \([0-9]*\) corpses$/\1/p')
+[ "${zfix:-99}" -le 2 ] && ok "no pile of corpses after $CYC starts (${zfix} left)" || bad "${zfix:-?} corpses left after $CYC starts"
 echo "== counter-proof: nozreap (corpses stay) =="
 run old nozreap
 S="$TMPD/old/serial.txt"
 n2=$(grep -ao 'launcher: start /[^ ]* pid=[0-9]*' "$S" | wc -l); r2=$(grep -ao 'launcher: start refused' "$S" | wc -l)
-[ "$r2" -ge 1 ] && ok "without the fix the table fills up: $r2 starts refused after $n2 good ones" || bad "the old kernel never ran out of slots ($n2 starts, none refused)"
 python3 tools/zreap/check.py "$S" old | sed 's/^/        /'
+zold=$(python3 tools/zreap/check.py "$S" old | tail -1 | sed -n 's/.*, \([0-9]*\) corpses$/\1/p')
+if [ "$r2" -ge 1 ]; then ok "without the fix the table fills up: $r2 starts refused after $n2 good ones"
+elif [ "${zold:-0}" -ge $((CYC / 2)) ]; then ok "without the fix the corpses pile up: ${zold} corpses after $n2 starts, none reaped"
+else bad "the old kernel left no pile of corpses (${zold:-0} after $n2 starts, none refused)"; fi
 echo "== $pass ok, $fail failed =="
 [ "$fail" -eq 0 ]
