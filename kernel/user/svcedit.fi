@@ -1,0 +1,179 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import libc.text
+import msg
+import icons
+import fuiscene
+import fuied
+import fuiapp.hostkey
+import services.svcosum
+import svcedit.sedoc
+import svcedit.sestr
+import svcedit.sesay
+import svcedit.sestatus
+import svcedit.sefiles
+
+export { u_start }
+
+const WIN_X: u64 = 80
+const WIN_Y: u64 = 60
+const DEFAULT_W: u64 = 720
+const DEFAULT_H: u64 = 480
+const PAD: u64 = 16
+const ROW_GAP: u64 = 8
+const BAR_H: u64 = 32
+const STATUS_H: u64 = 24
+const TITLE_W: u64 = 220
+const MIN_EDITOR_H: u64 = 100
+const K_EDITOR: u64 = 10
+const K_NEW: u64 = 20
+const K_OPEN: u64 = 21
+const K_SAVE: u64 = 22
+const K_OVERFLOW: u64 = 23
+
+static mut win_w: u64 = 720
+static mut win_h: u64 = 480
+static mut surface_up: bool = false
+static mut seen_keys: u64 = 0
+
+fn editor_height(total: u64) -> u64 {
+    let fixed: u64 = PAD + 2 * ROW_GAP + BAR_H + STATUS_H
+    if total > fixed + MIN_EDITOR_H {
+        return total - fixed
+    }
+    return MIN_EDITOR_H
+}
+
+fn bar_room() -> u64 {
+    if win_w > PAD + TITLE_W + ROW_GAP {
+        return win_w - PAD - TITLE_W - ROW_GAP
+    }
+    return 0
+}
+
+fn build() {
+    win_w = fuiscene.width()
+    win_h = fuiscene.height()
+    let col: usize = fuiscene.root()
+    let bar: usize = fuiscene.row(col)
+    fuiscene.set_gap(bar, 4)
+    fuiscene.cmd_begin()
+    fuiscene.cmd_item(icons.CMD_NEW_FILE, K_NEW, sestr.cmd_new(), 0, 0)
+    fuiscene.cmd_item(icons.CMD_OPEN, K_OPEN, sestr.cmd_open(), 0, 0)
+    fuiscene.cmd_item(icons.CMD_SAVE, K_SAVE, sestr.cmd_save(), 0, 0)
+    let _visible: u64 = fuiscene.cmd_end(bar, bar_room(), K_OVERFLOW)
+    let _title: usize = fuiscene.label(bar, sestatus.title_ptr())
+    let _editor: usize = fuiscene.editor(col, K_EDITOR, win_w - PAD, editor_height(win_h))
+    let _status: usize = fuiscene.label(col, sestatus.status_ptr())
+}
+
+fn start_surface() -> bool {
+    if !fuiscene.begin() {
+        return false
+    }
+    sedoc.set_slot(fuiscene.editor_prep(K_EDITOR))
+    if sedoc.slot() >= fuied.TA_MAX {
+        return false
+    }
+    fuied.ed_size(sedoc.slot(), win_w - PAD, editor_height(win_h))
+    if !fuiscene.open(WIN_X, WIN_Y, win_w, win_h, sestr.window_title(), build) {
+        return false
+    }
+    surface_up = true
+    fuiscene.set_app(sestr.app())
+    fuiscene.focus(K_EDITOR)
+    return true
+}
+
+fn redraw() {
+    sestatus.compose()
+    if surface_up {
+        fuiscene.refresh()
+    }
+}
+
+fn run_action(key: u64) -> bool {
+    if key == K_NEW {
+        sefiles.new_doc()
+        return true
+    }
+    if key == K_OPEN {
+        sefiles.open_doc()
+        return true
+    }
+    if key == K_SAVE {
+        sefiles.save_doc()
+        return true
+    }
+    return false
+}
+
+fn shortcut_action(key: u64) -> u64 {
+    if key == hostkey.KEY_CTRL_N {
+        return K_NEW
+    }
+    if key == hostkey.KEY_CTRL_O {
+        return K_OPEN
+    }
+    if key == hostkey.KEY_CTRL_S {
+        return K_SAVE
+    }
+    return 0
+}
+
+fn handle_pressed(key: u64) {
+    if run_action(key) {
+        sesay.state()
+        redraw()
+        fuiscene.focus(K_EDITOR)
+    }
+}
+
+fn handle_shortcut() {
+    let seq: u64 = fuiscene.key_seq()
+    if seq == seen_keys {
+        return
+    }
+    seen_keys = seq
+    let action: u64 = shortcut_action(fuiscene.key_any())
+    if action == 0 {
+        return
+    }
+    sesay.shortcut(fuiscene.key_any())
+    handle_pressed(action)
+}
+
+fn pump_once() {
+    let key: u64 = fuiscene.pump()
+    if key != 0 {
+        handle_pressed(key)
+    }
+    handle_shortcut()
+    if sestatus.changed() {
+        redraw()
+        sesay.state()
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    let _msg: u64 = msg.init()
+    sestatus.compose()
+    if !start_surface() {
+        sesay.no_surface()
+        return 1
+    }
+    let _app: u64 = svcosum.set_app(sestr.app(), text.length(sestr.app()))
+    redraw()
+    sesay.ready()
+    sesay.state()
+    while fuiscene.alive() {
+        pump_once()
+    }
+    return 0
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}
