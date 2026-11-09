@@ -110,7 +110,7 @@ dn=$(groesste "$S" 'explorer: drops [0-9]+')
 echo "== 5. points 2 and 5: the deed and the idle time =="
 hat "$S" 'expl: drop /data/alpha\.txt q=/data/bilder' \
     "Punkt 2: alpha.txt wurde auf /data/bilder abgelegt"
-hat "$S" 'expl: drop /data/notizen q=/data gleich' \
+hat "$S" 'expl: drop /data/notizen q=/data same' \
     "Punkt 5: das Ablegen im selben Ordner wurde als 'gleich' erkannt"
 hatnicht "$S" 'explorer: dlgrect' \
     "Punkt 5: kein Dialog beim Ablegen im selben Ordner"
