@@ -54,8 +54,10 @@ jarvismini 56, a11ydemo 54, fuib 52, notifc 50. All others <= 50.
 3. **DONE** Window protocol constants (`L_* WS_* WM_* WI_* WA_* WE_* WL_* WO_*`, 97 names incl. `WS_SCALE`, `WI_SCALEPCT`) in `fuiapp/hostwinp.fi`
    (leaf, wire constants only); wlibc and its parts no longer define or export them (no forwards: Certus does not use them);
    `uiscale` drops its private copies; 48 files switch; Certus staging seds `import fuiapp.hostwinp` to `import hostwinp`.
-4. **Text metrics**: `text_w/text_h/ascent_of/F_*/ink_*` into a `uitext` module (bodies from `wcgfx`/`wcpaint`); controls in
-   `fscore` keep calling it; apps move to `fuiscene` labels where they only measure for layout.
+4. **DONE** Text metrics: `uitext.fi` owns `F_UI F_MONO F_ICON F_BOLD`, `text_w`, `text_h`, `ascent_of`, `mono_cell`, `ink_l/t/w/h`
+   (bodies out of `wcgfx`/`wcpaint`/`wctheme`; reads the glyph cache through `wcpaint.gfind/gkey/kern26/source_glyph`);
+   wlibc no longer exports them (no forwards: Certus does not use them); 34 files switch; apps that only measure for layout
+   can move to `fuiscene` labels later.
 5. **Icons**: replace `wlibc.icon_*`/`app_icon` by direct `icons`/`appicon` imports (7 files, no body move).
 6. **a11y channel**: `ax_*` to `fuiapp/hostax`; `a11ydemo` follows.
 7. **Services**: clipboard, drag, notify, bus bodies out of `wcpaint` into the services module; 14 files.
