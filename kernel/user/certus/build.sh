@@ -96,7 +96,7 @@ while todo:
                 todo.append(mod)
                 break
 PYEOF
-for f in "$BAU/apphost.fi" "$BAU/uiscale.fi" "$BAU/uidraw.fi" "$BAU/uiglyph.fi" "$BAU/uisys.fi" "$BAU/hosthead.fi" "$BAU/hostwin.fi" "$BAU/hoststart.fi" "$BAU/fuib.fi" "$BAU/fuiglyph.fi" "$BAU"/hostui/*.fi "$BAU"/uitheme/*.fi; do
+for f in "$BAU/apphost.fi" "$BAU/uiscale.fi" "$BAU/uidraw.fi" "$BAU/uitextat.fi" "$BAU/uiglyph.fi" "$BAU/uisys.fi" "$BAU/hosthead.fi" "$BAU/hostwin.fi" "$BAU/hoststart.fi" "$BAU/fuib.fi" "$BAU/fuiglyph.fi" "$BAU"/hostui/*.fi "$BAU"/uitheme/*.fi; do
     [ -f "$f" ] && sed -i -e 's/^import fuiapp\.hostwinp$/import hostwinp/' -e 's/^import fuiapp\.hostax$/import hostax/' -e 's/^import fuiapp\.hosthead$/import hosthead/' -e 's/^import fuiapp\.hostwin$/import hostwin/' -e 's/^import fuiapp\.hoststart$/import hoststart/' -e 's/^import fuiapp\.hostkey$/import hostkey/' -e 's/^import fuiapp\.hostflags$/import hostflags/' "$f"
 done
 for f in "$BAU"/*.fi "$BAU"/hostui/*.fi "$BAU"/uitheme/*.fi; do
