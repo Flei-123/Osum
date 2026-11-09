@@ -3,22 +3,18 @@
 import arch.arch
 import sync.atomic
 import ui.ax
-import bus.bus
 import ipc.cap
 import sched.ctr
-import fs.file
-import fs.fs
 import ipc.handle
 import lib.kstate
 import mm.mmframe
 import mm.mmswap
 import sched.sched
 import serial
-import bus.slots
 import sched.taskconst
 import sched.taskslot
-import ipc.uio
-import fs.unixsock
+import mm.mmlock
+import sched.proc.prochooks
 import sched.proc.procbase
 import sched.proc.procmap
 import sched.proc.procpt
@@ -124,9 +120,7 @@ fn reap(state: u64, i: u64) -> bool {
     if taskslot.tget(state, i, taskconst.T_SHARED) == 0 {
         reap_group_corpses(state, i)
     }
-    file.close_all(state, i)
-    bus.forget_task(state, i, taskslot.tget(state, i, taskconst.T_PID))
-    slots.forget_task(state, taskslot.tget(state, i, taskconst.T_PID))
+    prochooks.task_release(state, i)
     ax.clear_task(state, i)
     free_space(state, i)
     return sched.reap_claimed(state, i)
@@ -185,11 +179,7 @@ fn swap_boot(state: u64) {
         return
     }
     swap_booted = 1
-    var path: [u8; 10] = "/swapfile\0"
-    var ino: u64 = fs.path(state, (&path[0]) as u64)
-    if ino == 0 {
-        ino = fs.create_path(state, (&path[0]) as u64, fs.T_FILE)
-    }
+    let ino: u64 = prochooks.swap_file(state)
     let batch: u64 = mmframe.frame_alloc(state)
     let bounce: u64 = mmframe.frame_alloc(state)
     if ino == 0 || batch == 0 || bounce == 0 || !mmswap.configure(state, ino, SWAP_SLOTS) {
@@ -254,7 +244,7 @@ fn swap_collect(state: u64, cur: u64, allow_self: bool, advanced: u64) -> u64 {
     var got: u64 = 0
     var examined: u64 = 0
     var full: bool = false
-    unixsock.demand_lock(state)
+    mmlock.demand_lock(state)
     while a < procbase.LAZY_TOP && got < SWAP_BATCH && examined < SWAP_SCAN_MAX && !full {
         let pt: u64 = procpt.pt_for(state, t, a, false)
         let tile_end: u64 = ((a >> 21) + 1) << 21
@@ -310,7 +300,7 @@ fn swap_collect(state: u64, cur: u64, allow_self: bool, advanced: u64) -> u64 {
             asm("mov rax, cr3\nmov cr3, rax", out("rax"))
         }
     }
-    unixsock.demand_unlock(state)
+    mmlock.demand_unlock(state)
     if full {
         swap_broken = 1
     }
@@ -333,7 +323,7 @@ fn swap_flush(state: u64, t: u64, got: u64) {
             src = swap_bounce
             copy_frame_words(src, mmframe.kva(frame))
         }
-        let wrote: u64 = fs.write_at(state, mmswap.inode(), slot * mmswap.SLOT_BYTES, src, mmframe.FRAME_SIZE)
+        let wrote: u64 = prochooks.write_at(state, mmswap.inode(), slot * mmswap.SLOT_BYTES, src, mmframe.FRAME_SIZE)
         if wrote == mmframe.FRAME_SIZE {
             mmswap.publish(state, slot)
             mmswap.count_out()
@@ -341,7 +331,7 @@ fn swap_flush(state: u64, t: u64, got: u64) {
         } else {
             mmswap.count_fail()
             swap_broken = 1
-            unixsock.demand_lock(state)
+            mmlock.demand_lock(state)
             let cur_e: u64 = procpt.read_entry(pt, idx)
             if procmap.is_swap_entry(cur_e) && procmap.swap_slot_of(cur_e) == slot {
                 procpt.write_entry(pt, idx, old)
@@ -352,7 +342,7 @@ fn swap_flush(state: u64, t: u64, got: u64) {
             } else {
                 mmswap.publish(state, slot)
             }
-            unixsock.demand_unlock(state)
+            mmlock.demand_unlock(state)
         }
         k = k + 1
     }
@@ -428,7 +418,7 @@ fn create_thread(state: u64, erzeuger: u64, prio: u64) -> u64 {
     if i == 0 {
         return 0
     }
-    uio.reset(state, i)
+    prochooks.task_reset(state, i)
     taskslot.tset(state, i, taskconst.T_CR3,
         taskslot.tget(state, erzeuger, taskconst.T_CR3))
     taskslot.tset(state, i, taskconst.T_PDPT,
@@ -441,7 +431,7 @@ fn create_thread(state: u64, erzeuger: u64, prio: u64) -> u64 {
         taskslot.tget(state, erzeuger, taskconst.T_DATA))
     taskslot.tset(state, i, taskconst.T_SHARED, 1)
     handle.clear_task(state, i, taskslot.tget(state, i, taskconst.T_PID))
-    file.init_task(state, i)
+    prochooks.task_files(state, i)
     cap.clear_task(state, i, taskslot.tget(state, i, taskconst.T_PID))
     ax.clear_task(state, i)
     return i

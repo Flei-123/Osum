@@ -18,6 +18,7 @@ import drv.con.tty
 import net.inet
 import net.netlink
 import net.netview
+import mm.mmlock
 import fs.unixsock
 import ipc.perm
 import ipc.appfs
@@ -1752,10 +1753,10 @@ const F_SEAL_SHRINK: u64 = 2
 const F_SEAL_GROW: u64 = 4
 
 // r721: the bounce buffer WL_SCRATCH is ONE page for the whole machine; two cores in sendmsg/recvmsg/read/write on sockets used it at the
-// same time and mixed their octets. The pair (copy in + send) / (receive + copy out) now runs under `unixsock.scratch_lock`.
+// same time and mixed their octets. The pair (copy in + send) / (receive + copy out) now runs under `mmlock.scratch_lock`.
 // A failed copy comes back as -EFAULT (the marker value); everything else is what `send_bytes` / `recv_bytes` said.
 fn wl_send(state: u64, me: u64, si: u64, src: u64, n: u64, dg: bool) -> u64 {
-    let fl: u64 = unixsock.scratch_lock(state)
+    let fl: u64 = mmlock.scratch_lock(state)
     var r: u64 = sysuser.neg(errno.E_FAULT)
     if sysuser.copy_in(state, me, state + sysconst.WL_SCRATCH, src, n) {
         if dg {
@@ -1764,12 +1765,12 @@ fn wl_send(state: u64, me: u64, si: u64, src: u64, n: u64, dg: bool) -> u64 {
             r = unixsock.send_bytes(state, si, sysconst.WL_SCRATCH, n)
         }
     }
-    unixsock.scratch_unlock(state, fl)
+    mmlock.scratch_unlock(state, fl)
     return r
 }
 
 fn wl_recv(state: u64, me: u64, si: u64, dst: u64, n: u64, dg: bool) -> u64 {
-    let fl: u64 = unixsock.scratch_lock(state)
+    let fl: u64 = mmlock.scratch_lock(state)
     var r: u64 = 0
     if dg {
         r = unixsock.recv_dgram(state, si, sysconst.WL_SCRATCH, n)
@@ -1779,7 +1780,7 @@ fn wl_recv(state: u64, me: u64, si: u64, dst: u64, n: u64, dg: bool) -> u64 {
     if !errno.is_error(r) && r != 0 && !sysuser.copy_out(state, me, dst, state + sysconst.WL_SCRATCH, r) {
         r = sysuser.neg(errno.E_FAULT)
     }
-    unixsock.scratch_unlock(state, fl)
+    mmlock.scratch_unlock(state, fl)
     return r
 }
 
@@ -2004,23 +2005,23 @@ fn usock_sendto(state: u64, me: u64, of: u64, buf: u64, len: u64, addr: u64, ale
         return sysuser.neg(errno.E_FAULT)
     }
     var plen: u64 = 0
-    let sfl: u64 = unixsock.scratch_lock(state)
+    let sfl: u64 = mmlock.scratch_lock(state)
     let r: u64 = sa_un(state, me, addr, alen, &plen)
     if errno.is_error(r) {
-        unixsock.scratch_unlock(state, sfl)
+        mmlock.scratch_unlock(state, sfl)
         return r
     }
     let dst: u64 = unixsock.find_dgram(state, sysconst.WL_PATH + 2, plen)
     if dst >= unixsock.USOCK_MAX {
-        unixsock.scratch_unlock(state, sfl)
+        mmlock.scratch_unlock(state, sfl)
         return sysuser.neg(errno.E_CONNREFUSED)
     }
     if !sysuser.copy_in(state, me, state + sysconst.WL_SCRATCH, buf, len) {
-        unixsock.scratch_unlock(state, sfl)
+        mmlock.scratch_unlock(state, sfl)
         return sysuser.neg(errno.E_FAULT)
     }
     let w: u64 = unixsock.send_dgram_to(state, dst, sysconst.WL_SCRATCH, len)
-    unixsock.scratch_unlock(state, sfl)
+    mmlock.scratch_unlock(state, sfl)
     if errno.is_error(w) {
         return sysuser.neg(w)
     }

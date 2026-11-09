@@ -3,7 +3,6 @@
 import ui.ax
 import ipc.cap
 import sched.ctr
-import fs.file
 import ipc.handle
 import lib.kstate
 import mm.mmframe
@@ -11,8 +10,8 @@ import mm.mmswap
 import sched.sched
 import sched.taskconst
 import sched.taskslot
-import ipc.uio
-import fs.unixsock
+import mm.mmlock
+import sched.proc.prochooks
 import sched.proc.procbase
 import sched.proc.procmap
 import sched.proc.procpt
@@ -86,7 +85,7 @@ fn create_bare(state: u64, prio: u64) -> u64 {
     if i == 0 {
         return 0
     }
-    uio.reset(state, i)
+    prochooks.task_reset(state, i)
     let space: u64 = procpt.space_build(state, i)
     if space == 0 {
         procswap.discard(state, i)
@@ -94,7 +93,7 @@ fn create_bare(state: u64, prio: u64) -> u64 {
     }
     taskslot.tset(state, i, taskconst.T_CR3, space)
     handle.clear_task(state, i, taskslot.tget(state, i, taskconst.T_PID))
-    file.init_task(state, i)
+    prochooks.task_files(state, i)
     cap.clear_task(state, i, taskslot.tget(state, i, taskconst.T_PID))
     ax.clear_task(state, i)
     let par: u64 = taskslot.tget(state, i, taskconst.T_PARENT)
@@ -134,7 +133,7 @@ fn create_cap(state: u64, prog: u64, rights: u64, prio: u64) -> u64 {
     taskslot.tset(state, i, taskconst.T_ENTRY, procpt.vector(state, V_USER_MAIN))
     taskslot.tset(state, i, taskconst.T_USTACK, USER_TOP - 16)
     taskslot.tset(state, i, taskconst.T_ARG, prog)
-    let h: u64 = cap.insert(state, i, cap.K_STREAM, rights, file.CON_OUT)
+    let h: u64 = cap.insert(state, i, cap.K_STREAM, rights, taskconst.CON_OUT)
     taskslot.tset(state, i, taskconst.T_WORK, cap.handle_gen(h))
     procpt.inherit(state, taskslot.tget(state, i, taskconst.T_PARENT), i)
     kstate.add(state, kstate.SPAWNS, 1)
@@ -165,13 +164,13 @@ fn page_drop(state: u64, i: u64, addr: u64) -> bool {
         }
         return false
     }
-    let mmfl: u64 = unixsock.mm_lock(state)
+    let mmfl: u64 = mmlock.mm_lock(state)
     let e2: u64 = procpt.read_entry(pt, s)
     procpt.write_entry(pt, s, 0)
     if (e2 & procbase.PAGE_PRESENT) != 0 && (e2 & procbase.PAGE_SHARED) == 0 {
         mmframe.frame_free(state, e2 & procbase.ADDR_MASK)
     }
-    unixsock.mm_unlock(state, mmfl)
+    mmlock.mm_unlock(state, mmfl)
     let had: u64 = taskslot.tget(state, i, taskconst.T_UPAGES)
     if had > 0 {
         taskslot.tset(state, i, taskconst.T_UPAGES, had - 1)

@@ -2,13 +2,13 @@
 
 import sched.ctr
 import mm.fileshare
-import fs.fs
 import mm.mmframe
 import mm.mmswap
 import sched.sched
 import sched.taskconst
 import sched.taskslot
-import fs.unixsock
+import mm.mmlock
+import sched.proc.prochooks
 import sched.proc.procbase
 import sched.proc.procmap
 import sched.proc.procpt
@@ -37,7 +37,7 @@ fn prefill_file_page(state: u64, i: u64, addr: u64, writable: bool, runnable: bo
 
 fn lazy_file_install(state: u64, cur: u64, page: u64, pt: u64, s: u64, e0: u64, frame: u64, shared: bool) -> u64 {
     var result: u64 = 0
-    unixsock.demand_lock(state)
+    mmlock.demand_lock(state)
     let e: u64 = procpt.read_entry(pt, s)
     if (e & procbase.PAGE_PRESENT) != 0 {
         result = 2
@@ -55,7 +55,7 @@ fn lazy_file_install(state: u64, cur: u64, page: u64, pt: u64, s: u64, e0: u64, 
             result = 1
         }
     }
-    unixsock.demand_unlock(state)
+    mmlock.demand_unlock(state)
     return result
 }
 
@@ -87,9 +87,9 @@ fn lazy_file_cache_page(state: u64, ino: u64, pg: u64, wide: bool) -> u64 {
     }
     var got: u64 = 0
     if wide {
-        got = fs.read_at_wide(state, ino, pg * mmframe.FRAME_SIZE, frame, mmframe.FRAME_SIZE)
+        got = prochooks.read_at_wide(state, ino, pg * mmframe.FRAME_SIZE, frame, mmframe.FRAME_SIZE)
     } else {
-        got = fs.read_at(state, ino, pg * mmframe.FRAME_SIZE, frame, mmframe.FRAME_SIZE)
+        got = prochooks.read_at(state, ino, pg * mmframe.FRAME_SIZE, frame, mmframe.FRAME_SIZE)
     }
     procmap.zero_tail(frame, got)
     let kept: u64 = fileshare.insert(state, ino, pg, frame, seen)
@@ -135,7 +135,7 @@ fn lazy_file_page(state: u64, cur: u64, page: u64, pt: u64, s: u64, e0: u64) -> 
             return 0
         }
         owned = true
-        let got: u64 = fs.read_at(state, ino, pg * mmframe.FRAME_SIZE, frame, mmframe.FRAME_SIZE)
+        let got: u64 = prochooks.read_at(state, ino, pg * mmframe.FRAME_SIZE, frame, mmframe.FRAME_SIZE)
         procmap.zero_tail(frame, got)
         if share {
             let kept: u64 = fileshare.insert(state, ino, pg, frame, seen)
@@ -253,14 +253,14 @@ fn swap_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -> boo
     while mmswap.busy(slot) {
         sched.yield_now(state)
     }
-    let got: u64 = fs.read_at(state, mmswap.inode(), slot * mmswap.SLOT_BYTES, tmp, mmframe.FRAME_SIZE)
+    let got: u64 = prochooks.read_at(state, mmswap.inode(), slot * mmswap.SLOT_BYTES, tmp, mmframe.FRAME_SIZE)
     if got != mmframe.FRAME_SIZE {
         mmswap.count_fail()
         mmframe.frame_free(state, tmp)
         return false
     }
     var ok: bool = false
-    unixsock.demand_lock(state)
+    mmlock.demand_lock(state)
     let e: u64 = procpt.read_entry(pt, s)
     if (e & procbase.PAGE_PRESENT) != 0 {
         ok = true
@@ -280,7 +280,7 @@ fn swap_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -> boo
             procpt.write_entry(pt, s, e)
         }
     }
-    unixsock.demand_unlock(state)
+    mmlock.demand_unlock(state)
     mmframe.frame_free(state, tmp)
     if ok {
         procspace.tlb_flush_if_current(state, cur)
@@ -307,7 +307,7 @@ fn lazy_fault(state: u64, cur: u64, addr: u64, err: u64) -> bool {
         return lazy_file_fault(state, cur, page, err, pt, s)
     }
     var ok: bool = false
-    unixsock.demand_lock(state)
+    mmlock.demand_lock(state)
     let e: u64 = procpt.read_entry(pt, s)
     if (e & procbase.PAGE_PRESENT) != 0 {
         ok = true
@@ -328,7 +328,7 @@ fn lazy_fault(state: u64, cur: u64, addr: u64, err: u64) -> bool {
             }
         }
     }
-    unixsock.demand_unlock(state)
+    mmlock.demand_unlock(state)
     if ok {
         procspace.tlb_flush_if_current(state, cur)
     }
@@ -341,16 +341,16 @@ fn demand_fault(state: u64, cur: u64, addr: u64, err: u64) -> bool {
     }
     let page: u64 = addr & 0xFFFFFFFFFFFFF000
     var ok: bool = false
-    unixsock.demand_lock(state)
+    mmlock.demand_lock(state)
     if procmap.page_free(state, cur, page) {
-        let r: u64 = unixsock.shm_demand(state, cur, page, err)
+        let r: u64 = prochooks.shm_demand(state, cur, page, err)
         if r != 0 && procmap.map_frame(state, cur, page, r & 0xFFFFFFFFFFFFF000, (r & 1) != 0) {
             ok = true
         }
     } else {
         ok = procmap.translate(state, cur, page) != 0
     }
-    unixsock.demand_unlock(state)
+    mmlock.demand_unlock(state)
     if ok {
         procspace.tlb_flush_if_current(state, cur)
     }
