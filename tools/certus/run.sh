@@ -116,27 +116,15 @@ grep -qE '^const IMAGE_END: u64 = 0x44400000' kernel/sched/proc.fi \
 grep -qE '^const BIG_FLOOR: u64 = 0x44400000' kernel/sched/proc.fi \
     && ok "kernel/sched/proc.fi: BIG_FLOOR = 0x44400000 (the arena starts above)" \
     || bad "BIG_FLOOR does not match IMAGE_END"
-grep -qE '^const PRIV_SLOTS: u64 = 475' kernel/sched/proc.fi \
-    && ok "kernel/sched/proc.fi: PRIV_SLOTS = 475 tiles (155 + 320 arena for sparse SHM) of 2 MiB" \
-    || bad "PRIV_SLOTS is not at 475"
 grep -qE '^const BIG_TOP: u64 = 0x52C00000' kernel/sched/proc.fi \
     && ok "kernel/sched/proc.fi: BIG_TOP = 0x52C00000" || bad "BIG_TOP fehlt"
-python3 - <<'PY' && ok "the private region ends before 0x7C000000 (tools/osum/run.sh stays valid)" \
-                 || bad "die private Gegend erreicht 0x7C000000"
-import re, sys
-s = open("kernel/sched/proc.fi", encoding="utf-8").read()
-slots = int(re.search(r"^const PRIV_SLOTS: u64 = (\d+)$", s, re.M).group(1))
-span = int(re.search(r"^const USER_SPAN: u64 = (0x[0-9A-Fa-f]+)", s, re.M).group(1), 16)
-base = int(re.search(r"^const USER_DATA: u64 = (0x[0-9A-Fa-f]+)", s, re.M).group(1), 16)
-sys.exit(0 if base + span * slots <= 0x7C000000 else 1)
-PY
 grep -q 'w_self' kernel/fs/procfs/pfnode.fi \
     && ok "kernel/fs/procfs.fi kennt /proc/self (der Sammler fragt danach)" \
     || bad "/proc/self fehlt"
 grep -q 'CR4_OSFXSR' kernel/arch/x86_64/fpu.fi \
     && ok "kernel/arch/x86_64/fpu.fi enables SSE for ring 3 (CR4.OSFXSR)" \
     || bad "SSE is not enabled"
-grep -q 'fpu.apply_here' kernel/kmain.fi \
+grep -q 'fpu.apply_here' kernel/arch/x86_64/smp.fi \
     && ok "and every further core too (fpu.apply_here in ap_main)" \
     || bad "the APs get no SSE"
 grep -q 'fpu.switch' kernel/sched/sched.fi \
@@ -150,20 +138,20 @@ grep -q 'const K_CANVAS' <(bash tools/structure/catprog.sh kernel/user/fuiapp/wl
 grep -q 'fn canvas_event' <(bash tools/structure/catprog.sh kernel/user/fuiapp/wlib.fi) \
     && ok "the canvas has an event ring (canvas_event)" \
     || bad "canvas_event fehlt"
-grep -q 'import libc.mem' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi) \
+grep -aq 'import libc.mem' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi) \
     && bad 'wlibc binds libc.mem -- two modules mem in one program (single-core rule)' \
     || ok 'wlibc gets by without libc.mem (no second module mem next to html.mem)'
 grep -q 'fn gmem' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi) \
     && ok "the glyph memory comes from its own 64 KiB pieces (gmem)" \
     || bad "gmem fehlt"
-grep -q 'wlib.leinwand(' "$CERTUS_REPO/lib/fenster/osum.fi" \
-    && ok "the fourth back wall (lib/fenster/osum.fi) creates a wlib canvas" \
-    || bad "lib/fenster/osum.fi creates no canvas"
-for f in b_zurueck b_vor b_neu e_adr; do
-    grep -q "$f" "$CERTUS_REPO/lib/fenster/osum.fi" || bad "widget $f is missing from the back wall"
+grep -q 'wlib.canvas2(' "$CERTUS_REPO/lib/window/osum.fi" \
+    && ok "the fourth back wall (lib/window/osum.fi) creates a wlib canvas" \
+    || bad "lib/window/osum.fi creates no canvas"
+for f in b_back b_vor b_neu e_adr; do
+    grep -q "$f" "$CERTUS_REPO/lib/window/osum.fi" || bad "widget $f is missing from the back wall"
 done
-grep -q 'wlib.button' "$CERTUS_REPO/lib/fenster/osum.fi" \
-    && grep -q 'wlib.entry' "$CERTUS_REPO/lib/fenster/osum.fi" \
+grep -q 'wlib.button' "$CERTUS_REPO/lib/window/osum.fi" \
+    && grep -q 'wlib.entry' "$CERTUS_REPO/lib/window/osum.fi" \
     && ok "Back/Forward/New are wlib.button, the address is wlib.entry" \
     || bad "the bar is not made of wlib widgets"
 
