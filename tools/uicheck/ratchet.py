@@ -12,7 +12,7 @@ PRIMITIVE = re.compile(
     rb"|wlibc\.(?:rect|frame|frame3|hline|vline|plate)"
     rb"|fuib\.(?:rect|rrect|ring|rring|frame|rframe|board|area|hline|dot)"
     rb"|wlib\.draw_(?:board|area|bar|frame|edge3|line|point))\s*\(")
-COMPONENT_DIRS = ("kernel/user/uikit/", "kernel/user/fuiscene/", "kernel/user/wlibc/", "kernel/user/wlib/")
+COMPONENT_DIRS = ("kernel/user/uikit/", "kernel/user/fuiscene/", "kernel/user/fuiapp/", "kernel/user/wlibc/", "kernel/user/wlib/")
 COMPONENT_FILES = {"kernel/user/fuiscene.fi", "kernel/user/wlibc.fi", "kernel/user/wlib.fi",
                    "kernel/user/fuib.fi", "kernel/user/fuiapp.fi"}
 
