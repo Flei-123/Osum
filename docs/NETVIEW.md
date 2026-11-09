@@ -535,7 +535,7 @@ designed larger.
 the fourth is coverage; 0 has always meant transparent and 255 "these
 three octets are the colour". This round uses **1 to 5** to mean *ask
 the scheme*: ink, dim, accent, warn, panel
-(`tools/k15/icon.py`, `wlibc.icon_draw`). One file is therefore right
+(`tools/k15/icon.py`, `uiicon.icon_draw`). One file is therefore right
 in a light scheme and in a dark one, and every symbol that existed
 before this addendum carries 0 and 255 and does not change by one octet.
 

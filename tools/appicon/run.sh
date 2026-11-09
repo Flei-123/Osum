@@ -53,7 +53,7 @@ def rd(p):
         t += ''.join(open(os.path.join(d, f), 'rb').read().decode('latin1') for f in sorted(os.listdir(d)) if f.endswith('.fi'))
     return t
 def say(ok,m): print(("OK    " if ok else "FAIL  ")+m)
-say("app_icon" in rd("kernel/user/taskbar.fi"), "bar: taskbar.sym_of asks appicon (wlibc.app_icon)")
+say("app_icon" in rd("kernel/user/taskbar.fi"), "bar: taskbar.sym_of asks appicon (uiicon.app_icon)")
 say("app_icon" in rd("kernel/user/appdir.fi"), "start menu: appdir.icon_load asks the fallback")
 say("appicon." in rd("kernel/ui/wm.fi"), "Alt+Tab: wm switcher paints the fallback tile")
 say("app_icon" in rd("kernel/user/taskmgr.fi"), "task manager: program rows ask the fallback")
