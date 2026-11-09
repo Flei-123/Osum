@@ -4,7 +4,8 @@ import lib.kstate
 import sched.sched
 import sched.taskconst
 import sched.taskslot
-import sched.proc
+import sched.proc.procfault
+import sched.proc.procmap
 import arch.cpu
 import fs.fs
 import lib.errno
@@ -50,7 +51,7 @@ fn neg(e: u64) -> u64 {
 // identity mapping.
 fn peek(state: u64, me: u64, addr: u64) -> u64 {
     let mmfl: u64 = mmlock.mm_lock(state)
-    let phys: u64 = proc.translate(state, me, addr)
+    let phys: u64 = procmap.translate(state, me, addr)
     if phys == 0 {
         mmlock.mm_unlock(state, mmfl)
         return 0
@@ -69,7 +70,7 @@ fn peek(state: u64, me: u64, addr: u64) -> u64 {
 
 fn poke(state: u64, me: u64, addr: u64, v: u64) -> bool {
     let mmfl: u64 = mmlock.mm_lock(state)
-    let phys: u64 = proc.translate(state, me, addr)
+    let phys: u64 = procmap.translate(state, me, addr)
     if phys == 0 {
         mmlock.mm_unlock(state, mmfl)
         return false
@@ -85,14 +86,14 @@ fn poke(state: u64, me: u64, addr: u64, v: u64) -> bool {
 // `translate` is a walk of four tables, and doing it per octet is what
 // made round 62's `read` the slowest thing in the system.
 fn copy_out(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
-    if !proc.user_ok(state, me, dst, len) {
+    if !procfault.user_ok(state, me, dst, len) {
         return false
     }
     var n: u64 = 0
     while n < len {
         // r721: translate + copy of ONE page under the MM lock (see `mmlock.mm_lock`): `munmap` on another core cannot free the frame in between
         let mmfl: u64 = mmlock.mm_lock(state)
-        let phys: u64 = proc.translate(state, me, dst + n)
+        let phys: u64 = procmap.translate(state, me, dst + n)
         if phys == 0 {
             mmlock.mm_unlock(state, mmfl)
             return false
@@ -122,13 +123,13 @@ fn copy_out(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
 }
 
 fn copy_in(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
-    if !proc.user_ok(state, me, src, len) {
+    if !procfault.user_ok(state, me, src, len) {
         return false
     }
     var n: u64 = 0
     while n < len {
         let mmfl: u64 = mmlock.mm_lock(state)
-        let phys: u64 = proc.translate(state, me, src + n)
+        let phys: u64 = procmap.translate(state, me, src + n)
         if phys == 0 {
             mmlock.mm_unlock(state, mmfl)
             return false
@@ -156,12 +157,12 @@ fn fetch_name(state: u64, me: u64, addr: u64, dst: u64, max: u64) -> u64 {
     if addr == 0 {
         return neg(errno.E_FAULT)
     }
-    if !proc.user_ok(state, me, addr, 1) {
+    if !procfault.user_ok(state, me, addr, 1) {
         return neg(errno.E_FAULT)
     }
     var n: u64 = 0
     while n < max {
-        if !proc.user_ok(state, me, addr + n, 1) {
+        if !procfault.user_ok(state, me, addr + n, 1) {
             return neg(errno.E_FAULT)
         }
         let c: u64 = peek(state, me, addr + n)
@@ -239,7 +240,7 @@ fn get_user64(state: u64, me: u64, addr: u64) -> u64 {
 }
 
 fn user_half(state: u64, me: u64, addr: u64) -> u64 {
-    let phys: u64 = proc.translate(state, me, addr)
+    let phys: u64 = procmap.translate(state, me, addr)
     if phys == 0 {
         return 0
     }
@@ -282,7 +283,7 @@ fn put64(state: u64, me: u64, addr: u64, v: u64) -> bool {
 // `futex` lives in sched/futex.fi (real wait queue, r714).
 
 fn user_word32(state: u64, me: u64, addr: u64) -> u64 {
-    let phys: u64 = proc.translate(state, me, addr)
+    let phys: u64 = procmap.translate(state, me, addr)
     if phys == 0 {
         return 0
     }

@@ -113,11 +113,11 @@ echo "== 2. what the kernel learned for it =="
 grep -qE '^const IMAGE_END: u64 = 0x44400000' kernel/sched/proc/procmap.fi \
     && ok "kernel/sched/proc/procmap.fi: IMAGE_END = 0x44400000 (the image window is 67 MiB)" \
     || bad "IMAGE_END is not at 0x44400000"
-grep -qE '^const BIG_FLOOR: u64 = 0x44400000' kernel/sched/proc.fi \
-    && ok "kernel/sched/proc.fi: BIG_FLOOR = 0x44400000 (the arena starts above)" \
+grep -qE '^const BIG_FLOOR: u64 = 0x44400000' kernel/sched/proc/procbase.fi \
+    && ok "kernel/sched/proc/procbase.fi: BIG_FLOOR = 0x44400000 (the arena starts above)" \
     || bad "BIG_FLOOR does not match IMAGE_END"
-grep -qE '^const BIG_TOP: u64 = 0x52C00000' kernel/sched/proc.fi \
-    && ok "kernel/sched/proc.fi: BIG_TOP = 0x52C00000" || bad "BIG_TOP fehlt"
+grep -qE '^const BIG_TOP: u64 = 0x52C00000' kernel/sched/proc/procbase.fi \
+    && ok "kernel/sched/proc/procbase.fi: BIG_TOP = 0x52C00000" || bad "BIG_TOP fehlt"
 grep -q 'w_self' kernel/fs/procfs/pfnode.fi \
     && ok "kernel/fs/procfs.fi kennt /proc/self (der Sammler fragt danach)" \
     || bad "/proc/self fehlt"

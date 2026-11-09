@@ -7,7 +7,12 @@ import mm.mmframe
 import sched.sched
 import sched.taskconst
 import sched.taskslot
-import sched.proc
+import sched.proc.procbase
+import sched.proc.proccopy
+import sched.proc.procfault
+import sched.proc.procmap
+import sched.proc.procspace
+import sched.proc.procswap
 import sched.futex
 import fs.fs
 import lib.errno
@@ -93,8 +98,8 @@ fn do_brk(state: u64, me: u64, want: u64) -> u64 {
     var p: u64 = sysfd.page_up(cur)
     if want > cur {
         while p < want {
-            if proc.page_free(state, me, p) {
-                if proc.map_page_zero(state, me, p, true, false) == 0 {
+            if procmap.page_free(state, me, p) {
+                if procmap.map_page_zero(state, me, p, true, false) == 0 {
                     oom_handle(state)
                     if p > cur {
                         taskslot.tset(state, mem_owner(state, me), taskconst.T_BRK, p)
@@ -109,7 +114,7 @@ fn do_brk(state: u64, me: u64, want: u64) -> u64 {
     } else {
         var q: u64 = sysfd.page_up(want)
         while q < p {
-            proc.page_drop(state, me, q)
+            procspace.page_drop(state, me, q)
             q = q + sysconst.PAGE
         }
     }
@@ -121,7 +126,7 @@ fn do_brk(state: u64, me: u64, want: u64) -> u64 {
 fn big_bottom(state: u64, me: u64) -> u64 {
     let b: u64 = taskslot.tget(state, mem_owner(state, me), taskconst.T_BIG)
     if b == 0 {
-        return proc.BIG_TOP
+        return procbase.BIG_TOP
     }
     return b
 }
@@ -135,7 +140,7 @@ fn vm_oom_after(state: u64) {
 }
 
 fn big_hole(state: u64, me: u64, top: u64, pages: u64, prot: u64) -> u64 {
-    let h: u64 = hole(state, me, top, proc.BIG_TOP, pages)
+    let h: u64 = hole(state, me, top, procbase.BIG_TOP, pages)
     if h != 0 && map_run(state, me, h, pages, prot) {
         return h
     }
@@ -145,7 +150,7 @@ fn big_hole(state: u64, me: u64, top: u64, pages: u64, prot: u64) -> u64 {
 fn lazy_bottom(state: u64, me: u64) -> u64 {
     let b: u64 = taskslot.tget(state, mem_owner(state, me), taskconst.T_LAZY)
     if b == 0 {
-        return proc.LAZY_ATOP
+        return procmap.LAZY_ATOP
     }
     return b
 }
@@ -153,7 +158,7 @@ fn lazy_bottom(state: u64, me: u64) -> u64 {
 fn lazy_undo(state: u64, me: u64, base: u64, upto: u64) {
     var k: u64 = 0
     while k < upto {
-        let _d: bool = proc.page_drop(state, me, base + k * sysconst.PAGE)
+        let _d: bool = procspace.page_drop(state, me, base + k * sysconst.PAGE)
         k = k + 1
     }
 }
@@ -166,9 +171,9 @@ fn lazy_run_f(state: u64, me: u64, base: u64, pages: u64, prot: u64, fk: u64, fp
     while k < pages {
         var ok: bool = false
         if fk != 0 {
-            ok = proc.lazy_mark_file(state, me, base + k * sysconst.PAGE, rd, wr, ex, fk - 1, fpg + k)
+            ok = procmap.lazy_mark_file(state, me, base + k * sysconst.PAGE, rd, wr, ex, fk - 1, fpg + k)
         } else {
-            ok = proc.lazy_mark(state, me, base + k * sysconst.PAGE, rd, wr, ex)
+            ok = procmap.lazy_mark(state, me, base + k * sysconst.PAGE, rd, wr, ex)
         }
         if !ok {
             lazy_undo(state, me, base, k)
@@ -189,14 +194,14 @@ fn lazy_alloc(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
 
 fn lazy_alloc_f(state: u64, me: u64, pages: u64, prot: u64, fk: u64, fpg: u64) -> u64 {
     let top: u64 = lazy_bottom(state, me)
-    if pages * sysconst.PAGE <= top - proc.LAZY_BASE {
+    if pages * sysconst.PAGE <= top - procbase.LAZY_BASE {
         let base: u64 = top - pages * sysconst.PAGE
         if lazy_run_f(state, me, base, pages, prot, fk, fpg) {
             taskslot.tset(state, mem_owner(state, me), taskconst.T_LAZY, base)
             return base
         }
     }
-    let h: u64 = proc.lazy_find(state, me, pages)
+    let h: u64 = procmap.lazy_find(state, me, pages)
     if h == 0 {
         return sysuser.neg(errno.E_NOMEM)
     }
@@ -215,16 +220,16 @@ fn big_map(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
         return sysuser.neg(errno.E_NOMEM)
     }
     let top: u64 = big_bottom(state, me)
-    if pages * sysconst.PAGE > top - proc.BIG_FLOOR {
+    if pages * sysconst.PAGE > top - procbase.BIG_FLOOR {
         return big_hole(state, me, top, pages, prot)
     }
     let base: u64 = top - pages * sysconst.PAGE
-    if base < proc.BIG_FLOOR {
+    if base < procbase.BIG_FLOOR {
         return big_hole(state, me, top, pages, prot)
     }
     var p: u64 = base
     while p < top {
-        if proc.map_page_zero(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
+        if procmap.map_page_zero(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
             if mmlock.vm_held(state, me) {
                 // the address-space lock is held: the handler can sleep (disk sync), so the caller runs it after the unlock
                 mmlock.vm_oom_note(state)
@@ -323,14 +328,14 @@ fn map_anon(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64) -> 
 fn set_range_prot(state: u64, me: u64, base: u64, pages: u64, prot: u64) -> u64 {
     var k: u64 = 0
     while k < pages {
-        let r: u64 = proc.page_protect(state, me, base + k * sysconst.PAGE, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0)
+        let r: u64 = procspace.page_protect(state, me, base + k * sysconst.PAGE, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0)
         if r != 0 {
-            proc.tlb_flush_if_current(state, me)
+            procspace.tlb_flush_if_current(state, me)
             return r
         }
         k = k + 1
     }
-    proc.tlb_flush_if_current(state, me)
+    procspace.tlb_flush_if_current(state, me)
     return 0
 }
 
@@ -350,8 +355,8 @@ fn map_fixed_f(state: u64, me: u64, addr: u64, pages: u64, prot: u64, fk: u64, f
     }
     let end: u64 = addr + pages * sysconst.PAGE
     let in_alt: bool = addr >= map_bottom(state, me) && end <= MMAP_TOP
-    let in_big: bool = addr >= big_bottom(state, me) && end <= proc.BIG_TOP
-    let in_lazy: bool = addr >= proc.LAZY_BASE && end <= proc.LAZY_TOP
+    let in_big: bool = addr >= big_bottom(state, me) && end <= procbase.BIG_TOP
+    let in_lazy: bool = addr >= procbase.LAZY_BASE && end <= procbase.LAZY_TOP
     if !in_alt && !in_big && !in_lazy {
         return sysuser.neg(errno.E_NOMEM)
     }
@@ -362,18 +367,18 @@ fn map_fixed_f(state: u64, me: u64, addr: u64, pages: u64, prot: u64, fk: u64, f
     let _released: bool = unixsock.map_release(state, me, addr, pages * sysconst.PAGE)
     var p: u64 = addr
     while p < end {
-        let _d: bool = proc.page_drop(state, me, p)
+        let _d: bool = procspace.page_drop(state, me, p)
         if in_lazy {
             var marked: bool = false
             if fk != 0 {
-                marked = proc.lazy_mark_file(state, me, p, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0, fk - 1, fpg + (p - addr) / sysconst.PAGE)
+                marked = procmap.lazy_mark_file(state, me, p, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0, fk - 1, fpg + (p - addr) / sysconst.PAGE)
             } else {
-                marked = proc.lazy_mark(state, me, p, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0)
+                marked = procmap.lazy_mark(state, me, p, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0)
             }
             if !marked {
                 return sysuser.neg(errno.E_NOMEM)
             }
-        } else if proc.map_page_zero(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
+        } else if procmap.map_page_zero(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
             return sysuser.neg(errno.E_NOMEM)
         }
         kstate.add(state, kstate.MAPS, 1)
@@ -578,11 +583,11 @@ fn map_file_lazy(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64
     let ino: u64 = file.open_ino(state, of)
     let pages: u64 = sysfd.page_up(len) / sysconst.PAGE
     let fpg: u64 = off / sysconst.PAGE
-    if ino >= proc.LAZYF_MAX || pages < FLAZY_MIN_PAGES || fpg + pages >= proc.LAZYF_MAX {
+    if ino >= procmap.LAZYF_MAX || pages < FLAZY_MIN_PAGES || fpg + pages >= procmap.LAZYF_MAX {
         return 0
     }
     if (flags & MAP_FIXED) != 0 {
-        if (addr & (sysconst.PAGE - 1)) != 0 || addr < proc.LAZY_BASE || addr + pages * sysconst.PAGE > proc.LAZY_TOP {
+        if (addr & (sysconst.PAGE - 1)) != 0 || addr < procbase.LAZY_BASE || addr + pages * sysconst.PAGE > procbase.LAZY_TOP {
             return 0
         }
         let r: u64 = map_fixed_f(state, me, addr, pages, prot, ino + 1, fpg)
@@ -679,7 +684,7 @@ fn map_alloc(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
     }
     var p: u64 = base
     while p < top {
-        if proc.map_page_zero(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
+        if procmap.map_page_zero(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
             return sysuser.neg(errno.E_NOMEM)
         }
         kstate.add(state, kstate.MAPS, 1)
@@ -701,7 +706,7 @@ fn hole(state: u64, me: u64, lo: u64, hi: u64, pages: u64) -> u64 {
     var run: u64 = 0
     var p: u64 = lo
     while p < hi {
-        if proc.translate(state, me, p) == 0 {
+        if procmap.translate(state, me, p) == 0 {
             run = run + 1
             if run == pages {
                 return p - (pages - 1) * sysconst.PAGE
@@ -717,7 +722,7 @@ fn hole(state: u64, me: u64, lo: u64, hi: u64, pages: u64) -> u64 {
 fn map_run(state: u64, me: u64, base: u64, pages: u64, prot: u64) -> bool {
     var i: u64 = 0
     while i < pages {
-        if proc.map_page_zero(state, me, base + i * sysconst.PAGE, true,
+        if procmap.map_page_zero(state, me, base + i * sysconst.PAGE, true,
             (prot & PROT_EXEC) != 0) == 0 {
             return false
         }
@@ -755,7 +760,7 @@ fn map_shm_do(state: u64, me: u64, of: u64, len: u64, prot: u64,
 
 fn big_place(state: u64, me: u64, pages: u64) -> u64 {
     let btop: u64 = big_bottom(state, me)
-    if btop < proc.BIG_FLOOR || pages * sysconst.PAGE > btop - proc.BIG_FLOOR {
+    if btop < procbase.BIG_FLOOR || pages * sysconst.PAGE > btop - procbase.BIG_FLOOR {
         return 0
     }
     return btop - pages * sysconst.PAGE
@@ -804,7 +809,7 @@ fn map_shm_obj(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64) -> u
         }
     }
     if in_arena {
-        base = unixsock.map_arena_find(state, me, pages, proc.SHM_ARENA_BASE, proc.SHM_ARENA_TOP)
+        base = unixsock.map_arena_find(state, me, pages, procfault.SHM_ARENA_BASE, procfault.SHM_ARENA_TOP)
         if base == 0 {
             return sysuser.neg(errno.E_NOMEM)
         }
@@ -816,7 +821,7 @@ fn map_shm_obj(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64) -> u
             return sysuser.neg(errno.E_NOMEM)
         }
         if frame != 0 {
-            if !proc.map_frame(state, me, base + p * sysconst.PAGE, frame,
+            if !procmap.map_frame(state, me, base + p * sysconst.PAGE, frame,
                 writing) {
                 return sysuser.neg(errno.E_NOMEM)
             }
@@ -875,7 +880,7 @@ fn map_fd(state: u64, me: u64, fd: u64, len: u64, prot: u64,
             return sysuser.neg(errno.E_ACCES)
         }
     }
-    if !proc.map_huge(state, me, gfx.fb_user_base(), gfx.fb_block(state), writing) {
+    if !procmap.map_huge(state, me, gfx.fb_user_base(), gfx.fb_block(state), writing) {
         return sysuser.neg(errno.E_NOMEM)
     }
     kstate.add(state, kstate.MAPS, 1)
@@ -1023,7 +1028,7 @@ fn do_unmap(state: u64, me: u64, addr: u64, len: u64) -> u64 {
     }
     if addr >= RES_BASE {
         let rl: u64 = sysfd.page_up(len)
-        proc.range_drop(state, me, addr, addr + rl)
+        procspace.range_drop(state, me, addr, addr + rl)
         let owner: u64 = mem_owner(state, me)
         let rr: u64 = res_remove(state, owner, addr, rl)
         if addr + rl == taskslot.tget(state, owner, taskconst.T_RESNEXT) {
@@ -1032,9 +1037,9 @@ fn do_unmap(state: u64, me: u64, addr: u64, len: u64) -> u64 {
         return rr
     }
     let in_alt: bool = addr >= map_bottom(state, me) && addr < MMAP_TOP
-    let in_big: bool = addr >= big_bottom(state, me) && addr < proc.BIG_TOP
-    let in_arena: bool = addr >= proc.SHM_ARENA_BASE && addr < proc.SHM_ARENA_TOP
-    let in_lazy: bool = addr >= proc.LAZY_BASE && addr < proc.LAZY_TOP
+    let in_big: bool = addr >= big_bottom(state, me) && addr < procbase.BIG_TOP
+    let in_arena: bool = addr >= procfault.SHM_ARENA_BASE && addr < procfault.SHM_ARENA_TOP
+    let in_lazy: bool = addr >= procbase.LAZY_BASE && addr < procbase.LAZY_TOP
     if !in_alt && !in_big && !in_arena && !in_lazy {
         return sysuser.neg(errno.E_INVAL)
     }
@@ -1044,14 +1049,14 @@ fn do_unmap(state: u64, me: u64, addr: u64, len: u64) -> u64 {
     var p: u64 = addr
     let end: u64 = addr + sysfd.page_up(len)
     while p < end {
-        if p < MMAP_TOP || p < proc.BIG_TOP || (p >= proc.SHM_ARENA_BASE && p < proc.SHM_ARENA_TOP) || (p >= proc.LAZY_BASE && p < proc.LAZY_TOP) {
-            proc.page_drop(state, me, p)
+        if p < MMAP_TOP || p < procbase.BIG_TOP || (p >= procfault.SHM_ARENA_BASE && p < procfault.SHM_ARENA_TOP) || (p >= procbase.LAZY_BASE && p < procbase.LAZY_TOP) {
+            procspace.page_drop(state, me, p)
         }
         p = p + sysconst.PAGE
     }
     if in_lazy && addr == lazy_bottom(state, me) {
         var nb: u64 = end
-        if nb >= proc.LAZY_ATOP {
+        if nb >= procmap.LAZY_ATOP {
             nb = 0
         }
         taskslot.tset(state, mem_owner(state, me), taskconst.T_LAZY, nb)
@@ -1069,7 +1074,7 @@ fn clear_child_tid(state: u64, me: u64) {
         return
     }
     taskslot.tset(state, me, taskconst.T_FUTEX, 0)
-    let phys: u64 = proc.translate(state, me, addr)
+    let phys: u64 = procmap.translate(state, me, addr)
     if phys == 0 {
         return
     }
@@ -1088,7 +1093,7 @@ fn res_protect(state: u64, me: u64, addr: u64, pages: u64, prot: u64) -> u64 {
     var k: u64 = 0
     while k < pages {
         let a: u64 = addr + k * sysconst.PAGE
-        if proc.page_mapped(state, me, a) {
+        if procspace.page_mapped(state, me, a) {
             let r: u64 = set_range_prot(state, me, a, 1, prot)
             if r == 2 {
                 return sysuser.neg(errno.E_ACCES)
@@ -1097,7 +1102,7 @@ fn res_protect(state: u64, me: u64, addr: u64, pages: u64, prot: u64) -> u64 {
                 return sysuser.neg(errno.E_NOMEM)
             }
         } else if prot != 0 {
-            if !proc.lazy_mark(state, me, a, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0) {
+            if !procmap.lazy_mark(state, me, a, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0) {
                 return sysuser.neg(errno.E_NOMEM)
             }
         }
@@ -1129,7 +1134,7 @@ fn do_mprotect(state: u64, me: u64, addr: u64, len: u64, prot: u64) -> u64 {
     let pages: u64 = sysfd.page_up(len) / sysconst.PAGE
     var k: u64 = 0
     while k < pages {
-        if !proc.page_mapped(state, me, addr + k * sysconst.PAGE) {
+        if !procspace.page_mapped(state, me, addr + k * sysconst.PAGE) {
             return sysuser.neg(errno.E_NOMEM)
         }
         k = k + 1
@@ -1239,7 +1244,7 @@ fn reap_dead_threads(state: u64, me: u64) -> u64 {
         if i != me && taskslot.tget(state, i, taskconst.T_STATE) == taskconst.S_ZOMBIE {
             let tg: u64 = taskslot.tget(state, i, taskconst.T_TGID)
             if tg == g && taskslot.tget(state, i, taskconst.T_PID) != g {
-                proc.reap(state, i)
+                procswap.reap(state, i)
                 n = n + 1
             }
         }
@@ -1267,7 +1272,7 @@ fn do_madvise(state: u64, me: u64, addr: u64, len: u64, advice: u64) -> u64 {
     let pages: u64 = sysfd.page_up(len) / sysconst.PAGE
     var k: u64 = 0
     while k < pages {
-        if !proc.page_mapped(state, me, addr + k * sysconst.PAGE) {
+        if !procspace.page_mapped(state, me, addr + k * sysconst.PAGE) {
             return sysuser.neg(errno.E_NOMEM)
         }
         k = k + 1
@@ -1275,14 +1280,14 @@ fn do_madvise(state: u64, me: u64, addr: u64, len: u64, advice: u64) -> u64 {
     if advice == 4 {
         k = 0
         while k < pages {
-            let _z: bool = proc.page_zero(state, me, addr + k * sysconst.PAGE)
+            let _z: bool = procspace.page_zero(state, me, addr + k * sysconst.PAGE)
             k = k + 1
         }
     }
     return 0
 }
 
-// Rights bits of proc.page_rights (2 read, 4 write, 8 execute) as PROT_* bits.
+// Rights bits of procspace.page_rights (2 read, 4 write, 8 execute) as PROT_* bits.
 fn rights_prot(rights: u64) -> u64 {
     var prot: u64 = 0
     if (rights & 2) != 0 {
@@ -1303,10 +1308,10 @@ fn mremap_lazy_grow(state: u64, me: u64, old_addr: u64, oldp: u64, newp: u64, ri
     let prot: u64 = rights_prot(rights)
     let old_end: u64 = old_addr + oldp * sysconst.PAGE
     let extra: u64 = newp - oldp
-    var free_after: bool = old_end + extra * sysconst.PAGE <= proc.LAZY_ATOP
+    var free_after: bool = old_end + extra * sysconst.PAGE <= procmap.LAZY_ATOP
     var k: u64 = 0
     while free_after && k < extra {
-        if proc.page_mapped(state, me, old_end + k * sysconst.PAGE) {
+        if procspace.page_mapped(state, me, old_end + k * sysconst.PAGE) {
             free_after = false
         }
         k = k + 1
@@ -1325,7 +1330,7 @@ fn mremap_lazy_grow(state: u64, me: u64, old_addr: u64, oldp: u64, newp: u64, ri
     }
     k = 0
     while k < oldp {
-        let _c: bool = proc.page_copy(state, me, old_addr + k * sysconst.PAGE, base + k * sysconst.PAGE)
+        let _c: bool = proccopy.page_copy(state, me, old_addr + k * sysconst.PAGE, base + k * sysconst.PAGE)
         k = k + 1
     }
     if (prot & 3) != 3 {
@@ -1346,8 +1351,8 @@ fn do_mremap(state: u64, me: u64, old_addr: u64, old_len: u64, new_len: u64, fla
     var k: u64 = 0
     var virtual_only: bool = false
     while k < oldp {
-        if !proc.page_mapped(state, me, old_addr + k * sysconst.PAGE) {
-            if !proc.stack_zone_has(state, me, old_addr + k * sysconst.PAGE) {
+        if !procspace.page_mapped(state, me, old_addr + k * sysconst.PAGE) {
+            if !procmap.stack_zone_has(state, me, old_addr + k * sysconst.PAGE) {
                 return sysuser.neg(errno.E_FAULT)
             }
             virtual_only = true
@@ -1364,8 +1369,8 @@ fn do_mremap(state: u64, me: u64, old_addr: u64, old_len: u64, new_len: u64, fla
         let _u: u64 = do_unmap(state, me, old_addr + newp * sysconst.PAGE, (oldp - newp) * sysconst.PAGE)
         return old_addr
     }
-    let rights: u64 = proc.page_rights(state, me, old_addr)
-    if old_addr >= proc.LAZY_BASE && old_addr + oldp * sysconst.PAGE <= proc.LAZY_ATOP {
+    let rights: u64 = procspace.page_rights(state, me, old_addr)
+    if old_addr >= procbase.LAZY_BASE && old_addr + oldp * sysconst.PAGE <= procmap.LAZY_ATOP {
         return mremap_lazy_grow(state, me, old_addr, oldp, newp, rights, (flags & 1) != 0)
     }
     if (flags & 1) == 0 {
@@ -1377,7 +1382,7 @@ fn do_mremap(state: u64, me: u64, old_addr: u64, old_len: u64, new_len: u64, fla
     }
     k = 0
     while k < oldp {
-        let _c: bool = proc.page_copy(state, me, old_addr + k * sysconst.PAGE, base + k * sysconst.PAGE)
+        let _c: bool = proccopy.page_copy(state, me, old_addr + k * sysconst.PAGE, base + k * sysconst.PAGE)
         k = k + 1
     }
     let prot: u64 = rights_prot(rights)

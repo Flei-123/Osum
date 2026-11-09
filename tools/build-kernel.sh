@@ -236,7 +236,7 @@ binde() { # $1 = osym-Objekt, $2 = Ausgabe
         --defsym=KERNEL_TRAP="${P}trap__entry" \
         --defsym=KERNEL_SYSCALL="${P}sys__entry" \
         --defsym=KERNEL_TASK_MAIN="${P}tasks__main" \
-        --defsym=KERNEL_USER_START="${P}proc__user_start" \
+        --defsym=KERNEL_USER_START="${P}proccopy__user_start" \
         --defsym=KERNEL_AP_MAIN="${P}smp__ap_main" \
         --defsym=USER_MAIN="${P}u_enter" \
         -o "$2" "$TMP/boot.o" "$TMP/isr.o" "$TMP/switch.o" \

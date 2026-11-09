@@ -9,7 +9,9 @@ import sched.sched
 import sched.taskconst
 import sched.taskslot
 import sync.atomic
-import sched.proc
+import sched.proc.procmap
+import sched.proc.procpt
+import sched.proc.procspace
 import arch.x86_64.fpu
 import arch.arch
 import arch.cpu
@@ -283,7 +285,7 @@ fn freeze(state: u64, limit: u64) -> bool {
     while i < kstate.MAX_TASKS {
         frozen_mark[i as usize] = 0
         if saveable(state, i) && n < limit {
-            let c: u64 = proc.frame_count(state, i)
+            let c: u64 = procpt.frame_count(state, i)
             if seiten + c <= MAX_PAGES && mark_frozen(state, i) {
                 seiten = seiten + c
                 n = n + 1
@@ -383,7 +385,7 @@ fn collect(state: u64) -> u64 {
     var i: u64 = 0
     while i < kstate.MAX_TASKS {
         if frozen_mark[i as usize] != 0 {
-            let c: u64 = proc.frame_count(state, i)
+            let c: u64 = procpt.frame_count(state, i)
             tsset(state, n, TS_MAGIC, WACH_MAGIC)
             tsset(state, n, TS_PID, taskslot.tget(state, i, taskconst.T_PID))
             tsset(state, n, TS_STATE, frozen_state[i as usize])
@@ -407,9 +409,9 @@ fn collect(state: u64) -> u64 {
             var k: u64 = 0
             while k < c {
                 pgset(state, seiten + k, PG_VIRT,
-                    proc.frame_virt_at(state, i, k))
+                    procpt.frame_virt_at(state, i, k))
                 pgset(state, seiten + k, PG_PHYS,
-                    proc.frame_at(state, i, k))
+                    procpt.frame_at(state, i, k))
                 k = k + 1
             }
             var s_w: [u8; 13] = "wake: saved \0"
@@ -775,7 +777,7 @@ fn restore_tasks(state: u64, dev: u64, base: u64, b: u64) -> bool {
         taskslot.tset(state, slot, taskconst.T_PARENT, 0)
 
         let frei_vor_pt: u64 = mmframe.frames_free(state)
-        let space: u64 = proc.space_build_empty(state, slot)
+        let space: u64 = procpt.space_build_empty(state, slot)
         if space == 0 {
             s(state, W_WHY, WW_SPACE)
             return false
@@ -789,7 +791,7 @@ fn restore_tasks(state: u64, dev: u64, base: u64, b: u64) -> bool {
             let va: u64 = pgget(state, doff + d, PG_VIRT)
             let pa: u64 = pgget(state, doff + d, PG_PHYS)
             if va != 0 && pa != 0 {
-                if proc.map_restored(state, slot, va, pa) {
+                if procmap.map_restored(state, slot, va, pa) {
                     dback = dback + 1
                 }
             }
@@ -922,14 +924,14 @@ fn arm(state: u64, zyk: u64) {
     serial.dec(zyk)
     serial.nl()
 
-    let a: u64 = proc.create(state, 65, 4000, 2)
-    let b2: u64 = proc.create(state, 65, 4000, 2)
-    let c: u64 = proc.create(state, 65, 4000, 2)
+    let a: u64 = procspace.create(state, 65, 4000, 2)
+    let b2: u64 = procspace.create(state, 65, 4000, 2)
+    let c: u64 = procspace.create(state, 65, 4000, 2)
     if kstate.mode_on(state, kstate.M_WACHBURN) {
         var burners: u64 = 0
         var attempts: u64 = 0
         while burners < BURNERS && attempts < BURNERS * 2 {
-            if proc.create(state, 68, 4000000000, 2) != 0 {
+            if procspace.create(state, 68, 4000000000, 2) != 0 {
                 burners = burners + 1
             }
             attempts = attempts + 1
@@ -969,7 +971,7 @@ fn arm(state: u64, zyk: u64) {
     var runden: u64 = 0
     var sum_value: u64 = 0
     if a != 0 {
-        let pa: u64 = proc.translate(state, a, 0x40000000)
+        let pa: u64 = procmap.translate(state, a, 0x40000000)
         if pa != 0 {
             sum_value = __mmio_read64((pa + 8) as *mut u64)
             runden = __mmio_read64((pa + 24) as *mut u64)
@@ -1000,7 +1002,7 @@ fn burner_sample(state: u64, record: bool) -> u64 {
             && taskslot.tget(state, i, taskconst.T_CR3) != 0
             && taskslot.tget(state, i, taskconst.T_CR3)
                 != kstate.get(state, kstate.KPML4) {
-            let pa: u64 = proc.translate(state, i, 0x40000000)
+            let pa: u64 = procmap.translate(state, i, 0x40000000)
             if pa != 0 && __mmio_read64(pa as *mut u64) == BURN_USERTAG {
                 let rounds: u64 = __mmio_read64((pa + 8) as *mut u64)
                 if record {
@@ -1070,7 +1072,7 @@ fn check(state: u64) {
             && taskslot.tget(state, i, taskconst.T_CR3) != 0
             && taskslot.tget(state, i, taskconst.T_CR3)
                 != kstate.get(state, kstate.KPML4) {
-            let pa: u64 = proc.translate(state, i, 0x40000000)
+            let pa: u64 = procmap.translate(state, i, 0x40000000)
             if pa != 0 {
                 if __mmio_read64(pa as *mut u64) == WACH_USERTAG {
                     prozesse = prozesse + 1

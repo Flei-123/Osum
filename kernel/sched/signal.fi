@@ -4,7 +4,8 @@ import lib.kstate
 import sched.sched
 import sched.taskconst
 import sched.taskslot
-import sched.proc
+import sched.proc.procfault
+import sched.proc.procmap
 import lib.errno
 import arch.cpu
 import sched.ctr
@@ -519,7 +520,7 @@ fn alarm_check(state: u64) -> u64 {
 
 
 fn poke64(state: u64, task: u64, addr: u64, v: u64) -> bool {
-    let phys: u64 = proc.translate(state, task, addr)
+    let phys: u64 = procmap.translate(state, task, addr)
     if phys == 0 {
         return false
     }
@@ -530,7 +531,7 @@ fn poke64(state: u64, task: u64, addr: u64, v: u64) -> bool {
 }
 
 fn peek64(state: u64, task: u64, addr: u64) -> u64 {
-    let phys: u64 = proc.translate(state, task, addr)
+    let phys: u64 = procmap.translate(state, task, addr)
     if phys == 0 {
         return 0
     }
@@ -574,7 +575,7 @@ fn deliver(state: u64, task: u64, sig: u64, ctx: u64) -> bool {
         }
     }
     let ret: u64 = base -% 8
-    if !proc.user_ok(state, task, ret, SF_BYTES + 8) {
+    if !procfault.user_ok(state, task, ret, SF_BYTES + 8) {
         return false
     }
     poke64(state, task, ret, vector(state, V_TRAMP))
@@ -830,7 +831,7 @@ fn do_sigaction(state: u64, task: u64, sig: u64, na: u64, oa: u64) -> u64 {
         return neg(errno.E_INVAL)
     }
     if oa != 0 {
-        if !proc.user_ok(state, task, oa, 32) {
+        if !procfault.user_ok(state, task, oa, 32) {
             return neg(errno.E_FAULT)
         }
         poke64(state, task, oa + 0, regio.read64(act(state, task, sig) + A_HANDLER))
@@ -839,7 +840,7 @@ fn do_sigaction(state: u64, task: u64, sig: u64, na: u64, oa: u64) -> u64 {
         poke64(state, task, oa + 24, regio.read64(act(state, task, sig) + A_MASK))
     }
     if na != 0 {
-        if !proc.user_ok(state, task, na, 32) {
+        if !procfault.user_ok(state, task, na, 32) {
             return neg(errno.E_FAULT)
         }
         let h: u64 = peek64(state, task, na + 0)
@@ -860,7 +861,7 @@ fn do_sigaction(state: u64, task: u64, sig: u64, na: u64, oa: u64) -> u64 {
 fn do_sigprocmask(state: u64, task: u64, how: u64, set: u64,
     old: u64) -> u64 {
     if old != 0 {
-        if !proc.user_ok(state, task, old, 8) {
+        if !procfault.user_ok(state, task, old, 8) {
             return neg(errno.E_FAULT)
         }
         poke64(state, task, old, taskslot.tget(state, task, taskconst.T_SIGMASK))
@@ -868,7 +869,7 @@ fn do_sigprocmask(state: u64, task: u64, how: u64, set: u64,
     if set == 0 {
         return 0
     }
-    if !proc.user_ok(state, task, set, 8) {
+    if !procfault.user_ok(state, task, set, 8) {
         return neg(errno.E_FAULT)
     }
     let v: u64 = peek64(state, task, set)
@@ -892,7 +893,7 @@ fn do_sigprocmask(state: u64, task: u64, how: u64, set: u64,
 }
 
 fn do_sigpending(state: u64, task: u64, out: u64) -> u64 {
-    if !proc.user_ok(state, task, out, 8) {
+    if !procfault.user_ok(state, task, out, 8) {
         return neg(errno.E_FAULT)
     }
     poke64(state, task, out, taskslot.tget(state, task, taskconst.T_SIGPEND))
@@ -905,7 +906,7 @@ fn do_sigreturn(state: u64, task: u64, frame: u64) -> u64 {
     if noted == 0 || base != noted {
         return neg(errno.E_FAULT)
     }
-    if !proc.user_ok(state, task, base, SF_BYTES) {
+    if !procfault.user_ok(state, task, base, SF_BYTES) {
         return neg(errno.E_FAULT)
     }
     if peek64(state, task, base + SF_MAGIC) != MAGIC {
@@ -1101,7 +1102,7 @@ fn do_getitimer(state: u64, task: u64, which: u64, cur: u64) -> u64 {
     if which != 0 {
         return neg(errno.E_INVAL)
     }
-    if !proc.user_ok(state, task, cur, 32) {
+    if !procfault.user_ok(state, task, cur, 32) {
         return neg(errno.E_FAULT)
     }
     put_itimer(state, task, cur)
@@ -1112,11 +1113,11 @@ fn do_setitimer(state: u64, task: u64, which: u64, newp: u64, oldp: u64) -> u64 
     if which != 0 {
         return neg(errno.E_INVAL)
     }
-    if !proc.user_ok(state, task, newp, 32) {
+    if !procfault.user_ok(state, task, newp, 32) {
         return neg(errno.E_FAULT)
     }
     if oldp != 0 {
-        if !proc.user_ok(state, task, oldp, 32) {
+        if !procfault.user_ok(state, task, oldp, 32) {
             return neg(errno.E_FAULT)
         }
         put_itimer(state, task, oldp)
@@ -1144,7 +1145,7 @@ fn do_sigaltstack(state: u64, task: u64, ss: u64, old: u64) -> u64 {
     let sp: u64 = taskslot.tget(state, task, taskconst.T_ALTSP)
     let sz: u64 = taskslot.tget(state, task, taskconst.T_ALTSZ)
     if old != 0 {
-        if !proc.user_ok(state, task, old, 24) {
+        if !procfault.user_ok(state, task, old, 24) {
             return neg(errno.E_FAULT)
         }
         var fl: u64 = 0
@@ -1161,7 +1162,7 @@ fn do_sigaltstack(state: u64, task: u64, ss: u64, old: u64) -> u64 {
         poke64(state, task, old + 16, sz)
     }
     if ss != 0 {
-        if !proc.user_ok(state, task, ss, 24) {
+        if !procfault.user_ok(state, task, ss, 24) {
             return neg(errno.E_FAULT)
         }
         let nsp: u64 = peek64(state, task, ss)
@@ -1184,14 +1185,14 @@ fn do_sigtimedwait(state: u64, task: u64, setp: u64, infop: u64, tsp: u64, size:
     if size != 8 {
         return neg(errno.E_INVAL)
     }
-    if !proc.user_ok(state, task, setp, 8) {
+    if !procfault.user_ok(state, task, setp, 8) {
         return neg(errno.E_FAULT)
     }
     let want: u64 = peek64(state, task, setp) & (0xFFFFFFFFFFFFFFFF -% (bit(SIGKILL) | bit(SIGSTOP)))
     var forever: bool = true
     var left: u64 = 0
     if tsp != 0 {
-        if !proc.user_ok(state, task, tsp, 16) {
+        if !procfault.user_ok(state, task, tsp, 16) {
             return neg(errno.E_FAULT)
         }
         let sec: u64 = peek64(state, task, tsp)
@@ -1206,7 +1207,7 @@ fn do_sigtimedwait(state: u64, task: u64, setp: u64, infop: u64, tsp: u64, size:
         }
         left = s2 * 100 + (nsec + 9999999) / 10000000
     }
-    if infop != 0 && !proc.user_ok(state, task, infop, 128) {
+    if infop != 0 && !procfault.user_ok(state, task, infop, 128) {
         return neg(errno.E_FAULT)
     }
     while true {
@@ -1246,7 +1247,7 @@ fn do_sigsuspend(state: u64, task: u64, maskp: u64, size: u64) -> u64 {
     if size != 8 {
         return neg(errno.E_INVAL)
     }
-    if !proc.user_ok(state, task, maskp, 8) {
+    if !procfault.user_ok(state, task, maskp, 8) {
         return neg(errno.E_FAULT)
     }
     let tmp: u64 = peek64(state, task, maskp) & (0xFFFFFFFFFFFFFFFF -% (bit(SIGKILL) | bit(SIGSTOP)))

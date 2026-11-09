@@ -6,7 +6,11 @@ import sched.sched
 import sched.taskconst
 import sched.taskslot
 import sched.origin
-import sched.proc
+import sched.proc.procbase
+import sched.proc.procfault
+import sched.proc.procmap
+import sched.proc.procspace
+import sched.proc.procswap
 import fs.fs
 import fs.file
 import ipc.uio
@@ -202,10 +206,10 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
     let flags: u64 = regio.read32(ph + P_FLAGS)
     let off: u64 = regio.read64(ph + P_OFFSET)
     let vraw: u64 = regio.read64(ph + P_VADDR)
-    if vraw > proc.IMAGE_END {
+    if vraw > procmap.IMAGE_END {
         return R_RANGE
     }
-    if bias > proc.IMAGE_END {
+    if bias > procmap.IMAGE_END {
         return R_RANGE
     }
     let vaddr: u64 = vraw + bias
@@ -223,13 +227,13 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
     if size - off < filesz {
         return R_SEGFILE
     }
-    if vaddr < proc.IMAGE_BASE {
+    if vaddr < procmap.IMAGE_BASE {
         return R_RANGE
     }
-    if vaddr >= proc.IMAGE_END {
+    if vaddr >= procmap.IMAGE_END {
         return R_RANGE
     }
-    if proc.IMAGE_END - vaddr < memsz {
+    if procmap.IMAGE_END - vaddr < memsz {
         return R_RANGE
     }
     let offset: u64 = vaddr & PAGE_MASK
@@ -247,7 +251,7 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
     }
     let first: u64 = vaddr - offset
     let span: u64 = memsz + offset
-    if proc.IMAGE_END - first < span {
+    if procmap.IMAGE_END - first < span {
         return R_RANGE
     }
     let file_first: u64 = off - (off & PAGE_MASK)
@@ -261,18 +265,18 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
     while done < span {
         let page: u64 = first + done
         var frame: u64 = 0
-        if proc.page_free(state, t, page) && done > 0 && done >= filesz + offset && lazy_bss
-                && proc.lazy_mark_image(state, t, page, writable, runnable) {
+        if procmap.page_free(state, t, page) && done > 0 && done >= filesz + offset && lazy_bss
+                && procmap.lazy_mark_image(state, t, page, writable, runnable) {
             done = done + PAGE
             continue
         }
-        if share_pages && proc.page_free(state, t, page) && (done > 0 || offset == 0) && data_end >= done + PAGE
-                && proc.prefill_file_page(state, t, page, writable, runnable, ino, (file_first + done) / PAGE) {
+        if share_pages && procmap.page_free(state, t, page) && (done > 0 || offset == 0) && data_end >= done + PAGE
+                && procfault.prefill_file_page(state, t, page, writable, runnable, ino, (file_first + done) / PAGE) {
             done = done + PAGE
             continue
         }
-        if proc.page_free(state, t, page) {
-            frame = proc.map_page(state, t, page, writable, runnable)
+        if procmap.page_free(state, t, page) {
+            frame = procmap.map_page(state, t, page, writable, runnable)
             if frame == 0 {
                 return R_NOMEM
             }
@@ -284,10 +288,10 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
             if bias == 0 {
                 return R_OVERLAP
             }
-            if proc.page_cached(state, t, page) {
+            if procmap.page_cached(state, t, page) {
                 return R_OVERLAP
             }
-            frame = proc.translate(state, t, page)
+            frame = procmap.translate(state, t, page)
             if frame == 0 {
                 return R_OVERLAP
             }
@@ -355,7 +359,7 @@ fn place_segment(state: u64, t: u64, ino: u64, ph: u64, size: u64, bias: u64) ->
 fn entry_runnable(state: u64, t: u64, h: u64, n: u64, bias: u64) -> bool {
     let entry: u64 = regio.read64(h + E_ENTRY)
     if !bigpie.in_high(bias) {
-        return proc.page_exec(state, t, entry + bias)
+        return procmap.page_exec(state, t, entry + bias)
     }
     var seg: u64 = 0
     while seg < n {
@@ -382,7 +386,7 @@ fn image_extent(state: u64) -> u64 {
         if regio.read32(ph + P_TYPE) == PT_LOAD {
             let lo: u64 = regio.read64(ph + P_VADDR)
             let len: u64 = regio.read64(ph + P_MEMSZ)
-            if lo < proc.IMAGE_END && len < proc.IMAGE_END && lo + len > top {
+            if lo < procmap.IMAGE_END && len < procmap.IMAGE_END && lo + len > top {
                 top = lo + len
             }
         }
@@ -481,7 +485,7 @@ fn say_segment(state: u64, t: u64, ph: u64, bias: u64) {
     serial.puts((&s_v[0]) as u64)
     serial.hex(vaddr)
     serial.puts((&s_f[0]) as u64)
-    serial.hex(proc.translate(state, t, vaddr))
+    serial.hex(procmap.translate(state, t, vaddr))
     serial.puts((&s_file[0]) as u64)
     serial.dec(regio.read64(ph + P_FILESZ))
     serial.puts((&s_mem[0]) as u64)
@@ -489,7 +493,7 @@ fn say_segment(state: u64, t: u64, ph: u64, bias: u64) {
     serial.puts((&s_w[0]) as u64)
     serial.dec(numeric.yes((flags & PF_W) != 0))
     serial.puts((&s_x[0]) as u64)
-    serial.dec(numeric.yes(proc.page_exec(state, t, vaddr)))
+    serial.dec(numeric.yes(procmap.page_exec(state, t, vaddr)))
     serial.nl()
 }
 
@@ -509,7 +513,7 @@ fn write_env(state: u64, frame: u64) {
     var at: u64 = ENV_STR
     var k: u64 = 0
     while k < n {
-        regio.write64(frame + ENV_OFF + 8 + k * 8, proc.ARGS_BASE + at)
+        regio.write64(frame + ENV_OFF + 8 + k * 8, procspace.ARGS_BASE + at)
         var going: bool = true
         while going {
             if at >= PAGE - 1 {
@@ -530,15 +534,15 @@ fn write_env(state: u64, frame: u64) {
 }
 
 fn write_args(state: u64, t: u64, args: u64, argc: u64) -> bool {
-    if argc > proc.MAX_ARGS {
+    if argc > procbase.MAX_ARGS {
         return false
     }
-    if proc.page_free(state, t, proc.ARGS_BASE) {
-        if proc.map_page_zero(state, t, proc.ARGS_BASE, true, false) == 0 {
+    if procmap.page_free(state, t, procspace.ARGS_BASE) {
+        if procmap.map_page_zero(state, t, procspace.ARGS_BASE, true, false) == 0 {
             return false
         }
     }
-    let frame: u64 = proc.translate(state, t, proc.ARGS_BASE)
+    let frame: u64 = procmap.translate(state, t, procspace.ARGS_BASE)
     if frame == 0 {
         return false
     }
@@ -548,7 +552,7 @@ fn write_args(state: u64, t: u64, args: u64, argc: u64) -> bool {
     var src: u64 = args
     var k: u64 = 0
     while k < argc {
-        regio.write64(frame + 8 + k * 8, proc.ARGS_BASE + at)
+        regio.write64(frame + 8 + k * 8, procspace.ARGS_BASE + at)
         var going: bool = true
         while going {
             if at >= ENV_OFF - 1 {
@@ -599,15 +603,15 @@ fn sv_put(frame: u64, at: u64, v: u64) {
 
 fn build_stack(state: u64, t: u64, args: u64, argc: u64,
     phdr: u64, phnum: u64, entry: u64, ibase: u64, path: u64) -> u64 {
-    if argc > proc.MAX_ARGS {
+    if argc > procbase.MAX_ARGS {
         return 0
     }
-    if proc.page_free(state, t, SP_PAGE) {
-        if proc.map_page_zero(state, t, SP_PAGE, true, false) == 0 {
+    if procmap.page_free(state, t, SP_PAGE) {
+        if procmap.map_page_zero(state, t, SP_PAGE, true, false) == 0 {
             return 0
         }
     }
-    let frame: u64 = proc.translate(state, t, SP_PAGE)
+    let frame: u64 = procmap.translate(state, t, SP_PAGE)
     if frame == 0 {
         return 0
     }
@@ -1053,7 +1057,7 @@ fn aufloesen(state: u64, path: u64, args: u64, argc: u64) -> u64 {
                 fresh = fresh + 1
                 k = k + 1
             }
-            if fresh > proc.MAX_ARGS {
+            if fresh > procbase.MAX_ARGS {
                 fail(state, R_ARGS)
                 return errno.neg(errno.E_2BIG)
             }
@@ -1135,7 +1139,7 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     }
     let bundle: u64 = origin.probe(state, path)
     let flags: u64 = sched.irq_save()
-    let t: u64 = proc.create_bare(state, prio)
+    let t: u64 = procspace.create_bare(state, prio)
     if t == 0 {
         sched.irq_restore(flags)
         if sched.free_slots(state) == 0 {
@@ -1147,7 +1151,7 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     }
     var r0: u64 = read_header(state, ino)
     if r0 != R_OK {
-        proc.discard(state, t)
+        procswap.discard(state, t)
         sched.irq_restore(flags)
         fail(state, r0)
         return 0
@@ -1159,7 +1163,7 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     let ir: u64 = read_interp(state, ino, ipath)
     if ir != R_KEINER {
         if ir != R_OK {
-            proc.discard(state, t)
+            procswap.discard(state, t)
             sched.irq_restore(flags)
             fail(state, ir)
             return 0
@@ -1172,7 +1176,7 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     var bias: u64 = 0
     if ist_dyn {
         bias = PIE_BASE
-        var window_end: u64 = proc.IMAGE_END
+        var window_end: u64 = procmap.IMAGE_END
         if braucht_lader {
             window_end = INTERP_BASE
         }
@@ -1182,7 +1186,7 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     }
     let r: u64 = load_at(state, t, ino, bias)
     if r != R_OK {
-        proc.discard(state, t)
+        procswap.discard(state, t)
         sched.irq_restore(flags)
         fail(state, r)
         return 0
@@ -1204,20 +1208,20 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
         }
         let iino: u64 = fs.path(state, ipath)
         if ipj == 0 || iino == 0 {
-            proc.discard(state, t)
+            procswap.discard(state, t)
             sched.irq_restore(flags)
             fail(state, R_INOFILE)
             return 0
         }
         if fs.inode_type(state, iino) != fs.T_FILE {
-            proc.discard(state, t)
+            procswap.discard(state, t)
             sched.irq_restore(flags)
             fail(state, R_INOFILE)
             return 0
         }
         let ir2: u64 = read_header(state, iino)
         if ir2 != R_OK {
-            proc.discard(state, t)
+            procswap.discard(state, t)
             sched.irq_restore(flags)
             fail(state, R_IFORM)
             return 0
@@ -1225,14 +1229,14 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
         let chain: u64 = state + kstate.K16_OFF + kstate.FT_IPATH
             + 4 * IPATH_MAX
         if read_interp(state, iino, chain) != R_KEINER {
-            proc.discard(state, t)
+            procswap.discard(state, t)
             sched.irq_restore(flags)
             fail(state, R_ICHAIN)
             return 0
         }
         let ir3: u64 = load_at(state, t, iino, INTERP_BASE)
         if ir3 != R_OK {
-            proc.discard(state, t)
+            procswap.discard(state, t)
             sched.irq_restore(flags)
             fail(state, ir3)
             return 0
@@ -1244,7 +1248,7 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     }
     perm.apply_exec(state, t, ino)
     if !write_args(state, t, a, n) {
-        proc.discard(state, t)
+        procswap.discard(state, t)
         sched.irq_restore(flags)
         fail(state, R_ARGS)
         return 0
@@ -1256,18 +1260,18 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     }
     if eentry == 0 || (eentry >> 47) != 0 {
         say_badentry(state, eentry)
-        proc.discard(state, t)
+        procswap.discard(state, t)
         sched.irq_restore(flags)
         fail(state, R_ENTRY)
         return 0
     }
     taskslot.tset(state, t, taskconst.T_ENTRY, eentry)
-    var ustack: u64 = proc.ARGS_BASE
+    var ustack: u64 = procspace.ARGS_BASE
     if braucht_lader || ist_dyn {
         let sp: u64 = build_stack(state, t, a, n, at_phdr, at_phnum,
             at_entry, at_base, path)
         if sp == 0 {
-            proc.discard(state, t)
+            procswap.discard(state, t)
             sched.irq_restore(flags)
             fail(state, R_STACK)
             return 0
@@ -1276,7 +1280,7 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     }
     taskslot.tset(state, t, taskconst.T_USTACK, ustack)
     taskslot.tset(state, t, taskconst.T_ARG, 0)
-    taskslot.tset(state, t, taskconst.T_WORK, proc.ARGS_BASE)
+    taskslot.tset(state, t, taskconst.T_WORK, procspace.ARGS_BASE)
     kstate.add(state, kstate.SPAWNS, 1)
     kstate.add(state, kstate.EXECS, 1)
     pmon.task_clear(state, t, taskslot.tget(state, t, taskconst.T_PID))

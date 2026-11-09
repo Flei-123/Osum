@@ -15,7 +15,10 @@ import lib.kstate
 import fs.mnt
 import sched.origin
 import bus.pci
-import sched.proc
+import sched.proc.procbase
+import sched.proc.procmap
+import sched.proc.procpt
+import sched.proc.procspace
 import sched.sched
 import sched.taskconst
 import sched.taskslot
@@ -1003,23 +1006,23 @@ fn make_pstat(state: u64, t: u64) -> u64 {
 
 fn make_cmdline(state: u64, t: u64) -> u64 {
     var p: u64 = 0
-    let frame: u64 = proc.translate(state, t, proc.ARGS_BASE)
+    let frame: u64 = procmap.translate(state, t, procspace.ARGS_BASE)
     if frame == 0 {
         return 0
     }
     guard.stac(state)
     let argc: u64 = __mmio_read64(frame as *mut u64)
-    if argc == 0 || argc > proc.MAX_ARGS {
+    if argc == 0 || argc > procbase.MAX_ARGS {
         guard.clac(state)
         return 0
     }
     var k: u64 = 0
     while k < argc {
         let ptr: u64 = __mmio_read64((frame + 8 + k * 8) as *mut u64)
-        if ptr < proc.ARGS_BASE || ptr >= proc.ARGS_BASE + 4096 {
+        if ptr < procspace.ARGS_BASE || ptr >= procspace.ARGS_BASE + 4096 {
             k = argc
         } else {
-            var at: u64 = frame + (ptr - proc.ARGS_BASE)
+            var at: u64 = frame + (ptr - procspace.ARGS_BASE)
             var going: bool = true
             while going {
                 let c: u64 = kstate.get8(at)
@@ -1040,23 +1043,23 @@ fn make_cmdline(state: u64, t: u64) -> u64 {
 
 fn make_maps(state: u64, t: u64) -> u64 {
     var p: u64 = 0
-    let low: u64 = proc.USER_DATA
-    let high: u64 = proc.LAZY_ATOP
+    let low: u64 = procbase.USER_DATA
+    let high: u64 = procmap.LAZY_ATOP
     var addr: u64 = low
     var run_start: u64 = 0
     var run_r: u64 = 0
     var in_run: bool = false
     while addr < high {
         var r: u64 = 0
-        let k: u64 = proc.pd_slot(addr)
-        if k != 0 && proc.pt_for(state, t, addr, false) == 0 {
+        let k: u64 = procpt.pd_slot(addr)
+        if k != 0 && procpt.pt_for(state, t, addr, false) == 0 {
             if in_run {
                 p = map_line(state, t, p, run_start, addr, run_r)
                 in_run = false
             }
             addr = (addr & 0xFFFFFFFFFFE00000) + 0x200000
         } else {
-            r = proc.page_rights(state, t, addr)
+            r = procspace.page_rights(state, t, addr)
             if r != 0 && !in_run {
                 in_run = true
                 run_start = addr
@@ -1105,15 +1108,15 @@ fn map_line(state: u64, t: u64, at: u64, a: u64, b: u64, r: u64) -> u64 {
     p = w_ch(state, p, 112)
     var tail: [u8; 26] = " 00000000 00:00 0      \0\0\0"
     p = w_str(state, p, (&tail[0]) as u64)
-    if a <= proc.USER_TOP - 4096 && b >= proc.USER_TOP {
+    if a <= procspace.USER_TOP - 4096 && b >= procspace.USER_TOP {
         var nm: [u8; 8] = "[stack]\0"
         p = w_str(state, p, (&nm[0]) as u64)
     } else if a == 0x40080000 {
         var nh: [u8; 8] = "[heap]\0\0"
         p = w_str(state, p, (&nh[0]) as u64)
-    } else if a >= MAPS_INTERP && a < proc.IMAGE_END {
+    } else if a >= MAPS_INTERP && a < procmap.IMAGE_END {
         p = w_interp_name(state, t, p)
-    } else if a >= proc.IMAGE_BASE && a < MAPS_INTERP {
+    } else if a >= procmap.IMAGE_BASE && a < MAPS_INTERP {
         p = w_exe_name(state, t, p)
     }
     p = w_nl(state, p)

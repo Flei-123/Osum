@@ -126,7 +126,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
         --defsym=KERNEL_TRAP="_F$s.trap__entry" \
         --defsym=KERNEL_SYSCALL="_F$s.sys__entry" \
         --defsym=KERNEL_TASK_MAIN="_F$s.tasks__main" \
-        --defsym=KERNEL_USER_START="_F$s.proc__user_start" \
+        --defsym=KERNEL_USER_START="_F$s.proccopy__user_start" \
         --defsym=KERNEL_AP_MAIN="_F$s.smp__ap_main" \
         --defsym=USER_MAIN="_F$s.u_enter" \
         -o "$TMPD/k$s.elf" "$TMPD/boot.o" "$TMPD/isr.o" "$TMPD/switch.o" \

@@ -31,7 +31,7 @@ ld -n -T "$LDSCRIPT" \
     --defsym=KERNEL_TRAP="_F$S.trap__entry" \
     --defsym=KERNEL_SYSCALL="_F$S.sys__entry" \
     --defsym=KERNEL_TASK_MAIN="_F$S.tasks__main" \
-    --defsym=KERNEL_USER_START="_F$S.proc__user_start" \
+    --defsym=KERNEL_USER_START="_F$S.proccopy__user_start" \
     --defsym=KERNEL_AP_MAIN="_F$S.smp__ap_main" \
     --defsym=USER_MAIN="_F$S.u_enter" \
     -o "$W/k.elf" "$W/boot.o" "$W/isr.o" "$W/switch.o" "$W/smp.o" \
