@@ -135,7 +135,7 @@ for f in kernel/ui/wm/wmlayout.fi kernel/sys/sys.fi kernel/user/wlibc.fi; do
     fi
 done
 sa=$(grep -c 'const WL_BYTES: u64 = 128' kernel/sys/sys.fi)
-sb=$(grep -c 'const WL_BYTES: u64 = 128' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi))
+sb=$(grep -c 'const WL_BYTES: u64 = 128' kernel/user/fuiapp/hostwinp.fi)
 if [ "$sa" = 1 ] && [ "$sb" = 1 ]; then
     ok "the WM_LIST record is 128 octets long on both sides"
 else
