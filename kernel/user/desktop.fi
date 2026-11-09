@@ -15,11 +15,11 @@ import uitheme
 import fuiglyph
 import fuiscene
 import uikit.uipopmenu
+import uikit.uiwallpaper
 import msg
 import kbdconf
 import ctxreg
 import widgetboard
-import libc.regio
 
 export { u_start }
 
@@ -34,12 +34,7 @@ static mut w_shp: u64 = 0 // r1004: the shared buffer of the window (kept to rem
 static mut w_shb: u64 = 0
 static mut sw: u64 = 0
 static mut sh: u64 = 0
-static mut image: u64 = 0
 static mut image_bytes: u64 = 0 // size of the mapping behind `image`
-static mut bw: u64 = 0
-static mut bh: u64 = 0
-static mut c_top: u64 = 0
-static mut c_bottom: u64 = 0
 static mut head: [u8; 16] = [0 as u8; 16]
 static mut ev: [u8; 16] = [0 as u8; 16]
 
@@ -95,119 +90,6 @@ fn u32_at(p: u64) -> u64 {
         | ((__mmio_read8((p + 3) as *mut u8) as u64) << 24)
 }
 
-const SMOOTH_MIN_W: u64 = 200
-static mut cv_step: u64 = 0
-static mut cv_ox: u64 = 0
-static mut cv_oy: u64 = 0
-
-fn cover_prepare() {
-    let sx: u64 = (bw << 16) / sw
-    let sy: u64 = (bh << 16) / sh
-    var step: u64 = sx
-    if sy < step {
-        step = sy
-    }
-    cv_step = step
-    cv_ox = ((bw << 16) - sw * step) / 2
-    cv_oy = ((bh << 16) - sh * step) / 2
-}
-
-fn color_at(x: u64, y: u64) -> u64 {
-    // A picture narrower than SMOOTH_MIN_W is a PATTERN or pixel art (the test
-    // patterns of the harnesses are 120x90 chequers): it is stretched to the screen with
-    // the nearest neighbour as before, so that its edges stay edges and its pixels
-    // can be recounted. Photographs (the wallpaper is 480x270) get cover + bilinear.
-    if image != 0 && bw != 0 && bh != 0 && bw < SMOOTH_MIN_W {
-        var qx: u64 = 0
-        var qy: u64 = 0
-        if sw > 1 {
-            qx = x * bw / sw
-        }
-        if sh > 1 {
-            qy = y * bh / sh
-        }
-        if qx >= bw {
-            qx = bw - 1
-        }
-        if qy >= bh {
-            qy = bh - 1
-        }
-        let at0: u64 = image + (qy * bw + qx) * 4
-        return (regio.read8_at(at0, 2) << 16) | (regio.read8_at(at0, 1) << 8) | regio.read8_at(at0, 0)
-    }
-    if image != 0 && bw != 0 && bh != 0 && sw > 1 && sh > 1 {
-        if cv_step == 0 {
-            cover_prepare()
-        }
-        // source position of the pixel centre, 16.16, never below 0
-        var px: u64 = cv_ox + x * cv_step + (cv_step >> 1)
-        var py: u64 = cv_oy + y * cv_step + (cv_step >> 1)
-        if px >= 32768 {
-            px = px - 32768
-        } else {
-            px = 0
-        }
-        if py >= 32768 {
-            py = py - 32768
-        } else {
-            py = 0
-        }
-        var ix: u64 = px >> 16
-        var iy: u64 = py >> 16
-        var ax: u64 = (px >> 8) & 255
-        var ay: u64 = (py >> 8) & 255
-        if ix >= bw - 1 {
-            ix = bw - 1
-            ax = 0
-        }
-        if iy >= bh - 1 {
-            iy = bh - 1
-            ay = 0
-        }
-        var jx: u64 = ix
-        var jy: u64 = iy
-        if ax != 0 {
-            jx = ix + 1
-        }
-        if ay != 0 {
-            jy = iy + 1
-        }
-        let p00: u64 = image + (iy * bw + ix) * 4
-        let p10: u64 = image + (iy * bw + jx) * 4
-        let p01: u64 = image + (jy * bw + ix) * 4
-        let p11: u64 = image + (jy * bw + jx) * 4
-        var out: u64 = 0
-        var c: u64 = 2
-        var shf: u64 = 16
-        var n: u64 = 0
-        // channels R (offset 2), G (1), B (0)
-        while n < 3 {
-            let top: u64 = regio.read8_at(p00, c) * (256 - ax) + regio.read8_at(p10, c) * ax
-            let bot: u64 = regio.read8_at(p01, c) * (256 - ax) + regio.read8_at(p11, c) * ax
-            let v: u64 = (top * (256 - ay) + bot * ay + 32768) >> 16
-            out = out | (v << shf)
-            if c > 0 {
-                c = c - 1
-            }
-            if shf >= 8 {
-                shf = shf - 8
-            }
-            n = n + 1
-        }
-        return out
-    }
-    if sh < 2 {
-        return c_top
-    }
-    let t: u64 = y * 255 / (sh - 1)
-    let r: u64 = (((c_top >> 16) & 255) * (255 - t)
-        + ((c_bottom >> 16) & 255) * t) / 255
-    let g: u64 = (((c_top >> 8) & 255) * (255 - t)
-        + ((c_bottom >> 8) & 255) * t) / 255
-    let b: u64 = ((c_top & 255) * (255 - t) + (c_bottom & 255) * t) / 255
-    return (r << 16) | (g << 8) | b
-}
-
 fn image_load(path: u64) -> bool {
     let fd: u64 = io.open(path, 0)
     if ulib.bad(fd) {
@@ -236,8 +118,8 @@ fn image_load(path: u64) -> bool {
     let bytes: u64 = iw * ih * 4
     // reload (desktop context menu): a picture that fits into the old mapping reuses it -- a process has no unmap for these
     var p: u64 = 0
-    if image != 0 && bytes <= image_bytes {
-        p = image
+    if uiwallpaper.image_ptr() != 0 && bytes <= image_bytes {
+        p = uiwallpaper.image_ptr()
     } else {
         p = wlibc.map_surface(bytes)
         image_bytes = bytes
@@ -251,10 +133,7 @@ fn image_load(path: u64) -> bool {
     if ulib.bad(g) || g < bytes {
         return false
     }
-    image = p
-    bw = iw
-    bh = ih
-    cv_step = 0
+    uiwallpaper.set_image(p, iw, ih)
     return true
 }
 
@@ -271,15 +150,7 @@ fn flush(x: u64, y: u64, w: u64, h: u64) {
 fn streifen(y0: u64, height: u64) {
     wlibc.set_band(y0)
     wlibc.clip_set(0, y0, sw, y0 + height)
-    var y: u64 = y0
-    while y < y0 + height {
-        var x: u64 = 0
-        while x < sw {
-            wlibc.px(x, y, color_at(x, y))
-            x = x + 1
-        }
-        y = y + 1
-    }
+    uiwallpaper.paint(0, y0, sw, y0 + height)
     flush(0, y0, sw, height)
 }
 
@@ -327,15 +198,7 @@ fn fleck(x: u64, y: u64, w: u64, h: u64) {
             return
         }
         wlibc.clip_set(x0, yy, x1, bis)
-        var py: u64 = yy
-        while py < bis {
-            var px: u64 = x0
-            while px < x1 {
-                wlibc.px(px, py, color_at(px, py))
-                px = px + 1
-            }
-            py = py + 1
-        }
+        uiwallpaper.paint(x0, yy, x1, bis)
         flush(x0, yy, x1 - x0, bis - yy)
         yy = bis
     }
@@ -611,9 +474,8 @@ fn settings_open(page: u64) {
 
 fn wallpaper_reload() {
     if !image_load((&p_wall[0 as usize]) as u64) {
-        image = 0
+        uiwallpaper.clear_image()
     }
-    cv_step = 0
     all_paint()
     widgets_paint()
 }
@@ -731,8 +593,8 @@ fn desk_rebuild() -> bool {
     w_shb = shb
     sw = nw
     sh = nh
+    uiwallpaper.set_screen(sw, sh)
     wlibc.surf_wide(shp, nw, nh)
-    cv_step = 0
     all_paint()
     widgetboard.set_screen(sw, sh)
     widgetboard.messen()
@@ -799,6 +661,7 @@ fn u_start(args: u64) -> u64 {
     let _s0: u64 = schema
     sw = wlibc.screen_w()
     sh = wlibc.screen_h()
+    uiwallpaper.set_screen(sw, sh)
     let shb: u64 = sw * sh * 4
     let shp: u64 = wlibc.shm_buffer(shb)
     var shfd1: u64 = 0
@@ -838,8 +701,7 @@ fn u_start(args: u64) -> u64 {
         return 1
     }
     popup_host_start()
-    c_top = uitheme.theme(wlibc.C_DESKTOP_TOP)
-    c_bottom = uitheme.theme(wlibc.C_DESKTOP_BOTTOM)
+    uiwallpaper.set_colors(uitheme.theme(wlibc.C_DESKTOP_TOP), uitheme.theme(wlibc.C_DESKTOP_BOTTOM))
     var with_image: bool = false
     if !without_image {
         with_image = image_load((&s_wall[0 as usize]) as u64)
@@ -869,18 +731,18 @@ fn u_start(args: u64) -> u64 {
     nl()
     if with_image {
         say((&s_bi[0 as usize]) as u64)
-        sayn(bw)
+        sayn(uiwallpaper.image_w())
         say((&s_bh[0 as usize]) as u64)
-        sayn(bh)
+        sayn(uiwallpaper.image_h())
         say((&s_bq[0 as usize]) as u64)
         say((&s_wall[0 as usize]) as u64)
         say((&s_zu[0 as usize]) as u64)
         nl()
     } else {
         say((&s_vl[0 as usize]) as u64)
-        sayn(c_top)
+        sayn(uiwallpaper.top())
         say((&s_un[0 as usize]) as u64)
-        sayn(c_bottom)
+        sayn(uiwallpaper.bottom())
         nl()
     }
     // root desktop (no sign-in, tests): run the list here; a signed-in person's desktop cannot grant, glogin ran the list as root before
@@ -914,7 +776,7 @@ fn u_start(args: u64) -> u64 {
         say((&s_py[0 as usize]) as u64)
         sayn(py_)
         say((&s_pc[0 as usize]) as u64)
-        sayn(color_at(px_, py_))
+        sayn(uiwallpaper.color_at(px_, py_))
         nl()
         k = k + 1
     }
@@ -1054,8 +916,7 @@ fn u_start(args: u64) -> u64 {
             if wlibc.theme_poll() {
                 sum = wlibc.theme_sum()
                 schema = wlibc.theme_scheme_keys()
-                c_top = uitheme.theme(wlibc.C_DESKTOP_TOP)
-                c_bottom = uitheme.theme(wlibc.C_DESKTOP_BOTTOM)
+                uiwallpaper.set_colors(uitheme.theme(wlibc.C_DESKTOP_TOP), uitheme.theme(wlibc.C_DESKTOP_BOTTOM))
                 all_paint()
                 widgetboard.messen()
                 widgets_paint()
