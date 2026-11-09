@@ -22,7 +22,7 @@ grep -aq 'launcher: ready' "$S" && ok "launcher up" || bad "launcher up"
 grep -aq 'explorer: ready' "$S" && ok "start menu opened and Explorer started" || bad "start menu opened and Explorer started"
 n=$(grep -ac 'KERNEL STACK OVERFLOW' "$S")
 [ "$n" = 0 ] && ok "no KERNEL STACK OVERFLOW line" || { bad "KERNEL STACK OVERFLOW x$n"; grep -a 'KERNSTAPEL' "$S" | head -3; }
-frames=$(grep -oE '^const KSTACK_FRAMES: u64 = [0-9]+' kernel/sched/sched.fi | grep -oE '[0-9]+$')
+frames=$(grep -oE '^const KSTACK_FRAMES: u64 = [0-9]+' kernel/sched/taskconst.fi | grep -oE '[0-9]+$')
 cap=$((frames * 4096 - 16384))
 for root in _F0.sys__dispatch syscall_entry; do
   d=$(python3 -I tools/kstack/depth.py "$DESIGNBUILD/k0.mb.elf" "$root" | grep -oE '[0-9]+ octets' | grep -oE '^[0-9]+')

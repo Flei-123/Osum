@@ -110,8 +110,8 @@ fi
 
 echo
 echo "== 2. what the kernel learned for it =="
-grep -qE '^const IMAGE_END: u64 = 0x44400000' kernel/sched/proc.fi \
-    && ok "kernel/sched/proc.fi: IMAGE_END = 0x44400000 (the image window is 67 MiB)" \
+grep -qE '^const IMAGE_END: u64 = 0x44400000' kernel/sched/proc/procmap.fi \
+    && ok "kernel/sched/proc/procmap.fi: IMAGE_END = 0x44400000 (the image window is 67 MiB)" \
     || bad "IMAGE_END is not at 0x44400000"
 grep -qE '^const BIG_FLOOR: u64 = 0x44400000' kernel/sched/proc.fi \
     && ok "kernel/sched/proc.fi: BIG_FLOOR = 0x44400000 (the arena starts above)" \

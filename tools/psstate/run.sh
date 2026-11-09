@@ -12,9 +12,9 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 
 echo "== host: state names match the scheduler constants =="
-python3 -I tools/psstate/names.py kernel/sched/sched.fi kernel/user/taskstate.fi > "$T/names.txt" 2>&1 && ok "every S_* constant has its own name, only S_NEW is called new" || { bad "state names"; cat "$T/names.txt"; }
+python3 -I tools/psstate/names.py kernel/sched/taskconst.fi kernel/user/taskstate.fi > "$T/names.txt" 2>&1 && ok "every S_* constant has its own name, only S_NEW is called new" || { bad "state names"; cat "$T/names.txt"; }
 sed 's/poll   \\0/new    \\0/' kernel/user/taskstate.fi > "$T/taskstate_bad.fi"
-python3 -I tools/psstate/names.py kernel/sched/sched.fi "$T/taskstate_bad.fi" > /dev/null 2>&1 && bad "counter-proof: poll named new was not caught" || ok "counter-proof: poll named new is caught"
+python3 -I tools/psstate/names.py kernel/sched/taskconst.fi "$T/taskstate_bad.fi" > /dev/null 2>&1 && bad "counter-proof: poll named new was not caught" || ok "counter-proof: poll named new is caught"
 
 PROGS="init sh ps top sleep orientbus cat echo"
 bash tools/sync/build.sh "$T/bin" 0 $PROGS > "$T/b.txt" 2>&1 || { tail "$T/b.txt"; echo "PSSTATE: build failed"; exit 1; }
