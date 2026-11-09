@@ -16,6 +16,7 @@
 # OVL_LINKS         optional file of "<dest> /bin/<name>" lines: <dest> becomes a second name of the new /bin file.
 # FEED_KERNEL      optional: publish this osum.mb instead of building one (a kernel byte-identical to the
 #                   installed slot A makes the device apply the overlay live, without a trial boot).
+# DRY_OUT           optional dir: with --dry the signed stand (system/<channel> content) is copied there.
 # --dry             build + sign into a temp copy of the feed and verify, publish nothing.
 #
 # Steps: kernel via build-kernel.sh (--stufe 0) into a dir that holds ONLY osum.mb (a root.img there adds a
@@ -95,4 +96,5 @@ assert len(doc) < vz_max - 1, "VERZEICHNIS too large for the client buffer"
 PYEOF
 AFTER=$(sums)
 [ "$BEFORE" = "$AFTER" ] && echo "package feed unchanged ($AFTER)" || { echo "feed-dev: aktuell/v/pakete CHANGED ($BEFORE -> $AFTER)"; exit 1; }
+if [ "$DRY" = 1 ] && [ -n "${DRY_OUT:-}" ]; then mkdir -p "$DRY_OUT" && cp -a "$D/." "$DRY_OUT/"; fi
 [ "$DRY" = 1 ] && echo "(dry run, nothing published)" || echo "published: $(head -4 "$D/VERZEICHNIS" | tail -1 | cut -c1-80)"
