@@ -5,6 +5,7 @@ cd "$(dirname "$0")/../.."
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD" "$TMPD-build" "$TMPD-mut"' EXIT
 export DESIGNBUILD="$TMPD-build"
+export FIRNLIB="$(pwd)/lib"
 DIR="$(pwd)/tools/tabstrip"
 live_fail=0
 for scale in 1 2; do
