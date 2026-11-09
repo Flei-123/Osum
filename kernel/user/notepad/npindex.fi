@@ -1,0 +1,223 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import libc.octets
+import libc.text
+import services.svcosum
+import services.svcrules
+import npstr
+
+export {
+    pad_index_load, pad_index_store, pad_index_add, pad_index_drop, pad_index_retitle,
+    pad_index_id, pad_index_rows, pad_index_blob, pad_index_next_id, pad_index_title,
+    PAD_INDEX_MAX,
+}
+
+const PAD_INDEX_MAX: u64 = 32
+const TITLE_CAP: u64 = 48
+const WIRE_CAP: u64 = 2048
+const NEWLINE: u64 = 10
+const CARRIAGE: u64 = 13
+const SPACE: u64 = 32
+const ZERO_DIGIT: u64 = 48
+const CONT_MASK: u64 = 192
+const CONT_BITS: u64 = 128
+const RESULT_BYTES: u64 = 8
+
+static mut idx_ids: [u64; 32] = [0 as u64; 32]
+static mut idx_titles: [u8; 1536] = [0 as u8; 1536]
+static mut idx_blob: [u8; 1664] = [0 as u8; 1664]
+static mut idx_wire: [u8; 2048] = [0 as u8; 2048]
+static mut idx_result: [u8; 8] = [0 as u8; 8]
+static mut idx_rows: u64 = 0
+
+fn wire_ptr() -> u64 {
+    return (&idx_wire[0 as usize]) as u64
+}
+
+fn result_ptr() -> u64 {
+    return (&idx_result[0 as usize]) as u64
+}
+
+fn pad_index_blob() -> u64 {
+    return (&idx_blob[0 as usize]) as u64
+}
+
+fn pad_index_rows() -> u64 {
+    return idx_rows
+}
+
+fn pad_index_id(row: u64) -> u64 {
+    if row >= idx_rows {
+        return 0
+    }
+    return idx_ids[(row) as usize]
+}
+
+fn pad_index_title(row: u64) -> u64 {
+    return (&idx_titles[0 as usize]) as u64 + row * TITLE_CAP
+}
+
+fn rebuild_blob() {
+    var at: u64 = 0
+    var row: u64 = 0
+    while row < idx_rows {
+        let n: u64 = text.length(pad_index_title(row))
+        octets.copy(pad_index_blob() + at, pad_index_title(row), n)
+        octets.st8(pad_index_blob(), at + n, NEWLINE)
+        at = at + n + 1
+        row = row + 1
+    }
+    octets.st8(pad_index_blob(), at, 0)
+}
+
+fn fit_title(p: u64, n: u64) -> u64 {
+    var take: u64 = n
+    if take > TITLE_CAP - 1 {
+        take = TITLE_CAP - 1
+    }
+    while take > 0 && take < n && (octets.ld8(p, take) & CONT_MASK) == CONT_BITS {
+        take = take - 1
+    }
+    return take
+}
+
+fn line_end(p: u64, n: u64) -> u64 {
+    var at: u64 = 0
+    while at < n {
+        let c: u64 = octets.ld8(p, at)
+        if c == NEWLINE || c == CARRIAGE {
+            return at
+        }
+        at = at + 1
+    }
+    return n
+}
+
+fn put_title(row: u64, p: u64, n: u64) {
+    let slot: u64 = pad_index_title(row)
+    octets.zero(slot, TITLE_CAP)
+    let take: u64 = fit_title(p, n)
+    if take == 0 {
+        octets.copy(slot, npstr.pad_untitled(), fit_title(npstr.pad_untitled(), text.length(npstr.pad_untitled())))
+        return
+    }
+    octets.copy(slot, p, take)
+}
+
+fn pad_index_retitle(row: u64, p: u64, n: u64) {
+    if row >= idx_rows {
+        return
+    }
+    put_title(row, p, line_end(p, n))
+    rebuild_blob()
+}
+
+fn pad_index_next_id() -> u64 {
+    var best: u64 = 0
+    var row: u64 = 0
+    while row < idx_rows {
+        if idx_ids[(row) as usize] > best {
+            best = idx_ids[(row) as usize]
+        }
+        row = row + 1
+    }
+    return best + 1
+}
+
+fn pad_index_add(id: u64) -> u64 {
+    if idx_rows >= PAD_INDEX_MAX {
+        return PAD_INDEX_MAX
+    }
+    let row: u64 = idx_rows
+    idx_ids[(row) as usize] = id
+    idx_rows = idx_rows + 1
+    put_title(row, 0, 0)
+    rebuild_blob()
+    return row
+}
+
+fn pad_index_drop(row: u64) {
+    if row >= idx_rows {
+        return
+    }
+    var at: u64 = row
+    while at + 1 < idx_rows {
+        idx_ids[(at) as usize] = idx_ids[(at + 1) as usize]
+        octets.copy(pad_index_title(at), pad_index_title(at + 1), TITLE_CAP)
+        at = at + 1
+    }
+    idx_rows = idx_rows - 1
+    octets.zero(pad_index_title(idx_rows), TITLE_CAP)
+    idx_ids[(idx_rows) as usize] = 0
+    rebuild_blob()
+}
+
+fn parse_line(start: u64, n: u64) -> u64 {
+    var at: u64 = start
+    var id: u64 = 0
+    while at < n && text.is_digit(octets.ld8(wire_ptr(), at)) {
+        id = id * 10 + octets.ld8(wire_ptr(), at) - ZERO_DIGIT
+        at = at + 1
+    }
+    if at < n && octets.ld8(wire_ptr(), at) == SPACE {
+        at = at + 1
+    }
+    let first: u64 = at
+    while at < n && octets.ld8(wire_ptr(), at) != NEWLINE {
+        at = at + 1
+    }
+    if id > 0 {
+        idx_ids[(idx_rows) as usize] = id
+        put_title(idx_rows, wire_ptr() + first, at - first)
+        idx_rows = idx_rows + 1
+    }
+    if at < n {
+        at = at + 1
+    }
+    return at
+}
+
+fn pad_index_load() -> u64 {
+    idx_rows = 0
+    octets.zero(wire_ptr(), WIRE_CAP)
+    octets.zero(result_ptr(), RESULT_BYTES)
+    let key: u64 = npstr.pad_index_key()
+    let status: u64 = svcosum.store_get(key, text.length(key), wire_ptr(), WIRE_CAP - 1, result_ptr())
+    if status != svcrules.OK {
+        rebuild_blob()
+        return status
+    }
+    let n: u64 = octets.le32(result_ptr())
+    var at: u64 = 0
+    while at < n && idx_rows < PAD_INDEX_MAX {
+        at = parse_line(at, n)
+    }
+    rebuild_blob()
+    return svcrules.OK
+}
+
+fn put_number(at: u64, value: u64) -> u64 {
+    var digits: [u8; 26] = [0 as u8; 26]
+    let ptr: u64 = (&digits[0 as usize]) as u64
+    let n: u64 = text.digits(value, ptr, false)
+    octets.copy(wire_ptr() + at, ptr, n)
+    return at + n
+}
+
+fn pad_index_store() -> u64 {
+    octets.zero(wire_ptr(), WIRE_CAP)
+    var at: u64 = 0
+    var row: u64 = 0
+    while row < idx_rows {
+        at = put_number(at, idx_ids[(row) as usize])
+        octets.st8(wire_ptr(), at, SPACE)
+        let n: u64 = text.length(pad_index_title(row))
+        octets.copy(wire_ptr() + at + 1, pad_index_title(row), n)
+        octets.st8(wire_ptr(), at + 1 + n, NEWLINE)
+        at = at + n + 2
+        row = row + 1
+    }
+    let key: u64 = npstr.pad_index_key()
+    return svcosum.store_set(key, text.length(key), wire_ptr(), at)
+}
