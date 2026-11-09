@@ -74,7 +74,7 @@ todo = ['hostui', 'ulib', 'hoststart', 'apphost']
 seen = set(todo)
 MOVED = ('uiscale', 'uitext', 'uiicon', 'uidraw', 'uiglyph', 'uitextat', 'uisys', 'svcclip', 'svcnoti', 'svcbus')
 def sources(name):
-    paths = [os.path.join(bau, name + '.fi')]
+    paths = [p for p in [os.path.join(bau, name + '.fi')] if os.path.exists(p)]
     if name in ('hostui', 'uitheme'):
         d = os.path.join(bau, name)
         paths += [os.path.join(d, f) for f in sorted(os.listdir(d)) if f.endswith('.fi')]
