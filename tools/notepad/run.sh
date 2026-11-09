@@ -86,6 +86,9 @@ mutant noconfirm kernel/user/notepad/npactions.fi 's/(status == svcrules.OK \&\&
     delete_cancel
 mutant noautosave kernel/user/notepad/npactions.fi '/^fn pad_autosave/,/^}/ s/if !npdoc.pad_is_dirty() {/if true {/' \
     autosave
+use_scale 2
+mutant norowh kernel/user/notepad.fi '/table_row_height(npdoc.PAD_K_LIST/d' \
+    list_row_scaled
 
 echo "NOTEPAD: $pass passed, $fail failed"
 [ "$fail" = 0 ]
