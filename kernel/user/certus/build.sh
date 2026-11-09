@@ -67,7 +67,7 @@ cp -r "$ROOT/kernel/user/fuiapp/wlib" "$ROOT/kernel/user/wlibc" "$ROOT/kernel/us
 cp "$ROOT/kernel/user/fuiapp/hostwinp.fi" "$ROOT/kernel/user/fuiapp/hostax.fi" "$ROOT/kernel/user/fuiapp/hosthead.fi" \
    "$ROOT/kernel/user/fuiapp/hostwin.fi" "$ROOT/kernel/user/fuiapp/hoststart.fi" \
    "$ROOT/kernel/user/fuiapp/apphost.fi" "$ROOT/kernel/user/fuiapp/hostkey.fi" "$ROOT/kernel/user/fuiapp/hostflags.fi" "$BAU/"
-sed -i -E 's/^import fuiapp\.(wlib(\.[a-z]+)?)$/import \1/' "$BAU/wlib.fi" "$BAU"/wlib/*.fi
+sed -i -E 's/^import fuiapp\.(wlib(\.[a-z]+)?)$/import \1/' "$BAU/wlib.fi" "$BAU/apphost.fi" "$BAU"/wlib/*.fi
 python3 - "$ROOT" "$BAU" <<'PYEOF'
 import os, re, shutil, sys
 root, bau = sys.argv[1], sys.argv[2]
