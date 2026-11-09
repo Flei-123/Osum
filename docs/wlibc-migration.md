@@ -49,8 +49,8 @@ jarvismini 56, a11ydemo 54, fuib 52, notifc 50. All others <= 50.
    `type_px/lh/base`, `snap`, `snap_up`, `space`, `radius`, `shape_*`, `transparency`, `win_alpha*`, `win_round`, `aa_old`,
    `elev_*`, `grid`, `hit_min`, `motion`, `shade`, `grad_room`) in `uitheme`; 32 files read them from `uitheme`; `freunde`
    and `widgetboard` drop `import wlibc`. wlibc ratchet added (73 files, score 1673).
-2. **Scale**: new `uiscale.fi` with `ui_scale`, `px_ui`, `px_ui_at`, `win_scale_pct` (bodies from `wcpaint`/`wcgfx`);
-   wlibc forwards; 33 files switch (sed + gate). Smallest, highest-ref group (181).
+2. **DONE** Scale: `uiscale.fi` (leaf, imports only `ulib`) owns `ui_scale`, `px_ui`, `px_ui_at`, `win_scale_pct`, `PX_UI0`;
+   wlibc no longer exports them (no forwards: Certus does not use them); 38 files switch; wlibc ratchet 74 -> 72 files, score 1673 -> 1490.
 3. **Window protocol constants** to `fuiapp/hostwinp.fi`; wlibc forwards; 40 files switch.
 4. **Text metrics**: `text_w/text_h/ascent_of/F_*/ink_*` into a `uitext` module (bodies from `wcgfx`/`wcpaint`); controls in
    `fscore` keep calling it; apps move to `fuiscene` labels where they only measure for layout.
