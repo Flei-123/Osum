@@ -1,27 +1,4 @@
 
-import serial
-import arch.arch
-import lib.kstate
-import mm.mmframe
-import mm.mmswap
-import sync.atomic
-import acpi.acpi
-import sched.sched
-import sched.taskconst
-import sched.taskslot
-import ipc.uio
-import arch.x86_64.user
-import fs.file
-import fs.unixsock
-import fs.fs
-import mm.fileshare
-import libc.octets
-import ipc.handle
-import ipc.cap
-import bus.bus
-import bus.slots
-import sched.ctr
-import ui.ax
 
 export {
     create, user_start, free_space, space_pages, reap, translate, user_ok,
@@ -38,2185 +15,254 @@ export {
     frame_count, frame_at,
     frame_virt_at, space_build_empty, map_restored
 }
+import sched.proc.procbase
+import sched.proc.proccopy
+import sched.proc.procfault
+import sched.proc.procmap
+import sched.proc.procpt
+import sched.proc.procspace
+import sched.proc.procswap
 
-const PAGE_PRESENT: u64 = 1
-const PAGE_WRITE: u64 = 2
-const PAGE_USER: u64 = 4
-const PAGE_SHARED: u64 = 512
-const PAGE_PCACHE: u64 = 0x20000000000000
-const ADDR_MASK: u64 = 0x000FFFFFFFFFF000
-
-const USER_DATA: u64 = 0x40000000
 const USER_STACK: u64 = 0x40001000
-const STACK_PAGES: u64 = 8
-const USER_TOP: u64 = 0x40009000
-const USER_SPAN: u64 = 0x00200000
 
-const IMAGE_BASE: u64 = 0x40100000
-const IMAGE_END: u64 = 0x44400000
-
-const MAIN_SLOTS: u64 = 475
-const LAZY_BASE: u64 = 0x80000000
-const LAZY_ATOP: u64 = 0x200000000
-const LAZY_TOP: u64 = 0x1000000000
-const PRIV_SLOTS: u64 = 32256
-const PAGE_LAZY: u64 = 0x400
-const PAGE_LAZYX: u64 = 0x800
-const PAGE_LAZYF: u64 = 0x200
-const LAZYF_KEEP: u64 = 0x000FFFFFFFFFF200
-const LAZYF_MAX: u64 = 0x100000
-const SHM_ARENA_BASE: u64 = 0x53600000
-const SHM_ARENA_TOP: u64 = 0x7B600000
 const BIG_TOP: u64 = 0x52C00000
+
 const BIG_FLOOR: u64 = 0x44400000
-const ARGS_BASE: u64 = 0x535FF000
-const ARGS_LOW: u64 = 0x4007F000
-const STACK_HIGH_FLOOR: u64 = 0x52C01000
-const STACK_FLOOR: u64 = 0x40001000
+
 const MAX_ARGS: u64 = 64
 
-const PAGE_NX: u64 = 0x8000000000000000
-
-const PAGE_HUGE: u64 = 0x80
-const HUGE_SIZE: u64 = 0x200000
-
-const V_ENTER_TASK: u64 = 56
-const V_USER_MAIN: u64 = 58
-const V_USER_START: u64 = 63
-const V_USER_RESUME: u64 = 64
-
-const ARG_RESUME: u64 = 0xF04B
-
-fn vector(state: u64, i: u64) -> u64 {
-    return __mmio_read64((kstate.get(state, kstate.VECTORS) + i * 8) as *mut u64)
-}
-
-fn nx(state: u64) -> u64 {
-    if kstate.get(state, kstate.NX_OK) != 0 {
-        return PAGE_NX
-    }
-    return 0
-}
-
-fn read_entry(table: u64, i: u64) -> u64 {
-    return __mmio_read64((table + i * 8) as *mut u64)
-}
-
-fn write_entry(table: u64, i: u64, v: u64) {
-    __mmio_write64((table + i * 8) as *mut u64, v)
-}
-
-fn zero_frame(frame: u64) {
-    arch.fill_words(mmframe.kva(frame), 0, mmframe.FRAME_SIZE / 8)
-}
-
-fn map_programs(state: u64) -> u64 {
-    let begin: u64 = vector(state, 59)
-    let end: u64 = vector(state, 60)
-    var p: u64 = begin & 0xFFFFFFFFFFFFF000
-    var n: u64 = 0
-    var kachel: u64 = p & 0xFFFFFFFFFFE00000
-    var page_table: u64 = state + kstate.PT_OFF
-    while p < end {
-        if (p & 0xFFFFFFFFFFE00000) != kachel {
-            kachel = p & 0xFFFFFFFFFFE00000
-            page_table = mmframe.frame_alloc(state)
-            if page_table == 0 {
-                return 0
-            }
-        }
-        if !user.map_user_pt(state, p, false, page_table) {
-            return 0
-        }
-        n = n + 1
-        p = p + mmframe.FRAME_SIZE
-    }
-    return n
-}
-
-
-fn space_build(state: u64, i: u64) -> u64 {
-    let pml4: u64 = mmframe.frame_alloc(state)
-    let pdpt: u64 = mmframe.frame_alloc(state)
-    let pd: u64 = mmframe.frame_alloc(state)
-    let pt: u64 = mmframe.frame_alloc(state)
-    let data: u64 = mmframe.frame_alloc(state)
-    if pml4 == 0 || pdpt == 0 || pd == 0 || pt == 0 || data == 0 {
-        return 0
-    }
-    zero_frame(pml4)
-    zero_frame(pdpt)
-    zero_frame(pd)
-    zero_frame(pt)
-    zero_frame(data)
-
-    let kpml4: u64 = kstate.get(state, kstate.KPML4)
-    let kpdpt: u64 = read_entry(kpml4, 0) & ADDR_MASK
-    write_entry(pdpt, 0, read_entry(kpdpt, 0) | PAGE_USER)
-    acpi.only_first_give()
-    write_entry(pml4, mmframe.DM_SLOT, read_entry(kpml4, mmframe.DM_SLOT))
-
-    write_entry(pml4, 0, pdpt | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
-    write_entry(pdpt, 1, pd | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
-    write_entry(pd, 0, pt | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
-    write_entry(pt, 0, data | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | nx(state))
-    var k: u64 = 0
-    while k < STACK_PAGES {
-        let f: u64 = mmframe.frame_alloc(state)
-        if f == 0 {
-            return 0
-        }
-        zero_frame(f)
-        write_entry(pt, 1 + k,
-            f | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | nx(state))
-        k = k + 1
-    }
-
-    taskslot.tset(state, i, taskconst.T_PDPT, pdpt)
-    taskslot.tset(state, i, taskconst.T_PD, pd)
-    taskslot.tset(state, i, taskconst.T_PT, pt)
-    taskslot.tset(state, i, taskconst.T_DATA, data)
-    return pml4
-}
-
-fn free_pt(state: u64, pt: u64) -> u64 {
-    var freed: u64 = 0
-    var k: u64 = 0
-    while k < 512 {
-        k = k + arch.zero_run(pt + k * 8, 512 - k)
-        if k >= 512 {
-            break
-        }
-        let e: u64 = read_entry(pt, k)
-        if (e & PAGE_PRESENT) != 0 {
-            if (e & PAGE_SHARED) == 0 {
-                mmframe.frame_free(state, e & ADDR_MASK)
-                freed = freed + 1
-            }
-        } else if is_swap_entry(e) {
-            mmswap.release(state, swap_slot_of(e))
-        }
-        k = k + 1
-    }
-    mmframe.frame_free(state, pt)
-    return freed + 1
-}
-
-fn free_space(state: u64, i: u64) -> u64 {
-    let pml4: u64 = taskslot.tget(state, i, taskconst.T_CR3)
-    if pml4 == 0 || pml4 == kstate.get(state, kstate.KPML4) {
-        return 0
-    }
-    if taskslot.tget(state, i, taskconst.T_SHARED) != 0 {
-        taskslot.tset(state, i, taskconst.T_CR3, 0)
-        taskslot.tset(state, i, taskconst.T_PT, 0)
-        taskslot.tset(state, i, taskconst.T_PD, 0)
-        taskslot.tset(state, i, taskconst.T_PDPT, 0)
-        taskslot.tset(state, i, taskconst.T_DATA, 0)
-        return 0
-    }
-    var freed: u64 = 0
-    let pt: u64 = taskslot.tget(state, i, taskconst.T_PT)
-    if pt != 0 {
-        freed = freed + free_pt(state, pt)
-    }
-    let pd: u64 = taskslot.tget(state, i, taskconst.T_PD)
-    if pd != 0 {
-        var k: u64 = 1
-        while k < MAIN_SLOTS {
-            k = k + arch.zero_run(pd + k * 8, MAIN_SLOTS - k)
-            if k >= MAIN_SLOTS {
-                break
-            }
-            let e: u64 = read_entry(pd, k)
-            if (e & PAGE_PRESENT) != 0 {
-                if (e & PAGE_HUGE) == 0 {
-                    freed = freed + free_pt(state, e & ADDR_MASK)
-                }
-                write_entry(pd, k, 0)
-            }
-            k = k + 1
-        }
-        mmframe.frame_free(state, pd)
-        freed = freed + 1
-    }
-    let pdpt: u64 = taskslot.tget(state, i, taskconst.T_PDPT)
-    if pdpt != 0 {
-        var j: u64 = 2
-        while j <= 63 {
-            let e2: u64 = read_entry(pdpt, j)
-            if (e2 & PAGE_PRESENT) != 0 {
-                let pdx: u64 = e2 & ADDR_MASK
-                var q: u64 = 0
-                while q < 512 {
-                    q = q + arch.zero_run(pdx + q * 8, 512 - q)
-                    if q >= 512 {
-                        break
-                    }
-                    let eq: u64 = read_entry(pdx, q)
-                    if (eq & PAGE_PRESENT) != 0 && (eq & PAGE_HUGE) == 0 {
-                        freed = freed + free_pt(state, eq & ADDR_MASK)
-                    }
-                    q = q + 1
-                }
-                mmframe.frame_free(state, pdx)
-                freed = freed + 1
-                write_entry(pdpt, j, 0)
-            }
-            j = j + 1
-        }
-        mmframe.frame_free(state, pdpt)
-        freed = freed + 1
-    }
-    mmframe.frame_free(state, pml4)
-    freed = freed + 1
-    ctr.mem_uncharge(state, ctr.ctr_of(state, i), freed)
-    taskslot.tset(state, i, taskconst.T_CR3, 0)
-    taskslot.tset(state, i, taskconst.T_PT, 0)
-    taskslot.tset(state, i, taskconst.T_PD, 0)
-    taskslot.tset(state, i, taskconst.T_PDPT, 0)
-    taskslot.tset(state, i, taskconst.T_DATA, 0)
-    return freed
-}
-
-fn space_pages(state: u64, i: u64) -> u64 {
-    let pml4: u64 = taskslot.tget(state, i, taskconst.T_CR3)
-    if pml4 == 0 || pml4 == kstate.get(state, kstate.KPML4) {
-        return 0
-    }
-    var n: u64 = 1
-    if taskslot.tget(state, i, taskconst.T_PDPT) != 0 {
-        n = n + 1
-    }
-    let pd: u64 = taskslot.tget(state, i, taskconst.T_PD)
-    if pd != 0 {
-        n = n + 1
-        var k: u64 = 1
-        while k < MAIN_SLOTS {
-            let e: u64 = read_entry(pd, k)
-            if (e & PAGE_PRESENT) != 0 && (e & PAGE_HUGE) == 0 {
-                n = n + count_pt(e & ADDR_MASK)
-            }
-            k = k + 1
-        }
-    }
-    let pt: u64 = taskslot.tget(state, i, taskconst.T_PT)
-    if pt != 0 {
-        n = n + count_pt(pt)
-    }
-    return n
-}
-
-fn count_pt(pt: u64) -> u64 {
-    var n: u64 = 1
-    var k: u64 = 0
-    while k < 512 {
-        if (read_entry(pt, k) & PAGE_PRESENT) != 0 {
-            n = n + 1
-        }
-        k = k + 1
-    }
-    return n
-}
-
-fn pt_data_count(pt: u64) -> u64 {
-    var n: u64 = 0
-    var k: u64 = 0
-    while k < 512 {
-        let e: u64 = read_entry(pt, k)
-        if (e & PAGE_PRESENT) != 0 && (e & PAGE_SHARED) == 0 {
-            n = n + 1
-        }
-        k = k + 1
-    }
-    return n
-}
-
-fn pt_data_nth(pt: u64, want: u64, vor: u64) -> u64 {
-    var n: u64 = vor
-    var k: u64 = 0
-    while k < 512 {
-        let e: u64 = read_entry(pt, k)
-        if (e & PAGE_PRESENT) != 0 && (e & PAGE_SHARED) == 0 {
-            if n == want {
-                return e & ADDR_MASK
-            }
-            n = n + 1
-        }
-        k = k + 1
-    }
-    return 0
-}
-
-fn frame_count(state: u64, i: u64) -> u64 {
-    let pml4: u64 = taskslot.tget(state, i, taskconst.T_CR3)
-    if pml4 == 0 || pml4 == kstate.get(state, kstate.KPML4) {
-        return 0
-    }
-    var n: u64 = 0
-    let pt0: u64 = taskslot.tget(state, i, taskconst.T_PT)
-    if pt0 != 0 {
-        n = n + pt_data_count(pt0)
-    }
-    let pd: u64 = taskslot.tget(state, i, taskconst.T_PD)
-    if pd != 0 {
-        var k: u64 = 1
-        while k < MAIN_SLOTS {
-            let e: u64 = read_entry(pd, k)
-            if (e & PAGE_PRESENT) != 0 && (e & PAGE_HUGE) == 0 {
-                n = n + pt_data_count(e & ADDR_MASK)
-            }
-            k = k + 1
-        }
-    }
-    return n
-}
-
-fn frame_at(state: u64, i: u64, want: u64) -> u64 {
-    let pml4: u64 = taskslot.tget(state, i, taskconst.T_CR3)
-    if pml4 == 0 || pml4 == kstate.get(state, kstate.KPML4) {
-        return 0
-    }
-    var vor: u64 = 0
-    let pt0: u64 = taskslot.tget(state, i, taskconst.T_PT)
-    if pt0 != 0 {
-        let c: u64 = pt_data_count(pt0)
-        if want < vor + c {
-            return pt_data_nth(pt0, want, vor)
-        }
-        vor = vor + c
-    }
-    let pd: u64 = taskslot.tget(state, i, taskconst.T_PD)
-    if pd != 0 {
-        var k: u64 = 1
-        while k < MAIN_SLOTS {
-            let e: u64 = read_entry(pd, k)
-            if (e & PAGE_PRESENT) != 0 && (e & PAGE_HUGE) == 0 {
-                let t: u64 = e & ADDR_MASK
-                let c: u64 = pt_data_count(t)
-                if want < vor + c {
-                    return pt_data_nth(t, want, vor)
-                }
-                vor = vor + c
-            }
-            k = k + 1
-        }
-    }
-    return 0
-}
-
-fn pt_data_virt_nth(pt: u64, want: u64, vor: u64, basis: u64) -> u64 {
-    var n: u64 = vor
-    var k: u64 = 0
-    while k < 512 {
-        let e: u64 = read_entry(pt, k)
-        if (e & PAGE_PRESENT) != 0 && (e & PAGE_SHARED) == 0 {
-            if n == want {
-                return basis + k * mmframe.FRAME_SIZE
-            }
-            n = n + 1
-        }
-        k = k + 1
-    }
-    return 0
-}
-
-fn frame_virt_at(state: u64, i: u64, want: u64) -> u64 {
-    let pml4: u64 = taskslot.tget(state, i, taskconst.T_CR3)
-    if pml4 == 0 || pml4 == kstate.get(state, kstate.KPML4) {
-        return 0
-    }
-    var vor: u64 = 0
-    let pt0: u64 = taskslot.tget(state, i, taskconst.T_PT)
-    if pt0 != 0 {
-        let c: u64 = pt_data_count(pt0)
-        if want < vor + c {
-            return pt_data_virt_nth(pt0, want, vor, USER_DATA)
-        }
-        vor = vor + c
-    }
-    let pd: u64 = taskslot.tget(state, i, taskconst.T_PD)
-    if pd != 0 {
-        var k: u64 = 1
-        while k < MAIN_SLOTS {
-            let e: u64 = read_entry(pd, k)
-            if (e & PAGE_PRESENT) != 0 && (e & PAGE_HUGE) == 0 {
-                let t: u64 = e & ADDR_MASK
-                let c: u64 = pt_data_count(t)
-                if want < vor + c {
-                    return pt_data_virt_nth(t, want, vor,
-                        USER_DATA + k * USER_SPAN)
-                }
-                vor = vor + c
-            }
-            k = k + 1
-        }
-    }
-    return 0
-}
-
-fn space_build_empty(state: u64, i: u64) -> u64 {
-    let pml4: u64 = mmframe.frame_alloc(state)
-    let pdpt: u64 = mmframe.frame_alloc(state)
-    let pd: u64 = mmframe.frame_alloc(state)
-    let pt: u64 = mmframe.frame_alloc(state)
-    if pml4 == 0 || pdpt == 0 || pd == 0 || pt == 0 {
-        return 0
-    }
-    zero_frame(pml4)
-    zero_frame(pdpt)
-    zero_frame(pd)
-    zero_frame(pt)
-    let kpml4: u64 = kstate.get(state, kstate.KPML4)
-    let kpdpt: u64 = read_entry(kpml4, 0) & ADDR_MASK
-    write_entry(pdpt, 0, read_entry(kpdpt, 0) | PAGE_USER)
-    acpi.only_first_give()
-    write_entry(pml4, mmframe.DM_SLOT, read_entry(kpml4, mmframe.DM_SLOT))
-    write_entry(pml4, 0, pdpt | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
-    write_entry(pdpt, 1, pd | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
-    write_entry(pd, 0, pt | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
-    taskslot.tset(state, i, taskconst.T_PDPT, pdpt)
-    taskslot.tset(state, i, taskconst.T_PD, pd)
-    taskslot.tset(state, i, taskconst.T_PT, pt)
-    return pml4
-}
-
-fn map_restored(state: u64, i: u64, addr: u64, frame: u64) -> bool {
-    let sl: u64 = pt_slot(addr)
-    if sl >= 512 {
-        return false
-    }
-    let pt: u64 = pt_for(state, i, addr, true)
-    if pt == 0 {
-        return false
-    }
-    if (read_entry(pt, sl) & PAGE_PRESENT) != 0 {
-        return false
-    }
-    write_entry(pt, sl,
-        (frame & ADDR_MASK) | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | nx(state))
-    return true
-}
-
-fn reap_group_corpses(state: u64, leader: u64) {
-    let g: u64 = sched.group_of(state, leader)
-    let n: u64 = kstate.get(state, kstate.TASKS)
-    var j: u64 = 0
-    while j < n {
-        if j != leader && taskslot.tget(state, j, taskconst.T_KIND) == taskconst.K_USER
-            && taskslot.tget(state, j, taskconst.T_TGID) == g
-            && taskslot.tget(state, j, taskconst.T_STATE) == taskconst.S_ZOMBIE {
-            let _r: bool = reap(state, j)
-        }
-        j = j + 1
-    }
-}
-
-fn reap(state: u64, i: u64) -> bool {
-    if taskslot.tget(state, i, taskconst.T_SHARED) == 0 && sched.group_live(state, i) {
-        return false
-    }
-    if !sched.claim_zombie(state, i) {
-        return false
-    }
-    if taskslot.tget(state, i, taskconst.T_SHARED) == 0 {
-        reap_group_corpses(state, i)
-    }
-    file.close_all(state, i)
-    bus.forget_task(state, i, taskslot.tget(state, i, taskconst.T_PID))
-    slots.forget_task(state, taskslot.tget(state, i, taskconst.T_PID))
-    ax.clear_task(state, i)
-    free_space(state, i)
-    return sched.reap_claimed(state, i)
-}
-
-fn map_frame(state: u64, i: u64, addr: u64, frame: u64,
-    writable: bool) -> bool {
-    let s: u64 = pt_slot(addr)
-    if s >= 512 {
-        return false
-    }
-    let pt: u64 = pt_for(state, i, addr, true)
-    if pt == 0 {
-        return false
-    }
-    if (read_entry(pt, s) & PAGE_PRESENT) != 0 {
-        return false
-    }
-    var bits: u64 = PAGE_PRESENT | PAGE_USER | PAGE_SHARED | nx(state)
-    if writable {
-        bits = bits | PAGE_WRITE
-    }
-    write_entry(pt, s, (frame & ADDR_MASK) | bits)
-    return true
-}
-
-fn inherit(state: u64, parent: u64, child: u64) -> bool {
-    if taskslot.tget(state, parent, taskconst.T_KIND) != taskconst.K_USER {
-        return false
-    }
-    let src: u64 = taskslot.tget(state, parent, taskconst.T_DATA)
-    let dst: u64 = taskslot.tget(state, child, taskconst.T_DATA)
-    if src == 0 || dst == 0 {
-        return false
-    }
-    var i: u64 = 0
-    while i < mmframe.FRAME_SIZE / 8 {
-        __mmio_write64((dst + i * 8) as *mut u64,
-            __mmio_read64((src + i * 8) as *mut u64))
-        i = i + 1
-    }
-    return true
-}
-
-
-fn pt_slot(addr: u64) -> u64 {
-    if addr < USER_DATA {
-        return 512
-    }
-    if addr >= USER_DATA + USER_SPAN * PRIV_SLOTS {
-        return 512
-    }
-    return ((addr - USER_DATA) >> 12) & 511
-}
-
-fn pd_slot(addr: u64) -> u64 {
-    if addr < USER_DATA {
-        return PRIV_SLOTS
-    }
-    if addr >= USER_DATA + USER_SPAN * PRIV_SLOTS {
-        return PRIV_SLOTS
-    }
-    return (addr - USER_DATA) >> 21
-}
-
-fn pt_for(state: u64, i: u64, addr: u64, allocate: bool) -> u64 {
-    let k: u64 = pd_slot(addr)
-    if k >= PRIV_SLOTS {
-        return 0
-    }
-    if k == 0 {
-        return taskslot.tget(state, i, taskconst.T_PT)
-    }
-    var pd: u64 = taskslot.tget(state, i, taskconst.T_PD)
-    var idx: u64 = k
-    if k >= 512 {
-        let pdpt: u64 = taskslot.tget(state, i, taskconst.T_PDPT)
-        if pdpt == 0 {
-            return 0
-        }
-        let pe: u64 = read_entry(pdpt, 1 + (k >> 9))
-        if (pe & PAGE_PRESENT) != 0 {
-            pd = pe & ADDR_MASK
-        } else {
-            if !allocate {
-                return 0
-            }
-            let nf: u64 = mmframe.frame_alloc(state)
-            if nf == 0 {
-                return 0
-            }
-            zero_frame(nf)
-            write_entry(pdpt, 1 + (k >> 9), nf | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
-            pd = nf
-        }
-        idx = k & 511
-    }
-    if pd == 0 {
-        return 0
-    }
-    let e: u64 = read_entry(pd, idx)
-    if (e & PAGE_PRESENT) != 0 {
-        if (e & PAGE_HUGE) != 0 {
-            return 0
-        }
-        return e & ADDR_MASK
-    }
-    if !allocate {
-        return 0
-    }
-    let f: u64 = mmframe.frame_alloc(state)
-    if f == 0 {
-        return 0
-    }
-    zero_frame(f)
-    write_entry(pd, idx, f | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
-    return f
-}
-
-fn page_free(state: u64, i: u64, addr: u64) -> bool {
-    let s: u64 = pt_slot(addr)
-    if s >= 512 {
-        return false
-    }
-    let pt: u64 = pt_for(state, i, addr, false)
-    if pt == 0 {
-        return pd_slot(addr) < PRIV_SLOTS
-    }
-    return (read_entry(pt, s) & (PAGE_PRESENT | PAGE_LAZY)) == 0
-}
-
-fn page_taken(state: u64, i: u64, addr: u64) -> bool {
-    let s: u64 = pt_slot(addr)
-    if s >= 512 {
-        return true
-    }
-    let pt: u64 = pt_for(state, i, addr, false)
-    if pt == 0 {
-        return false
-    }
-    return read_entry(pt, s) != 0
-}
-
-fn lazy_bits(readable: bool, writable: bool, runnable: bool) -> u64 {
-    var b: u64 = PAGE_LAZY
-    if readable || writable || runnable {
-        b = b | PAGE_USER
-    }
-    if writable {
-        b = b | PAGE_WRITE
-    }
-    if runnable {
-        b = b | PAGE_LAZYX
-    }
-    return b
-}
-
-fn lazy_mark(state: u64, i: u64, addr: u64, readable: bool, writable: bool, runnable: bool) -> bool {
-    if addr < LAZY_BASE || addr >= LAZY_TOP {
-        return false
-    }
-    let s: u64 = pt_slot(addr)
-    let pt: u64 = pt_for(state, i, addr, true)
-    if pt == 0 {
-        return false
-    }
-    if read_entry(pt, s) != 0 {
-        return false
-    }
-    write_entry(pt, s, lazy_bits(readable, writable, runnable))
-    return true
-}
-
-fn lazy_zone(addr: u64) -> bool {
-    if addr >= LAZY_BASE && addr < LAZY_TOP {
-        return true
-    }
-    return addr >= IMAGE_BASE && addr < IMAGE_END
-}
-
-fn lazy_mark_image(state: u64, i: u64, addr: u64, writable: bool, runnable: bool) -> bool {
-    if addr < IMAGE_BASE || addr >= IMAGE_END {
-        return false
-    }
-    let s: u64 = pt_slot(addr)
-    let pt: u64 = pt_for(state, i, addr, true)
-    if pt == 0 {
-        return false
-    }
-    if read_entry(pt, s) != 0 {
-        return false
-    }
-    write_entry(pt, s, lazy_bits(true, writable, runnable))
-    return true
-}
-
-fn lazy_is_file(state: u64, i: u64, addr: u64) -> bool {
-    let pt: u64 = pt_for(state, i, addr, false)
-    if pt == 0 {
-        return false
-    }
-    let e: u64 = read_entry(pt, pt_slot(addr))
-    return (e & PAGE_PRESENT) == 0 && (e & PAGE_LAZYF) != 0
-}
-
-fn lazy_mark_file(state: u64, i: u64, addr: u64, readable: bool, writable: bool, runnable: bool, ino: u64, pg: u64) -> bool {
-    if !lazy_zone(addr) || ino >= LAZYF_MAX || pg >= LAZYF_MAX {
-        return false
-    }
-    let s: u64 = pt_slot(addr)
-    let pt: u64 = pt_for(state, i, addr, true)
-    if pt == 0 {
-        return false
-    }
-    if read_entry(pt, s) != 0 {
-        return false
-    }
-    write_entry(pt, s, lazy_bits(readable, writable, runnable) | PAGE_LAZYF | (ino << 12) | (pg << 32))
-    return true
-}
-
-fn prefill_file_page(state: u64, i: u64, addr: u64, writable: bool, runnable: bool, ino: u64, pg: u64) -> bool {
-    if !lazy_mark_file(state, i, addr, true, writable, runnable, ino, pg) {
-        return false
-    }
-    let s: u64 = pt_slot(addr)
-    let pt: u64 = pt_for(state, i, addr, false)
-    if pt == 0 {
-        return false
-    }
-    if lazy_file_page(state, i, addr, pt, s, read_entry(pt, s)) == 1 {
-        return true
-    }
-    write_entry(pt, s, 0)
-    return false
-}
-
-fn page_cached(state: u64, i: u64, addr: u64) -> bool {
-    let pt: u64 = pt_for(state, i, addr, false)
-    if pt == 0 {
-        return false
-    }
-    return (read_entry(pt, pt_slot(addr)) & PAGE_PCACHE) != 0
-}
-
-fn range_drop(state: u64, i: u64, start: u64, end: u64) {
-    var a: u64 = start
-    while a < end {
-        let k: u64 = pd_slot(a)
-        if k >= PRIV_SLOTS {
-            return
-        }
-        if k >= 512 {
-            let pdpt: u64 = taskslot.tget(state, i, taskconst.T_PDPT)
-            if pdpt == 0 || (read_entry(pdpt, 1 + (k >> 9)) & PAGE_PRESENT) == 0 {
-                a = ((a >> 30) + 1) << 30
-                continue
-            }
-        }
-        let tile_end: u64 = ((a >> 21) + 1) << 21
-        let pt: u64 = pt_for(state, i, a, false)
-        if pt != 0 {
-            var p: u64 = a
-            while p < tile_end && p < end {
-                if read_entry(pt, pt_slot(p)) != 0 {
-                    let _d: bool = page_drop(state, i, p)
-                }
-                p = p + 4096
-            }
-        }
-        a = tile_end
-    }
-}
-
-fn lazy_find(state: u64, i: u64, pages: u64) -> u64 {
-    var run: u64 = 0
-    var start: u64 = 0
-    var tile: u64 = pd_slot(LAZY_BASE)
-    let last: u64 = pd_slot(LAZY_ATOP - 1)
-    while tile <= last {
-        let ta: u64 = USER_DATA + tile * USER_SPAN
-        let pt: u64 = pt_for(state, i, ta, false)
-        if pt == 0 {
-            if run == 0 {
-                start = ta
-            }
-            run = run + 512
-            if run >= pages {
-                return start
-            }
-        } else {
-            var s: u64 = 0
-            while s < 512 {
-                if read_entry(pt, s) == 0 {
-                    if run == 0 {
-                        start = ta + s * 4096
-                    }
-                    run = run + 1
-                    if run >= pages {
-                        return start
-                    }
-                } else {
-                    run = 0
-                }
-                s = s + 1
-            }
-        }
-        tile = tile + 1
-    }
-    return 0
-}
-
-fn map_page(state: u64, i: u64, addr: u64, writable: bool,
-    runnable: bool) -> u64 {
-    let s: u64 = pt_slot(addr)
-    if s >= 512 {
-        return 0
-    }
-    let pt: u64 = pt_for(state, i, addr, true)
-    if pt == 0 {
-        return 0
-    }
-    if (read_entry(pt, s) & PAGE_PRESENT) != 0 {
-        return 0
-    }
-    if !ctr.mem_charge(state, ctr.ctr_of(state, i), 1) {
-        return 0
-    }
-    let frame: u64 = mmframe.frame_alloc_user(state)
-    if frame == 0 {
-        ctr.mem_uncharge(state, ctr.ctr_of(state, i), 1)
-        return 0
-    }
-    var bits: u64 = PAGE_PRESENT | PAGE_USER
-    if writable {
-        bits = bits | PAGE_WRITE
-    }
-    if !runnable {
-        bits = bits | nx(state)
-    }
-    write_entry(pt, s, frame | bits)
-    taskslot.tset(state, i, taskconst.T_UPAGES,
-        taskslot.tget(state, i, taskconst.T_UPAGES) + 1)
-    return mmframe.kva(frame)
-}
-
-fn map_page_zero(state: u64, i: u64, addr: u64, writable: bool,
-    runnable: bool) -> u64 {
-    let frame: u64 = map_page(state, i, addr, writable, runnable)
-    if frame == 0 {
-        return 0
-    }
-    zero_frame(frame)
-    return frame
-}
-
-const GROW_SLACK: u64 = 65536
-
-fn grow_stack(state: u64, i: u64, addr: u64, rsp: u64) -> bool {
-    let boden: u64 = taskslot.tget(state, i, taskconst.T_USTACK)
-    if boden == 0 {
-        return false
-    }
-    var floor: u64 = STACK_FLOOR
-    if boden > ARGS_LOW {
-        floor = STACK_HIGH_FLOOR
-    }
-    if addr < floor || addr >= boden {
-        return false
-    }
-    if rsp > addr + GROW_SLACK {
-        return false
-    }
-    if taskslot.tget(state, i, taskconst.T_KIND) != taskconst.K_USER {
-        return false
-    }
-    let page: u64 = addr & 0xFFFFFFFFFFFFF000
-    if !page_free(state, i, page) {
-        return false
-    }
-    if map_page_zero(state, i, page, true, false) == 0 {
-        return false
-    }
-    kstate.add(state, kstate.STACKGROW, 1)
-    let now: u64 = asm("mov rax, cr3", out("rax"))
-    if taskslot.tget(state, i, taskconst.T_CR3) == now {
-        asm("mov rax, cr3\nmov cr3, rax", out("rax"))
-    }
-    return true
-}
-
-fn stack_zone_has(state: u64, i: u64, addr: u64) -> bool {
-    let boden: u64 = taskslot.tget(state, i, taskconst.T_USTACK)
-    if boden <= ARGS_LOW {
-        return false
-    }
-    return addr >= STACK_HIGH_FLOOR && addr < boden
-}
-
-fn map_huge(state: u64, i: u64, addr: u64, phys: u64, writable: bool) -> bool {
-    if addr < USER_DATA || addr >= USER_DATA + 512 * HUGE_SIZE {
-        return false
-    }
-    if (addr & (HUGE_SIZE - 1)) != 0 || (phys & (HUGE_SIZE - 1)) != 0 {
-        return false
-    }
-    let pd: u64 = taskslot.tget(state, i, taskconst.T_PD)
-    if pd == 0 {
-        return false
-    }
-    let s: u64 = (addr >> 21) & 0x1FF
-    if s == 0 {
-        return false
-    }
-    let vorher: u64 = read_entry(pd, s)
-    if (vorher & PAGE_PRESENT) != 0 {
-        if (vorher & PAGE_HUGE) == 0 {
-            return false
-        }
-    }
-    var bits: u64 = PAGE_PRESENT | PAGE_USER | PAGE_HUGE | nx(state)
-    if writable {
-        bits = bits | PAGE_WRITE
-    }
-    write_entry(pd, s, (phys & (~(HUGE_SIZE - 1))) | bits)
-    let now: u64 = asm("mov rax, cr3", out("rax"))
-    asm("mov cr3, rax", in("rax") now, clobber("memory"))
-    return true
-}
-
-fn page_exec(state: u64, i: u64, addr: u64) -> bool {
-    let s: u64 = pt_slot(addr)
-    if s >= 512 {
-        return false
-    }
-    let pt: u64 = pt_for(state, i, addr, false)
-    if pt == 0 {
-        return false
-    }
-    let e: u64 = read_entry(pt, s)
-    if (e & PAGE_PRESENT) == 0 {
-        return false
-    }
-    if (e & PAGE_USER) == 0 {
-        return false
-    }
-    return (e & PAGE_NX) == 0
-}
-
-
-fn translate(state: u64, i: u64, addr: u64) -> u64 {
-    let pml4: u64 = taskslot.tget(state, i, taskconst.T_CR3)
-    if pml4 == 0 {
-        return 0
-    }
-    let e4: u64 = read_entry(pml4, (addr >> 39) & 0x1FF)
-    if (e4 & PAGE_PRESENT) == 0 {
-        return 0
-    }
-    let e3: u64 = read_entry(e4 & ADDR_MASK, (addr >> 30) & 0x1FF)
-    if (e3 & PAGE_PRESENT) == 0 {
-        return 0
-    }
-    let e2: u64 = read_entry(e3 & ADDR_MASK, (addr >> 21) & 0x1FF)
-    if (e2 & PAGE_PRESENT) == 0 {
-        return 0
-    }
-    if (e2 & 0x80) != 0 {
-        return mmframe.kva((e2 & ADDR_MASK) + (addr & 0x1FFFFF))
-    }
-    let e1: u64 = read_entry(e2 & ADDR_MASK, (addr >> 12) & 0x1FF)
-    if (e1 & PAGE_PRESENT) == 0 {
-        return 0
-    }
-    return mmframe.kva((e1 & ADDR_MASK) + (addr & 0xFFF))
-}
-
-fn zero_tail(frame: u64, from: u64) {
-    if from < mmframe.FRAME_SIZE {
-        octets.zero(mmframe.kva(frame) + from, mmframe.FRAME_SIZE - from)
-    }
-}
-
-fn lazy_file_install(state: u64, cur: u64, page: u64, pt: u64, s: u64, e0: u64, frame: u64, shared: bool) -> u64 {
-    var result: u64 = 0
-    unixsock.demand_lock(state)
-    let e: u64 = read_entry(pt, s)
-    if (e & PAGE_PRESENT) != 0 {
-        result = 2
-    } else if (e & PAGE_LAZYF) != 0 && (e & PAGE_USER) != 0 && ((e ^ e0) & 0x000FFFFFFFFFF000) == 0 {
-        if (!shared || (e & PAGE_WRITE) == 0) && ctr.mem_charge(state, ctr.ctr_of(state, cur), 1) {
-            var bits: u64 = PAGE_PRESENT | PAGE_USER | (e & PAGE_WRITE)
-            if (e & PAGE_LAZYX) == 0 {
-                bits = bits | nx(state)
-            }
-            if shared {
-                bits = bits | PAGE_SHARED | PAGE_PCACHE
-            }
-            write_entry(pt, s, frame | bits)
-            taskslot.tset(state, cur, taskconst.T_UPAGES, taskslot.tget(state, cur, taskconst.T_UPAGES) + 1)
-            result = 1
-        }
-    }
-    unixsock.demand_unlock(state)
-    return result
-}
-
-const FAULT_AROUND_PAGES: u64 = 16
-const PTE_FILE_REF_MASK: u64 = PAGE_PRESENT | PAGE_LAZYF | PAGE_USER | PAGE_WRITE
-const PTE_FILE_REF_WANT: u64 = PAGE_LAZYF | PAGE_USER
-const PTE_FILE_INO_SHIFT: u64 = 12
-const PTE_FILE_PAGE_SHIFT: u64 = 32
-const PTE_FILE_FIELD_MASK: u64 = 0xFFFFF
-
-fn lazy_file_ino(e: u64) -> u64 {
-    return (e >> PTE_FILE_INO_SHIFT) & PTE_FILE_FIELD_MASK
-}
-
-fn lazy_file_pg(e: u64) -> u64 {
-    return (e >> PTE_FILE_PAGE_SHIFT) & PTE_FILE_FIELD_MASK
-}
-
-fn lazy_file_cache_page(state: u64, ino: u64, pg: u64, wide: bool) -> u64 {
-    let seen: u64 = fileshare.epoch()
-    let frame: u64 = mmframe.frame_alloc_user_low(state)
-    if frame == 0 {
-        return 0
-    }
-    var got: u64 = 0
-    if wide {
-        got = fs.read_at_wide(state, ino, pg * mmframe.FRAME_SIZE, frame, mmframe.FRAME_SIZE)
-    } else {
-        got = fs.read_at(state, ino, pg * mmframe.FRAME_SIZE, frame, mmframe.FRAME_SIZE)
-    }
-    zero_tail(frame, got)
-    let kept: u64 = fileshare.insert(state, ino, pg, frame, seen)
-    if kept != frame {
-        mmframe.frame_free(state, frame)
-    }
-    return kept
-}
-
-fn lazy_file_private_frame(state: u64, ino: u64, pg: u64) -> u64 {
-    var cached: u64 = fileshare.lookup(state, ino, pg)
-    if cached == 0 && fileshare.has_room(state) {
-        cached = lazy_file_cache_page(state, ino, pg, true)
-    }
-    if cached == 0 {
-        return 0
-    }
-    let frame: u64 = mmframe.frame_alloc_user_low(state)
-    if frame != 0 {
-        copy_frame_words(mmframe.kva(frame), mmframe.kva(cached))
-    }
-    return frame
-}
-
-fn lazy_file_page(state: u64, cur: u64, page: u64, pt: u64, s: u64, e0: u64) -> u64 {
-    let ino: u64 = lazy_file_ino(e0)
-    let pg: u64 = lazy_file_pg(e0)
-    let share: bool = (e0 & PAGE_WRITE) == 0
-    var frame: u64 = 0
-    var shared: bool = false
-    var owned: bool = false
-    if share {
-        frame = fileshare.lookup(state, ino, pg)
-        shared = frame != 0
-    } else {
-        frame = lazy_file_private_frame(state, ino, pg)
-        owned = frame != 0
-    }
-    if frame == 0 {
-        let seen: u64 = fileshare.epoch()
-        frame = mmframe.frame_alloc_user_low(state)
-        if frame == 0 {
-            return 0
-        }
-        owned = true
-        let got: u64 = fs.read_at(state, ino, pg * mmframe.FRAME_SIZE, frame, mmframe.FRAME_SIZE)
-        zero_tail(frame, got)
-        if share {
-            let kept: u64 = fileshare.insert(state, ino, pg, frame, seen)
-            if kept != 0 {
-                if kept != frame {
-                    mmframe.frame_free(state, frame)
-                    frame = kept
-                }
-                shared = true
-                owned = false
-            }
-        }
-    }
-    let r: u64 = lazy_file_install(state, cur, page, pt, s, e0, frame, shared)
-    if r != 1 && owned {
-        mmframe.frame_free(state, frame)
-    }
-    return r
-}
-
-fn lazy_file_neighbor(e: u64, ino: u64, pg: u64) -> bool {
-    return (e & PTE_FILE_REF_MASK) == PTE_FILE_REF_WANT && lazy_file_ino(e) == ino && lazy_file_pg(e) == pg
-}
-
-fn lazy_file_readahead(state: u64, pt: u64, s: u64, e0: u64) -> u64 {
-    let ino: u64 = lazy_file_ino(e0)
-    let pg: u64 = lazy_file_pg(e0)
-    let first: u64 = s - s % FAULT_AROUND_PAGES
-    var cached: u64 = 0
-    var i: u64 = first
-    while i < first + FAULT_AROUND_PAGES {
-        var e: u64 = e0
-        if i != s {
-            e = read_entry(pt, i)
-        }
-        if (i == s || pg + i >= s) && lazy_file_neighbor(e, ino, pg + i - s) {
-            if fileshare.lookup(state, ino, pg + i - s) != 0 {
-                cached = cached | ((1 as u64) << (i - first))
-            } else if fileshare.has_room(state) {
-                let _k: u64 = lazy_file_cache_page(state, ino, pg + i - s, true)
-            }
-        }
-        i = i + 1
-    }
-    return cached
-}
-
-fn lazy_file_around(state: u64, cur: u64, page: u64, pt: u64, s: u64, e0: u64) -> u64 {
-    let first: u64 = s - s % FAULT_AROUND_PAGES
-    var cached: u64 = 0
-    if fileshare.has_room(state) {
-        cached = lazy_file_readahead(state, pt, s, e0)
-    }
-    let ino: u64 = lazy_file_ino(e0)
-    let pg: u64 = lazy_file_pg(e0)
-    var main: u64 = 0
-    var i: u64 = first
-    while i < first + FAULT_AROUND_PAGES {
-        if i == s {
-            main = lazy_file_page(state, cur, page, pt, s, e0)
-        } else if ((cached >> (i - first)) & 1) != 0 {
-            let e: u64 = read_entry(pt, i)
-            if lazy_file_neighbor(e, ino, pg + i - s) {
-                let _r: u64 = lazy_file_page(state, cur, page, pt, i, e)
-            }
-        }
-        i = i + 1
-    }
-    return main
-}
-
-fn lazy_file_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -> bool {
-    let e0: u64 = read_entry(pt, s)
-    if (e0 & PAGE_USER) == 0 {
-        return false
-    }
-    if (err & 2) != 0 && (e0 & PAGE_WRITE) == 0 {
-        return false
-    }
-    if (err & 16) != 0 && (e0 & PAGE_LAZYX) == 0 {
-        return false
-    }
-    var r: u64 = 0
-    if (e0 & PAGE_WRITE) == 0 {
-        r = lazy_file_around(state, cur, page, pt, s, e0)
-    } else {
-        r = lazy_file_page(state, cur, page, pt, s, e0)
-    }
-    if r != 0 {
-        tlb_flush_if_current(state, cur)
-    }
-    return r != 0
-}
-
-const PAGE_SWAP: u64 = 0x800
-const PAGE_ACCESSED: u64 = 0x20
-const PAGE_EXEC_SW: u64 = 0x10000000000000
-const SWAP_SLOTS: u64 = 16384
-const SWAP_BATCH: u64 = 16
-static mut swap_bounce: u64 = 0
-const SWAP_SCAN_MAX: u64 = 8192
-const SWAP_ITER_MAX: u64 = 4096
-const SB_FRAME: u64 = 0
-const SB_SLOT: u64 = 128
-const SB_PT: u64 = 256
-const SB_IDX: u64 = 384
-const SB_ENT: u64 = 512
-
-static mut swap_booted: u64 = 0
-static mut swap_broken: u64 = 0
-static mut swap_batch_at: u64 = 0
-static mut swap_hand_task: u64 = 0
-static mut swap_hand_addr: u64 = 0
-static mut swap_busy: [u64; 1] = [0]
-static mut swap_reported: u64 = 0
-
-fn is_swap_entry(e: u64) -> bool {
-    return (e & (PAGE_PRESENT | PAGE_LAZY | PAGE_LAZYF | PAGE_SWAP)) == PAGE_SWAP
-}
-
-fn swap_slot_of(e: u64) -> u64 {
-    return (e >> 12) & 0xFFFFFFF
-}
-
-fn swap_entry_of(slot: u64, e: u64) -> u64 {
-    var b: u64 = PAGE_SWAP | (slot << 12) | PAGE_USER | (e & PAGE_WRITE)
-    if (e & PAGE_NX) == 0 {
-        b = b | PAGE_EXEC_SW
-    }
-    return b
-}
-
-fn swap_low(state: u64) -> u64 {
-    return kstate.get(state, kstate.RESERVE_FRAMES) * 2
-}
-
-fn swap_boot(state: u64) {
-    if swap_booted != 0 {
-        return
-    }
-    swap_booted = 1
-    var path: [u8; 10] = "/swapfile\0"
-    var ino: u64 = fs.path(state, (&path[0]) as u64)
-    if ino == 0 {
-        ino = fs.create_path(state, (&path[0]) as u64, fs.T_FILE)
-    }
-    let batch: u64 = mmframe.frame_alloc(state)
-    let bounce: u64 = mmframe.frame_alloc(state)
-    if ino == 0 || batch == 0 || bounce == 0 || !mmswap.configure(state, ino, SWAP_SLOTS) {
-        swap_broken = 1
-        return
-    }
-    swap_batch_at = batch
-    swap_bounce = bounce
-}
-
-fn copy_frame_words(dst: u64, src: u64) {
-    var o: u64 = 0
-    while o < mmframe.FRAME_SIZE / 8 {
-        __mmio_write64((dst + o * 8) as *mut u64, __mmio_read64((src + o * 8) as *mut u64))
-        o = o + 1
-    }
-}
-
-fn swap_cr3_busy(state: u64, cr3: u64, me: u64) -> bool {
-    let n: u64 = kstate.get(state, kstate.TASKS)
-    var j: u64 = 0
-    while j < n {
-        if j != me && taskslot.tget(state, j, taskconst.T_STATE) == taskconst.S_RUN && taskslot.tget(state, j, taskconst.T_CR3) == cr3 {
-            return true
-        }
-        j = j + 1
-    }
-    return false
-}
-
-fn swap_evictable(state: u64, t: u64, cur: u64, allow_self: bool) -> bool {
-    if taskslot.tget(state, t, taskconst.T_KIND) != taskconst.K_USER {
-        return false
-    }
-    let st: u64 = taskslot.tget(state, t, taskconst.T_STATE)
-    if st == taskconst.S_FREE || st == taskconst.S_ZOMBIE || st == taskconst.S_NEW || st == taskconst.S_REAPING {
-        return false
-    }
-    let cr3: u64 = taskslot.tget(state, t, taskconst.T_CR3)
-    if cr3 == taskslot.tget(state, cur, taskconst.T_CR3) && !allow_self {
-        return false
-    }
-    return !swap_cr3_busy(state, cr3, cur)
-}
-
-fn swap_collect(state: u64, cur: u64, allow_self: bool, advanced: u64) -> u64 {
-    let n: u64 = kstate.get(state, kstate.TASKS)
-    var t: u64 = swap_hand_task
-    if t >= n {
-        t = 0
-        swap_hand_task = 0
-    }
-    if !swap_evictable(state, t, cur, allow_self) {
-        swap_hand_task = t + 1
-        swap_hand_addr = LAZY_BASE
-        return 0 -% 1
-    }
-    var a: u64 = swap_hand_addr
-    if a < LAZY_BASE {
-        a = LAZY_BASE
-    }
-    var got: u64 = 0
-    var examined: u64 = 0
-    var full: bool = false
-    unixsock.demand_lock(state)
-    while a < LAZY_TOP && got < SWAP_BATCH && examined < SWAP_SCAN_MAX && !full {
-        let pt: u64 = pt_for(state, t, a, false)
-        let tile_end: u64 = ((a >> 21) + 1) << 21
-        if pt == 0 {
-            a = tile_end
-            examined = examined + 8
-        } else {
-            while a < tile_end && got < SWAP_BATCH && examined < SWAP_SCAN_MAX && !full {
-                let s: u64 = pt_slot(a)
-                let e: u64 = read_entry(pt, s)
-                examined = examined + 1
-                if (e & PAGE_PRESENT) != 0 && (e & PAGE_USER) != 0 && (e & PAGE_SHARED) == 0 {
-                    if (e & PAGE_ACCESSED) != 0 {
-                        write_entry(pt, s, e & (~PAGE_ACCESSED))
-                    } else {
-                        let slot1: u64 = mmswap.alloc(state)
-                        if slot1 == 0 {
-                            full = true
-                        } else {
-                            let ne: u64 = swap_entry_of(slot1 - 1, e)
-                            write_entry(pt, s, ne)
-                            kstate.set(swap_batch_at, SB_FRAME + got * 8, e & ADDR_MASK)
-                            kstate.set(swap_batch_at, SB_SLOT + got * 8, slot1 - 1)
-                            kstate.set(swap_batch_at, SB_PT + got * 8, pt)
-                            kstate.set(swap_batch_at, SB_IDX + got * 8, s)
-                            kstate.set(swap_batch_at, SB_ENT + got * 8, e)
-                            got = got + 1
-                        }
-                    }
-                }
-                a = a + 4096
-            }
-        }
-    }
-    var exhausted: u64 = 0
-    if a >= LAZY_TOP {
-        swap_hand_task = t + 1
-        swap_hand_addr = LAZY_BASE
-        exhausted = 1
-    } else {
-        swap_hand_addr = a
-    }
-    if got > 0 {
-        let had: u64 = taskslot.tget(state, t, taskconst.T_UPAGES)
-        if had >= got {
-            taskslot.tset(state, t, taskconst.T_UPAGES, had - got)
-        } else {
-            taskslot.tset(state, t, taskconst.T_UPAGES, 0)
-        }
-        ctr.mem_uncharge(state, ctr.ctr_of(state, t), got)
-        let now: u64 = asm("mov rax, cr3", out("rax"))
-        if taskslot.tget(state, t, taskconst.T_CR3) == now {
-            asm("mov rax, cr3\nmov cr3, rax", out("rax"))
-        }
-    }
-    unixsock.demand_unlock(state)
-    if full {
-        swap_broken = 1
-    }
-    if got == 0 && exhausted != 0 {
-        return 0 -% 1
-    }
-    return got
-}
-
-fn swap_flush(state: u64, t: u64, got: u64) {
-    var k: u64 = 0
-    while k < got {
-        let frame: u64 = kstate.get(swap_batch_at, SB_FRAME + k * 8)
-        let slot: u64 = kstate.get(swap_batch_at, SB_SLOT + k * 8)
-        let pt: u64 = kstate.get(swap_batch_at, SB_PT + k * 8)
-        let idx: u64 = kstate.get(swap_batch_at, SB_IDX + k * 8)
-        let old: u64 = kstate.get(swap_batch_at, SB_ENT + k * 8)
-        var src: u64 = frame
-        if frame >= mmframe.REACH_FRAMES * mmframe.FRAME_SIZE {
-            src = swap_bounce
-            copy_frame_words(src, mmframe.kva(frame))
-        }
-        let wrote: u64 = fs.write_at(state, mmswap.inode(), slot * mmswap.SLOT_BYTES, src, mmframe.FRAME_SIZE)
-        if wrote == mmframe.FRAME_SIZE {
-            mmswap.publish(state, slot)
-            mmswap.count_out()
-            mmframe.frame_free(state, frame)
-        } else {
-            mmswap.count_fail()
-            swap_broken = 1
-            unixsock.demand_lock(state)
-            let cur_e: u64 = read_entry(pt, idx)
-            if is_swap_entry(cur_e) && swap_slot_of(cur_e) == slot {
-                write_entry(pt, idx, old)
-                taskslot.tset(state, t, taskconst.T_UPAGES, taskslot.tget(state, t, taskconst.T_UPAGES) + 1)
-                let _c: bool = ctr.mem_charge(state, ctr.ctr_of(state, t), 1)
-                mmswap.publish(state, slot)
-                mmswap.release(state, slot)
-            } else {
-                mmswap.publish(state, slot)
-            }
-            unixsock.demand_unlock(state)
-        }
-        k = k + 1
-    }
-}
-
-fn swap_report(state: u64) {
-    let o: u64 = mmswap.outs()
-    if o / 1024 == swap_reported {
-        return
-    }
-    swap_reported = o / 1024
-    var s_a: [u8; 11] = "swap: out=\0"
-    var s_b: [u8; 5] = " in=\0"
-    var s_c: [u8; 7] = " used=\0"
-    var s_d: [u8; 7] = " free=\0"
-    serial.puts((&s_a[0]) as u64)
-    serial.dec(o)
-    serial.puts((&s_b[0]) as u64)
-    serial.dec(mmswap.ins())
-    serial.puts((&s_c[0]) as u64)
-    serial.dec(mmswap.used())
-    serial.puts((&s_d[0]) as u64)
-    serial.dec(mmframe.frames_free(state))
-    serial.nl()
-}
-
-fn swap_reclaim(state: u64, cur: u64, allow_self: bool) -> u64 {
-    if swap_broken != 0 || !mmswap.active() {
-        return 0
-    }
-    if atomic.cas((&swap_busy[0]) as u64, 0, 1) != 0 {
-        sched.yield_now(state)
-        return 0
-    }
-    let want: u64 = swap_low(state) + 256
-    let n: u64 = kstate.get(state, kstate.TASKS)
-    var total: u64 = 0
-    var stalls: u64 = 0
-    var iter: u64 = 0
-    while mmframe.frames_free(state) < want && stalls < 2 * (n + 1) && iter < SWAP_ITER_MAX && swap_broken == 0 {
-        let t: u64 = swap_hand_task
-        let got: u64 = swap_collect(state, cur, allow_self, 0)
-        if got == 0 -% 1 {
-            stalls = stalls + 1
-        } else if got > 0 {
-            stalls = 0
-            swap_flush(state, t, got)
-            total = total + got
-        }
-        iter = iter + 1
-    }
-    atomic.store((&swap_busy[0]) as u64, 0)
-    if total > 0 {
-        swap_report(state)
-    }
-    return total
-}
-
-fn swap_relieve(state: u64, cur: u64, err: u64) {
-    if !kstate.mode_on(state, kstate.M_SWAP) || swap_broken != 0 {
-        return
-    }
-    if mmframe.frames_free(state) >= swap_low(state) {
-        return
-    }
-    swap_boot(state)
-    let _r: u64 = swap_reclaim(state, cur, (err & 4) != 0)
-}
-
-fn swap_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -> bool {
-    let e0: u64 = read_entry(pt, s)
-    if (e0 & PAGE_USER) == 0 {
-        return false
-    }
-    if (err & 2) != 0 && (e0 & PAGE_WRITE) == 0 {
-        return false
-    }
-    if (err & 16) != 0 && (e0 & PAGE_EXEC_SW) == 0 {
-        return false
-    }
-    let slot: u64 = swap_slot_of(e0)
-    var tmp: u64 = mmframe.frame_alloc_user_low(state)
-    if tmp == 0 {
-        let _r: u64 = swap_reclaim(state, cur, (err & 4) != 0)
-        tmp = mmframe.frame_alloc_user_low(state)
-        if tmp == 0 {
-            return false
-        }
-    }
-    while mmswap.busy(slot) {
-        sched.yield_now(state)
-    }
-    let got: u64 = fs.read_at(state, mmswap.inode(), slot * mmswap.SLOT_BYTES, tmp, mmframe.FRAME_SIZE)
-    if got != mmframe.FRAME_SIZE {
-        mmswap.count_fail()
-        mmframe.frame_free(state, tmp)
-        return false
-    }
-    var ok: bool = false
-    unixsock.demand_lock(state)
-    let e: u64 = read_entry(pt, s)
-    if (e & PAGE_PRESENT) != 0 {
-        ok = true
-    } else if e == e0 {
-        write_entry(pt, s, 0)
-        let f: u64 = map_page(state, cur, page, (e0 & PAGE_WRITE) != 0, (e0 & PAGE_EXEC_SW) != 0)
-        if f != 0 {
-            var o: u64 = 0
-            while o < mmframe.FRAME_SIZE / 8 {
-                __mmio_write64((f + o * 8) as *mut u64, __mmio_read64((tmp + o * 8) as *mut u64))
-                o = o + 1
-            }
-            mmswap.release(state, slot)
-            mmswap.count_in()
-            ok = true
-        } else {
-            write_entry(pt, s, e)
-        }
-    }
-    unixsock.demand_unlock(state)
-    mmframe.frame_free(state, tmp)
-    if ok {
-        tlb_flush_if_current(state, cur)
-    }
-    return ok
-}
-
-fn lazy_fault(state: u64, cur: u64, addr: u64, err: u64) -> bool {
-    if !lazy_zone(addr) || (err & 1) != 0 {
-        return false
-    }
-    let page: u64 = addr & 0xFFFFFFFFFFFFF000
-    let s: u64 = pt_slot(page)
-    let pt: u64 = pt_for(state, cur, page, false)
-    if pt == 0 {
-        return false
-    }
-    swap_relieve(state, cur, err)
-    let e1: u64 = read_entry(pt, s)
-    if is_swap_entry(e1) {
-        return swap_fault(state, cur, page, err, pt, s)
-    }
-    if (e1 & PAGE_PRESENT) == 0 && (e1 & PAGE_LAZYF) != 0 {
-        return lazy_file_fault(state, cur, page, err, pt, s)
-    }
-    var ok: bool = false
-    unixsock.demand_lock(state)
-    let e: u64 = read_entry(pt, s)
-    if (e & PAGE_PRESENT) != 0 {
-        ok = true
-    } else if (e & PAGE_LAZY) != 0 && (e & PAGE_USER) != 0 {
-        var denied: bool = false
-        if (err & 2) != 0 && (e & PAGE_WRITE) == 0 {
-            denied = true
-        }
-        if (err & 16) != 0 && (e & PAGE_LAZYX) == 0 {
-            denied = true
-        }
-        if !denied {
-            write_entry(pt, s, 0)
-            if map_page_zero(state, cur, page, (e & PAGE_WRITE) != 0, (e & PAGE_LAZYX) != 0) != 0 {
-                ok = true
-            } else {
-                write_entry(pt, s, e)
-            }
-        }
-    }
-    unixsock.demand_unlock(state)
-    if ok {
-        tlb_flush_if_current(state, cur)
-    }
-    return ok
-}
-
-fn demand_fault(state: u64, cur: u64, addr: u64, err: u64) -> bool {
-    if addr < SHM_ARENA_BASE || addr >= SHM_ARENA_TOP || (err & 1) != 0 {
-        return false
-    }
-    let page: u64 = addr & 0xFFFFFFFFFFFFF000
-    var ok: bool = false
-    unixsock.demand_lock(state)
-    if page_free(state, cur, page) {
-        let r: u64 = unixsock.shm_demand(state, cur, page, err)
-        if r != 0 && map_frame(state, cur, page, r & 0xFFFFFFFFFFFFF000, (r & 1) != 0) {
-            ok = true
-        }
-    } else {
-        ok = translate(state, cur, page) != 0
-    }
-    unixsock.demand_unlock(state)
-    if ok {
-        tlb_flush_if_current(state, cur)
-    }
-    return ok
-}
-
-fn stack_page_for_call(state: u64, i: u64, p: u64) -> bool {
-    var top: u64 = ARGS_LOW
-    var floor: u64 = STACK_FLOOR
-    if p >= STACK_HIGH_FLOOR {
-        top = ARGS_BASE
-        floor = STACK_HIGH_FLOOR
-    }
-    if p < floor || p >= top {
-        return false
-    }
-    let page: u64 = p & 0xFFFFFFFFFFFFF000
-    var q: u64 = page + 4096
-    var found: bool = false
-    while q < top && q <= page + 65536 + 4096 && !found {
-        if page_mapped(state, i, q) {
-            found = true
-        }
-        q = q + 4096
-    }
-    if !found {
-        return false
-    }
-    return map_page_zero(state, i, page, true, false) != 0
-}
-
-fn user_ok(state: u64, i: u64, addr: u64, len: u64) -> bool {
-    if len == 0 {
-        return true
-    }
-    if addr < USER_DATA {
-        return false
-    }
-    if addr +% len < addr {
-        return false
-    }
-    if addr +% len > USER_DATA + USER_SPAN * PRIV_SLOTS {
-        return false
-    }
-    var p: u64 = addr
-    let last: u64 = addr +% len -% 1
-    while p <= last {
-        if p >= SHM_ARENA_BASE && p < SHM_ARENA_TOP && translate(state, i, p) == 0 {
-            if !demand_fault(state, i, p, 0) {
-                return false
-            }
-        }
-        if lazy_zone(p) && translate(state, i, p) == 0 {
-            if !lazy_fault(state, i, p, 0) {
-                return false
-            }
-        }
-        let pml4: u64 = taskslot.tget(state, i, taskconst.T_CR3)
-        let e4: u64 = read_entry(pml4, (p >> 39) & 0x1FF)
-        if (e4 & PAGE_USER) == 0 {
-            return false
-        }
-        let e3: u64 = read_entry(e4 & ADDR_MASK, (p >> 30) & 0x1FF)
-        if (e3 & PAGE_USER) == 0 {
-            return false
-        }
-        let e2: u64 = read_entry(e3 & ADDR_MASK, (p >> 21) & 0x1FF)
-        if (e2 & PAGE_USER) == 0 {
-            return false
-        }
-        if (e2 & PAGE_HUGE) != 0 {
-            if (e2 & PAGE_PRESENT) == 0 {
-                return false
-            }
-            p = (p & (~(HUGE_SIZE - 1))) + HUGE_SIZE
-        } else {
-            var e1: u64 = read_entry(e2 & ADDR_MASK, (p >> 12) & 0x1FF)
-            if (e1 & PAGE_PRESENT) == 0 && stack_page_for_call(state, i, p) {
-                e1 = read_entry(e2 & ADDR_MASK, (p >> 12) & 0x1FF)
-            }
-            if (e1 & PAGE_USER) == 0 || (e1 & PAGE_PRESENT) == 0 {
-                return false
-            }
-            p = (p & 0xFFFFFFFFFFFFF000) + 4096
-        }
-    }
-    return true
-}
-
-
-fn create_bare(state: u64, prio: u64) -> u64 {
-    let i: u64 = sched.create(state, taskconst.K_USER, prio, 0,
-        vector(state, V_USER_START))
-    if i == 0 {
-        return 0
-    }
-    uio.reset(state, i)
-    let space: u64 = space_build(state, i)
-    if space == 0 {
-        discard(state, i)
-        return 0
-    }
-    taskslot.tset(state, i, taskconst.T_CR3, space)
-    handle.clear_task(state, i, taskslot.tget(state, i, taskconst.T_PID))
-    file.init_task(state, i)
-    cap.clear_task(state, i, taskslot.tget(state, i, taskconst.T_PID))
-    ax.clear_task(state, i)
-    let par: u64 = taskslot.tget(state, i, taskconst.T_PARENT)
-    if par < kstate.MAX_TASKS {
-        taskslot.tset(state, i, taskconst.T_PGID, taskslot.tget(state, par, taskconst.T_PGID))
-        taskslot.tset(state, i, taskconst.T_SID, taskslot.tget(state, par, taskconst.T_SID))
-        taskslot.tset(state, i, taskconst.T_TTY, taskslot.tget(state, par, taskconst.T_TTY))
-    }
-    return i
-}
-
-fn create_thread(state: u64, erzeuger: u64, prio: u64) -> u64 {
-    let i: u64 = sched.create(state, taskconst.K_USER, prio, 0,
-        vector(state, V_USER_START))
-    if i == 0 {
-        return 0
-    }
-    uio.reset(state, i)
-    taskslot.tset(state, i, taskconst.T_CR3,
-        taskslot.tget(state, erzeuger, taskconst.T_CR3))
-    taskslot.tset(state, i, taskconst.T_PDPT,
-        taskslot.tget(state, erzeuger, taskconst.T_PDPT))
-    taskslot.tset(state, i, taskconst.T_PD,
-        taskslot.tget(state, erzeuger, taskconst.T_PD))
-    taskslot.tset(state, i, taskconst.T_PT,
-        taskslot.tget(state, erzeuger, taskconst.T_PT))
-    taskslot.tset(state, i, taskconst.T_DATA,
-        taskslot.tget(state, erzeuger, taskconst.T_DATA))
-    taskslot.tset(state, i, taskconst.T_SHARED, 1)
-    handle.clear_task(state, i, taskslot.tget(state, i, taskconst.T_PID))
-    file.init_task(state, i)
-    cap.clear_task(state, i, taskslot.tget(state, i, taskconst.T_PID))
-    ax.clear_task(state, i)
-    return i
-}
-
-fn discard(state: u64, i: u64) {
-    taskslot.tset(state, i, taskconst.T_STATE, taskconst.S_REAPING)
-    free_space(state, i)
-    sched.reap_claimed(state, i)
-}
-
 fn create(state: u64, prog: u64, arg: u64, prio: u64) -> u64 {
-    let flags: u64 = sched.irq_save()
-    let i: u64 = create_bare(state, prio)
-    if i == 0 {
-        sched.irq_restore(flags)
-        return 0
-    }
-    taskslot.tset(state, i, taskconst.T_ENTRY, vector(state, V_USER_MAIN))
-    taskslot.tset(state, i, taskconst.T_USTACK, USER_TOP - 16)
-    taskslot.tset(state, i, taskconst.T_ARG, prog)
-    taskslot.tset(state, i, taskconst.T_WORK, arg)
-    inherit(state, taskslot.tget(state, i, taskconst.T_PARENT), i)
-    kstate.add(state, kstate.SPAWNS, 1)
-    sched.start(state, i)
-    sched.irq_restore(flags)
-    return i
-}
-
-fn create_cap(state: u64, prog: u64, rights: u64, prio: u64) -> u64 {
-    let flags: u64 = sched.irq_save()
-    let i: u64 = create_bare(state, prio)
-    if i == 0 {
-        sched.irq_restore(flags)
-        return 0
-    }
-    taskslot.tset(state, i, taskconst.T_ENTRY, vector(state, V_USER_MAIN))
-    taskslot.tset(state, i, taskconst.T_USTACK, USER_TOP - 16)
-    taskslot.tset(state, i, taskconst.T_ARG, prog)
-    let h: u64 = cap.insert(state, i, cap.K_STREAM, rights, file.CON_OUT)
-    taskslot.tset(state, i, taskconst.T_WORK, cap.handle_gen(h))
-    inherit(state, taskslot.tget(state, i, taskconst.T_PARENT), i)
-    kstate.add(state, kstate.SPAWNS, 1)
-    sched.start(state, i)
-    sched.irq_restore(flags)
-    return i
-}
-
-
-fn page_drop(state: u64, i: u64, addr: u64) -> bool {
-    let s: u64 = pt_slot(addr)
-    if s >= 512 {
-        return false
-    }
-    let pt: u64 = pt_for(state, i, addr, false)
-    if pt == 0 {
-        return false
-    }
-    let e: u64 = read_entry(pt, s)
-    if (e & PAGE_PRESENT) == 0 {
-        if (e & PAGE_LAZY) != 0 {
-            write_entry(pt, s, 0)
-            return true
-        }
-        if is_swap_entry(e) {
-            write_entry(pt, s, 0)
-            mmswap.release(state, swap_slot_of(e))
-            return true
-        }
-        return false
-    }
-    let mmfl: u64 = unixsock.mm_lock(state)
-    let e2: u64 = read_entry(pt, s)
-    write_entry(pt, s, 0)
-    if (e2 & PAGE_PRESENT) != 0 && (e2 & PAGE_SHARED) == 0 {
-        mmframe.frame_free(state, e2 & ADDR_MASK)
-    }
-    unixsock.mm_unlock(state, mmfl)
-    let had: u64 = taskslot.tget(state, i, taskconst.T_UPAGES)
-    if had > 0 {
-        taskslot.tset(state, i, taskconst.T_UPAGES, had - 1)
-    }
-    let now: u64 = asm("mov rax, cr3", out("rax"))
-    if taskslot.tget(state, i, taskconst.T_CR3) == now {
-        asm("mov rax, cr3\nmov cr3, rax", out("rax"))
-    }
-    return true
-}
-
-fn page_mapped(state: u64, i: u64, addr: u64) -> bool {
-    let s: u64 = pt_slot(addr)
-    if s >= 512 {
-        return false
-    }
-    let pt: u64 = pt_for(state, i, addr, false)
-    if pt == 0 {
-        return false
-    }
-    return (read_entry(pt, s) & (PAGE_PRESENT | PAGE_LAZY)) != 0
-}
-
-fn unshare_page(state: u64, i: u64, pt: u64, s: u64, e: u64) -> u64 {
-    if !ctr.mem_charge(state, ctr.ctr_of(state, i), 1) {
-        return 0
-    }
-    let f: u64 = mmframe.frame_alloc_user(state)
-    if f == 0 {
-        ctr.mem_uncharge(state, ctr.ctr_of(state, i), 1)
-        return 0
-    }
-    copy_frame_words(mmframe.kva(f), mmframe.kva(e & ADDR_MASK))
-    let ne: u64 = (e & (~(ADDR_MASK | PAGE_SHARED | PAGE_PCACHE))) | f
-    write_entry(pt, s, ne)
-    return ne
-}
-
-fn page_protect(state: u64, i: u64, addr: u64, readable: bool, writable: bool, runnable: bool) -> u64 {
-    let s: u64 = pt_slot(addr)
-    if s >= 512 {
-        return 1
-    }
-    let pt: u64 = pt_for(state, i, addr, false)
-    if pt == 0 {
-        return 1
-    }
-    let e: u64 = read_entry(pt, s)
-    if (e & PAGE_PRESENT) == 0 {
-        if (e & PAGE_LAZY) != 0 {
-            write_entry(pt, s, lazy_bits(readable, writable, runnable) | (e & LAZYF_KEEP))
-            return 0
-        }
-        if is_swap_entry(e) {
-            var ne: u64 = e & (~(PAGE_WRITE | PAGE_USER | PAGE_EXEC_SW))
-            if readable || writable || runnable {
-                ne = ne | PAGE_USER
-                if writable {
-                    ne = ne | PAGE_WRITE
-                }
-                if runnable {
-                    ne = ne | PAGE_EXEC_SW
-                }
-            }
-            write_entry(pt, s, ne)
-            return 0
-        }
-        return 1
-    }
-    var want_w: bool = writable
-    var cur_e: u64 = e
-    if (cur_e & PAGE_PCACHE) != 0 && want_w {
-        cur_e = unshare_page(state, i, pt, s, cur_e)
-        if cur_e == 0 {
-            return 3
-        }
-    }
-    if (cur_e & PAGE_SHARED) != 0 && (cur_e & PAGE_WRITE) == 0 && want_w {
-        return 2
-    }
-    var rest: u64 = cur_e & (~(PAGE_WRITE | PAGE_USER | PAGE_NX))
-    if readable || writable || runnable {
-        rest = rest | PAGE_USER
-        if want_w {
-            rest = rest | PAGE_WRITE
-        }
-        if !runnable {
-            rest = rest | nx(state)
-        }
-    } else {
-        rest = rest | nx(state)
-    }
-    write_entry(pt, s, rest)
-    return 0
-}
-
-fn page_rights(state: u64, i: u64, addr: u64) -> u64 {
-    let s: u64 = pt_slot(addr)
-    if s >= 512 {
-        return 0
-    }
-    let pt: u64 = pt_for(state, i, addr, false)
-    if pt == 0 {
-        return 0
-    }
-    let e: u64 = read_entry(pt, s)
-    if (e & PAGE_PRESENT) == 0 {
-        if (e & PAGE_LAZY) != 0 {
-            var lr: u64 = 1
-            if (e & PAGE_USER) != 0 {
-                lr = lr | 2
-                if (e & PAGE_WRITE) != 0 {
-                    lr = lr | 4
-                }
-                if (e & PAGE_LAZYX) != 0 {
-                    lr = lr | 8
-                }
-            }
-            return lr
-        }
-        if is_swap_entry(e) {
-            var sr: u64 = 1
-            if (e & PAGE_USER) != 0 {
-                sr = sr | 2
-                if (e & PAGE_WRITE) != 0 {
-                    sr = sr | 4
-                }
-                if (e & PAGE_EXEC_SW) != 0 {
-                    sr = sr | 8
-                }
-            }
-            return sr
-        }
-        return 0
-    }
-    var r: u64 = 1
-    if (e & PAGE_USER) != 0 {
-        r = r | 2
-        if (e & PAGE_WRITE) != 0 {
-            r = r | 4
-        }
-        if (e & PAGE_NX) == 0 {
-            r = r | 8
-        }
-    }
-    return r
-}
-
-fn page_zero(state: u64, i: u64, addr: u64) -> bool {
-    let s: u64 = pt_slot(addr)
-    if s >= 512 {
-        return false
-    }
-    let pt: u64 = pt_for(state, i, addr, false)
-    if pt == 0 {
-        return false
-    }
-    let e: u64 = read_entry(pt, s)
-    if (e & PAGE_PRESENT) == 0 {
-        return false
-    }
-    if (e & PAGE_SHARED) == 0 {
-        zero_frame(e & ADDR_MASK)
-    }
-    return true
-}
-
-fn page_copy(state: u64, i: u64, from: u64, to: u64) -> bool {
-    var a: u64 = translate(state, i, from)
-    var b: u64 = translate(state, i, to)
-    if a == 0 && from >= LAZY_BASE && from < LAZY_TOP && lazy_is_file(state, i, from) {
-        if lazy_fault(state, i, from, 0) {
-            a = translate(state, i, from)
-        }
-    }
-    if a == 0 {
-        return false
-    }
-    if b == 0 {
-        if !lazy_fault(state, i, to, 2) {
-            return false
-        }
-        b = translate(state, i, to)
-    }
-    if b == 0 {
-        return false
-    }
-    var k: u64 = 0
-    while k < mmframe.FRAME_SIZE / 8 {
-        __mmio_write64((b + k * 8) as *mut u64, __mmio_read64((a + k * 8) as *mut u64))
-        k = k + 1
-    }
-    return true
-}
-
-fn tlb_flush_if_current(state: u64, i: u64) {
-    let now: u64 = asm("mov rax, cr3", out("rax"))
-    if taskslot.tget(state, i, taskconst.T_CR3) == now {
-        asm("mov rax, cr3\nmov cr3, rax", out("rax"))
-    }
-}
-
-fn next_pt_entry(table: u64, from: u64) -> u64 {
-    var j: u64 = from
-    while j < 512 {
-        j = j + arch.zero_run(table + j * 8, 512 - j)
-        if j >= 512 {
-            return 512
-        }
-        let e: u64 = read_entry(table, j)
-        if (e & PAGE_PRESENT) != 0 && (e & PAGE_HUGE) == 0 {
-            return j
-        }
-        j = j + 1
-    }
-    return 512
-}
-
-fn next_priv_slot(state: u64, from: u64, start: u64) -> u64 {
-    var k: u64 = start
-    if k == 0 {
-        if taskslot.tget(state, from, taskconst.T_PT) != 0 {
-            return 0
-        }
-        k = 1
-    }
-    if k < 512 {
-        let pd: u64 = taskslot.tget(state, from, taskconst.T_PD)
-        if pd != 0 {
-            let j: u64 = next_pt_entry(pd, k)
-            if j < 512 {
-                return j
-            }
-        }
-        k = 512
-    }
-    let pdpt: u64 = taskslot.tget(state, from, taskconst.T_PDPT)
-    if pdpt == 0 {
-        return PRIV_SLOTS
-    }
-    var group: u64 = k >> 9
-    var idx: u64 = k & 511
-    while (group << 9) < PRIV_SLOTS {
-        let pe: u64 = read_entry(pdpt, 1 + group)
-        if (pe & PAGE_PRESENT) != 0 {
-            let j: u64 = next_pt_entry(pe & ADDR_MASK, idx)
-            if j < 512 {
-                return (group << 9) + j
-            }
-        }
-        group = group + 1
-        idx = 0
-    }
-    return PRIV_SLOTS
-}
-
-fn copy_space(state: u64, from: u64, to: u64) -> u64 {
-    var n: u64 = 0
-    var kachel: u64 = next_priv_slot(state, from, 0)
-    while kachel < PRIV_SLOTS {
-        let a: u64 = USER_DATA + kachel * USER_SPAN
-        let s2: u64 = pt_for(state, from, a, false)
-        if s2 != 0 {
-            let d2: u64 = pt_for(state, to, a, true)
-            if d2 == 0 {
-                return 0
-            }
-            let m: u64 = copy_pt(state, s2, d2)
-            if m == 0 {
-                if pt_used(s2) != 0 {
-                    return 0
-                }
-            }
-            n = n + m
-        }
-        kachel = next_priv_slot(state, from, kachel + 1)
-    }
-    return n
-}
-
-fn pt_used(pt: u64) -> u64 {
-    var n: u64 = 0
-    var k: u64 = 0
-    while k < 512 {
-        if (read_entry(pt, k) & PAGE_PRESENT) != 0 {
-            n = n + 1
-        }
-        k = k + 1
-    }
-    return n
-}
-
-fn copy_pt(state: u64, src: u64, dst: u64) -> u64 {
-    var n: u64 = 0
-    var k: u64 = 0
-    while k < 512 {
-        k = k + arch.zero_run(src + k * 8, 512 - k)
-        if k >= 512 {
-            break
-        }
-        let e: u64 = read_entry(src, k)
-        if (e & PAGE_PRESENT) == 0 && (e & PAGE_LAZY) != 0 {
-            write_entry(dst, k, e)
-        }
-        if is_swap_entry(e) {
-            write_entry(dst, k, e)
-            mmswap.share(state, swap_slot_of(e))
-        }
-        if (e & PAGE_PRESENT) != 0 && (e & PAGE_PCACHE) != 0 {
-            write_entry(dst, k, e)
-            n = n + 1
-        } else if (e & PAGE_PRESENT) != 0 {
-            var d: u64 = read_entry(dst, k)
-            if (d & PAGE_PRESENT) == 0 {
-                let f: u64 = mmframe.frame_alloc_user(state)
-                if f == 0 {
-                    return 0
-                }
-                write_entry(dst, k, f | (e & 0xFFF) | (e & PAGE_NX))
-                d = read_entry(dst, k)
-            }
-            arch.copy_words(mmframe.kva(d & ADDR_MASK), mmframe.kva(e & ADDR_MASK),
-                mmframe.FRAME_SIZE / 8)
-            n = n + 1
-        }
-        k = k + 1
-    }
-    return n
-}
-
-fn swap_space(state: u64, a: u64, b: u64) {
-    let cr3: u64 = taskslot.tget(state, a, taskconst.T_CR3)
-    let pdpt: u64 = taskslot.tget(state, a, taskconst.T_PDPT)
-    let pd: u64 = taskslot.tget(state, a, taskconst.T_PD)
-    let pt: u64 = taskslot.tget(state, a, taskconst.T_PT)
-    let data: u64 = taskslot.tget(state, a, taskconst.T_DATA)
-    taskslot.tset(state, a, taskconst.T_CR3, taskslot.tget(state, b, taskconst.T_CR3))
-    taskslot.tset(state, a, taskconst.T_PDPT, taskslot.tget(state, b, taskconst.T_PDPT))
-    taskslot.tset(state, a, taskconst.T_PD, taskslot.tget(state, b, taskconst.T_PD))
-    taskslot.tset(state, a, taskconst.T_PT, taskslot.tget(state, b, taskconst.T_PT))
-    taskslot.tset(state, a, taskconst.T_DATA, taskslot.tget(state, b, taskconst.T_DATA))
-    taskslot.tset(state, b, taskconst.T_CR3, cr3)
-    taskslot.tset(state, b, taskconst.T_PDPT, pdpt)
-    taskslot.tset(state, b, taskconst.T_PD, pd)
-    taskslot.tset(state, b, taskconst.T_PT, pt)
-    taskslot.tset(state, b, taskconst.T_DATA, data)
-}
-
-fn use_space(state: u64, i: u64) {
-    let cr3: u64 = taskslot.tget(state, i, taskconst.T_CR3)
-    if cr3 != 0 {
-        asm("mov cr3, rax", in("rax") cr3, clobber("memory"))
-    }
+    return procspace.create(state, prog, arg, prio)
 }
 
 fn user_start(state: u64, i: u64, kind: u64) {
-    sched.enter_task(state)
-
-    if taskslot.tget(state, i, taskconst.T_ARG) == ARG_RESUME {
-        taskslot.tset(state, i, taskconst.T_ARG, 0)
-        asm("call rax", in("rax") vector(state, V_USER_RESUME),
-            in("rdi") state + kstate.CTX_OFF + i * 128, clobber("memory"))
-        sched.exit_task(state, 0)
-        return
-    }
-    let arg: u64 = taskslot.tget(state, i, taskconst.T_WORK)
-    taskslot.tset(state, i, taskconst.T_WORK, 0)
-    let e: u64 = taskslot.tget(state, i, taskconst.T_ENTRY)
-    let sp: u64 = taskslot.tget(state, i, taskconst.T_USTACK)
-    if e == 0 || (e >> 47) != 0 || sp == 0 || (sp >> 47) != 0 {
-        say_badentry(state, i, e, sp)
-        sched.exit_task(state, 127)
-        return
-    }
-    asm("call rax", in("rax") vector(state, V_ENTER_TASK),
-        in("rdi") e,
-        in("rsi") sp,
-        in("rdx")(taskslot.tget(state, i, taskconst.T_ARG) << 32) | arg,
-        clobber("memory"))
-    sched.exit_task(state, 0)
+    proccopy.user_start(state, i, kind)
 }
 
-static mut bad_entries: u64 = 0
+fn free_space(state: u64, i: u64) -> u64 {
+    return procswap.free_space(state, i)
+}
+
+fn space_pages(state: u64, i: u64) -> u64 {
+    return procpt.space_pages(state, i)
+}
+
+fn reap(state: u64, i: u64) -> bool {
+    return procswap.reap(state, i)
+}
+
+fn translate(state: u64, i: u64, addr: u64) -> u64 {
+    return procmap.translate(state, i, addr)
+}
+
+fn user_ok(state: u64, i: u64, addr: u64, len: u64) -> bool {
+    return procfault.user_ok(state, i, addr, len)
+}
+
+fn map_programs(state: u64) -> u64 {
+    return procpt.map_programs(state)
+}
 
 fn badentry_num() -> u64 {
-    return bad_entries
+    return proccopy.badentry_num()
 }
 
-fn say_badentry(state: u64, i: u64, e: u64, sp: u64) {
-    var s_a: [u8; 27] = "proc: bad entry -- pid=\0\0\0\0"
-    var s_e: [u8; 9] = "  entry=\0"
-    var s_u: [u8; 10] = "  ustack=\0"
-    var s_t: [u8; 34] = "  (kein sysret, Prozess beendet)\0\0"
-    serial.puts((&s_a[0]) as u64)
-    serial.dec(taskslot.tget(state, i, taskconst.T_PID))
-    serial.puts((&s_e[0]) as u64)
-    serial.hex(e)
-    serial.puts((&s_u[0]) as u64)
-    serial.hex(sp)
-    serial.puts((&s_t[0]) as u64)
-    serial.nl()
-    bad_entries = bad_entries + 1
+fn inherit(state: u64, parent: u64, child: u64) -> bool {
+    return procpt.inherit(state, parent, child)
+}
+
+fn create_bare(state: u64, prio: u64) -> u64 {
+    return procspace.create_bare(state, prio)
+}
+
+fn create_thread(state: u64, erzeuger: u64, prio: u64) -> u64 {
+    return procswap.create_thread(state, erzeuger, prio)
+}
+
+fn discard(state: u64, i: u64) {
+    procswap.discard(state, i)
+}
+
+fn page_free(state: u64, i: u64, addr: u64) -> bool {
+    return procmap.page_free(state, i, addr)
+}
+
+fn page_exec(state: u64, i: u64, addr: u64) -> bool {
+    return procmap.page_exec(state, i, addr)
+}
+
+fn map_page(state: u64, i: u64, addr: u64, writable: bool, runnable: bool) -> u64 {
+    return procmap.map_page(state, i, addr, writable, runnable)
+}
+
+fn map_page_zero(state: u64, i: u64, addr: u64, writable: bool, runnable: bool) -> u64 {
+    return procmap.map_page_zero(state, i, addr, writable, runnable)
+}
+
+fn map_huge(state: u64, i: u64, addr: u64, phys: u64, writable: bool) -> bool {
+    return procmap.map_huge(state, i, addr, phys, writable)
+}
+
+fn nx(state: u64) -> u64 {
+    return procpt.nx(state)
+}
+
+fn page_mapped(state: u64, i: u64, addr: u64) -> bool {
+    return procspace.page_mapped(state, i, addr)
+}
+
+fn page_protect(state: u64, i: u64, addr: u64, readable: bool, writable: bool, runnable: bool) -> u64 {
+    return procspace.page_protect(state, i, addr, readable, writable, runnable)
+}
+
+fn tlb_flush_if_current(state: u64, i: u64) {
+    procspace.tlb_flush_if_current(state, i)
+}
+
+fn page_rights(state: u64, i: u64, addr: u64) -> u64 {
+    return procspace.page_rights(state, i, addr)
+}
+
+fn page_zero(state: u64, i: u64, addr: u64) -> bool {
+    return procspace.page_zero(state, i, addr)
+}
+
+fn page_copy(state: u64, i: u64, from: u64, to: u64) -> bool {
+    return proccopy.page_copy(state, i, from, to)
+}
+
+fn map_frame(state: u64, i: u64, addr: u64, frame: u64, writable: bool) -> bool {
+    return procmap.map_frame(state, i, addr, frame, writable)
+}
+
+fn create_cap(state: u64, prog: u64, rights: u64, prio: u64) -> u64 {
+    return procspace.create_cap(state, prog, rights, prio)
+}
+
+fn copy_space(state: u64, from: u64, to: u64) -> u64 {
+    return proccopy.copy_space(state, from, to)
+}
+
+fn swap_space(state: u64, a: u64, b: u64) {
+    proccopy.swap_space(state, a, b)
+}
+
+fn use_space(state: u64, i: u64) {
+    proccopy.use_space(state, i)
+}
+
+fn page_drop(state: u64, i: u64, addr: u64) -> bool {
+    return procspace.page_drop(state, i, addr)
+}
+
+const ARG_RESUME: u64 = proccopy.ARG_RESUME
+
+const USER_DATA: u64 = procbase.USER_DATA
+
+const USER_SPAN: u64 = procbase.USER_SPAN
+
+const USER_TOP: u64 = procspace.USER_TOP
+
+const IMAGE_BASE: u64 = procmap.IMAGE_BASE
+
+const IMAGE_END: u64 = procmap.IMAGE_END
+
+const ARGS_BASE: u64 = procspace.ARGS_BASE
+
+const STACK_FLOOR: u64 = procbase.STACK_FLOOR
+
+fn grow_stack(state: u64, i: u64, addr: u64, rsp: u64) -> bool {
+    return procmap.grow_stack(state, i, addr, rsp)
+}
+
+fn stack_zone_has(state: u64, i: u64, addr: u64) -> bool {
+    return procmap.stack_zone_has(state, i, addr)
+}
+
+const PRIV_SLOTS: u64 = procbase.PRIV_SLOTS
+
+const MAIN_SLOTS: u64 = procbase.MAIN_SLOTS
+
+const LAZY_BASE: u64 = procbase.LAZY_BASE
+
+const LAZY_TOP: u64 = procbase.LAZY_TOP
+
+const LAZY_ATOP: u64 = procmap.LAZY_ATOP
+
+const LAZYF_MAX: u64 = procmap.LAZYF_MAX
+
+fn range_drop(state: u64, i: u64, start: u64, end: u64) {
+    procspace.range_drop(state, i, start, end)
+}
+
+fn lazy_mark(state: u64, i: u64, addr: u64, readable: bool, writable: bool, runnable: bool) -> bool {
+    return procmap.lazy_mark(state, i, addr, readable, writable, runnable)
+}
+
+fn lazy_mark_image(state: u64, i: u64, addr: u64, writable: bool, runnable: bool) -> bool {
+    return procmap.lazy_mark_image(state, i, addr, writable, runnable)
+}
+
+fn lazy_mark_file(state: u64, i: u64, addr: u64, readable: bool, writable: bool, runnable: bool, ino: u64, pg: u64) -> bool {
+    return procmap.lazy_mark_file(state, i, addr, readable, writable, runnable, ino, pg)
+}
+
+fn prefill_file_page(state: u64, i: u64, addr: u64, writable: bool, runnable: bool, ino: u64, pg: u64) -> bool {
+    return procfault.prefill_file_page(state, i, addr, writable, runnable, ino, pg)
+}
+
+fn page_cached(state: u64, i: u64, addr: u64) -> bool {
+    return procmap.page_cached(state, i, addr)
+}
+
+fn lazy_fault(state: u64, cur: u64, addr: u64, err: u64) -> bool {
+    return procfault.lazy_fault(state, cur, addr, err)
+}
+
+fn lazy_zone(addr: u64) -> bool {
+    return procmap.lazy_zone(addr)
+}
+
+fn lazy_find(state: u64, i: u64, pages: u64) -> u64 {
+    return procmap.lazy_find(state, i, pages)
+}
+
+fn page_taken(state: u64, i: u64, addr: u64) -> bool {
+    return procmap.page_taken(state, i, addr)
+}
+
+const SHM_ARENA_BASE: u64 = procfault.SHM_ARENA_BASE
+
+const SHM_ARENA_TOP: u64 = procfault.SHM_ARENA_TOP
+
+fn demand_fault(state: u64, cur: u64, addr: u64, err: u64) -> bool {
+    return procfault.demand_fault(state, cur, addr, err)
+}
+
+fn pd_slot(addr: u64) -> u64 {
+    return procpt.pd_slot(addr)
+}
+
+fn pt_for(state: u64, i: u64, addr: u64, allocate: bool) -> u64 {
+    return procpt.pt_for(state, i, addr, allocate)
+}
+
+fn frame_count(state: u64, i: u64) -> u64 {
+    return procpt.frame_count(state, i)
+}
+
+fn frame_at(state: u64, i: u64, want: u64) -> u64 {
+    return procpt.frame_at(state, i, want)
+}
+
+fn frame_virt_at(state: u64, i: u64, want: u64) -> u64 {
+    return procpt.frame_virt_at(state, i, want)
+}
+
+fn space_build_empty(state: u64, i: u64) -> u64 {
+    return procpt.space_build_empty(state, i)
+}
+
+fn map_restored(state: u64, i: u64, addr: u64, frame: u64) -> bool {
+    return procmap.map_restored(state, i, addr, frame)
 }
