@@ -4,18 +4,29 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 MODE=${1:-light}
-SCALE=${NOTEPAD_SCALE:-1}
+SCALES=${NOTEPAD_SCALES:-1 2}
 OUT=$(mktemp -d)
 trap '[ -n "${NOTEPAD_KEEP:-}" ] && cp -r "$OUT" "$NOTEPAD_KEEP"; rm -rf "$OUT"' EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
+use_scale() {
+    SCALE=$1
+    case "$SCALE" in
+        1) LIST0=180,518; LIST1=180,546; EDITOR=540,700; TERM=50,700 ;;
+        2) LIST0=360,602; LIST1=360,630; EDITOR=1000,800; TERM=100,700 ;;
+        *) echo "NOTEPAD: unsupported scale $SCALE"; exit 2 ;;
+    esac
+    sed -e "s/@LIST0@/$LIST0/" -e "s/@LIST1@/$LIST1/" -e "s/@EDITOR@/$EDITOR/" -e "s/@TERM@/$TERM/" \
+        "$ROOT/tools/notepad/script.txt" > "$OUT/script.txt"
+}
+
 guest() {
     local tree=$1 out=$2
     ( cd "$tree" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
       DESIGNREBUILD=1 DESIGNBUILD="$out.build" bash tools/design/eh6.sh "$out" res=1920x1080 accel=kvm \
-        mode="$MODE" uiscale="$SCALE" lang=en drehbuch="$ROOT/tools/notepad/script.txt" moreprogs="dialogd notepad" ) > "$out.log" 2>&1
+        mode="$MODE" uiscale="$SCALE" lang=en drehbuch="$OUT/script.txt" moreprogs="dialogd notepad" ) > "$out.log" 2>&1
     rm -rf "$out.build"
     [ -s "$out/serial.txt" ] && grep -aq "notepad: ready" "$out/serial.txt"
 }
@@ -34,17 +45,21 @@ expect() {
     esac
 }
 
-echo "== 1. notepad in the guest (scale $SCALE): save, autosave, delete confirm, reopen =="
-if guest "$ROOT" "$OUT/main"; then
-    ok "guest script ran"
-    verdicts "$OUT/main"
-    while read -r _ name state note; do
-        if [ "$state" = ok ]; then ok "$name"; else bad "$name -- $note"; fi
-    done < "$OUT/main.checks"
-    [ "$(wc -l < "$OUT/main.checks")" -ge 12 ] && ok "all check groups reported" || bad "check groups missing"
-else
-    bad "guest run failed"; tail -n 12 "$OUT/main.log"
-fi
+for scale in $SCALES; do
+    use_scale "$scale"
+    echo "== 1.$SCALE notepad in the guest (scale $SCALE): save, autosave, delete confirm, reopen =="
+    if guest "$ROOT" "$OUT/s$SCALE"; then
+        ok "guest script ran"
+        verdicts "$OUT/s$SCALE"
+        while read -r _ name state note; do
+            if [ "$state" = ok ]; then ok "$name"; else bad "$name -- $note"; fi
+        done < "$OUT/s$SCALE.checks"
+        [ "$(wc -l < "$OUT/s$SCALE.checks")" -ge 12 ] && ok "all check groups reported" || bad "check groups missing"
+    else
+        bad "guest run failed"; tail -n 12 "$OUT/s$SCALE.log"
+    fi
+done
+use_scale 1
 
 [ -n "${NOTEPAD_NOMUT:-}" ] && { echo "NOTEPAD: $pass passed, $fail failed"; [ "$fail" = 0 ]; exit; }
 echo
