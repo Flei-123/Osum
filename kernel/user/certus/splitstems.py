@@ -53,7 +53,7 @@ class Layout:
             if name.endswith('.fi') and os.path.isfile(path) and not os.path.islink(path):
                 if any(os.path.exists(os.path.join(self.root, d, name)) for d in ('kernel/user', 'kernel/user/fuiapp', 'lib')):
                     owned.add(name)
-        for sub in ('libc', 'wlib', 'wlibc'):
+        for sub in ('libc', 'wlib', 'wlibc', 'uitheme'):
             base = os.path.join(self.bau, sub)
             if os.path.isdir(base) and not os.path.islink(base):
                 for name in os.listdir(base):

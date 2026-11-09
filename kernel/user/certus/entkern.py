@@ -186,6 +186,8 @@ def main():
         if os.path.basename(p) == 'wcpaint.fi':
             text = wlibc_asm(text) + EXT
         write_2(p, text)
+    for p in split_files(bau, 'uitheme'):
+        write_2(p, profil_gone(read_2(p), os.path.basename(p)))
     for p in split_files(bau, 'wlib'):
         write_2(p, schlicht(read_2(p), os.path.basename(p)))
     for name in ('ulib.fi', 'wlib.fi', 'icons.fi', 'utf8.fi'):

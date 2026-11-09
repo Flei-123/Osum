@@ -62,8 +62,8 @@ cp -r "$ROOT/lib/libc" "$BAU/libc"
 cp "$ROOT/lib/icons.fi" "$ROOT/lib/utf8.fi" "$BAU/"
 cp "$ROOT/kernel/user/ulib.fi" "$ROOT/kernel/user/wlibc.fi" \
    "$ROOT/kernel/user/fuiapp/wlib.fi" "$BAU/"
-rm -rf "$BAU/wlib" "$BAU/wlibc"
-cp -r "$ROOT/kernel/user/fuiapp/wlib" "$ROOT/kernel/user/wlibc" "$BAU/"
+rm -rf "$BAU/wlib" "$BAU/wlibc" "$BAU/uitheme"
+cp -r "$ROOT/kernel/user/fuiapp/wlib" "$ROOT/kernel/user/wlibc" "$ROOT/kernel/user/uitheme" "$BAU/"
 cp "$ROOT/kernel/user/fuiapp/hostwinp.fi" "$ROOT/kernel/user/fuiapp/hostax.fi" "$BAU/"
 sed -i -E 's/^import fuiapp\.(wlib(\.[a-z]+)?)$/import \1/' "$BAU/wlib.fi" "$BAU"/wlib/*.fi
 python3 - "$ROOT" "$BAU" <<'PYEOF'
@@ -73,7 +73,7 @@ todo = ['wlib', 'wlibc', 'ulib']
 seen = set(todo)
 def sources(name):
     paths = [os.path.join(bau, name + '.fi')]
-    if name in ('wlib', 'wlibc'):
+    if name in ('wlib', 'wlibc', 'uitheme'):
         d = os.path.join(bau, name)
         paths += [os.path.join(d, f) for f in sorted(os.listdir(d)) if f.endswith('.fi')]
     return paths
@@ -94,12 +94,12 @@ while todo:
                 todo.append(mod)
                 break
 PYEOF
-for f in "$BAU/wlib.fi" "$BAU/wlibc.fi" "$BAU/uiscale.fi" "$BAU"/wlib/*.fi "$BAU"/wlibc/*.fi; do
+for f in "$BAU/wlib.fi" "$BAU/wlibc.fi" "$BAU/uiscale.fi" "$BAU"/wlib/*.fi "$BAU"/wlibc/*.fi "$BAU"/uitheme/*.fi; do
     [ -f "$f" ] && sed -i -e 's/^import fuiapp\.hostwinp$/import hostwinp/' -e 's/^import fuiapp\.hostax$/import hostax/' "$f"
 done
 if [ -f "$BAU/msg.fi" ]; then
     mv "$BAU/msg.fi" "$BAU/osmsg.fi"
-    for f in "$BAU"/*.fi "$BAU"/wlib/*.fi "$BAU"/wlibc/*.fi; do
+    for f in "$BAU"/*.fi "$BAU"/wlib/*.fi "$BAU"/wlibc/*.fi "$BAU"/uitheme/*.fi; do
         [ -f "$f" ] && [ ! -L "$f" ] && grep -q '^import msg[[:space:]]*$' "$f" || continue
         sed -i -e 's/^import msg[[:space:]]*$/import osmsg/' -e 's/\bmsg\./osmsg./g' "$f"
     done
@@ -142,7 +142,7 @@ done
 python3 "$ROOT/kernel/user/certus/entkern.py" "$BAU" > "$BAU/entkern.log"
 
 cp "$CERTUS_REPO/lib/osum/certus_main.fi" "$BAU/certus_main.fi"
-(cd "$BAU" && python3 "$ROOT/kernel/user/certus/inlineconsts.py" "$BAU" wlib.fi wlibc.fi wlib/*.fi wlibc/*.fi) | tee "$BAU/inlineconsts.log"
+(cd "$BAU" && python3 "$ROOT/kernel/user/certus/inlineconsts.py" "$BAU" wlib.fi wlibc.fi wlib/*.fi wlibc/*.fi uitheme/*.fi) | tee "$BAU/inlineconsts.log"
 python3 "$ROOT/kernel/user/certus/splitstems.py" "$ROOT" "$BAU" "$ROOT/vendor/firn" | tee "$BAU/splitstems.log"
 (cd "$BAU" && python3 "$ROOT/kernel/user/certus/inlineconsts.py" "$BAU" $(ls osa/*.fi fui/*.fi 2>/dev/null)) | tee -a "$BAU/inlineconsts.log"
 (cd "$BAU" && { grep -l '__bits(\|__include_str(' osa/*.fi fui/*.fi 2>/dev/null || true; } | xargs -r python3 "$ROOT/kernel/user/certus/lowerintrinsics.py" "$BAU") | tee "$BAU/lowerintrinsics.log"

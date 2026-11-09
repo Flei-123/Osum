@@ -146,7 +146,7 @@ for sym in wlib__button wlib__step wlibc__text_at; do
         ok "the kernel does NOT carry $sym (the library lives in ring 3)"
     fi
 done
-wigzeilen=$(cat kernel/user/fuiapp/wlib.fi kernel/user/wlibc.fi kernel/user/fuiapp/wlib/*.fi kernel/user/wlibc/*.fi | wc -l)
+wigzeilen=$(cat kernel/user/fuiapp/wlib.fi kernel/user/wlibc.fi kernel/user/fuiapp/wlib/*.fi kernel/user/wlibc/*.fi kernel/user/uitheme/*.fi | wc -l)
 kernzeilen=$(grep -vc -e '^[[:space:]]*//' -e '^[[:space:]]*$' kernel/ui/wig.fi)
 num "library lines in ring 3" "$wigzeilen" gt 1500
 num "seam lines in the kernel (no comments/blank) -- as little kernel as possible" "$kernzeilen" lt 600

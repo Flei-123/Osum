@@ -138,7 +138,7 @@ grep -q 'const K_CANVAS' <(bash tools/structure/catprog.sh kernel/user/fuiapp/wl
 grep -q 'fn canvas_event' <(bash tools/structure/catprog.sh kernel/user/fuiapp/wlib.fi) \
     && ok "the canvas has an event ring (canvas_event)" \
     || bad "canvas_event fehlt"
-grep -aqE 'import libc\.mem([^a-z]|$)' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi) \
+grep -aqE 'import libc\.mem([^a-z]|$)' <({ bash tools/structure/catprog.sh kernel/user/wlibc.fi; cat kernel/user/uitheme/*.fi; }) \
     && bad 'wlibc binds libc.mem -- two modules mem in one program (single-core rule)' \
     || ok 'wlibc gets by without libc.mem (no second module mem next to html.mem)'
 grep -q 'fn gmem' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi) \

@@ -11,7 +11,7 @@ head=$(git -C "$CERTUS_REPO" rev-parse HEAD 2>/dev/null || echo nogit)
 dirty=$(git -C "$CERTUS_REPO" status --porcelain --untracked-files=no 2>/dev/null | sha256sum | cut -c1-16)
 inputs=$( (cat kernel/user/ulib.fi kernel/user/fuiapp/wlib.fi kernel/user/wlibc.fi lib/icons.fi lib/utf8.fi \
     kernel/user/certus/build.sh kernel/user/certus/entkern.py kernel/user/certus/splitstems.py kernel/user/certus/inlineconsts.py kernel/user/certus/lowerintrinsics.py kernel/user/certus/merge-stems.txt kernel/user/certus/shims/deflate_limited.fi kernel/user/sysstub.s kernel/user/user.ld
-    find lib/libc kernel/user/fuiapp kernel/user/wlibc -type f | sort | xargs cat
+    find lib/libc kernel/user/fuiapp kernel/user/wlibc kernel/user/uitheme -type f | sort | xargs cat
     sha256sum "$CERTUS_FIRNC") | sha256sum | cut -c1-16)
 key="$head-$dirty-$inputs"
 elf="$CACHE/$key.elf"
