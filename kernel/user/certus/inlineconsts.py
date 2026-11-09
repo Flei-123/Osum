@@ -21,7 +21,7 @@ def literals(path):
     return table
 
 
-INDEX_DIRS = ('', 'fui', 'wlib', 'wlibc', 'uitheme', 'osa', 'std', 'font')
+INDEX_DIRS = ('', 'fui', 'hostui', 'uitheme', 'osa', 'std', 'font')
 
 
 def build_index(bau):

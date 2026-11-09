@@ -8,7 +8,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 BASELINE = os.path.join(ROOT, "tools", "palette", "hex_baseline.tsv")
 LITERAL = re.compile(rb"(?<![&] )(?<!&)0x(?:00|FF|ff)?[0-9A-Fa-f]{6}\b")
 ALPHA_MASK = re.compile(rb"0x[Ff]{6}[0-9A-Fa-f]{2}$")
-SKIP = {"kernel/user/wlibc/wcpal.fi"}
+SKIP = {"kernel/user/uitheme/thdark.fi"}
 
 
 def tracked_sources(root):
