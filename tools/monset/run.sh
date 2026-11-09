@@ -6,7 +6,8 @@
 #
 # Run A: /etc/mouse.conf has mon=true at boot, no key pressed -> the overlay appears (`fpsov: shown`), its rectangle differs from run B.
 # Run B (counter-proof): no mon line -> no fpsov line, no monov line.
-# Run C: Settings -> Mouse -> click the switch (mmon) on, off, on: `settings: mouse ... mon=1/0/1 ok=1`, `fpsov: shown/hidden/shown` follow within seconds.
+# Run C: Settings -> Mouse -> click the switch (mmon) on, off, on: `settings: mouse ... mon=1/0/1 ok=1`, `fpsov: shown/hidden/shown` follow within seconds, at scale 1 (1280x800) and scale 2 (1920x1080).
+# Run M (counter-proof): settings built so the switch value never reaches the bus -> the clicks are stored but the overlay never follows.
 # eh6 boots without the `vfs` word and without /proc: both are added (EH_MKFS_EXTRA, extra=).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -23,9 +24,11 @@ warte 12
 foto 01
 DEOF
 cp "$TMPD/a.txt" "$TMPD/b.txt"
-cat > "$TMPD/c.txt" <<'DEOF'
+write_click_script() {
+    local yres=$1
+    cat > "$2" <<DEOF
 warte 12
-klick 24,780
+klick 24,$((yres - 20))
 warte 3
 klickauf start_Settings
 warte 12
@@ -42,22 +45,46 @@ klickauf srectmmon
 warte 5
 foto c-on2
 DEOF
+}
+write_click_script 800 "$TMPD/c.txt"
+write_click_script 1080 "$TMPD/c2.txt"
+cp "$TMPD/c.txt" "$TMPD/m.txt"
 
-run_one() { # name, drehbuch, etc extra
-    mkdir -p "$TMPD/$1"
-    EH_ETC_EXTRA="$3" EH_MKFS_EXTRA="/proc/" DESIGNBUILD="$TMPD/$1/build" bash tools/design/eh6.sh "$TMPD/$1/o" res=1280x800 accel=kvm tafel=nein "extra=vfs lang=en" \
-        drehbuch="$2" > "$TMPD/$1/o.log" 2>&1
-    rm -rf "$TMPD/$1/build"
+SHARED_BUILD="$TMPD/build"
+run_one() {
+    local name=$1 script=$2 etc=$3 res=${4:-1280x800} scale=${5:-1} build=${6:-$SHARED_BUILD}
+    mkdir -p "$TMPD/$name"
+    EH_ETC_EXTRA="$etc" EH_MKFS_EXTRA="/proc/" DESIGNBUILD="$build" bash tools/design/eh6.sh "$TMPD/$name/o" res="$res" uiscale="$scale" accel=kvm tafel=nein "extra=vfs lang=en" \
+        drehbuch="$script" > "$TMPD/$name/o.log" 2>&1
 }
 
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+MUT="$TMPD/mutant"
+mkdir -p "$MUT"
+cp -a kernel/user "$MUT/user"
+sed -i 's/mouse_bus_set((&k_mon\[0 as usize\]) as u64, ms_mon)/mouse_bus_set((\&k_mon[0 as usize]) as u64, 0)/' "$MUT/user/settings/setpages.fi"
+if cmp -s kernel/user/settings/setpages.fi "$MUT/user/settings/setpages.fi"; then bad "mutant source is identical to the real source"; fi
+
 run_one a "$TMPD/a.txt" "/etc/mouse.conf=$TMPD/mouse-on.conf@0644"
 run_one b "$TMPD/b.txt" ""
-run_one c "$TMPD/c.txt" ""
-SA="$TMPD/a/o/serial.txt"; SB="$TMPD/b/o/serial.txt"; SC="$TMPD/c/o/serial.txt"
+MUT_BUILD="$TMPD/build-mut"
+cp -a "$SHARED_BUILD" "$MUT_BUILD"
+if vendor/firn/bin/firnc -c "$MUT/user/settings.fi" -o "$MUT/settings.o" > "$MUT/cc.log" 2>&1 \
+   && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" -o "$MUT/settings.elf" "$MUT/settings.o" 2>>"$MUT/cc.log"; then
+    strip --strip-all "$MUT/settings.elf"
+    cp "$MUT/settings.elf" "$MUT_BUILD/settings.elf"
+    ok "mutant settings (switch value never sent) builds"
+else
+    bad "mutant settings does not build: $(head -5 "$MUT/cc.log")"
+fi
+run_one c "$TMPD/c.txt" "" &
+run_one c2 "$TMPD/c2.txt" "" 1920x1080 2 &
+run_one m "$TMPD/m.txt" "" 1280x800 1 "$MUT_BUILD" &
+wait
+SA="$TMPD/a/o/serial.txt"; SB="$TMPD/b/o/serial.txt"; SC="$TMPD/c/o/serial.txt"; SC2="$TMPD/c2/o/serial.txt"; SM="$TMPD/m/o/serial.txt"
 if [ -n "${MONSET_OUT:-}" ]; then
     mkdir -p "$MONSET_OUT"
-    for r in a b c; do cp "$TMPD/$r/o/serial.txt" "$MONSET_OUT/serial-$r.txt" 2>/dev/null; cp "$TMPD/$r/o/"*.ppm "$MONSET_OUT/" 2>/dev/null; cp "$TMPD/$r/o.log" "$MONSET_OUT/log-$r.txt" 2>/dev/null; done
+    for r in a b c c2 m; do cp "$TMPD/$r/o/serial.txt" "$MONSET_OUT/serial-$r.txt" 2>/dev/null; cp "$TMPD/$r/o/"*.ppm "$MONSET_OUT/" 2>/dev/null; cp "$TMPD/$r/o.log" "$MONSET_OUT/log-$r.txt" 2>/dev/null; done
 fi
 
 diffpix() {
@@ -98,7 +125,8 @@ fi
 if grep -aq 'fpsov: \|wm: monov' "$SB"; then bad "B COUNTER-PROOF: overlay lines without mon=true: $(grep -a 'fpsov: \|wm: monov' "$SB" | head -1)"
 else ok "B COUNTER-PROOF: without mon=true there is no fpsov and no monov line"; fi
 
-python3 -I - "$SC" <<'PY' && ok "C: clicks stored mon 1, 0, 1 (ok=1)" || bad "C: click effects"
+clicks_stored() {
+    python3 -I - "$1" <<'PY'
 import re, sys
 t = open(sys.argv[1], "rb").read().decode("latin1")
 L = [(int(m.group(1)), int(m.group(2))) for m in re.finditer(r"settings: mouse speed=\d+ accel=\d+ natural=\d+ gestures=\d+ ok=(\d+) fps=\d+ mon=(\d+)", t)]
@@ -107,7 +135,9 @@ L = L[-3:]
 if len(L) < 3 or any(s[0] != 1 for s in L) or [s[1] for s in L] != [1, 0, 1]:
     sys.exit(1)
 PY
-python3 -I - "$SC" <<'PY' && ok "C: the overlay followed the switch: shown, hidden, shown" || bad "C: overlay did not follow (need shown, hidden, shown)"
+}
+overlay_followed() {
+    python3 -I - "$1" <<'PY'
 import re, sys
 t = open(sys.argv[1], "rb").read().decode("latin1")
 ev = re.findall(r"fpsov: (shown|hidden)", t)
@@ -115,8 +145,16 @@ print("events:", ev)
 if ev[:3] != ["shown", "hidden", "shown"]:
     sys.exit(1)
 PY
-grep -aq 'klickauf srectmmon -> KEIN' "$TMPD/c/o.log" && bad "C: click on mmon had no target" || ok "C: every click found its widget"
-n=$(grep -ac 'CRASH\|EXCEPTION\|panic' "$SA" "$SB" "$SC" | awk -F: '{s+=$2} END{print s+0}')
+}
+for run in "C:$SC:$TMPD/c/o.log" "C2 (scale 2):$SC2:$TMPD/c2/o.log"; do
+    label=${run%%:*}; rest=${run#*:}; serial=${rest%%:*}; log=${rest#*:}
+    clicks_stored "$serial" && ok "$label: clicks stored mon 1, 0, 1 (ok=1)" || bad "$label: click effects"
+    overlay_followed "$serial" && ok "$label: the overlay followed the switch: shown, hidden, shown" || bad "$label: overlay did not follow (need shown, hidden, shown)"
+    grep -aq 'klickauf srectmmon -> KEIN' "$log" && bad "$label: click on mmon had no target" || ok "$label: every click found its widget"
+done
+clicks_stored "$SM" && ok "M COUNTER-PROOF: the mutant still stores mon 1, 0, 1" || bad "M COUNTER-PROOF: mutant did not take the clicks"
+overlay_followed "$SM" && bad "M COUNTER-PROOF: the overlay followed although the value never reached the bus" || ok "M COUNTER-PROOF: without the value on the bus the overlay does not follow"
+n=$(grep -ac 'CRASH\|EXCEPTION\|panic' "$SA" "$SB" "$SC" "$SC2" | awk -F: '{s+=$2} END{print s+0}')
 [ "$n" = 0 ] && ok "no crash or panic" || bad "crash lines: $n"
 echo; echo "MONSET: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
