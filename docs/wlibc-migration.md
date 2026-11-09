@@ -15,10 +15,11 @@ Ratchet: `python3 tools/uicheck/wlibuse.py check` (families `wlib` and `wlibc`, 
 | `wlibc/wcpal.fi` | 108 | dark palette values |
 | `wlibc/wcgfx.fi` | 1860 | metrics, type scale, shapes, transparency, spacing, text measuring, window-info calls |
 | `wlibc/wcpaint.fi` | 1943 | surface, heads/screens, mouse, window protocol calls, clipboard/drag/notify/bus, raw drawing, a11y channel, `ui_scale` |
-| `wlibc/wctheme.fi` | 1647 | theme file parsing, accent, mode, probes, edges/work area, tb alpha/blur, icons |
+| `wlibc/wcstart.fi` | 70 | `start`, head bounds, start-menu head, band (surface bring-up; goes with step 9) |
+| `uitheme/th*.fi` | 1130 | former `wctheme`: `thbase` shared state, `thquery` reads, `thfile` file parsing, `thapply` apply + setters, `thload` reload/poll, `thprobe` probes, `thpush` decoration/form/ansi push, `thedge` edges/work area |
 
-Import graph: `wcbase` <- `wcpal` <- `wcgfx` <- `wctheme`; `wcgfx` imports `wcpaint`; `uitheme` imports `wcbase`, `wcgfx`;
-`wctheme` and `wlibc` import `uitheme`. Bodies must move out of `wcgfx`/`wcpaint`/`wctheme` into their new homes before
+Import graph: `wcbase` <- `wcpal` <- `wcgfx`; `wcgfx` imports `wcpaint`; `uitheme` imports `wcbase`, `wcgfx`;
+`wlibc` imports `uitheme`, the `uitheme/th*` modules and `wcstart`; `th*` order: `thquery` < `thfile` < `thapply` < `thload` < `thprobe` < `thpush` < `thedge`, `wcstart` on top. Bodies must move out of `wcgfx`/`wcpaint`/`wctheme` into their new homes before
 the facade can go; forwards come first so each step is pixel-neutral.
 
 ## Measured use (09.11., main 6b9430b48 + step 1)
@@ -64,9 +65,10 @@ jarvismini 56, a11ydemo 54, fuib 52, notifc 50. All others <= 50.
    wlibc no longer exports them (no forwards: Certus does not use them); `a11ydemo`, `wlax`, `wctheme` switch; Certus staging copies `hostax` and seds its import.
 7. **DONE** Services: `svcclip.fi` (clipboard, drag, `BT_*`, owns the `noclip` flag via `set_noclip`), `svcnoti.fi` (notification ring), `svcbus.fi` (bus calls, `bus_da`) are leaf modules (import `ulib`/`xfer`);
    bodies out of `wcpaint`, forwards and `WIG_CLIPSET/GET` exports out of `wlibc` (no forwards: Certus does not use them); 13 files switch.
-8. **Theme state**: split `wctheme` (1647 lines) into `uitheme/` submodules by responsibility (file, accent+mode, probes,
-   edges+work area, tb alpha/blur, shapes); breaks the `wctheme -> uitheme` import so `uitheme` can own the bodies;
-   `settings*`, `template`, `theme`, `themetest`, `taskbar*`, `desktop`, `fuib`, `fsdraw` switch; wlibc forwards.
+8. **DONE** `wctheme` split into `kernel/user/uitheme/` (eight modules, 51-258 lines each, plus `wlibc/wcstart.fi` for the surface bring-up);
+   `wctheme.fi` deleted, `wlibc.fi` forwards to the new modules; no other file imported `wctheme`. Dis proof: `themetest` and `desktop`
+   disassembly before/after identical per function (map `wctheme__x` -> `<module>__x`, 7113 / 7291 functions, 0 body diffs). Certus staging copies `uitheme/`.
+   Open follow-up: `uitheme` can now own the bodies (drop forwards in `wlibc.fi`), `settings*`, `template`, `theme`, `themetest`, `taskbar*`, `desktop`, `fuib`, `fsdraw` switch to `uitheme`/`thquery` calls.
 9. **Window/head calls**: bodies of `win_*`, `head_*`, `screen_*`, `mouse_*`, `work_*`, `shm_*`, `surface*` out of
    `wcpaint`/`wcgfx` into `fuiapp/hostwin.fi` + `fuiapp/hosthead.fi`; `apphost` calls them; popups and taskbar modules switch
    (largest group, split per program: taskbar family, settings family, popups, tools).
