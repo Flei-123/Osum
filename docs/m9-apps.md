@@ -46,3 +46,11 @@ Goal (ecosystem roadmap L3 + M9): file manager, settings, notes (and later the t
 - Storage: app folder `/data/notepad/services/`: key `note-<id>` (UTF-8 text, max 64 KiB, max 32 notes shown); the list comes from `store_keys`, a blank unsaved note is not persisted.
 - Keys: Ctrl+N new, Ctrl+S save, Ctrl+D delete (confirm dialog via `dialogd`); switching notes and creating a note autosave a modified note.
 - Serial events (`notepad: ...`): `ready rows=`, `state`, `saved id= status= len= title=`, `new`, `select`, `delete status= answer= rows=`, `shortcut`.
+
+## explorer over services (M9-6 plan, sizes small to large)
+
+1. View state in the store: `explorer/expview.fi` keeps `view` (sort key, direction, view mode, last folder) through `svcosum.store_get/store_set`; `svcosum.set_app` before the first call. Gate: guest run, change sort, reopen, same state; mutant without store write turns red.
+2. Delete confirm through `svcosum.confirm` (blocking, dialogd) instead of `fuiscene.dialog_open` in `expwork.fi` line ~1910; keep the in-scene dialog as the `NO_BACKEND` fallback. Needs the explorer2/3/4 gates for the old path.
+3. Clipboard file list (uri-list) in `svcosum` plus `xfer`, then copy/paste between explorer windows.
+4. Picker mode: `dlgdir.fi` and explorer share one directory model; `explorer --pick` replaces the dialogd-only list.
+Each step: palette and uicheck ratchets must not grow; explorer2, explorer3, explorer4, explctx gates stay green.
