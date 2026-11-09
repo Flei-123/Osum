@@ -11,7 +11,7 @@ import sys
 GRAFIK = ["fb", "wm", "wig", "font", "ttf", "tile", "vmode", "ansi", "ps2m"]
 OWN_DIRS = ("gfx/fb/", "ui/wm/", "ui/kgui/")
 OWN = set(g + ".fi" for g in GRAFIK) | {
-    "gfx.fi", "gfx-aus.fi", "slotattach.fi", "kgui.fi", "kgbase.fi", "kgdisp.fi", "kgsvc.fi", "kgwm.fi", "kgrun.fi", "kgstage.fi", "sysgui.fi",
+    "gfx.fi", "gfx-aus.fi", "slotattach.fi", "kgui.fi", "kgbase.fi", "kgdisp.fi", "kgsvc.fi", "kgwm.fi", "kgrun.fi", "kgstage.fi", "sysgui.fi", "sysguiwire.fi", "kguiwire.fi", "inputwire.fi",
     "dispsave.fi",
     "zeiger.fi",
     "vgpu.fi",

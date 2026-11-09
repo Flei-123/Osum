@@ -175,10 +175,16 @@ if [[ $GUI == off ]]; then
     ersetze gfx-aus gfx || exit 1
     ersetze fb-aus fb || exit 1
     ersetze slotattach-aus slotattach || exit 1
+    ersetze sysguiwire-aus sysguiwire || exit 1
+    ersetze kguiwire-aus kguiwire || exit 1
+    ersetze inputwire-aus inputwire || exit 1
 fi
 weg gfx-aus
 weg fb-aus
 weg slotattach-aus
+weg sysguiwire-aus
+weg kguiwire-aus
+weg inputwire-aus
 
 if [[ $OHNE_PS2M == 1 ]]; then
     if [[ $GUI == off ]]; then
