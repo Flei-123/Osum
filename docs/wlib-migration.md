@@ -93,6 +93,9 @@ No colour literals, no raw draw outside components, English code, no comments.
   event step, keys, a11y) to it; deleting `wlib` = moving those bodies behind `apphost`/`fuiscene`. `wlibc` is still
   imported by 75 files (theme, platform, drawing parts) and stays until its parts have new homes.
 
+- 09.11. (landing 14, wlibc plan): `docs/wlibc-migration.md` holds the wlibc plan (12 steps). Step 1 done: theme constants and
+  metric/type forwards live in `uitheme`; `wlibuse.py` ratchets both families (wlibc baseline 73 files, score 1673).
+
 ## Inventory
 
 Priority: **P1** leaf (no other file imports it) with unused imports or <= 10 refs, **P2** leaf, **P3** shared
