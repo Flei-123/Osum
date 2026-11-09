@@ -6,12 +6,13 @@ export FIRNLIB="$ROOT/lib"
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
-has() { grep -aqF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
-hasnot() { grep -aqF -- "$2" "$1" && bad "$3 -- '$2' present" || ok "$3"; }
+has() { [ -s "$1" ] && grep -aqF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
+hasnot() { [ -s "$1" ] && ! grep -aqF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' present or no output"; }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 OPK=${OPK:-$(python3 tools/lib/opkpfad.py)}
 PAYLOAD_MIB=${OPKBIG_MIB:-10}
 PROGS="sh ls cat echo shasum opk"
+IMAGE_PROGS="sh ls cat echo shasum"
 finish() { echo "OPKBIG: $pass passed, $fail failed"; [ "$fail" = 0 ]; exit $?; }
 
 mkdir -p "$T/bin" "$T/bin-old" "$T/h/payload" "$T/src" "$T/user-old"
@@ -56,7 +57,7 @@ EOS
 run_guest() {
     local name=$1 opkelf=$2
     bash tools/mkfsfi/mkfs.sh build "$T/$name.img" 200000 /bin/ /t/ /system/ /apps/ /store/ /tmp/ /proc/ /dev/ /etc/ /var/ \
-        $(for p in $PROGS; do echo "/bin/$p=$T/bin/$p.elf"; done) "/bin/opk=$opkelf" \
+        $(for p in $IMAGE_PROGS; do echo "/bin/$p=$T/bin/$p.elf"; done) "/bin/opk=$opkelf" \
         "/system/schluessel.pub=$T/src/oeffentlich.key" \
         "/t/big.opk=$T/src/bigpkg-1.0.0.opk" "/t/big.opk.sig=$T/src/bigpkg-1.0.0.opk.sig" \
         "/t/bad.opk=$T/bad.opk" "/t/bad.opk.sig=$T/bad.opk.sig" "/t/s0.sh=$T/s0.sh" > "$T/$name.mkfs" 2>&1 || tail -3 "$T/$name.mkfs"
