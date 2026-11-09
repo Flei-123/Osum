@@ -58,7 +58,8 @@ jarvismini 56, a11ydemo 54, fuib 52, notifc 50. All others <= 50.
    (bodies out of `wcgfx`/`wcpaint`/`wctheme`; reads the glyph cache through `wcpaint.gfind/gkey/kern26/source_glyph`);
    wlibc no longer exports them (no forwards: Certus does not use them); 34 files switch; apps that only measure for layout
    can move to `fuiscene` labels later.
-5. **Icons**: replace `wlibc.icon_*`/`app_icon` by direct `icons`/`appicon` imports (7 files, no body move).
+5. **DONE** Icons: `uiicon.fi` owns `icon_*` and `app_icon` (bodies out of `wctheme`; imports `icons`, `appicon`, `uitheme`, `uiscale`, `uitext`);
+   wlibc no longer forwards them (Certus does not use them); 10 files switch.
 6. **a11y channel**: `ax_*` to `fuiapp/hostax`; `a11ydemo` follows.
 7. **Services**: clipboard, drag, notify, bus bodies out of `wcpaint` into the services module; 14 files.
 8. **Theme state**: split `wctheme` (1647 lines) into `uitheme/` submodules by responsibility (file, accent+mode, probes,
