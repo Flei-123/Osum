@@ -22,7 +22,10 @@ def latest(path, text, source):
             batch.append(m)
     if not batch:
         return None
-    return batch[0] if source == "wlib" else batch[-1]
+    if source != "wlib":
+        return batch[-1]
+    painted = [m for m in batch if m.group(2) == "1"]
+    return painted[0] if painted else batch[0]
 
 
 def find(path, text, source="wlib"):
