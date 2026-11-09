@@ -72,7 +72,7 @@ import os, re, shutil, sys
 root, bau = sys.argv[1], sys.argv[2]
 todo = ['wlib', 'wlibc', 'ulib', 'hoststart']
 seen = set(todo)
-MOVED = ('uiscale', 'uitext', 'uiicon', 'svcclip', 'svcnoti', 'svcbus')
+MOVED = ('uiscale', 'uitext', 'uiicon', 'uidraw', 'svcclip', 'svcnoti', 'svcbus')
 def sources(name):
     paths = [os.path.join(bau, name + '.fi')]
     if name in ('wlib', 'wlibc', 'uitheme'):
@@ -96,11 +96,11 @@ while todo:
                 todo.append(mod)
                 break
 PYEOF
-for f in "$BAU/wlib.fi" "$BAU/wlibc.fi" "$BAU/uiscale.fi" "$BAU/hosthead.fi" "$BAU/hostwin.fi" "$BAU/hoststart.fi" "$BAU/fuib.fi" "$BAU/fuiglyph.fi" "$BAU"/wlib/*.fi "$BAU"/wlibc/*.fi "$BAU"/uitheme/*.fi; do
+for f in "$BAU/wlib.fi" "$BAU/wlibc.fi" "$BAU/uiscale.fi" "$BAU/uidraw.fi" "$BAU/hosthead.fi" "$BAU/hostwin.fi" "$BAU/hoststart.fi" "$BAU/fuib.fi" "$BAU/fuiglyph.fi" "$BAU"/wlib/*.fi "$BAU"/wlibc/*.fi "$BAU"/uitheme/*.fi; do
     [ -f "$f" ] && sed -i -e 's/^import fuiapp\.hostwinp$/import hostwinp/' -e 's/^import fuiapp\.hostax$/import hostax/' -e 's/^import fuiapp\.hosthead$/import hosthead/' -e 's/^import fuiapp\.hostwin$/import hostwin/' -e 's/^import fuiapp\.hoststart$/import hoststart/' "$f"
 done
 for f in "$BAU"/*.fi "$BAU"/wlib/*.fi "$BAU"/wlibc/*.fi "$BAU"/uitheme/*.fi; do
-    [ -f "$f" ] && [ ! -L "$f" ] && sed -i -E 's/^import (uikit|fuiapp)\.(uiscale|uitext|uiicon|svcclip|svcnoti|svcbus)[[:space:]]*$/import \2/' "$f"
+    [ -f "$f" ] && [ ! -L "$f" ] && sed -i -E 's/^import (uikit|fuiapp)\.(uiscale|uitext|uiicon|uidraw|svcclip|svcnoti|svcbus)[[:space:]]*$/import \2/' "$f"
 done
 if [ -f "$BAU/msg.fi" ]; then
     mv "$BAU/msg.fi" "$BAU/osmsg.fi"

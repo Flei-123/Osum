@@ -29,11 +29,11 @@ FILES = [
 ]
 
 CALLS = {
-    "wlibc.rect": (2, 3),
-    "wlibc.rrect": (2, 3, 4),
-    "wlibc.frame": (2, 3),
-    "wlibc.rframe": (2, 3, 4, 5),
-    "wlibc.frame3": (2, 3),
+    "uidraw.rect": (2, 3),
+    "uidraw.rrect": (2, 3, 4),
+    "uidraw.frame": (2, 3),
+    "uidraw.rframe": (2, 3, 4, 5),
+    "uidraw.frame3": (2, 3),
     "rect": (2, 3),
     "rrect": (2, 3, 4),
     "frame": (2, 3),
