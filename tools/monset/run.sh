@@ -7,7 +7,7 @@
 # Run A: /etc/mouse.conf has mon=true at boot, no key pressed -> the overlay appears (`fpsov: shown`), its rectangle differs from run B.
 # Run B (counter-proof): no mon line -> no fpsov line, no monov line.
 # Run C: Settings -> Mouse -> click the switch (mmon) on, off, on: `settings: mouse ... mon=1/0/1 ok=1`, `fpsov: shown/hidden/shown` follow within seconds, at scale 1 (1280x800) and scale 2 (1920x1080).
-# Run M (counter-proof): settings built so the switch value never reaches the bus -> the clicks are stored but the overlay never follows.
+# Run M (counter-proof): settings built so the switch value never reaches the bus or /etc/mouse.conf -> the clicks are stored but the overlay never follows.
 # eh6 boots without the `vfs` word and without /proc: both are added (EH_MKFS_EXTRA, extra=).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -63,7 +63,7 @@ export FIRNLIB="$PWD/lib"
 MUT="$TMPD/mutant"
 mkdir -p "$MUT"
 cp -a kernel/user "$MUT/user"
-sed -i 's/mouse_bus_set((&k_mon\[0 as usize\]) as u64, ms_mon)/mouse_bus_set((\&k_mon[0 as usize]) as u64, 0)/' "$MUT/user/settings/setpages.fi"
+sed -i -e 's/mouse_bus_set((&k_mon\[0 as usize\]) as u64, ms_mon)/mouse_bus_set((\&k_mon[0 as usize]) as u64, 0)/' -e 's/^    if ms_mon != 0 {/    if 0 != 0 {/' "$MUT/user/settings/setpages.fi"
 if cmp -s kernel/user/settings/setpages.fi "$MUT/user/settings/setpages.fi"; then bad "mutant source is identical to the real source"; fi
 
 run_one a "$TMPD/a.txt" "/etc/mouse.conf=$TMPD/mouse-on.conf@0644"
@@ -74,7 +74,7 @@ if vendor/firn/bin/firnc -c "$MUT/user/settings.fi" -o "$MUT/settings.o" > "$MUT
    && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" -o "$MUT/settings.elf" "$MUT/settings.o" 2>>"$MUT/cc.log"; then
     strip --strip-all "$MUT/settings.elf"
     cp "$MUT/settings.elf" "$MUT_BUILD/settings.elf"
-    ok "mutant settings (switch value never sent) builds"
+    ok "mutant settings (switch value never sent to the bus or the file) builds"
 else
     bad "mutant settings does not build: $(head -5 "$MUT/cc.log")"
 fi
@@ -154,7 +154,7 @@ for run in "C:$SC:$TMPD/c/o.log" "C2 (scale 2):$SC2:$TMPD/c2/o.log"; do
     grep -aq 'klickauf srectmmon -> KEIN' "$log" && bad "$label: click on mmon had no target" || ok "$label: every click found its widget"
 done
 clicks_stored "$SM" && ok "M COUNTER-PROOF: the mutant still stores mon 1, 0, 1" || bad "M COUNTER-PROOF: mutant did not take the clicks"
-overlay_followed "$SM" && bad "M COUNTER-PROOF: the overlay followed although the value never reached the bus" || ok "M COUNTER-PROOF: without the value on the bus the overlay does not follow"
+overlay_followed "$SM" && bad "M COUNTER-PROOF: the overlay followed although the value never reached the bus or the file" || ok "M COUNTER-PROOF: without the value on the bus or in the file the overlay does not follow"
 n=$(grep -ac 'CRASH\|EXCEPTION\|panic' "$SA" "$SB" "$SC" "$SC2" | awk -F: '{s+=$2} END{print s+0}')
 [ "$n" = 0 ] && ok "no crash or panic" || bad "crash lines: $n"
 echo; echo "MONSET: $pass passed, $fail failed"
