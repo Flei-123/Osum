@@ -65,12 +65,13 @@ cp "$ROOT/kernel/user/ulib.fi" "$ROOT/kernel/user/wlibc.fi" \
 rm -rf "$BAU/wlib" "$BAU/wlibc" "$BAU/uitheme"
 cp -r "$ROOT/kernel/user/fuiapp/wlib" "$ROOT/kernel/user/wlibc" "$ROOT/kernel/user/uitheme" "$BAU/"
 cp "$ROOT/kernel/user/fuiapp/hostwinp.fi" "$ROOT/kernel/user/fuiapp/hostax.fi" "$ROOT/kernel/user/fuiapp/hosthead.fi" \
-   "$ROOT/kernel/user/fuiapp/hostwin.fi" "$ROOT/kernel/user/fuiapp/hoststart.fi" "$BAU/"
+   "$ROOT/kernel/user/fuiapp/hostwin.fi" "$ROOT/kernel/user/fuiapp/hoststart.fi" \
+   "$ROOT/kernel/user/fuiapp/apphost.fi" "$ROOT/kernel/user/fuiapp/hostkey.fi" "$ROOT/kernel/user/fuiapp/hostflags.fi" "$BAU/"
 sed -i -E 's/^import fuiapp\.(wlib(\.[a-z]+)?)$/import \1/' "$BAU/wlib.fi" "$BAU"/wlib/*.fi
 python3 - "$ROOT" "$BAU" <<'PYEOF'
 import os, re, shutil, sys
 root, bau = sys.argv[1], sys.argv[2]
-todo = ['wlib', 'wlibc', 'ulib', 'hoststart']
+todo = ['wlib', 'wlibc', 'ulib', 'hoststart', 'apphost']
 seen = set(todo)
 MOVED = ('uiscale', 'uitext', 'uiicon', 'uidraw', 'svcclip', 'svcnoti', 'svcbus')
 def sources(name):
@@ -96,8 +97,8 @@ while todo:
                 todo.append(mod)
                 break
 PYEOF
-for f in "$BAU/wlib.fi" "$BAU/wlibc.fi" "$BAU/uiscale.fi" "$BAU/uidraw.fi" "$BAU/hosthead.fi" "$BAU/hostwin.fi" "$BAU/hoststart.fi" "$BAU/fuib.fi" "$BAU/fuiglyph.fi" "$BAU"/wlib/*.fi "$BAU"/wlibc/*.fi "$BAU"/uitheme/*.fi; do
-    [ -f "$f" ] && sed -i -e 's/^import fuiapp\.hostwinp$/import hostwinp/' -e 's/^import fuiapp\.hostax$/import hostax/' -e 's/^import fuiapp\.hosthead$/import hosthead/' -e 's/^import fuiapp\.hostwin$/import hostwin/' -e 's/^import fuiapp\.hoststart$/import hoststart/' "$f"
+for f in "$BAU/apphost.fi" "$BAU/wlib.fi" "$BAU/wlibc.fi" "$BAU/uiscale.fi" "$BAU/uidraw.fi" "$BAU/hosthead.fi" "$BAU/hostwin.fi" "$BAU/hoststart.fi" "$BAU/fuib.fi" "$BAU/fuiglyph.fi" "$BAU"/wlib/*.fi "$BAU"/wlibc/*.fi "$BAU"/uitheme/*.fi; do
+    [ -f "$f" ] && sed -i -e 's/^import fuiapp\.hostwinp$/import hostwinp/' -e 's/^import fuiapp\.hostax$/import hostax/' -e 's/^import fuiapp\.hosthead$/import hosthead/' -e 's/^import fuiapp\.hostwin$/import hostwin/' -e 's/^import fuiapp\.hoststart$/import hoststart/' -e 's/^import fuiapp\.wlib$/import wlib/' -e 's/^import fuiapp\.hostkey$/import hostkey/' -e 's/^import fuiapp\.hostflags$/import hostflags/' "$f"
 done
 for f in "$BAU"/*.fi "$BAU"/wlib/*.fi "$BAU"/wlibc/*.fi "$BAU"/uitheme/*.fi; do
     [ -f "$f" ] && [ ! -L "$f" ] && sed -i -E 's/^import (uikit|fuiapp)\.(uiscale|uitext|uiicon|uidraw|svcclip|svcnoti|svcbus)[[:space:]]*$/import \2/' "$f"
@@ -127,7 +128,7 @@ if [ "$LAYOUT" = new ]; then
         ln -sfn "$CERTUS_REPO/lib/osum/prof_os" "$BAU/prof_os"
     fi
     rm -f "$BAU/window/osum.fi" "$BAU/window/backend.fi"
-    sed 's/wlib\.canvas2(/wlib.canvas(/g' "$CERTUS_REPO/lib/window/osum.fi" > "$BAU/window/osum.fi"
+    cp "$CERTUS_REPO/lib/window/osum.fi" "$BAU/window/osum.fi"
     ln -sfn osum.fi "$BAU/window/backend.fi"
 else
     mkdir -p "$BAU/fenster"

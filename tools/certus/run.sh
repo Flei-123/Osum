@@ -144,14 +144,14 @@ grep -aqE 'import libc\.mem([^a-z]|$)' <({ bash tools/structure/catprog.sh kerne
 grep -q 'fn gmem' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi) \
     && ok "the glyph memory comes from its own 64 KiB pieces (gmem)" \
     || bad "gmem fehlt"
-grep -q 'wlib.canvas2(' "$CERTUS_REPO/lib/window/osum.fi" \
+grep -q 'apphost.canvas(' "$CERTUS_REPO/lib/window/osum.fi" \
     && ok "the fourth back wall (lib/window/osum.fi) creates a wlib canvas" \
     || bad "lib/window/osum.fi creates no canvas"
 for f in b_back b_vor b_neu e_adr; do
     grep -q "$f" "$CERTUS_REPO/lib/window/osum.fi" || bad "widget $f is missing from the back wall"
 done
-grep -q 'wlib.button' "$CERTUS_REPO/lib/window/osum.fi" \
-    && grep -q 'wlib.entry' "$CERTUS_REPO/lib/window/osum.fi" \
+grep -q 'apphost.button' "$CERTUS_REPO/lib/window/osum.fi" \
+    && grep -q 'apphost.entry' "$CERTUS_REPO/lib/window/osum.fi" \
     && ok "Back/Forward/New are wlib.button, the address is wlib.entry" \
     || bad "the bar is not made of wlib widgets"
 
