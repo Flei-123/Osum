@@ -476,6 +476,8 @@ soll = []
 for raw in open(sys.argv[2], 'rb').read().decode('utf-8').splitlines():
     if raw.startswith('settings.tabs'):
         soll = soll + raw.split('=', 1)[1].strip().split('\\n')
+    elif re.match(r'settings\.page\.[^=]*\.title\s*=', raw):
+        soll.append(raw.split('=', 1)[1].strip())
 if not soll:
     print('KEINE SPRACHDATEI'); raise SystemExit
 ist = {}
@@ -484,11 +486,9 @@ for m in re.finditer(r'wlib: tab i=(\d+) .* nq=(\d+) nv=(\d+) t=(.*)', txt):
                                                                'replace'),
                             int(m.group(2)), int(m.group(3)))
 schlecht = []
-for i, name in enumerate(soll):
-    if i not in ist:
-        continue
-    if ist[i][0] != name:
-        schlecht.append("%d meldet '%s' statt '%s'" % (i, ist[i][0], name))
+for i in sorted(ist):
+    if ist[i][0] not in soll:
+        schlecht.append("%d meldet '%s', not in the language file" % (i, ist[i][0]))
 print(len(schlecht), ';'.join(schlecht[:4]) if schlecht else '')
 PY
 )
