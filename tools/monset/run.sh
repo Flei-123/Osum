@@ -59,6 +59,7 @@ run_one() {
 }
 
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+export FIRNLIB="$PWD/lib"
 MUT="$TMPD/mutant"
 mkdir -p "$MUT"
 cp -a kernel/user "$MUT/user"
