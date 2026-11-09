@@ -50,6 +50,8 @@ echo ==B==
 opk install /t/big.opk
 opk list
 ls /apps
+ls /apps/bigpkg.osp
+shasum /apps/bigpkg.osp/blob.bin
 echo ==END==
 sleep 3
 EOS
@@ -79,6 +81,7 @@ has "$T/new.A" "SIGNATURE WRONG" "corrupt big package refused by the signature c
 hasnot "$T/new.A" "opk: installed" "corrupt big package not installed"
 has "$T/new.B" "opk: installed bigpkg" "big package installed"
 has "$T/new.B" "bigpkg" "big package listed"
+has "$T/new.B" "$H_BLOB  /apps/bigpkg.osp/blob.bin" "installed payload hash equals the host hash"
 hasnot "$T/new.B" "does not fit the buffer" "no size refusal for the big package"
 grep -aiqE 'panic|kernel fault|page fault|exception' "$T/new.klar" && bad "fault on the serial line" || ok "0 faults"
 grep -aq '^kernel: done' "$T/new.klar" && ok "the kernel finished" || bad "kernel did not finish"
