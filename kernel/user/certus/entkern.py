@@ -182,10 +182,7 @@ def main():
     write_2(p, profil_gone(read_2(p), 'wlibc'))
     print('entkernt wlibc.fi')
     for p in split_files(bau, 'wlibc'):
-        text = profil_gone(read_2(p), os.path.basename(p))
-        if os.path.basename(p) == 'wcpaint.fi':
-            text = wlibc_asm(text) + EXT
-        write_2(p, text)
+        write_2(p, profil_gone(read_2(p), os.path.basename(p)))
     for p in split_files(bau, 'uitheme'):
         write_2(p, profil_gone(read_2(p), os.path.basename(p)))
     for name in ('hosthead.fi', 'hostwin.fi', 'hoststart.fi'):
@@ -194,13 +191,16 @@ def main():
         if name != 'hoststart.fi':
             text = wlibc_asm(text) + EXT
         write_2(p, text)
+    p = os.path.join(bau, 'uisys.fi')
+    if os.path.exists(p):
+        write_2(p, wlibc_asm(profil_gone(read_2(p), 'uisys.fi')) + EXT)
     for p in split_files(bau, 'wlib'):
         write_2(p, schlicht(read_2(p), os.path.basename(p)))
     for name in ('ulib.fi', 'wlib.fi', 'icons.fi', 'utf8.fi'):
         p = os.path.join(bau, name)
         if os.path.exists(p):
             write_2(p, schlicht(read_2(p), name))
-    done = ('libc', 'ulib.fi', 'wlib.fi', 'wlibc.fi', 'icons.fi', 'utf8.fi')
+    done = ('libc', 'ulib.fi', 'wlib.fi', 'wlibc.fi', 'icons.fi', 'utf8.fi', 'uisys.fi')
     for f in sorted(os.listdir(bau)):
         p = os.path.join(bau, f)
         if f.endswith('.fi') and f not in done and not os.path.islink(p) and os.path.isfile(p) \

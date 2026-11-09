@@ -1,0 +1,245 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import wlibc.wcbase
+
+const SCALE: u64 = 16777216
+
+static mut ramps: [u64; 36] = [0 as u64; 36]
+
+static mut pairs_ok: u64 = 0
+
+fn pairs_init() {
+    if pairs_ok != 0 {
+        return
+    }
+    wcbase.pair_fg[(0) as usize] = wcbase.S_TEXT_PRIMARY
+    wcbase.pair_bg[(0) as usize] = wcbase.S_SURFACE
+    wcbase.pair_fg[(1) as usize] = wcbase.S_TEXT_PRIMARY
+    wcbase.pair_bg[(1) as usize] = wcbase.S_SURFACE_RAISED
+    wcbase.pair_fg[(2) as usize] = wcbase.S_TEXT_PRIMARY
+    wcbase.pair_bg[(2) as usize] = wcbase.S_SURFACE_SUNKEN
+    wcbase.pair_fg[(3) as usize] = wcbase.S_TEXT_PRIMARY
+    wcbase.pair_bg[(3) as usize] = wcbase.S_SURFACE_HOVER
+    wcbase.pair_fg[(4) as usize] = wcbase.S_TEXT_PRIMARY
+    wcbase.pair_bg[(4) as usize] = wcbase.S_SURFACE_PRESSED
+    wcbase.pair_fg[(5) as usize] = wcbase.S_TEXT_PRIMARY
+    wcbase.pair_bg[(5) as usize] = wcbase.S_OVERLAY
+    wcbase.pair_fg[(6) as usize] = wcbase.S_TEXT_SECONDARY
+    wcbase.pair_bg[(6) as usize] = wcbase.S_SURFACE
+    wcbase.pair_fg[(7) as usize] = wcbase.S_TEXT_SECONDARY
+    wcbase.pair_bg[(7) as usize] = wcbase.S_SURFACE_RAISED
+    wcbase.pair_fg[(8) as usize] = wcbase.S_TEXT_SECONDARY
+    wcbase.pair_bg[(8) as usize] = wcbase.S_SURFACE_SUNKEN
+    wcbase.pair_fg[(9) as usize] = wcbase.S_TEXT_SECONDARY
+    wcbase.pair_bg[(9) as usize] = wcbase.S_SURFACE_HOVER
+    wcbase.pair_fg[(10) as usize] = wcbase.S_ON_ACCENT
+    wcbase.pair_bg[(10) as usize] = wcbase.S_ACCENT
+    wcbase.pair_fg[(11) as usize] = wcbase.S_ON_ACCENT
+    wcbase.pair_bg[(11) as usize] = wcbase.S_ACCENT_HOVER
+    wcbase.pair_fg[(12) as usize] = wcbase.S_ON_ACCENT
+    wcbase.pair_bg[(12) as usize] = wcbase.S_ACCENT_PRESSED
+    wcbase.pair_fg[(13) as usize] = wcbase.S_ON_SELECTION
+    wcbase.pair_bg[(13) as usize] = wcbase.S_SELECTION
+    wcbase.pair_fg[(14) as usize] = wcbase.S_DANGER
+    wcbase.pair_bg[(14) as usize] = wcbase.S_SURFACE
+    wcbase.pair_fg[(15) as usize] = wcbase.S_WARNING
+    wcbase.pair_bg[(15) as usize] = wcbase.S_SURFACE
+    wcbase.pair_fg[(16) as usize] = wcbase.S_SUCCESS
+    wcbase.pair_bg[(16) as usize] = wcbase.S_SURFACE
+    wcbase.pair_fg[(17) as usize] = wcbase.S_TEXT_PRIMARY
+    wcbase.pair_bg[(17) as usize] = wcbase.S_CONTROL
+    wcbase.pair_fg[(18) as usize] = wcbase.S_TEXT_PRIMARY
+    wcbase.pair_bg[(18) as usize] = wcbase.S_CONTROL_HOVER
+    wcbase.pair_fg[(19) as usize] = wcbase.S_TEXT_PRIMARY
+    wcbase.pair_bg[(19) as usize] = wcbase.S_CONTROL_PRESSED
+    wcbase.pair_fg[(20) as usize] = wcbase.S_TEXT_PRIMARY
+    wcbase.pair_bg[(20) as usize] = wcbase.S_FIELD
+    pairs_ok = 1
+}
+
+fn mulf(a: u64, b: u64) -> u64 {
+    return (a * b) >> 24
+}
+
+fn fifth_root(v: u64) -> u64 {
+    if v == 0 {
+        return 0
+    }
+    var r: u64 = SCALE
+    var k: u64 = 0
+    while k < 60 {
+        let r2: u64 = mulf(r, r)
+        let r4: u64 = mulf(r2, r2)
+        if r4 == 0 {
+            k = 60
+        } else {
+            let q: u64 = (v << 24) / r4
+            let nr: u64 = (4 * r + q) / 5
+            if nr == r {
+                k = 60
+            } else {
+                r = nr
+                k = k + 1
+            }
+        }
+    }
+    return r
+}
+
+fn lin_of(c: u64) -> u64 {
+    let x: u64 = (c * SCALE) / 255
+    if c <= 10 {
+        return (x * 10000) / 129200
+    }
+    let t: u64 = ((x + (55 * SCALE) / 1000) * 1000) / 1055
+    let t2: u64 = mulf(t, t)
+    return mulf(t2, fifth_root(t2))
+}
+
+fn luminance(rgb: u64) -> u64 {
+    let r: u64 = lin_of((rgb >> 16) & 255)
+    let g: u64 = lin_of((rgb >> 8) & 255)
+    let b: u64 = lin_of(rgb & 255)
+    return (2126 * r + 7152 * g + 722 * b) / 10000
+}
+
+fn contrast(a: u64, b: u64) -> u64 {
+    var la: u64 = luminance(a)
+    var lb: u64 = luminance(b)
+    if la < lb {
+        let t: u64 = la
+        la = lb
+        lb = t
+    }
+    return ((la + SCALE / 20) * 100) / (lb + SCALE / 20)
+}
+
+fn mix(a: u64, b: u64, p: u64) -> u64 {
+    var out: u64 = 0
+    var n: u64 = 0
+    while n < 3 {
+        let s: u64 = 16 - n * 8
+        let ca: u64 = (a >> s) & 255
+        let cb: u64 = (b >> s) & 255
+        let cv: u64 = ((ca * (100 - p) + cb * p) / 100) & 255
+        out = out | (cv << s)
+        n = n + 1
+    }
+    return out
+}
+
+fn ramp_build(slot: u64, base: u64) {
+    let at: u64 = slot * wcbase.RAMP_STEPS
+    ramps[((at + 0)) as usize] = mix(base, wcbase.RGB_WHITE, 88)
+    ramps[((at + 1)) as usize] = mix(base, wcbase.RGB_WHITE, 76)
+    ramps[((at + 2)) as usize] = mix(base, wcbase.RGB_WHITE, 60)
+    ramps[((at + 3)) as usize] = mix(base, wcbase.RGB_WHITE, 38)
+    ramps[((at + 4)) as usize] = mix(base, wcbase.RGB_WHITE, 18)
+    ramps[((at + 5)) as usize] = base
+    ramps[((at + 6)) as usize] = mix(base, wcbase.RGB_BLACK, 16)
+    ramps[((at + 7)) as usize] = mix(base, wcbase.RGB_BLACK, 33)
+    ramps[((at + 8)) as usize] = mix(base, wcbase.RGB_BLACK, 50)
+}
+
+fn ramp_at(slot: u64, step: u64) -> u64 {
+    return ramps[((slot * wcbase.RAMP_STEPS + step)) as usize]
+}
+
+fn pick_on(bg: u64) -> u64 {
+    var best: u64 = wcbase.neutral[(wcbase.N_0) as usize]
+    var bestr: u64 = contrast(best, bg)
+    var i: u64 = 0
+    while i < 2 {
+        var c: u64 = wcbase.neutral[(wcbase.N_1000) as usize]
+        if i == 1 {
+            c = wcbase.neutral[(wcbase.N_900) as usize]
+        }
+        let r: u64 = contrast(c, bg)
+        if r > bestr {
+            bestr = r
+            best = c
+        }
+        i = i + 1
+    }
+    return best
+}
+
+fn states_of(a: u64) {
+    let on: u64 = pick_on(a)
+    var towards: u64 = wcbase.RGB_WHITE
+    if luminance(on) > luminance(a) {
+        towards = wcbase.RGB_BLACK
+    }
+    wcbase.st_hover = mix(a, towards, 12)
+    wcbase.st_pressed = mix(a, towards, 26)
+    wcbase.st_on = on
+}
+
+fn cand_step(start: u64, up: bool, d: u64, second: bool) -> u64 {
+    var forward: bool = up
+    if second {
+        if d == 0 {
+            return wcbase.RAMP_STEPS
+        }
+        forward = !up
+    }
+    if forward {
+        if start + d < wcbase.RAMP_STEPS {
+            return start + d
+        }
+        return wcbase.RAMP_STEPS
+    }
+    if start >= d {
+        return start - d
+    }
+    return wcbase.RAMP_STEPS
+}
+
+fn fit_status(slot: u64, start: u64, up: bool, need: u64) -> u64 {
+    let bg: u64 = wcbase.sem[(wcbase.S_SURFACE) as usize]
+    var d: u64 = 0
+    while d < wcbase.RAMP_STEPS {
+        var k: u64 = 0
+        while k < 2 {
+            let i: u64 = cand_step(start, up, d, k == 1)
+            if i < wcbase.RAMP_STEPS {
+                if contrast(ramp_at(slot, i), bg) >= need {
+                    return ramp_at(slot, i)
+                }
+            }
+            k = k + 1
+        }
+        d = d + 1
+    }
+    var best: u64 = ramp_at(slot, 0)
+    var bestr: u64 = contrast(best, bg)
+    var i2: u64 = 1
+    while i2 < wcbase.RAMP_STEPS {
+        let r: u64 = contrast(ramp_at(slot, i2), bg)
+        if r > bestr {
+            bestr = r
+            best = ramp_at(slot, i2)
+        }
+        i2 = i2 + 1
+    }
+    return best
+}
+
+fn shadow_an() -> bool {
+    return wcbase.set_shadow == wcbase.SHDW_AN
+}
+
+fn shadow_value(roh: u64) -> u64 {
+    if wcbase.set_shadow == wcbase.SHDW_AN {
+        return roh
+    }
+    return 0
+}
+
+fn drag_value(ovr: u64, m: u64) -> u64 {
+    if ovr != 0 {
+        return ovr - 1
+    }
+    return wcbase.met[(m) as usize]
+}
