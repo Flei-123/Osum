@@ -51,10 +51,11 @@ done
 rm -f "$BAU/fenster" "$BAU/libc"
 cp -r "$ROOT/lib/libc" "$BAU/libc"
 cp "$ROOT/lib/icons.fi" "$ROOT/lib/utf8.fi" "$BAU/"
-cp "$ROOT/kernel/user/ulib.fi" "$ROOT/kernel/user/wlib.fi" \
-   "$ROOT/kernel/user/wlibc.fi" "$BAU/"
+cp "$ROOT/kernel/user/ulib.fi" "$ROOT/kernel/user/wlibc.fi" \
+   "$ROOT/kernel/user/fuiapp/wlib.fi" "$BAU/"
 rm -rf "$BAU/wlib" "$BAU/wlibc"
-cp -r "$ROOT/kernel/user/wlib" "$ROOT/kernel/user/wlibc" "$BAU/"
+cp -r "$ROOT/kernel/user/fuiapp/wlib" "$ROOT/kernel/user/wlibc" "$BAU/"
+sed -i -E 's/^import fuiapp\.(wlib(\.[a-z]+)?)$/import \1/' "$BAU/wlib.fi" "$BAU"/wlib/*.fi
 python3 - "$ROOT" "$BAU" <<'PYEOF'
 import os, re, shutil, sys
 root, bau = sys.argv[1], sys.argv[2]
@@ -138,7 +139,7 @@ python3 "$ROOT/kernel/user/certus/entkern.py" "$BAU" > "$BAU/entkern.log"
 cp "$CERTUS_REPO/lib/osum/certus_main.fi" "$BAU/certus_main.fi"
 (cd "$BAU" && python3 "$ROOT/kernel/user/certus/inlineconsts.py" "$BAU" wlib.fi wlibc.fi wlib/*.fi wlibc/*.fi) | tee "$BAU/inlineconsts.log"
 python3 "$ROOT/kernel/user/certus/splitstems.py" "$ROOT" "$BAU" "$ROOT/vendor/firn" | tee "$BAU/splitstems.log"
-(cd "$BAU" && python3 "$ROOT/kernel/user/certus/inlineconsts.py" "$BAU" osa/*.fi fui/*.fi) | tee -a "$BAU/inlineconsts.log"
+(cd "$BAU" && python3 "$ROOT/kernel/user/certus/inlineconsts.py" "$BAU" $(ls osa/*.fi fui/*.fi 2>/dev/null)) | tee -a "$BAU/inlineconsts.log"
 (cd "$BAU" && grep -l '__bits(\|__include_str(' osa/*.fi fui/*.fi 2>/dev/null | xargs -r python3 "$ROOT/kernel/user/certus/lowerintrinsics.py" "$BAU") | tee "$BAU/lowerintrinsics.log"
 if [ -f "$BAU/std/deflate.fi" ] && ! grep -q 'fn inflate_limited' "$BAU/std/deflate.fi"; then
     stddir=$(readlink -f "$BAU/std")

@@ -152,6 +152,13 @@ def schlicht(s, name='?'):
     if name == 'wlevent.fi':
         s = s.replace('return asm("rdtsc\\nshl rdx, 32\\nor rax, rdx", out("rax"))', 'return osum_rdtsc()', 1)
         s += '\nextern fn osum_rdtsc() -> u64;\n'
+    if name == 'libc/net.fi':
+        s = re.sub(r'asm\("syscall", out\("rax"\), in\("rax"\) kcall\.SYS_GETSOCKOPT,.*?clobber\("memory"\)\)',
+                   'kcall.sys5(kcall.SYS_GETSOCKOPT, fd, SOL_SOCKET, SO_ERROR, (&val[0]) as u64, (&len[0]) as u64)',
+                   s, count=1, flags=re.S)
+    if name == 'libc/threads.fi':
+        s = re.sub(r'(fn clone_call\([^)]*\) -> u64 \{\n)    return asm\(.*?clobber\("memory"\)\)',
+                   r'\1    return 0 -% 38', s, count=1, flags=re.S)
     if 'asm(' in s:
         print('unexpected asm( in ' + name, file=sys.stderr)
         sys.exit(1)
@@ -195,7 +202,7 @@ def main():
     for f in sorted(os.listdir(d)):
         if f.endswith('.fi') and f != 'kcall.fi':
             p = os.path.join(d, f)
-            write_2(p, schlicht(read_2(p)))
+            write_2(p, schlicht(read_2(p), 'libc/' + f))
     print('fertig')
 
 

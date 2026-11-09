@@ -146,9 +146,9 @@ grep -q 'fpu.switch' kernel/sched/sched.fi \
 
 echo
 echo "== 3. the canvas and the single-core rule =="
-grep -q 'const K_CANVAS' <(bash tools/structure/catprog.sh kernel/user/wlib.fi) \
-    && ok "kernel/user/wlib.fi has the widget K_CANVAS" || bad "K_CANVAS fehlt"
-grep -q 'fn canvas_event' <(bash tools/structure/catprog.sh kernel/user/wlib.fi) \
+grep -q 'const K_CANVAS' <(bash tools/structure/catprog.sh kernel/user/fuiapp/wlib.fi) \
+    && ok "kernel/user/fuiapp/wlib.fi has the widget K_CANVAS" || bad "K_CANVAS fehlt"
+grep -q 'fn canvas_event' <(bash tools/structure/catprog.sh kernel/user/fuiapp/wlib.fi) \
     && ok "the canvas has an event ring (canvas_event)" \
     || bad "canvas_event fehlt"
 grep -q 'import libc.mem' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi) \

@@ -15,7 +15,7 @@ ALLOWED_FN = {
         "fn divider",
         "fn cap",
     ),
-    "kernel/user/wlib.fi": (
+    "kernel/user/fuiapp/wlib.fi": (
         "fn ctrl_small",
         "fn ctrl_thin",
         "fn inset",
@@ -25,7 +25,7 @@ ALLOWED_FN = {
 
 FILES = [
     "kernel/user/wlibc.fi",
-    "kernel/user/wlib.fi",
+    "kernel/user/fuiapp/wlib.fi",
 ]
 
 CALLS = {

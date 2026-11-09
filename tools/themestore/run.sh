@@ -1659,7 +1659,7 @@ same "und die Datei auch" "4" \
     "$(bash tools/mkfsfi/mkfs.sh cat "$TMPD/rvor/disk.img" /etc/theme.conf \
        2>/dev/null | grep -aE '^radius=' | tail -1 | cut -d= -f2)"
 num "Schmuck-Widgets sind von der Trefferpruefung ausgenommen" \
-    "$(grep -ac 'fn only_decoration(' <(bash tools/structure/catprog.sh kernel/user/wlib.fi))" eq 1
+    "$(grep -ac 'fn only_decoration(' <(bash tools/structure/catprog.sh kernel/user/fuiapp/wlib.fi))" eq 1
 
 GSHOT=0
 for s in glas-radius-0 glas-radius-12 glas-radius-24 glas-alpha-100 \

@@ -19,9 +19,9 @@
 set -u
 cd "$(dirname "$0")/.."
 
-ERLAUBT_ROH="kernel/user/wlib.fi kernel/user/icont.fi kernel/user/fuib.fi"
+ERLAUBT_ROH="kernel/user/fuiapp/wlib.fi kernel/user/icont.fi kernel/user/fuib.fi"
 
-ERLAUBT_FUI="kernel/user/fuib.fi kernel/user/fuiapp.fi kernel/user/fuiscene.fi kernel/user/fuied.fi kernel/user/lock.fi kernel/user/wlib.fi kernel/user/signin.fi kernel/user/traypop.fi kernel/user/calpop.fi kernel/user/wmd.fi kernel/user/compdiff.fi"
+ERLAUBT_FUI="kernel/user/fuib.fi kernel/user/fuiapp.fi kernel/user/fuiscene.fi kernel/user/fuied.fi kernel/user/lock.fi kernel/user/fuiapp/wlib.fi kernel/user/signin.fi kernel/user/traypop.fi kernel/user/calpop.fi kernel/user/wmd.fi kernel/user/compdiff.fi"
 
 ROH='wlibc\.(rect|hline|vline|frame|frame3|px|rrect|rframe|rring|vrect|vkreis|divider|drop_shadow)\('
 
@@ -68,7 +68,7 @@ zweite=$(awk '
 /wlibc\.(rect|hline|vline|frame|frame3|px|rrect|rframe|rring|vrect|vkreis|divider|drop_shadow)\(/ { roh++ }
 /fuib\./ { br++ }
 END      { if (name != "" && roh > 0 && br == 0) print "  " name }
-' <(bash tools/structure/catprog.sh kernel/user/wlib.fi))
+' <(bash tools/structure/catprog.sh kernel/user/fuiapp/wlib.fi))
 
 #
 #
@@ -91,7 +91,7 @@ done <<< "$zweite"
 
 if [[ -n ${uebrig//[$'\n' ]/} ]]; then
     fehler=$((fehler + 1))
-    treffer+="  kernel/user/wlib.fi: malt an fUi vorbei (zweite Umsetzung):"$'\n'
+    treffer+="  kernel/user/fuiapp/wlib.fi: malt an fUi vorbei (zweite Umsetzung):"$'\n'
     treffer+="$uebrig"
 fi
 
@@ -149,7 +149,7 @@ if [[ $fehler -gt 0 ]]; then
     printf '%s' "$treffer"
     echo
     echo "Abhilfe:"
-    echo "  * A PROGRAM takes the element from kernel/user/wlib.fi"
+    echo "  * A PROGRAM takes the element from kernel/user/fuiapp/wlib.fi"
     echo "    (label, button, check, entry, list, table, tabs, choice,"
     echo "     tile, card, slider, sep, scrollarea, menubar, dlg_*) oder"
     echo "    die Malschicht (draw_board, draw_area, draw_bar)."

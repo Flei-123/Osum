@@ -12,7 +12,7 @@ PAT_RGB = re.compile(r"\brgb\(\s*state\s*,\s*(0x[0-9A-Fa-f]{1,2}|\d{1,3})"
 FILES = [
     "kernel/ui/wm.fi",
     "kernel/user/wlibc.fi",
-    "kernel/user/wlib.fi",
+    "kernel/user/fuiapp/wlib.fi",
     "kernel/user/taskbar.fi",
     "kernel/user/taskbar/tbbase.fi",
     "kernel/user/taskbar/tbhover.fi",

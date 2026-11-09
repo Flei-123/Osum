@@ -182,7 +182,7 @@ gleich "GEGENPROBE: mit acht KiB weniger Stapel geht es nicht" \
 echo "== 2b. the silent abort of firnc1 (D-019) =="
 LEER="$TMPD/leerimport"
 rm -rf "$LEER"; mkdir -p "$LEER"
-cp kernel/user/wlib.fi "$LEER/" 2>/dev/null
+cp kernel/user/fuiapp/wlib.fi "$LEER/" 2>/dev/null
 FIRNLIB="$PWD/lib" "$FC1" -c -o "$LEER/x.o" "$LEER/wlib.fi" \
     > "$LEER/c1.out" 2> "$LEER/c1.err"
 RC1=$?

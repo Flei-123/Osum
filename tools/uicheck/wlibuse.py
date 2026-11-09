@@ -12,8 +12,8 @@ DOC_END = "<!-- INVENTORY:END -->"
 
 WLIB_MODULES = ("wlib", "wlax", "wlbase", "wldraw", "wlevent", "wlstate", "wlwidget")
 WLIBC_MODULES = ("wlibc", "wcbase", "wcgfx", "wcpaint", "wcpal", "wctheme")
-TOOLKIT_PATHS = ("kernel/user/wlib/", "kernel/user/wlibc/", "kernel/user/fuiapp/")
-TOOLKIT_FILES = {"kernel/user/wlib.fi", "kernel/user/wlibc.fi"}
+TOOLKIT_PATHS = ("kernel/user/wlibc/", "kernel/user/fuiapp/")
+TOOLKIT_FILES = {"kernel/user/fuiapp/wlib.fi", "kernel/user/wlibc.fi"}
 IMPORT = re.compile(rb"^import ([A-Za-z0-9_.]+)", re.M)
 REF = re.compile(rb"\b(" + b"|".join(m.encode() for m in WLIB_MODULES + WLIBC_MODULES) + rb")\.([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -117,7 +117,7 @@ def program_of(rel, programs):
 
 
 def scan(root):
-    facades = {"wlib": facade_symbols(root, "kernel/user/wlib.fi", "wlib"),
+    facades = {"wlib": facade_symbols(root, "kernel/user/fuiapp/wlib.fi", "wlib"),
                "wlibc": facade_symbols(root, "kernel/user/wlibc.fi", "wlibc")}
     sources = git_sources(root)
     imports_of = {}
