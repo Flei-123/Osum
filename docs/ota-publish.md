@@ -14,3 +14,12 @@
 
 - Never delete `hp-*base*` or `hp-stick*` directories under `/root/abbilder`: they are the baselines `republish-hp.sh` and `publish.sh` compare against.
 - `hp-stick36-base` is the build output directory (`*.elf`, `osum.mb`, `buendel`) of `IMAGE_ID=hp-stick36 HP_STICK=1 bash tools/usbimg/build.sh <out>` at commit `89003cb4` (rebuild: detached worktree of that commit, `bash vendor/firn/fetch-firnc.sh` first).
+
+## Device key (WARNING)
+
+- The real HP device key (`hp-device.key`, also `justin-device.key`, `vm-device.key`) is gone from `/root/abbilder`. The only copy left is on the HP itself (`/var/jarvis`, key in `jsig`).
+- `hp-stick36-base` was built with a throwaway key (`/root/abbilder/hp36tmp/dummy-device.key`). It is a comparison baseline for overlays only. NEVER flash or boot it on the HP: its device id is not paired.
+- Rule for `/root/abbilder`: never delete `*.key`, `hp-*base*`, `hp-stick*`.
+- Recover: read the key from the running HP (`jarvisctl` / `/var/jarvis` over an existing bridge session) and store it as `/root/abbilder/hp-device.key`, mode 0600. Do not run an image with that key in parallel in QEMU (same bridge id).
+- New pairing instead (needs a new image): build with a fresh key, boot once, read the 6-digit code from `/var/jarvis/pairing`, run `jarvisctl pair <code>` on the device, then the admin calls `POST /bruecke/koppeln {geraet, code}` on the server (see `docs/BRIDGE-PAIRING.md`), and pin the new id in `data/bruecke_devices.json`.
+- Nothing in this recipe is applied to the HP by the tooling.
