@@ -15,7 +15,7 @@ use_scale() {
     SCALE=$1
     case "$SCALE" in
         1) LIST0=180,518; LIST1=180,546; EDITOR=540,700; TERM=50,700 ;;
-        2) LIST0=360,602; LIST1=360,630; EDITOR=1000,800; TERM=100,700 ;;
+        2) LIST0=360,613; LIST1=360,669; EDITOR=1000,800; TERM=100,700 ;;
         *) echo "NOTEPAD: unsupported scale $SCALE"; exit 2 ;;
     esac
     sed -e "s/@LIST0@/$LIST0/" -e "s/@LIST1@/$LIST1/" -e "s/@EDITOR@/$EDITOR/" -e "s/@TERM@/$TERM/" \

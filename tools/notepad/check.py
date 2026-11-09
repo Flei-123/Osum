@@ -36,8 +36,8 @@ def main():
     verdict("persisted_rows", len(readies) > 1 and "ready rows=1" in again[0])
     verdict("persisted_note", has(again, "select", "row=0", "id=2", "len=4"))
     rows = [dict(f.split("=") for f in e.split()[1:]) for e in evs if e.startswith("list ")]
-    scaled = bool(rows) and int(rows[0]["rowh"]) == (28 * int(rows[0]["scale"]) + 500) // 1000
-    verdict("list_row_scaled", scaled, rows[0]["rowh"] if rows else "missing")
+    scaled = bool(rows) and int(rows[-1]["rowh"]) == (28 * int(rows[-1]["scale"]) + 500) // 1000
+    verdict("list_row_scaled", scaled, rows[-1]["rowh"] if rows else "missing")
     verdict("no_surface_absent", "no surface" not in evs)
 
 
