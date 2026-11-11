@@ -255,9 +255,11 @@ mutant seqwait "stages waited one by one (no concurrency)" \
         stage_pid[k as usize] = 0
         carry = out_r
 " t1
-mutant keepw "write end kept open in the shell (reader never sees EOF)" \
-    "        close_fd(out_w)
-" "" t1
+mutant keepr "read end kept open in the shell (writer never sees the reader leave)" \
+    "        close_fd(carry)
+        close_fd(out_w)
+" "        close_fd(out_w)
+" t1
 mutant noerrdup "2>&1 ignored" \
     "            ulib.sys(ulib.SYS_DUP2, 1, 2, 0)
 " "" t2
