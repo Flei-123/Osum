@@ -32,6 +32,7 @@ done
 free_port() { python3 -I -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])'; }
 TLSPORT=$(free_port)
 mkdir -p "$D/www" "$D/bin" "$D/lib" "$D/src"
+echo devtools > "$D/bin/dt-marker"
 echo hello-net > "$D/www/h.txt"
 head -c 300000 /dev/urandom > "$D/www/big.bin"
 BIGSHA=$(sha256sum "$D/www/big.bin" | cut -c1-16)
