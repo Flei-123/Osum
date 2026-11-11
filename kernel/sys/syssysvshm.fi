@@ -1,0 +1,246 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.errno
+import fs.unixsock
+import sys.sysconst
+import sys.sysmem
+import sys.sysuser
+import sched.taskconst
+import sched.taskslot
+
+export {
+    handles, call
+}
+
+const SYS_SHMGET: u64 = 29
+const SYS_SHMAT: u64 = 30
+const SYS_SHMCTL: u64 = 31
+const SYS_SHMDT: u64 = 67
+
+const IPC_CREAT: u64 = 512
+const IPC_EXCL: u64 = 1024
+const IPC_RMID: u64 = 0
+const IPC_SET: u64 = 1
+const IPC_STAT: u64 = 2
+const SHM_LOCK: u64 = 11
+const SHM_UNLOCK: u64 = 12
+const SHM_RDONLY: u64 = 4096
+const PROT_READ: u64 = 1
+const PROT_WRITE: u64 = 2
+
+const SEGS_MAX: u64 = 16
+const ID_SLOT_MASK: u64 = 255
+const ID_GEN_SHIFT: u64 = 8
+const STAT_BYTES: u64 = 112
+const STAT_MODE_OFF: u64 = 20
+const STAT_SEGSZ_OFF: u64 = 48
+const STAT_CPID_OFF: u64 = 80
+const STAT_NATTCH_OFF: u64 = 88
+const MODE_DEFAULT: u64 = 384
+const MAP_TASK_MASK: u64 = 0xFFFF
+const MAP_OBJ_SHIFT: u64 = 16
+
+static mut seg_key: [u64; 16] = [0 as u64; 16]
+static mut seg_live: [u64; 16] = [0 as u64; 16]
+static mut seg_gen: [u64; 16] = [0 as u64; 16]
+static mut seg_obj: [u64; 16] = [0 as u64; 16]
+static mut seg_size: [u64; 16] = [0 as u64; 16]
+static mut seg_cpid: [u64; 16] = [0 as u64; 16]
+
+fn fail(e: u64) -> u64 {
+    return errno.neg(e)
+}
+
+fn handles(number: u64) -> bool {
+    return (number >= SYS_SHMGET && number <= SYS_SHMCTL) || number == SYS_SHMDT
+}
+
+fn call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64) -> u64 {
+    if number == SYS_SHMGET {
+        return shmget(state, me, a0, a1, a2)
+    }
+    if number == SYS_SHMAT {
+        return shmat(state, me, a0, a2)
+    }
+    if number == SYS_SHMDT {
+        return shmdt(state, me, a0)
+    }
+    return shmctl(state, me, a0, a1, a2)
+}
+
+fn id_make(slot: u64, gen: u64) -> u64 {
+    return (gen << ID_GEN_SHIFT) | slot
+}
+
+fn seg_slot(id: u64) -> u64 {
+    let slot: u64 = id & ID_SLOT_MASK
+    if slot >= SEGS_MAX || seg_live[slot as usize] == 0 {
+        return SEGS_MAX
+    }
+    if (id >> ID_GEN_SHIFT) != seg_gen[slot as usize] {
+        return SEGS_MAX
+    }
+    return slot
+}
+
+fn seg_find(key: u64) -> u64 {
+    var i: u64 = 0
+    while i < SEGS_MAX {
+        if seg_live[i as usize] != 0 && seg_key[i as usize] == key {
+            return i
+        }
+        i = i + 1
+    }
+    return SEGS_MAX
+}
+
+fn seg_free_slot() -> u64 {
+    var i: u64 = 0
+    while i < SEGS_MAX {
+        if seg_live[i as usize] == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return SEGS_MAX
+}
+
+fn shmget(state: u64, me: u64, key: u64, size: u64, flags: u64) -> u64 {
+    let k: u64 = key & 0xFFFFFFFF
+    if k != 0 {
+        let found: u64 = seg_find(k)
+        if found < SEGS_MAX {
+            if (flags & IPC_CREAT) != 0 && (flags & IPC_EXCL) != 0 {
+                return fail(errno.E_EXIST)
+            }
+            if size > seg_size[found as usize] {
+                return fail(errno.E_INVAL)
+            }
+            return id_make(found, seg_gen[found as usize])
+        }
+        if (flags & IPC_CREAT) == 0 {
+            return fail(errno.E_NOENT)
+        }
+    }
+    if size == 0 {
+        return fail(errno.E_INVAL)
+    }
+    return seg_create(state, me, k, size)
+}
+
+fn seg_create(state: u64, me: u64, key: u64, size: u64) -> u64 {
+    let slot: u64 = seg_free_slot()
+    if slot >= SEGS_MAX {
+        return fail(errno.E_NOSPC)
+    }
+    let obj: u64 = unixsock.shm_new_any(state)
+    if obj >= unixsock.USHM_MAX {
+        return fail(errno.E_NOSPC)
+    }
+    let pages: u64 = (size + sysconst.PAGE - 1) / sysconst.PAGE
+    if pages > unixsock.shm_max_pages(state, obj) {
+        unixsock.shm_free(state, obj)
+        return fail(errno.E_INVAL)
+    }
+    unixsock.shm_set_size(state, obj, size)
+    seg_live[slot as usize] = 1
+    seg_key[slot as usize] = key
+    seg_obj[slot as usize] = obj
+    seg_size[slot as usize] = size
+    seg_cpid[slot as usize] = taskslot.tget(state, me, taskconst.T_PID)
+    seg_gen[slot as usize] = seg_gen[slot as usize] + 1
+    return id_make(slot, seg_gen[slot as usize])
+}
+
+fn shmat(state: u64, me: u64, id: u64, flags: u64) -> u64 {
+    let slot: u64 = seg_slot(id & 0xFFFFFFFF)
+    if slot >= SEGS_MAX {
+        return fail(errno.E_INVAL)
+    }
+    let obj: u64 = seg_obj[slot as usize]
+    var prot: u64 = PROT_READ
+    if (flags & SHM_RDONLY) == 0 {
+        prot = PROT_READ | PROT_WRITE
+        if !unixsock.shm_wmap_take(state, obj) {
+            return fail(errno.E_ACCES)
+        }
+    }
+    let base: u64 = sysmem.map_shm_obj(state, me, obj, true, seg_size[slot as usize], prot)
+    if base >= 0xFFFFFFFFFFFFF000 && (prot & PROT_WRITE) != 0 {
+        unixsock.shm_wmap_drop(state, obj)
+    }
+    return base
+}
+
+fn attached_pages(state: u64, me: u64, addr: u64) -> u64 {
+    var k: u64 = 0
+    while k < unixsock.UMAP_MAX {
+        if unixsock.map_rec_base(state, k) == addr {
+            let w: u64 = unixsock.map_rec_word(state, k)
+            if (w & MAP_TASK_MASK) == me && is_sysv_object(state, (w >> MAP_OBJ_SHIFT) & MAP_TASK_MASK) {
+                return (w >> 32) & unixsock.UM_PAGES_MASK
+            }
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+fn is_sysv_object(state: u64, obj: u64) -> bool {
+    var i: u64 = 0
+    while i < SEGS_MAX {
+        if seg_live[i as usize] != 0 && seg_obj[i as usize] == obj {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn shmdt(state: u64, me: u64, addr: u64) -> u64 {
+    let pages: u64 = attached_pages(state, me, addr)
+    if pages == 0 {
+        return fail(errno.E_INVAL)
+    }
+    return sysmem.do_unmap(state, me, addr, pages * sysconst.PAGE)
+}
+
+fn shmctl(state: u64, me: u64, id: u64, cmd: u64, buf: u64) -> u64 {
+    let slot: u64 = seg_slot(id & 0xFFFFFFFF)
+    if slot >= SEGS_MAX {
+        return fail(errno.E_INVAL)
+    }
+    let op: u64 = cmd & 0xFF
+    if op == IPC_RMID {
+        seg_live[slot as usize] = 0
+        unixsock.shm_unref(state, seg_obj[slot as usize])
+        return 0
+    }
+    if op == IPC_STAT {
+        return stat_out(state, me, slot, buf)
+    }
+    if op == IPC_SET || op == SHM_LOCK || op == SHM_UNLOCK {
+        return 0
+    }
+    return fail(errno.E_INVAL)
+}
+
+fn stat_out(state: u64, me: u64, slot: u64, buf: u64) -> u64 {
+    var i: u64 = 0
+    while i < STAT_BYTES {
+        if !sysuser.poke(state, me, buf + i, 0) {
+            return fail(errno.E_FAULT)
+        }
+        i = i + 1
+    }
+    let attached: u64 = unixsock.shm_refs(state, seg_obj[slot as usize]) - 1
+    let ok: bool = sysuser.put32(state, me, buf, seg_key[slot as usize])
+        && sysuser.put32(state, me, buf + STAT_MODE_OFF, MODE_DEFAULT)
+        && sysuser.put64(state, me, buf + STAT_SEGSZ_OFF, seg_size[slot as usize])
+        && sysuser.put32(state, me, buf + STAT_CPID_OFF, seg_cpid[slot as usize])
+        && sysuser.put64(state, me, buf + STAT_NATTCH_OFF, attached)
+    if !ok {
+        return fail(errno.E_FAULT)
+    }
+    return 0
+}

@@ -1,0 +1,176 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.errno
+import lib.kstate
+import sched.ptimer
+import sched.signal
+import sched.taskconst
+import sched.taskslot
+import sys.sysevent
+import sys.sysuser
+
+export {
+    handles, call
+}
+
+const SYS_TIMER_CREATE: u64 = 222
+const SYS_TIMER_SETTIME: u64 = 223
+const SYS_TIMER_GETTIME: u64 = 224
+const SYS_TIMER_GETOVERRUN: u64 = 225
+const SYS_TIMER_DELETE: u64 = 226
+
+const SIGEV_NOTIFY_OFF: u64 = 12
+const SIGEV_SIGNO_OFF: u64 = 8
+const SIGEV_TID_OFF: u64 = 16
+const TIMER_ABSTIME: u64 = 1
+const CLOCK_REALTIME: u64 = 0
+const CLOCK_MONOTONIC: u64 = 1
+const CLOCK_BOOTTIME: u64 = 7
+const NSEC_PER_SEC: u64 = 1000000000
+const SEC_MAX: u64 = 0x8000000000000000
+
+fn fail(e: u64) -> u64 {
+    return sysuser.neg(e)
+}
+
+fn handles(number: u64) -> bool {
+    return number >= SYS_TIMER_CREATE && number <= SYS_TIMER_DELETE
+}
+
+fn call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
+    if number == SYS_TIMER_CREATE {
+        return do_create(state, me, a0, a1, a2)
+    }
+    if number == SYS_TIMER_SETTIME {
+        return do_settime(state, me, a0, a1, a2, a3)
+    }
+    if number == SYS_TIMER_GETTIME {
+        return do_gettime(state, me, a0, a1)
+    }
+    if number == SYS_TIMER_GETOVERRUN {
+        return do_getoverrun(state, me, a0)
+    }
+    return do_delete(state, me, a0)
+}
+
+fn owner_pid(state: u64, me: u64) -> u64 {
+    let tgid: u64 = taskslot.tget(state, me, taskconst.T_TGID)
+    if tgid != 0 {
+        return tgid
+    }
+    return taskslot.tget(state, me, taskconst.T_PID)
+}
+
+fn valid_clock(clock: u64) -> bool {
+    return clock == CLOCK_REALTIME || clock == CLOCK_MONOTONIC || clock == CLOCK_BOOTTIME
+}
+
+fn valid_notify(kind: u64) -> bool {
+    return kind == ptimer.NOTIFY_SIGNAL || kind == ptimer.NOTIFY_NONE
+        || kind == ptimer.NOTIFY_THREAD || kind == ptimer.NOTIFY_THREAD_ID
+}
+
+fn do_create(state: u64, me: u64, clock: u64, evp: u64, out: u64) -> u64 {
+    if !valid_clock(clock & 0xFFFFFFFF) {
+        return fail(errno.E_INVAL)
+    }
+    var kind: u64 = ptimer.NOTIFY_SIGNAL
+    var signo: u64 = signal.SIGALRM
+    var target: u64 = 0
+    if evp != 0 {
+        kind = sysuser.get32(state, me, evp + SIGEV_NOTIFY_OFF)
+        signo = sysuser.get32(state, me, evp + SIGEV_SIGNO_OFF)
+        target = sysuser.get32(state, me, evp + SIGEV_TID_OFF)
+    }
+    if !valid_notify(kind) {
+        return fail(errno.E_INVAL)
+    }
+    if kind != ptimer.NOTIFY_NONE && (signo == 0 || signo >= signal.NSIG) {
+        return fail(errno.E_INVAL)
+    }
+    let slot: u64 = ptimer.create(owner_pid(state, me), kind, signo, target)
+    if slot >= ptimer.TIMERS_MAX {
+        return fail(errno.E_AGAIN)
+    }
+    if !sysuser.put32(state, me, out, slot) {
+        ptimer.destroy(slot)
+        return fail(errno.E_FAULT)
+    }
+    return 0
+}
+
+fn timer_of(state: u64, me: u64, id: u64) -> u64 {
+    let slot: u64 = id & 0xFFFFFFFF
+    if !ptimer.owned(slot, owner_pid(state, me)) {
+        return ptimer.TIMERS_MAX
+    }
+    return slot
+}
+
+fn put_spec(state: u64, me: u64, addr: u64, slot: u64, now: u64) -> bool {
+    return sysevent.ev_put_ts(state, me, addr, ptimer.interval_of(slot))
+        && sysevent.ev_put_ts(state, me, addr + 16, ptimer.remaining(slot, now))
+}
+
+fn do_settime(state: u64, me: u64, id: u64, flags: u64, newp: u64, oldp: u64) -> u64 {
+    let slot: u64 = timer_of(state, me, id)
+    if slot >= ptimer.TIMERS_MAX {
+        return fail(errno.E_INVAL)
+    }
+    if newp == 0 {
+        return fail(errno.E_FAULT)
+    }
+    let isec: u64 = sysuser.user_word(state, me, newp)
+    let insec: u64 = sysuser.user_word(state, me, newp + 8)
+    let vsec: u64 = sysuser.user_word(state, me, newp + 16)
+    let vnsec: u64 = sysuser.user_word(state, me, newp + 24)
+    if insec >= NSEC_PER_SEC || vnsec >= NSEC_PER_SEC || isec >= SEC_MAX || vsec >= SEC_MAX {
+        return fail(errno.E_INVAL)
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if oldp != 0 && !put_spec(state, me, oldp, slot, now) {
+        return fail(errno.E_FAULT)
+    }
+    let value: u64 = sysevent.ev_ticks(vsec, vnsec)
+    if value == 0 {
+        ptimer.arm(slot, 0, 0)
+        return 0
+    }
+    var first: u64 = now + value
+    if (flags & TIMER_ABSTIME) != 0 {
+        first = value
+        if first < now {
+            first = now
+        }
+    }
+    ptimer.arm(slot, first, sysevent.ev_ticks(isec, insec))
+    return 0
+}
+
+fn do_gettime(state: u64, me: u64, id: u64, curp: u64) -> u64 {
+    let slot: u64 = timer_of(state, me, id)
+    if slot >= ptimer.TIMERS_MAX {
+        return fail(errno.E_INVAL)
+    }
+    if !put_spec(state, me, curp, slot, kstate.get(state, kstate.TICKS)) {
+        return fail(errno.E_FAULT)
+    }
+    return 0
+}
+
+fn do_getoverrun(state: u64, me: u64, id: u64) -> u64 {
+    let slot: u64 = timer_of(state, me, id)
+    if slot >= ptimer.TIMERS_MAX {
+        return fail(errno.E_INVAL)
+    }
+    return ptimer.overrun_of(slot)
+}
+
+fn do_delete(state: u64, me: u64, id: u64) -> u64 {
+    let slot: u64 = timer_of(state, me, id)
+    if slot >= ptimer.TIMERS_MAX {
+        return fail(errno.E_INVAL)
+    }
+    ptimer.destroy(slot)
+    return 0
+}

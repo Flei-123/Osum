@@ -14,7 +14,7 @@ import libc.regio
 
 export {
     init_task, clear_task, exec_reset, inherit,
-    send, send_task, send_pid, send_pgid, send_tty, fault, alarm_check,
+    send, send_task, send_timer, send_pid, send_pgid, send_tty, fault, alarm_check,
     check_sys, check_trap, pending, deliverable, interrupted,
     do_sigaction, do_sigprocmask, do_sigreturn, do_kill, do_pause,
     do_setpgid, do_getpgid, do_setsid, do_alarm, do_sigpending,
@@ -51,6 +51,8 @@ const SIGTTIN: u64 = 21
 const SIGTTOU: u64 = 22
 const SIGWINCH: u64 = 28
 const NSIG: u64 = 65
+const SI_TIMER_CODE: u64 = 0xFFFFFFFE
+static mut timer_marks: [u64; 256] = [0 as u64; 256]
 const NSIG_OLD: u64 = 32
 
 const SIG_DFL: u64 = 0
@@ -305,6 +307,26 @@ fn discarded(state: u64, task: u64, sig: u64) -> bool {
 }
 
 fn send_task(state: u64, task: u64, sig: u64) -> bool {
+    return raise(state, task, sig, false)
+}
+
+fn send_timer(state: u64, pid: u64, sig: u64) -> u64 {
+    let i: u64 = sched.find_pid(state, pid)
+    if i >= kstate.MAX_TASKS || !raise(state, i, sig, true) {
+        return neg(errno.E_SRCH)
+    }
+    return 0
+}
+
+fn mark_origin(task: u64, sig: u64, from_timer: bool) {
+    if from_timer {
+        timer_marks[task as usize] = timer_marks[task as usize] | bit(sig)
+    } else {
+        timer_marks[task as usize] = timer_marks[task as usize] & (0xFFFFFFFFFFFFFFFF -% bit(sig))
+    }
+}
+
+fn raise(state: u64, task: u64, sig: u64, from_timer: bool) -> bool {
     if task >= kstate.MAX_TASKS || sig == 0 || sig >= NSIG {
         return false
     }
@@ -332,6 +354,7 @@ fn send_task(state: u64, task: u64, sig: u64) -> bool {
         kstate.add(state, kstate.SIG_SENT, 1)
         return true
     }
+    mark_origin(task, sig, from_timer)
     taskslot.tset(state, task, taskconst.T_SIGPEND, pend | bit(sig))
     let now: u64 = taskslot.tget(state, task, taskconst.T_STATE)
     if now == taskconst.S_SLEEP || now == taskconst.S_WAIT || now == taskconst.S_POLL {
@@ -1226,6 +1249,9 @@ fn do_sigtimedwait(state: u64, task: u64, setp: u64, infop: u64, tsp: u64, size:
                     k = k + 1
                 }
                 poke64(state, task, infop, sig)
+                if (timer_marks[task as usize] & bit(sig)) != 0 {
+                    poke64(state, task, infop + 8, SI_TIMER_CODE)
+                }
             }
             return sig
         }

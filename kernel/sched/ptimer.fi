@@ -1,0 +1,151 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.kstate
+import sched.sched
+import sched.signal
+import sched.taskconst
+import sched.taskslot
+
+export {
+    TIMERS_MAX, NOTIFY_SIGNAL, NOTIFY_NONE, NOTIFY_THREAD, NOTIFY_THREAD_ID,
+    create, destroy, owned, arm, remaining, interval_of, overrun_of, tick
+}
+
+const TIMERS_MAX: u64 = 32
+const NOTIFY_SIGNAL: u64 = 0
+const NOTIFY_NONE: u64 = 1
+const NOTIFY_THREAD: u64 = 2
+const NOTIFY_THREAD_ID: u64 = 4
+const OVERRUN_MAX: u64 = 0x7FFFFFFF
+
+static mut t_live: [u64; 32] = [0 as u64; 32]
+static mut t_pid: [u64; 32] = [0 as u64; 32]
+static mut t_notify: [u64; 32] = [0 as u64; 32]
+static mut t_signo: [u64; 32] = [0 as u64; 32]
+static mut t_target: [u64; 32] = [0 as u64; 32]
+static mut t_next: [u64; 32] = [0 as u64; 32]
+static mut t_interval: [u64; 32] = [0 as u64; 32]
+static mut t_overrun: [u64; 32] = [0 as u64; 32]
+static mut live_count: u64 = 0
+
+fn free_slot() -> u64 {
+    var i: u64 = 0
+    while i < TIMERS_MAX {
+        if t_live[i as usize] == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return TIMERS_MAX
+}
+
+fn create(pid: u64, notify: u64, signo: u64, target: u64) -> u64 {
+    let slot: u64 = free_slot()
+    if slot >= TIMERS_MAX {
+        return TIMERS_MAX
+    }
+    let s: usize = slot as usize
+    t_next[s] = 0
+    t_interval[s] = 0
+    t_overrun[s] = 0
+    t_pid[s] = pid
+    t_notify[s] = notify
+    t_signo[s] = signo
+    t_target[s] = target
+    t_live[s] = 1
+    live_count = live_count + 1
+    return slot
+}
+
+fn owned(slot: u64, pid: u64) -> bool {
+    return slot < TIMERS_MAX && t_live[slot as usize] != 0 && t_pid[slot as usize] == pid
+}
+
+fn destroy(slot: u64) {
+    if slot >= TIMERS_MAX || t_live[slot as usize] == 0 {
+        return
+    }
+    t_next[slot as usize] = 0
+    t_live[slot as usize] = 0
+    live_count = live_count - 1
+}
+
+fn arm(slot: u64, first: u64, interval: u64) {
+    let s: usize = slot as usize
+    t_next[s] = 0
+    t_interval[s] = interval
+    t_overrun[s] = 0
+    t_next[s] = first
+}
+
+fn remaining(slot: u64, now: u64) -> u64 {
+    let nx: u64 = t_next[slot as usize]
+    if nx == 0 || nx <= now {
+        return 0
+    }
+    return nx - now
+}
+
+fn interval_of(slot: u64) -> u64 {
+    return t_interval[slot as usize]
+}
+
+fn overrun_of(slot: u64) -> u64 {
+    return t_overrun[slot as usize]
+}
+
+fn owner_alive(state: u64, pid: u64) -> bool {
+    return sched.find_pid(state, pid) < kstate.MAX_TASKS
+}
+
+fn notify(state: u64, slot: u64) {
+    let s: usize = slot as usize
+    let kind: u64 = t_notify[s]
+    if kind == NOTIFY_NONE {
+        return
+    }
+    var pid: u64 = t_pid[s]
+    if kind == NOTIFY_THREAD_ID {
+        pid = t_target[s]
+    }
+    let _r: u64 = signal.send_timer(state, pid, t_signo[s])
+}
+
+fn fire(state: u64, slot: u64, now: u64) {
+    let s: usize = slot as usize
+    let due: u64 = t_next[s]
+    let iv: u64 = t_interval[s]
+    var missed: u64 = 0
+    if iv == 0 {
+        t_next[s] = 0
+    } else {
+        missed = (now - due) / iv
+        t_next[s] = due + (missed + 1) * iv
+    }
+    if missed > OVERRUN_MAX {
+        missed = OVERRUN_MAX
+    }
+    t_overrun[s] = missed
+    notify(state, slot)
+}
+
+fn tick(state: u64) {
+    if live_count == 0 {
+        return
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    var i: u64 = 0
+    while i < TIMERS_MAX {
+        if t_live[i as usize] != 0 {
+            if !owner_alive(state, t_pid[i as usize]) {
+                destroy(i)
+            } else {
+                let nx: u64 = t_next[i as usize]
+                if nx != 0 && nx <= now {
+                    fire(state, i, now)
+                }
+            }
+        }
+        i = i + 1
+    }
+}
