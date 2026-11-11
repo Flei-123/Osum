@@ -13,10 +13,13 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 guest() {
     local tree=$1 out=$2
-    ( cd "$tree" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+    local apps="$out.apps"
+    rm -rf "$apps"; cp -a "$tree/assets/apps" "$apps"
+    printf 'perm=notify\n' >> "$apps/charmap.osp/INFO"
+    ( cd "$tree" && export APPS_DIR="$apps" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
       DESIGNREBUILD=1 DESIGNBUILD="$out.build" bash tools/design/eh6.sh "$out" res=1920x1080 accel=kvm \
-        mode="$MODE" uiscale="$SCALE" lang=en drehbuch="$ROOT/tools/settingsvc/script.txt" moreprogs="dialogd apprights term" ) > "$out.log" 2>&1
-    rm -rf "$out.build"
+        mode="$MODE" uiscale="$SCALE" lang=en drehbuch="$ROOT/tools/settingsvc/script.txt" moreprogs="dialogd apprights" ) > "$out.log" 2>&1
+    rm -rf "$out.build" "$apps"
     [ -s "$out/serial.txt" ] && grep -aq "settings: ready" "$out/serial.txt"
 }
 
