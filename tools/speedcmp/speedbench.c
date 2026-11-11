@@ -20,7 +20,7 @@
 #define IO_CHUNK 65536
 #define SMALL_FILE_BYTES (512 * 1024)
 #define ANON_PAGES 8192
-#define FILE_PAGES 2048
+#define FILE_PAGES 128
 #define SMALL_BUF 64
 #define PIPE_ROUNDS 2000
 
