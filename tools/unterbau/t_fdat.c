@@ -76,6 +76,8 @@ int main(void)
     CHECK("fchmod_vfile", r == 0 && stat("/tmp/fa/one/f", &st) == 0 && (st.st_mode & 0777) == 0640, "r %d mode %o errno %d", r, st.st_mode & 0777, errno);
     errno = 0; r = fchown(fd, 1234, 4321);
     CHECK("fchown_vfile", r == 0 && stat("/tmp/fa/one/f", &st) == 0 && st.st_uid == 1234 && st.st_gid == 4321, "r %d uid %d gid %d errno %d", r, (int)st.st_uid, (int)st.st_gid, errno);
+    errno = 0; r = chown("/tmp/fa/one/f", 1235, 4322);
+    CHECK("chown_path_control", r == 0 && stat("/tmp/fa/one/f", &st) == 0 && st.st_uid == 1235, "r %d uid %d errno %d", r, (int)st.st_uid, errno);
     errno = 0; r = fchmod(d1, 0750);
     CHECK("fchmod_dir_fd", r == 0 && stat("/tmp/fa/one", &st) == 0 && (st.st_mode & 0777) == 0750, "r %d mode %o errno %d", r, st.st_mode & 0777, errno);
     errno = 0;
