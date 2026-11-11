@@ -28,6 +28,7 @@ for p in sh ls cat echo; do
     SPEC="$SPEC /bin/$p=$W/$p.elf"
 done
 printf 'root:x:0:0:root:/root:/bin/sh\n' > "$W/passwd"
+if [ -n "${SPEED_ONLY:-}" ]; then printf '%s\n' "$SPEED_ONLY" > "$W/speedonly"; SPEC="$SPEC /etc/speedonly=$W/speedonly"; fi
 SPEC="$SPEC /lib/ld-musl-x86_64.so.1=$LIBC /bin/speedbench=$BENCH /etc/passwd=$W/passwd"
 bash tools/mkfsfi/mkfs.sh build "$W/disk.img" 98304 --v3 --inodes=1024 $SPEC > "$W/mkfs.txt" 2>&1 || { tail -5 "$W/mkfs.txt" >&2; exit 1; }
 

@@ -43,8 +43,26 @@ static void emit(const char *name, double ns_per_op, long ops)
     (void)!write(1, line, n);
 }
 
+static int selected(const char *name)
+{
+    static char only[256];
+    static int loaded;
+    if (!loaded) {
+        int fd = open("/etc/speedonly", O_RDONLY);
+        loaded = 1;
+        if (fd >= 0) {
+            ssize_t n = read(fd, only, sizeof(only) - 1);
+            only[n > 0 ? n : 0] = 0;
+            close(fd);
+        }
+    }
+    return !only[0] || strstr(only, name);
+}
+
 static void measure(const char *name, bench_fn fn, long batch, long min_batches, long ops_per_item)
 {
+    if (!selected(name))
+        return;
     long total = 0;
     long long t0 = now_ns();
     long long elapsed;

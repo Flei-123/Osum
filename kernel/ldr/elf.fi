@@ -1,5 +1,6 @@
 
 import serial
+import arch.arch
 import lib.errno
 import lib.kstate
 import sched.sched
@@ -109,19 +110,11 @@ fn head(state: u64) -> u64 {
 }
 
 fn fill(p: u64, n: u64, v: u64) {
-    var i: u64 = 0
-    while i < n / 8 {
-        regio.write64(p + i * 8, v)
-        i = i + 1
-    }
+    arch.fill_words(p, v, n / 8)
 }
 
 fn copy(from: u64, to: u64, n: u64) {
-    var i: u64 = 0
-    while i < n {
-        kstate.set8(to + i, kstate.get8(from + i) as u8)
-        i = i + 1
-    }
+    arch.copy_octets(to, from, n)
 }
 
 fn fail(state: u64, r: u64) -> u64 {
@@ -135,7 +128,7 @@ fn read_header(state: u64, ino: u64) -> u64 {
     if size < EHSIZE {
         return R_SHORT
     }
-    if fs.read_at(state, ino, 0, h, EHSIZE) != EHSIZE {
+    if fs.read_at_cached(state, ino, 0, h, EHSIZE) != EHSIZE {
         return R_READ
     }
     if kstate.get8(h) != 0x7F {
@@ -195,7 +188,7 @@ fn read_header(state: u64, ino: u64) -> u64 {
     if size - off < need {
         return R_PHOFF
     }
-    if fs.read_at(state, ino, off, h + EHSIZE, need) != need {
+    if fs.read_at_cached(state, ino, off, h + EHSIZE, need) != need {
         return R_READ
     }
     return R_OK
@@ -271,9 +264,10 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
             if frame == 0 {
                 return R_NOMEM
             }
-            fill(frame, PAGE, POISON)
             if zeroing {
                 fill_bytes(frame, PAGE, 0)
+            } else {
+                fill(frame, PAGE, POISON)
             }
         } else {
             if bias == 0 {
@@ -302,7 +296,7 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
         if bis > von {
             let nimm: u64 = bis - von
             let sc: u64 = state + kstate.LOAD_OFF
-            if fs.read_at(state, ino, file_first + done + von, sc,
+            if fs.read_at_cached(state, ino, file_first + done + von, sc,
                     nimm) != nimm {
                 return R_READ
             }
@@ -387,11 +381,7 @@ fn image_extent(state: u64) -> u64 {
 }
 
 fn fill_bytes(p: u64, n: u64, v: u64) {
-    var i: u64 = 0
-    while i < n {
-        kstate.set8(p + i, v as u8)
-        i = i + 1
-    }
+    arch.fill_words(p, v * 0x0101010101010101, n / 8)
 }
 
 fn load(state: u64, t: u64, ino: u64) -> u64 {
@@ -967,7 +957,7 @@ fn read_interp(state: u64, ino: u64, dst: u64) -> u64 {
             if size - off < len {
                 return R_IPATH
             }
-            if fs.read_at(state, ino, off, dst, len) != len {
+            if fs.read_at_cached(state, ino, off, dst, len) != len {
                 return R_READ
             }
             if kstate.get8(dst + len - 1) != 0 {
@@ -1162,7 +1152,7 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     }
     let braucht_lader: bool = ir == R_OK
     if braucht_lader {
-        say_interp(ipath)
+        say_interp(state, ipath)
     }
     var bias: u64 = 0
     if ist_dyn {
@@ -1540,7 +1530,10 @@ fn say_text_f(r: u64) {
     serial.puts((&tz[0]) as u64)
 }
 
-fn say_interp(p: u64) {
+fn say_interp(state: u64, p: u64) {
+    if !kstate.mode_on(state, kstate.M_EXECLOG) {
+        return
+    }
     var s_i: [u8; 14] = "elf: interp \0\0"
     serial.puts((&s_i[0]) as u64)
     serial.puts(p)
