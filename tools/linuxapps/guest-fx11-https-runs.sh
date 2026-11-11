@@ -1,9 +1,9 @@
 echo "FX start"
 export HOME=/root XDG_RUNTIME_DIR=/tmp MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 MOZ_CRASHREPORTER_DISABLE=1
-export MOZ_LOG="${FXLOG:-timestamp,nsHostResolver:4,nsSocketTransport:4,nsHttp:3,pipnss:4}"
+[ -n "${FXLOG:-}" ] && export MOZ_LOG="$FXLOG"
 up() { read u _ < /proc/uptime; echo $u; }
-echo "FX11 nslookup: $(timeout 20 nslookup example.com 2>&1 | tr '\n' ' ' | head -c 200)"
-echo "FX11 wget-https: $(timeout 60 wget -q -O - https://example.com/ 2>&1 | head -c 40 | tr -d '\n')"
+[ -n "${FX_PROBES:-}" ] && echo "FX11 nslookup: $(timeout 20 nslookup example.com 2>&1 | tr '\n' ' ' | head -c 200)"
+[ -n "${FX_PROBES:-}" ] && echo "FX11 wget-https: $(timeout 60 wget -q -O - https://example.com/ 2>&1 | head -c 40 | tr -d '\n')"
 n=1
 while [ $n -le ${FX_RUNS:-2} ]; do
     mkdir -p /tmp/p$n
