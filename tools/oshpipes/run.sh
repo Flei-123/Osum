@@ -49,7 +49,7 @@ run_case() {
 
 transcript() {
     awk '/^==BEGIN==$/ {f=1; next} /^==END==$/ {f=0} f' "$1" \
-        | grep -vE '^(elf: |key: |osum: |user fault: |\*\*\*)' \
+        | grep -vE '^(elf: |key: |osum: |user fault: |acpiev: |thermal: |\*\*\*)' \
         | sed -E 's/^\[[0-9]+\] [0-9]+$/[job]/; s/^\[[0-9]+\] -> /[done] -> /' \
         | tr -d '\r'
 }
@@ -224,7 +224,8 @@ check_case t3 "&&, ||, background jobs, background pipelines, wait"
 
 mutant() {
     local name=$1 label=$2 pattern=$3 replacement=$4 case=$5
-    local msrc="$TMPD/sh-$name.fi" rc
+    local msrc="$TMPD/user/sh-$name.fi" rc
+    [ -d "$TMPD/user" ] || cp -r kernel/user "$TMPD/user"
     python3 -I - "$pattern" "$replacement" kernel/user/sh.fi "$msrc" <<'PY' || { bad "$label: mutation does not apply"; return; }
 import sys
 pattern, replacement, source, out = sys.argv[1:5]
