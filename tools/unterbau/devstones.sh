@@ -9,7 +9,7 @@ devstones_spec() { # devstones_spec <stonesdir>: image spec words for make, tcc 
         [ -r "$S/gitexec/git-http-fetch" ] && out="$out /libexec/git-core/git-http-fetch=$S/gitexec/git-http-fetch"
     fi
     if [ -r "$S/tcc" ] && [ -r "$S/lib/tcc/libtcc1.a" ] && [ -d "$S/include" ]; then
-        out="$out /bin/tcc=$S/tcc /usr/ /usr/lib/ /usr/lib/tcc/ /usr/lib/tcc/libtcc1.a=$S/lib/tcc/libtcc1.a /usr/lib/tcc/include/ /usr/include/"
+        out="$out /bin/tcc=$S/tcc /usr/ /usr/lib/ /usr/lib/tcc/ /usr/lib/libtcc1.a=$S/lib/tcc/libtcc1.a /usr/lib/tcc/include/ /usr/include/"
         for f in "$S"/lib/tcc/include/*.h; do out="$out /usr/lib/tcc/include/$(basename "$f")=$f"; done
         for f in crt1.o crti.o crtn.o; do out="$out /usr/lib/$f=$S/lib/musl/$f"; done
         for f in c m dl pthread rt; do out="$out /usr/lib/lib$f.so->/lib/ld-musl-x86_64.so.1"; done
