@@ -1,0 +1,174 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.octets
+
+export {
+    set_level, set_source, set_since_ms, set_plain, set_uptime_ms,
+    level_from, fits, emit
+}
+
+const CH_RBRACKET: u64 = 93
+const CH_LBRACKET: u64 = 91
+const CH_SPACE: u64 = 32
+const CH_COLON: u64 = 58
+const CH_ZERO: u64 = 48
+const CH_NINE: u64 = 57
+const SPACES_BEFORE_LEVEL: u64 = 2
+const SPACES_BEFORE_SOURCE: u64 = 3
+
+static mut min_level: u64 = 0
+static mut source: u64 = 0
+static mut since_ms: u64 = 0
+static mut plain: u64 = 0
+static mut uptime_ms: u64 = 0
+
+fn set_level(v: u64) {
+    min_level = v
+}
+
+fn set_source(p: u64) {
+    source = p
+}
+
+fn set_since_ms(v: u64) {
+    since_ms = v
+}
+
+fn set_plain(v: u64) {
+    plain = v
+}
+
+fn set_uptime_ms(v: u64) {
+    uptime_ms = v
+}
+
+fn level_from(s: u64) -> u64 {
+    var name_debug: [u8; 6] = "debug\0"
+    var name_info: [u8; 5] = "info\0"
+    var name_warn: [u8; 5] = "warn\0"
+    var name_error: [u8; 6] = "error\0"
+    if ulib.streq(s, (&name_debug[0 as usize]) as u64) {
+        return ulib.LV_DEBUG
+    }
+    if ulib.streq(s, (&name_info[0 as usize]) as u64) {
+        return ulib.LV_INFO
+    }
+    if ulib.streq(s, (&name_warn[0 as usize]) as u64) {
+        return ulib.LV_WARN
+    }
+    if ulib.streq(s, (&name_error[0 as usize]) as u64) {
+        return ulib.LV_ERROR
+    }
+    return ulib.LV_INFO
+}
+
+fn line_time_us(p: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n && octets.ld8(p, i) != CH_LBRACKET {
+        i = i + 1
+    }
+    i = i + 1
+    while i < n && octets.ld8(p, i) != CH_RBRACKET {
+        let c: u64 = octets.ld8(p, i)
+        if c >= CH_ZERO && c <= CH_NINE {
+            v = v * 10 + (c - CH_ZERO)
+        }
+        i = i + 1
+    }
+    return v
+}
+
+fn after_bracket(p: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < n && octets.ld8(p, i) != CH_RBRACKET {
+        i = i + 1
+    }
+    return i
+}
+
+fn line_level(p: u64, n: u64) -> u64 {
+    var i: u64 = after_bracket(p, n)
+    var spaces: u64 = 0
+    while i < n {
+        if octets.ld8(p, i) == CH_SPACE {
+            spaces = spaces + 1
+            if spaces == SPACES_BEFORE_LEVEL {
+                return level_of_char(octets.ld8(p, i + 1))
+            }
+        }
+        i = i + 1
+    }
+    return ulib.LV_INFO
+}
+
+fn level_of_char(c: u64) -> u64 {
+    if c == 68 {
+        return ulib.LV_DEBUG
+    }
+    if c == 87 {
+        return ulib.LV_WARN
+    }
+    if c == 69 {
+        return ulib.LV_ERROR
+    }
+    return ulib.LV_INFO
+}
+
+fn source_matches(p: u64, n: u64, name: u64) -> bool {
+    var i: u64 = after_bracket(p, n)
+    var spaces: u64 = 0
+    while i < n {
+        if octets.ld8(p, i) == CH_SPACE {
+            spaces = spaces + 1
+            if spaces == SPACES_BEFORE_SOURCE {
+                return prefix_at(p, n, i + 1, name)
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn prefix_at(p: u64, n: u64, at: u64, name: u64) -> bool {
+    var k: u64 = 0
+    while octets.ld8(name, k) != 0 {
+        if at + k >= n || octets.ld8(p, at + k) != octets.ld8(name, k) {
+            return false
+        }
+        k = k + 1
+    }
+    let next: u64 = octets.ld8(p, at + k)
+    return next == CH_COLON || next == CH_SPACE
+}
+
+fn fits(p: u64, n: u64) -> bool {
+    if min_level != 0 && line_level(p, n) < min_level {
+        return false
+    }
+    if source != 0 && !source_matches(p, n, source) {
+        return false
+    }
+    if since_ms != 0 {
+        let us: u64 = line_time_us(p, n)
+        if uptime_ms * 1000 > us && uptime_ms * 1000 - us > since_ms * 1000 {
+            return false
+        }
+    }
+    return true
+}
+
+fn emit(p: u64, n: u64) {
+    if fits(p, n) {
+        if plain != 0 {
+            let cut: u64 = after_bracket(p, n) + 2
+            if cut < n {
+                ulib.sys(ulib.SYS_WRITE, ulib.OUT, p + cut, n - cut)
+                return
+            }
+        }
+        ulib.sys(ulib.SYS_WRITE, ulib.OUT, p, n)
+    }
+}

@@ -1,0 +1,242 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.errno
+import libc.clockapi
+import libc.text
+import libc.octets
+import klogcli.klfilter
+import klogcli.klread
+
+export { run, MODE_DMESG, MODE_KLOG }
+
+const MODE_DMESG: u64 = 0
+const MODE_KLOG: u64 = 1
+const FOLLOW_POLL_MS: u64 = 100
+const FLOOD_TEXT_LEN: u64 = 88
+const FLOOD_FILL: u64 = 120
+const FLOOD_NUM_WIDTH: u64 = 8
+const FLOOD_SAVE_EVERY: u64 = 300
+
+fn flag(a: u64, name: u64) -> bool {
+    return ulib.streq(a, name)
+}
+
+fn run(args: u64, mode: u64) -> u64 {
+    var o_n: [u8; 3] = "-n\0"
+    var o_s: [u8; 3] = "-s\0"
+    var o_l: [u8; 3] = "-l\0"
+    var o_y: [u8; 3] = "-y\0"
+    var o_t: [u8; 3] = "-t\0"
+    var o_w: [u8; 3] = "-w\0"
+    var o_p: [u8; 3] = "-p\0"
+    var o_z: [u8; 3] = "-z\0"
+    var o_q: [u8; 3] = "-q\0"
+    var o_a: [u8; 3] = "-a\0"
+    var o_x: [u8; 3] = "-x\0"
+    var o_f: [u8; 3] = "-F\0"
+    var o_h: [u8; 3] = "-h\0"
+    let argc: u64 = ulib.arg_count(args)
+    var count: u64 = 0
+    var follow: bool = false
+    var previous: bool = false
+    var i: u64 = 1
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        let has_value: bool = i + 1 < argc
+        if flag(a, (&o_h[0 as usize]) as u64) {
+            usage(mode)
+            return 0
+        } else if flag(a, (&o_w[0 as usize]) as u64) {
+            follow = true
+        } else if flag(a, (&o_p[0 as usize]) as u64) {
+            previous = true
+        } else if flag(a, (&o_t[0 as usize]) as u64) {
+            klfilter.set_plain(1)
+        } else if flag(a, (&o_n[0 as usize]) as u64) && has_value {
+            i = i + 1
+            count = ulib.to_num(ulib.arg_at(args, i))
+        } else if flag(a, (&o_s[0 as usize]) as u64) && has_value {
+            i = i + 1
+            klfilter.set_source(ulib.arg_at(args, i))
+        } else if flag(a, (&o_l[0 as usize]) as u64) && has_value {
+            i = i + 1
+            klfilter.set_level(klfilter.level_from(ulib.arg_at(args, i)))
+        } else if flag(a, (&o_y[0 as usize]) as u64) && has_value {
+            i = i + 1
+            klfilter.set_since_ms(ulib.to_num(ulib.arg_at(args, i)))
+        } else if mode == MODE_KLOG && flag(a, (&o_z[0 as usize]) as u64) {
+            stats()
+            return 0
+        } else if mode == MODE_KLOG && flag(a, (&o_x[0 as usize]) as u64) {
+            return save_now()
+        } else if mode == MODE_KLOG && flag(a, (&o_f[0 as usize]) as u64) && has_value {
+            return flood(ulib.to_num(ulib.arg_at(args, i + 1)))
+        } else if mode == MODE_KLOG && flag(a, (&o_a[0 as usize]) as u64) && has_value {
+            return write_line(ulib.arg_at(args, i + 1))
+        } else if mode == MODE_KLOG && flag(a, (&o_q[0 as usize]) as u64) && has_value {
+            return set_threshold(klfilter.level_from(ulib.arg_at(args, i + 1)))
+        }
+        i = i + 1
+    }
+    if previous {
+        return print_previous()
+    }
+    return print_live(count, follow)
+}
+
+fn print_live(count: u64, follow: bool) -> u64 {
+    let last: u64 = kcall.sys4(ulib.SYS_KLOG, ulib.KL_SEQ, 0, 0, 0)
+    let first: u64 = kcall.sys4(ulib.SYS_KLOG, ulib.KL_FIRST, 0, 0, 0)
+    var from: u64 = first
+    if count != 0 && last > count && last - count + 1 > first {
+        from = last - count + 1
+    }
+    klfilter.set_uptime_ms(ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0))
+    var next: u64 = klread.print_ring(from, last)
+    while follow {
+        clockapi.sleep_ms(FOLLOW_POLL_MS)
+        let now: u64 = kcall.sys4(ulib.SYS_KLOG, ulib.KL_SEQ, 0, 0, 0)
+        if now >= next {
+            klfilter.set_uptime_ms(ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0))
+            next = klread.print_ring(next, now)
+        }
+    }
+    return 0
+}
+
+fn print_previous() -> u64 {
+    var s_none: [u8; 32] = "dmesg: no previous boot log\0\0\0\0\0"
+    let current: u64 = kcall.sys4(ulib.SYS_KLOG, ulib.KL_BOOT, 0, 0, 0)
+    var target: u64 = 0
+    var idx: u64 = 0
+    while idx < klread.SEGMENTS && target == 0 {
+        let b: u64 = klread.file_boot(klread.segment_path(idx))
+        if b != 0 && b != current {
+            target = b
+        }
+        idx = idx + 1
+    }
+    if target == 0 {
+        ulib.esay_line((&s_none[0 as usize]) as u64, 0)
+        return 1
+    }
+    var k: u64 = klread.SEGMENTS
+    while k > 0 {
+        k = k - 1
+        let path: u64 = klread.segment_path(k)
+        if klread.file_boot(path) == target {
+            klread.print_file(path)
+        }
+    }
+    return 0
+}
+
+fn stats() {
+    var s_a: [u8; 12] = "lines:     \0"
+    var s_b: [u8; 12] = "first:     \0"
+    var s_c: [u8; 12] = "rotated:   \0"
+    var s_d: [u8; 12] = "filtered:  \0"
+    var s_e: [u8; 12] = "ring:      \0"
+    var s_f: [u8; 12] = "threshold: \0"
+    var s_g: [u8; 12] = "serial:    \0"
+    var s_h: [u8; 12] = "warnings:  \0"
+    var s_i: [u8; 12] = "boot:      \0"
+    var s_j: [u8; 12] = "saved:     \0"
+    stat_line((&s_a[0 as usize]) as u64, ulib.KL_SEQ)
+    stat_line((&s_b[0 as usize]) as u64, ulib.KL_FIRST)
+    stat_line((&s_c[0 as usize]) as u64, ulib.KL_LOST)
+    stat_line((&s_d[0 as usize]) as u64, ulib.KL_FILT)
+    stat_line((&s_e[0 as usize]) as u64, ulib.KL_NENT)
+    stat_line((&s_f[0 as usize]) as u64, ulib.KL_MIN)
+    stat_line((&s_g[0 as usize]) as u64, ulib.KL_SER)
+    stat_line((&s_h[0 as usize]) as u64, ulib.KL_WARNS)
+    stat_line((&s_i[0 as usize]) as u64, ulib.KL_BOOT)
+    stat_line((&s_j[0 as usize]) as u64, ulib.KL_SAVED)
+}
+
+fn stat_line(label: u64, what: u64) {
+    ulib.say(label)
+    ulib.sayu(kcall.sys4(ulib.SYS_KLOG, what, 0, 0, 0))
+    ulib.nl()
+}
+
+fn save_now() -> u64 {
+    var s_n: [u8; 14] = "saved lines: \0"
+    let n: u64 = kcall.sys4(ulib.SYS_KLOG, ulib.KL_SAVE, 1, 0, 0)
+    ulib.say((&s_n[0 as usize]) as u64)
+    ulib.sayu(n)
+    ulib.nl()
+    return 0
+}
+
+fn flood(lines: u64) -> u64 {
+    var text_buf: [u8; 96] = [0 as u8; 96]
+    let t: u64 = (&text_buf[0 as usize]) as u64
+    var i: u64 = 0
+    while i < lines {
+        var k: u64 = 0
+        while k < FLOOD_TEXT_LEN {
+            octets.st8(t, k, FLOOD_FILL)
+            k = k + 1
+        }
+        octets.st8(t, FLOOD_TEXT_LEN, 0)
+        put_number(t, i)
+        kcall.sys4(ulib.SYS_KLOG, ulib.KL_WRITE, ulib.LV_INFO, t, FLOOD_TEXT_LEN)
+        i = i + 1
+        if i % FLOOD_SAVE_EVERY == 0 {
+            kcall.sys4(ulib.SYS_KLOG, ulib.KL_SAVE, 0, 0, 0)
+        }
+    }
+    kcall.sys4(ulib.SYS_KLOG, ulib.KL_SAVE, 1, 0, 0)
+    return 0
+}
+
+fn put_number(t: u64, v: u64) {
+    var x: u64 = v
+    var at: u64 = FLOOD_NUM_WIDTH
+    while at > 0 {
+        at = at - 1
+        octets.st8(t, at, 48 + x % 10)
+        x = x / 10
+    }
+}
+
+fn write_line(msg: u64) -> u64 {
+    var s_bad: [u8; 19] = "klog: write failed\0"
+    let n: u64 = kcall.sys4(ulib.SYS_KLOG, ulib.KL_WRITE, ulib.LV_INFO, msg, text.length(msg))
+    if errno.is_error(n) {
+        ulib.esay_line((&s_bad[0 as usize]) as u64, 0)
+        return 1
+    }
+    return 0
+}
+
+fn set_threshold(level: u64) -> u64 {
+    var s_bad: [u8; 40] = "klog: only root may set the threshold\0\0\0"
+    let r: u64 = kcall.sys4(ulib.SYS_KLOG, ulib.KL_SETMIN, level, 0, 0)
+    if errno.is_error(r) {
+        ulib.esay_line((&s_bad[0 as usize]) as u64, 0)
+        return 1
+    }
+    return 0
+}
+
+fn usage(mode: u64) {
+    var d1: [u8; 57] = "dmesg [-n N] [-l LEVEL] [-s SUBSYSTEM] [-y MS] [-t] [-w]\0"
+    var d2: [u8; 46] = "      [-p]   previous boot (/var/log/klog*)\0\0\0"
+    var d3: [u8; 40] = "levels: debug info warn error\0\0\0\0\0\0\0\0\0\0\0"
+    var k1: [u8; 53] = "klog:  as dmesg, plus -z stats, -x save now, -a TEXT\0"
+    var k2: [u8; 49] = "       add a line, -q LEVEL set threshold (root)\0"
+    var k3: [u8; 31] = "       -F N write N test lines\0"
+    ulib.say_line((&d1[0 as usize]) as u64, 0)
+    ulib.say_line((&d2[0 as usize]) as u64, 0)
+    ulib.say_line((&d3[0 as usize]) as u64, 0)
+    if mode == MODE_KLOG {
+        ulib.say_line((&k1[0 as usize]) as u64, 0)
+        ulib.say_line((&k2[0 as usize]) as u64, 0)
+        ulib.say_line((&k3[0 as usize]) as u64, 0)
+    }
+}

@@ -136,7 +136,7 @@ PROGS=${PROGS:-"desktop taskbar settings launcher explorer netview \
 widgetdemo taskmgr installer dualcli locate edit nedit trashbin sh echo ls cat ps uname date df mkdir rm cp mv \
 grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
-dhcp ping log host ota fsck jsig jarvisctl pollbr reboot shutdown power fas \
+dhcp ping log dmesg klog klogd host ota fsck jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown idlelock powerd init svc term termfull shasum noise \
 orientbus act settingsd axd sntp accountcli pdfview open certus store stored mediad presentlog sysinfo hwinv hwprofile massren privacy welcome elevate msgbox runbox cliphist xclip charmap vplay osk apprights wmplug hotkeyd jarvismini social soclocal melder freunde partyrun bench wlanpersist drvctl lspci pcicfg regdump prphread wlanctl dbgsrv backup recover resetsys screenreader xfx xfxd vaultd vaultctl vaultprompt vaultui dialogd"}
 # ODB=1 (debug build): the debug agent is one more program in /bin

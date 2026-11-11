@@ -1,0 +1,111 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.octets
+import klogcli.klfilter
+
+export { print_ring, print_file, file_boot, segment_path, SEGMENTS }
+
+const SEGMENTS: u64 = 4
+const LINE_MAX: u64 = 256
+const READ_CHUNK: u64 = 512
+const CH_NEWLINE: u64 = 10
+const CH_HASH: u64 = 35
+const BOOT_PREFIX_LEN: u64 = 12
+
+static mut seg_name: [u8; 24] = [0 as u8; 24]
+
+fn segment_path(index: u64) -> u64 {
+    var base: [u8; 14] = "/var/log/klog\0"
+    let out: u64 = (&seg_name[0 as usize]) as u64
+    var n: u64 = 0
+    while octets.ld8((&base[0 as usize]) as u64, n) != 0 {
+        octets.st8(out, n, octets.ld8((&base[0 as usize]) as u64, n))
+        n = n + 1
+    }
+    if index > 0 {
+        octets.st8(out, n, 46)
+        octets.st8(out, n + 1, 48 + index)
+        n = n + 2
+    }
+    octets.st8(out, n, 0)
+    return out
+}
+
+fn print_ring(from: u64, last: u64) -> u64 {
+    var b: [u8; 256] = [0 as u8; 256]
+    let p: u64 = (&b[0 as usize]) as u64
+    var s: u64 = from
+    while s <= last {
+        let n: u64 = kcall.sys4(ulib.SYS_KLOG, ulib.KL_LINE, s, p, LINE_MAX)
+        if n != 0 {
+            klfilter.emit(p, n)
+        }
+        s = s + 1
+    }
+    return last + 1
+}
+
+fn print_file(path: u64) -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    var chunk: [u8; 512] = [0 as u8; 512]
+    var line: [u8; 256] = [0 as u8; 256]
+    let c: u64 = (&chunk[0 as usize]) as u64
+    let l: u64 = (&line[0 as usize]) as u64
+    var used: u64 = 0
+    var going: bool = true
+    while going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, fd, c, READ_CHUNK)
+        if n == 0 || ulib.bad(n) {
+            going = false
+        } else {
+            var i: u64 = 0
+            while i < n {
+                let ch: u64 = octets.ld8(c, i)
+                if used < LINE_MAX - 1 {
+                    octets.st8(l, used, ch)
+                    used = used + 1
+                }
+                if ch == CH_NEWLINE {
+                    if used > 0 && octets.ld8(l, 0) != CH_HASH {
+                        klfilter.emit(l, used)
+                    }
+                    used = 0
+                }
+                i = i + 1
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return true
+}
+
+fn file_boot(path: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var head: [u8; 32] = [0 as u8; 32]
+    let h: u64 = (&head[0 as usize]) as u64
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, h, 31)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n <= BOOT_PREFIX_LEN {
+        return 0
+    }
+    var v: u64 = 0
+    var i: u64 = BOOT_PREFIX_LEN
+    while i < n {
+        let ch: u64 = octets.ld8(h, i)
+        if ch < 48 || ch > 57 {
+            return v
+        }
+        v = v * 10 + (ch - 48)
+        i = i + 1
+    }
+    return v
+}
