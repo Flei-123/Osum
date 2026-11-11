@@ -22,7 +22,7 @@ export {
     open_alloc, open_ref, open_unref, open_kind, open_ino, open_off,
     open_set_off, open_flags, open_set_flags, open_used, open_refs,
     pipe_new, pipe_get, pipe_put, pipe_room, pipe_bytes, pipe_writers,
-    pipe_readers,
+    pipe_readers, pipe_open_named, pipe_attach, pipe_drop, pipe_owner, pipe_find,
     K_FREE, K_FILE, K_DIR, K_CONIN, K_CONOUT, K_PIPER, K_PIPEW, K_FB,
     K_TTY, K_SOCK, K_VFILE, K_VDIR, K_USOCK, K_SHM,
     K_EVENT, K_TIMER, K_SIGFD, K_EPOLL, K_INOTIFY, K_NETLINK,
@@ -88,6 +88,7 @@ const PH_WRITE: u64 = 8
 const PH_READERS: u64 = 16
 const PH_WRITERS: u64 = 24
 const PH_USED: u64 = 32
+const PH_INO: u64 = 40
 
 fn of_at(i: u64) -> u64 {
     return kstate.OFILE_OFF + i * OF_BYTES
@@ -518,6 +519,9 @@ fn open_teardown(state: u64, i: u64) {
     let kind: u64 = kstate.get(state, of_at(i) + OF_KIND)
     let p: u64 = kstate.get(state, of_at(i) + OF_INO)
     if kind == K_PIPER {
+        if pipe_owner(state, p) != 0 && (kstate.get(state, of_at(i) + OF_FLAGS) & 3) == 2 {
+            pipe_drop(state, p, false)
+        }
         pipe_drop(state, p, true)
     }
     if kind == K_PIPEW {
@@ -659,12 +663,57 @@ fn pipe_new(state: u64) -> u64 {
             kstate.set(state, ph_at(i) + PH_WRITE, 0)
             kstate.set(state, ph_at(i) + PH_READERS, 1)
             kstate.set(state, ph_at(i) + PH_WRITERS, 1)
+            kstate.set(state, ph_at(i) + PH_INO, 0)
             kstate.add(state, kstate.PIPES, 1)
             return i
         }
         i = i + 1
     }
     return MAX_PIPES
+}
+
+fn pipe_find(state: u64, ino: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_PIPES {
+        if kstate.get(state, ph_at(i) + PH_USED) != 0 && kstate.get(state, ph_at(i) + PH_INO) == ino {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_PIPES
+}
+
+fn pipe_open_named(state: u64, ino: u64) -> u64 {
+    let found: u64 = pipe_find(state, ino)
+    if found < MAX_PIPES {
+        return found
+    }
+    let i: u64 = pipe_new(state)
+    if i >= MAX_PIPES {
+        return MAX_PIPES
+    }
+    kstate.set(state, ph_at(i) + PH_READERS, 0)
+    kstate.set(state, ph_at(i) + PH_WRITERS, 0)
+    kstate.set(state, ph_at(i) + PH_INO, ino)
+    return i
+}
+
+fn pipe_owner(state: u64, i: u64) -> u64 {
+    if i >= MAX_PIPES {
+        return 0
+    }
+    return kstate.get(state, ph_at(i) + PH_INO)
+}
+
+fn pipe_attach(state: u64, i: u64, reader: bool) {
+    if i >= MAX_PIPES {
+        return
+    }
+    if reader {
+        kstate.add(state, ph_at(i) + PH_READERS, 1)
+    } else {
+        kstate.add(state, ph_at(i) + PH_WRITERS, 1)
+    }
 }
 
 fn pipe_drop(state: u64, i: u64, reader: bool) {

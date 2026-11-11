@@ -36,6 +36,7 @@ import fs.fat
 import sys.sysconst
 import sys.sysuser
 import sys.systerm
+import sys.sysfifo
 
 export {
     cx_bit, cx_close_marked, cx_copy, cx_pair, cx_put, cx_result, dir_allowed, do_close, do_dup, do_dup2, do_dup_min, do_fsync, do_ftruncate, do_lseek, do_open_mode, do_pio, do_pipe, do_pipe_flags, do_pvec, do_read, do_recvfrom, do_sendto, do_writev, ev_kind, file_io_loop, fsync_of, nl_name_out, nl_recv_of, nl_run, nl_wait, open_named, page_up, read_of, readable, sa_in, sa_out, sa_un, net_wait, sock_deadline, sock_gave_up, sock_of, vfs_on_create, wl_recv, wl_send, writable, write_of
@@ -190,7 +191,7 @@ fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if kind == file.K_TTY {
         return systerm.conout(state, me, file.open_ino(state, of), buf, len)
     }
-    if kind == file.K_PIPEW {
+    if kind == file.K_PIPEW || (kind == file.K_PIPER && (file.open_flags(state, of) & 3) == sysconst.O_RDWR) {
         return pipe_write(state, me, of, buf, len)
     }
     if kind == file.K_FB {
@@ -960,6 +961,9 @@ fn open_named(state: u64, me: u64, buf: u64, len: u64, flags: u64, mode: u64) ->
         if !perm.may(state, me, ino, want_of(flags)) {
             return sysuser.neg(errno.E_ACCES)
         }
+        if fs.inode_is_fifo(state, ino) {
+            return open_fifo(state, me, ino, flags)
+        }
     }
     var kind: u64 = file.K_FILE
     if fs.inode_type(state, ino) == fs.T_DIR {
@@ -989,6 +993,29 @@ fn open_named(state: u64, me: u64, buf: u64, len: u64, flags: u64, mode: u64) ->
         dirpath_remember(state, me, of, buf)
     }
     fs.touch_atime(state, ino)
+    return fd
+}
+
+fn open_fifo(state: u64, me: u64, ino: u64, flags: u64) -> u64 {
+    let p: u64 = sysfifo.rendezvous(state, ino, flags)
+    if errno.is_error(p) {
+        return p
+    }
+    var kind: u64 = file.K_PIPER
+    if (flags & 3) == O_WRONLY {
+        kind = file.K_PIPEW
+    }
+    let of: u64 = file.open_alloc(state, kind, p, flags & (3 | sysconst.UB_O_NONBLOCK))
+    if of >= file.MAX_OPEN {
+        sysfifo.release(state, p, flags & 3)
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        unref_of(state, of)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
     return fd
 }
 

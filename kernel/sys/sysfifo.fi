@@ -1,0 +1,162 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.kstate
+import sched.sched
+import fs.fs
+import fs.file
+import fs.vfs
+import lib.errno
+import ipc.perm
+import ipc.appfs
+import sys.sysconst
+import sys.sysuser
+
+export {
+    do_mknod, rendezvous, release
+}
+
+const S_IFMT: u64 = 61440
+const S_IFIFO: u64 = 4096
+const S_IFREG: u64 = 32768
+const S_IFCHR: u64 = 8192
+const S_IFBLK: u64 = 24576
+const S_IFSOCK: u64 = 49152
+const ACCESS_MASK: u64 = 3
+const ACCESS_READ: u64 = 0
+const ACCESS_WRITE: u64 = 1
+const ACCESS_BOTH: u64 = 2
+
+fn node_kind_ok(kind: u64) -> u64 {
+    if kind == 0 || kind == S_IFREG || kind == S_IFIFO {
+        return 0
+    }
+    if kind == S_IFCHR || kind == S_IFBLK || kind == S_IFSOCK {
+        return sysuser.neg(errno.E_PERM)
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn off_root_mount(state: u64, buf: u64) -> bool {
+    if !vfs.ready(state) {
+        return false
+    }
+    let m: u64 = vfs.mount_for(state, buf)
+    if m >= vfs.MAX_MNT {
+        return false
+    }
+    return m != 0 || vfs.all_mode(state)
+}
+
+fn do_mknod(state: u64, me: u64, name: u64, mode: u64) -> u64 {
+    let kind: u64 = mode & S_IFMT
+    let bad: u64 = node_kind_ok(kind)
+    if bad != 0 {
+        return bad
+    }
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = sysuser.fetch_path(state, me, name, buf, sysconst.MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if len == 0 {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    if !perm.walk_w(state, me, buf) || !appfs.write_ok(state, me, buf) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if off_root_mount(state, buf) {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    if kind == S_IFIFO && fs.version(state) < fs.OFS_V2 {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if fs.path_nofollow(state, buf) != 0 {
+        return sysuser.neg(errno.E_EXIST)
+    }
+    let dir: u64 = fs.parent_ino(state, buf)
+    if dir == 0 {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    if !perm.may(state, me, dir, perm.R_WRITE | perm.R_EXEC) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    let ino: u64 = fs.create_path(state, buf, fs.T_FILE)
+    if ino == 0 {
+        return sysuser.neg(errno.E_NOSPC)
+    }
+    perm.on_create(state, me, ino, mode & 4095)
+    if kind == S_IFIFO && !fs.mark_fifo(state, ino) {
+        fs.unlink_path(state, buf)
+        return sysuser.neg(errno.E_IO)
+    }
+    return 0
+}
+
+fn peer_present(state: u64, p: u64, access: u64) -> bool {
+    if access == ACCESS_READ {
+        return file.pipe_writers(state, p) != 0 || file.pipe_bytes(state, p) != 0
+    }
+    return file.pipe_readers(state, p) != 0
+}
+
+fn attach(state: u64, p: u64, access: u64) {
+    if access != ACCESS_WRITE {
+        file.pipe_attach(state, p, true)
+    }
+    if access != ACCESS_READ {
+        file.pipe_attach(state, p, false)
+    }
+    sched.poll_kick(state)
+}
+
+fn release(state: u64, p: u64, access: u64) {
+    if access != ACCESS_WRITE {
+        file.pipe_drop(state, p, true)
+    }
+    if access != ACCESS_READ {
+        file.pipe_drop(state, p, false)
+    }
+}
+
+fn wait_for_peer(state: u64, p: u64, access: u64) -> bool {
+    let deadline: u64 = kstate.get(state, kstate.TICKS) + sysconst.BLOCK_ROUNDS
+    while true {
+        let seen: u64 = sched.poll_seq(state)
+        if peer_present(state, p, access) {
+            return true
+        }
+        if kstate.get(state, kstate.TICKS) >= deadline {
+            return false
+        }
+        sched.poll_sleep(state, seen, deadline)
+    }
+    return false
+}
+
+fn rendezvous(state: u64, ino: u64, flags: u64) -> u64 {
+    let access: u64 = flags & ACCESS_MASK
+    if access > ACCESS_BOTH {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let nonblock: bool = (flags & sysconst.UB_O_NONBLOCK) != 0
+    let p: u64 = file.pipe_open_named(state, ino)
+    if p >= file.MAX_PIPES {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    if access == ACCESS_WRITE && nonblock && file.pipe_readers(state, p) == 0 {
+        file.pipe_drop(state, p, true)
+        return sysuser.neg(errno.E_NXIO)
+    }
+    attach(state, p, access)
+    if access == ACCESS_BOTH || nonblock {
+        return p
+    }
+    if !wait_for_peer(state, p, access) {
+        release(state, p, access)
+        return sysuser.neg(errno.E_AGAIN)
+    }
+    return p
+}
