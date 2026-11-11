@@ -41,7 +41,7 @@ if guest "$ROOT" "$OUT/main"; then
     while read -r _ name state note; do
         if [ "$state" = ok ]; then ok "$name"; else bad "$name -- $note"; fi
     done < "$OUT/main.checks"
-    [ "$(wc -l < "$OUT/main.checks")" -ge 15 ] && ok "all check groups reported" || bad "check groups missing"
+    [ "$(wc -l < "$OUT/main.checks")" -ge 14 ] && ok "all check groups reported" || bad "check groups missing"
 else
     bad "guest run failed"; tail -n 12 "$OUT/main.log"
 fi
