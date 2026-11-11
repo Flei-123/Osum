@@ -22,7 +22,7 @@ build_image() { # build_image <srcdir> <outdir>   (user programs of the system +
         spec="$spec /bin/busybox=$BBDYN /etc/bb.sh=$D/bb.sh /etc/pruef.txt=$D/pruef.txt"
     fi
     for f in "$D"/bin/*; do spec="$spec /bin/$(basename $f)=$f"; done
-    for f in "$D"/lib/*.so; do spec="$spec /lib/$(basename $f)=$f"; done
+    for f in "$D"/lib/*.so; do [ -e "$f" ] && spec="$spec /lib/$(basename $f)=$f"; done
     printf 'root:x:0:0:root:/root:/bin/sh\n' > "$D/passwd"; printf '127.0.0.1 localhost\n' > "$D/hosts"
     spec="$spec /etc/passwd=$D/passwd /etc/hosts=$D/hosts"
     # the files and directories a Linux package set puts under /etc and /usr/share (not kernel business; the real image
