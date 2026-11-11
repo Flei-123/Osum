@@ -161,7 +161,8 @@ for k in "${FIRN_REPO:-}" "$ROOT/../firn" "$ROOT/../../firn"; do
     [ -n "$k" ] && [ -f "$k/bin/firnc1.fi" ] && FIRNQ=$(cd "$k" && pwd) && break
 done
 firnc_osum_job() {
-    local cc_abs="$ROOT/$CC" rootp
+    local cc_abs rootp
+    case "$CC" in /*) cc_abs=$CC ;; *) cc_abs=$ROOT/$CC ;; esac
     rootp=$(cd "$FIRNQ" && pwd -P)
     rm -f "$OUT/firnc-osum.fail"
     if ( cd "$rootp" && ROOT="$rootp" BC_GEBAUT="$FIRN_TOOLCHAIN/COMMIT" BC_LIST_HASH="" FIRNLIB="$rootp/lib" \
