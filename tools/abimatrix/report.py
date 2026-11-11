@@ -4,7 +4,7 @@ import re
 
 import registry
 
-GROUP_ORDER = ("busybox", "coreutils-like", "python3", "curl", "git", "compiled-c", "compiler", "firefox")
+GROUP_ORDER = ("busybox", "coreutils-like", "filesystem", "python3", "curl", "git", "compiled-c", "compiler", "firefox")
 
 
 def parse_serial(path):
