@@ -59,7 +59,7 @@ check() {
     if [ "$line" = "WT $name $want" ]; then ok "$name: $want"; else bad "$name: expected '$want', got '${line:-nothing}'"; fi
 }
 while read -r name want; do case "$name" in ''|'#'*) continue ;; esac; check "$name" "$want"; done < "$HERE/expect.txt"
-check https-big "$BIGSHA"
+check https-big "300000 $BIGSHA"
 grep -aq '^WT end' "$D/wt.res" && ok "guest script ran to the end" || bad "guest script did not reach its end"
 echo "WGETHTTPS: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
