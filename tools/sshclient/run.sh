@@ -228,6 +228,8 @@ echo "$lsout" | grep -aq 'sftp_up.bin' && echo "$lsout" | grep -aq 'up.bin' && o
 accepted=$(grep -c 'Accepted publickey' "$TMPD/sshd.log")
 [ "$accepted" -ge 5 ] && ok "OpenSSH booked $accepted publickey logins" || bad "only $accepted accepted logins in the host log"
 
+[ "$fail" -gt 0 ] && { note "guest output:"; tr -d '\000\r' < "$S" | sed -n '/^T7$/,/^T9$/p' | sed 's/^/        | /'; }
+
 echo "== 4. counter-probes: weakened clients must fail the same script =="
 rm -rf "$TMPD/umut"
 cp -r kernel/user "$TMPD/umut"
