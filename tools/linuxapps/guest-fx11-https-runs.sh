@@ -5,7 +5,7 @@ up() { read u _ < /proc/uptime; echo $u; }
 echo "FX11 nslookup: $(timeout 20 nslookup example.com 2>&1 | tr '\n' ' ' | head -c 200)"
 echo "FX11 wget-https: $(timeout 60 wget -q -O - https://example.com/ 2>&1 | head -c 40 | tr -d '\n')"
 n=1
-while [ $n -le ${FX_RUNS:-4} ]; do
+while [ $n -le ${FX_RUNS:-2} ]; do
     mkdir -p /tmp/p$n
     echo 'user_pref("gfx.webrender.software", true);' > /tmp/p$n/user.js
     echo "FX11 run $n begin t=$(up)"
