@@ -34,7 +34,7 @@ expect() {
     esac
 }
 
-echo "== 1. settings in the guest (scale $SCALE): last page, restore confirm =="
+echo "== 1. settings in the guest (scale $SCALE): last page, uninstall confirm =="
 if guest "$ROOT" "$OUT/main"; then
     ok "guest script ran"
     verdicts "$OUT/main"
@@ -67,8 +67,8 @@ mutant() {
     fi
     rm -rf "$T"
 }
-mutant noconfirm kernel/user/settings.fi 's/if setsvc.confirm_restore() {/if true {/' \
-    confirm_cancel confirm_accept cancel_keeps_presets
+mutant noconfirm kernel/user/settings/setdevice.fi 's/let verdict: u64 = setsvc.confirm_uninstall()/let verdict: u64 = setsvc.VERDICT_GO/' \
+    confirm_cancel confirm_accept cancel_keeps_app
 mutant norestore kernel/user/settings.fi 's/^    setsvc.restore_start_page()$//' \
     page_restored reopened_on_page
 

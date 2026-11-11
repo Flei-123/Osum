@@ -26,18 +26,18 @@ def main():
     evs = lines(serial)
     readies = [i for i, e in enumerate(evs) if e.startswith("ready")]
     saved = index_of(evs, "page saved", 0, "page=" + PAGE_THEMES, "status=0")
-    cancel = index_of(evs, "confirm restore", 0, "status=0", "answer=0", "go=0")
-    accept = index_of(evs, "confirm restore", max(cancel, 0), "status=0", "answer=1", "go=1")
+    cancel = index_of(evs, "confirm uninstall", 0, "status=0", "answer=0", "go=0")
+    accept = index_of(evs, "confirm uninstall", max(cancel, 0), "status=0", "answer=1", "go=1")
     restored = index_of(evs, "page restored", 0, "page=" + PAGE_THEMES)
     verdict("ready_twice", len(readies) >= 2, str(len(readies)))
     verdict("fresh_start_no_restore", restored < 0 or saved < 0 or restored > saved)
     verdict("page_saved", saved >= 0, str([e for e in evs if e.startswith("page saved")][:3]))
-    verdict("confirm_cancel", cancel >= 0, str([e for e in evs if e.startswith("confirm restore")][:3]))
+    verdict("confirm_cancel", cancel >= 0, str([e for e in evs if e.startswith("confirm uninstall")][:3]))
     verdict("confirm_accept", accept >= 0)
-    between = [e for e in evs[max(cancel, 0):max(accept, 0)] if e.startswith("preset ")]
-    verdict("cancel_keeps_presets", cancel >= 0 and accept > cancel and not between)
-    after = [e for e in evs[max(accept, 0):] if e.startswith("preset ")]
-    verdict("accept_restores_presets", accept >= 0 and len(after) > 0, str(len(after)))
+    between = [e for e in evs[max(cancel, 0):max(accept, 0)] if e.startswith("apps uninstall ")]
+    verdict("cancel_keeps_app", cancel >= 0 and accept > cancel and not between)
+    after = [e for e in evs[max(accept, 0):] if e.startswith("apps uninstall ")]
+    verdict("accept_uninstalls", accept >= 0 and len(after) > 0, str(after[:2]))
     verdict("page_restored", restored >= 0 and saved >= 0 and restored > saved)
     nav = index_of(evs, "nav route=", max(restored, 0), "page=" + PAGE_THEMES)
     verdict("reopened_on_page", restored >= 0 and nav > restored)
