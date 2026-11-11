@@ -15,7 +15,7 @@ guest() {
     local tree=$1 out=$2
     ( cd "$tree" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
       DESIGNREBUILD=1 DESIGNBUILD="$out.build" bash tools/design/eh6.sh "$out" res=1920x1080 accel=kvm \
-        mode="$MODE" uiscale="$SCALE" lang=en drehbuch="$ROOT/tools/svcedit/script.txt" moreprogs="dialogd svcedit" ) > "$out.log" 2>&1
+        mode="$MODE" uiscale="$SCALE" "extra=vfs" lang=en drehbuch="$ROOT/tools/svcedit/script.txt" moreprogs="dialogd svcedit" ) > "$out.log" 2>&1
     rm -rf "$out.build"
     [ -s "$out/serial.txt" ] && grep -aq "svcedit: ready" "$out/serial.txt"
 }
@@ -41,7 +41,7 @@ if guest "$ROOT" "$OUT/main"; then
     while read -r _ name state note; do
         if [ "$state" = ok ]; then ok "$name"; else bad "$name -- $note"; fi
     done < "$OUT/main.checks"
-    [ "$(wc -l < "$OUT/main.checks")" -ge 12 ] && ok "all check groups reported" || bad "check groups missing"
+    [ "$(wc -l < "$OUT/main.checks")" -ge 14 ] && ok "all check groups reported" || bad "check groups missing"
 else
     bad "guest run failed"; tail -n 12 "$OUT/main.log"
 fi
@@ -69,6 +69,10 @@ mutant() {
 }
 mutant noconfirm kernel/user/svcedit/sefiles.fi 's/if !sedoc.dirty() {/if true {/' \
     confirm_cancel confirm_accept
+mutant nopicksave kernel/user/svcedit/sefiles.fi 's/svcosum.pick_save(/svcosum.file_save(/' \
+    picker_saved
+mutant nopickopen kernel/user/svcedit/sefiles.fi 's/svcosum.pick_open(/svcosum.file_open(/' \
+    picker_opened
 mutant stickydirty kernel/user/svcedit/sefiles.fi '/^fn apply_save/,/^}/ s/sedoc.mark_clean()//' \
     saved_clean
 

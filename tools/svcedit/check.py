@@ -40,6 +40,9 @@ def main():
     verdict("new_cleared", after(evs, "new", "len=0"))
     verdict("open_ok", find(evs, "open name=", "status=0", "len=5"), str([e for e in evs if e.startswith("open")][:2]))
     verdict("recent_set", any(e.startswith("recent=") for e in evs))
+    picks = re.findall(r"(?m)^explorer: pick answer=(\d+) name=(\S*) len=(\d+)", serial)
+    verdict("picker_saved", any(a == "1" and n == "untitled.txt" and l == "0" for a, n, l in picks), str(picks))
+    verdict("picker_opened", any(a == "1" and n == "untitled.txt" and l == "5" for a, n, l in picks), str(picks))
     verdict("no_surface_absent", "no surface" not in evs)
 
 
