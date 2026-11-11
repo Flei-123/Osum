@@ -221,6 +221,8 @@ EHCI_STUECKE = [
 ]
 
 NO_KDATA = {
+    ("pci.fi", "PM_CSR_OFF"),
+    ("xhci.fi", "PCI_COMMAND_OFF"),
     ("fb.fi", "FB_OFF"),
     ("fb.fi", "FONT_OFF"),
     ("fb.fi", "VMS_OFF"),
