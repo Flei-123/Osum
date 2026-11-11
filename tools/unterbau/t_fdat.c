@@ -72,6 +72,14 @@ int main(void)
     CHECK("futimens_bad_fd_ebadf", futimens(999, ts) < 0 && errno == EBADF, "errno %d", errno);
     errno = 0; r = futimens(d1, ts);
     CHECK("futimens_dir_fd", r == 0 && stat("/tmp/fa/one", &st) == 0 && st.st_mtime == 3000000, "r %d m %ld errno %d", r, (long)st.st_mtime, errno);
+    errno = 0; r = fchmod(fd, 0640);
+    CHECK("fchmod_vfile", r == 0 && stat("/tmp/fa/one/f", &st) == 0 && (st.st_mode & 0777) == 0640, "r %d mode %o errno %d", r, st.st_mode & 0777, errno);
+    errno = 0; r = fchown(fd, 1234, 4321);
+    CHECK("fchown_vfile", r == 0 && stat("/tmp/fa/one/f", &st) == 0 && st.st_uid == 1234 && st.st_gid == 4321, "r %d uid %d gid %d errno %d", r, (int)st.st_uid, (int)st.st_gid, errno);
+    errno = 0; r = fchmod(d1, 0750);
+    CHECK("fchmod_dir_fd", r == 0 && stat("/tmp/fa/one", &st) == 0 && (st.st_mode & 0777) == 0750, "r %d mode %o errno %d", r, st.st_mode & 0777, errno);
+    errno = 0;
+    CHECK("fchmod_bad_fd_ebadf", fchmod(999, 0600) < 0 && errno == EBADF, "errno %d", errno);
     if (fd >= 0) close(fd);
 
     /* ---- r820: execveat with a directory descriptor */

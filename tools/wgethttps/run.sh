@@ -60,6 +60,10 @@ check() {
 }
 while read -r name want; do case "$name" in ''|'#'*) continue ;; esac; check "$name" "$want"; done < "$HERE/expect.txt"
 check https-big "300000 $BIGSHA"
+check pipe-cat "$BIGSHA"
+check pipe-http "$BIGSHA"
+check pipe-https "$BIGSHA"
+check pipe-https-2 "$BIGSHA"
 grep -aq '^WT end' "$D/wt.res" && ok "guest script ran to the end" || bad "guest script did not reach its end"
 echo "WGETHTTPS: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
