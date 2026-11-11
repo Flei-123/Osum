@@ -39,7 +39,7 @@ import sys.systerm
 import sys.sysfifo
 
 export {
-    cx_bit, cx_close_marked, cx_copy, cx_pair, cx_put, cx_result, dir_allowed, do_close, do_dup, do_dup2, do_dup_min, do_fsync, do_ftruncate, do_lseek, do_open_mode, do_pio, do_pipe, do_pipe_flags, do_pvec, do_read, do_recvfrom, do_sendto, do_writev, ev_kind, file_io_loop, fsync_of, nl_name_out, nl_recv_of, nl_run, nl_wait, open_named, page_up, read_of, readable, sa_in, sa_out, sa_un, net_wait, sock_deadline, sock_gave_up, sock_of, vfs_on_create, wl_recv, wl_send, writable, write_of
+    cx_bit, cx_close_marked, cx_copy, cx_pair, cx_put, cx_result, dir_allowed, do_close, do_dup, do_dup2, do_dup_min, do_fsync, do_ftruncate, do_lseek, do_open_mode, do_pio, do_pipe, do_pipe_flags, do_pvec, do_read, do_recvfrom, do_sendto, do_writev, ev_kind, file_io_loop, fsync_of, nl_name_out, nl_recv_of, nl_run, nl_wait, ofs_ino_of_open, open_named, page_up, read_of, readable, sa_in, sa_out, sa_un, net_wait, sock_deadline, sock_gave_up, sock_of, vfs_on_create, wl_recv, wl_send, writable, write_of
 }
 
 const SA_BYTES: u64 = 16
@@ -769,7 +769,7 @@ fn open_devshm(state: u64, me: u64, i: u64, flags: u64) -> u64 {
     return fd
 }
 
-fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64) -> u64 {
+fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64, mode: u64) -> u64 {
     if mnt_gone(state, m) {
         return sysuser.neg(errno.E_NODEV)
     }
@@ -791,7 +791,7 @@ fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64) -> u64 {
             }
             return sysuser.neg(vfscreate.failure_errno(state, m, path))
         }
-        vfs_on_create(state, me, m, node, 438)
+        vfs_on_create(state, me, m, node, create_mode(mode))
     } else {
         if (flags & O_CREAT) != 0 && (flags & O_EXCL) != 0 {
             return sysuser.neg(errno.E_EXIST)
@@ -936,7 +936,7 @@ fn open_named(state: u64, me: u64, buf: u64, len: u64, flags: u64, mode: u64) ->
                 }
             }
             if m != 0 || vfs.all_mode(state) {
-                return open_vfs(state, me, m, buf, flags)
+                return open_vfs(state, me, m, buf, flags, mode)
             }
         }
     }
@@ -1852,20 +1852,31 @@ fn sa_un(state: u64, me: u64, addr: u64, len: u64, lenp: *mut u64) -> u64 {
 }
 
 // ---------------------------------------------------------- ftruncate()
+fn ofs_ino_of_open(state: u64, of: u64) -> u64 {
+    let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_FILE {
+        return file.open_ino(state, of)
+    }
+    if kind == file.K_VFILE && vfs.type_of(state, file.open_mnt(state, of)) == vfsops.FS_OFS {
+        return file.open_ino(state, of)
+    }
+    return 0
+}
+
 fn do_ftruncate(state: u64, me: u64, fd: u64, size: u64) -> u64 {
     let of: u64 = sysuser.of_of(state, me, fd)
     if of >= file.MAX_OPEN {
         return sysuser.neg(errno.E_BADF)
     }
-    if file.open_kind(state, of) == file.K_FILE {
-        // ROUND UNTERBAU: a plain file of the root file system: any size (growth = hole, shrink = zeroed tail)
+    let plain: u64 = ofs_ino_of_open(state, of)
+    if plain != 0 {
         if (file.open_flags(state, of) & 3) == 0 {
             return sysuser.neg(errno.E_INVAL)
         }
         if size > 0xFFFFFFFF {
             return sysuser.neg(errno.E_FBIG)
         }
-        if !fs.set_size(state, file.open_ino(state, of), size) {
+        if !fs.set_size(state, plain, size) {
             return sysuser.neg(errno.E_IO)
         }
         return 0

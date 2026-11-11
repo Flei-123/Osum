@@ -404,7 +404,7 @@ fn do_lstat(state: u64, me: u64, name: u64, out: u64) -> u64 {
         let m: u64 = vfs.mount_for(state, buf)
         if m < vfs.MAX_MNT {
             if m != 0 || vfs.all_mode(state) {
-                let node: u64 = vfs.node_for(state, m, buf)
+                let node: u64 = vfs.node_for_nofollow(state, m, buf)
                 if node == 0 {
                     return sysuser.neg(errno.E_NOENT)
                 }
@@ -490,7 +490,7 @@ fn do_readlink(state: u64, me: u64, name: u64, out: u64,
         let m: u64 = vfs.mount_for(state, buf)
         if m < vfs.MAX_MNT {
             if m != 0 || vfs.all_mode(state) {
-                let vnode: u64 = vfs.node_for(state, m, buf)
+                let vnode: u64 = vfs.node_for_nofollow(state, m, buf)
                 if vnode == 0 {
                     return sysuser.neg(errno.E_NOENT)
                 }
@@ -548,12 +548,15 @@ fn do_utimensat(state: u64, me: u64, fd: u64, name: u64, zeiten: u64,
             return sysuser.neg(errno.E_BADF)
         }
         let kd: u64 = file.open_kind(state, ofd)
-        if kd != file.K_FILE && kd != file.K_DIR {
-            return sysuser.neg(errno.E_PERM) // pipes, consoles and virtual files carry no times
+        if kd == file.K_DIR {
+            ino = file.open_ino(state, ofd)
+        } else if kd == file.K_VDIR && vfs.type_of(state, file.open_mnt(state, ofd)) == vfsops.FS_OFS {
+            ino = file.open_ino(state, ofd)
+        } else {
+            ino = sysfd.ofs_ino_of_open(state, ofd)
         }
-        ino = file.open_ino(state, ofd)
         if ino == 0 {
-            return sysuser.neg(errno.E_BADF)
+            return sysuser.neg(errno.E_PERM)
         }
     } else {
         let buf: u64 = sysuser.nameb(state)
@@ -1596,8 +1599,8 @@ fn do_fallocate(state: u64, me: u64, fd: u64, mode: u64, off: u64,
     // ROUND UNTERBAU: on a plain file the size only GROWS (never shrinks), as posix_fallocate does. The blocks are not reserved:
     // the file has a hole there and a full disk is found out when the hole is written (documented in docs/RUNDE-UNTERBAU-FIREFOX.md).
     let of: u64 = sysuser.of_of(state, me, fd)
-    if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_FILE {
-        if fs.inode_size(state, file.open_ino(state, of)) >= off + len {
+    if of < file.MAX_OPEN && sysfd.ofs_ino_of_open(state, of) != 0 {
+        if fs.inode_size(state, sysfd.ofs_ino_of_open(state, of)) >= off + len {
             return 0
         }
     }
