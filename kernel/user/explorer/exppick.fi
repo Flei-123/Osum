@@ -1,0 +1,133 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import lineout
+import fuiscene
+import libc.octets
+import libc.text
+import services.dlgproto
+import services.dlgreply
+import services.svcrules
+import explorer.expbase
+
+export { parse, active, accepts, choose, finish }
+
+const ARGS_MIN: u64 = 6
+const ARG_ID: u64 = 2
+const ARG_MODE: u64 = 3
+const ARG_APP: u64 = 4
+const ARG_ACCEPT: u64 = 6
+const APP_CAP: u64 = 64
+const ACCEPT_CAP: u64 = 47
+const NAME_CAP: u64 = 63
+const CONTENT_CAP: u64 = 65536
+const SLASH: u64 = 47
+
+static mut FLAG: [u8; 7] = "--pick\0"
+static mut PICK_LINE: [u8; 23] = "explorer: pick answer=\0"
+static mut NAME_FIELD: [u8; 7] = " name=\0"
+static mut LEN_FIELD: [u8; 6] = " len=\0"
+static mut app_buf: [u8; 65] = [0 as u8; 65]
+static mut accept_buf: [u8; 48] = [0 as u8; 48]
+static mut name_buf: [u8; 64] = [0 as u8; 64]
+static mut content: [u8; 65536] = [0 as u8; 65536]
+static mut pick_id: u64 = 0
+static mut enabled: bool = false
+static mut answered: bool = false
+
+fn app_ptr() -> u64 {
+    return (&app_buf[0 as usize]) as u64
+}
+
+fn accept_ptr() -> u64 {
+    return (&accept_buf[0 as usize]) as u64
+}
+
+fn name_ptr() -> u64 {
+    return (&name_buf[0 as usize]) as u64
+}
+
+fn content_ptr() -> u64 {
+    return (&content[0 as usize]) as u64
+}
+
+fn active() -> bool {
+    return enabled
+}
+
+fn parse(args: u64) -> bool {
+    if ulib.arg_count(args) < ARGS_MIN || !ulib.streq(ulib.arg_at(args, 1), (&FLAG[0 as usize]) as u64) {
+        return false
+    }
+    let app: u64 = ulib.arg_at(args, ARG_APP)
+    if dlgproto.mode_of(ulib.arg_at(args, ARG_MODE)) != dlgproto.MODE_OPEN || !svcrules.valid_name(app, text.length(app)) {
+        return false
+    }
+    octets.copy(app_ptr(), app, text.length(app))
+    pick_id = ulib.to_num(ulib.arg_at(args, ARG_ID))
+    if ulib.arg_count(args) > ARG_ACCEPT {
+        ulib.strncpy(accept_ptr(), ulib.arg_at(args, ARG_ACCEPT), ACCEPT_CAP)
+    }
+    enabled = true
+    return true
+}
+
+fn accepts(name: u64) -> bool {
+    return dlgproto.ext_matches(accept_ptr(), name, text.length(name))
+}
+
+fn base_name(path: u64) -> u64 {
+    var at: u64 = text.length(path)
+    while at > 0 && octets.ld8(path, at - 1) != SLASH {
+        at = at - 1
+    }
+    return path + at
+}
+
+fn report(answer: u64, len: u64) {
+    if expbase.s_dbg == 0 {
+        return
+    }
+    lineout.add_text((&PICK_LINE[0 as usize]) as u64)
+    lineout.add_num(answer)
+    lineout.add_text((&NAME_FIELD[0 as usize]) as u64)
+    lineout.add_text(name_ptr())
+    lineout.add_text((&LEN_FIELD[0 as usize]) as u64)
+    lineout.add_num(len)
+    lineout.end_line()
+}
+
+fn store(answer: u64, len: u64) {
+    answered = true
+    let _wrote: bool = dlgreply.write(app_ptr(), pick_id, answer, name_ptr(), content_ptr(), len)
+    report(answer, len)
+}
+
+fn reply(answer: u64, len: u64) {
+    store(answer, len)
+    fuiscene.quit()
+}
+
+fn choose(path: u64) {
+    let base: u64 = base_name(path)
+    if text.length(base) > NAME_CAP {
+        reply(dlgproto.ANSWER_FAILED, 0)
+        return
+    }
+    octets.zero(name_ptr(), 64)
+    octets.copy(name_ptr(), base, text.length(base))
+    let got: u64 = dlgreply.read_file(path, content_ptr(), CONTENT_CAP)
+    if got == dlgreply.READ_FAILED {
+        reply(dlgproto.ANSWER_FAILED, 0)
+        return
+    }
+    reply(dlgproto.ANSWER_OK, got)
+}
+
+fn finish() {
+    if enabled && !answered {
+        octets.zero(name_ptr(), 64)
+        store(dlgproto.ANSWER_CANCEL, 0)
+    }
+}

@@ -11,20 +11,22 @@ import services.svcrules
 import services.svcqueue
 import services.dlgproto
 
-export { available, run, queue_result }
+export { available, picker_available, run, pick, queue_result }
 
-const DIALOGD_ARGC_MAX: u64 = 6
+const ARGV_MAX: u64 = 8
 const KEY_CAP: u64 = 48
 const PATH_CAP: u64 = 160
 const ID_CAP: u64 = 26
 const REPLY_CAP: u64 = 65664
 
 static mut DIALOGD_PATH: [u8; 14] = "/bin/dialogd\0\0"
+static mut PICKER_PATH: [u8; 14] = "/bin/explorer\0"
+static mut PICK_FLAG: [u8; 7] = "--pick\0"
 static mut reply_buf: [u8; 65664] = [0 as u8; 65664]
 static mut key_buf: [u8; 48] = [0 as u8; 48]
 static mut path_buf: [u8; 160] = [0 as u8; 160]
 static mut id_buf: [u8; 26] = [0 as u8; 26]
-static mut argv_buf: [u64; 6] = [0 as u64; 6]
+static mut argv_buf: [u64; 8] = [0 as u64; 8]
 static mut answer_buf: [u8; 8] = [0 as u8; 8]
 static mut name_len_buf: [u8; 8] = [0 as u8; 8]
 static mut content_at: u64 = 0
@@ -38,22 +40,35 @@ fn available() -> bool {
     return !errno.failed(io.stat_mode(dialogd_path()))
 }
 
-fn spawn(id: u64, mode: u64, app: u64, title: u64, extra: u64) -> u64 {
+fn picker_path() -> u64 {
+    return (&PICKER_PATH[0 as usize]) as u64
+}
+
+fn picker_available() -> bool {
+    return !errno.failed(io.stat_mode(picker_path()))
+}
+
+fn push_arg(value: u64, argc: u64) -> u64 {
+    argv_buf[argc as usize] = value
+    return argc + 1
+}
+
+fn spawn(program: u64, lead: u64, id: u64, mode: u64, app: u64, title: u64, extra: u64) -> u64 {
     let digits: u64 = (&id_buf[0 as usize]) as u64
     let n: u64 = text.digits(id, digits, false)
     octets.st8(digits, n, 0)
-    let argv: u64 = (&argv_buf[0 as usize]) as u64
-    var argc: u64 = 5
-    argv_buf[0 as usize] = dialogd_path()
-    argv_buf[1 as usize] = digits
-    argv_buf[2 as usize] = dlgproto.mode_name(mode)
-    argv_buf[3 as usize] = app
-    argv_buf[4 as usize] = title
-    if extra != 0 && text.length(extra) > 0 {
-        argv_buf[5 as usize] = extra
-        argc = DIALOGD_ARGC_MAX
+    var argc: u64 = push_arg(program, 0)
+    if lead != 0 {
+        argc = push_arg(lead, argc)
     }
-    let pid: u64 = ulib.spawn_app(dialogd_path(), argv, argc)
+    argc = push_arg(digits, argc)
+    argc = push_arg(dlgproto.mode_name(mode), argc)
+    argc = push_arg(app, argc)
+    argc = push_arg(title, argc)
+    if extra != 0 && text.length(extra) > 0 {
+        argc = push_arg(extra, argc)
+    }
+    let pid: u64 = ulib.spawn_app(program, (&argv_buf[0 as usize]) as u64, argc)
     if errno.failed(pid) {
         return pid
     }
@@ -91,7 +106,7 @@ fn load_reply(path: u64) -> u64 {
     return got
 }
 
-fn run(id: u64, mode: u64, app: u64, app_len: u64, title: u64, extra: u64) -> u64 {
+fn run_with(program: u64, lead: u64, id: u64, mode: u64, app: u64, app_len: u64, title: u64, extra: u64) -> u64 {
     content_at = 0
     content_size = 0
     let path: u64 = reply_path(app, app_len, id)
@@ -99,7 +114,7 @@ fn run(id: u64, mode: u64, app: u64, app_len: u64, title: u64, extra: u64) -> u6
         return dlgproto.ANSWER_FAILED
     }
     io.unlink(path)
-    let code: u64 = spawn(id, mode, app, title, extra)
+    let code: u64 = spawn(program, lead, id, mode, app, title, extra)
     if errno.failed(code) {
         return dlgproto.ANSWER_FAILED
     }
@@ -115,6 +130,14 @@ fn run(id: u64, mode: u64, app: u64, app_len: u64, title: u64, extra: u64) -> u6
     content_at = buf + head
     content_size = got - head
     return octets.le32(answer)
+}
+
+fn run(id: u64, mode: u64, app: u64, app_len: u64, title: u64, extra: u64) -> u64 {
+    return run_with(dialogd_path(), 0, id, mode, app, app_len, title, extra)
+}
+
+fn pick(id: u64, app: u64, app_len: u64, title: u64, extra: u64) -> u64 {
+    return run_with(picker_path(), (&PICK_FLAG[0 as usize]) as u64, id, dlgproto.MODE_OPEN, app, app_len, title, extra)
 }
 
 fn name_ptr() -> u64 {
