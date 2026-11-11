@@ -9,7 +9,7 @@ def verdict(name, cond, note=""):
 
 
 def events(serial):
-    return [m.group(1).strip() for m in re.finditer(r"notepad: ([^\r\n]*)", serial)]
+    return [m.group(1).strip() for m in re.finditer(r"(?m)^notepad: ([^\r\n]*)", serial)]
 
 
 def has(evs, prefix, *needles):
