@@ -22,5 +22,6 @@ DP=$!
 trap 'kill $DP 2>/dev/null' EXIT
 GUI=1 DONE=FX-END BLOCKS=${BLOCKS:-1000000} TMO=${TMO:-1500} MEM=${MEM:-3072} \
     EXTRA="/etc/fx3.sh=$PWD/tools/linuxapps/guest-fx7-input.sh@755" \
-    KARGS="gfx disp wm wmdauer wmshell osum vfs bus fremdtrace script=sh /etc/fx.sh;exit" \
+    KARGS="gfx disp wm wmdauer wmshell osum vfs bus fremdtrace nic nip=10.0.2.15/24 ngw=10.0.2.2 script=sh /etc/fx.sh;exit" \
+    QEMU_EXTRA="-netdev user,id=n0 -device e1000,netdev=n0" \
     bash tools/linuxapps/run.sh "$WD" tools/linuxapps/guest-fx3-boot.sh "$OUT"
