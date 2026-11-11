@@ -61,6 +61,7 @@ while read -r dest rel; do
         echo "republish-hp: extra $dest"
     fi
 done < <([ -n "${HP_NO_EXTRAS:-}" ] || cat tools/ota/overlay-extras.txt)
+[ -n "${HP_NO_EXTRAS:-}" ] || bash tools/ota/stage-extras.sh "$IMG" "$EXTRA"
 if [ -n "${HP_FX_PACK:-}" ]; then
     mkdir -p "$EXTRA/usr/share/xfx"
     if [ -f "$HP_FX_PACK/parts/firefox.tar.part000" ]; then
