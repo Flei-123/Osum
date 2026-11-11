@@ -34,7 +34,7 @@ echo hello-net > "$D/www/h.txt"
 head -c 300000 /dev/urandom > "$D/www/big.bin"
 BIGSHA=$(sha256sum "$D/www/big.bin" | cut -c1-16)
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$D/key.pem" -out "$D/ca.pem" -days 30 -subj "/CN=10.0.2.2" -addext "subjectAltName=IP:10.0.2.2" >/dev/null 2>&1 || { echo "WGETHTTPS: openssl cannot make a certificate"; exit 1; }
-sed "s/HTTPPORT/$HTTPPORT/g; s/TLSPORT/$TLSPORT/g" "$HERE/guest.sh" > "$D/wt.sh"
+sed "s/HTTPPORT/$HTTPPORT/g; s/TLSPORT/$TLSPORT/g" "${WT_GUEST:-$HERE/guest.sh}" > "$D/wt.sh"
 printf 'one\ntwo\nthree\n' > "$D/pruef.txt"; echo 'echo BB end' > "$D/bb.sh"
 
 KNEW=${KERNEL:-$D/k.mb}
