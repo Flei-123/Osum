@@ -15,7 +15,7 @@ guest() {
     local tree=$1 out=$2
     ( cd "$tree" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
       DESIGNREBUILD=1 DESIGNBUILD="$out.build" bash tools/design/eh6.sh "$out" res=1920x1080 accel=kvm \
-        mode="$MODE" uiscale="$SCALE" lang=en drehbuch="$ROOT/tools/settingsvc/script.txt" moreprogs="dialogd settings" ) > "$out.log" 2>&1
+        mode="$MODE" uiscale="$SCALE" lang=en drehbuch="$ROOT/tools/settingsvc/script.txt" moreprogs="dialogd" ) > "$out.log" 2>&1
     rm -rf "$out.build"
     [ -s "$out/serial.txt" ] && grep -aq "settings: ready" "$out/serial.txt"
 }
