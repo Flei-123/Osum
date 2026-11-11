@@ -1,0 +1,234 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import libc.io
+import libc.errno
+import libc.octets
+import libc.text
+import services.dlgproto
+
+export {
+    NAME_CAP, PATH_CAP, NONE_ROW,
+    start, count, is_dir, name_of, size_of_row, enter, path_of, join, cell, is_up, cur_dir,
+}
+
+const ENTRY_MAX: u64 = 128
+const NAME_CAP: u64 = 64
+const PATH_CAP: u64 = 256
+const FULL_CAP: u64 = 320
+const NONE_ROW: u64 = 0xFFFFFFFFFFFFFFFF
+const READ_CAP: u64 = 4096
+const SLASH: u64 = 47
+const DOT: u64 = 46
+
+static mut names: [u8; 8192] = [0 as u8; 8192]
+static mut kinds: [u8; 128] = [0 as u8; 128]
+static mut sizes: [u64; 128] = [0 as u64; 128]
+static mut cur: [u8; 256] = [0 as u8; 256]
+static mut full: [u8; 320] = [0 as u8; 320]
+static mut cell_buf: [u8; 32] = [0 as u8; 32]
+static mut read_buf: [u8; 4096] = [0 as u8; 4096]
+static mut filter: u64 = 0
+static mut total: u64 = 0
+static mut START_DIR: [u8; 6] = "/data\0"
+static mut ROOT_DIR: [u8; 2] = "/\0"
+static mut UP_NAME: [u8; 3] = "..\0"
+
+fn cur_ptr() -> u64 {
+    return (&cur[0 as usize]) as u64
+}
+
+fn cur_dir() -> u64 {
+    return cur_ptr()
+}
+
+fn count() -> u64 {
+    return total
+}
+
+fn name_of(row: u64) -> u64 {
+    return (&names[0 as usize]) as u64 + row * NAME_CAP
+}
+
+fn is_dir(row: u64) -> bool {
+    return row < total && kinds[row as usize] == 4 as u8
+}
+
+fn is_up(row: u64) -> bool {
+    return row == 0 && is_dir(0) && text.equal_n(name_of(0), (&UP_NAME[0 as usize]) as u64, 3)
+}
+
+fn size_of_row(row: u64) -> u64 {
+    return sizes[row as usize]
+}
+
+fn at_root() -> bool {
+    return text.length(cur_ptr()) == 1
+}
+
+fn join(dir: u64, name: u64, out: u64, max: u64) -> bool {
+    let dn: u64 = text.length(dir)
+    let nn: u64 = text.length(name)
+    if dn + 1 + nn + 1 > max {
+        return false
+    }
+    octets.copy(out, dir, dn)
+    var at: u64 = dn
+    if !(dn == 1 && octets.ld8(dir, 0) == SLASH) {
+        octets.st8(out, at, SLASH)
+        at = at + 1
+    }
+    octets.copy(out + at, name, nn)
+    octets.st8(out, at + nn, 0)
+    return true
+}
+
+fn path_of(row: u64) -> u64 {
+    if row >= total || !join(cur_ptr(), name_of(row), (&full[0 as usize]) as u64, FULL_CAP) {
+        return 0
+    }
+    return (&full[0 as usize]) as u64
+}
+
+fn add(name: u64, dir: bool, size: u64) {
+    let n: u64 = text.length(name)
+    if total >= ENTRY_MAX || n == 0 || n >= NAME_CAP {
+        return
+    }
+    octets.copy(name_of(total), name, n)
+    octets.st8(name_of(total), n, 0)
+    if dir {
+        kinds[total as usize] = 4 as u8
+    } else {
+        kinds[total as usize] = 8 as u8
+    }
+    sizes[total as usize] = size
+    total = total + 1
+}
+
+fn skip_special(name: u64) -> bool {
+    let n: u64 = text.length(name)
+    if n == 1 && octets.ld8(name, 0) == DOT {
+        return true
+    }
+    return n == 2 && octets.ld8(name, 0) == DOT && octets.ld8(name, 1) == DOT
+}
+
+fn file_size(name: u64) -> u64 {
+    var path: [u8; 320] = [0 as u8; 320]
+    let p: u64 = (&path[0 as usize]) as u64
+    if !join(cur_ptr(), name, p, FULL_CAP) {
+        return 0
+    }
+    let size: u64 = io.size_of(p)
+    if errno.failed(size) {
+        return 0
+    }
+    return size
+}
+
+fn list_one(name: u64, dir: bool) {
+    if dir {
+        add(name, true, 0)
+    } else if dlgproto.ext_matches(filter, name, text.length(name)) {
+        add(name, false, file_size(name))
+    }
+}
+
+fn scan(want_dirs: bool) {
+    let fd: u64 = io.dir_open(cur_ptr())
+    if errno.failed(fd) {
+        return
+    }
+    let buf: u64 = (&read_buf[0 as usize]) as u64
+    var going: bool = true
+    while going {
+        let n: u64 = io.dir_read(fd, buf, READ_CAP)
+        if errno.failed(n) || n == 0 {
+            going = false
+        } else {
+            var at: u64 = 0
+            while at < n {
+                let rec: u64 = buf + at
+                let name: u64 = io.dir_name(rec)
+                let dir: bool = io.dir_kind(rec) == io.DT_DIR
+                if !skip_special(name) && dir == want_dirs {
+                    list_one(name, dir)
+                }
+                at = at + io.dir_reclen(rec)
+            }
+        }
+    }
+    io.close(fd)
+}
+
+fn reload() {
+    total = 0
+    if !at_root() {
+        add((&UP_NAME[0 as usize]) as u64, true, 0)
+    }
+    scan(true)
+    scan(false)
+}
+
+fn start(accept: u64) {
+    filter = accept
+    octets.zero(cur_ptr(), PATH_CAP)
+    var from: u64 = (&ROOT_DIR[0 as usize]) as u64
+    if !errno.failed(io.stat_mode((&START_DIR[0 as usize]) as u64)) {
+        from = (&START_DIR[0 as usize]) as u64
+    }
+    octets.copy(cur_ptr(), from, text.length(from))
+    reload()
+}
+
+fn ascend() {
+    var at: u64 = text.length(cur_ptr())
+    while at > 1 && octets.ld8(cur_ptr(), at - 1) != SLASH {
+        at = at - 1
+    }
+    if at > 1 {
+        at = at - 1
+    }
+    octets.st8(cur_ptr(), at, 0)
+}
+
+fn descend(row: u64) -> bool {
+    var next: [u8; 256] = [0 as u8; 256]
+    let q: u64 = (&next[0 as usize]) as u64
+    if !join(cur_ptr(), name_of(row), q, PATH_CAP) {
+        return false
+    }
+    octets.copy(cur_ptr(), q, text.length(q) + 1)
+    return true
+}
+
+fn enter(row: u64) -> bool {
+    if !is_dir(row) {
+        return false
+    }
+    if is_up(row) {
+        ascend()
+    } else if !descend(row) {
+        return false
+    }
+    reload()
+    return true
+}
+
+fn cell(row: u64, col: u64) -> u64 {
+    let out: u64 = (&cell_buf[0 as usize]) as u64
+    octets.st8(out, 0, 0)
+    if row >= total {
+        return out
+    }
+    if col == 0 {
+        return name_of(row)
+    }
+    if is_dir(row) {
+        return out
+    }
+    let n: u64 = text.digits(sizes[row as usize], out, false)
+    octets.st8(out, n, 0)
+    return out
+}

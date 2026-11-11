@@ -76,7 +76,7 @@ def measure(img, x, y, w, h, r, which=None):
         if which and name not in which:
             continue
         mx = x + w // 2
-        ground = get(ex + 2 if sx > 0 else ex - 3, ey + 2 if sy > 0 else ey - 3)
+        ground = get(ex - sx * r - (1 if sx > 0 else 0), ey + 2 if sy > 0 else ey - 3)
         if sy < 0:
             rim = get(mx, y)
             fill = get(mx, y + 3)

@@ -9,7 +9,7 @@ Layers (a file may import its own layer and the layers listed here; lib/ is laye
   lib       lib/**                      imports lib only
   base      runtime + data helpers      -> lib, base          (ulib, msg, pw, sha, images, codecs, bus clients)
   cmd       CLI programs (ls, cp ...)   -> lib, base
-  toolkit   window + widget stack       -> lib, base, toolkit (wlibc, wlib, fui*, winopts ...)
+  toolkit   window + widget stack       -> lib, base, toolkit (fui*, winopts ...)
   services  headless daemons            -> lib, base, services
   shell     desktop, bar, start menu,   -> lib, base, toolkit, shell
             lock, login, popups
@@ -46,7 +46,7 @@ def _s(x):
 
 TABLE = {
     'base': _s("""ulib msg nv pw grp sha tools nidx actwire actcli act image gif jpeg pngenc flate inflate media
-        unix kbund bstore jenc jsig key vault pin trash chacha dcrypt bsec aiot setschema wl_data wl_input
+        unix kbund bstore jenc jsig key vault pin trash chacha dcrypt bsec aiot setschema wl_data wl_frame wl_input
         wl_keytab wl_msg wlproto h264 h264tab mp3tab sync serline instaccount diskscan drvpkg drvmatch instkern dualkern
         brand_start hwid dbgio"""),
     'cmd': _s("""cat chmod chown cp cut date df diff dirname du echo env false find grep gunzip gzip head id kill ln
@@ -54,7 +54,7 @@ TABLE = {
         tail tar tee top touch tr true umount uname uniq wc wget which whoami xargs zip host ping netstat
         sh edit sysinfo eject accountcli pinctl jarvisctl fsck log privacy notify apprights backup dualcli
         firun basename lspci pcicfg regdump prphread wlanctl"""),
-    'toolkit': _s("""appdir wlibc wlib fuib fuiglyph fuiapp fuiscene fuied winopts winfloat backdrop template"""),
+    'toolkit': _s("""appdir fuib fuiglyph fuiapp fuiscene fuied winopts winfloat backdrop template"""),
     'services': _s("""orientbus odbd settingsd stored social sshd wayd powerd hotkeyd wmplug dhcp sntp svc rpc rpcc
         rpcd init ota opk presence proxy dnswt fsrv fsrw fsrlim fremdfs stickwr standby power
         melder autorun diskctl drvctl dispctl ebpfctl axd bsect modeapply"""),
@@ -62,11 +62,11 @@ TABLE = {
         calpop calev taskview notifc qs qsmodes runbox wmd freunde tiling backlum cliphist mbg modul elevate msgbox"""),
     'apps': _s("""explorer expakt exporte fileop expdlg expmodell massren trashbin settings term termfull nedit calc
         taskmgr store mail pdfview viewer fvviewer mp3 play charmap snip notes netview powermon theme jarvismini
-        install installer fas certus disks storage netmon wlan vpn"""),
+        install installer fas certus disks storage netmon wlan vpn dialogd"""),
     'test': _s("""k13t k14 k16 k17 shat h264t i18nt icont themetest hallo1 hallo2 hallo3 hello posix hurt wrace wspam
         wchurn stress crash burn execsmp shmtest ptytest bench compbench compdiff a11ydemo scenedemo widgetdemo
         plugboese plugpaar plugprobe plugregel plugspaet plugtempo pluguhr pollbr pollt sockt soclocal stab fftempo
-        cptempo ctr ctrkill presentlog nvcheck noise ofs3 netmeter sysstub mut"""),
+        cptempo ctr ctrkill presentlog nvcheck noise ofs3 netmeter sysstub mut dialogdemo pickdemo svcproof"""),
 }
 ORDER = ['test', 'cmd', 'toolkit', 'services', 'shell', 'apps', 'base']
 

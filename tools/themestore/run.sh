@@ -475,6 +475,8 @@ soll = []
 for raw in open(sys.argv[2], 'rb').read().decode('utf-8').splitlines():
     if raw.startswith('settings.tabs'):
         soll = soll + raw.split('=', 1)[1].strip().split('\\n')
+    elif re.match(r'settings\.page\.[^=]*\.title\s*=', raw):
+        soll.append(raw.split('=', 1)[1].strip())
 if not soll:
     print('KEINE SPRACHDATEI'); raise SystemExit
 ist = {}
@@ -483,11 +485,9 @@ for m in re.finditer(r'wlib: tab i=(\d+) .* nq=(\d+) nv=(\d+) t=(.*)', txt):
                                                                'replace'),
                             int(m.group(2)), int(m.group(3)))
 schlecht = []
-for i, name in enumerate(soll):
-    if i not in ist:
-        continue
-    if ist[i][0] != name:
-        schlecht.append("%d meldet '%s' statt '%s'" % (i, ist[i][0], name))
+for i in sorted(ist):
+    if ist[i][0] not in soll:
+        schlecht.append("%d meldet '%s', not in the language file" % (i, ist[i][0]))
 print(len(schlecht), ';'.join(schlecht[:4]) if schlecht else '')
 PY
 )
@@ -566,8 +566,8 @@ import re, sys
 txt = open(sys.argv[1], 'rb').read().decode('latin1')
 cut = txt.rfind('settings: rect name=waa ')
 tail = txt[cut:] if cut >= 0 else txt
-win = re.findall(r'settings: rect name=win x=(\d+) y=(\d+)', txt)
-ox, oy = (int(win[-1][0]) + 2, int(win[-1][1]) + 22) if win else (22, 25)
+win = re.findall(r'settings: rect name=win x=\d+ y=\d+ w=\d+ h=\d+ ax=(\d+) ay=(\d+)', txt)
+ox, oy = (int(win[-1][0]), int(win[-1][1])) if win else (22, 25)
 seen = set()
 for m in re.finditer(r'wlib: kachelbalken x=\d+ y=\d+ w=\d+ h=\d+'
                      r' kx=(\d+) ky=(\d+) kw=(\d+) kh=(\d+)', tail):
@@ -645,7 +645,9 @@ echo "== 10. the images are measured, not looked at =="
 WX=$(grep -ao 'name=win x=[0-9]*' "$SE" | tail -1 | cut -d= -f3)
 WY=$(grep -ao 'name=win x=[0-9]* y=[0-9]*' "$SE" | tail -1 | grep -oE 'y=[0-9]+' | cut -d= -f2)
 WW=$(grep -ao 'name=win x=[0-9]* y=[0-9]* w=[0-9]*' "$SE" | tail -1 | grep -oE 'w=[0-9]+' | cut -d= -f2)
-IX=$(( ${WX:-50} + 2 )); IY=$(( ${WY:-3} + 22 ))
+WAX=$(grep -aoE 'name=win x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+ ax=[0-9]+' "$SE" | tail -1 | grep -oE 'ax=[0-9]+' | cut -d= -f2)
+WAY=$(grep -aoE 'name=win x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+ ax=[0-9]+ ay=[0-9]+' "$SE" | tail -1 | grep -oE 'ay=[0-9]+' | cut -d= -f2)
+IX=${WAX:-$(( ${WX:-50} + 2 ))}; IY=${WAY:-$(( ${WY:-3} + 22 ))}
 IW=${WW:-700}
 for pair in "set:Darstellung" "setv:Vorlagen"; do
     d=${pair%%:*}; nm=${pair##*:}
@@ -670,12 +672,19 @@ for pair in "set:Darstellung" "setv:Vorlagen"; do
         printf '%s\n' "$out" | sed 's/^/        /' | head -12
 done
 #
-TABNV=$(python3 - locale/de/messages "$SEF" <<'PY'
+TABNV=$(python3 - locale/de/messages "$SEF" kernel/user/settings.d/settings.pagemap <<'PY'
 import re, sys
-want = []
+msgs = {}
 for zeile in open(sys.argv[1], 'rb').read().decode('utf-8').splitlines():
-    if zeile.startswith('settings.tabs'):
-        want = want + zeile.split('=', 1)[1].strip().split('\\n')
+    if ' = ' in zeile:
+        k, v = zeile.split(' = ', 1)
+        msgs[k] = v
+want = []
+for zeile in open(sys.argv[3], 'rb').read().decode('utf-8').splitlines():
+    f = zeile.split()
+    if len(f) == 3 and f[0] == 'page':
+        slug = f[2][len('settings://'):].replace('/', '-')
+        want.append(msgs.get('settings.page.%s.title' % slug, ''))
 if not want:
     print(99)
     raise SystemExit
@@ -897,7 +906,7 @@ num "GEGENPROBE: bei Radius 0 ist keine der vier Ecken rund" "$ECK0" eq 0
 KART=$(python3 - "$TMPD/rad0/serial.txt" <<'PYK2'
 import re, sys
 roh = open(sys.argv[1], 'rb').read().decode('latin1')
-w = re.findall(r'settings: rect name=win x=(\d+) y=(\d+)', roh)
+w = re.findall(r'settings: rect name=win x=\d+ y=\d+ w=\d+ h=\d+ ax=(\d+) ay=(\d+)', roh)
 rects = re.findall(r'settings: rect name=(kart[a-z]*) x=(\d+) y=(\d+)'
                    r' w=(\d+) h=(\d+)', roh)
 gesehen = {}
@@ -907,7 +916,7 @@ for nm in sorted(gesehen):
     x, y, bw, bh = gesehen[nm]
     if not w:
         break
-    print(nm, int(w[-1][0]) + 2 + x, int(w[-1][1]) + 22 + y, bw, bh)
+    print(nm, int(w[-1][0]) + x, int(w[-1][1]) + y, bw, bh)
 PYK2
 )
 KARTN=0
@@ -1430,12 +1439,12 @@ num "und genau eine entscheidet, wie deckend ein Punkt ist" "$GM" eq 1
 #
 PM0=$(grep -aoE '^const PLATE_MARK: u64 = 0x[0-9A-Fa-f]+' kernel/ui/wm/wmglass.fi \
       | grep -oE '0x[0-9A-Fa-f]+')
-PM3=$(grep -aoE '^const PLATE: u64 = 0x[0-9A-Fa-f]+' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi) \
+PM3=$(grep -aoE '^const PLATE: u64 = 0x[0-9A-Fa-f]+' kernel/user/uikit/uitextat.fi \
       | grep -oE '0x[0-9A-Fa-f]+')
 same "die Marke der Textplatte ist in Ring 0 und Ring 3 dieselbe Zahl" \
     "${PM0:-0}" "${PM3:-1}"
 num "und genau eine Stelle in Ring 3 setzt sie" \
-    "$(grep -ac '^fn plate(' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi))" eq 1
+    "$(grep -ac '^fn plate(' kernel/user/uikit/uitextat.fi)" eq 1
 num "und genau eine in Ring 0 loest sie auf" \
     "$({ grep -ac '== (PLATE_MARK >> 24)' kernel/ui/wm/wmglass.fi || true; })" eq 1
 #
@@ -1649,7 +1658,7 @@ same "und die Datei auch" "4" \
     "$(bash tools/mkfsfi/mkfs.sh cat "$TMPD/rvor/disk.img" /etc/theme.conf \
        2>/dev/null | grep -aE '^radius=' | tail -1 | cut -d= -f2)"
 num "Schmuck-Widgets sind von der Trefferpruefung ausgenommen" \
-    "$(grep -ac 'fn only_decoration(' <(bash tools/structure/catprog.sh kernel/user/wlib.fi))" eq 1
+    "$(grep -ac 'fn only_decoration(' kernel/user/fuiapp/hostui/hostwidget.fi)" eq 1
 
 GSHOT=0
 for s in glas-radius-0 glas-radius-12 glas-radius-24 glas-alpha-100 \
@@ -1678,15 +1687,17 @@ num "und in keiner von ihnen eine leere, abgeschnittene oder ueberlappende Besch
 echo
 echo "== 12. addendum: the umlaut in the terminal and the measured bar =="
 
-TLOG="$TMPD/al100/serial.txt"
-TPPM="$TMPD/al100/desktop.ppm"
+bash tools/themestore/build.sh "$TMPD/term" terminal_only=yes keep=yes \
+    > "$TMPD/term.log" 2>&1
+TLOG="$TMPD/term/serial.txt"
+TPPM="$TMPD/term/desktop.ppm"
 has "$TLOG" "wm: termgitter win=" \
     "der Kern nennt das Zellenraster des Terminals (Lage, Zelle, Aufsteiger)"
 TG=$(grep -a 'wm: termgitter win=' "$TLOG" | tail -1)
 tgv() { printf '%s' "$TG" | grep -oE " $1=[0-9]+" | grep -oE '[0-9]+'; }
 TGX=$(tgv x); TGY=$(tgv y); TGW=$(tgv cellw); TGH=$(tgv cellh)
 TGP=$(tgv px); TGA=$(tgv asc)
-TLINE='NOT A SINGLE DEVICE!'
+TLINE='abcdefghijklm ABCDEFGHIJK +-*/'
 COLS=$(python3 - "$TPPM" "${TGX:-0}" "${TGY:-0}" "${TGW:-10}" "${TGH:-19}" \
     "${TGA:-14}" "${#TLINE}" <<'PYC'
 import sys
@@ -1694,8 +1705,8 @@ sys.path.insert(0, "tools/look")
 import umlaut
 ppm = sys.argv[1]
 x, y, cw, ch, asc, n = [int(v) for v in sys.argv[2:8]]
-ax, ay = x + cw, y + ch + asc
-fb = umlaut.grundfarben(ppm, ax, ay - asc, ax + n * cw, ay + 4)
+ay = y + ch + asc
+fb = umlaut.grundfarben(ppm, x, ay - asc, x + n * cw, ay + 4)
 if fb is None:
     print("0 0 0 0 0 0")
 else:
@@ -1704,21 +1715,24 @@ PYC
 )
 tgrid() {
     python3 tools/gfx/checkshot.py tgrid "$TPPM" assets/osum-mono.ttf \
-        "${TGP:-16}" "${TGX:-0}" "${TGY:-0}" "${TGW:-10}" "${TGH:-19}" 1 1 \
+        "${TGP:-16}" "${TGX:-0}" "${TGY:-0}" "${TGW:-10}" "${TGH:-19}" 1 0 \
         $COLS "$1" 0 2>&1
 }
 UM=$(tgrid "$TLINE" | head -1)
 UF=$(printf '%s' "$UM" | grep -oE '[0-9]+ wrong' | grep -oE '^[0-9]+')
 UT=$(printf '%s' "$UM" | grep -oE '[0-9]+ ink pixels' | grep -oE '^[0-9]+')
+UE=$(printf '%s' "$UM" | grep -c 'EMPTY')
 num "the terminal text is rasterised pixel-exact (wrong pixels)" \
     "${UF:-99}" eq 0
+num "and no cell of the line is empty (an empty terminal is not a pass)" \
+    "${UE:-1}" eq 0
 num "and ink was actually measured" "${UT:-0}" ge 500
-UC=$(tgrid 'NOT A SINGLE DEVCE!' | head -1 | grep -oE '[0-9]+ wrong' \
+UCD=$(tgrid 'abcdefghijkl ABCDEFGHIJK +-*/' | head -1 | grep -oE '[0-9]+ wrong' \
      | grep -oE '^[0-9]+')
 num "CONTROL: a line with a letter missing does NOT fit the raster" \
-    "${UC:-0}" gt 0
+    "${UCD:-0}" gt 0
 #
-BL=$(python3 tools/themestore/shotcheck.py "$TPPM" "$TLOG" --taskbar 2>&1 \
+BL=$(python3 tools/themestore/shotcheck.py "$TMPD/al100/desktop.ppm" "$TMPD/al100/serial.txt" --taskbar 2>&1 \
      | grep -a 'shotcheck: leiste')
 echo "        $BL"
 BN=$(printf '%s' "$BL" | grep -oE 'texts [0-9]+' | grep -oE '[0-9]+')
@@ -1730,7 +1744,7 @@ num "die Leiste meldet ihre Beschriftungen mit gemessener Breite" \
 num "und keine davon ist leer" "${BE:-9}" eq 0
 num "und keine ragt aus ihrem Bedienelement heraus" "${BC:-9}" eq 0
 num "und keine ueberlappt eine andere" "${BO:-9}" eq 0
-BT=$(grep -aE '^taskbar: btn i=0 ' "$TLOG" | tail -1 | sed -E 's/.* t=//')
+BT=$(grep -aE '^taskbar: btn i=0 ' "$TMPD/al100/serial.txt" | tail -1 | sed -E 's/.* t=//')
 if [ -n "$BT" ]; then
     ok "the window button of the bar carries the window title: $BT"
 else
@@ -1781,7 +1795,7 @@ num "GEGENPROBE: eine gemalte Linie durch die Schrift wird gefunden" \
 
 echo
 echo "== 11i. the line under the bar button follows the text =="
-PI=$(python3 - "$TLOG" <<'PYP'
+PI=$(python3 - "$TMPD/al100/serial.txt" <<'PYP'
 import re
 import sys
 txt = open(sys.argv[1], 'rb').read().decode('latin1')

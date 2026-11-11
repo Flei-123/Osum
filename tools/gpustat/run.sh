@@ -51,7 +51,7 @@ build_kernel() { # srcroot out.mb
           && FIRNLIB="$src/lib" "$ROOT/$FIRNC" kernel/uprog.fi -o "$w/u.o" >>"$w/e" 2>&1 || { head -8 "$w/e"; exit 1; }
       ld -n -T kernel/kernel.ld --defsym=KERNEL_MAIN="_F0.kernel_main" --defsym=KERNEL_TRAP="_F0.trap__entry" \
           --defsym=KERNEL_SYSCALL="_F0.sys__entry" --defsym=KERNEL_TASK_MAIN="_F0.tasks__main" \
-          --defsym=KERNEL_USER_START="_F0.proc__user_start" --defsym=KERNEL_AP_MAIN="_F0.smp__ap_main" \
+          --defsym=KERNEL_USER_START="_F0.proccopy__user_start" --defsym=KERNEL_AP_MAIN="_F0.smp__ap_main" \
           --defsym=USER_MAIN="_F0.u_enter" -o "$w/k.elf" "$w/boot.o" "$w/isr.o" "$w/switch.o" "$w/smp.o" "$w/hv.o" \
           "$w/k.o" "$w/u.o" 2>"$w/ld.err" || { head -5 "$w/ld.err"; exit 1; }
       objcopy -O elf32-i386 "$w/k.elf" "$out" 2>/dev/null )

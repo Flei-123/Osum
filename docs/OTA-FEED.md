@@ -82,14 +82,14 @@ functionally changed by r1277 (`platte_ink`), but overlaying every GUI program d
 
 ## 5. HP dev feed: publish and device steps (08.11.2026)
 
-Publish (verified by `feed-dev.sh`: signature, every hash and size, package feed byte-identical, VERZEICHNIS below `VZ_MAX`):
+One command (base preset `HP_BASE=/root/abbilder/hp-stick36-base`, `HP_DEV=1`, ref `origin/main`; runs `republish-hp.sh` via `heavy`, then re-checks signature + every hash and size over https and prints the HP steps):
 
-    HP_DEV=1 HP_REF=origin/main HP_BASE=/root/abbilder/hp-stick36-base HEAVY_TIMELIMIT=90 \
-        setsid nohup /root/jarvis/bin/heavy bash <worktree>/tools/ota/republish-hp.sh "<notes>" [--dry] > log 2>&1 &
+    bash tools/ota/publish-dev.sh --dry          # build + sign + verify in a temp copy, then https check of the live feed; publishes nothing
+    bash tools/ota/publish-dev.sh "<notes>"      # real publish, ~3 min plus queue wait (run with setsid nohup, tool calls die after ~60 s)
 
-Run `--dry` first (prints programs, `verify OK ... N files`, VERZEICHNIS size), then without it; ~3 min plus queue wait.
-The stand name is `count` = `git rev-list --count <HP_REF>` at the moment the script fetches, so a main that moves during
-the queue wait publishes a later commit: read the `published:` line, not the commit you started from.
+It refuses a wrong `HP_BASE` (missing, no `SYSVERSION`, fewer than 100 programs) and fails unless the publisher printed `verify OK` and `package feed unchanged` and `tools/ota/verify_feed.py` accepts the https feed (signature, hashes, `--count` = the stand it started from).
+Overrides: `HP_BASE`, `HP_REF`, `FEED_URL`. Gate: `bash tools/publishdev/run.sh` (13 checks, mutants: tampered kernel byte, tampered hash, broken signature, wrong base).
+The stand name is `count` = `git rev-list --count <HP_REF>` when the script fetches; a main that moves during the queue wait publishes a later commit: read the printed stand.
 
 Current stand: 5411 (main 6d3d8e658, includes CURRENT/TRIAL files, English wire keys (prov_own, kbund KOPF writer), ab_boot English serial texts, tscdelta, fb-aus gui-off; 141 overlay programs, 359 hashes, VERZEICHNIS 39865 B).
 All packages carry the new meta key `version`, so their hashes differ from earlier stands.

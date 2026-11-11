@@ -1,0 +1,405 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import block.blk
+import fs.mnt
+import fs.ext4
+import libc.octets
+
+export { sb_read, block_write, block_alloc, block_free_run, inode_alloc, inode_free,
+    gd_load, gd_inode_table, blocks_per_group, sb_flag_state, bm_buf,
+    SB_STATE_VALID }
+
+const SB_FREE_BLOCKS_LO: u64 = 0x0C
+const SB_FREE_INODES: u64 = 0x10
+const SB_BLOCKS_PER_GROUP: u64 = 0x20
+const SB_STATE: u64 = 0x3A
+const SB_FREE_BLOCKS_HI: u64 = 0x158
+const SB_SECTOR: u64 = 2
+
+const SB_STATE_VALID: u64 = 1
+
+const GD_BLOCK_BITMAP: u64 = 0x00
+const GD_INODE_BITMAP: u64 = 0x04
+const GD_INODE_TABLE: u64 = 0x08
+const GD_FREE_BLOCKS: u64 = 0x0C
+const GD_FREE_INODES: u64 = 0x0E
+const GD_USED_DIRS: u64 = 0x10
+const GD_HI_DELTA: u64 = 0x20
+const GD_WIDE_MIN: u64 = 64
+
+const NONE: u64 = 0xFFFFFFFF
+
+fn bm_buf(state: u64) -> u64 {
+    return ext4.buf(state, ext4.NODEBUF)
+}
+
+fn block_write(state: u64, m: u64, block: u64, src: u64) -> bool {
+    let sectors: u64 = ext4.sget(state, m, ext4.S_BSIZE) / ext4.BS
+    let first: u64 = mnt.first(state, m) + block * sectors
+    var i: u64 = 0
+    while i < sectors {
+        if !blk.write_on(state, mnt.dev(state, m), first + i,
+            src + i * ext4.BS) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn sb_read(state: u64, m: u64, dst: u64) -> bool {
+    return blk.read_mounted(state, m, mnt.first(state, m) + SB_SECTOR, dst)
+}
+
+fn blocks_per_group(state: u64, m: u64) -> u64 {
+    let s: u64 = ext4.buf(state, ext4.SECBUF)
+    if !blk.read_mounted(state, m, mnt.first(state, m) + SB_SECTOR, s) {
+        return 0
+    }
+    return octets.le32(s + SB_BLOCKS_PER_GROUP)
+}
+
+fn sb_counter(state: u64, m: u64, lo: u64, hi: u64, n: u64,
+    add: bool) -> bool {
+    let s: u64 = ext4.buf(state, ext4.SECBUF)
+    let lba: u64 = mnt.first(state, m) + SB_SECTOR
+    if !blk.read_mounted(state, m, lba, s) {
+        return false
+    }
+    var v: u64 = octets.le32(s + lo)
+    if hi != 0 {
+        v = v | (octets.le32(s + hi) << 32)
+    }
+    if add {
+        v = v + n
+    } else if v >= n {
+        v = v - n
+    } else {
+        v = 0
+    }
+    octets.put32(s + lo, v & 0xFFFFFFFF)
+    if hi != 0 {
+        octets.put32(s + hi, v >> 32)
+    }
+    return blk.write_on(state, mnt.dev(state, m), lba, s)
+}
+
+fn sb_flag_state(state: u64, m: u64, valid: bool) -> bool {
+    let s: u64 = ext4.buf(state, ext4.SECBUF)
+    let lba: u64 = mnt.first(state, m) + SB_SECTOR
+    if !blk.read_mounted(state, m, lba, s) {
+        return false
+    }
+    var st: u64 = octets.le16(s + SB_STATE)
+    if valid {
+        st = st | SB_STATE_VALID
+    } else {
+        st = st & 0xFFFE
+    }
+    octets.put16(s + SB_STATE, st)
+    return blk.write_on(state, mnt.dev(state, m), lba, s)
+}
+
+fn sb_free_blocks(state: u64, m: u64, n: u64, add: bool) -> bool {
+    var hi: u64 = 0
+    if ext4.sget(state, m, ext4.S_64BIT) != 0 {
+        hi = SB_FREE_BLOCKS_HI
+    }
+    return sb_counter(state, m, SB_FREE_BLOCKS_LO, hi, n, add)
+}
+
+fn sb_free_inodes(state: u64, m: u64, n: u64, add: bool) -> bool {
+    return sb_counter(state, m, SB_FREE_INODES, 0, n, add)
+}
+
+fn gd_wide(state: u64, m: u64) -> bool {
+    return ext4.sget(state, m, ext4.S_64BIT) != 0
+        && ext4.sget(state, m, ext4.S_DESCSZ) >= GD_WIDE_MIN
+}
+
+fn gd_block(state: u64, m: u64, g: u64) -> u64 {
+    let off: u64 = g * ext4.sget(state, m, ext4.S_DESCSZ)
+    return ext4.sget(state, m, ext4.S_GDBLOCK)
+        + off / ext4.sget(state, m, ext4.S_BSIZE)
+}
+
+fn gd_load(state: u64, m: u64, g: u64) -> u64 {
+    let off: u64 = g * ext4.sget(state, m, ext4.S_DESCSZ)
+    let bs: u64 = ext4.sget(state, m, ext4.S_BSIZE)
+    if !ext4.block_read(state, m, gd_block(state, m, g),
+        ext4.buf(state, ext4.BLKBUF)) {
+        return 0
+    }
+    return ext4.buf(state, ext4.BLKBUF) + off % bs
+}
+
+fn gd_store(state: u64, m: u64, g: u64) -> bool {
+    return block_write(state, m, gd_block(state, m, g),
+        ext4.buf(state, ext4.BLKBUF))
+}
+
+fn gd_addr(state: u64, m: u64, d: u64, lo: u64) -> u64 {
+    var v: u64 = octets.le32(d + lo)
+    if gd_wide(state, m) {
+        v = v | (octets.le32(d + lo + GD_HI_DELTA) << 32)
+    }
+    return v
+}
+
+fn gd_inode_table(state: u64, m: u64, d: u64) -> u64 {
+    return gd_addr(state, m, d, GD_INODE_TABLE)
+}
+
+fn gd_count(state: u64, m: u64, d: u64, lo: u64) -> u64 {
+    var v: u64 = octets.le16(d + lo)
+    if gd_wide(state, m) {
+        v = v | (octets.le16(d + lo + GD_HI_DELTA) << 16)
+    }
+    return v
+}
+
+fn gd_set_count(state: u64, m: u64, d: u64, lo: u64, v: u64) {
+    octets.put16(d + lo, v & 0xFFFF)
+    if gd_wide(state, m) {
+        octets.put16(d + lo + GD_HI_DELTA, v >> 16)
+    }
+}
+
+fn gd_add(state: u64, m: u64, d: u64, lo: u64, n: u64, add: bool) {
+    let v: u64 = gd_count(state, m, d, lo)
+    if add {
+        gd_set_count(state, m, d, lo, v + n)
+    } else if v >= n {
+        gd_set_count(state, m, d, lo, v - n)
+    } else {
+        gd_set_count(state, m, d, lo, 0)
+    }
+}
+
+fn bit_get(p: u64, i: u64) -> bool {
+    return ((kstate.get8(p + (i >> 3)) >> (i & 7)) & 1) != 0
+}
+
+fn bit_set(p: u64, i: u64) {
+    kstate.set8(p + (i >> 3),
+        (kstate.get8(p + (i >> 3)) | (1 << (i & 7))) as u8)
+}
+
+fn bit_clear(p: u64, i: u64) {
+    kstate.set8(p + (i >> 3),
+        (kstate.get8(p + (i >> 3)) & (255 - (1 << (i & 7)))) as u8)
+}
+
+fn find_zero(p: u64, from: u64, to: u64) -> u64 {
+    var i: u64 = from
+    while i < to {
+        if (i & 7) == 0 && i + 8 <= to && kstate.get8(p + (i >> 3)) == 0xFF {
+            i = i + 8
+        } else {
+            if !bit_get(p, i) {
+                return i
+            }
+            i = i + 1
+        }
+    }
+    return NONE
+}
+
+fn group_count(state: u64, m: u64, bpg: u64) -> u64 {
+    let span: u64 = ext4.sget(state, m, ext4.S_BLOCKS)
+        - ext4.sget(state, m, ext4.S_FIRST)
+    return (span + bpg - 1) / bpg
+}
+
+fn bits_in_group(state: u64, m: u64, g: u64, bpg: u64) -> u64 {
+    let span: u64 = ext4.sget(state, m, ext4.S_BLOCKS)
+        - ext4.sget(state, m, ext4.S_FIRST)
+    let left: u64 = span - g * bpg
+    if left < bpg {
+        return left
+    }
+    return bpg
+}
+
+fn block_alloc_in_group(state: u64, m: u64, g: u64, from: u64,
+    bpg: u64) -> u64 {
+    let d: u64 = gd_load(state, m, g)
+    if d == 0 || gd_count(state, m, d, GD_FREE_BLOCKS) == 0 {
+        return 0
+    }
+    let bb: u64 = gd_addr(state, m, d, GD_BLOCK_BITMAP)
+    let bm: u64 = bm_buf(state)
+    if !ext4.block_read(state, m, bb, bm) {
+        return 0
+    }
+    let nbits: u64 = bits_in_group(state, m, g, bpg)
+    var idx: u64 = find_zero(bm, from, nbits)
+    if idx == NONE && from > 0 {
+        idx = find_zero(bm, 0, nbits)
+    }
+    if idx == NONE {
+        return 0
+    }
+    bit_set(bm, idx)
+    if !block_write(state, m, bb, bm) {
+        return 0
+    }
+    gd_add(state, m, d, GD_FREE_BLOCKS, 1, false)
+    if !gd_store(state, m, g) {
+        return 0
+    }
+    sb_free_blocks(state, m, 1, false)
+    return ext4.sget(state, m, ext4.S_FIRST) + g * bpg + idx
+}
+
+fn block_alloc(state: u64, m: u64, goal: u64) -> u64 {
+    let bpg: u64 = blocks_per_group(state, m)
+    if bpg == 0 {
+        return 0
+    }
+    let first: u64 = ext4.sget(state, m, ext4.S_FIRST)
+    let groups: u64 = group_count(state, m, bpg)
+    var g0: u64 = 0
+    var start_bit: u64 = 0
+    if goal >= first && goal < ext4.sget(state, m, ext4.S_BLOCKS) {
+        g0 = (goal - first) / bpg
+        start_bit = (goal - first) % bpg
+    }
+    var n: u64 = 0
+    while n < groups {
+        var from: u64 = 0
+        if n == 0 {
+            from = start_bit
+        }
+        let r: u64 = block_alloc_in_group(state, m, (g0 + n) % groups,
+            from, bpg)
+        if r != 0 {
+            return r
+        }
+        n = n + 1
+    }
+    return 0
+}
+
+fn block_free_run(state: u64, m: u64, start: u64, len: u64) -> bool {
+    let bpg: u64 = blocks_per_group(state, m)
+    let first: u64 = ext4.sget(state, m, ext4.S_FIRST)
+    if bpg == 0 || start < first || start + len > ext4.sget(state, m, ext4.S_BLOCKS) {
+        return false
+    }
+    var at: u64 = start
+    var left: u64 = len
+    while left > 0 {
+        let g: u64 = (at - first) / bpg
+        let bit: u64 = (at - first) % bpg
+        var cnt: u64 = bpg - bit
+        if cnt > left {
+            cnt = left
+        }
+        let d: u64 = gd_load(state, m, g)
+        if d == 0 {
+            return false
+        }
+        let bb: u64 = gd_addr(state, m, d, GD_BLOCK_BITMAP)
+        let bm: u64 = bm_buf(state)
+        if !ext4.block_read(state, m, bb, bm) {
+            return false
+        }
+        var k: u64 = 0
+        while k < cnt {
+            bit_clear(bm, bit + k)
+            k = k + 1
+        }
+        if !block_write(state, m, bb, bm) {
+            return false
+        }
+        gd_add(state, m, d, GD_FREE_BLOCKS, cnt, true)
+        if !gd_store(state, m, g) {
+            return false
+        }
+        sb_free_blocks(state, m, cnt, true)
+        at = at + cnt
+        left = left - cnt
+    }
+    return true
+}
+
+fn inode_alloc_in_group(state: u64, m: u64, g: u64, is_dir: bool) -> u64 {
+    let ipg: u64 = ext4.sget(state, m, ext4.S_IPG)
+    let d: u64 = gd_load(state, m, g)
+    if d == 0 || gd_count(state, m, d, GD_FREE_INODES) == 0 {
+        return 0
+    }
+    let ib: u64 = gd_addr(state, m, d, GD_INODE_BITMAP)
+    let bm: u64 = bm_buf(state)
+    if !ext4.block_read(state, m, ib, bm) {
+        return 0
+    }
+    let idx: u64 = find_zero(bm, 0, ipg)
+    if idx == NONE {
+        return 0
+    }
+    bit_set(bm, idx)
+    if !block_write(state, m, ib, bm) {
+        return 0
+    }
+    gd_add(state, m, d, GD_FREE_INODES, 1, false)
+    if is_dir {
+        gd_add(state, m, d, GD_USED_DIRS, 1, true)
+    }
+    if !gd_store(state, m, g) {
+        return 0
+    }
+    sb_free_inodes(state, m, 1, false)
+    return g * ipg + idx + 1
+}
+
+fn inode_alloc(state: u64, m: u64, is_dir: bool) -> u64 {
+    let bpg: u64 = blocks_per_group(state, m)
+    if bpg == 0 {
+        return 0
+    }
+    let groups: u64 = group_count(state, m, bpg)
+    var g: u64 = 0
+    while g < groups {
+        let r: u64 = inode_alloc_in_group(state, m, g, is_dir)
+        if r != 0 {
+            return r
+        }
+        g = g + 1
+    }
+    return 0
+}
+
+fn inode_free(state: u64, m: u64, ino: u64, is_dir: bool) -> bool {
+    let ipg: u64 = ext4.sget(state, m, ext4.S_IPG)
+    if ino == 0 || ipg == 0 {
+        return false
+    }
+    let g: u64 = (ino - 1) / ipg
+    let idx: u64 = (ino - 1) % ipg
+    let d: u64 = gd_load(state, m, g)
+    if d == 0 {
+        return false
+    }
+    let ib: u64 = gd_addr(state, m, d, GD_INODE_BITMAP)
+    let bm: u64 = bm_buf(state)
+    if !ext4.block_read(state, m, ib, bm) {
+        return false
+    }
+    bit_clear(bm, idx)
+    if !block_write(state, m, ib, bm) {
+        return false
+    }
+    gd_add(state, m, d, GD_FREE_INODES, 1, true)
+    if is_dir {
+        gd_add(state, m, d, GD_USED_DIRS, 1, false)
+    }
+    if !gd_store(state, m, g) {
+        return false
+    }
+    sb_free_inodes(state, m, 1, true)
+    return true
+}

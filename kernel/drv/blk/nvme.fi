@@ -1,6 +1,7 @@
 
 import serial
 import lib.kstate
+import lib.tscwait
 import block.wlock
 import klog
 import bus.pci
@@ -41,6 +42,10 @@ const S_MSIX: u64 = 0x190
 const S_IDX: u64 = 0x198
 const S_NSN: u64 = 0x1A0
 const S_NSLIST: u64 = 0x1A8
+const S_WANT_CID: u64 = 0x1300
+const S_GOT: u64 = 0x1308
+const S_TIMEOUTS: u64 = 0x1310
+const S_RESETS: u64 = 0x1318
 const NS_TAB: u64 = 0x1200
 const MAX_NS: u64 = 8
 const N_ID: u64 = 0
@@ -88,6 +93,13 @@ const SECTOR: u64 = 512
 
 const SPIN_LIMIT: u64 = 4000000
 const TICK_LIMIT: u64 = 300
+const IO_TIMEOUT_MS: u64 = 8000
+const ADMIN_TIMEOUT_MS: u64 = 3000
+const RDY_MIN_MS: u64 = 1000
+const RDY_MAX_MS: u64 = 10000
+const RDY_UNIT_MS: u64 = 500
+const LOST_CID: u64 = 64
+const ATTEMPTS: u64 = 2
 
 fn sc(off: u64) -> u64 {
     return pci.K2_SCALARS + off
@@ -192,7 +204,8 @@ fn admin(state: u64, opcode: u64, nsid: u64, prp1: u64,
     var head: u64 = kstate.get(state, sc(S_ACQ_HEAD))
     let phase: u64 = kstate.get(state, sc(S_APHASE))
     var spin: u64 = 0
-    while spin < SPIN_LIMIT {
+    let limit: u64 = tscwait.deadline_ms(state, ADMIN_TIMEOUT_MS)
+    while !tscwait.passed(limit, spin, SPIN_LIMIT) {
         let d3: u64 = cqe(cq, head, 3)
         if ((d3 >> 16) & 1) == phase {
             let status: u64 = (d3 >> 17) & 0x7FF
@@ -276,7 +289,7 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
     }
 
     regio.write32_at(b, R_CC, 0)
-    if !await_rdy(b, 0) {
+    if !await_rdy(state, b, 0) {
         return false
     }
 
@@ -288,6 +301,8 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
     kstate.set(state, sc(S_PHASE), 1)
     kstate.set(state, sc(S_IRQS), 0)
     kstate.set(state, sc(S_DONE), 0)
+    kstate.set(state, sc(S_GOT), 0)
+    kstate.set(state, sc(S_WANT_CID), 0xFFFFFFFF)
     kstate.set(state, sc(S_WAITS), 0)
     kstate.set(state, sc(S_CID), 0)
     regio.zero64(state + ASQ_OFF, PAGE)
@@ -299,7 +314,7 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
     regio.write64_at(b, R_ASQ, state + ASQ_OFF)
     regio.write64_at(b, R_ACQ, state + ACQ_OFF)
     regio.write32_at(b, R_CC, CC_ENABLE | (6 << 16) | (4 << 20))
-    if !await_rdy(b, 1) {
+    if !await_rdy(state, b, 1) {
         return false
     }
 
@@ -323,11 +338,23 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
     return true
 }
 
-fn await_rdy(b: u64, want: u64) -> bool {
+fn rdy_budget_ms(b: u64) -> u64 {
+    var ms: u64 = ((regio.read64_at(b, R_CAP) >> 24) & 0xFF) * RDY_UNIT_MS
+    if ms < RDY_MIN_MS {
+        ms = RDY_MIN_MS
+    }
+    if ms > RDY_MAX_MS {
+        ms = RDY_MAX_MS
+    }
+    return ms
+}
+
+fn await_rdy(state: u64, b: u64, want: u64) -> bool {
     var spin: u64 = 0
-    while spin < SPIN_LIMIT {
+    let limit: u64 = tscwait.deadline_ms(state, rdy_budget_ms(b))
+    while !tscwait.passed(limit, spin, SPIN_LIMIT) {
         let csts: u64 = regio.read32_at(b, R_CSTS)
-        if (csts & CSTS_CFS) != 0 {
+        if want != 0 && (csts & CSTS_CFS) != 0 {
             return false
         }
         if (csts & CSTS_RDY) == want {
@@ -578,7 +605,10 @@ fn drain(state: u64) -> u64 {
         if ((d3 >> 16) & 1) != phase {
             break
         }
-        kstate.set(state, sc(S_STATUS), (d3 >> 17) & 0x7FF)
+        if (d3 & 0xFFFF) == kstate.get(state, sc(S_WANT_CID)) {
+            kstate.set(state, sc(S_STATUS), (d3 >> 17) & 0x7FF)
+            kstate.set(state, sc(S_GOT), 1)
+        }
         head = head + 1
         if head >= QDEPTH {
             head = 0
@@ -608,13 +638,30 @@ fn run_io_ns(state: u64, opcode: u64, nsid: u64, lba: u64, count: u64,
     if opcode == IO_WRITE && !wlock.allowed(wlock.D_NVME) {
         return false
     }
-    if !ready(state) {
-        return false
+    var attempt: u64 = 0
+    while attempt < ATTEMPTS {
+        if !ready(state) {
+            return false
+        }
+        let resets: u64 = kstate.get(state, sc(S_RESETS))
+        if submit(state, opcode, nsid, lba, count, addr, len) {
+            return true
+        }
+        if kstate.get(state, sc(S_RESETS)) == resets {
+            return false
+        }
+        attempt = attempt + 1
     }
+    return false
+}
+
+fn submit(state: u64, opcode: u64, nsid: u64, lba: u64, count: u64,
+    addr: u64, len: u64) -> bool {
     let sq: u64 = state + IOSQ_OFF
     var tail: u64 = kstate.get(state, sc(S_SQ_TAIL))
-    let want: u64 = kstate.get(state, sc(S_DONE)) + 1
     let cid: u64 = next_cid(state)
+    kstate.set(state, sc(S_WANT_CID), cid)
+    kstate.set(state, sc(S_GOT), 0)
     command(sq, tail, opcode, cid, nsid, addr, prp2_of(addr, len),
         lba & 0xFFFFFFFF, lba >> 32, (count - 1) & 0xFFFF)
     tail = tail + 1
@@ -622,26 +669,80 @@ fn run_io_ns(state: u64, opcode: u64, nsid: u64, lba: u64, count: u64,
         tail = 0
     }
     kstate.set(state, sc(S_SQ_TAIL), tail)
-    doorbell(state, 1, 0, tail)
-    return await(state, want)
+    if !lose_doorbell(state, cid) {
+        doorbell(state, 1, 0, tail)
+    }
+    return await(state)
 }
 
-fn await(state: u64, want: u64) -> bool {
+fn lose_doorbell(state: u64, cid: u64) -> bool {
+    return kstate.mode_on(state, kstate.M_NVMELOST) && cid == LOST_CID
+        && kstate.get(state, sc(S_RESETS)) == 0
+}
+
+static mut s_timeout: [u8; 22] = "nvme: command timeout\0"
+static mut s_reset: [u8; 23] = "nvme: controller reset\0"
+static mut s_reset_dead: [u8; 36] = "nvme: reset failed, controller off\0\0"
+static mut s_reinit_dead: [u8; 36] = "nvme: reinit failed, controller off\0"
+
+fn say(msg: u64) {
+    serial.puts(msg)
+    serial.nl()
+}
+
+fn timed_out(state: u64) -> bool {
+    kstate.add(state, sc(S_TIMEOUTS), 1)
+    say((&s_timeout[0]) as u64)
+    reset_controller(state)
+    return false
+}
+
+fn reset_controller(state: u64) {
+    kstate.set(state, sc(S_READY), 0)
+    kstate.set(state, sc(S_WANT_CID), 0xFFFFFFFF)
+    kstate.set(state, sc(S_GOT), 0)
+    let b: u64 = kstate.get(state, sc(S_BASE))
+    if b == 0 {
+        return
+    }
+    pci.disable_master(bdf(state))
+    regio.write32_at(b, R_CC, 0)
+    if !await_rdy(state, b, 0) {
+        say((&s_reset_dead[0]) as u64)
+        return
+    }
+    kstate.add(state, sc(S_RESETS), 1)
+    if !init(state, kstate.get(state, sc(S_MSIX)) != 0, true) {
+        say((&s_reinit_dead[0]) as u64)
+        return
+    }
+    say((&s_reset[0]) as u64)
+}
+
+fn waiting_over(state: u64, limit: u64, start: u64) -> bool {
+    if limit != 0 {
+        return tscwait.passed(limit, 0, 0)
+    }
+    return kstate.get(state, kstate.TICKS) - start > TICK_LIMIT
+}
+
+fn await(state: u64) -> bool {
+    let limit: u64 = tscwait.deadline_ms(state, IO_TIMEOUT_MS)
     if poll_mode(state) || !arch.irq_are_on() {
         var spin: u64 = 0
-        while spin < SPIN_LIMIT {
+        while !tscwait.passed(limit, spin, SPIN_LIMIT) {
             drain(state)
-            if kstate.get(state, sc(S_DONE)) >= want {
+            if kstate.get(state, sc(S_GOT)) != 0 {
                 return kstate.get(state, sc(S_STATUS)) == 0
             }
             spin = spin + 1
         }
-        return false
+        return timed_out(state)
     }
     let start: u64 = kstate.get(state, kstate.TICKS)
-    while kstate.get(state, sc(S_DONE)) < want {
-        if kstate.get(state, kstate.TICKS) - start > TICK_LIMIT {
-            return false
+    while kstate.get(state, sc(S_GOT)) == 0 {
+        if waiting_over(state, limit, start) {
+            return timed_out(state)
         }
         kstate.add(state, sc(S_WAITS), 1)
         arch.idle()

@@ -10,7 +10,7 @@ if [ -n "${1:-}" ]; then
     OUT=$1
 else
     OUT=$(mktemp -d)
-    trap 'rm -rf "$OUT" /tmp/osum-clip2-gegen' EXIT
+    trap 'rm -rf "$OUT"' EXIT
 fi
 mkdir -p "$OUT"
 SHOTS=${CLIP2_SHOTS:-$ROOT/.clip2-shots}
@@ -33,11 +33,11 @@ fi
 # =================================================== 1. der Quelltext
 #
 echo "== 1. Quelltext =="
-grep -qE '^const K_DROP: u64 = [0-9]+' <(bash tools/structure/catprog.sh kernel/user/wlib.fi) \
+grep -qE '^const K_DROP: u64 = [0-9]+' kernel/user/fuiapp/hostui/hostaxtree.fi \
     && ok "wlib kennt K_DROP" || bad "wlib kennt kein K_DROP"
-grep -qE 'fire\(d, K_DROP, line, w\)' <(bash tools/structure/catprog.sh kernel/user/wlib.fi) \
+grep -qE 'fire\(d, K_DROP, line, w\)' kernel/user/fuiapp/hostui/hostaxtree.fi \
     && ok "on_up feuert K_DROP" || bad "on_up feuert kein K_DROP"
-grep -qE 'fn drop_an\(' <(bash tools/structure/catprog.sh kernel/user/wlib.fi) \
+grep -qE 'fn drop_an\(' kernel/user/fuiapp/hostui/hostwidget.fi \
     && ok "wlib has drop_an (a window registers as a target)" \
     || bad "wlib has no drop_an"
 grep -qE 'fuiscene\.drop_accept\(true\)' <(bash tools/structure/srcview.sh kernel/user/explorer.fi) \
@@ -54,15 +54,15 @@ if grep -qE 'io\.(create|write_all|unlink)\(' <(bash tools/structure/srcview.sh 
 else
     ok "explorer.fi does not touch any file itself"
 fi
-if grep -qE 'wlibc\.drag_take' <(bash tools/structure/srcview.sh kernel/user/explorer.fi); then
-    bad "the file manager calls wlibc.drag_take past the library"
+if grep -qE 'hostevent\.drag_take' <(bash tools/structure/srcview.sh kernel/user/explorer.fi); then
+    bad "the file manager calls hostevent.drag_take past the library"
 else
-    ok "negative test: no wlibc.drag_take in the file manager"
+    ok "negative test: no hostevent.drag_take in the file manager"
 fi
 
 # ======================================================== 2. der Bau
 echo "== 2. bauen =="
-export DESIGNBUILD=${DESIGNBUILD:-/tmp/osum-clip2-build}
+export DESIGNBUILD=${DESIGNBUILD:-$OUT/designbuild}
 bash tools/design/capture.sh "$OUT/bau" nurbau=ja res="$RES" \
     > "$OUT/bau.log" 2>&1 \
     || { echo "FEHLGESCHLAGEN: der Bau"; tail -20 "$OUT/bau.log"; exit 1; }
@@ -110,7 +110,7 @@ dn=$(groesste "$S" 'explorer: drops [0-9]+')
 echo "== 5. points 2 and 5: the deed and the idle time =="
 hat "$S" 'expl: drop /data/alpha\.txt q=/data/bilder' \
     "Punkt 2: alpha.txt wurde auf /data/bilder abgelegt"
-hat "$S" 'expl: drop /data/notizen q=/data gleich' \
+hat "$S" 'expl: drop /data/notizen q=/data same' \
     "Punkt 5: das Ablegen im selben Ordner wurde als 'gleich' erkannt"
 hatnicht "$S" 'explorer: dlgrect' \
     "Punkt 5: kein Dialog beim Ablegen im selben Ordner"
@@ -181,7 +181,7 @@ else
         "$GBAUM"/kernel/user/explorer/*.fi
     if grep -qE '^\s*fuiscene\.drop_accept\(false\)' "$GBAUM"/kernel/user/explorer/*.fi; then
         ok "negative test: the registration is set to false"
-        export DESIGNBUILD=/tmp/osum-clip2-gegen
+        export DESIGNBUILD="$GEG/designbuild"
         bash "$GBAUM/tools/design/capture.sh" "$GEG/bau" nurbau=ja res="$RES" \
             > "$GEG/bau.log" 2>&1
         if [ $? -ne 0 ]; then

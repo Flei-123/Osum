@@ -20,9 +20,9 @@ MEASURE = [
     "aa_pixels",
 ]
 PRUEFSTAND = {"icont.fi", "themetest.fi", "wlibt.fi"}
-KERN = {"wlib.fi", "wlibc.fi"}
+KERN = {"uitextat.fi", "uitheme.fi"}
 
-RE_CALL = re.compile(r"\bwlibc\.([a-z_0-9]+)\s*\(")
+RE_CALL = re.compile(r"\buitextat\.([a-z_0-9]+)\s*\(")
 RE_COMMENT = re.compile(r"^\s*//")
 
 
@@ -47,7 +47,7 @@ def scan(path_2):
 
 
 RE_MAL_CALL = re.compile(
-    r"\bwlibc?\.(" + "|".join(
+    r"\b(?:uitextat|hostdraw)\.(" + "|".join(
         ["px", "rect", "hline", "vline", "frame", "frame3", "rrect",
          "rframe", "rring", "drop_shadow", "shadow_edge", "divider",
          "text_at", "icon_at", "icon_draw", "get",
@@ -104,7 +104,7 @@ def main():
             ergebnis["farben"] += len(f)
         wide.append((name, len(mal), len(f), ist_check))
 
-    print("== direkte Zeichenaufrufe ausserhalb wlib/wlibc ==")
+    print("== direkte Zeichenaufrufe ausserhalb uitextat/hostdraw ==")
     print("%-18s %6s %7s  %s" % ("Programm", "malt", "farben", "Art"))
     for name, m, f, p in wide:
         print("%-18s %6d %7d  %s" % (name, m, f, "PRUEFSTAND" if p else ""))

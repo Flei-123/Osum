@@ -2,6 +2,7 @@
 import hashlib
 import os
 import re
+import shutil
 import sys
 
 IMPORT = re.compile(r'^(\s*)import ([A-Za-z0-9_.]+)(\s*)$')
@@ -50,9 +51,9 @@ class Layout:
         for name in os.listdir(self.bau):
             path = os.path.join(self.bau, name)
             if name.endswith('.fi') and os.path.isfile(path) and not os.path.islink(path):
-                if any(os.path.exists(os.path.join(self.root, d, name)) for d in ('kernel/user', 'lib')):
+                if any(os.path.exists(os.path.join(self.root, d, name)) for d in ('kernel/user', 'kernel/user/fuiapp', 'lib')):
                     owned.add(name)
-        for sub in ('libc', 'wlib', 'wlibc'):
+        for sub in ('libc', 'hostui', 'uitheme'):
             base = os.path.join(self.bau, sub)
             if os.path.isdir(base) and not os.path.islink(base):
                 for name in os.listdir(base):
@@ -194,6 +195,17 @@ def write_clean(path, text):
         f.write(text)
 
 
+INCLUDE_ASSET = re.compile(r'__include_str\("([^"]+)"\)')
+
+
+def copy_assets(source_path, target_path, text):
+    for name in INCLUDE_ASSET.findall(text):
+        source = os.path.join(os.path.dirname(os.path.realpath(source_path)), name)
+        target = os.path.join(os.path.dirname(target_path), name)
+        if os.path.isfile(source) and not os.path.exists(target):
+            shutil.copyfile(source, target)
+
+
 def main(argv):
     root, bau, shared = (os.path.abspath(a) for a in argv[1:4])
     layout = Layout(root, bau, shared)
@@ -211,10 +223,14 @@ def main(argv):
             continue
         if path in renamed:
             stem = os.path.basename(path)[:-3]
-            write_clean(os.path.join(bau, SPLIT_DIR, PREFIX + stem + '.fi'), texts[path])
+            target = os.path.join(bau, SPLIT_DIR, PREFIX + stem + '.fi')
+            write_clean(target, texts[path])
+            copy_assets(path, target, texts[path])
             written += 1
         elif not os.path.isfile(os.path.join(bau, rel)) or read_text(os.path.join(bau, rel)) != texts[path]:
-            write_clean(os.path.join(bau, rel), texts[path])
+            target = os.path.join(bau, rel)
+            write_clean(target, texts[path])
+            copy_assets(path, target, texts[path])
             written += 1
     print('splitstems: %d files in the Osum closure, %d renamed, %d written' % (len(a_rel), len(renamed), written))
     return 0

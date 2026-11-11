@@ -150,8 +150,10 @@ weg wg-aus
 
 if [[ $OHNE_EXT4 == 1 ]]; then
     ersetze ext4-aus ext4 || exit 1
+    ersetze ext4w-aus ext4w || exit 1
 fi
 weg ext4-aus
+weg ext4w-aus
 if [[ $OHNE_NTFS == 1 ]]; then
     ersetze ntfs-aus ntfs || exit 1
 fi
@@ -175,10 +177,16 @@ if [[ $GUI == off ]]; then
     ersetze gfx-aus gfx || exit 1
     ersetze fb-aus fb || exit 1
     ersetze slotattach-aus slotattach || exit 1
+    ersetze sysguiwire-aus sysguiwire || exit 1
+    ersetze kguiwire-aus kguiwire || exit 1
+    ersetze inputwire-aus inputwire || exit 1
 fi
 weg gfx-aus
 weg fb-aus
 weg slotattach-aus
+weg sysguiwire-aus
+weg kguiwire-aus
+weg inputwire-aus
 
 if [[ $OHNE_PS2M == 1 ]]; then
     if [[ $GUI == off ]]; then
@@ -236,7 +244,7 @@ binde() { # $1 = osym-Objekt, $2 = Ausgabe
         --defsym=KERNEL_TRAP="${P}trap__entry" \
         --defsym=KERNEL_SYSCALL="${P}sys__entry" \
         --defsym=KERNEL_TASK_MAIN="${P}tasks__main" \
-        --defsym=KERNEL_USER_START="${P}proc__user_start" \
+        --defsym=KERNEL_USER_START="${P}proccopy__user_start" \
         --defsym=KERNEL_AP_MAIN="${P}smp__ap_main" \
         --defsym=USER_MAIN="${P}u_enter" \
         -o "$2" "$TMP/boot.o" "$TMP/isr.o" "$TMP/switch.o" \

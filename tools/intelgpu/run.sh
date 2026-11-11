@@ -12,7 +12,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 
-for m in ids regs bits mode timing edid aux snap dump flip ggtt dbuf backbuf confirm modeset flushpol flushstat; do
+for m in ids regs bits mode timing edid aux snap dump flip ggtt dbuf backbuf confirm modeset flushpol flushstat engregs fwake micmd ring lrc elsp ereset engine submit; do
     printf 'import gpu.intel.%s\nfn main() -> i32 {\n    return 0\n}\n' "$m" > "$T/k_$m.fi"
     "$FIRNC" --profile=kernel -c "$T/k_$m.fi" -o "$T/k_$m.o" 2> "$T/k.err" \
         && ok "gpu.intel.$m compiles with --profile=kernel" \
@@ -62,6 +62,21 @@ if [ -x "$T/flush" ]; then
     [ "$nbad" = 0 ] && ok "flush oracle: no FAIL line" || bad "flush oracle: $nbad FAIL lines"
     [ "$nok" -ge 45 ] && ok "flush oracle: $nok promises OK (>= 45)" || bad "flush oracle: only $nok OK (< 45)"
     sed -n 's/^INFO /  INFO  /p' "$T/out3.txt"
+    pass=$((pass+nok))
+fi
+
+"$FIRNC" tools/intelgpu/engine.fi -o "$T/engine" 2> "$T/e.err" \
+    && ok "engine oracle builds" || { bad "engine oracle does not build"; head -10 "$T/e.err"; }
+
+if [ -x "$T/engine" ]; then
+    "$T/engine" > "$T/out4.txt" 2>&1
+    rc=$?
+    nok=$(grep -c '^OK' "$T/out4.txt")
+    nbad=$(grep -c '^FAIL' "$T/out4.txt")
+    sed -n 's/^FAIL /  FAIL  engine: /p' "$T/out4.txt"
+    [ "$rc" = 0 ] && ok "engine oracle exits 0" || bad "engine oracle exit code $rc"
+    [ "$nbad" = 0 ] && ok "engine oracle: no FAIL line" || bad "engine oracle: $nbad FAIL lines"
+    [ "$nok" -ge 105 ] && ok "engine oracle: $nok promises OK (>= 105)" || bad "engine oracle: only $nok OK (< 105)"
     pass=$((pass+nok))
 fi
 
@@ -217,6 +232,34 @@ mutate fs_sum        flushstat 's/(\*s).sum = (\*s).sum + cycles/(*s).sum = cycl
 mutate fs_last       flushstat 's/(\*s).last = cycles//'
 mutate fs_lines      flushstat 's/(\*s).lines = (\*s).lines + lines//'
 mutate fs_count      flushstat 's/(\*s).count = (\*s).count + 1//'
+ORACLE=tools/intelgpu/engine.fi
+mutate en_lri_posted  micmd   's/h = h | MI_LRI_POSTED/h = h/'
+mutate en_store_ggtt  micmd   's/return mi(OP_STORE_DWORD_IMM, STORE_LEN_FIELD) | MI_USE_GGTT/return mi(OP_STORE_DWORD_IMM, STORE_LEN_FIELD)/'
+mutate en_masked      engregs 's/return ((bits \& LOW16) << MASK_SHIFT) | (bits \& LOW16)/return bits \& LOW16/'
+mutate en_ringctl     ring    's/((bytes - PAGE) \& RING_NR_PAGES) | RING_VALID/(bytes \& RING_NR_PAGES) | RING_VALID/'
+mutate en_gap         ring    's/RING_GAP: u64 = 8/RING_GAP: u64 = 0/'
+mutate en_pad         ring    's/emit(r, micmd.MI_NOOP)/(*r).tail = (*r).tail/'
+mutate en_desc_valid  lrc     's/| DESC_LEGACY_32B | DESC_PRIVILEGE | DESC_VALID/| DESC_LEGACY_32B | DESC_PRIVILEGE/'
+mutate en_ctxctl      lrc     's/CTRL_INHIBIT_SYN_SWITCH | CTRL_RESTORE_INHIBIT)/CTRL_INHIBIT_SYN_SWITCH)/'
+mutate en_lrc_base    lrc     's/put(state, i, base + octets.ld64(regs, n \* 8))/put(state, i, octets.ld64(regs, n * 8))/'
+mutate en_elsp_order  elsp    's/wr(port, desc >> 32)/wr(port, desc \& LOW32)/'
+mutate en_csb_ack     elsp    's/^    ack(wr, base, (\*c).read)$//'
+mutate en_csb_reset   elsp    's/if p >= engregs.CSB_ENTRIES {/if false {/'
+mutate en_ack_bit     fwake   's/FORCEWAKE_KERNEL) == want/FORCEWAKE_KERNEL) != 2/'
+mutate en_noack_keep  fwake   '0,/wr(req, engregs.masked_off(engregs.FORCEWAKE_KERNEL))/{s/wr(req, engregs.masked_off(engregs.FORCEWAKE_KERNEL))/us(0)/}'
+mutate en_reset_skip  ereset  's/wr(engregs.GDRST, domain)/wr(engregs.GDRST, 0)/'
+mutate en_reset_keep  ereset  's/wr(ctl, engregs.masked_off(engregs.RESET_REQUEST))//'
+mutate en_stuck_ok    ereset  's/return R_STUCK/return R_OK/'
+mutate en_mode_check  engine  's/\& engregs.RUN_LIST_ENABLE) == 0 {/\& 0) != 0 {/'
+mutate en_seqno_off   engine  's/SEQNO_OFFSET: u64 = 0x400/SEQNO_OFFSET: u64 = 0x404/'
+mutate en_align       engine  's/return ((\*l).ring_ggtt \& PAGE_MASK) == 0 \&\& /return /'
+mutate en_skip_head   submit  's/lrc.set_head(engine.state_page(e), (\*e).ring.tail)//'
+mutate en_reenable    submit  's/if !engine.enable_execlists(rd, wr, e) {/if false {/'
+mutate en_dead_guard  submit  's/if (\*e).status != engine.E_READY {/if false {/'
+mutate en_fw_put      submit  's/^    fwake.put(rd, wr, us, engregs.FORCEWAKE_GT, engregs.FORCEWAKE_ACK_GT)$//'
+mutate en_wait_long   submit  's/WAIT_POLLS: u64 = 100/WAIT_POLLS: u64 = 1000000/'
+mutate en_fits        submit  's/if !ring.fits(/if false \&\& !ring.fits(/'
+mutate en_size_cap    submit  's/if n > MAX_USER_DWORDS {/if false {/'
 ORACLE=tools/intelgpu/oracle.fi
 
 echo "INTELGPU: $pass passed, $fail failed"

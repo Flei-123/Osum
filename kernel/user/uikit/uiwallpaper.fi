@@ -1,0 +1,177 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import uikit.uidraw
+import libc.regio
+
+export { set_screen, set_colors, set_image, clear_image, image_ptr, image_w, image_h, top, bottom, color_at, paint }
+
+static mut wp_image: u64 = 0
+static mut wp_w: u64 = 0
+static mut wp_h: u64 = 0
+static mut wp_sw: u64 = 0
+static mut wp_sh: u64 = 0
+static mut wp_top: u64 = 0
+static mut wp_bottom: u64 = 0
+
+const SMOOTH_MIN_W: u64 = 200
+static mut cv_step: u64 = 0
+static mut cv_ox: u64 = 0
+static mut cv_oy: u64 = 0
+
+fn cover_prepare() {
+    let sx: u64 = (wp_w << 16) / wp_sw
+    let sy: u64 = (wp_h << 16) / wp_sh
+    var step: u64 = sx
+    if sy < step {
+        step = sy
+    }
+    cv_step = step
+    cv_ox = ((wp_w << 16) - wp_sw * step) / 2
+    cv_oy = ((wp_h << 16) - wp_sh * step) / 2
+}
+
+fn color_at(x: u64, y: u64) -> u64 {
+    if wp_image != 0 && wp_w != 0 && wp_h != 0 && wp_w < SMOOTH_MIN_W {
+        var qx: u64 = 0
+        var qy: u64 = 0
+        if wp_sw > 1 {
+            qx = x * wp_w / wp_sw
+        }
+        if wp_sh > 1 {
+            qy = y * wp_h / wp_sh
+        }
+        if qx >= wp_w {
+            qx = wp_w - 1
+        }
+        if qy >= wp_h {
+            qy = wp_h - 1
+        }
+        let at0: u64 = wp_image + (qy * wp_w + qx) * 4
+        return (regio.read8_at(at0, 2) << 16) | (regio.read8_at(at0, 1) << 8) | regio.read8_at(at0, 0)
+    }
+    if wp_image != 0 && wp_w != 0 && wp_h != 0 && wp_sw > 1 && wp_sh > 1 {
+        if cv_step == 0 {
+            cover_prepare()
+        }
+        var px: u64 = cv_ox + x * cv_step + (cv_step >> 1)
+        var py: u64 = cv_oy + y * cv_step + (cv_step >> 1)
+        if px >= 32768 {
+            px = px - 32768
+        } else {
+            px = 0
+        }
+        if py >= 32768 {
+            py = py - 32768
+        } else {
+            py = 0
+        }
+        var ix: u64 = px >> 16
+        var iy: u64 = py >> 16
+        var ax: u64 = (px >> 8) & 255
+        var ay: u64 = (py >> 8) & 255
+        if ix >= wp_w - 1 {
+            ix = wp_w - 1
+            ax = 0
+        }
+        if iy >= wp_h - 1 {
+            iy = wp_h - 1
+            ay = 0
+        }
+        var jx: u64 = ix
+        var jy: u64 = iy
+        if ax != 0 {
+            jx = ix + 1
+        }
+        if ay != 0 {
+            jy = iy + 1
+        }
+        let p00: u64 = wp_image + (iy * wp_w + ix) * 4
+        let p10: u64 = wp_image + (iy * wp_w + jx) * 4
+        let p01: u64 = wp_image + (jy * wp_w + ix) * 4
+        let p11: u64 = wp_image + (jy * wp_w + jx) * 4
+        var out: u64 = 0
+        var c: u64 = 2
+        var shf: u64 = 16
+        var n: u64 = 0
+        while n < 3 {
+            let top: u64 = regio.read8_at(p00, c) * (256 - ax) + regio.read8_at(p10, c) * ax
+            let bot: u64 = regio.read8_at(p01, c) * (256 - ax) + regio.read8_at(p11, c) * ax
+            let v: u64 = (top * (256 - ay) + bot * ay + 32768) >> 16
+            out = out | (v << shf)
+            if c > 0 {
+                c = c - 1
+            }
+            if shf >= 8 {
+                shf = shf - 8
+            }
+            n = n + 1
+        }
+        return out
+    }
+    if wp_sh < 2 {
+        return wp_top
+    }
+    let t: u64 = y * 255 / (wp_sh - 1)
+    let r: u64 = (((wp_top >> 16) & 255) * (255 - t)
+        + ((wp_bottom >> 16) & 255) * t) / 255
+    let g: u64 = (((wp_top >> 8) & 255) * (255 - t)
+        + ((wp_bottom >> 8) & 255) * t) / 255
+    let b: u64 = ((wp_top & 255) * (255 - t) + (wp_bottom & 255) * t) / 255
+    return (r << 16) | (g << 8) | b
+}
+
+fn set_screen(w: u64, h: u64) {
+    wp_sw = w
+    wp_sh = h
+    cv_step = 0
+}
+
+fn set_colors(top_color: u64, bottom_color: u64) {
+    wp_top = top_color
+    wp_bottom = bottom_color
+}
+
+fn set_image(p: u64, w: u64, h: u64) {
+    wp_image = p
+    wp_w = w
+    wp_h = h
+    cv_step = 0
+}
+
+fn clear_image() {
+    wp_image = 0
+    cv_step = 0
+}
+
+fn image_ptr() -> u64 {
+    return wp_image
+}
+
+fn image_w() -> u64 {
+    return wp_w
+}
+
+fn image_h() -> u64 {
+    return wp_h
+}
+
+fn top() -> u64 {
+    return wp_top
+}
+
+fn bottom() -> u64 {
+    return wp_bottom
+}
+
+fn paint(x0: u64, y0: u64, x1: u64, y1: u64) {
+    var y: u64 = y0
+    while y < y1 {
+        var x: u64 = x0
+        while x < x1 {
+            uidraw.px(x, y, color_at(x, y))
+            x = x + 1
+        }
+        y = y + 1
+    }
+}

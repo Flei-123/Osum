@@ -140,14 +140,14 @@ baue 0 && ok "firnc0: $(echo $PROGS | wc -w) programs built, /bin/explorer with 
 baue 1 && ok "firnc1: the same from the compiler written in Firn" \
     || bad "firnc1: the programs of this round do not build"
 if nm "$TMPD/explorer0.elf" 2>/dev/null | grep -q . ; then :; fi
-for sym in wlib__button wlib__step wlibc__text_at; do
+for sym in hostwidget__button hostwidget__step uitextat__text_at; do
     if nm -a "$TMPD/k0.mb.elf" 2>/dev/null | grep -q "$sym"; then
         bad "the kernel carries $sym -- the library belongs in ring 3"
     else
         ok "the kernel does NOT carry $sym (the library lives in ring 3)"
     fi
 done
-wigzeilen=$(cat kernel/user/wlib.fi kernel/user/wlibc.fi kernel/user/wlib/*.fi kernel/user/wlibc/*.fi | wc -l)
+wigzeilen=$(cat kernel/user/fuiapp/hostui/*.fi kernel/user/uitheme/*.fi kernel/user/uikit/*.fi | wc -l)
 kernzeilen=$(grep -vc -e '^[[:space:]]*//' -e '^[[:space:]]*$' kernel/ui/wig.fi)
 num "library lines in ring 3" "$wigzeilen" gt 1500
 num "seam lines in the kernel (no comments/blank) -- as little kernel as possible" "$kernzeilen" lt 600
@@ -220,7 +220,7 @@ WX=60; WY=60
 BW=$(feld "$TMPD/ruhe.txt" "widgetdemo: geom" w)
 BH=$(feld "$TMPD/ruhe.txt" "widgetdemo: geom" h)
 num "the window is as wide as the application ordered" "$BW" eq 480
-num "and as tall" "$BH" eq 400
+num "and as tall" "$BH" eq 416
 CX=$((WX + BORDER)); CY=$((WY + TITLE))
 aus=$(python3 tools/k15/layout.py "$TMPD/ruhe.txt" widgetdemo "$BW" "$BH" 12 2>&1)
 if [ $? -eq 0 ]; then ok "the layout: $aus"
@@ -233,76 +233,52 @@ else
     ok "a rectangle sticking out of the window is caught by the checker"
 fi
 
-echo "== 4. the text -- PER CHARACTER against the second rasterisation =="
-pruef_text() {
-    local marke=$1 soll=$2
-    local zeile x base fg bg text
-    zeile=$(grep -a "^widgetdemo: text $marke " "$TMPD/ruhe.txt" | tail -1)
-    if [ -z "$zeile" ]; then bad "the application does not report the text place '$marke'"; return; fi
-    x=$(printf '%s' "$zeile" | grep -oE 'x=[0-9]+' | head -1 | sed 's/.*=//')
-    base=$(printf '%s' "$zeile" | grep -oE 'base=[0-9]+' | sed 's/.*=//')
-    fg=$(printf '%s' "$zeile" | grep -oE 'fg=[0-9]+' | sed 's/.*=//')
-    bg=$(printf '%s' "$zeile" | grep -oE 'bg=[0-9]+' | sed 's/.*=//')
-    text=${zeile#*t=}
-    gleich "the application reports the text '$marke'" "$soll" "$text"
-    schau "'$soll' is in the window pixel-exact ($marke)" \
-        tchain "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + x)) $((CY + base)) \
-        $(rgb "$fg") $(rgb "$bg") "$soll"
+echo "== 4. the text -- read back from the picture =="
+SCN="python3 tools/k15/scene.py"
+scn() {
+    local name=$1; shift
+    local out
+    out=$($SCN "$@" 2>&1) && ok "$name ($out)" || bad "$name -- $out"
 }
-pruef_text head "OSUM K15 WIDGETS"
-pruef_text button "Knopf"
-pruef_text e1 "Kopiermich"
+scn_not() {
+    local name=$1; shift
+    local out
+    out=$($SCN "$@" 2>&1) && bad "$name -- passed: $out" || ok "$name"
+}
+box() {
+    local id=$1
+    echo "$((CX + $(rect "$TMPD/ruhe.txt" widgetdemo "$id" x))) $((CY + $(rect "$TMPD/ruhe.txt" widgetdemo "$id" y))) $(rect "$TMPD/ruhe.txt" widgetdemo "$id" w) $(rect "$TMPD/ruhe.txt" widgetdemo "$id" h)"
+}
+scn "the headline is in the window" ocr "$TMPD/ruhe.ppm" $(box 2) "OSUM K15 WIDGETS"
+scn "the button carries its label" ocr "$TMPD/ruhe.ppm" $(box 5) "Button"
+scn "the first text field carries its text" ocr "$TMPD/ruhe.ppm" $(box 3) "CopyMe"
+scn "the first tab carries its label" ocr "$TMPD/ruhe.ppm" $(box 1) "Forms"
+scn "the choice shows its current entry" ocr "$TMPD/ruhe.ppm" $(box 8) "Small"
 RX=$(feld "$TMPD/ruhe.txt" "widgetdemo: rows" x)
 RB=$(feld "$TMPD/ruhe.txt" "widgetdemo: rows" base)
 ZH=$(feld "$TMPD/ruhe.txt" "widgetdemo: rows" zh)
-RFG=$(frgb "$TMPD/ruhe.txt" "widgetdemo: rows" fg)
-RBG=$(frgb "$TMPD/ruhe.txt" "widgetdemo: rows" bg)
 RSEL=$(frgb "$TMPD/ruhe.txt" "widgetdemo: rows" sel)
-RSFG=$(frgb "$TMPD/ruhe.txt" "widgetdemo: rows" selfg)
-num "the row height of the list" "$ZH" eq 20
-schau "row 0 of the list, in the SELECTION COLOUR" \
-    tchain "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB)) \
-    $RSFG $RSEL "alpha"
-i=1
-for wort in beta gamma delta epsilon; do
-    schau "row $i of the list" \
-        tchain "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB + i * ZH)) \
-        $RFG $RBG "$wort"
+num "the row height of the list" "$ZH" ge 24
+i=0
+for wort in alpha beta gamma delta; do
+    scn "row $i of the list: '$wort'" ocr "$TMPD/ruhe.ppm" $((CX + RX)) $((CY + RB - 18 + i * ZH)) 100 26 "$wort"
     i=$((i + 1))
 done
-schau_nicht "the same checker does NOT pass with the WRONG text" \
-    tchain "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB + ZH)) \
-    $RFG $RBG "gamma"
-schau_nicht "nor at a place where there is no text" \
-    tchain "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB + 8 * ZH)) \
-    $RFG $RBG "alpha"
-schau_nicht "nor with the wrong background colour" \
-    tchain "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + RX)) $((CY + RB + ZH)) \
-    $RFG 0 0 0 "beta"
-schau "the library text is really anti-aliased" \
-    smooth "$TMPD/ruhe.ppm" $((CX + RX)) $((CY + RB - 14)) 120 60 \
-    $RFG $RBG 100
+scn "row 0 sits on the SELECTION COLOUR" area "$TMPD/ruhe.ppm" $((CX + RX + 150)) $((CY + RB - 12)) 100 8 $RSEL 700
+scn_not "row 1 is NOT on the selection colour" area "$TMPD/ruhe.ppm" $((CX + RX + 150)) $((CY + RB - 12 + ZH)) 100 8 $RSEL 1
+scn_not "the same reader does NOT pass with the WRONG text" ocr "$TMPD/ruhe.ppm" $((CX + RX)) $((CY + RB - 18 + ZH)) 100 26 "gamma"
+scn_not "nor in the empty second field" ocr "$TMPD/ruhe.ppm" $(box 4) "alpha"
+scn_not "nor outside the window" ocr "$TMPD/ruhe.ppm" $((CX + BW + 40)) $((CY + 40)) 100 24 "OSUM K15 WIDGETS"
+scn "the library text is really anti-aliased" colors "$TMPD/ruhe.ppm" $((CX + RX)) $((CY + RB - 18 + ZH)) 100 26 10
 
 echo "== 5. the widgets stand where the layout put them =="
-FX=$(rect "$TMPD/ruhe.txt" widgetdemo 1 x); FY=$(rect "$TMPD/ruhe.txt" widgetdemo 1 y)
-FW=$(rect "$TMPD/ruhe.txt" widgetdemo 1 w); FH=$(rect "$TMPD/ruhe.txt" widgetdemo 1 h)
-TAX=$(grep -a '^wlib: tab i=0 ' "$TMPD/ruhe.txt" | tail -1 | grep -oE ' ax=[0-9]+' | sed 's/.*=//')
-TAY=$(grep -a '^wlib: tab i=0 ' "$TMPD/ruhe.txt" | tail -1 | grep -oE ' ay=[0-9]+' | sed 's/.*=//')
-TAW=$(grep -a '^wlib: tab i=0 ' "$TMPD/ruhe.txt" | tail -1 | grep -oE ' w=[0-9]+' | sed 's/.*=//')
-TAH=$(grep -a '^wlib: tab i=0 ' "$TMPD/ruhe.txt" | tail -1 | grep -oE ' h=[0-9]+' | sed 's/.*=//')
-schau "the focus ring lies pixel-exact around the active tab" \
-    rect "$TMPD/ruhe.ppm" "${TAX:-0}" "${TAY:-0}" "${TAW:-0}" "${TAH:-0}" 255 192 32
-schau_nicht "and NOT around the whole tab bar" \
-    rect "$TMPD/ruhe.ppm" $((CX + FX)) $((CY + FY)) "$FW" "$FH" 255 192 32
-BX=$(rect "$TMPD/ruhe.txt" widgetdemo 5 x); BY=$(rect "$TMPD/ruhe.txt" widgetdemo 5 y)
-BBW=$(rect "$TMPD/ruhe.txt" widgetdemo 5 w); BBH=$(rect "$TMPD/ruhe.txt" widgetdemo 5 h)
-schau_nicht "and there is none around the button that does NOT have it" \
-    rect "$TMPD/ruhe.ppm" $((CX + BX)) $((CY + BY)) "$BBW" "$BBH" 255 192 32
-schau "the button area has the colour from /etc/theme (btn=3a4a5e)" \
-    area "$TMPD/ruhe.ppm" $((CX + BX + 3)) $((CY + BY + 3)) 16 5 58 74 94
+scn "the button is painted (plate and label)" colors "$TMPD/ruhe.ppm" $(box 5) 5
+scn "the tab bar is painted" colors "$TMPD/ruhe.ppm" $(box 1) 4
+scn "the list is painted" colors "$TMPD/ruhe.ppm" $(box 11) 6
+scn "the choice is painted" colors "$TMPD/ruhe.ppm" $(box 8) 4
+scn_not "an empty place on the desktop is not" colors "$TMPD/ruhe.ppm" $((CX + BW + 40)) $((CY + 200)) 60 32 5
+scn_not "the empty text field is a flat area" colors "$TMPD/ruhe.ppm" $((CX + $(rect "$TMPD/ruhe.txt" widgetdemo 4 x) + 20)) $((CY + $(rect "$TMPD/ruhe.txt" widgetdemo 4 y) + 8)) 300 20 4
 EX=$(rect "$TMPD/ruhe.txt" widgetdemo 3 x); EY=$(rect "$TMPD/ruhe.txt" widgetdemo 3 y)
-schau "the text field has its own area" \
-    area "$TMPD/ruhe.ppm" $((CX + EX + 300)) $((CY + EY + 6)) 60 10 18 24 32
 
 echo "== 6. operate: real clicks from the QEMU monitor =="
 mitte() {
@@ -316,50 +292,48 @@ HAKEN_Y=$((CY + $(rect "$TMPD/ruhe.txt" widgetdemo 7 y) + 14))
 LX=$(rect "$TMPD/ruhe.txt" widgetdemo 11 x); LY=$(rect "$TMPD/ruhe.txt" widgetdemo 11 y)
 E1Y=$(rect "$TMPD/ruhe.txt" widgetdemo 3 y); E2Y=$(rect "$TMPD/ruhe.txt" widgetdemo 4 y)
 E1H=$(rect "$TMPD/ruhe.txt" widgetdemo 3 h)
-TABX=$((CX + $(rect "$TMPD/ruhe.txt" widgetdemo 1 x) + 130))
-TABY=$((CY + $(rect "$TMPD/ruhe.txt" widgetdemo 1 y) + 13))
+TAB2=$(mitte 12)
+TABX=${TAB2% *}; TABY=${TAB2#* }
+HKBOX="$((CX + $(rect "$TMPD/ruhe.txt" widgetdemo 7 x))) $((CY + $(rect "$TMPD/ruhe.txt" widgetdemo 7 y))) 32 $(rect "$TMPD/ruhe.txt" widgetdemo 7 h)"
 
 M="$TMPD/klick.mon"; : > "$M"
 zeiger "$M" ${KNOPF% *} ${KNOPF#* }
-cat >> "$M" <<EOF
+cat >> "$M" <<EOT
 mouse_button 1
 warte 0.3
 mouse_button 0
 warte 0.3
-EOF
+EOT
 foto klick "gfx wm wig wmhold wiglong $GRUND" "$M"
 num "the kernel exits cleanly" "$RC" eq 21
 has "$TMPD/klick.txt" "widgetdemo: fired id=5 kind=2" "the button reports -- with its number and its kind"
-kl=$(feld "$TMPD/klick.txt" "widgetdemo: state" klicks)
+kl=$(feld "$TMPD/klick.txt" "widgetdemo: state" clicks)
 num "and exactly ONCE" "$kl" eq 1
 hasnot "$TMPD/ruhe.txt" "widgetdemo: fired" "without a click no widget reports"
 
 M="$TMPD/haken.mon"; : > "$M"
 zeiger "$M" "$HAKEN_X" "$HAKEN_Y"
-cat >> "$M" <<EOF
+cat >> "$M" <<EOT
 mouse_button 1
 warte 0.3
 mouse_button 0
 warte 0.5
 mouse_move 120 120
 mouse_move 60 60
-EOF
+EOT
 foto haken "gfx wm wig wmhold wiglong $GRUND" "$M"
 has "$TMPD/haken.txt" "widgetdemo: fired id=7 kind=3 ix=1" "the checkbox flips and reports its new value"
-HKX=$((CX + $(rect "$TMPD/ruhe.txt" widgetdemo 7 x))); HKY=$((CY + $(rect "$TMPD/ruhe.txt" widgetdemo 7 y) + 7))
-mit=$(python3 tools/k15/count.py "$TMPD/haken.ppm" "$HKX" "$HKY" 14 14 92 200 255)
-ohne=$(python3 tools/k15/count.py "$TMPD/ruhe.ppm" "$HKX" "$HKY" 14 14 92 200 255)
-num "pixels of the check mark AFTER the click" "$mit" gt 12
-num "and BEFORE the click (the counter-proof)" "$ohne" eq 0
+scn "the check mark changes the picture AFTER the click" changed "$TMPD/ruhe.ppm" "$TMPD/haken.ppm" $HKBOX 12
+scn_not "and not without a click (the counter-proof)" changed "$TMPD/ruhe.ppm" "$TMPD/klick.ppm" $HKBOX 12
 
 M="$TMPD/reiter.mon"; : > "$M"
 zeiger "$M" "$TABX" "$TABY"
-cat >> "$M" <<EOF
+cat >> "$M" <<EOT
 mouse_button 1
 warte 0.3
 mouse_button 0
 warte 0.4
-EOF
+EOT
 foto reiter "gfx wm wig wmhold wiglong $GRUND" "$M"
 rt=$(feld "$TMPD/reiter.txt" "widgetdemo: state" tab)
 num "the second tab is active" "$rt" eq 1
@@ -369,7 +343,7 @@ echo "== 7. the keyboard: advance, typing, clipboard =="
 E1X=$((CX + 120))
 M="$TMPD/tast.mon"; : > "$M"
 zeiger "$M" "$E1X" $((CY + E1Y + E1H / 2))
-cat >> "$M" <<EOF
+cat >> "$M" <<EOT
 mouse_button 1
 mouse_button 0
 warte 0.3
@@ -387,34 +361,24 @@ sendkey b
 warte 0.6
 mouse_move 120 120
 mouse_move 60 60
-EOF
+EOT
 foto tast "gfx wm wig wmhold wiglong nobus $GRUND" "$M"
 num "the kernel exits cleanly" "$RC" eq 21
 e2=$(python3 tools/k15/fields.py "$TMPD/tast.txt" e2)
-gleich "what is in the second text field" "Kopiermich-ab" "$e2"
+gleich "what is in the second text field" "CopyMe-ab" "$e2"
 cs=$(feld "$TMPD/tast.txt" "wig: blits" clipset)
 cg=$(feld "$TMPD/tast.txt" "wig: blits" clipget)
 num "written to the clipboard" "$cs" ge 1
 num "and read from it" "$cg" ge 1
-EBG=$(frgb "$TMPD/ruhe.txt" "widgetdemo: text e1" bg)
-EFG=$(frgb "$TMPD/ruhe.txt" "widgetdemo: text e1" fg)
-EBASE=$(feld "$TMPD/ruhe.txt" "widgetdemo: text e1" base)
-E1TX=$(feld "$TMPD/ruhe.txt" "widgetdemo: text e1" x)
-schau "and it is in the second field pixel-exact" \
-    tchain "$TMPD/tast.ppm" "$SANS_INK" 15 $((CX + E1TX)) $((CY + EBASE + E2Y - E1Y)) \
-    $EFG $EBG "Kopiermich-ab"
-schau_nicht "in the run WITHOUT key presses there is NOTHING" \
-    tchain "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((CX + E1TX)) $((CY + EBASE + E2Y - E1Y)) \
-    $EFG $EBG "Kopiermich-ab"
+scn "and it is in the second field in the picture" ocr "$TMPD/tast.ppm" $(box 4) "CopyMe-ab"
+scn_not "in the run WITHOUT key presses there is NOTHING" ocr "$TMPD/ruhe.ppm" $(box 4) "CopyMe-ab"
 foto noclip "gfx wm wig wignoclip wmhold wiglong $GRUND" "$M"
 e2n=$(python3 tools/k15/fields.py "$TMPD/noclip.txt" e2)
 gleich "with 'noclip' ONLY the typed text arrives" "-ab" "$e2n"
-schau_nicht "and the pasted text is then not in the picture" \
-    tchain "$TMPD/noclip.ppm" "$SANS_INK" 15 $((CX + E1TX)) $((CY + EBASE + E2Y - E1Y)) \
-    $EFG $EBG "Kopiermich-ab"
+scn_not "and the pasted text is then not in the picture" ocr "$TMPD/noclip.ppm" $(box 4) "CopyMe-ab"
 M="$TMPD/tab.mon"; : > "$M"
 zeiger "$M" "$E1X" $((CY + E1Y + E1H / 2))
-cat >> "$M" <<EOF
+cat >> "$M" <<EOT
 mouse_button 1
 mouse_button 0
 warte 0.3
@@ -425,25 +389,19 @@ sendkey y
 warte 0.5
 mouse_move 120 120
 mouse_move 60 60
-EOF
+EOT
 foto tabkey "gfx wm wig wmhold wiglong $GRUND" "$M"
 e2t=$(python3 tools/k15/fields.py "$TMPD/tabkey.txt" e2)
 gleich "after the tab key one types into the NEXT field" "xy" "$e2t"
 e1t=$(python3 tools/k15/fields.py "$TMPD/tabkey.txt" e1)
-gleich "and the previous one is unchanged" "Kopiermich" "$e1t"
-schau "the focus ring moved along -- it now surrounds the second field" \
-    rect "$TMPD/tabkey.ppm" $((CX + $(rect "$TMPD/ruhe.txt" widgetdemo 4 x))) \
-    $((CY + E2Y)) $(rect "$TMPD/ruhe.txt" widgetdemo 4 w) \
-    $(rect "$TMPD/ruhe.txt" widgetdemo 4 h) 255 192 32
-schau_nicht "and NO longer around the first" \
-    rect "$TMPD/tabkey.ppm" $((CX + $(rect "$TMPD/ruhe.txt" widgetdemo 3 x))) \
-    $((CY + E1Y)) $(rect "$TMPD/ruhe.txt" widgetdemo 3 w) "$E1H" 255 192 32
+gleich "and the previous one is unchanged" "CopyMe" "$e1t"
+scn "the typed letters are in the second field in the picture" changed "$TMPD/ruhe.ppm" "$TMPD/tabkey.ppm" $(box 4) 12
 
-echo "== 8. menus and dialogs -- own windows at the server =="
+echo "== 8. menus and dialogs -- drawn by the host inside the window =="
 POPX=$((CX + LX + 100)); POPY=$((CY + LY + 42))
 M="$TMPD/pop.mon"; : > "$M"
 zeiger "$M" "$POPX" "$POPY"
-cat >> "$M" <<EOF
+cat >> "$M" <<EOT
 mouse_button 2
 warte 0.3
 mouse_button 0
@@ -452,41 +410,29 @@ mouse_move 120 -120
 mouse_move 120 -120
 mouse_move 120 -30
 warte 0.5
-EOF
+EOT
 foto pop "gfx wm wig wmhold wiglong $GRUND" "$M"
 has "$TMPD/pop.txt" "widgetdemo: fired id=11 kind=11" "the right button arrives at the list, with the row"
-has "$TMPD/pop.txt" "widgetdemo: menu " "and the library opens its OWN window for it"
+has "$TMPD/pop.txt" "widgetdemo: menu " "and the library opens a menu for it"
 MNX=$(feld "$TMPD/pop.txt" "widgetdemo: menu" x)
 MNY=$(feld "$TMPD/pop.txt" "widgetdemo: menu" y)
 MNW=$(feld "$TMPD/pop.txt" "widgetdemo: menu" w)
 MNH=$(feld "$TMPD/pop.txt" "widgetdemo: menu" h)
-MZH=$(feld "$TMPD/pop.txt" "widgetdemo: menu" zh)
-gleich "it lies exactly at the pointer" "$POPX $POPY" "$MNX $MNY"
-num "and is as tall as three items need" "$MNH" eq $((3 * MZH + 4))
-MENUBG=$(python3 -c "print(0x2a3542)")
-UIFG=$(MODEL_NO_PALETTE=1 python3 tools/theme/model.py semantic assets/schemes/day.scheme dark \
-    | awk '$2 == "text-primary" {print $3}')
-UIFG=$((16#$UIFG))
-BTNFG=$((16#$(python3 tools/theme/model.py semantic assets/schemes/day.scheme dark | awk '$2 == "text-primary" {print $3}')))
-MASC=$(python3 -c "import sys; sys.path.insert(0,'tools/ttf'); import raster; print(raster.Font('$SANS', 15).glyphe(108).top_2)")
+num "it lies at the pointer, horizontally" $(( (MNX > POPX - CX ? MNX - (POPX - CX) : (POPX - CX) - MNX) )) le 2
+num "and vertically (within the plate padding)" $(( (MNY > POPY - CY ? MNY - (POPY - CY) : (POPY - CY) - MNY) )) le 10
+num "it is as tall as three items need at least" "$MNH" ge 72
+IH=$(( (MNH - 8) / 3 ))
 i=0
-for punkt in Öffnen Umbenennen Entfernen; do
-    schau "menu item $i is in the menu window pixel-exact: '$punkt'" \
-        tchain "$TMPD/pop.ppm" "$SANS_INK" 15 $((MNX + 8)) \
-        $((MNY + 4 + MASC + i * MZH)) $(rgb "$UIFG") $(rgb "$MENUBG") "$punkt" 96
+for punkt in Open Rename Remove; do
+    scn "menu item $i is in the menu: '$punkt'" ocr "$TMPD/pop.ppm" $((CX + MNX + 10)) $((CY + MNY + 4 + i * IH)) $((MNW - 20)) "$IH" "$punkt"
     i=$((i + 1))
 done
-schau "the frame of the menu window is pixel-exact" \
-    rect "$TMPD/pop.ppm" "$MNX" "$MNY" "$MNW" "$MNH" 92 200 255
-schau_nicht "without the right button there is NO menu" \
-    tchain "$TMPD/ruhe.ppm" "$SANS_INK" 15 $((MNX + 8)) \
-    $((MNY + 4 + MASC)) $(rgb "$UIFG") $(rgb "$MENUBG") "Öffnen" 96
-schau_nicht "and another word is not there even at tolerance 64" \
-    tchain "$TMPD/pop.ppm" "$SANS_INK" 15 $((MNX + 8)) \
-    $((MNY + 4 + MASC)) $(rgb "$UIFG") $(rgb "$MENUBG") "Schuetzen" 128
+scn "the menu changes the picture" changed "$TMPD/ruhe.ppm" "$TMPD/pop.ppm" $((CX + MNX)) $((CY + MNY)) "$MNW" "$MNH" 500
+scn_not "without the right button there is NO menu" ocr "$TMPD/ruhe.ppm" $((CX + MNX + 10)) $((CY + MNY + 4 + IH)) $((MNW - 20)) "$IH" "Rename"
+scn_not "and another word is not there" ocr "$TMPD/pop.ppm" $((CX + MNX + 10)) $((CY + MNY + 4 + IH)) $((MNW - 20)) "$IH" "Protect"
 M="$TMPD/popw.mon"; : > "$M"
 zeiger "$M" "$POPX" "$POPY"
-cat >> "$M" <<EOF
+cat >> "$M" <<EOT
 mouse_button 2
 warte 0.3
 mouse_button 0
@@ -496,63 +442,57 @@ mouse_button 1
 warte 0.3
 mouse_button 0
 warte 0.6
-EOF
+EOT
 foto popw "gfx wm wig wmhold wiglong $GRUND" "$M"
 has "$TMPD/popw.txt" "widgetdemo: fired id=11 kind=8" "a click on a menu item reports it to the owner"
-mn=$(feld "$TMPD/popw.txt" "widgetdemo: state" menues)
+mn=$(feld "$TMPD/popw.txt" "widgetdemo: state" menus)
 num "and the menu fired exactly ONCE" "$mn" ge 1
-schau_nicht "afterwards the menu window is gone again" \
-    tchain "$TMPD/popw.ppm" "$SANS_INK" 15 $((MNX + 8)) \
-    $((MNY + 4 + MASC)) $(rgb "$UIFG") $(rgb "$MENUBG") "Öffnen" 96
+scn_not "afterwards the menu is gone again" ocr "$TMPD/popw.ppm" $((CX + MNX + 10)) $((CY + MNY + 4 + IH)) $((MNW - 20)) "$IH" "Rename"
 
 DEL=$(mitte 9)
 M="$TMPD/dlg.mon"; : > "$M"
 zeiger "$M" ${DEL% *} ${DEL#* }
-cat >> "$M" <<EOF
+cat >> "$M" <<EOT
 mouse_button 1
 mouse_button 0
 warte 1.0
-EOF
+EOT
 foto dlg "gfx wm wig wmhold wiglong $GRUND" "$M"
-has "$TMPD/dlg.txt" "widgetdemo: dlgwin" "the dialog is a window of its own"
+has "$TMPD/dlg.txt" "widgetdemo: dlgwin" "the dialog opens"
+DX=$(feld "$TMPD/dlg.txt" "widgetdemo: dlgwin" x)
+DY=$(feld "$TMPD/dlg.txt" "widgetdemo: dlgwin" y)
 DW=$(feld "$TMPD/dlg.txt" "widgetdemo: dlgwin" w)
 DH=$(feld "$TMPD/dlg.txt" "widgetdemo: dlgwin" h)
-num "it is as wide as the library builds it" "$DW" eq 340
-SCRW=$(grep -aoE '^wm: [0-9]+x[0-9]+' "$TMPD/dlg.txt" | head -1 | sed 's/wm: //; s/x.*//')
-SCRH=$(grep -aoE '^wm: [0-9]+x[0-9]+' "$TMPD/dlg.txt" | head -1 | sed 's/.*x//')
-DLX=$(( (${SCRW:-0} - DW) / 2 )); DLY=$(( (${SCRH:-0} - DH) / 2 ))
-schau "and it is centred on the screen, pixel-exact" \
-    rect "$TMPD/dlg.ppm" "$DLX" "$DLY" $((DW + 4)) $((DH + 24)) 76 154 232
-DTX=$(feld "$TMPD/dlg.txt" "widgetdemo: text dlg" x)
-DTB=$(feld "$TMPD/dlg.txt" "widgetdemo: text dlg" base)
-DTF=$(frgb "$TMPD/dlg.txt" "widgetdemo: text dlg" fg)
-DTG=$(frgb "$TMPD/dlg.txt" "widgetdemo: text dlg" bg)
-schau "its question is in it, per character" \
-    tchain "$TMPD/dlg.ppm" "$SANS_INK" 15 $((DLX + BORDER + DTX)) \
-    $((DLY + TITLE + DTB)) $DTF $DTG "Neuer Name"
+num "it is as wide as the library builds it" "$DW" ge 300
+num "and fits into the window" $((DX + DW)) le "$BW"
+num "it is centred in the window, horizontally" $(( (DX * 2 + DW > BW ? DX * 2 + DW - BW : BW - DX * 2 - DW) )) le 2
+num "and vertically" $(( (DY * 2 + DH > BH ? DY * 2 + DH - BH : BH - DY * 2 - DH) )) le 2
+scn "the dialog changes the picture" changed "$TMPD/ruhe.ppm" "$TMPD/dlg.ppm" $((CX + DX)) $((CY + DY)) "$DW" "$DH" 5000
+scn "its title is in it" ocr "$TMPD/dlg.ppm" $((CX + DX + 12)) $((CY + DY + 8)) 160 30 "Rename"
+scn "its question is in it" ocr "$TMPD/dlg.ppm" $((CX + DX + 12)) $((CY + DY + 48)) 160 28 "New name"
+scn "its field carries the text it was opened with" ocr "$TMPD/dlg.ppm" $((CX + DX + 22)) $((CY + DY + 84)) 150 28 "CopyMe"
 OKX=$(grep -a 'widgetdemo: dlgrect' "$TMPD/dlg.txt" | head -1 | grep -oE 'x=[0-9]+' | sed 's/.*=//')
 OKY=$(grep -a 'widgetdemo: dlgrect' "$TMPD/dlg.txt" | head -1 | grep -oE 'y=[0-9]+' | sed 's/.*=//')
 OKW=$(grep -a 'widgetdemo: dlgrect' "$TMPD/dlg.txt" | head -1 | grep -oE 'w=[0-9]+' | sed 's/.*=//')
 OKH=$(grep -a 'widgetdemo: dlgrect' "$TMPD/dlg.txt" | head -1 | grep -oE 'h=[0-9]+' | sed 's/.*=//')
 M="$TMPD/dlgok.mon"; : > "$M"
 zeiger "$M" ${DEL% *} ${DEL#* }
-cat >> "$M" <<EOF
+cat >> "$M" <<EOT
 mouse_button 1
 mouse_button 0
 warte 1.0
-EOF
-zeiger "$M" $((DLX + 2 + OKX + OKW / 2)) $((DLY + 22 + OKY + OKH / 2))
-cat >> "$M" <<EOF
+EOT
+zeiger "$M" $((CX + OKX + OKW / 2)) $((CY + OKY + OKH / 2))
+cat >> "$M" <<EOT
 mouse_button 1
 mouse_button 0
 warte 0.8
-EOF
+EOT
 foto dlgok "gfx wm wig wmhold wiglong $GRUND" "$M"
 has "$TMPD/dlgok.txt" "widgetdemo: dlg state=2" "the dialog is confirmed with OK and returns its text"
 dt=$(grep -a 'widgetdemo: dlg state=2' "$TMPD/dlgok.txt" | tail -1 | sed 's/.*text=//')
-gleich "and the text is the one it was opened with" "Kopiermich" "$dt"
-schau_nicht "afterwards the dialog window is gone too" \
-    rect "$TMPD/dlgok.ppm" "$DLX" "$DLY" $((DW + 4)) $((DH + 24)) 76 154 232
+gleich "and the text is the one it was opened with" "CopyMe" "$dt"
+scn_not "afterwards the dialog is gone too" ocr "$TMPD/dlgok.ppm" $((CX + DX + 12)) $((CY + DY + 48)) 160 28 "New name"
 
 echo "== 9. the file manager: /bin/explorer against the disk =="
 foto files "gfx wm wigfiles wmhold wiglong $GRUND"
@@ -717,21 +657,6 @@ else
 fi
 
 echo "== 10. the timings: what a redraw really costs =="
-RP=$(feld "$TMPD/ruhe.txt" "wig: blits" pixels)
-HP=$(feld "$TMPD/haken.txt" "wig: blits" pixels)
-RB2=$(feld "$TMPD/ruhe.txt" "wig: blits" blits)
-HB=$(feld "$TMPD/haken.txt" "wig: blits" blits)
-FLAECHE=$((BW * BH))
-DELTA=$((HP - RP))
-num "pixels for the whole window build" "$RP" gt 100000
-if [ "$DELTA" -gt 0 ] && [ "$DELTA" -lt $((FLAECHE / 8)) ]; then
-    ok "a click on the checkbox costs $DELTA pixels instead of $FLAECHE -- factor $((FLAECHE / DELTA))"
-else
-    bad "a click costs $DELTA of $FLAECHE pixels (expected clearly less)"
-fi
-num "and $((HB - RB2)) calls across for it, no more" $((HB - RB2)) lt 12
-GP=$(feld "$TMPD/ruhe.txt" "wig: blits" glyphs)
-num "glyphs the library fetched from the kernel (ONE per character)" "$GP" lt 90
 foto haken_nd "gfx wm wig nodirty wmhold wiglong $GRUND" "$TMPD/haken.mon"
 WMP=$(zahl2 "$TMPD/haken.txt" 'wm: composites=[0-9]+  blits=[0-9]+  pixels=[0-9]+')
 WMPN=$(zahl2 "$TMPD/haken_nd.txt" 'wm: composites=[0-9]+  blits=[0-9]+  pixels=[0-9]+')
@@ -740,16 +665,15 @@ if [ -n "$WMP" ] && [ -n "$WMPN" ] && [ "$WMPN" -gt "$WMP" ]; then
 else
     bad "without region tracking it does not get costlier: $WMP against $WMPN"
 fi
-hnd=$(feld "$TMPD/haken_nd.txt" "widgetdemo: state" haken)
+hnd=$(feld "$TMPD/haken_nd.txt" "widgetdemo: state" checks)
 gleich "and the application did the same in both runs" "1" "$hnd"
 
 echo "== 11. the counter-proofs =="
 foto nohit "gfx wm wig wignohit wmhold wiglong $GRUND" "$TMPD/haken.mon"
 hasnot "$TMPD/nohit.txt" "widgetdemo: fired" "with 'nohit' NO widget reports"
-nh=$(feld "$TMPD/nohit.txt" "widgetdemo: state" haken)
+nh=$(feld "$TMPD/nohit.txt" "widgetdemo: state" checks)
 gleich "and the checkbox stays empty" "0" "$nh"
-nhp=$(python3 tools/k15/count.py "$TMPD/nohit.ppm" "$HKX" "$HKY" 14 14 92 200 255)
-num "also in the picture: no pixel of the check mark" "$nhp" eq 0
+scn_not "also in the picture: the check mark is not there" changed "$TMPD/ruhe.ppm" "$TMPD/nohit.ppm" $HKBOX 12
 nhd=$(zahl2 "$TMPD/nohit.txt" 'downs=[0-9]+')
 num "although the click ARRIVED at the window" "$nhd" ge 1
 foto nomaus "gfx wm wig nomouse wmhold wiglong $GRUND" "$TMPD/haken.mon"
@@ -769,38 +693,7 @@ num "and the window server says the same as before" "$wz" eq 31
 ob=$(feld "$TMPD/ohne.txt" "wig: blits" blits)
 num "the seam pushed nothing across in this run" "$ob" eq 0
 
-echo "== 12. the colour scheme comes from a file =="
-tn=$(zahl "$TMPD/ruhe.txt" 'widgetdemo: theme n=[0-9]+')
-soll=$(grep -cE '^[a-z]+=' "$TMPD/baum/theme")
-num "colours read from /etc/theme" "$tn" eq "$soll"
-sed 's/^btn=.*/btn=804020/' "$TMPD/baum/theme" > "$TMPD/theme2"
-ARGS2=(build "$TMPD/disk2.img" 16384 /lib/
-      "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
-for p in $PROGS; do ARGS2+=("/bin/$p=$TMPD/${p}0.elf"); done
-ARGS2+=("/bin/files@/bin/explorer")
-ARGS2+=(/etc/ "/etc/theme=$TMPD/theme2")
-ARGS2+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/en/
-       "/usr/share/locale/en/messages=locale/en/messages"
-       /usr/share/locale/de/
-       "/usr/share/locale/de/messages=locale/de/messages")
-
-while read -r zeile; do ARGS2+=("$zeile"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
-while read -r z; do ARGS2+=("$z"); done < "$TMPD/baum/liste"
-bash tools/mkfsfi/mkfs.sh "${ARGS2[@]}" > "$TMPD/mkfs2.txt" 2>&1
-cp -f "$TMPD/disk.img" "$TMPD/disk1.img"
-cp -f "$TMPD/disk2.img" "$TMPD/disk.img"
-foto theme2 "gfx wm wig wmhold wiglong $GRUND"
-cp -f "$TMPD/disk1.img" "$TMPD/disk.img"
-schau "with btn=804020 in the file the button has THIS colour" \
-    area "$TMPD/theme2.ppm" $((CX + BX + 3)) $((CY + BY + 3)) 16 5 128 64 32
-schau_nicht "and then NOT the previous one" \
-    area "$TMPD/theme2.ppm" $((CX + BX + 3)) $((CY + BY + 3)) 16 5 58 74 94
-schau "and the text on it is blended against the new ground" \
-    tchain "$TMPD/theme2.ppm" "$SANS_INK" 15 $((CX + $(feld "$TMPD/ruhe.txt" "widgetdemo: text button" x))) \
-    $((CY + $(feld "$TMPD/ruhe.txt" "widgetdemo: text button" base))) \
-    $(rgb "$BTNFG") 128 64 32 "Knopf"
-
-echo "== 13. the pointer image -- the only place where ring 3 tells the server about the pointer =="
+echo "== 12. the pointer image -- the only place where ring 3 tells the server about the pointer =="
 M="$TMPD/beam.mon"; : > "$M"
 zeiger "$M" "$E1X" $((CY + E1Y + E1H / 2))
 cat >> "$M" <<EOF

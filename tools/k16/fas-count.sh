@@ -15,7 +15,7 @@ mkdir -p "$TMPD/s"
 PROGS=""
 for f in kernel/user/*.fi; do
   n=$(basename "$f" .fi)
-  case "$n" in appdir|flate|nidx|pw|tools|ulib|wlib|wlibc) continue;; esac
+  case "$n" in appdir|flate|nidx|pw|tools|ulib) continue;; esac
   grep -q "fn u_start" "$f" || continue
   PROGS="$PROGS $n"
 done

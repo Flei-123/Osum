@@ -63,15 +63,16 @@ klick() {
 }
 
 klick 20,786 2
-MENU_X=8
-MENU_Y=312
-SETTINGS_ROW_DX=200
-SETTINGS_ROW_DY=218
-note "start menu at $MENU_X,$MENU_Y -- settings row at $((MENU_X+SETTINGS_ROW_DX)),$((MENU_Y+SETTINGS_ROW_DY))"
-klick "$((MENU_X+SETTINGS_ROW_DX)),$((MENU_Y+SETTINGS_ROW_DY))" 3
+SETTINGS_POS=$(python3 -I tools/bridge2/menupos.py "$OUT/serial.txt" /apps/settings.osp/start) || SETTINGS_POS=""
+if [ -n "$SETTINGS_POS" ]; then
+    ok "start menu reports the Settings tile at $SETTINGS_POS"
+    klick "$SETTINGS_POS" 3
+else
+    bad "start menu did not report a Settings tile"
+fi
 sleep 2
 
-if grep -qa 'settings: stand' "$OUT/serial.txt" 2>/dev/null; then
+if grep -qa 'settings: state tab=' "$OUT/serial.txt" 2>/dev/null; then
     ok "settings laeuft"
     note "$(grep -a 'settings: elemente' "$OUT/serial.txt" | tail -1)"
 else
@@ -101,7 +102,7 @@ CMD
 }
 
 current_tab() {
-    grep -a 'settings: state tab=' "$OUT/serial.txt" | tail -1 | sed -n 's/.*reiter=\([0-9]*\).*/\1/p'
+    grep -a 'settings: state tab=' "$OUT/serial.txt" | tail -1 | sed -n 's/.*state tab=\([0-9]*\).*/\1/p'
 }
 
 wait_for_tab() {

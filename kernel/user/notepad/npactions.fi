@@ -1,0 +1,159 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import libc.octets
+import fuiscene
+import services.svcosum
+import services.svcrules
+import services.dlgproto
+import npstr
+import npdoc
+import npindex
+import npnote
+import npsay
+import npfiles
+
+export {
+    pad_boot, pad_open_first, pad_poll_selection, pad_new, pad_save, pad_delete,
+    pad_autosave, pad_import, pad_export,
+}
+
+const RESULT_BYTES: u64 = 8
+
+static mut act_result: [u8; 8] = [0 as u8; 8]
+
+fn act_result_ptr() -> u64 {
+    return (&act_result[0 as usize]) as u64
+}
+
+fn sync_list(row: u64) {
+    fuiscene.table_set_blob(npdoc.PAD_K_LIST, npindex.pad_index_blob())
+    fuiscene.table_set_sel(npdoc.PAD_K_LIST, row)
+}
+
+fn open_row(row: u64) {
+    let id: u64 = npindex.pad_index_id(row)
+    octets.zero(act_result_ptr(), RESULT_BYTES)
+    let status: u64 = npnote.pad_note_read(id, npdoc.pad_text_ptr(), npdoc.PAD_TEXT_CAP, act_result_ptr())
+    var n: u64 = 0
+    if status == svcrules.OK {
+        n = octets.le32(act_result_ptr())
+        npdoc.pad_load(npdoc.pad_text_ptr(), n)
+    } else {
+        npdoc.pad_blank()
+    }
+    npdoc.pad_set_row(row)
+    npsay.pad_say_select(row, id, n)
+}
+
+fn add_blank_note() -> u64 {
+    let row: u64 = npindex.pad_index_add(npindex.pad_index_next_id())
+    return row
+}
+
+fn pad_boot() -> u64 {
+    let _loaded: u64 = npindex.pad_index_load(npdoc.pad_text_ptr(), npdoc.PAD_TEXT_CAP)
+    if npindex.pad_index_rows() == 0 {
+        let _row: u64 = add_blank_note()
+    }
+    return npindex.pad_index_rows()
+}
+
+fn pad_open_first() {
+    open_row(0)
+    sync_list(0)
+}
+
+fn pad_save() -> u64 {
+    let row: u64 = npdoc.pad_row()
+    let id: u64 = npindex.pad_index_id(row)
+    let n: u64 = npdoc.pad_snapshot()
+    let status: u64 = npnote.pad_note_write(id, npdoc.pad_text_ptr(), n)
+    if status == svcrules.OK {
+        npindex.pad_index_retitle(row, npdoc.pad_text_ptr(), n)
+        sync_list(row)
+        npdoc.pad_mark_clean()
+    }
+    npsay.pad_say_saved(id, status, n, npindex.pad_index_title(row))
+    return status
+}
+
+fn pad_autosave() {
+    if !npdoc.pad_is_dirty() {
+        return
+    }
+    let _status: u64 = pad_save()
+}
+
+fn pad_poll_selection() -> bool {
+    let picked: u64 = fuiscene.table_sel(npdoc.PAD_K_LIST)
+    if picked == npdoc.pad_row() || picked >= npindex.pad_index_rows() {
+        return false
+    }
+    pad_autosave()
+    open_row(picked)
+    return true
+}
+
+fn pad_new() {
+    pad_autosave()
+    let row: u64 = add_blank_note()
+    if row >= npindex.PAD_INDEX_MAX {
+        return
+    }
+    npdoc.pad_blank()
+    npdoc.pad_set_row(row)
+    sync_list(row)
+    npsay.pad_say_new(npindex.pad_index_id(row), npindex.pad_index_rows())
+}
+
+fn remove_current() {
+    let row: u64 = npdoc.pad_row()
+    let _dropped: u64 = npnote.pad_note_drop(npindex.pad_index_id(row))
+    npindex.pad_index_drop(row)
+    if npindex.pad_index_rows() == 0 {
+        let _fresh: u64 = add_blank_note()
+    }
+    var target: u64 = row
+    if target >= npindex.pad_index_rows() {
+        target = npindex.pad_index_rows() - 1
+    }
+    open_row(target)
+    sync_list(target)
+}
+
+fn pad_delete() {
+    octets.zero(act_result_ptr(), RESULT_BYTES)
+    let status: u64 = svcosum.confirm(npstr.pad_delete_title(), npstr.pad_delete_text(), act_result_ptr())
+    let answer: u64 = octets.le32(act_result_ptr())
+    if status == svcrules.NO_BACKEND || (status == svcrules.OK && answer == dlgproto.ANSWER_OK) {
+        remove_current()
+    }
+    npsay.pad_say_delete(status, answer, npindex.pad_index_rows())
+}
+
+fn pad_import() {
+    pad_autosave()
+    let status: u64 = npfiles.pad_import()
+    if status != svcrules.OK {
+        npsay.pad_say_import(0, status, 0)
+        return
+    }
+    let n: u64 = npfiles.pad_file_len()
+    let row: u64 = add_blank_note()
+    if row >= npindex.PAD_INDEX_MAX {
+        npsay.pad_say_import(0, svcrules.FAILED, n)
+        return
+    }
+    npdoc.pad_load(npdoc.pad_text_ptr(), n)
+    npdoc.pad_set_row(row)
+    let _saved: u64 = pad_save()
+    sync_list(row)
+    npsay.pad_say_import(npfiles.pad_file_name(), svcrules.OK, n)
+}
+
+fn pad_export() {
+    let n: u64 = npdoc.pad_snapshot()
+    let status: u64 = npfiles.pad_export(npstr.pad_export_name(), n)
+    npsay.pad_say_export(npfiles.pad_file_name(), status, n)
+}

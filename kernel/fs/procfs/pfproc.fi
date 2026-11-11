@@ -15,8 +15,13 @@ import lib.kstate
 import fs.mnt
 import sched.origin
 import bus.pci
-import sched.proc
+import sched.proc.procbase
+import sched.proc.procmap
+import sched.proc.procpt
+import sched.proc.procspace
 import sched.sched
+import sched.taskconst
+import sched.taskslot
 import sched.time
 import ipc.uio
 import usb.usb
@@ -120,8 +125,8 @@ fn w_nl(state: u64, at: u64) -> u64 {
 fn slot_of_pid(state: u64, pid: u64) -> u64 {
     var i: u64 = 0
     while i < kstate.get(state, kstate.TASKS) {
-        if sched.tget(state, i, sched.T_STATE) != sched.S_FREE {
-            if sched.tget(state, i, sched.T_PID) == pid {
+        if taskslot.tget(state, i, taskconst.T_STATE) != taskconst.S_FREE {
+            if taskslot.tget(state, i, taskconst.T_PID) == pid {
                 return i
             }
         }
@@ -134,26 +139,26 @@ fn alive(state: u64, i: u64) -> bool {
     if i >= kstate.get(state, kstate.TASKS) {
         return false
     }
-    return sched.tget(state, i, sched.T_STATE) != sched.S_FREE
+    return taskslot.tget(state, i, taskconst.T_STATE) != taskconst.S_FREE
 }
 
 fn state_letter(s: u64) -> u64 {
-    if s == sched.S_RUN {
+    if s == taskconst.S_RUN {
         return 82
     }
-    if s == sched.S_READY {
+    if s == taskconst.S_READY {
         return 82
     }
-    if s == sched.S_SLEEP {
+    if s == taskconst.S_SLEEP {
         return 83
     }
-    if s == sched.S_WAIT {
+    if s == taskconst.S_WAIT {
         return 83
     }
-    if s == sched.S_ZOMBIE {
+    if s == taskconst.S_ZOMBIE {
         return 90
     }
-    if s == sched.S_STOP {
+    if s == taskconst.S_STOP {
         return 84
     }
     return 78
@@ -167,15 +172,15 @@ fn kind_name(k: u64, out: u64) {
     var netd: [u8; 5] = "netd\0"
     var grind: [u8; 6] = "grind\0"
     var src: u64 = (&user[0]) as u64
-    if k == sched.K_BOOT {
+    if k == taskconst.K_BOOT {
         src = (&boot[0]) as u64
-    } else if k == sched.K_IDLE {
+    } else if k == taskconst.K_IDLE {
         src = (&idle[0]) as u64
-    } else if k == sched.K_WORKER {
+    } else if k == taskconst.K_WORKER {
         src = (&work[0]) as u64
-    } else if k == sched.K_GRIND {
+    } else if k == taskconst.K_GRIND {
         src = (&grind[0]) as u64
-    } else if k == sched.K_NETD {
+    } else if k == taskconst.K_NETD {
         src = (&netd[0]) as u64
     }
     var i: u64 = 0
@@ -357,7 +362,7 @@ fn make_cpus(state: u64) -> u64 {
         var cur_pid: u64 = 0
         let ct: u64 = cpu.get(state, i, cpu.C_CUR)
         if ct < kstate.MAX_TASKS {
-            cur_pid = sched.tget(state, ct, sched.T_PID)
+            cur_pid = taskslot.tget(state, ct, taskconst.T_PID)
         }
         p = w_str(state, p, (&l1[0]) as u64)
         p = w_num(state, p, i)
@@ -415,7 +420,7 @@ fn make_uptime(state: u64) -> u64 {
     let idle: u64 = kstate.get(state, kstate.IDLE)
     var iticks: u64 = 0
     if idle < kstate.MAX_TASKS {
-        iticks = sched.tget(state, idle, sched.T_TICKS)
+        iticks = taskslot.tget(state, idle, taskconst.T_TICKS)
     }
     p = w_num(state, p, iticks / 100)
     p = w_ch(state, p, 46)
@@ -528,7 +533,7 @@ fn make_stat(state: u64) -> u64 {
     let idle_slot: u64 = kstate.get(state, kstate.IDLE)
     var idle_ticks: u64 = 0
     if idle_slot < kstate.MAX_TASKS {
-        idle_ticks = sched.tget(state, idle_slot, sched.T_TICKS)
+        idle_ticks = taskslot.tget(state, idle_slot, taskconst.T_TICKS)
     }
     if idle_ticks > total {
         idle_ticks = total
@@ -821,9 +826,9 @@ fn make_status(state: u64, t: u64) -> u64 {
     var name: [u8; 12] = [0 as u8; 12]
     var cm: [u8; 17] = [0 as u8; 17]
     var p: u64 = 0
-    kind_name(sched.tget(state, t, sched.T_KIND), (&name[0]) as u64)
-    let ca: u64 = sched.tget(state, t, sched.T_COMMA)
-    let cb: u64 = sched.tget(state, t, sched.T_COMMB)
+    kind_name(taskslot.tget(state, t, taskconst.T_KIND), (&name[0]) as u64)
+    let ca: u64 = taskslot.tget(state, t, taskconst.T_COMMA)
+    let cb: u64 = taskslot.tget(state, t, taskconst.T_COMMB)
     var ci: u64 = 0
     while ci < 8 {
         kstate.set8(((&cm[0]) as u64) + ci, ((ca >> (ci * 8)) & 255) as u8)
@@ -842,33 +847,33 @@ fn make_status(state: u64, t: u64) -> u64 {
     }
     p = w_nl(state, p)
     p = w_str(state, p, (&l2[0]) as u64)
-    p = w_num(state, p, sched.tget(state, t, sched.T_PID))
+    p = w_num(state, p, taskslot.tget(state, t, taskconst.T_PID))
     p = w_nl(state, p)
     p = w_str(state, p, (&l3[0]) as u64)
-    let par: u64 = sched.tget(state, t, sched.T_PARENT)
+    let par: u64 = taskslot.tget(state, t, taskconst.T_PARENT)
     var ppid: u64 = 0
     if par < kstate.MAX_TASKS {
-        ppid = sched.tget(state, par, sched.T_PID)
+        ppid = taskslot.tget(state, par, taskconst.T_PID)
     }
     p = w_num(state, p, ppid)
     p = w_nl(state, p)
     p = w_str(state, p, (&l4[0]) as u64)
-    p = w_ch(state, p, state_letter(sched.tget(state, t, sched.T_STATE)))
+    p = w_ch(state, p, state_letter(taskslot.tget(state, t, taskconst.T_STATE)))
     p = w_nl(state, p)
     p = w_str(state, p, (&l5[0]) as u64)
-    p = w_num(state, p, sched.tget(state, t, sched.T_PRIO))
+    p = w_num(state, p, taskslot.tget(state, t, taskconst.T_PRIO))
     p = w_nl(state, p)
     p = w_str(state, p, (&l6[0]) as u64)
-    p = w_num(state, p, sched.tget(state, t, sched.T_TICKS))
+    p = w_num(state, p, taskslot.tget(state, t, taskconst.T_TICKS))
     p = w_nl(state, p)
     p = w_str(state, p, (&l7[0]) as u64)
-    p = w_num(state, p, sched.tget(state, t, sched.T_RUNS))
+    p = w_num(state, p, taskslot.tget(state, t, taskconst.T_RUNS))
     p = w_nl(state, p)
     p = w_str(state, p, (&l8[0]) as u64)
-    p = w_num(state, p, sched.tget(state, t, sched.T_FAULTS))
+    p = w_num(state, p, taskslot.tget(state, t, taskconst.T_FAULTS))
     p = w_nl(state, p)
     p = w_str(state, p, (&l9[0]) as u64)
-    p = w_hex16(state, p, sched.tget(state, t, sched.T_BRK))
+    p = w_hex16(state, p, taskslot.tget(state, t, taskconst.T_BRK))
     p = w_nl(state, p)
     p = w_str(state, p, (&l10[0]) as u64)
     var k: u64 = 0
@@ -882,17 +887,17 @@ fn make_status(state: u64, t: u64) -> u64 {
     var l13: [u8; 10] = "VmRSS:  \0\0"
     var l14: [u8; 10] = "VmSize: \0\0"
     var l15: [u8; 5] = " kB\0\0"
-    var grp: u64 = sched.tget(state, t, sched.T_TGID)
+    var grp: u64 = taskslot.tget(state, t, taskconst.T_TGID)
     if grp == 0 {
-        grp = sched.tget(state, t, sched.T_PID)
+        grp = taskslot.tget(state, t, taskconst.T_PID)
     }
     var nth: u64 = 0
     var ti: u64 = 0
     while ti < kstate.MAX_TASKS {
-        if sched.tget(state, ti, sched.T_STATE) != sched.S_FREE && sched.tget(state, ti, sched.T_STATE) != sched.S_ZOMBIE {
-            var tg: u64 = sched.tget(state, ti, sched.T_TGID)
+        if taskslot.tget(state, ti, taskconst.T_STATE) != taskconst.S_FREE && taskslot.tget(state, ti, taskconst.T_STATE) != taskconst.S_ZOMBIE {
+            var tg: u64 = taskslot.tget(state, ti, taskconst.T_TGID)
             if tg == 0 {
-                tg = sched.tget(state, ti, sched.T_PID)
+                tg = taskslot.tget(state, ti, taskconst.T_PID)
             }
             if tg == grp {
                 nth = nth + 1
@@ -904,11 +909,11 @@ fn make_status(state: u64, t: u64) -> u64 {
     p = w_num(state, p, nth)
     p = w_nl(state, p)
     p = w_str(state, p, (&l13[0]) as u64)
-    p = w_num(state, p, sched.tget(state, t, sched.T_UPAGES) * 4)
+    p = w_num(state, p, taskslot.tget(state, t, taskconst.T_UPAGES) * 4)
     p = w_str(state, p, (&l15[0]) as u64)
     p = w_nl(state, p)
     p = w_str(state, p, (&l14[0]) as u64)
-    p = w_num(state, p, sched.tget(state, t, sched.T_UPAGES) * 4)
+    p = w_num(state, p, taskslot.tget(state, t, taskconst.T_UPAGES) * 4)
     p = w_str(state, p, (&l15[0]) as u64)
     p = w_nl(state, p)
     var l11: [u8; 10] = "Origin: \0\0"
@@ -935,9 +940,9 @@ fn make_pstat(state: u64, t: u64) -> u64 {
     var name: [u8; 12] = [0 as u8; 12]
     var cm: [u8; 17] = [0 as u8; 17]
     var p: u64 = 0
-    kind_name(sched.tget(state, t, sched.T_KIND), (&name[0]) as u64)
-    let ca: u64 = sched.tget(state, t, sched.T_COMMA)
-    let cb: u64 = sched.tget(state, t, sched.T_COMMB)
+    kind_name(taskslot.tget(state, t, taskconst.T_KIND), (&name[0]) as u64)
+    let ca: u64 = taskslot.tget(state, t, taskconst.T_COMMA)
+    let cb: u64 = taskslot.tget(state, t, taskconst.T_COMMB)
     var ci: u64 = 0
     while ci < 8 {
         kstate.set8(((&cm[0]) as u64) + ci, ((ca >> (ci * 8)) & 255) as u8)
@@ -948,7 +953,7 @@ fn make_pstat(state: u64, t: u64) -> u64 {
         kstate.set8(((&cm[0]) as u64) + 8 + ci, ((cb >> (ci * 8)) & 255) as u8)
         ci = ci + 1
     }
-    p = w_num(state, p, sched.tget(state, t, sched.T_PID))
+    p = w_num(state, p, taskslot.tget(state, t, taskconst.T_PID))
     p = w_ch(state, p, 32)
     p = w_ch(state, p, 40)
     if ca != 0 {
@@ -958,33 +963,33 @@ fn make_pstat(state: u64, t: u64) -> u64 {
     }
     p = w_ch(state, p, 41)
     p = w_ch(state, p, 32)
-    p = w_ch(state, p, state_letter(sched.tget(state, t, sched.T_STATE)))
-    let par: u64 = sched.tget(state, t, sched.T_PARENT)
+    p = w_ch(state, p, state_letter(taskslot.tget(state, t, taskconst.T_STATE)))
+    let par: u64 = taskslot.tget(state, t, taskconst.T_PARENT)
     var ppid: u64 = 0
     if par < kstate.MAX_TASKS {
-        ppid = sched.tget(state, par, sched.T_PID)
+        ppid = taskslot.tget(state, par, taskconst.T_PID)
     }
     p = st_num(state, p, ppid)
-    p = st_num(state, p, sched.tget(state, t, sched.T_PGID))
-    p = st_num(state, p, sched.tget(state, t, sched.T_SID))
+    p = st_num(state, p, taskslot.tget(state, t, taskconst.T_PGID))
+    p = st_num(state, p, taskslot.tget(state, t, taskconst.T_SID))
     p = st_num(state, p, 0)
     p = st_num(state, p, 0)
     p = st_num(state, p, 0)
-    p = st_num(state, p, sched.tget(state, t, sched.T_FAULTS))
+    p = st_num(state, p, taskslot.tget(state, t, taskconst.T_FAULTS))
     p = st_num(state, p, 0)
     p = st_num(state, p, 0)
     p = st_num(state, p, 0)
-    p = st_num(state, p, sched.tget(state, t, sched.T_TICKS))
+    p = st_num(state, p, taskslot.tget(state, t, taskconst.T_TICKS))
     p = st_num(state, p, 0)
     p = st_num(state, p, 0)
     p = st_num(state, p, 0)
-    p = st_num(state, p, sched.tget(state, t, sched.T_PRIO))
+    p = st_num(state, p, taskslot.tget(state, t, taskconst.T_PRIO))
     p = st_num(state, p, 0)
     p = st_num(state, p, 1)
     p = st_num(state, p, 0)
     p = st_num(state, p, 0)
-    p = st_num(state, p, sched.tget(state, t, sched.T_UPAGES) * 4096)
-    p = st_num(state, p, sched.tget(state, t, sched.T_UPAGES))
+    p = st_num(state, p, taskslot.tget(state, t, taskconst.T_UPAGES) * 4096)
+    p = st_num(state, p, taskslot.tget(state, t, taskconst.T_UPAGES))
     p = st_num(state, p, 0 -% 1)
     var f: u64 = 26
     while f <= 52 {
@@ -1001,23 +1006,23 @@ fn make_pstat(state: u64, t: u64) -> u64 {
 
 fn make_cmdline(state: u64, t: u64) -> u64 {
     var p: u64 = 0
-    let frame: u64 = proc.translate(state, t, proc.ARGS_BASE)
+    let frame: u64 = procmap.translate(state, t, procspace.ARGS_BASE)
     if frame == 0 {
         return 0
     }
     guard.stac(state)
     let argc: u64 = __mmio_read64(frame as *mut u64)
-    if argc == 0 || argc > proc.MAX_ARGS {
+    if argc == 0 || argc > procbase.MAX_ARGS {
         guard.clac(state)
         return 0
     }
     var k: u64 = 0
     while k < argc {
         let ptr: u64 = __mmio_read64((frame + 8 + k * 8) as *mut u64)
-        if ptr < proc.ARGS_BASE || ptr >= proc.ARGS_BASE + 4096 {
+        if ptr < procspace.ARGS_BASE || ptr >= procspace.ARGS_BASE + 4096 {
             k = argc
         } else {
-            var at: u64 = frame + (ptr - proc.ARGS_BASE)
+            var at: u64 = frame + (ptr - procspace.ARGS_BASE)
             var going: bool = true
             while going {
                 let c: u64 = kstate.get8(at)
@@ -1038,23 +1043,23 @@ fn make_cmdline(state: u64, t: u64) -> u64 {
 
 fn make_maps(state: u64, t: u64) -> u64 {
     var p: u64 = 0
-    let low: u64 = proc.USER_DATA
-    let high: u64 = proc.LAZY_ATOP
+    let low: u64 = procbase.USER_DATA
+    let high: u64 = procmap.LAZY_ATOP
     var addr: u64 = low
     var run_start: u64 = 0
     var run_r: u64 = 0
     var in_run: bool = false
     while addr < high {
         var r: u64 = 0
-        let k: u64 = proc.pd_slot(addr)
-        if k != 0 && proc.pt_for(state, t, addr, false) == 0 {
+        let k: u64 = procpt.pd_slot(addr)
+        if k != 0 && procpt.pt_for(state, t, addr, false) == 0 {
             if in_run {
                 p = map_line(state, t, p, run_start, addr, run_r)
                 in_run = false
             }
             addr = (addr & 0xFFFFFFFFFFE00000) + 0x200000
         } else {
-            r = proc.page_rights(state, t, addr)
+            r = procspace.page_rights(state, t, addr)
             if r != 0 && !in_run {
                 in_run = true
                 run_start = addr
@@ -1103,15 +1108,15 @@ fn map_line(state: u64, t: u64, at: u64, a: u64, b: u64, r: u64) -> u64 {
     p = w_ch(state, p, 112)
     var tail: [u8; 26] = " 00000000 00:00 0      \0\0\0"
     p = w_str(state, p, (&tail[0]) as u64)
-    if a <= proc.USER_TOP - 4096 && b >= proc.USER_TOP {
+    if a <= procspace.USER_TOP - 4096 && b >= procspace.USER_TOP {
         var nm: [u8; 8] = "[stack]\0"
         p = w_str(state, p, (&nm[0]) as u64)
     } else if a == 0x40080000 {
         var nh: [u8; 8] = "[heap]\0\0"
         p = w_str(state, p, (&nh[0]) as u64)
-    } else if a >= MAPS_INTERP && a < proc.IMAGE_END {
+    } else if a >= MAPS_INTERP && a < procmap.IMAGE_END {
         p = w_interp_name(state, t, p)
-    } else if a >= proc.IMAGE_BASE && a < MAPS_INTERP {
+    } else if a >= procmap.IMAGE_BASE && a < MAPS_INTERP {
         p = w_exe_name(state, t, p)
     }
     p = w_nl(state, p)

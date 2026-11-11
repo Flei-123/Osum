@@ -69,7 +69,7 @@ ld -n -T "$LDSCRIPT" \
     --defsym=KERNEL_TRAP="_F0.trap__entry" \
     --defsym=KERNEL_SYSCALL="_F0.sys__entry" \
     --defsym=KERNEL_TASK_MAIN="_F0.tasks__main" \
-    --defsym=KERNEL_USER_START="_F0.proc__user_start" \
+    --defsym=KERNEL_USER_START="_F0.proccopy__user_start" \
     --defsym=KERNEL_AP_MAIN="_F0.smp__ap_main" \
     --defsym=USER_MAIN="_F0.u_enter" \
     -o "$TMPD/k0.elf" "$TMPD/boot.o" "$TMPD/isr.o" "$TMPD/switch.o" \

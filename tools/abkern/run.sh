@@ -127,5 +127,21 @@ hat "$OUT/o2.txt" "ab: TRIAL failed, back to 0" "the kernel reads the old trial 
 grep -qa '^default_entry: 1' "$OUT/o2.after" && ok "ESP flipped from the old trial file" || bad "ESP not flipped"
 
 echo
+echo "== 7. old spelling: /system/AKTUELL is still read and written when /system/CURRENT is absent =="
+rc=$(lauf a1 "cp /system/CURRENT /system/AKTUELL;rm /system/CURRENT;rm /system/ERPROBUNG;cp /erpseed /system/TRIAL;exit" two)
+gleich "boot 1 (moves the current file to the old name)" "$rc" "21"
+rc=$(lauf a2 "exit" two)
+gleich "boot 2" "$rc" "21"
+hat "$OUT/a2.txt" "ab: TRIAL failed, back to 0" "rollback writes through the old current file"
+hatnicht "$OUT/a2.txt" "ab: TRIAL not writable" "the old current file was found"
+grep -qa '^default_entry: 1' "$OUT/a2.after" && ok "ESP flipped with only /system/AKTUELL present" || bad "ESP not flipped"
+
+echo
+echo "== 8. counter-proof: neither /system/CURRENT nor /system/AKTUELL -> rollback cannot write =="
+rc=$(lauf g1 "rm /system/AKTUELL;cp /erpseed /system/TRIAL;exit" two)
+rc=$(lauf g2 "exit" two)
+hat "$OUT/g2.txt" "ab: TRIAL not writable" "without any current file the rollback is refused"
+
+echo
 echo "abkern: $pass/$fail OK/FAIL"
 [ "$fail" = 0 ]

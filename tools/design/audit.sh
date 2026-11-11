@@ -35,6 +35,7 @@ nurbau=nein
 vorherbild=nein
 #
 ton=nein
+kbd=off
 drehbuch=""
 lang=en
 dark_scheme=""
@@ -81,6 +82,7 @@ for a in "$@"; do
         nurbau=*) nurbau=${a#*=} ;;
         vorherbild=*) vorherbild=${a#*=} ;;
         ton=*) ton=${a#*=} ;;
+        kbd=*) kbd=${a#*=} ;;
         *) echo "unbekannt: $a" >&2; exit 2 ;;
     esac
 done
@@ -88,6 +90,8 @@ done
 [ "${battfake:-}" = ja ] && extra="$extra battfake"
 XRES=${res%x*}
 YRES=${res#*x}
+NOKBD="nokbd"
+[ "$kbd" = on ] && NOKBD=""
 SKAL=""
 if [ -n "$uiscale" ]; then SKAL="uiscale=$uiscale"; fi
 echo "uiscale ${uiscale:-1 (Vorgabe)}"
@@ -111,7 +115,7 @@ if [ ! -s "$BUILDD/crt.o" ] || [ -n "${DESIGNREBUILD:-}" ]; then
     as --64 -o "$BUILDD/crt.o" kernel/user/crt.s 2>"$BUILDD/as.err" \
         || { echo "FEHLGESCHLAGEN: crt.s"; cat "$BUILDD/as.err"; exit 1; }
 fi
-USERNEW=$(ls -t kernel/user/*.fi 2>/dev/null | head -1)
+USERNEW=$(bash tools/design/newest-source.sh)
 for p in $progs; do
     if [ -s "$BUILDD/$p.elf" ] && [ -z "${DESIGNREBUILD:-}" ] \
        && [ "$BUILDD/$p.elf" -nt "kernel/user/$p.fi" ] \
@@ -351,7 +355,7 @@ if [ -n "$zweite" ]; then
     ZWEITE=(-drive "file=$OUT/zweite.img,format=raw,if=ide,index=1")
 fi
 ( cd "$BUILDD" && exec timeout ${AUDIT_TIMEOUT:-600} qemu-system-x86_64 "${ACC[@]}" -kernel k0.mb -m ${AUDIT_MEM:-512} ${AUDIT_SMP:+-smp $AUDIT_SMP} \
-    -append "gfx fbres=${XRES}x${YRES} osum wm desk wmhold wighalt=$halt nokbd nosched $PROCFLAG $FSFLAG lang=$lang $SKAL $extra" \
+    -append "gfx fbres=${XRES}x${YRES} osum wm desk wmhold wighalt=$halt $NOKBD nosched $PROCFLAG $FSFLAG lang=$lang $SKAL $extra" \
     -serial "file:$OUT/serial.txt" -display none -no-reboot \
     "${GPUDEV[@]}" \
     -monitor "unix:$SOCK,server,nowait" \
@@ -363,11 +367,11 @@ fi
 PID=$!
 i=0
 while [ $i -lt 2400 ]; do
-    grep -qaE '^wm: hold' "$OUT/serial.txt" 2>/dev/null && break
+    grep -qaE '^wm: (hold|dauer)' "$OUT/serial.txt" 2>/dev/null && break
     kill -0 "$PID" 2>/dev/null || break
     sleep 0.15; i=$((i+1))
 done
-if ! grep -qaE '^wm: hold' "$OUT/serial.txt" 2>/dev/null; then
+if ! grep -qaE '^wm: (hold|dauer)' "$OUT/serial.txt" 2>/dev/null; then
     echo "FAIL: the window server never got to 'wm: hold' gekommen"
     tail -20 "$OUT/serial.txt" 2>/dev/null
 fi

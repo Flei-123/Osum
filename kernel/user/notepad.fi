@@ -1,0 +1,227 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import msg
+import icons
+import fuiscene
+import fuied
+import fuiapp.hostkey
+import services.svcosum
+import libc.text
+import notepad.npstr
+import notepad.npdoc
+import notepad.npindex
+import notepad.npstatus
+import notepad.npsay
+import notepad.npactions
+
+export { u_start }
+
+const WIN_X: u64 = 80
+const WIN_Y: u64 = 30
+const WIN_W: u64 = 720
+const WIN_H: u64 = 440
+const PAD: u64 = 16
+const ROW_GAP: u64 = 8
+const BAR_H: u64 = 32
+const STATUS_H: u64 = 24
+const LIST_W: u64 = 180
+const LIST_ROW_H: u64 = 28
+const MIN_BODY_H: u64 = 100
+const MIN_EDITOR_W: u64 = 200
+const K_NEW: u64 = 20
+const K_IMPORT: u64 = 21
+const K_SAVE: u64 = 22
+const K_DELETE: u64 = 23
+const K_OVERFLOW: u64 = 24
+const K_EXPORT: u64 = 25
+const CTRL_D: u64 = 4
+const CTRL_E: u64 = 5
+
+static mut win_w: u64 = 720
+static mut win_h: u64 = 440
+static mut surface_up: bool = false
+static mut seen_keys: u64 = 0
+static mut seen_builds: u64 = 0
+
+fn body_height(total: u64) -> u64 {
+    let fixed: u64 = PAD + 2 * ROW_GAP + BAR_H + STATUS_H
+    if total > fixed + MIN_BODY_H {
+        return total - fixed
+    }
+    return MIN_BODY_H
+}
+
+fn editor_width(total: u64) -> u64 {
+    let fixed: u64 = PAD + LIST_W + ROW_GAP
+    if total > fixed + MIN_EDITOR_W {
+        return total - fixed
+    }
+    return MIN_EDITOR_W
+}
+
+fn build() {
+    win_w = fuiscene.width()
+    win_h = fuiscene.height()
+    let col: usize = fuiscene.root()
+    let bar: usize = fuiscene.row(col)
+    fuiscene.set_gap(bar, 4)
+    fuiscene.cmd_begin()
+    fuiscene.cmd_item(icons.CMD_NEW_FILE, K_NEW, npstr.pad_cmd_new(), 0, 0)
+    fuiscene.cmd_item(icons.CMD_SAVE, K_SAVE, npstr.pad_cmd_save(), 0, 0)
+    fuiscene.cmd_item(icons.CMD_OPEN, K_IMPORT, npstr.pad_cmd_import(), 0, 0)
+    fuiscene.cmd_item(icons.FILE_TEXT, K_EXPORT, npstr.pad_cmd_export(), 0, 0)
+    fuiscene.cmd_item(icons.TRASH, K_DELETE, npstr.pad_cmd_delete(), 0, 0)
+    let _visible: u64 = fuiscene.cmd_end(bar, win_w - PAD, K_OVERFLOW)
+    let body: usize = fuiscene.row(col)
+    fuiscene.set_gap(body, ROW_GAP)
+    let _list: usize = fuiscene.table_list(body, npdoc.PAD_K_LIST, LIST_W, body_height(win_h), 1, npindex.pad_index_blob())
+    fuiscene.table_row_height(npdoc.PAD_K_LIST, LIST_ROW_H)
+    let _editor: usize = fuiscene.editor(body, npdoc.PAD_K_EDITOR, editor_width(win_w), body_height(win_h))
+    let _status: usize = fuiscene.label(col, npstatus.pad_status_ptr())
+}
+
+fn start_surface() -> bool {
+    if !fuiscene.begin() {
+        return false
+    }
+    npdoc.pad_set_slot(fuiscene.editor_prep(npdoc.PAD_K_EDITOR))
+    if npdoc.pad_slot() >= fuied.TA_MAX {
+        return false
+    }
+    fuiscene.table_prep(npdoc.PAD_K_LIST)
+    fuied.ed_size(npdoc.pad_slot(), editor_width(WIN_W), body_height(WIN_H))
+    if !fuiscene.open(WIN_X, WIN_Y, WIN_W, WIN_H, npstr.pad_window_title(), build) {
+        return false
+    }
+    surface_up = true
+    fuiscene.set_app(npstr.pad_app())
+    fuiscene.focus(npdoc.PAD_K_EDITOR)
+    return true
+}
+
+fn redraw() {
+    npstatus.pad_status_compose()
+    if surface_up {
+        fuiscene.refresh()
+    }
+}
+
+fn say_state() {
+    let row: u64 = npdoc.pad_row()
+    npsay.pad_say_state(row, npindex.pad_index_id(row), npdoc.pad_snapshot(), npdoc.pad_is_dirty())
+}
+
+fn run_action(key: u64) -> bool {
+    if key == K_NEW {
+        npactions.pad_new()
+        return true
+    }
+    if key == K_SAVE {
+        let _status: u64 = npactions.pad_save()
+        return true
+    }
+    if key == K_IMPORT {
+        npactions.pad_import()
+        return true
+    }
+    if key == K_EXPORT {
+        npactions.pad_export()
+        return true
+    }
+    if key == K_DELETE {
+        npactions.pad_delete()
+        return true
+    }
+    return false
+}
+
+fn shortcut_action(key: u64) -> u64 {
+    if key == hostkey.KEY_CTRL_N {
+        return K_NEW
+    }
+    if key == hostkey.KEY_CTRL_S {
+        return K_SAVE
+    }
+    if key == hostkey.KEY_CTRL_O {
+        return K_IMPORT
+    }
+    if key == CTRL_E {
+        return K_EXPORT
+    }
+    if key == CTRL_D {
+        return K_DELETE
+    }
+    return 0
+}
+
+fn handle_pressed(key: u64) {
+    if run_action(key) {
+        say_state()
+        redraw()
+        fuiscene.focus(npdoc.PAD_K_EDITOR)
+    }
+}
+
+fn handle_shortcut() {
+    let seq: u64 = fuiscene.key_seq()
+    if seq == seen_keys {
+        return
+    }
+    seen_keys = seq
+    let action: u64 = shortcut_action(fuiscene.key_any())
+    if action == 0 {
+        return
+    }
+    npsay.pad_say_shortcut(fuiscene.key_any())
+    handle_pressed(action)
+}
+
+fn say_list_after_build() {
+    let builds: u64 = fuiscene.builds()
+    if builds == seen_builds {
+        return
+    }
+    seen_builds = builds
+    npsay.pad_say_list(fuiscene.table_row_h(npdoc.PAD_K_LIST), fuiscene.scale_milli())
+}
+
+fn pump_once() {
+    let key: u64 = fuiscene.pump()
+    say_list_after_build()
+    if key != 0 {
+        handle_pressed(key)
+    }
+    handle_shortcut()
+    if npactions.pad_poll_selection() {
+        redraw()
+    }
+    if npstatus.pad_status_changed() {
+        redraw()
+        say_state()
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    let _msg: u64 = msg.init()
+    let _app: u64 = svcosum.set_app(npstr.pad_app(), text.length(npstr.pad_app()))
+    let rows: u64 = npactions.pad_boot()
+    npstatus.pad_status_compose()
+    if !start_surface() {
+        npsay.pad_say_no_surface()
+        return 1
+    }
+    npactions.pad_open_first()
+    redraw()
+    npsay.pad_say_ready(rows)
+    say_state()
+    while fuiscene.alive() {
+        pump_once()
+    }
+    return 0
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}

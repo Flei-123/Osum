@@ -28,7 +28,10 @@ bash tools/design/audit.sh "$TMPD/w" accel=kvm uitrace=yes halt=300 drehbuch="$(
 nw=$(grep -ac 'explorer: new window=' "$TMPD/w/serial.txt" 2>/dev/null); ns=$(grep -ac 'explorer: strip h=' "$TMPD/w/serial.txt" 2>/dev/null)
 f3=0
 if [ "${nw:-0}" -ge 1 ] && [ "${ns:-0}" -ge 2 ]; then echo "  OK    Ctrl+N starts a second file manager window ($ns strips)"; else echo "  FAIL  Ctrl+N did not start a second window (new window=$nw, strips=$ns)"; f3=1; fi
+echo "== the plus button on an inactive strip =="
+bash tools/tabstrip/inactive.sh | tee "$TMPD/inact.txt"
+f4=$?
 echo "== result =="
 [ "$f1" -eq 0 ] && [ "$o1" -ge 20 ] && echo "  OK    all $o1 checks pass" || echo "  FAIL  $f1 failed ($o1 ok)"
 [ "$f2" -ge 6 ] && echo "  OK    without the strip $f2 checks fail: they measure something" || echo "  FAIL  without the strip only $f2 checks fail"
-[ "$f1" -eq 0 ] && [ "$o1" -ge 20 ] && [ "$f2" -ge 6 ] && [ "$f3" -eq 0 ]
+[ "$f1" -eq 0 ] && [ "$o1" -ge 20 ] && [ "$f2" -ge 6 ] && [ "$f3" -eq 0 ] && [ "$f4" -eq 0 ]

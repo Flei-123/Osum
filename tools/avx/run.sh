@@ -85,15 +85,15 @@ if command -v objdump >/dev/null 2>&1; then
         /xmm|ymm|zmm/      { c[sym]++ }
         END { for (s in c) printf "%d %s\n", c[s], s }' \
         | sort -rn > "$TMPD/vecsym.txt"
-    ERLAUBT='<_F0\.(u_(vec|xmm|ymm|zmm)_[a-z]+|fpu__vec_[a-z]+|fb__hline_a_simd|(raster|fuittf|fuiink)__[a-z0-9_]+)>:'
-    FREMD=$(grep -vE " $ERLAUBT\$" "$TMPD/vecsym.txt" | wc -l)
-    GES=$(awk '{s += $1} END {print s + 0}' "$TMPD/vecsym.txt")
-    ERL=$(grep -cE " $ERLAUBT\$" "$TMPD/vecsym.txt")
-    if [ "$FREMD" -eq 0 ]; then
-        ok "vector instructions in the kernel ONLY in the $ERL functions of the probe ($GES pieces)"
+    ALLOWED='<_F0\.((upmisc__)?u_(vec|xmm|ymm|zmm)_[a-z]+|fpu__vec_[a-z]+|(aesni|shani|wmblur|fbpanel)__[a-z0-9_]+|(raster|fuittf|fuiink)__[a-z0-9_]+)>:'
+    FOREIGN=$(grep -vE " $ALLOWED\$" "$TMPD/vecsym.txt" | wc -l)
+    TOTAL=$(awk '{s += $1} END {print s + 0}' "$TMPD/vecsym.txt")
+    ALLOWED_COUNT=$(grep -cE " $ALLOWED\$" "$TMPD/vecsym.txt")
+    if [ "$FOREIGN" -eq 0 ]; then
+        ok "vector instructions in the kernel ONLY in the $ALLOWED_COUNT functions of the probe ($TOTAL pieces)"
     else
-        bad "vector instructions outside the probe, in $FREMD functions:"
-        grep -vE " $ERLAUBT\$" "$TMPD/vecsym.txt" | head -8 | sed 's/^/        /'
+        bad "vector instructions outside the probe, in $FOREIGN functions:"
+        grep -vE " $ALLOWED\$" "$TMPD/vecsym.txt" | head -8 | sed 's/^/        /'
     fi
 fi
 

@@ -6,7 +6,7 @@
 #   /root/jarvis/bin/heavy bash tools/linuxapps/run.sh <workdir> <guest-script> [outdir]
 #
 # <guest-script> is run by Alpine's busybox init as the sysinit line (/etc/fx.sh); everything it prints goes to the serial log.
-# Env: KERNEL=<k0.img|osum.mb> (default: builds stufe 0), MEM (MiB, 3072), TMO (s, 600), BLOCKS (512-byte blocks, 900000), DRIVE (ide|ahci),
+# Env: KERNEL=<k0.img|osum.mb> (default: builds stufe 0), MEM (MiB, 3072), TMO (s, 600), BLOCKS (512-byte blocks, 900000), DRIVE (ide|ahci|nvme),
 #      KARGS (default "osum vfs nokbd nosched noproc nofs fremdtrace"), SMP (1), DONE (marker the guest prints at the end, FX-END),
 #      SPEC (an existing mkroot spec; default <workdir>/fxrun/spec.txt), KEEP=1 (keep the disk image),
 #      GUI=1 (replace busybox sh/sleep/echo/cat/ls by the Osum programs, add wayd, fonts and keymaps: the guest script is then an Osum-sh script),
@@ -59,6 +59,7 @@ bash tools/mkfsfi/mkfs.sh build "$OUT/disk.img" "$BLOCKS" --v3 --inodes=${INODES
 echo "LINUXAPPS: disk $(stat -c%s "$OUT/disk.img") bytes, kernel $KERNEL"
 DRV=(-drive "file=$OUT/disk.img,format=raw,if=ide,index=0")
 [ "$DRIVE" = ahci ] && DRV=(-device ahci,id=ahci -drive "file=$OUT/disk.img,format=raw,if=none,id=d0" -device ide-hd,drive=d0,bus=ahci.0)
+[ "$DRIVE" = nvme ] && DRV=(-drive "file=$OUT/disk.img,format=raw,if=none,id=d0" -device nvme,drive=d0,serial=fxnvme)
 SOCK="$OUT/mon.sock"; rm -f "$SOCK"
 timeout "$TMO" qemu-system-x86_64 "${ACC[@]}" -smp "${SMP:-1}" -kernel "$KERNEL" -m "$MEM" -append "$KARGS" \
     -serial "file:$OUT/ser.txt" -display none -no-reboot -monitor "unix:$SOCK,server,nowait" "${DRV[@]}" \

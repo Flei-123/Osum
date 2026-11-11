@@ -33,7 +33,7 @@ erwiesen, obwohl er einzeln messbar schneller war (Abschnitt 4.2).
 
 ### 1.1 Wie gemessen wurde
 
-Fuenf Zaehler in `kernel/user/h264.fi`, gefuellt mit `rdtsc`:
+Fuenf Zaehler in `kernel/user/codec/h264.fi`, gefuellt mit `rdtsc`:
 
 | Zaehler | was er umschliesst |
 |---|---|

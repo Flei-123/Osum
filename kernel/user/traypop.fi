@@ -3,11 +3,8 @@
 //
 // One scene window of the bar's scene host (window 6, like barpop / taskview; NOT code in
 // taskbar.fi, which sits at its size limit). It is opened by the tray chevron when the tray has
-// icons in the overflow, and shows three things, top down:
+// icons in the overflow, and shows two things, top down:
 //
-//   network     a VECTOR glyph of the real state + the sentence the bar's tooltip uses
-//   sound       speaker glyph, mute button and a volume slider (SYS_AUDGET / SYS_AUDSET: the same
-//               calls as the quick settings; "no audio device" when the kernel has none)
 //   microphone  glyph + "in use by N programs" / "muted" + mute button -- real numbers (SYS_AUDGET A_CAPUSERS/A_CAPMUTE)
 //   overflow    one row per item of lib/fui/tray.fi (PLACE_OVERFLOW): glyph, name, a "..." button
 //               that opens the item's context menu (its entries + "Move up" + "Hide")
@@ -35,12 +32,17 @@
 //   traypop: click id= owner=          traypop: menu id=        traypop: pick id= action=
 //   traypop: vol <0..100> rc=          traypop: mute <0|1>      traypop: shut <why>
 
-profile kernel
+profile app
 
+import fuiapp.hosthead
+import fuiapp.hostwin
+import fuiapp.hostwinp
+import uikit.uiscale
+import uikit.uitext
 import ulib
 import lineout
-import wlibc
-import wlib
+import uitheme
+import fuiapp.apphost
 import fuiscene
 import fuiapp
 import msg
@@ -50,6 +52,8 @@ import fui.icon
 import fui.tray
 import osktray
 import pairshow
+import uikit.uiflyout
+import uikit.uisys
 
 export { init, toggle, step, is_open, hit, shut_now, net_glyph, wlan_glyph, speaker_glyph, mic_glyph,
     chevron_glyph }
@@ -65,8 +69,6 @@ const CELL: u64 = 52
 const CELL_ICON: u64 = 28
 const MAXH: u64 = 560
 
-const K_MUTE: u64 = 300
-const K_VOL: u64 = 301
 const K_OSK: u64 = 303
 const K_ITEM: u64 = 320
 const K_MENU: u64 = 340
@@ -74,8 +76,6 @@ const K_ENT: u64 = 360
 const K_UP: u64 = 380
 const K_HIDE: u64 = 381
 const K_BACK: u64 = 382
-const CK_NET: u64 = 400
-const CK_SND: u64 = 401
 const CK_MIC: u64 = 402
 const CK_ITEM: u64 = 410
 const CK_SHEET: u64 = 440
@@ -88,8 +88,6 @@ const SYS_AUDSET: u64 = 1851
 const A_READY: u64 = 0
 const A_VOLUME: u64 = 4
 const A_MUTED: u64 = 21
-const AS_VOLUME: u64 = 0
-const AS_MUTE: u64 = 2
 const A_CAPREADY: u64 = 54 // microphone: a path exists
 const A_CAPUSERS: u64 = 55 // programs reading it within 2 s
 const A_CAPMUTE: u64 = 56
@@ -121,7 +119,6 @@ static mut mode: u64 = 0
 static mut menu_item: u64 = 0 // id of the item whose menu is open
 static mut net_st: u64 = 0
 static mut net_da: u64 = 0
-static mut snd_da: u64 = 0
 static mut snd_vol: u64 = 0
 static mut snd_mute: u64 = 0
 static mut mic_users: u64 = 0 // STUB source (see the header)
@@ -148,26 +145,16 @@ static mut tip_b: [u8; 64] = [0 as u8; 64]
 const SYS_NETGET: u64 = 1300
 const NG_UPKIND: u64 = 24
 const KIND_WLAN: u64 = 6
-const KIND_USBNET: u64 = 5
 static mut p_items: [u8; 16] = "/etc/tray.items\0"
 static mut s_tile: [u8; 17] = "traypop: tile i=\0"
 static mut t_title: [u8; 5] = "Tray\0"
 static mut t_sys: [u8; 7] = "system\0"
-static mut t_net: [u8; 22] = "taskbar.tip.nocarrier\0"
-static mut t_net1: [u8; 17] = "taskbar.tip.noip\0"
-static mut t_net2: [u8; 20] = "taskbar.tip.noroute\0"
-static mut t_net3: [u8; 19] = "taskbar.tip.online\0"
 static mut t_net3w: [u8; 24] = "taskbar.tip.online_wlan\0"
 static mut t_net3u: [u8; 23] = "taskbar.tip.online_usb\0"
-static mut t_net4: [u8; 19] = "taskbar.tip.noinet\0"
-static mut t_net4a: [u8; 18] = "taskbar.tip.nogw\0\0"
-static mut t_net4b: [u8; 20] = "taskbar.tip.nodns\0\0\0"
-const NG_HEALTH: u64 = 20
 static mut k_net: [u8; 9] = "tray.net\0"
 static mut k_snd: [u8; 11] = "tray.sound\0"
 static mut k_mute: [u8; 10] = "tray.mute\0"
 static mut k_unmute: [u8; 12] = "tray.unmute\0"
-static mut k_nosnd: [u8; 13] = "tray.nosound\0"
 static mut k_osk: [u8; 9] = "tray.osk\0"
 static mut k_oskgo: [u8; 14] = "tray.osk.open\0"
 static mut s_oskpid: [u8; 18] = "traypop: osk pid=\0"
@@ -176,7 +163,6 @@ static mut n_osk: [u8; 4] = "osk\0"
 static mut s_oskwhy: [u8; 4] = "osk\0"
 static mut k_micuse: [u8; 13] = "tray.mic.use\0"
 static mut k_micmuted: [u8; 15] = "tray.mic.muted\0"
-static mut k_more: [u8; 10] = "tray.more\0"
 static mut k_pairw: [u8; 18] = "tray.pair.waiting\0"
 static mut k_pairc: [u8; 18] = "tray.pair.confirm\0"
 static mut n_pair: [u8; 8] = "pairing\0"
@@ -187,7 +173,6 @@ static mut k_up: [u8; 8] = "tray.up\0"
 static mut k_hide: [u8; 10] = "tray.hide\0"
 static mut k_back: [u8; 10] = "tray.back\0"
 static mut k_dots: [u8; 13] = "tray.options\0"
-static mut k_nonet: [u8; 11] = "tray.nonet\0"
 static mut s_open: [u8; 17] = "traypop: open n=\0"
 static mut s_xy: [u8; 4] = " x=\0"
 static mut s_yy: [u8; 4] = " y=\0"
@@ -201,9 +186,7 @@ static mut s_click: [u8; 19] = "traypop: click id=\0"
 static mut s_menu: [u8; 18] = "traypop: menu id=\0"
 static mut s_pick: [u8; 18] = "traypop: pick id=\0"
 static mut s_act: [u8; 9] = " action=\0"
-static mut s_vol: [u8; 14] = "traypop: vol \0"
 static mut s_rc: [u8; 5] = " rc=\0"
-static mut s_mute: [u8; 15] = "traypop: mute \0"
 static mut s_micmute: [u8; 18] = "traypop: micmute \0"
 static mut s_shut: [u8; 15] = "traypop: shut \0"
 static mut s_esc: [u8; 4] = "esc\0"
@@ -414,8 +397,10 @@ fn chevron_glyph(x: u64, y: u64, size: u64, dir: u64, fg: u64) {
     }
 }
 
-// Wi-Fi exists in this system only when a driver says so. None does (roadmap N-005): Ethernet.
 fn net_kind() -> u64 {
+    if ulib.sys(SYS_NETGET, NG_UPKIND, 0, 0) == KIND_WLAN {
+        return NK_WLAN
+    }
     return NK_ETH
 }
 
@@ -432,18 +417,18 @@ fn speaker_level() -> u64 {
 // the first letter of an owner on a plate: the glyph of a program that brings no picture
 fn letter_glyph(x: u64, y: u64, size: u64, owner: u64) {
     let s: f64 = size as f64
-    plate(x as f64, y as f64, s, s, s * 0.22, argb(wlibc.theme(wlibc.T_ACCENT), 70))
-    ringp(x as f64, y as f64, s, s, s * 0.22, 1.0, argb(wlibc.theme(wlibc.T_ACCENT), 255))
+    plate(x as f64, y as f64, s, s, s * 0.22, argb(uitheme.theme(uitheme.T_ACCENT), 70))
+    ringp(x as f64, y as f64, s, s, s * 0.22, 1.0, argb(uitheme.theme(uitheme.T_ACCENT), 255))
     var up: u8 = __mmio_read8(owner as *mut u8)
     if up >= 97 as u8 && up <= 122 as u8 {
         up = up - 32 as u8
     }
     __mmio_write8((&owner_b[0 as usize]) as *mut u8, up)
     __mmio_write8(((&owner_b[0 as usize]) as u64 + 1) as *mut u8, 0 as u8)
-    let px: u64 = wlibc.px_ui()
-    let base: u64 = y + (size + wlibc.ascent_of(wlibc.F_UI, px)) / 2
+    let px: u64 = uiscale.px_ui()
+    let base: u64 = y + (size + uitext.ascent_of(uitext.F_UI, px)) / 2
     fuiscene.cv_text_rgb(x + size / 3, base, size, (&owner_b[0 as usize]) as u64, px, true,
-        wlibc.theme(wlibc.T_FG))
+        uitheme.theme(uitheme.T_FG))
 }
 
 fn warn_rgb() -> u64 {
@@ -452,10 +437,10 @@ fn warn_rgb() -> u64 {
 
 fn paint_net(x: u64, y: u64, size: u64) {
     if net_kind() == NK_WLAN {
-        wlan_glyph(x, y, size, 4, wlibc.theme(wlibc.T_FG), warn_rgb())
+        wlan_glyph(x, y, size, 4, uitheme.theme(uitheme.T_FG), warn_rgb())
         return
     }
-    net_glyph(x, y, size, net_st, wlibc.theme(wlibc.T_FG), warn_rgb(), wlibc.theme(wlibc.T_MENU))
+    net_glyph(x, y, size, net_st, uitheme.theme(uitheme.T_FG), warn_rgb(), uitheme.theme(uitheme.T_MENU))
 }
 
 // one function for every canvas of the window: the node's key says which glyph
@@ -466,12 +451,8 @@ fn draw_cv(key: u64, x: u64, y: u64, w: u64, h: u64) {
     }
     let ox: u64 = x + (w - size) / 2
     let oy: u64 = y + (h - size) / 2
-    let fg: u64 = wlibc.theme(wlibc.T_FG)
-    if key == CK_NET {
-        paint_net(ox, oy, size)
-    } else if key == CK_SND {
-        speaker_glyph(ox, oy, size, speaker_level(), snd_mute, fg)
-    } else if key == CK_MIC {
+    let fg: u64 = uitheme.theme(uitheme.T_FG)
+    if key == CK_MIC {
         mic_glyph(ox, oy, size, mic_muted, fg, warn_rgb())
     } else if key >= CK_ITEM && key < CK_ITEM + MAXROWS {
         let id: u64 = row_id[(key - CK_ITEM) as usize]
@@ -495,10 +476,10 @@ fn draw_cv(key: u64, x: u64, y: u64, w: u64, h: u64) {
 
 // the glyph sheet (test aid, `sheet` line in /etc/tray.items): every state of every glyph
 fn sheet(x: u64, y: u64, w: u64, h: u64) {
-    let fg: u64 = wlibc.theme(wlibc.T_FG)
-    let bg: u64 = wlibc.theme(wlibc.T_MENU)
-    let cell: u64 = 32 * wlibc.ui_scale()
-    let gap: u64 = 8 * wlibc.ui_scale()
+    let fg: u64 = uitheme.theme(uitheme.T_FG)
+    let bg: u64 = uitheme.theme(uitheme.T_MENU)
+    let cell: u64 = 32 * uiscale.ui_scale()
+    let gap: u64 = 8 * uiscale.ui_scale()
     var i: u64 = 0
     while i < 4 {
         net_glyph(x + i * (cell + gap), y, cell, i, fg, warn_rgb(), bg)
@@ -626,9 +607,7 @@ fn read_items() {
 // ------------------------------------------------------------------ the tree
 
 fn read_audio() {
-    snd_da = 0
     if ulib.sys(SYS_AUDGET, A_READY, 0, 0) == 1 {
-        snd_da = 1
         snd_vol = ulib.sys(SYS_AUDGET, A_VOLUME, 0, 0)
         snd_mute = ulib.sys(SYS_AUDGET, A_MUTED, 0, 0)
         if snd_vol > 100 {
@@ -646,39 +625,6 @@ fn read_audio() {
             mic_who = 0
         }
     }
-}
-
-fn net_text() -> u64 {
-    if net_da == 0 {
-        return msg.get((&k_nonet[0 as usize]) as u64)
-    }
-    if net_st == 0 {
-        return msg.get((&t_net[0 as usize]) as u64)
-    }
-    if net_st == 1 {
-        return msg.get((&t_net1[0 as usize]) as u64)
-    }
-    if net_st == 2 {
-        return msg.get((&t_net2[0 as usize]) as u64)
-    }
-    if net_st == 4 {
-        let hl: u64 = ulib.sys(SYS_NETGET, NG_HEALTH, 0, 0)
-        if hl == 2 {
-            return msg.get((&t_net4a[0 as usize]) as u64)
-        }
-        if hl == 3 {
-            return msg.get((&t_net4b[0 as usize]) as u64)
-        }
-        return msg.get((&t_net4[0 as usize]) as u64)
-    }
-    let uk: u64 = ulib.sys(SYS_NETGET, NG_UPKIND, 0, 0)
-    if uk == KIND_WLAN {
-        return msg.get((&t_net3w[0 as usize]) as u64)
-    }
-    if uk == KIND_USBNET {
-        return msg.get((&t_net3u[0 as usize]) as u64)
-    }
-    return msg.get((&t_net3[0 as usize]) as u64)
 }
 
 fn num_into(at: u64, v: u64) -> u64 {
@@ -832,7 +778,7 @@ fn grid_rows() -> u64 {
 
 fn tile_cb(ud: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
     let _s: u64 = st
-    var size: u64 = CELL_ICON * wlibc.ui_scale()
+    var size: u64 = CELL_ICON * uiscale.ui_scale()
     if size > w {
         size = w
     }
@@ -876,8 +822,6 @@ fn card_h() -> u64 {
         let m: u64 = tray.tray_menu_count(&tr, id) as u64
         return h + (m + 4) * (ROW_H + GAPP)
     }
-    h = h + ROW_H + GAPP // network
-    h = h + ROW_H + GAPP // sound: mute button + slider on one row
     if mic_shown() {
         h = h + ROW_H + GAPP
     }
@@ -887,7 +831,6 @@ fn card_h() -> u64 {
     if osk_on != 0 {
         h = h + ROW_H + GAPP
     }
-    h = h + 22 + GAPP // the "more" caption
     if n_rows == 0 {
         h = h + 22 + GAPP
     } else {
@@ -928,26 +871,6 @@ fn build() {
         build_menu(r)
         return
     }
-    // network
-    let rn: usize = fuiscene.row(r)
-    fuiscene.set_gap(rn, GAPP + 2)
-    let _gn: usize = fuiscene.canvas2(rn, CK_NET, ROW_H - 4, ROW_H - 4, draw_cv)
-    let _ln: usize = fuiscene.label(rn, net_text())
-    // sound
-    let rs: usize = fuiscene.row(r)
-    fuiscene.set_gap(rs, GAPP + 2)
-    if snd_da != 0 {
-        let _gs: usize = fuiscene.canvas2(rs, CK_SND, ROW_H - 4, ROW_H - 4, draw_cv)
-        var mk: u64 = (&k_mute[0 as usize]) as u64
-        if snd_mute != 0 {
-            mk = (&k_unmute[0 as usize]) as u64
-        }
-        let _bm: usize = fuiscene.button(rs, msg.get(mk), K_MUTE)
-        let _sl: usize = fuiscene.slider(rs, K_VOL, 120, (snd_vol * 10) as i64)
-    } else {
-        let _gs: usize = fuiscene.canvas2(rs, CK_SND, ROW_H - 4, ROW_H - 4, draw_cv)
-        let _ls: usize = fuiscene.label(rs, msg.get((&k_nosnd[0 as usize]) as u64))
-    }
     // microphone (STUB source)
     if mic_shown() {
         let rm: usize = fuiscene.row(r)
@@ -976,7 +899,6 @@ fn build() {
         let _bo: usize = fuiscene.button(ro, msg.get((&k_oskgo[0 as usize]) as u64), K_OSK)
     }
     // overflow
-    let _lc: usize = fuiscene.label_muted(r, msg.get((&k_more[0 as usize]) as u64))
     if n_rows == 0 {
         let _ln2: usize = fuiscene.label(r, msg.get((&k_none[0 as usize]) as u64))
     }
@@ -1008,8 +930,8 @@ fn init() -> bool {
     }
     add_system()
     read_items()
-    tp_win = fuiscene.win_open_plain(0, 0, CARD_W * wlibc.ui_scale(), MAXH * wlibc.ui_scale(), (&t_title[0 as usize]) as u64,
-        wlibc.L_MENU, build)
+    tp_win = fuiscene.win_open_plain(0, 0, CARD_W * uiscale.ui_scale(), MAXH * uiscale.ui_scale(), (&t_title[0 as usize]) as u64,
+        hostwinp.L_MENU, build)
     if tp_win == fuiscene.BADWIN {
         tp_win = NONE
         return false
@@ -1017,9 +939,9 @@ fn init() -> bool {
     let _s: bool = fuiscene.win_select(tp_win)
     fuiscene.keys_always(true)
     tp_h = fuiscene.handle()
-    let _v: u64 = wlibc.win_state(tp_h, wlibc.WS_HIDDEN, 1)
+    let _v: u64 = hostwin.win_state(tp_h, hostwinp.WS_HIDDEN, 1)
     let _u: bool = fuiscene.win_select(0)
-    tp_id = wlibc.sys3w(wlibc.WM_INFO, tp_h, wlibc.WI_ID, 0)
+    tp_id = uisys.sys3w(hostwinp.WM_INFO, tp_h, hostwinp.WI_ID, 0)
     return true
 }
 
@@ -1045,24 +967,15 @@ fn paint_now() {
 // size + place the card (above the chevron, right edge kept on the screen) and repaint
 fn relayout() {
     read_rows()
-    pw_ = CARD_W * wlibc.ui_scale()
-    ph_ = card_h() * wlibc.ui_scale()
-    if ph_ > MAXH * wlibc.ui_scale() {
-        ph_ = MAXH * wlibc.ui_scale()
+    pw_ = CARD_W * uiscale.ui_scale()
+    ph_ = card_h() * uiscale.ui_scale()
+    if ph_ > MAXH * uiscale.ui_scale() {
+        ph_ = MAXH * uiscale.ui_scale()
     }
-    // r828: stay inside the head of the bar that owns the chevron (the whole screen on one head)
-    let sw: u64 = wlibc.head_bx() + wlibc.head_bw()
-    px_ = wlibc.head_bx()
-    if ax_ + aw_ > pw_ + px_ {
-        px_ = ax_ + aw_ - pw_
-    }
-    if px_ + pw_ > sw && sw > pw_ {
-        px_ = sw - pw_
-    }
-    py_ = 0
-    if ay_ > ph_ + 8 * wlibc.ui_scale() {
-        py_ = ay_ - ph_ - 8 * wlibc.ui_scale()
-    }
+    uiflyout.place(ax_, ay_, aw_, ah_, pw_, ph_, hosthead.head_bx() + hosthead.head_bw(), hosthead.head_by() + hosthead.head_bh(),
+        uiscale.ui_scale())
+    px_ = uiflyout.x()
+    py_ = uiflyout.y()
     let _s: bool = fuiscene.win_select(tp_win)
     let _z: bool = fuiscene.win_size(pw_, ph_)
     fuiscene.refresh()
@@ -1070,7 +983,7 @@ fn relayout() {
     key_last = fuiscene.key_seq()
     let _u: bool = fuiscene.win_select(0)
     paint_now()
-    let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, tp_h, (px_ << 16) | py_, 0)
+    let _m: u64 = uisys.sys3w(hostwinp.WM_MOVE, tp_h, (px_ << 16) | py_, 0)
 }
 
 fn say_osk_rect() {
@@ -1112,12 +1025,12 @@ fn open_now() {
     tile_say = 1
     relayout()
     tile_say = 0
-    let _v: u64 = wlibc.win_state(tp_h, wlibc.WS_HIDDEN, 0)
+    let _v: u64 = hostwin.win_state(tp_h, hostwinp.WS_HIDDEN, 0)
     open_ = 1
-    btn_last = wlibc.mouse_btn() & 7
+    btn_last = hosthead.mouse_btn() & 7
     focus_seen = 0
-    let _a: u64 = wlibc.win_act(tp_id, wlibc.WA_RAISE)
-    let _k: u64 = wlibc.win_state(tp_h, wlibc.WS_KEYS, 1)
+    let _a: u64 = hostwin.win_act(tp_id, hostwinp.WA_RAISE)
+    let _k: u64 = hostwin.win_state(tp_h, hostwinp.WS_KEYS, 1)
     let _fs: bool = fuiscene.win_select(tp_win)
     fuiscene.focus_canvas()
     let _fu: bool = fuiscene.win_select(0)
@@ -1155,7 +1068,7 @@ fn shut(why: u64) {
         return
     }
     open_ = 0
-    let _v: u64 = wlibc.win_state(tp_h, wlibc.WS_HIDDEN, 1)
+    let _v: u64 = hostwin.win_state(tp_h, hostwinp.WS_HIDDEN, 1)
     say_shut_line(why)
 }
 
@@ -1255,40 +1168,6 @@ fn on_key(key: u64) -> bool {
         relayout()
         return true
     }
-    if key == K_MUTE {
-        var fresh: u64 = 1
-        if snd_mute != 0 {
-            fresh = 0
-        }
-        let rc: u64 = ulib.sys(SYS_AUDSET, AS_MUTE, fresh, 0)
-        say((&s_mute[0 as usize]) as u64)
-        lineout.add_num(fresh)
-        say((&s_rc[0 as usize]) as u64)
-        lineout.add_num(rc)
-        lineout.end_line()
-        read_audio()
-        relayout()
-        return true
-    }
-    if key == K_VOL {
-        let _s: bool = fuiscene.win_select(tp_win)
-        let v: u64 = (fuiscene.value_of(K_VOL) as u64) / 10
-        let _u: bool = fuiscene.win_select(0)
-        let rc: u64 = ulib.sys(SYS_AUDSET, AS_VOLUME, v, 0)
-        if v > 0 && snd_mute != 0 {
-            let _m: u64 = ulib.sys(SYS_AUDSET, AS_MUTE, 0, 0)
-        }
-        snd_vol = v
-        if v > 0 {
-            snd_mute = 0
-        }
-        say((&s_vol[0 as usize]) as u64)
-        lineout.add_num(v)
-        say((&s_rc[0 as usize]) as u64)
-        lineout.add_num(rc)
-        lineout.end_line()
-        return true
-    }
     if key >= K_ITEM && key < K_ITEM + n_rows {
         let id: u64 = row_id[(key - K_ITEM) as usize]
         let _c: bool = tray.tray_click(&tr, id, tray.BTN_LEFT)
@@ -1347,14 +1226,14 @@ fn on_key(key: u64) -> bool {
 }
 
 fn has_focus() -> bool {
-    return wlibc.sys3w(wlibc.WM_INFO, tp_h, wlibc.WI_FOCUS, 0) == 1
+    return uisys.sys3w(hostwinp.WM_INFO, tp_h, hostwinp.WI_FOCUS, 0) == 1
 }
 
 fn step() -> bool {
     if open_ == 0 {
         return false
     }
-    let _st: u64 = wlib.step()
+    let _st: u64 = apphost.step()
     let key: u64 = fuiscene.pump_aux(tp_win)
     if key != 0 && on_key(key) {
         return true
@@ -1384,10 +1263,10 @@ fn step() -> bool {
         shut((&s_foc[0 as usize]) as u64)
         return true
     }
-    let btn: u64 = wlibc.mouse_btn() & 7
+    let btn: u64 = hosthead.mouse_btn() & 7
     if (btn & ~btn_last) != 0 {
-        let mx: u64 = wlibc.mouse_x()
-        let my: u64 = wlibc.mouse_y()
+        let mx: u64 = hosthead.mouse_x()
+        let my: u64 = hosthead.mouse_y()
         let on_anchor: bool = mx >= ax_ && mx < ax_ + aw_ && my >= ay_ && my < ay_ + ah_
         if !hit(mx, my) && !on_anchor {
             shut((&s_out[0 as usize]) as u64)

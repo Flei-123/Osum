@@ -31,8 +31,12 @@ import drv.con.sercon
 import pwr.power
 import pwr.pmon
 import sched.sched
+import sched.taskconst
+import sched.taskslot
 import apic
 import drv.blk.nvme
+import drv.blk.ahci
+import drv.blk.ahci_irq
 import usb.usb
 import drv.snd.audio
 import net.netdev
@@ -44,7 +48,8 @@ import sched.time
 import sched.hrt
 import sched.signal
 import fs.evfd
-import sched.proc
+import sched.proc.procfault
+import sched.proc.procmap
 import arch.msr
 import arch.safemem
 import arch.arch
@@ -143,7 +148,7 @@ fn entry(frame: u64, state: u64) {
         }
         if vector == 14 && user_fault(frame, state) {
             if !kstate.mode_on(state, kstate.M_NOSTACK) {
-                if proc.grow_stack(state, sched.current(state), cr2(),
+                if procmap.grow_stack(state, sched.current(state), cr2(),
                         regio.read64_at(frame, F_RSP)) {
                     return
                 }
@@ -153,10 +158,10 @@ fn entry(frame: u64, state: u64) {
         // repeats. Gegenprobe: `nodemand` on the kernel command line.
         if vector == 14 && user_fault(frame, state) {
             if !kstate.mode_on(state, kstate.M_NODEMAND) {
-                if proc.demand_fault(state, sched.current(state), cr2(), regio.read64_at(frame, F_ERROR)) {
+                if procfault.demand_fault(state, sched.current(state), cr2(), regio.read64_at(frame, F_ERROR)) {
                     return
                 }
-                if proc.lazy_fault(state, sched.current(state), cr2(), regio.read64_at(frame, F_ERROR)) {
+                if procfault.lazy_fault(state, sched.current(state), cr2(), regio.read64_at(frame, F_ERROR)) {
                     return
                 }
             }
@@ -256,6 +261,11 @@ fn entry(frame: u64, state: u64) {
     if vector >= VEC_AUDIO && vector <= VEC_NET + 1 {
         acpiev.shared(state, vector)
     }
+    if vector == ahci_irq.VECTOR {
+        ahci.irq(state)
+        eoi(state, vector)
+        return
+    }
     if vector == VEC_NVME {
         nvme.irq(state)
         eoi(state, vector)
@@ -307,7 +317,7 @@ fn user_fault(frame: u64, state: u64) -> bool {
         return false
     }
     let cur: u64 = sched.current(state)
-    return sched.tget(state, cur, sched.T_KIND) == sched.K_USER
+    return taskslot.tget(state, cur, taskconst.T_KIND) == taskconst.K_USER
 }
 
 fn report_user(frame: u64, state: u64, vector: u64, cur: u64, dies: bool) {
@@ -321,7 +331,7 @@ fn report_user(frame: u64, state: u64, vector: u64, cur: u64, dies: bool) {
     var s_sig: [u8; 13] = "  -> caught \0"
     serial.puts((&s_kill[0]) as u64)
     serial.puts((&s_pid[0]) as u64)
-    serial.dec(sched.tget(state, cur, sched.T_PID))
+    serial.dec(taskslot.tget(state, cur, taskconst.T_PID))
     serial.puts((&s_vec[0]) as u64)
     serial.dec(vector)
     serial.puts((&s_err[0]) as u64)
@@ -351,7 +361,7 @@ fn report_user(frame: u64, state: u64, vector: u64, cur: u64, dies: bool) {
             regio.read64_at(frame, F_CS), regio.read64_at(frame, F_RFLAGS),
             regio.read64_at(frame, F_RSP), regio.read64_at(frame, F_SS),
             regio.read64_at(frame, F_ERROR), cr2(), vector,
-            sched.tget(state, cur, sched.T_PID),
+            taskslot.tget(state, cur, taskconst.T_PID),
             (&nm[0 as usize]) as u64,
             (&uspur[0 as usize]) as u64, uspur_n)
         notice.crash(state, (&nm[0 as usize]) as u64)
@@ -387,14 +397,14 @@ fn trace_say(state: u64, cur: u64, rsp: u64) {
     var s_ph: [u8; 8] = "  phys=\0"
     var s_ks: [u8; 10] = "  kstack=\0"
     serial.puts((&s_ph[0]) as u64)
-    serial.hex(proc.translate(state, cur, rsp))
+    serial.hex(procmap.translate(state, cur, rsp))
     serial.puts((&s_ks[0]) as u64)
-    serial.hex(sched.tget(state, cur, sched.T_KSTACK))
+    serial.hex(taskslot.tget(state, cur, taskconst.T_KSTACK))
     var i: u64 = 0
     var n: u64 = 0
     while i < 256 && n < 8 {
         let a: u64 = rsp + i * 8
-        let phys: u64 = proc.translate(state, cur, a)
+        let phys: u64 = procmap.translate(state, cur, a)
         if phys != 0 {
             let v: u64 = __mmio_read64(phys as *mut u64)
             if how_code(v) {
@@ -416,7 +426,7 @@ fn trace_say(state: u64, cur: u64, rsp: u64) {
         serial.puts((&s_no[0]) as u64)
     }
     serial.nl()
-    tot_pid = sched.tget(state, cur, sched.T_PID)
+    tot_pid = taskslot.tget(state, cur, taskconst.T_PID)
     dead_count = dead_count + 1
 }
 

@@ -111,7 +111,7 @@ D="$TMPD/s0/disk.img"
 # The driver is part of the freestanding kernel: no libc, no runtime and
 # not one `syscall` instruction in ring 0.
 undef=$(nm -u "$TMPD/s0/k.o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' \
-        | grep -vE '^(osum_panic|kdata|osym_tab)$')
+        | grep -vE '^(osum_panic|kdata|osym_tab|kernel_start)$')
 [ -z "$undef" ] && ok "k.o: no undefined name other than osum_panic, kdata und osym_tab" \
                 || bad "k.o: undefined symbols: $undef"
 n=$(nm "$TMPD/s0/k.o" 2>/dev/null | grep -cE 'e1000__init_on|netdev__probe')

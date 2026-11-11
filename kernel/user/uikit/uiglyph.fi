@@ -1,0 +1,354 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import fuiapp.hosthead
+import libc.memcopy
+import uikit.uidraw
+import uikit.uiscale
+import uikit.uisys
+import ulib
+import utf8
+import uitheme.thtokens
+
+const WIG_BLIT: u64 = 1800
+
+const WIG_GLYPH: u64 = 1801
+
+const WIG_KERN: u64 = 1802
+
+const WIG_CURSOR: u64 = 1806
+
+const SYS_MMAP: u64 = 9
+
+const PROT_RW: u64 = 3
+
+const MAP_ANON_PRIV: u64 = 34
+
+const PX_MONO0: u64 = 16
+
+static mut s_shape: u64 = 0
+
+static mut s_scene: u64 = 0
+
+fn px_mono() -> u64 {
+    return PX_MONO0 * uiscale.ui_scale()
+}
+
+const GC_SLOTS: u64 = 512
+
+const GC_KEY: u64 = 0
+
+const GC_FIELDS: u64 = 8
+
+static mut gc_used: u64 = 0
+
+static mut gc_calls: u64 = 0
+
+static mut gc_fui: u64 = 0
+
+struct GlyphSource {
+    glyph: fn(u64, u64, u64, u64, u64) -> u64,
+    kern: fn(u64, u64, u64, u64) -> i64,
+}
+
+static mut gs_on: u64 = 0
+
+static mut gs_mem: [u64; 4] = [0; 4]
+
+fn gsrc() -> *mut GlyphSource {
+    return (&gs_mem[0 as usize]) as u64 as *mut GlyphSource
+}
+
+fn glyph_source(g: fn(u64, u64, u64, u64, u64) -> u64,
+    k: fn(u64, u64, u64, u64) -> i64) {
+    *gsrc() = GlyphSource { glyph: g, kern: k }
+    var i: u64 = 0
+    while i < GC_SLOTS * GC_FIELDS {
+        thtokens.gc[i as usize] = 0
+        i = i + 1
+    }
+    gc_used = 0
+    gs_on = 1
+}
+
+fn source_glyph(f: u64, px_: u64, c: u64, buf: u64, n: u64) -> u64 {
+    if gs_on == 0 {
+        return 0
+    }
+    let g: fn(u64, u64, u64, u64, u64) -> u64 = (*gsrc()).glyph
+    return g(f, px_, c, buf, n)
+}
+
+fn glyphs_fui() -> u64 {
+    return gc_fui
+}
+
+static mut gbuf: [u8; 2048] = [0 as u8; 2048]
+
+fn gkey(f: u64, px_: u64, c: u64) -> u64 {
+    return (f << 32) | ((px_ & 0xFF) << 24) | (c & thtokens.RGB24)
+        | 0x8000000000000000
+}
+
+fn ghash(k: u64) -> u64 {
+    var h: u64 = k *% 1099511628211
+    h = h ^ (h >> 29)
+    return h % GC_SLOTS
+}
+
+fn gfind(f: u64, px_: u64, c: u64) -> u64 {
+    let k: u64 = gkey(f, px_, c)
+    var i: u64 = ghash(k)
+    var n: u64 = 0
+    while n < GC_SLOTS {
+        let at: u64 = i * GC_FIELDS
+        if thtokens.gc[(at + GC_KEY) as usize] == k {
+            return at
+        }
+        if thtokens.gc[(at + GC_KEY) as usize] == 0 {
+            return gload(at, f, px_, c, k)
+        }
+        i = (i + 1) % GC_SLOTS
+        n = n + 1
+    }
+    return 0xFFFFFFFFFFFFFFFF
+}
+
+const GMAX: u64 = 256
+
+static mut g_arena: u64 = 0
+
+static mut g_arena_rest: u64 = 0
+
+const G_CHUNK: u64 = 65536
+
+fn gmem(n: u64) -> u64 {
+    let m: u64 = (n + 15) & ~15
+    if m > G_CHUNK {
+        return 0
+    }
+    if g_arena == 0 || g_arena_rest < m {
+        let p: u64 = hosthead.map_surface(G_CHUNK)
+        if ulib.bad(p) || p == 0 {
+            return 0
+        }
+        g_arena = p
+        g_arena_rest = G_CHUNK
+    }
+    let r: u64 = g_arena
+    g_arena = g_arena + m
+    g_arena_rest = g_arena_rest - m
+    return r
+}
+
+fn gload(at: u64, f: u64, px_: u64, c: u64, k: u64) -> u64 {
+
+    var n: u64 = 0
+    if gs_on != 0 {
+        let g: fn(u64, u64, u64, u64, u64) -> u64 = (*gsrc()).glyph
+        n = g(f, px_, c, (&gbuf[0 as usize]) as u64, 2048)
+    }
+    if n == 0 {
+        n = uisys.sys5(WIG_GLYPH, f, px_, c, (&gbuf[0 as usize]) as u64, 2048)
+    } else {
+        gc_fui = gc_fui + 1
+    }
+    if ulib.bad(n) || n < 48 {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    gc_calls = gc_calls + 1
+    let b: u64 = (&gbuf[0 as usize]) as u64
+    let gw: u64 = __mmio_read64((b + 0) as *mut u64)
+    let gh: u64 = __mmio_read64((b + 8) as *mut u64)
+
+    if gw > GMAX || gh > GMAX {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    if gw != 0 && gh > (n - 48) / gw {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    thtokens.gc[(at + GC_KEY) as usize] = k
+    thtokens.gc[(at + thtokens.GC_W) as usize] = gw
+    thtokens.gc[(at + thtokens.GC_H) as usize] = gh
+    thtokens.gc[(at + thtokens.GC_L) as usize] = __mmio_read64((b + 16) as *mut u64)
+    thtokens.gc[(at + thtokens.GC_T) as usize] = __mmio_read64((b + 24) as *mut u64)
+    thtokens.gc[(at + thtokens.GC_ADV) as usize] = __mmio_read64((b + 32) as *mut u64)
+    thtokens.gc[(at + thtokens.GC_DATA) as usize] = 0
+    if gw * gh > 0 {
+        let p: u64 = gmem(gw * gh)
+        if p != 0 {
+            memcopy.copy(p, b + 48, gw * gh)
+            thtokens.gc[(at + thtokens.GC_DATA) as usize] = p
+        } else {
+            thtokens.gc[(at + thtokens.GC_W) as usize] = 0
+            thtokens.gc[(at + thtokens.GC_H) as usize] = 0
+        }
+    }
+    gc_used = gc_used + 1
+    return at
+}
+
+fn kern26(f: u64, px_: u64, c1: u64, c2: u64) -> i64 {
+
+    if gs_on != 0 {
+        let k: fn(u64, u64, u64, u64) -> i64 = (*gsrc()).kern
+        return k(f, px_, c1, c2)
+    }
+    return uisys.sys5(WIG_KERN, f, px_, c1, c2, 0) as i64
+}
+
+fn draw_glyph(at: u64, x: i64, y: i64, color: u64) {
+    let gw: u64 = thtokens.gc[(at + thtokens.GC_W) as usize]
+    let gh: u64 = thtokens.gc[(at + thtokens.GC_H) as usize]
+    let data: u64 = thtokens.gc[(at + thtokens.GC_DATA) as usize]
+    if gw == 0 || gh == 0 || data == 0 {
+        return
+    }
+    let x0: i64 = x + thtokens.gc[(at + thtokens.GC_L) as usize] as i64
+    let y0: i64 = y - thtokens.gc[(at + thtokens.GC_T) as usize] as i64
+    var r: u64 = 0
+    while r < gh {
+        let py: i64 = y0 + r as i64
+        if py >= 0 {
+            var c: u64 = 0
+            while c < gw {
+                let pxx: i64 = x0 + c as i64
+                if pxx >= 0 {
+                    let a: u64 = (*((data + r * gw + c) as *mut u8)) as u64
+                    if a != 0 {
+                        let ux: u64 = pxx as u64
+                        let uy: u64 = py as u64
+                        uidraw.px(ux, uy, uidraw.blend(uidraw.get(ux, uy), color, a))
+                    }
+                }
+                c = c + 1
+            }
+        }
+        r = r + 1
+    }
+}
+
+fn pen_x(f: u64, px_: u64, p: u64, n: u64, k0: u64) -> u64 {
+    var cx: i64 = 0
+    var vorher: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let v: u64 = utf8.next(p, n, k)
+        let l: u64 = utf8.len_of(v)
+        let c: u64 = utf8.cp_of(v)
+        if l == 0 || c == 0 {
+            return (cx >> 6) as u64
+        }
+        if vorher != 0 {
+            cx = cx + kern26(f, px_, vorher, c)
+        }
+        if k == k0 {
+            return (cx >> 6) as u64
+        }
+        let at: u64 = gfind(f, px_, c)
+        if at != 0xFFFFFFFFFFFFFFFF {
+            cx = cx + thtokens.gc[(at + thtokens.GC_ADV) as usize] as i64
+        }
+        vorher = c
+        k = k + l
+    }
+    return (cx >> 6) as u64
+}
+
+fn back(p: u64, k: u64) -> u64 {
+    if k == 0 {
+        return 0
+    }
+    var i: u64 = k - 1
+    var n: u64 = 0
+    while n < 3 {
+        if ((*((p + i) as *mut u8)) as u64 & 0xC0) != 0x80 {
+            return i
+        }
+        if i == 0 {
+            return 0
+        }
+        i = i - 1
+        n = n + 1
+    }
+    return i
+}
+
+fn fit(f: u64, px_: u64, p: u64, n: u64, width: u64) -> u64 {
+    var cx: i64 = 0
+    var vorher: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let v: u64 = utf8.next(p, n, k)
+        let l: u64 = utf8.len_of(v)
+        let c: u64 = utf8.cp_of(v)
+        if l == 0 || c == 0 {
+            return k
+        }
+        if vorher != 0 {
+            cx = cx + kern26(f, px_, vorher, c)
+        }
+        let at: u64 = gfind(f, px_, c)
+        if at != 0xFFFFFFFFFFFFFFFF {
+            cx = cx + thtokens.gc[(at + thtokens.GC_ADV) as usize] as i64
+        }
+        if (cx >> 6) as u64 > width {
+            return k
+        }
+        vorher = c
+        k = k + l
+    }
+    return n
+}
+
+fn chars(p: u64, n: u64) -> u64 {
+    return utf8.chars(p, n)
+}
+
+fn glyph_w(f: u64, px_: u64, c: u64) -> u64 {
+    let at: u64 = gfind(f, px_, c)
+    if at == 0xFFFFFFFFFFFFFFFF {
+        return 0
+    }
+    return (thtokens.gc[(at + thtokens.GC_ADV) as usize] as i64 >> 6) as u64
+}
+
+fn push(h: u64, x: u64, y: u64, w: u64, hh: u64) -> u64 {
+    if w == 0 || hh == 0 {
+        return 0
+    }
+    if y < hosthead.s_band {
+        return 0
+    }
+    let r: u64 = y -% hosthead.s_band
+    if r >= hosthead.s_srows {
+        return 0
+    }
+    var hn: u64 = hh
+    if r +% hn > hosthead.s_srows {
+        hn = hosthead.s_srows -% r
+    }
+    if hn == 0 {
+        return 0
+    }
+    let src: u64 = hosthead.s_surf +% r *% hosthead.s_sw *% 4 +% x *% 4
+    return uisys.sys5(WIG_BLIT, h, (x << 16) | y, (w << 16) | hn, src, hosthead.s_sw)
+}
+
+fn push_rect(h: u64, x: u64, y: u64, w: u64, hh: u64) -> u64 {
+    return push(h, x, y, w, hh)
+}
+
+fn cursor_scene_mode() {
+    s_scene = 1
+}
+
+fn cursor_scene() -> bool {
+    return s_scene != 0
+}
+
+fn cursor_shape(s: u64) {
+    s_shape = s
+    uisys.sys3w(WIG_CURSOR, s, 0, 0)
+}
+

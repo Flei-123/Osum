@@ -5,7 +5,7 @@ import sys
 
 SKIP_PREFIXES = ("kernel/user/", "kernel/uprog/")
 TSC_ASSIGN = re.compile(r"(\w+)\s*(?::\s*u64)?\s*=\s*\(?\s*(?:\w+\.)*(?:tsc|rdtsc)\(\)")
-DIRECT = re.compile(r"(?:tsc|rdtsc)\(\)\s*-\s")
+DIRECT = re.compile(r"(?:tsc|rdtsc)\(\)\s*-%?\s")
 
 
 def source_files(root):

@@ -19,11 +19,11 @@
 set -u
 cd "$(dirname "$0")/.."
 
-ERLAUBT_ROH="kernel/user/wlib.fi kernel/user/icont.fi kernel/user/fuib.fi"
+ERLAUBT_ROH="kernel/user/fuiapp/hostui/hostdraw.fi kernel/user/icont.fi kernel/user/fuib.fi"
 
-ERLAUBT_FUI="kernel/user/fuib.fi kernel/user/fuiapp.fi kernel/user/fuiscene.fi kernel/user/fuied.fi kernel/user/lock.fi kernel/user/wlib.fi kernel/user/signin.fi kernel/user/traypop.fi kernel/user/calpop.fi kernel/user/wmd.fi kernel/user/compdiff.fi"
+ERLAUBT_FUI="kernel/user/fuib.fi kernel/user/fuiapp.fi kernel/user/fuiscene.fi kernel/user/fuied.fi kernel/user/lock.fi kernel/user/fuiapp/hostui/hostdraw.fi kernel/user/signin.fi kernel/user/traypop.fi kernel/user/calpop.fi kernel/user/wmd.fi kernel/user/compdiff.fi"
 
-ROH='wlibc\.(rect|hline|vline|frame|frame3|px|rrect|rframe|rring|vrect|vkreis|divider|drop_shadow)\('
+ROH='uitextat\.(rect|hline|vline|frame|frame3|px|rrect|rframe|rring|vrect|vkreis|divider|drop_shadow)\('
 
 fehler=0
 treffer=""
@@ -65,10 +65,10 @@ done
 zweite=$(awk '
 /^fn /   { if (name != "" && roh > 0 && br == 0) print "  " name;
            name = $2; sub(/\(.*/, "", name); roh = 0; br = 0; next }
-/wlibc\.(rect|hline|vline|frame|frame3|px|rrect|rframe|rring|vrect|vkreis|divider|drop_shadow)\(/ { roh++ }
+/uitextat\.(rect|hline|vline|frame|frame3|px|rrect|rframe|rring|vrect|vkreis|divider|drop_shadow)\(/ { roh++ }
 /fuib\./ { br++ }
 END      { if (name != "" && roh > 0 && br == 0) print "  " name }
-' <(bash tools/structure/catprog.sh kernel/user/wlib.fi))
+' kernel/user/fuiapp/hostui/hostdraw.fi)
 
 #
 #
@@ -91,7 +91,7 @@ done <<< "$zweite"
 
 if [[ -n ${uebrig//[$'\n' ]/} ]]; then
     fehler=$((fehler + 1))
-    treffer+="  kernel/user/wlib.fi: malt an fUi vorbei (zweite Umsetzung):"$'\n'
+    treffer+="  kernel/user/fuiapp/hostui/hostdraw.fi: malt an fUi vorbei (zweite Umsetzung):"$'\n'
     treffer+="$uebrig"
 fi
 
@@ -149,7 +149,7 @@ if [[ $fehler -gt 0 ]]; then
     printf '%s' "$treffer"
     echo
     echo "Abhilfe:"
-    echo "  * A PROGRAM takes the element from kernel/user/wlib.fi"
+    echo "  * A PROGRAM takes the element from kernel/user/fuiapp/hostui/hostdraw.fi"
     echo "    (label, button, check, entry, list, table, tabs, choice,"
     echo "     tile, card, slider, sep, scrollarea, menubar, dlg_*) oder"
     echo "    die Malschicht (draw_board, draw_area, draw_bar)."
@@ -175,7 +175,7 @@ geprueft=$(ls kernel/user/*.fi | wc -l)
 echo "  $geprueft Dateien geprueft"
 echo "  0 programs draw a control themselves"
 echo "  0 programs bypass the library and reach into fUi"
-echo "  0 Funktionen in wlib.fi malen an fUi vorbei"
+echo "  0 Funktionen in hostdraw.fi malen an fUi vorbei"
 if [[ -f kernel/ui/wm.fi ]]; then
     echo "  kernel/ui/wm.fi bindet fui.core -- der Kern malt dieselben Formen"
     echo "  0 drawing functions in the kernel draw around fUi"

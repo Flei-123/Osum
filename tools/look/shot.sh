@@ -191,7 +191,7 @@ fi
 # The newest file in kernel/user decides for all of them. Recompiling
 # thirteen small programs costs a few seconds; a measurement taken
 # against yesterday's binary costs a round.
-USERNEW=$(ls -t kernel/user/*.fi 2>/dev/null | head -1)
+USERNEW=$(bash tools/design/newest-source.sh)
 for p in $progs; do
     if [ -s "$BUILDD/$p.elf" ] && [ -z "${LOOKREBUILD:-}" ] \
        && [ "$BUILDD/$p.elf" -nt "kernel/user/$p.fi" ] \

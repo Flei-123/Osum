@@ -72,6 +72,36 @@ int main(void)
     CHECK("futimens_bad_fd_ebadf", futimens(999, ts) < 0 && errno == EBADF, "errno %d", errno);
     errno = 0; r = futimens(d1, ts);
     CHECK("futimens_dir_fd", r == 0 && stat("/tmp/fa/one", &st) == 0 && st.st_mtime == 3000000, "r %d m %ld errno %d", r, (long)st.st_mtime, errno);
+    errno = 0; r = fchmod(fd, 0640);
+    CHECK("fchmod_vfile", r == 0 && stat("/tmp/fa/one/f", &st) == 0 && (st.st_mode & 0777) == 0640, "r %d mode %o errno %d", r, st.st_mode & 0777, errno);
+    errno = 0; r = fchown(fd, 1234, 4321);
+    CHECK("fchown_vfile", r == 0 && stat("/tmp/fa/one/f", &st) == 0 && st.st_uid == 1234 && st.st_gid == 4321, "r %d uid %d gid %d errno %d", r, (int)st.st_uid, (int)st.st_gid, errno);
+    errno = 0; r = fchown(fd, -1, 77);
+    CHECK("fchown_keep_uid", r == 0 && stat("/tmp/fa/one/f", &st) == 0 && st.st_uid == 1234 && st.st_gid == 77, "r %d uid %d gid %d errno %d", r, (int)st.st_uid, (int)st.st_gid, errno);
+    errno = 0; r = chown("/tmp/fa/one/f", 55, -1);
+    CHECK("chown_path_uid", r == 0 && stat("/tmp/fa/one/f", &st) == 0 && st.st_uid == 55 && st.st_gid == 77, "r %d uid %d gid %d errno %d", r, (int)st.st_uid, (int)st.st_gid, errno);
+    errno = 0; r = fchownat(AT_FDCWD, "/tmp/fa/one/f", 66, 88, 0);
+    CHECK("fchownat_path", r == 0 && stat("/tmp/fa/one/f", &st) == 0 && st.st_uid == 66 && st.st_gid == 88, "r %d uid %d gid %d errno %d", r, (int)st.st_uid, (int)st.st_gid, errno);
+    errno = 0; r = fchownat(d1, "f", 67, 89, 0);
+    CHECK("fchownat_dirfd", r == 0 && stat("/tmp/fa/one/f", &st) == 0 && st.st_uid == 67 && st.st_gid == 89, "r %d uid %d gid %d errno %d", r, (int)st.st_uid, (int)st.st_gid, errno);
+    errno = 0; r = chown("/tmp/fa/one", 11, 12);
+    CHECK("chown_dir", r == 0 && stat("/tmp/fa/one", &st) == 0 && st.st_uid == 11 && st.st_gid == 12, "r %d uid %d gid %d errno %d", r, (int)st.st_uid, (int)st.st_gid, errno);
+    (void)!symlink("f", "/tmp/fa/one/ln");
+    errno = 0; r = lchown("/tmp/fa/one/ln", 21, 22);
+    CHECK("lchown_link_itself", r == 0 && lstat("/tmp/fa/one/ln", &st) == 0 && st.st_uid == 21 && st.st_gid == 22, "r %d uid %d gid %d errno %d", r, (int)st.st_uid, (int)st.st_gid, errno);
+    CHECK("lchown_target_untouched", stat("/tmp/fa/one/f", &st) == 0 && st.st_uid == 67 && st.st_gid == 89, "uid %d gid %d", (int)st.st_uid, (int)st.st_gid);
+    errno = 0; r = fchownat(AT_FDCWD, "/tmp/fa/one/ln", 23, 24, AT_SYMLINK_NOFOLLOW);
+    CHECK("fchownat_nofollow_link", r == 0 && lstat("/tmp/fa/one/ln", &st) == 0 && st.st_uid == 23 && st.st_gid == 24, "r %d uid %d gid %d errno %d", r, (int)st.st_uid, (int)st.st_gid, errno);
+    errno = 0; r = chown("/tmp/fa/one/ln", 31, 32);
+    CHECK("chown_follows_link", r == 0 && stat("/tmp/fa/one/f", &st) == 0 && st.st_uid == 31 && st.st_gid == 32 && lstat("/tmp/fa/one/ln", &st) == 0 && st.st_uid == 23, "r %d uid %d gid %d errno %d", r, (int)st.st_uid, (int)st.st_gid, errno);
+    int dfd = open("/tmp/fa/one", O_RDONLY | O_DIRECTORY);
+    errno = 0; r = fchown(dfd, 41, 42);
+    CHECK("fchown_dir_fd", r == 0 && stat("/tmp/fa/one", &st) == 0 && st.st_uid == 41 && st.st_gid == 42, "r %d uid %d gid %d errno %d", r, (int)st.st_uid, (int)st.st_gid, errno);
+    if (dfd >= 0) close(dfd);
+    errno = 0; r = fchmod(d1, 0750);
+    CHECK("fchmod_dir_fd", r == 0 && stat("/tmp/fa/one", &st) == 0 && (st.st_mode & 0777) == 0750, "r %d mode %o errno %d", r, st.st_mode & 0777, errno);
+    errno = 0;
+    CHECK("fchmod_bad_fd_ebadf", fchmod(999, 0600) < 0 && errno == EBADF, "errno %d", errno);
     if (fd >= 0) close(fd);
 
     /* ---- r820: execveat with a directory descriptor */

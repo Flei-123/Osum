@@ -142,7 +142,7 @@ for s in 0 1; do
           --defsym=KERNEL_TRAP="_F$s.trap__entry" \
           --defsym=KERNEL_SYSCALL="_F$s.sys__entry" \
           --defsym=KERNEL_TASK_MAIN="_F$s.tasks__main" \
-          --defsym=KERNEL_USER_START="_F$s.proc__user_start" \
+          --defsym=KERNEL_USER_START="_F$s.proccopy__user_start" \
           --defsym=KERNEL_AP_MAIN="_F$s.smp__ap_main" \
           --defsym=USER_MAIN="_F$s.u_enter" \
           -o "$TMPD/k$s.elf" "$TMPD/boot.o" "$TMPD/isr.o" "$TMPD/switch.o" \
@@ -164,7 +164,7 @@ for f in k0 k1 uprog0 uprog1; do
     [ "$kind" = "REL" ] && ok "$f.o: ELF type REL (object file, not an executable)" \
                         || bad "$f.o: ELF kind '$kind', expected REL"
     erlaubt='^(osum_panic)$'
-    case "$f" in k0|k1) erlaubt='^(osum_panic|kdata|osym_tab)$' ;; esac
+    case "$f" in k0|k1) erlaubt='^(osum_panic|kdata|osym_tab|kernel_start)$' ;; esac
     undef=$(nm -u "$o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vE "$erlaubt")
     [ -z "$undef" ] && ok "$f.o: no undefined symbol other than $(echo "$erlaubt" | tr -d '^$()' | tr '|' '/') (no libc, no runtime)" \
                     || { bad "$f.o: undefined symbols"; echo "$undef" | sed 's/^/        /'; }

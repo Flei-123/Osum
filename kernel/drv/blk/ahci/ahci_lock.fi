@@ -1,0 +1,73 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import sync.atomic
+import arch.cpu
+import lib.kstate
+import serial
+import drv.blk.ahci.ahci_defs
+
+const DL_BYPASS: u64 = 0
+const DL_TAKEN: u64 = 1
+const DL_SPINS: u64 = 40000000
+
+static mut dl_owner: u64 = 0
+
+static mut dl_refused: u64 = 0
+
+static mut dl_nested: u64 = 0
+
+static mut dl_said: u64 = 0
+
+static mut s_dl_nest: [u8; 36] = "ahci: nested driver entry on cpu \0\0\0"
+
+static mut s_dl_busy: [u8; 36] = "ahci: driver busy, refused on cpu \0\0"
+
+fn lock_refused() -> u64 {
+    return dl_refused
+}
+
+fn lock_nested() -> u64 {
+    return dl_nested
+}
+
+fn stop_fails() -> u64 {
+    return ahci_defs.dl_stopfail
+}
+
+fn dl_say(msg: u64, me: u64) {
+    if dl_said >= 8 {
+        return
+    }
+    dl_said = dl_said + 1
+    serial.puts(msg)
+    serial.dec(me)
+    serial.nl()
+}
+
+fn lock_in(state: u64) -> u64 {
+    if kstate.mode_on(state, kstate.M_NOAHCILOCK) {
+        return DL_BYPASS
+    }
+    let me: u64 = cpu.here(state) + 1
+    if atomic.load((&dl_owner) as u64) == me {
+        atomic.fetch_add((&dl_nested) as u64, 1)
+        dl_say((&s_dl_nest[0]) as u64, me - 1)
+        return ahci_defs.DL_REFUSE
+    }
+    var spin: u64 = 0
+    while spin < DL_SPINS {
+        if atomic.cas((&dl_owner) as u64, 0, me) == 0 {
+            return DL_TAKEN
+        }
+        atomic.pause()
+        spin = spin + 1
+    }
+    atomic.fetch_add((&dl_refused) as u64, 1)
+    dl_say((&s_dl_busy[0]) as u64, me - 1)
+    return ahci_defs.DL_REFUSE
+}
+
+fn lock_out(t: u64) {
+    if t == DL_TAKEN {
+        atomic.store((&dl_owner) as u64, 0)
+    }
+}

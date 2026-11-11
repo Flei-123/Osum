@@ -7,14 +7,19 @@ ROOT=$(pwd)
 ZIEL=${1:-$ROOT/.certus-bau/certus.elf}
 CERTUS_REPO=${CERTUS_REPO:-/root/certus-ui}
 . tools/lib/firnenv.sh
-FIRNC=${CERTUS_FIRNC:-/root/firnc-gc/compiler/target/release/firnc}
-BAU=${CERTUS_BAU:-$ROOT/.certus-bau}
+FIRNC=${CERTUS_FIRNC:-$FIRNC}
+if [ -n "${CERTUS_BAU:-}" ]; then
+    BAU=$CERTUS_BAU
+else
+    BAU=$(mktemp -d "${TMPDIR:-/tmp}/certus-bau.XXXXXX")
+    trap 'rm -rf "$BAU"' EXIT
+fi
+export FIRNC_GC_RUNTIME=${FIRNC_GC_RUNTIME:-certus}
 
 [ -d "$CERTUS_REPO/lib/browser" ] || {
     echo "no Certus tree in $CERTUS_REPO (set CERTUS_REPO)" >&2; exit 2; }
 [ -x "$FIRNC" ] || {
-    echo "no compiler: $FIRNC" >&2
-    echo "  (cd $CERTUS_REPO/compiler && cargo build --release)" >&2; exit 2; }
+    echo "no compiler: $FIRNC" >&2; exit 2; }
 if [ -f "$CERTUS_REPO/lib/osum/window/backend.fi" ]; then
     LAYOUT=new
 elif [ -f "$CERTUS_REPO/lib/fenster/osum.fi" ]; then
@@ -29,12 +34,16 @@ mkdir -p "$BAU"
 for d in "$CERTUS_REPO"/lib/*; do
     ln -sfn "$d" "$BAU/$(basename "$d")"
 done
-for pair in fui:.fui-win rt:.rt-win std:.std-win; do
-    if [ -d "$CERTUS_REPO/${pair#*:}" ]; then
-        ln -sfn "$CERTUS_REPO/${pair#*:}" "$BAU/${pair%%:*}"
-    fi
+SUPPORT_REPO=${CERTUS_SUPPORT:-/root/certus-ui}
+for pair in rt:.rt-win std:.std-win; do
+    for base in "$CERTUS_REPO" "$SUPPORT_REPO"; do
+        if [ -d "$base/${pair#*:}" ]; then
+            ln -sfn "$base/${pair#*:}" "$BAU/${pair%%:*}"
+            break
+        fi
+    done
 done
-FIRN_SHARED=${FIRN_SHARED:-/root/firn}
+FIRN_SHARED=${FIRN_SHARED:-$FIRN_TOOLCHAIN}
 if [ -d "$FIRN_SHARED/lib" ]; then
     for d in "$FIRN_SHARED"/lib/*; do
         [ -e "$BAU/$(basename "$d")" ] || ln -sfn "$d" "$BAU/$(basename "$d")"
@@ -52,18 +61,22 @@ done
 rm -f "$BAU/fenster" "$BAU/libc"
 cp -r "$ROOT/lib/libc" "$BAU/libc"
 cp "$ROOT/lib/icons.fi" "$ROOT/lib/utf8.fi" "$BAU/"
-cp "$ROOT/kernel/user/ulib.fi" "$ROOT/kernel/user/wlib.fi" \
-   "$ROOT/kernel/user/wlibc.fi" "$BAU/"
-rm -rf "$BAU/wlib" "$BAU/wlibc"
-cp -r "$ROOT/kernel/user/wlib" "$ROOT/kernel/user/wlibc" "$BAU/"
+cp "$ROOT/kernel/user/ulib.fi" "$BAU/"
+rm -rf "$BAU/hostui" "$BAU/uitheme"
+cp -r "$ROOT/kernel/user/fuiapp/hostui" "$ROOT/kernel/user/uitheme" "$BAU/"
+cp "$ROOT/kernel/user/fuiapp/hostwinp.fi" "$ROOT/kernel/user/fuiapp/hostax.fi" "$ROOT/kernel/user/fuiapp/hosthead.fi" \
+   "$ROOT/kernel/user/fuiapp/hostwin.fi" "$ROOT/kernel/user/fuiapp/hoststart.fi" \
+   "$ROOT/kernel/user/fuiapp/apphost.fi" "$ROOT/kernel/user/fuiapp/hostkey.fi" "$ROOT/kernel/user/fuiapp/hostflags.fi" "$BAU/"
+sed -i -E 's/^import fuiapp\.(hostui(\.[a-z]+)?)$/import \1/' "$BAU/apphost.fi" "$BAU"/hostui/*.fi
 python3 - "$ROOT" "$BAU" <<'PYEOF'
 import os, re, shutil, sys
 root, bau = sys.argv[1], sys.argv[2]
-todo = ['wlib', 'wlibc', 'ulib']
+todo = ['hostui', 'ulib', 'hoststart', 'apphost']
 seen = set(todo)
+MOVED = ('uiscale', 'uitext', 'uiicon', 'uidraw', 'uiglyph', 'uitextat', 'uisys', 'svcclip', 'svcnoti', 'svcbus')
 def sources(name):
-    paths = [os.path.join(bau, name + '.fi')]
-    if name in ('wlib', 'wlibc'):
+    paths = [p for p in [os.path.join(bau, name + '.fi')] if os.path.exists(p)]
+    if name in ('hostui', 'uitheme'):
         d = os.path.join(bau, name)
         paths += [os.path.join(d, f) for f in sorted(os.listdir(d)) if f.endswith('.fi')]
     return paths
@@ -71,12 +84,12 @@ while todo:
     name = todo.pop()
     lines = [l for p in sources(name) for l in open(p, encoding='latin1')]
     for line in lines:
-        m = re.match(r'import ([a-z0-9_]+)\s*$', line)
-        if not m or m.group(1) in seen:
+        m = re.match(r'import ((?:uikit\.|fuiapp\.)?)([a-z0-9_]+)\s*$', line)
+        if not m or m.group(2) in seen or (m.group(1) and m.group(2) not in MOVED):
             continue
-        mod = m.group(1)
+        mod = m.group(2)
         seen.add(mod)
-        for d in ('kernel/user', 'lib'):
+        for d in ('kernel/user', 'kernel/user/uikit', 'kernel/user/fuiapp', 'lib'):
             src = os.path.join(root, d, mod + '.fi')
             if os.path.exists(src):
                 if not os.path.exists(os.path.join(bau, mod + '.fi')):
@@ -84,21 +97,19 @@ while todo:
                 todo.append(mod)
                 break
 PYEOF
+for f in "$BAU/apphost.fi" "$BAU/uiscale.fi" "$BAU/uidraw.fi" "$BAU/uitextat.fi" "$BAU/uiglyph.fi" "$BAU/uisys.fi" "$BAU/hosthead.fi" "$BAU/hostwin.fi" "$BAU/hoststart.fi" "$BAU/fuib.fi" "$BAU/fuiglyph.fi" "$BAU"/hostui/*.fi "$BAU"/uitheme/*.fi; do
+    [ -f "$f" ] && sed -i -e 's/^import fuiapp\.hostwinp$/import hostwinp/' -e 's/^import fuiapp\.hostax$/import hostax/' -e 's/^import fuiapp\.hosthead$/import hosthead/' -e 's/^import fuiapp\.hostwin$/import hostwin/' -e 's/^import fuiapp\.hoststart$/import hoststart/' -e 's/^import fuiapp\.hostkey$/import hostkey/' -e 's/^import fuiapp\.hostflags$/import hostflags/' "$f"
+done
+for f in "$BAU"/*.fi "$BAU"/hostui/*.fi "$BAU"/uitheme/*.fi; do
+    [ -f "$f" ] && [ ! -L "$f" ] && sed -i -E 's/^import (uikit|fuiapp)\.(uiscale|uitext|uiicon|uidraw|uiglyph|uitextat|uisys|svcclip|svcnoti|svcbus)[[:space:]]*$/import \2/' "$f"
+done
 if [ -f "$BAU/msg.fi" ]; then
     mv "$BAU/msg.fi" "$BAU/osmsg.fi"
-    for f in "$BAU"/*.fi "$BAU"/wlib/*.fi "$BAU"/wlibc/*.fi; do
+    for f in "$BAU"/*.fi "$BAU"/hostui/*.fi "$BAU"/uitheme/*.fi; do
         [ -f "$f" ] && [ ! -L "$f" ] && grep -q '^import msg[[:space:]]*$' "$f" || continue
         sed -i -e 's/^import msg[[:space:]]*$/import osmsg/' -e 's/\bmsg\./osmsg./g' "$f"
     done
 fi
-if [ -d "$CERTUS_REPO/.fui-win" ]; then
-    rm -f "$BAU/fui"; mkdir -p "$BAU/fui"
-    for f in "$CERTUS_REPO"/.fui-win/*; do ln -sfn "$f" "$BAU/fui/$(basename "$f")"; done
-    for f in "$ROOT"/lib/fui/* "$FIRN_SHARED"/lib/fui/*; do
-        [ -e "$BAU/fui/$(basename "$f")" ] || ln -sfn "$f" "$BAU/fui/$(basename "$f")"
-    done
-fi
-
 if [ "$LAYOUT" = new ]; then
     for sub in window dlg media; do
         rm -f "$BAU/$sub"
@@ -117,7 +128,7 @@ if [ "$LAYOUT" = new ]; then
         ln -sfn "$CERTUS_REPO/lib/osum/prof_os" "$BAU/prof_os"
     fi
     rm -f "$BAU/window/osum.fi" "$BAU/window/backend.fi"
-    sed 's/wlib\.canvas2(/wlib.canvas(/g' "$CERTUS_REPO/lib/window/osum.fi" > "$BAU/window/osum.fi"
+    cp "$CERTUS_REPO/lib/window/osum.fi" "$BAU/window/osum.fi"
     ln -sfn osum.fi "$BAU/window/backend.fi"
 else
     mkdir -p "$BAU/fenster"
@@ -137,10 +148,10 @@ done
 python3 "$ROOT/kernel/user/certus/entkern.py" "$BAU" > "$BAU/entkern.log"
 
 cp "$CERTUS_REPO/lib/osum/certus_main.fi" "$BAU/certus_main.fi"
-(cd "$BAU" && python3 "$ROOT/kernel/user/certus/inlineconsts.py" "$BAU" wlib.fi wlibc.fi wlib/*.fi wlibc/*.fi) | tee "$BAU/inlineconsts.log"
+(cd "$BAU" && python3 "$ROOT/kernel/user/certus/inlineconsts.py" "$BAU" hostui/*.fi uitheme/*.fi) | tee "$BAU/inlineconsts.log"
 python3 "$ROOT/kernel/user/certus/splitstems.py" "$ROOT" "$BAU" "$FIRN_TOOLCHAIN" | tee "$BAU/splitstems.log"
-(cd "$BAU" && python3 "$ROOT/kernel/user/certus/inlineconsts.py" "$BAU" osa/*.fi fui/*.fi) | tee -a "$BAU/inlineconsts.log"
-(cd "$BAU" && grep -l '__bits(\|__include_str(' osa/*.fi fui/*.fi 2>/dev/null | xargs -r python3 "$ROOT/kernel/user/certus/lowerintrinsics.py" "$BAU") | tee "$BAU/lowerintrinsics.log"
+(cd "$BAU" && python3 "$ROOT/kernel/user/certus/inlineconsts.py" "$BAU" $(ls osa/*.fi fui/*.fi 2>/dev/null)) | tee -a "$BAU/inlineconsts.log"
+(cd "$BAU" && { grep -l '__bits(\|__include_str(' osa/*.fi fui/*.fi 2>/dev/null || true; } | xargs -r python3 "$ROOT/kernel/user/certus/lowerintrinsics.py" "$BAU") | tee "$BAU/lowerintrinsics.log"
 if [ -f "$BAU/std/deflate.fi" ] && ! grep -q 'fn inflate_limited' "$BAU/std/deflate.fi"; then
     stddir=$(readlink -f "$BAU/std")
     rm "$BAU/std"
@@ -158,6 +169,7 @@ ld -T "$ROOT/kernel/user/user.ld" -o "$BAU/certus.dbg" \
     "$BAU/certus.o" "$BAU/sysstub.o"
 mkdir -p "$(dirname "$ZIEL")"
 cp "$BAU/certus.dbg" "$ZIEL"
+[ -z "${CERTUS_DBG_OUT:-}" ] || cp "$BAU/certus.dbg" "$CERTUS_DBG_OUT"
 strip --strip-all "$ZIEL"
 
 echo "certus: $(stat -c%s "$ZIEL") Oktette -> $ZIEL"

@@ -85,11 +85,11 @@ boot() {
     rm -f "$sock" "$ser"; cp -f "$img" "$W/$n.img"
     local args=(-machine pc -m 1024 -smp "${SMP:-2}" -vga std -display none -no-reboot
                 -serial "file:$ser" -monitor "unix:$sock,server,nowait")
-    if [ "${BUS:-ahci}" = ahci ]; then
-        args+=(-device ich9-ahci,id=ahci0 -drive "if=none,id=hd0,file=$W/$n.img,format=raw" -device ide-hd,drive=hd0,bus=ahci0.0)
-    else
-        args+=(-drive "file=$W/$n.img,format=raw,if=ide,index=0")
-    fi
+    case "${BUS:-ahci}" in
+        ahci) args+=(-device ich9-ahci,id=ahci0 -drive "if=none,id=hd0,file=$W/$n.img,format=raw" -device ide-hd,drive=hd0,bus=ahci0.0) ;;
+        nvme) args+=(-drive "if=none,id=hd0,file=$W/$n.img,format=raw" -device nvme,drive=hd0,serial=nvmeboot) ;;
+        *)    args+=(-drive "file=$W/$n.img,format=raw,if=ide,index=0") ;;
+    esac
     [ -w /dev/kvm ] && args+=(-accel kvm -cpu host)
     if [ "$how" = uefi ]; then
         local code=/usr/share/OVMF/OVMF_CODE.fd; [ -f /usr/share/OVMF/OVMF_CODE_4M.fd ] && code=/usr/share/OVMF/OVMF_CODE_4M.fd
@@ -167,9 +167,20 @@ if [ -n "${IDEPIO_OLD_KERNEL:-}" ] && [ -f "$IDEPIO_OLD_KERNEL" ]; then
     rm -f "$W/oldk.img"
 fi
 
+echo "== 3a6. SeaBIOS, NVMe disk (nvmemany is the default): login reached, no freeze report =="
+BUS=nvme boot seabiosnvme bios "$W/disk.img" "glogin: ready" 400 15
+check_login seabiosnvme ""
+grep -aq "rootsel: nvme" "$W/seabiosnvme.txt" && okk "seabiosnvme: root on the NVMe disk" || bd "seabiosnvme: root not on nvme"
+grep -aq "hang: detected" "$W/seabiosnvme.txt" && bd "seabiosnvme: freeze logger fired" || okk "seabiosnvme: freeze logger stayed quiet"
+
 echo "== 3b. OVMF (UEFI) =="
 boot ovmf uefi "$W/disk.img"
 check_login ovmf ""
+
+echo "== 3b2. OVMF (UEFI), NVMe disk =="
+BUS=nvme boot ovmfnvme uefi "$W/disk.img"
+check_login ovmfnvme ""
+grep -aq "rootsel: nvme" "$W/ovmfnvme.txt" && okk "ovmfnvme: root on the NVMe disk" || bd "ovmfnvme: root not on nvme"
 
 echo "== 3c. counter-proof: stage2 zeroed on a copy of the installed disk =="
 cp "$W/disk.img" "$W/nostage.img"

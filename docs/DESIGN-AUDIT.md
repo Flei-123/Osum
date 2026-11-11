@@ -140,7 +140,7 @@ draw a 3 px accent indicator bar (`fuiscene.sel_bar`). `tools/theme/model.py` mi
 (ISC, `assets/icons/svg/`) with a gradient stroke and tint (`tools/svg/apps.tsv`) into
 `assets/apps/<bundle>.osp/symbol.svg` and bakes it with the fixed-point rasterizer `lib/svg`
 (`tools/svg/bake.fi`) to 72x72, true alpha, `symbol.osym`; `tools/k15/bundle.py` takes it before `symbol.txt`.
-`wlibc.icon_draw_fit` draws such a picture into a square of any size (area-averaged,
+`uiicon.icon_draw_fit` draws such a picture into a square of any size (area-averaged,
 premultiplied); the bar draws it at 24 points, the start menu at 32 (`fuiscene.row_icon`,
 `icon_col`). 16x16 drawings are told apart by size and keep their integer scale.
 

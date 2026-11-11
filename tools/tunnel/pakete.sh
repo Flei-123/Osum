@@ -52,7 +52,7 @@ fi
 
 WURZEL="$TMPD/wurzel"
 mkdir -p "$WURZEL"/{store,apps,system/generations,etc,users/justin/config,users/justin/state}
-echo -n "0" > "$WURZEL/system/AKTUELL"
+echo -n "0" > "$WURZEL/system/CURRENT"
 mkdir -p "$WURZEL/etc/init.d" "$WURZEL/etc/net" "$WURZEL/etc/skel"
 for i in $(seq 1 12); do
     printf 'zeile %d\n' "$i" > "$WURZEL/etc/init.d/rc$i"
@@ -138,7 +138,7 @@ rm -f "$WURZEL/etc/proxy.conf"
 aufnehmen "$WURZEL" > "$TMPD/nachher.txt"
 N_NACHHER=$(wc -l < "$TMPD/nachher.txt")
 
-ohne_gen() { grep -vE '^(system(/generations|/AKTUELL)|users)' "$1"; }
+ohne_gen() { grep -vE '^(system(/generations|/CURRENT)|users)' "$1"; }
 ohne_gen "$TMPD/vorher.txt"  > "$TMPD/v2.txt"
 ohne_gen "$TMPD/nachher.txt" > "$TMPD/n2.txt"
 N_VGL=$(wc -l < "$TMPD/v2.txt")

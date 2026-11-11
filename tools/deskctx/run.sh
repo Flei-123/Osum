@@ -10,7 +10,7 @@
 #   2. click on row 3 (refresh): `desktop: context pick=3`, the menu is gone again (rectangle as before)
 #   3. rklick again, click on row 0 (display settings): `desktop: context pick=0`, /bin/settings starts (`settings: ready`)
 #   4. rklick again, Escape: the menu closes without a `pick=` line
-# COUNTER-PROOF: the tree one commit before (BASE=<rev>, default HEAD~1) has no menu: no `context open`, and the picture after the
+# COUNTER-PROOF: the same tree with a 1x1 popup host window (BASE=<rev> picks the tree to mutate, default HEAD) has no menu: no `context open`, and the picture after the
 # right click equals the one before.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -78,9 +78,10 @@ PY
 }
 
 mkdir -p "$TMPD/new" "$TMPD/old"
-git worktree add --detach "$BT" "${BASE:-3f8b8bff9}" >/dev/null 2>&1 || { echo "base worktree failed"; exit 1; }
-# the old tree needs the drive.py of this tree (the `dmenue` name) -- the picture and the trace lines are what differ
+git worktree add --detach "$BT" "${BASE:-HEAD}" >/dev/null 2>&1 || { echo "base worktree failed"; exit 1; }
 cp -f tools/design/drive.py "$BT/tools/design/drive.py"
+sed -i 's/open_plain(0, 0, 64, 32, (&k_host/open_plain(0, 0, 1, 1, (\&k_host/' "$BT/kernel/user/desktop.fi"
+grep -q 'open_plain(0, 0, 1, 1, (&k_host' "$BT/kernel/user/desktop.fi" || { echo "mutant not applied"; exit 1; }
 run_tree "$ROOT" "$TMPD/new" &
 run_tree "$BT" "$TMPD/old" &
 wait
@@ -117,14 +118,14 @@ n=$(grep -ac 'desktop: context pick=' "$S")
 [ "$n" = 2 ] && ok "Escape closed the second menu without a pick (2 picks in total)" || bad "expected 2 picks, found $n"
 d=$(diffpix "$TMPD/new/o/04-menu2.ppm" "$TMPD/new/o/05-esc.ppm" "$mx" "$my" "$mw" "$mh")
 [ "$d" -gt $((mw * mh / 3)) ] && ok "the second menu is gone after Escape ($d pixels changed)" || bad "the menu survived Escape ($d pixels changed)"
-# COUNTER-PROOF: the old tree has no menu
+# COUNTER-PROOF: the mutant tree (1x1 popup host window) has no menu
 if [ ! -s "$TMPD/old/o/01-menu.ppm" ]; then
-    bad "COUNTER-PROOF: no picture of the old tree"
+    bad "COUNTER-PROOF: no picture of the mutant tree"
 else
-    grep -aq 'desktop: context open' "$SO" && bad "COUNTER-PROOF: the old tree has a menu" || ok "COUNTER-PROOF old tree: no 'context open'"
+    grep -aq 'desktop: context open' "$SO" && bad "COUNTER-PROOF: the mutant tree has a menu" || ok "COUNTER-PROOF mutant tree: no 'context open'"
     d=$(diffpix "$TMPD/old/o/00-before.ppm" "$TMPD/old/o/01-menu.ppm" "$mx" "$my" "$mw" "$mh")
-    [ "$d" -le 300 ] && ok "COUNTER-PROOF old tree: the picture does not change ($d pixels differ)" \
-        || bad "COUNTER-PROOF: the old tree changed $d pixels at the right click"
+    [ "$d" -le 300 ] && ok "COUNTER-PROOF mutant tree: the picture does not change ($d pixels differ)" \
+        || bad "COUNTER-PROOF: the mutant tree changed $d pixels at the right click"
 fi
 echo; echo "DESKCTX: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

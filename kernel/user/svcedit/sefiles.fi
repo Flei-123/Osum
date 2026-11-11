@@ -1,0 +1,140 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import libc.octets
+import libc.text
+import services.svcosum
+import services.svcrules
+import services.svcqueue
+import services.dlgproto
+import svcedit.sedoc
+import svcedit.sestr
+import svcedit.sesay
+import services.svcreply
+
+export { new_doc, open_doc, save_doc }
+
+const RESULT_BYTES: u64 = 8
+const RECENT_MAX: u64 = 128
+
+static mut result_buf: [u8; 8] = [0 as u8; 8]
+static mut recent_buf: [u8; 128] = [0 as u8; 128]
+
+fn result_ptr() -> u64 {
+    return (&result_buf[0 as usize]) as u64
+}
+
+fn confirm_discard() -> bool {
+    if !sedoc.dirty() {
+        return true
+    }
+    octets.zero(result_ptr(), RESULT_BYTES)
+    let status: u64 = svcosum.confirm(sestr.discard_title(), sestr.discard_text(), result_ptr())
+    let answer: u64 = octets.le32(result_ptr())
+    sesay.confirmed(status, answer)
+    if status == svcrules.NO_BACKEND {
+        return true
+    }
+    return status == svcrules.OK && answer == dlgproto.ANSWER_OK
+}
+
+fn remember(name: u64) {
+    let key: u64 = sestr.recent_key()
+    let key_len: u64 = text.length(key)
+    if svcosum.store_set(key, key_len, name, text.length(name)) != svcrules.OK {
+        return
+    }
+    let buf: u64 = (&recent_buf[0 as usize]) as u64
+    octets.zero(result_ptr(), RESULT_BYTES)
+    if svcosum.store_get(key, key_len, buf, RECENT_MAX - 1, result_ptr()) != svcrules.OK {
+        return
+    }
+    octets.st8(buf, octets.le32(result_ptr()), 0)
+    sesay.recent(buf)
+}
+
+fn apply_open() {
+    let n: u64 = svcreply.data_len()
+    let name: u64 = svcreply.reply_name_ptr()
+    if n > sedoc.TEXT_CAP {
+        sesay.opened(name, svcrules.FAILED, n)
+        return
+    }
+    sedoc.load(svcreply.data_ptr(), n)
+    sedoc.set_name(name, text.length(name))
+    sesay.opened(sedoc.doc_name_ptr(), svcrules.OK, n)
+    remember(sedoc.doc_name_ptr())
+}
+
+fn apply_save() {
+    let name: u64 = svcreply.reply_name_ptr()
+    sedoc.set_name(name, text.length(name))
+    sedoc.mark_clean()
+    sesay.saved(sedoc.doc_name_ptr(), svcrules.OK, sedoc.text_len())
+    remember(sedoc.doc_name_ptr())
+}
+
+fn report(mode: u64, status: u64) {
+    if mode == dlgproto.MODE_OPEN {
+        sesay.opened(0, status, 0)
+        return
+    }
+    sesay.saved(0, status, 0)
+}
+
+fn drain(mode: u64) {
+    while svcreply.next() {
+        if svcreply.op() == svcqueue.OP_FILE_END && svcreply.status() != svcrules.OK {
+            report(mode, svcreply.status())
+        }
+        if svcreply.op() == svcqueue.OP_FILE_ITEM && svcreply.status() == svcrules.OK {
+            if mode == dlgproto.MODE_OPEN {
+                apply_open()
+            } else {
+                apply_save()
+            }
+        }
+    }
+}
+
+fn new_doc() {
+    if !confirm_discard() {
+        return
+    }
+    sedoc.clear()
+    sesay.created()
+}
+
+fn open_doc() {
+    if !confirm_discard() {
+        return
+    }
+    octets.zero(result_ptr(), RESULT_BYTES)
+    var status: u64 = svcosum.pick_open(sestr.open_title(), sestr.accept(), result_ptr())
+    if status == svcrules.NO_BACKEND {
+        status = svcosum.file_open(sestr.open_title(), sestr.accept(), result_ptr())
+    }
+    if status != svcrules.OK {
+        report(dlgproto.MODE_OPEN, status)
+        return
+    }
+    drain(dlgproto.MODE_OPEN)
+}
+
+fn save_doc() {
+    let n: u64 = sedoc.snapshot()
+    var name: u64 = sedoc.doc_name_ptr()
+    if !sedoc.has_name() {
+        name = sestr.default_name()
+    }
+    octets.zero(result_ptr(), RESULT_BYTES)
+    var status: u64 = svcosum.pick_save(sestr.save_title(), name, sedoc.text_ptr(), n, result_ptr())
+    if status == svcrules.NO_BACKEND {
+        status = svcosum.file_save(sestr.save_title(), name, sedoc.text_ptr(), n, result_ptr())
+    }
+    if status != svcrules.OK {
+        report(dlgproto.MODE_SAVE, status)
+        return
+    }
+    drain(dlgproto.MODE_SAVE)
+}

@@ -3,15 +3,16 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 CERTUS_REPO=${CERTUS_REPO:-/root/certus-ui}
-CERTUS_FIRNC=${CERTUS_FIRNC:-/root/firnc-gc/compiler/target/release/firnc}
+. "$ROOT/tools/lib/firnenv.sh"
+CERTUS_FIRNC=${CERTUS_FIRNC:-"$FIRNC"}
 CACHE=${CERTUS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/osum/certus}
 
 [ -d "$CERTUS_REPO/lib/browser" ] && [ -x "$CERTUS_FIRNC" ] || exit 0
 head=$(git -C "$CERTUS_REPO" rev-parse HEAD 2>/dev/null || echo nogit)
 dirty=$(git -C "$CERTUS_REPO" status --porcelain --untracked-files=no 2>/dev/null | sha256sum | cut -c1-16)
-inputs=$( (cat kernel/user/ulib.fi kernel/user/wlib.fi kernel/user/wlibc.fi lib/icons.fi lib/utf8.fi \
+inputs=$( (cat kernel/user/ulib.fi lib/icons.fi lib/utf8.fi \
     kernel/user/certus/build.sh kernel/user/certus/entkern.py kernel/user/certus/splitstems.py kernel/user/certus/inlineconsts.py kernel/user/certus/lowerintrinsics.py kernel/user/certus/merge-stems.txt kernel/user/certus/shims/deflate_limited.fi kernel/user/sysstub.s kernel/user/user.ld
-    find lib/libc kernel/user/wlib kernel/user/wlibc -type f | sort | xargs cat
+    find lib/libc kernel/user/fuiapp kernel/user/uitheme -type f | sort | xargs cat
     sha256sum "$CERTUS_FIRNC") | sha256sum | cut -c1-16)
 key="$head-$dirty-$inputs"
 elf="$CACHE/$key.elf"

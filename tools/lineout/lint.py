@@ -3,7 +3,7 @@ import re
 import sys
 
 GUI_IMPORT = re.compile(
-    rb"^import +(wlibc|wlib|fuiscene|fuib|fuiapp|fui\.[a-z]+|softui|wmplug|wmd)\b", re.M
+    rb"^import +(uitheme|fuiscene|fuib|fuiapp|fui\.[a-z]+|softui|wmplug|wmd)\b", re.M
 )
 FORBIDDEN = re.compile(rb"(?<![\w.])ulib\.(say|sayn|sayu|nl|say_line|put|pad)\(")
 USES_LINEOUT = re.compile(rb"(?<![\w.])lineout\.add_(text|num|unum)\(")

@@ -14,7 +14,7 @@ rm -rf "$OUT/registry"
 python3 tools/appreg/build.py "$ROOT" "$OUT/registry" || exit 1
 
 n=0
-while IFS='|' read -r paket programm fassung titel info keys art; do
+while IFS='|' read -r paket programm fassung titel info keys art menu; do
     case "${paket:-}" in ""|\#*) continue ;; esac
     prog="$OUT/bin/$programm"
     if [ ! -x "$prog" ] && [ "$paket" = certus ]; then
@@ -29,6 +29,7 @@ while IFS='|' read -r paket programm fassung titel info keys art; do
         echo "info=$info"
         echo "keys=$keys"
         echo "revision=${fassung%%.*}"
+        [ "${menu:-}" = hidden ] && echo "menu=hidden"
     } > "$OUT/info/$paket"
 
     cp "$OUT/registry/usr/share/appreg/$paket/symbol" "$OUT/symbole/$paket" || {

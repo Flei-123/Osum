@@ -16,6 +16,7 @@ import symjoin  # noqa: E402
 
 
 INFO_LIMIT = 1023
+USER_BUNDLES = set(os.environ.get("BUNDLE_USER_APPS", "").split())
 
 
 def angaben_stehen_vorn(file_path):
@@ -125,7 +126,8 @@ def main(argv):
         if not os.path.exists(brand_name):
             with open(brand_name, "w") as f:
                 f.write("shipped with the {{PRODUCT}} image; see docs/ACTION-BUS.md 5.2\n")
-        line_list.append("%s/SYSTEM=%s" % (target_dir, brand_name))
+        if name not in USER_BUNDLES:
+            line_list.append("%s/SYSTEM=%s" % (target_dir, brand_name))
         line_list.append("%s/data/" % target_dir)
         line_list.append("%s/data/README=%s"
                       % (target_dir, os.path.join(file_path, "data", "README")))

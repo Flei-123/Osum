@@ -1,0 +1,421 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import xfer
+import libc.io
+import libc.errno
+import libc.kcall
+import libc.octets
+import libc.text
+import services.svcrules
+import services.svcqueue
+import services.svcdlg
+import services.dlgproto
+
+export {
+    set_app, caps, copy_text, paste_text, copy_files, paste_files, files_seq, clear_files, message, confirm, file_open, file_save, pick_open, pick_save,
+    store_set, store_get, store_remove, store_has, store_keys,
+    poll, pending,
+}
+
+const CLIP_MAX: u64 = 16384
+const CUT_MIME_LEN: u64 = 22
+const KIND_MAX: u64 = 3
+const BUTTONS_MAX: u64 = 3
+const DATA_ROOT_LEN: u64 = 6
+const TMP_SUFFIX_LEN: u64 = 6
+const DENT_BYTES: u64 = 1024
+const KEY_SEPARATOR: u64 = 10
+const KEYS_FULL: u64 = 4294967295
+
+static mut app_name: [u8; 65] = [0 as u8; 65]
+static mut app_len: u64 = 0
+static mut path_buf: [u8; 160] = [0 as u8; 160]
+static mut tmp_buf: [u8; 176] = [0 as u8; 176]
+static mut dlg_key: [u8; 48] = [0 as u8; 48]
+static mut clip_buf: [u8; 16384] = [0 as u8; 16384]
+static mut dent_buf: [u8; 1024] = [0 as u8; 1024]
+static mut TMP_SUFFIX: [u8; 6] = "/.tmp\0"
+static mut CUT_MIME: [u8; 23] = "application/x-osum-cut\0"
+static mut cut_mask_cache: u64 = 0
+
+fn app_ptr() -> u64 {
+    return (&app_name[0 as usize]) as u64
+}
+
+fn path_ptr() -> u64 {
+    return (&path_buf[0 as usize]) as u64
+}
+
+fn dent_ptr() -> u64 {
+    return (&dent_buf[0 as usize]) as u64
+}
+
+fn tmp_ptr() -> u64 {
+    return (&tmp_buf[0 as usize]) as u64
+}
+
+fn set_app(name: u64, n: u64) -> u64 {
+    if !svcrules.valid_name(name, n) {
+        return svcrules.INVALID
+    }
+    octets.zero(app_ptr(), 65)
+    octets.copy(app_ptr(), name, n)
+    app_len = n
+    return svcrules.OK
+}
+
+fn caps() -> u64 {
+    var bits: u64 = svcrules.CAP_STORAGE | svcrules.CAP_ASYNC_HOST
+    if xfer.available() {
+        bits = bits | svcrules.CAP_CLIP_WRITE | svcrules.CAP_CLIP_READ
+    }
+    if svcdlg.available() {
+        bits = bits | svcrules.CAP_DIALOG | svcrules.CAP_FILE_OPEN | svcrules.CAP_FILE_SAVE
+    }
+    return bits
+}
+
+fn copy_text(p: u64, n: u64) -> u64 {
+    if !svcrules.has(caps(), svcrules.CAP_CLIP_WRITE) {
+        return svcrules.NO_BACKEND
+    }
+    if n > CLIP_MAX {
+        return svcrules.INVALID
+    }
+    if xfer.is_error(xfer.set_text(p, n)) {
+        return svcrules.FAILED
+    }
+    return svcrules.OK
+}
+
+fn paste_text(id_out: u64) -> u64 {
+    if !svcrules.has(caps(), svcrules.CAP_CLIP_READ) {
+        return svcrules.NO_BACKEND
+    }
+    let id: u64 = svcqueue.next_id()
+    let buf: u64 = (&clip_buf[0 as usize]) as u64
+    let n: u64 = xfer.get_text(xfer.SEL_CLIPBOARD, 0, buf, CLIP_MAX)
+    var status: u64 = svcrules.OK
+    var got: u64 = n
+    if xfer.is_error(n) || n == 0 {
+        status = svcrules.NOT_FOUND
+        got = 0
+    }
+    if !svcqueue.push(id, svcqueue.OP_CLIP_TEXT, status, 0, buf, 0, buf, got) {
+        return svcrules.FAILED
+    }
+    octets.st32(id_out, 0, id)
+    return svcrules.OK
+}
+
+fn cut_mask() -> u64 {
+    if cut_mask_cache == 0 {
+        cut_mask_cache = xfer.mime_of((&CUT_MIME[0 as usize]) as u64, CUT_MIME_LEN)
+    }
+    return cut_mask_cache
+}
+
+fn copy_files(uris: u64, n: u64, cut: u64) -> u64 {
+    if !svcrules.has(caps(), svcrules.CAP_CLIP_WRITE) {
+        return svcrules.NO_BACKEND
+    }
+    if n == 0 {
+        return svcrules.INVALID
+    }
+    var kinds: u64 = xfer.MIME_URIS
+    if cut != 0 {
+        kinds = kinds | cut_mask()
+    }
+    if xfer.is_error(xfer.set(xfer.SEL_CLIPBOARD, kinds, uris, n)) {
+        return svcrules.FAILED
+    }
+    return svcrules.OK
+}
+
+fn paste_files(out: u64, max: u64, len_out: u64, cut_out: u64) -> u64 {
+    octets.st32(len_out, 0, 0)
+    octets.st32(cut_out, 0, 0)
+    if !svcrules.has(caps(), svcrules.CAP_CLIP_READ) {
+        return svcrules.NO_BACKEND
+    }
+    let kinds: u64 = xfer.types(xfer.SEL_CLIPBOARD, 0)
+    if (kinds & (xfer.MIME_URIS | xfer.MIME_PATH)) == 0 {
+        return svcrules.NOT_FOUND
+    }
+    let n: u64 = xfer.get_files(xfer.SEL_CLIPBOARD, 0, out, max)
+    if xfer.is_error(n) || n > max {
+        return svcrules.FAILED
+    }
+    octets.st32(len_out, 0, n)
+    if (kinds & cut_mask()) != 0 {
+        octets.st32(cut_out, 0, 1)
+    }
+    return svcrules.OK
+}
+
+fn files_seq() -> u64 {
+    return xfer.seq(xfer.SEL_CLIPBOARD, 0)
+}
+
+fn clear_files() -> u64 {
+    if xfer.is_error(xfer.clear(xfer.SEL_CLIPBOARD)) {
+        return svcrules.FAILED
+    }
+    return svcrules.OK
+}
+
+fn ask(mode: u64, title: u64, body: u64, yes_out: u64) -> u64 {
+    if !svcrules.has(caps(), svcrules.CAP_DIALOG) {
+        return svcrules.NO_BACKEND
+    }
+    let answer: u64 = svcdlg.run(svcqueue.next_id(), mode, app_ptr(), app_len, title, body)
+    if answer == dlgproto.ANSWER_FAILED {
+        return svcrules.FAILED
+    }
+    octets.st32(yes_out, 0, answer)
+    return svcrules.OK
+}
+
+fn message(kind: u64, title: u64, text: u64, buttons: u64, answer_out: u64) -> u64 {
+    if kind > KIND_MAX || buttons > BUTTONS_MAX {
+        return svcrules.INVALID
+    }
+    return ask(dlgproto.MODE_MESSAGE, title, text, answer_out)
+}
+
+fn confirm(title: u64, text: u64, yes_out: u64) -> u64 {
+    return ask(dlgproto.MODE_CONFIRM, title, text, yes_out)
+}
+
+fn file_open(title: u64, accept: u64, id_out: u64) -> u64 {
+    if !svcrules.has(caps(), svcrules.CAP_FILE_OPEN) {
+        return svcrules.NO_BACKEND
+    }
+    let id: u64 = svcqueue.next_id()
+    let answer: u64 = svcdlg.run(id, dlgproto.MODE_OPEN, app_ptr(), app_len, title, accept)
+    octets.st32(id_out, 0, id)
+    return svcdlg.queue_result(id, answer, true)
+}
+
+fn pick_open(title: u64, accept: u64, id_out: u64) -> u64 {
+    if !svcdlg.picker_available() {
+        return svcrules.NO_BACKEND
+    }
+    let id: u64 = svcqueue.next_id()
+    let answer: u64 = svcdlg.pick(id, app_ptr(), app_len, title, accept)
+    octets.st32(id_out, 0, id)
+    return svcdlg.queue_result(id, answer, true)
+}
+
+fn pick_save(title: u64, name: u64, data: u64, n: u64, id_out: u64) -> u64 {
+    if !svcdlg.picker_available() {
+        return svcrules.NO_BACKEND
+    }
+    if text.length(name) == 0 {
+        return svcrules.INVALID
+    }
+    let id: u64 = svcqueue.next_id()
+    let staged: u64 = stage_input(id, data, n)
+    if staged != svcrules.OK {
+        return staged
+    }
+    let answer: u64 = svcdlg.pick_save(id, app_ptr(), app_len, title, name)
+    drop_input(id)
+    octets.st32(id_out, 0, id)
+    return svcdlg.queue_result(id, answer, false)
+}
+
+fn stage_input(id: u64, data: u64, n: u64) -> u64 {
+    let key: u64 = (&dlg_key[0 as usize]) as u64
+    let key_len: u64 = dlgproto.input_key(id, key, 48)
+    if key_len == 0 {
+        return svcrules.INVALID
+    }
+    if n == 0 {
+        return svcrules.INVALID
+    }
+    return store_set(key, key_len, data, n)
+}
+
+fn drop_input(id: u64) {
+    let key: u64 = (&dlg_key[0 as usize]) as u64
+    let key_len: u64 = dlgproto.input_key(id, key, 48)
+    if key_len != 0 {
+        let _r: u64 = store_remove(key, key_len)
+    }
+}
+
+fn file_save(title: u64, name: u64, data: u64, n: u64, id_out: u64) -> u64 {
+    if !svcrules.has(caps(), svcrules.CAP_FILE_SAVE) {
+        return svcrules.NO_BACKEND
+    }
+    if text.length(name) == 0 {
+        return svcrules.INVALID
+    }
+    let id: u64 = svcqueue.next_id()
+    let staged: u64 = stage_input(id, data, n)
+    if staged != svcrules.OK {
+        return staged
+    }
+    let answer: u64 = svcdlg.run(id, dlgproto.MODE_SAVE, app_ptr(), app_len, title, name)
+    drop_input(id)
+    octets.st32(id_out, 0, id)
+    return svcdlg.queue_result(id, answer, false)
+}
+
+fn ensure_dirs() -> bool {
+    let dir_len: u64 = svcrules.store_dir(app_ptr(), app_len, path_ptr(), 160)
+    if dir_len == 0 {
+        return false
+    }
+    let cut: u64 = DATA_ROOT_LEN + app_len
+    octets.st8(path_ptr(), DATA_ROOT_LEN - 1, 0)
+    io.make_dir(path_ptr())
+    octets.st8(path_ptr(), DATA_ROOT_LEN - 1, 47)
+    octets.st8(path_ptr(), cut, 0)
+    io.make_dir(path_ptr())
+    octets.st8(path_ptr(), cut, 47)
+    io.make_dir(path_ptr())
+    return true
+}
+
+fn tmp_path() -> u64 {
+    let dir_len: u64 = svcrules.store_dir(app_ptr(), app_len, tmp_ptr(), 160)
+    if dir_len == 0 {
+        return 0
+    }
+    octets.copy(tmp_ptr() + dir_len, (&TMP_SUFFIX[0 as usize]) as u64, TMP_SUFFIX_LEN)
+    return tmp_ptr()
+}
+
+fn key_path(key: u64, key_len: u64) -> bool {
+    return svcrules.store_path(app_ptr(), app_len, key, key_len, path_ptr(), 160) != 0
+}
+
+fn store_remove(key: u64, key_len: u64) -> u64 {
+    if !key_path(key, key_len) {
+        return svcrules.INVALID
+    }
+    io.unlink(path_ptr())
+    return svcrules.OK
+}
+
+fn store_write(key: u64, key_len: u64, value: u64, n: u64) -> u64 {
+    if !ensure_dirs() || !key_path(key, key_len) {
+        return svcrules.FAILED
+    }
+    let tmp: u64 = tmp_path()
+    let fd: u64 = io.create(tmp)
+    if errno.failed(fd) {
+        return svcrules.FAILED
+    }
+    let wrote: u64 = io.write_all(fd, value, n)
+    io.close(fd)
+    if errno.failed(wrote) || wrote != n {
+        io.unlink(tmp)
+        return svcrules.FAILED
+    }
+    if errno.failed(io.rename(tmp, path_ptr())) {
+        io.unlink(tmp)
+        return svcrules.FAILED
+    }
+    return svcrules.OK
+}
+
+fn store_set(key: u64, key_len: u64, value: u64, n: u64) -> u64 {
+    if !key_path(key, key_len) || n > svcrules.VALUE_MAX {
+        return svcrules.INVALID
+    }
+    if n == 0 {
+        return store_remove(key, key_len)
+    }
+    return store_write(key, key_len, value, n)
+}
+
+fn store_has(key: u64, key_len: u64) -> bool {
+    if !key_path(key, key_len) {
+        return false
+    }
+    return !errno.failed(io.size_of(path_ptr()))
+}
+
+fn store_get(key: u64, key_len: u64, out: u64, max: u64, len_out: u64) -> u64 {
+    if !key_path(key, key_len) {
+        return svcrules.INVALID
+    }
+    let size: u64 = io.size_of(path_ptr())
+    if errno.failed(size) {
+        return svcrules.NOT_FOUND
+    }
+    if size > max {
+        return svcrules.FAILED
+    }
+    let fd: u64 = io.open(path_ptr(), kcall.O_RDONLY)
+    if errno.failed(fd) {
+        return svcrules.NOT_FOUND
+    }
+    let got: u64 = io.read_full(fd, out, size)
+    io.close(fd)
+    if errno.failed(got) {
+        return svcrules.FAILED
+    }
+    octets.st32(len_out, 0, got)
+    return svcrules.OK
+}
+
+fn append_key(name: u64, out: u64, max: u64, used: u64) -> u64 {
+    let n: u64 = text.length(name)
+    if used + n + 2 > max {
+        return KEYS_FULL
+    }
+    octets.copy(out + used, name, n)
+    octets.st8(out, used + n, KEY_SEPARATOR)
+    octets.st8(out, used + n + 1, 0)
+    return used + n + 1
+}
+
+fn collect_keys(block: u64, bytes: u64, out: u64, max: u64, start: u64) -> u64 {
+    var used: u64 = start
+    var at: u64 = 0
+    while at < bytes && used != KEYS_FULL {
+        let name: u64 = io.dir_name(block + at)
+        if svcrules.valid_key(name, text.length(name)) {
+            used = append_key(name, out, max, used)
+        }
+        at = at + io.dir_reclen(block + at)
+    }
+    return used
+}
+
+fn store_keys(out: u64, max: u64, len_out: u64) -> u64 {
+    octets.st32(len_out, 0, 0)
+    if max == 0 || svcrules.store_dir(app_ptr(), app_len, path_ptr(), 160) == 0 {
+        return svcrules.INVALID
+    }
+    octets.st8(out, 0, 0)
+    let fd: u64 = io.dir_open(path_ptr())
+    if errno.failed(fd) {
+        return svcrules.OK
+    }
+    var used: u64 = 0
+    var got: u64 = io.dir_read(fd, dent_ptr(), DENT_BYTES)
+    while !errno.failed(got) && got > 0 && used != KEYS_FULL {
+        used = collect_keys(dent_ptr(), got, out, max, used)
+        got = io.dir_read(fd, dent_ptr(), DENT_BYTES)
+    }
+    io.close(fd)
+    if used == KEYS_FULL || errno.failed(got) {
+        return svcrules.FAILED
+    }
+    octets.st32(len_out, 0, used)
+    return svcrules.OK
+}
+
+fn poll(head: u64, name: u64, name_max: u64, data: u64, data_max: u64) -> bool {
+    return svcqueue.pop(head, name, name_max, data, data_max)
+}
+
+fn pending() -> u64 {
+    return svcqueue.pending()
+}

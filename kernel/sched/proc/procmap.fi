@@ -1,0 +1,407 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import arch.arch
+import sched.ctr
+import lib.kstate
+import mm.mmframe
+import mm.mmswap
+import libc.octets
+import sched.taskconst
+import sched.taskslot
+import sched.proc.procbase
+import sched.proc.procpt
+
+const IMAGE_BASE: u64 = 0x40100000
+
+const IMAGE_END: u64 = 0x44400000
+
+const LAZY_ATOP: u64 = 0x200000000
+
+const LAZYF_MAX: u64 = 0x100000
+
+fn free_pt(state: u64, pt: u64) -> u64 {
+    var freed: u64 = 0
+    var k: u64 = 0
+    while k < 512 {
+        k = k + arch.zero_run(pt + k * 8, 512 - k)
+        if k >= 512 {
+            break
+        }
+        let e: u64 = procpt.read_entry(pt, k)
+        if (e & procbase.PAGE_PRESENT) != 0 {
+            if (e & procbase.PAGE_SHARED) == 0 {
+                mmframe.frame_free(state, e & procbase.ADDR_MASK)
+                freed = freed + 1
+            }
+        } else if is_swap_entry(e) {
+            mmswap.release(state, swap_slot_of(e))
+        }
+        k = k + 1
+    }
+    mmframe.frame_free(state, pt)
+    return freed + 1
+}
+
+fn map_restored(state: u64, i: u64, addr: u64, frame: u64) -> bool {
+    let sl: u64 = procpt.pt_slot(addr)
+    if sl >= 512 {
+        return false
+    }
+    let pt: u64 = procpt.pt_for(state, i, addr, true)
+    if pt == 0 {
+        return false
+    }
+    if (procpt.read_entry(pt, sl) & procbase.PAGE_PRESENT) != 0 {
+        return false
+    }
+    procpt.write_entry(pt, sl,
+        (frame & procbase.ADDR_MASK) | procbase.PAGE_PRESENT | procbase.PAGE_WRITE | procbase.PAGE_USER | procpt.nx(state))
+    return true
+}
+
+fn map_frame(state: u64, i: u64, addr: u64, frame: u64,
+    writable: bool) -> bool {
+    let s: u64 = procpt.pt_slot(addr)
+    if s >= 512 {
+        return false
+    }
+    let pt: u64 = procpt.pt_for(state, i, addr, true)
+    if pt == 0 {
+        return false
+    }
+    if (procpt.read_entry(pt, s) & procbase.PAGE_PRESENT) != 0 {
+        return false
+    }
+    var bits: u64 = procbase.PAGE_PRESENT | procbase.PAGE_USER | procbase.PAGE_SHARED | procpt.nx(state)
+    if writable {
+        bits = bits | procbase.PAGE_WRITE
+    }
+    procpt.write_entry(pt, s, (frame & procbase.ADDR_MASK) | bits)
+    return true
+}
+
+fn page_free(state: u64, i: u64, addr: u64) -> bool {
+    let s: u64 = procpt.pt_slot(addr)
+    if s >= 512 {
+        return false
+    }
+    let pt: u64 = procpt.pt_for(state, i, addr, false)
+    if pt == 0 {
+        return procpt.pd_slot(addr) < procbase.PRIV_SLOTS
+    }
+    return (procpt.read_entry(pt, s) & (procbase.PAGE_PRESENT | procbase.PAGE_LAZY)) == 0
+}
+
+fn page_taken(state: u64, i: u64, addr: u64) -> bool {
+    let s: u64 = procpt.pt_slot(addr)
+    if s >= 512 {
+        return true
+    }
+    let pt: u64 = procpt.pt_for(state, i, addr, false)
+    if pt == 0 {
+        return false
+    }
+    return procpt.read_entry(pt, s) != 0
+}
+
+fn lazy_bits(readable: bool, writable: bool, runnable: bool) -> u64 {
+    var b: u64 = procbase.PAGE_LAZY
+    if readable || writable || runnable {
+        b = b | procbase.PAGE_USER
+    }
+    if writable {
+        b = b | procbase.PAGE_WRITE
+    }
+    if runnable {
+        b = b | procbase.PAGE_LAZYX
+    }
+    return b
+}
+
+fn lazy_mark(state: u64, i: u64, addr: u64, readable: bool, writable: bool, runnable: bool) -> bool {
+    if addr < procbase.LAZY_BASE || addr >= procbase.LAZY_TOP {
+        return false
+    }
+    let s: u64 = procpt.pt_slot(addr)
+    let pt: u64 = procpt.pt_for(state, i, addr, true)
+    if pt == 0 {
+        return false
+    }
+    if procpt.read_entry(pt, s) != 0 {
+        return false
+    }
+    procpt.write_entry(pt, s, lazy_bits(readable, writable, runnable))
+    return true
+}
+
+fn lazy_zone(addr: u64) -> bool {
+    if addr >= procbase.LAZY_BASE && addr < procbase.LAZY_TOP {
+        return true
+    }
+    return addr >= IMAGE_BASE && addr < IMAGE_END
+}
+
+fn lazy_mark_image(state: u64, i: u64, addr: u64, writable: bool, runnable: bool) -> bool {
+    if addr < IMAGE_BASE || addr >= IMAGE_END {
+        return false
+    }
+    let s: u64 = procpt.pt_slot(addr)
+    let pt: u64 = procpt.pt_for(state, i, addr, true)
+    if pt == 0 {
+        return false
+    }
+    if procpt.read_entry(pt, s) != 0 {
+        return false
+    }
+    procpt.write_entry(pt, s, lazy_bits(true, writable, runnable))
+    return true
+}
+
+fn lazy_is_file(state: u64, i: u64, addr: u64) -> bool {
+    let pt: u64 = procpt.pt_for(state, i, addr, false)
+    if pt == 0 {
+        return false
+    }
+    let e: u64 = procpt.read_entry(pt, procpt.pt_slot(addr))
+    return (e & procbase.PAGE_PRESENT) == 0 && (e & procbase.PAGE_LAZYF) != 0
+}
+
+fn lazy_mark_file(state: u64, i: u64, addr: u64, readable: bool, writable: bool, runnable: bool, ino: u64, pg: u64) -> bool {
+    if !lazy_zone(addr) || ino >= LAZYF_MAX || pg >= LAZYF_MAX {
+        return false
+    }
+    let s: u64 = procpt.pt_slot(addr)
+    let pt: u64 = procpt.pt_for(state, i, addr, true)
+    if pt == 0 {
+        return false
+    }
+    if procpt.read_entry(pt, s) != 0 {
+        return false
+    }
+    procpt.write_entry(pt, s, lazy_bits(readable, writable, runnable) | procbase.PAGE_LAZYF | (ino << 12) | (pg << 32))
+    return true
+}
+
+fn page_cached(state: u64, i: u64, addr: u64) -> bool {
+    let pt: u64 = procpt.pt_for(state, i, addr, false)
+    if pt == 0 {
+        return false
+    }
+    return (procpt.read_entry(pt, procpt.pt_slot(addr)) & procbase.PAGE_PCACHE) != 0
+}
+
+fn lazy_find(state: u64, i: u64, pages: u64) -> u64 {
+    var run: u64 = 0
+    var start: u64 = 0
+    var tile: u64 = procpt.pd_slot(procbase.LAZY_BASE)
+    let last: u64 = procpt.pd_slot(LAZY_ATOP - 1)
+    while tile <= last {
+        let ta: u64 = procbase.USER_DATA + tile * procbase.USER_SPAN
+        let pt: u64 = procpt.pt_for(state, i, ta, false)
+        if pt == 0 {
+            if run == 0 {
+                start = ta
+            }
+            run = run + 512
+            if run >= pages {
+                return start
+            }
+        } else {
+            var s: u64 = 0
+            while s < 512 {
+                if procpt.read_entry(pt, s) == 0 {
+                    if run == 0 {
+                        start = ta + s * 4096
+                    }
+                    run = run + 1
+                    if run >= pages {
+                        return start
+                    }
+                } else {
+                    run = 0
+                }
+                s = s + 1
+            }
+        }
+        tile = tile + 1
+    }
+    return 0
+}
+
+fn map_page(state: u64, i: u64, addr: u64, writable: bool,
+    runnable: bool) -> u64 {
+    let s: u64 = procpt.pt_slot(addr)
+    if s >= 512 {
+        return 0
+    }
+    let pt: u64 = procpt.pt_for(state, i, addr, true)
+    if pt == 0 {
+        return 0
+    }
+    if (procpt.read_entry(pt, s) & procbase.PAGE_PRESENT) != 0 {
+        return 0
+    }
+    if !ctr.mem_charge(state, ctr.ctr_of(state, i), 1) {
+        return 0
+    }
+    let frame: u64 = mmframe.frame_alloc_user(state)
+    if frame == 0 {
+        ctr.mem_uncharge(state, ctr.ctr_of(state, i), 1)
+        return 0
+    }
+    var bits: u64 = procbase.PAGE_PRESENT | procbase.PAGE_USER
+    if writable {
+        bits = bits | procbase.PAGE_WRITE
+    }
+    if !runnable {
+        bits = bits | procpt.nx(state)
+    }
+    procpt.write_entry(pt, s, frame | bits)
+    taskslot.tset(state, i, taskconst.T_UPAGES,
+        taskslot.tget(state, i, taskconst.T_UPAGES) + 1)
+    return mmframe.kva(frame)
+}
+
+fn map_page_zero(state: u64, i: u64, addr: u64, writable: bool,
+    runnable: bool) -> u64 {
+    let frame: u64 = map_page(state, i, addr, writable, runnable)
+    if frame == 0 {
+        return 0
+    }
+    procpt.zero_frame(frame)
+    return frame
+}
+
+const GROW_SLACK: u64 = 65536
+
+fn grow_stack(state: u64, i: u64, addr: u64, rsp: u64) -> bool {
+    let boden: u64 = taskslot.tget(state, i, taskconst.T_USTACK)
+    if boden == 0 {
+        return false
+    }
+    var floor: u64 = procbase.STACK_FLOOR
+    if boden > procbase.ARGS_LOW {
+        floor = procbase.STACK_HIGH_FLOOR
+    }
+    if addr < floor || addr >= boden {
+        return false
+    }
+    if rsp > addr + GROW_SLACK {
+        return false
+    }
+    if taskslot.tget(state, i, taskconst.T_KIND) != taskconst.K_USER {
+        return false
+    }
+    let page: u64 = addr & 0xFFFFFFFFFFFFF000
+    if !page_free(state, i, page) {
+        return false
+    }
+    if map_page_zero(state, i, page, true, false) == 0 {
+        return false
+    }
+    kstate.add(state, kstate.STACKGROW, 1)
+    let now: u64 = asm("mov rax, cr3", out("rax"))
+    if taskslot.tget(state, i, taskconst.T_CR3) == now {
+        asm("mov rax, cr3\nmov cr3, rax", out("rax"))
+    }
+    return true
+}
+
+fn stack_zone_has(state: u64, i: u64, addr: u64) -> bool {
+    let boden: u64 = taskslot.tget(state, i, taskconst.T_USTACK)
+    if boden <= procbase.ARGS_LOW {
+        return false
+    }
+    return addr >= procbase.STACK_HIGH_FLOOR && addr < boden
+}
+
+fn map_huge(state: u64, i: u64, addr: u64, phys: u64, writable: bool) -> bool {
+    if addr < procbase.USER_DATA || addr >= procbase.USER_DATA + 512 * procbase.HUGE_SIZE {
+        return false
+    }
+    if (addr & (procbase.HUGE_SIZE - 1)) != 0 || (phys & (procbase.HUGE_SIZE - 1)) != 0 {
+        return false
+    }
+    let pd: u64 = taskslot.tget(state, i, taskconst.T_PD)
+    if pd == 0 {
+        return false
+    }
+    let s: u64 = (addr >> 21) & 0x1FF
+    if s == 0 {
+        return false
+    }
+    let vorher: u64 = procpt.read_entry(pd, s)
+    if (vorher & procbase.PAGE_PRESENT) != 0 {
+        if (vorher & procbase.PAGE_HUGE) == 0 {
+            return false
+        }
+    }
+    var bits: u64 = procbase.PAGE_PRESENT | procbase.PAGE_USER | procbase.PAGE_HUGE | procpt.nx(state)
+    if writable {
+        bits = bits | procbase.PAGE_WRITE
+    }
+    procpt.write_entry(pd, s, (phys & (~(procbase.HUGE_SIZE - 1))) | bits)
+    let now: u64 = asm("mov rax, cr3", out("rax"))
+    asm("mov cr3, rax", in("rax") now, clobber("memory"))
+    return true
+}
+
+fn page_exec(state: u64, i: u64, addr: u64) -> bool {
+    let s: u64 = procpt.pt_slot(addr)
+    if s >= 512 {
+        return false
+    }
+    let pt: u64 = procpt.pt_for(state, i, addr, false)
+    if pt == 0 {
+        return false
+    }
+    let e: u64 = procpt.read_entry(pt, s)
+    if (e & procbase.PAGE_PRESENT) == 0 {
+        return false
+    }
+    if (e & procbase.PAGE_USER) == 0 {
+        return false
+    }
+    return (e & procbase.PAGE_NX) == 0
+}
+
+fn translate(state: u64, i: u64, addr: u64) -> u64 {
+    let pml4: u64 = taskslot.tget(state, i, taskconst.T_CR3)
+    if pml4 == 0 {
+        return 0
+    }
+    let e4: u64 = procpt.read_entry(pml4, (addr >> 39) & 0x1FF)
+    if (e4 & procbase.PAGE_PRESENT) == 0 {
+        return 0
+    }
+    let e3: u64 = procpt.read_entry(e4 & procbase.ADDR_MASK, (addr >> 30) & 0x1FF)
+    if (e3 & procbase.PAGE_PRESENT) == 0 {
+        return 0
+    }
+    let e2: u64 = procpt.read_entry(e3 & procbase.ADDR_MASK, (addr >> 21) & 0x1FF)
+    if (e2 & procbase.PAGE_PRESENT) == 0 {
+        return 0
+    }
+    if (e2 & 0x80) != 0 {
+        return mmframe.kva((e2 & procbase.ADDR_MASK) + (addr & 0x1FFFFF))
+    }
+    let e1: u64 = procpt.read_entry(e2 & procbase.ADDR_MASK, (addr >> 12) & 0x1FF)
+    if (e1 & procbase.PAGE_PRESENT) == 0 {
+        return 0
+    }
+    return mmframe.kva((e1 & procbase.ADDR_MASK) + (addr & 0xFFF))
+}
+
+fn zero_tail(frame: u64, from: u64) {
+    if from < mmframe.FRAME_SIZE {
+        octets.zero(mmframe.kva(frame) + from, mmframe.FRAME_SIZE - from)
+    }
+}
+
+fn is_swap_entry(e: u64) -> bool {
+    return (e & (procbase.PAGE_PRESENT | procbase.PAGE_LAZY | procbase.PAGE_LAZYF | procbase.PAGE_SWAP)) == procbase.PAGE_SWAP
+}
+
+fn swap_slot_of(e: u64) -> u64 {
+    return (e >> 12) & 0xFFFFFFF
+}

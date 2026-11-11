@@ -5,7 +5,15 @@ import lib.kstate
 import mm.mmframe
 import mm.mmheap
 import sched.sched
-import sched.proc
+import sched.taskconst
+import sched.taskslot
+import sched.proc.procbase
+import sched.proc.proccopy
+import sched.proc.procfault
+import sched.proc.procmap
+import sched.proc.procpt
+import sched.proc.procspace
+import sched.proc.procswap
 import arch.cpu
 import fs.fs
 import ldr.elf
@@ -128,13 +136,13 @@ fn comm_store(state: u64, t: u64, buf: u64) {
         b = b | (kstate.get8(buf + 8 + i) << (i * 8))
         i = i + 1
     }
-    sched.tset(state, t, sched.T_COMMA, a)
-    sched.tset(state, t, sched.T_COMMB, b)
+    taskslot.tset(state, t, taskconst.T_COMMA, a)
+    taskslot.tset(state, t, taskconst.T_COMMB, b)
 }
 
 fn comm_load(state: u64, t: u64, buf: u64) {
-    let a: u64 = sched.tget(state, t, sched.T_COMMA)
-    let b: u64 = sched.tget(state, t, sched.T_COMMB)
+    let a: u64 = taskslot.tget(state, t, taskconst.T_COMMA)
+    let b: u64 = taskslot.tget(state, t, taskconst.T_COMMB)
     var i: u64 = 0
     while i < 8 {
         kstate.set8(buf + i, ((a >> (i * 8)) & 255) as u8)
@@ -149,8 +157,8 @@ fn comm_load(state: u64, t: u64, buf: u64) {
 }
 
 fn comm_inherit(state: u64, from: u64, to: u64) {
-    sched.tset(state, to, sched.T_COMMA, sched.tget(state, from, sched.T_COMMA))
-    sched.tset(state, to, sched.T_COMMB, sched.tget(state, from, sched.T_COMMB))
+    taskslot.tset(state, to, taskconst.T_COMMA, taskslot.tget(state, from, taskconst.T_COMMA))
+    taskslot.tset(state, to, taskconst.T_COMMB, taskslot.tget(state, from, taskconst.T_COMMB))
 }
 
 // exec: comm = the last component of the path, cut to 15 characters (what Linux does)
@@ -198,7 +206,7 @@ fn do_prctl(state: u64, me: u64, was: u64, arg: u64) -> u64 {
         var k: u64 = 0
         var more: bool = true
         while k < 15 && more {
-            if !proc.user_ok(state, me, arg + k, 1) {
+            if !procfault.user_ok(state, me, arg + k, 1) {
                 return sysuser.neg(errno.E_FAULT)
             }
             let c: u64 = sysuser.peek(state, me, arg + k)
@@ -247,7 +255,7 @@ fn do_waitid(state: u64, me: u64, idtype: u64, id: u64, info: u64, options: u64)
     if (options & 4) == 0 {
         return sysuser.neg(errno.E_INVAL)
     }
-    if info != 0 && !proc.user_ok(state, me, info, 128) {
+    if info != 0 && !procfault.user_ok(state, me, info, 128) {
         return sysuser.neg(errno.E_FAULT)
     }
     var want: u64 = 0
@@ -300,8 +308,8 @@ fn do_waitid(state: u64, me: u64, idtype: u64, id: u64, info: u64, options: u64)
         return 0
     }
     if info != 0 {
-        let code: u64 = sched.tget(state, child, sched.T_EXIT)
-        let sl: u64 = sched.tget(state, child, sched.T_SIGLAST)
+        let code: u64 = taskslot.tget(state, child, taskconst.T_EXIT)
+        let sl: u64 = taskslot.tget(state, child, taskconst.T_SIGLAST)
         var z2: u64 = 0
         while z2 < 16 {
             sysuser.put64(state, me, info + z2 * 8, 0)
@@ -315,10 +323,10 @@ fn do_waitid(state: u64, me: u64, idtype: u64, id: u64, info: u64, options: u64)
             sysuser.put32(state, me, info + 8, 1)
             sysuser.put32(state, me, info + 24, code & 255)
         }
-        sysuser.put32(state, me, info + 16, sched.tget(state, child, sched.T_PID))
+        sysuser.put32(state, me, info + 16, taskslot.tget(state, child, taskconst.T_PID))
     }
     if (options & 0x1000000) == 0 {
-        proc.reap(state, child)
+        procswap.reap(state, child)
     }
     return 0
 }
@@ -328,30 +336,30 @@ fn do_arch_prctl(state: u64, me: u64, code: u64, addr: u64) -> u64 {
         if (addr >> 47) != 0 {
             return sysuser.neg(errno.E_INVAL)
         }
-        sched.tset(state, me, sched.T_FSBASE, addr)
+        taskslot.tset(state, me, taskconst.T_FSBASE, addr)
         sched.fsbase_apply(state, me)
         return 0
     }
     if code == ARCH_GET_FS {
-        if !proc.user_ok(state, me, addr, 8) {
+        if !procfault.user_ok(state, me, addr, 8) {
             return sysuser.neg(errno.E_FAULT)
         }
-        sysuser.put64(state, me, addr, sched.tget(state, me, sched.T_FSBASE))
+        sysuser.put64(state, me, addr, taskslot.tget(state, me, taskconst.T_FSBASE))
         return 0
     }
     if code == ARCH_SET_GS {
         if (addr >> 47) != 0 {
             return sysuser.neg(errno.E_INVAL)
         }
-        sched.tset(state, me, sched.T_GSBASE, addr)
+        taskslot.tset(state, me, taskconst.T_GSBASE, addr)
         sched.fsbase_apply(state, me)
         return 0
     }
     if code == ARCH_GET_GS {
-        if !proc.user_ok(state, me, addr, 8) {
+        if !procfault.user_ok(state, me, addr, 8) {
             return sysuser.neg(errno.E_FAULT)
         }
-        sysuser.put64(state, me, addr, sched.tget(state, me, sched.T_GSBASE))
+        sysuser.put64(state, me, addr, taskslot.tget(state, me, taskconst.T_GSBASE))
         return 0
     }
     return sysuser.neg(errno.E_INVAL)
@@ -382,7 +390,7 @@ fn sleep_until_fine(state: u64, me: u64, fine: u64) -> u64 {
 }
 
 fn do_nanosleep(state: u64, me: u64, req: u64) -> u64 {
-    if !proc.user_ok(state, me, req, 16) {
+    if !procfault.user_ok(state, me, req, 16) {
         return sysuser.neg(errno.E_FAULT)
     }
     let sec: u64 = sysuser.user_word(state, me, req)
@@ -433,7 +441,7 @@ fn do_clock_settime(state: u64, me: u64, clk: u64, tp: u64) -> u64 {
     if !perm.is_root(state, me) {
         return sysuser.neg(errno.E_PERM)
     }
-    if !proc.user_ok(state, me, tp, 16) {
+    if !procfault.user_ok(state, me, tp, 16) {
         return sysuser.neg(errno.E_FAULT)
     }
     let sec: u64 = sysuser.user_word(state, me, tp)
@@ -454,7 +462,7 @@ const NS_PER_USEC: u64 = 1000
 // clock by `offset` microseconds (root only); mode 0 only reads. The rest of
 // the structure is left alone.
 fn do_adjtimex(state: u64, me: u64, tx: u64) -> u64 {
-    if !proc.user_ok(state, me, tx, clockabi.TIMEX_BYTES) {
+    if !procfault.user_ok(state, me, tx, clockabi.TIMEX_BYTES) {
         return sysuser.neg(errno.E_FAULT)
     }
     let modes: u64 = sysuser.user_word32(state, me, tx + clockabi.TIMEX_MODES)
@@ -520,7 +528,7 @@ fn do_clock_gettime(state: u64, me: u64, clk_arg: u64, tp: u64) -> u64 {
     if clk > time.CLOCK_MAX {
         return sysuser.neg(errno.E_INVAL)
     }
-    if !proc.user_ok(state, me, tp, 16) {
+    if !procfault.user_ok(state, me, tp, 16) {
         return sysuser.neg(errno.E_FAULT)
     }
     kstate.add(state, kstate.TIME_CALLS, 1)
@@ -546,7 +554,7 @@ fn do_clock_getres(state: u64, me: u64, clk: u64, tp: u64) -> u64 {
     if tp == 0 {
         return 0
     }
-    if !proc.user_ok(state, me, tp, 16) {
+    if !procfault.user_ok(state, me, tp, 16) {
         return sysuser.neg(errno.E_FAULT)
     }
     var res: u64 = time.TICK_NS
@@ -562,7 +570,7 @@ fn do_gettimeofday(state: u64, me: u64, tv: u64) -> u64 {
     if tv == 0 {
         return 0
     }
-    if !proc.user_ok(state, me, tv, 16) {
+    if !procfault.user_ok(state, me, tv, 16) {
         return sysuser.neg(errno.E_FAULT)
     }
     let ns: u64 = time.real_ns(state)
@@ -574,7 +582,7 @@ fn do_gettimeofday(state: u64, me: u64, tv: u64) -> u64 {
 fn do_time(state: u64, me: u64, out: u64) -> u64 {
     let secs: u64 = time.now_sec(state)
     if out != 0 {
-        if !proc.user_ok(state, me, out, 8) {
+        if !procfault.user_ok(state, me, out, 8) {
             return sysuser.neg(errno.E_FAULT)
         }
         sysuser.put64(state, me, out, secs)
@@ -594,7 +602,7 @@ fn do_getrandom(state: u64, me: u64, buf: u64, want: u64, flags: u64) -> u64 {
     if len > sysconst.MAX_IO {
         len = sysconst.MAX_IO
     }
-    if !proc.user_ok(state, me, buf, len) {
+    if !procfault.user_ok(state, me, buf, len) {
         return sysuser.neg(errno.E_FAULT)
     }
     if len == 0 {
@@ -635,24 +643,24 @@ fn do_siginfo(state: u64, me: u64, what: u64, arg: u64) -> u64 {
             return sysuser.neg(errno.E_SRCH)
         }
         if what == SI_STATE_OF {
-            return sched.tget(state, i, sched.T_STATE)
+            return taskslot.tget(state, i, taskconst.T_STATE)
         }
         if what == SI_TICKS_OF {
-            return sched.tget(state, i, sched.T_TICKS)
+            return taskslot.tget(state, i, taskconst.T_TICKS)
         }
         if what == SI_PEND_OF {
-            return sched.tget(state, i, sched.T_SIGPEND)
+            return taskslot.tget(state, i, taskconst.T_SIGPEND)
         }
         return sysuser.neg(errno.E_INVAL)
     }
     if what == SI_PENDING {
-        return sched.tget(state, me, sched.T_SIGPEND)
+        return taskslot.tget(state, me, taskconst.T_SIGPEND)
     }
     if what == SI_MASK {
-        return sched.tget(state, me, sched.T_SIGMASK)
+        return taskslot.tget(state, me, taskconst.T_SIGMASK)
     }
     if what == SI_LAST {
-        return sched.tget(state, me, sched.T_SIGLAST)
+        return taskslot.tget(state, me, taskconst.T_SIGLAST)
     }
     if what == SI_DELIVERED {
         return kstate.get(state, kstate.SIG_DELIVERED)
@@ -670,7 +678,7 @@ fn do_siginfo(state: u64, me: u64, what: u64, arg: u64) -> u64 {
         return kstate.get(state, kstate.SIG_STOPS)
     }
     if what == SI_MYCOUNT {
-        return sched.tget(state, me, sched.T_SIGDEL)
+        return taskslot.tget(state, me, taskconst.T_SIGDEL)
     }
     if what == SI_STOPPED {
         return signal.stopped_count(state)
@@ -684,13 +692,13 @@ fn do_siginfo(state: u64, me: u64, what: u64, arg: u64) -> u64 {
 // ------------------------------------------------------ processes
 
 fn do_getppid(state: u64, me: u64) -> u64 {
-    let p: u64 = sched.tget(state, me, sched.T_PARENT)
-    return sched.tget(state, p, sched.T_PID)
+    let p: u64 = taskslot.tget(state, me, taskconst.T_PARENT)
+    return taskslot.tget(state, p, taskconst.T_PID)
 }
 
 fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stack_top: u64,
     ptid: u64, ctid: u64, tls: u64) -> u64 {
-    if sched.tget(state, me, sched.T_KIND) != sched.K_USER {
+    if taskslot.tget(state, me, taskconst.T_KIND) != taskconst.K_USER {
         return sysuser.neg(errno.E_NOSYS)
     }
     if (flags & CLONE_VM) == 0 || (flags & CLONE_THREAD) == 0 {
@@ -699,7 +707,7 @@ fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stack_top: u64,
     if stack_top == 0 {
         return sysuser.neg(errno.E_INVAL)
     }
-    if !proc.user_ok(state, me, stack_top - 8, 8) {
+    if !procfault.user_ok(state, me, stack_top - 8, 8) {
         return sysuser.neg(errno.E_FAULT)
     }
     // RUNDE UNTERBAU: THE FINISHED THREADS OF THIS PROCESS GO FIRST. A thread that ended stayed a corpse in the task table until
@@ -708,8 +716,8 @@ fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stack_top: u64,
     // t_threads `churn_64_threads`). Linux frees a non-leader thread by itself; here the next `clone` of the group does it.
     sysmem.reap_dead_threads(state, me)
     let irq: u64 = sched.irq_save()
-    let faden: u64 = proc.create_thread(state, me,
-        sched.tget(state, me, sched.T_PRIO))
+    let faden: u64 = procswap.create_thread(state, me,
+        taskslot.tget(state, me, taskconst.T_PRIO))
     if faden == 0 {
         sched.irq_restore(irq)
         return sysuser.neg(errno.E_AGAIN)
@@ -723,13 +731,13 @@ fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stack_top: u64,
     }
     sched.fpu_inherit(state, me, faden)
     signal.inherit(state, me, faden)
-    sched.tset(state, faden, sched.T_CWD,
-        sched.tget(state, me, sched.T_CWD))
+    taskslot.tset(state, faden, taskconst.T_CWD,
+        taskslot.tget(state, me, taskconst.T_CWD))
     uio.adopt(state, me, faden)
-    sched.tset(state, faden, sched.T_BRK, sysmem.brk_of(state, me))
-    sched.tset(state, faden, sched.T_MMAP, sysmem.map_bottom(state, me))
-    sched.tset(state, faden, sched.T_BIG, sched.tget(state, sysmem.mem_owner(state, me), sched.T_BIG))
-    sched.tset(state, faden, sched.T_USTACK, stack_top)
+    taskslot.tset(state, faden, taskconst.T_BRK, sysmem.brk_of(state, me))
+    taskslot.tset(state, faden, taskconst.T_MMAP, sysmem.map_bottom(state, me))
+    taskslot.tset(state, faden, taskconst.T_BIG, taskslot.tget(state, sysmem.mem_owner(state, me), taskconst.T_BIG))
+    taskslot.tset(state, faden, taskconst.T_USTACK, stack_top)
     netview.inherit(state, me, faden)
     ctr.inherit(state, me, faden)
     // AB-003: a thread is its process -- same origin.
@@ -737,22 +745,22 @@ fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stack_top: u64,
     comm_inherit(state, me, faden)
     uio.exe_copy(state, me, faden)
     if (flags & CLONE_THREAD) != 0 {
-        sched.tset(state, faden, sched.T_TGID,
-            sched.tget(state, me, sched.T_TGID))
+        taskslot.tset(state, faden, taskconst.T_TGID,
+            taskslot.tget(state, me, taskconst.T_TGID))
     }
-    sched.tset(state, faden, sched.T_GSBASE, sched.tget(state, me, sched.T_GSBASE))
+    taskslot.tset(state, faden, taskconst.T_GSBASE, taskslot.tget(state, me, taskconst.T_GSBASE))
     if (flags & CLONE_SETTLS) != 0 {
-        sched.tset(state, faden, sched.T_FSBASE, tls)
+        taskslot.tset(state, faden, taskconst.T_FSBASE, tls)
     }
-    let new_tid: u64 = sched.tget(state, faden, sched.T_PID)
+    let new_tid: u64 = taskslot.tget(state, faden, taskconst.T_PID)
     if (flags & CLONE_PARENT_SETTID) != 0 {
-        if proc.user_ok(state, me, ptid, 8) {
+        if procfault.user_ok(state, me, ptid, 8) {
             sysuser.put64(state, me, ptid, new_tid)
         }
     }
     if (flags & CLONE_CHILD_CLEARTID) != 0 {
-        if proc.user_ok(state, me, ctid, 4) {
-            sched.tset(state, faden, sched.T_FUTEX, ctid)
+        if procfault.user_ok(state, me, ctid, 4) {
+            taskslot.tset(state, faden, taskconst.T_FUTEX, ctid)
         }
     }
     let ctx: u64 = state + kstate.CTX_OFF + faden * F_BYTES
@@ -764,7 +772,7 @@ fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stack_top: u64,
     }
     __mmio_write64((ctx + sysconst.F_RAX) as *mut u64, 0)
     __mmio_write64((ctx + F_RSP) as *mut u64, stack_top)
-    sched.tset(state, faden, sched.T_ARG, proc.ARG_RESUME)
+    taskslot.tset(state, faden, taskconst.T_ARG, proccopy.ARG_RESUME)
     kstate.add(state, kstate.SPAWNS, 1)
     sched.start(state, faden)
     sched.irq_restore(irq)
@@ -772,20 +780,20 @@ fn do_clone(state: u64, me: u64, frame: u64, flags: u64, stack_top: u64,
 }
 
 fn do_fork(state: u64, me: u64, frame: u64, stack_top: u64) -> u64 {
-    if sched.tget(state, me, sched.T_KIND) != sched.K_USER {
+    if taskslot.tget(state, me, taskconst.T_KIND) != taskconst.K_USER {
         return sysuser.neg(errno.E_NOSYS)
     }
     // RUNDE UNTERBAU: the corpses of finished threads of this process leave first (a task slot is a task slot)
     sysmem.reap_dead_threads(state, me)
     let flags: u64 = sched.irq_save()
-    let child: u64 = proc.create_bare(state, sched.tget(state, me,
-            sched.T_PRIO))
+    let child: u64 = procspace.create_bare(state, taskslot.tget(state, me,
+            taskconst.T_PRIO))
     if child == 0 {
         sched.irq_restore(flags)
         return sysuser.neg(errno.E_AGAIN)
     }
-    if proc.copy_space(state, me, child) == 0 {
-        proc.discard(state, child)
+    if proccopy.copy_space(state, me, child) == 0 {
+        procswap.discard(state, child)
         sched.irq_restore(flags)
         return sysuser.neg(errno.E_NOMEM)
     }
@@ -793,25 +801,25 @@ fn do_fork(state: u64, me: u64, frame: u64, stack_top: u64) -> u64 {
     sysfd.cx_copy(state, me, child)
     sched.fpu_inherit(state, me, child)
     signal.inherit(state, me, child)
-    sched.tset(state, child, sched.T_CWD, sched.tget(state, me, sched.T_CWD))
+    taskslot.tset(state, child, taskconst.T_CWD, taskslot.tget(state, me, taskconst.T_CWD))
     // ROUND K6: and the working directory as TEXT, which is what `getcwd`
     // prints and what a relative path is completed with.
     uio.adopt(state, me, child)
-    sched.tset(state, child, sched.T_BRK, sysmem.brk_of(state, me))
-    sched.tset(state, child, sched.T_MMAP, sysmem.map_bottom(state, me))
-    sched.tset(state, child, sched.T_BIG, sched.tget(state, sysmem.mem_owner(state, me), sched.T_BIG))
-    sched.tset(state, child, sched.T_LAZY, sched.tget(state, sysmem.mem_owner(state, me), sched.T_LAZY))
+    taskslot.tset(state, child, taskconst.T_BRK, sysmem.brk_of(state, me))
+    taskslot.tset(state, child, taskconst.T_MMAP, sysmem.map_bottom(state, me))
+    taskslot.tset(state, child, taskconst.T_BIG, taskslot.tget(state, sysmem.mem_owner(state, me), taskconst.T_BIG))
+    taskslot.tset(state, child, taskconst.T_LAZY, taskslot.tget(state, sysmem.mem_owner(state, me), taskconst.T_LAZY))
     netview.inherit(state, me, child)
     ctr.inherit(state, me, child)
     // AB-003: the origin is sticky -- a fork cannot shed it.
     origin.inherit(state, me, child)
     comm_inherit(state, me, child)
     uio.exe_copy(state, me, child)
-    sched.tset(state, child, sched.T_USTACK, sched.tget(state, me, sched.T_USTACK))
-    sched.tset(state, child, sched.T_FSBASE,
-        sched.tget(state, me, sched.T_FSBASE))
-    sched.tset(state, child, sched.T_GSBASE,
-        sched.tget(state, me, sched.T_GSBASE))
+    taskslot.tset(state, child, taskconst.T_USTACK, taskslot.tget(state, me, taskconst.T_USTACK))
+    taskslot.tset(state, child, taskconst.T_FSBASE,
+        taskslot.tget(state, me, taskconst.T_FSBASE))
+    taskslot.tset(state, child, taskconst.T_GSBASE,
+        taskslot.tget(state, me, taskconst.T_GSBASE))
     // The context the child comes back on. `proc.resume_start` hands this
     // copy to `user_resume` in isr.s.
     let ctx: u64 = state + kstate.CTX_OFF + child * F_BYTES
@@ -825,12 +833,12 @@ fn do_fork(state: u64, me: u64, frame: u64, stack_top: u64) -> u64 {
     if stack_top != 0 {
         __mmio_write64((ctx + F_RSP) as *mut u64, stack_top)
     }
-    sched.tset(state, child, sched.T_ARG, proc.ARG_RESUME)
+    taskslot.tset(state, child, taskconst.T_ARG, proccopy.ARG_RESUME)
     kstate.add(state, kstate.SPAWNS, 1)
     kstate.add(state, kstate.FORKS, 1)
     sched.start(state, child)
     sched.irq_restore(flags)
-    return sched.tget(state, child, sched.T_PID)
+    return taskslot.tget(state, child, taskconst.T_PID)
 }
 
 // `execve(path, argv, envp)` -- the caller BECOMES the program. The
@@ -849,7 +857,7 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64, envp: u64) -
     if kstate.get(state, kstate.FS_READY) == 0 {
         return sysuser.neg(errno.E_NOSYS)
     }
-    if sched.tget(state, me, sched.T_KIND) != sched.K_USER {
+    if taskslot.tget(state, me, taskconst.T_KIND) != taskconst.K_USER {
         return sysuser.neg(errno.E_NOSYS)
     }
     let name: u64 = sysuser.nameb(state)
@@ -868,17 +876,17 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64, envp: u64) -
         while going {
             // the terminating 0 may sit in slot MAX_ARGS: eight words
             // plus the end mark, not seven (a NULL-terminated argv)
-            if argc > proc.MAX_ARGS {
+            if argc > procbase.MAX_ARGS {
                 return sysuser.neg(errno.E_2BIG)
             }
-            if !proc.user_ok(state, me, argv + argc * 8, 8) {
+            if !procfault.user_ok(state, me, argv + argc * 8, 8) {
                 return sysuser.neg(errno.E_FAULT)
             }
             let p: u64 = sysuser.user_word(state, me, argv + argc * 8)
             if p == 0 {
                 going = false
             } else {
-                if argc >= proc.MAX_ARGS {
+                if argc >= procbase.MAX_ARGS {
                     return sysuser.neg(errno.E_2BIG)
                 }
                 if at + MAX_ARG + 1 > kstate.EARG_MAX {
@@ -916,7 +924,7 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64, envp: u64) -
             var ecnt: u64 = 0
             var egoing: bool = true
             while egoing && ecnt < elf.STACK_ENV_MAXN {
-                if !proc.user_ok(state, me, envp + ecnt * 8, 8) {
+                if !procfault.user_ok(state, me, envp + ecnt * 8, 8) {
                     egoing = false
                 } else {
                     let ep: u64 = sysuser.user_word(state, me, envp + ecnt * 8)
@@ -940,8 +948,8 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64, envp: u64) -
     let flags: u64 = sched.irq_save()
     // r334: one program start at a time on the whole machine.
     let lk: u64 = elf.lock_enter(state)
-    let t: u64 = elf.build(state, name, abuf, argc, sched.tget(state, me,
-            sched.T_PRIO))
+    let t: u64 = elf.build(state, name, abuf, argc, taskslot.tget(state, me,
+            taskconst.T_PRIO))
     elf.lock_leave(state, lk)
     if env_saved != 0 {
         // the new image has copied the block onto its argument page: the old block goes back
@@ -960,32 +968,32 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64, envp: u64) -
         let why: u64 = kstate.get(state, kstate.ELF_ERR)
         return sysuser.neg(elf.errno_of(why))
     }
-    let entry: u64 = sched.tget(state, t, sched.T_ENTRY)
-    let ustack: u64 = sched.tget(state, t, sched.T_USTACK)
-    let args: u64 = sched.tget(state, t, sched.T_WORK)
-    sched.tset(state, me, sched.T_EUID, sched.tget(state, t, sched.T_EUID))
-    sched.tset(state, me, sched.T_EGID, sched.tget(state, t, sched.T_EGID))
-    sched.tset(state, me, sched.T_SUID, sched.tget(state, t, sched.T_SUID))
-    sched.tset(state, me, sched.T_SGID, sched.tget(state, t, sched.T_SGID))
+    let entry: u64 = taskslot.tget(state, t, taskconst.T_ENTRY)
+    let ustack: u64 = taskslot.tget(state, t, taskconst.T_USTACK)
+    let args: u64 = taskslot.tget(state, t, taskconst.T_WORK)
+    taskslot.tset(state, me, taskconst.T_EUID, taskslot.tget(state, t, taskconst.T_EUID))
+    taskslot.tset(state, me, taskconst.T_EGID, taskslot.tget(state, t, taskconst.T_EGID))
+    taskslot.tset(state, me, taskconst.T_SUID, taskslot.tget(state, t, taskconst.T_SUID))
+    taskslot.tset(state, me, taskconst.T_SGID, taskslot.tget(state, t, taskconst.T_SGID))
     // AB-003: `elf.build` gave the new image its origin (the caller's
     // label, or `app:<name>` for a program in an app bundle); `execve`
     // is not a new process, so it moves over like the four words above.
     origin.inherit(state, t, me)
     uio.interp_copy(state, t, me)
     sysfd.cx_close_marked(state, me)
-    proc.swap_space(state, me, t)
+    proccopy.swap_space(state, me, t)
     // The new tables FIRST, then the old ones are freed -- in that order,
     // because the processor is standing in the old ones right now.
-    proc.use_space(state, me)
-    proc.discard(state, t)
-    sched.tset(state, me, sched.T_ENTRY, entry)
-    sched.tset(state, me, sched.T_USTACK, ustack)
-    sched.tset(state, me, sched.T_FSBASE, 0)
-    sched.tset(state, me, sched.T_GSBASE, 0)
+    proccopy.use_space(state, me)
+    procswap.discard(state, t)
+    taskslot.tset(state, me, taskconst.T_ENTRY, entry)
+    taskslot.tset(state, me, taskconst.T_USTACK, ustack)
+    taskslot.tset(state, me, taskconst.T_FSBASE, 0)
+    taskslot.tset(state, me, taskconst.T_GSBASE, 0)
     sched.fsbase_apply(state, me)
-    sched.tset(state, me, sched.T_BRK, 0)
-    sched.tset(state, me, sched.T_MMAP, 0)
-    sched.tset(state, me, sched.T_BIG, 0)
+    taskslot.tset(state, me, taskconst.T_BRK, 0)
+    taskslot.tset(state, me, taskconst.T_MMAP, 0)
+    taskslot.tset(state, me, taskconst.T_BIG, 0)
     sysmem.res_clear(state, me)
     // What ring 3 finds on the way out: a program at its entry point with
     // the argument block in rdi and nothing else left over from the
@@ -1005,7 +1013,7 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64, envp: u64) -
     // the new name -- otherwise `sh` would carry away everything the
     // program it exec'd into ever spent, which is the plainest form of
     // the lie this round exists to avoid.
-    pmon.task_clear(state, me, sched.tget(state, me, sched.T_PID))
+    pmon.task_clear(state, me, taskslot.tget(state, me, taskconst.T_PID))
     comm_from_path(state, me, name)
     uio.exe_set(state, me, name)
     pmon.name_set(state, me, name)
@@ -1014,7 +1022,7 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64, envp: u64) -
     // Everything the old image used belonged to the old image; carrying
     // it over would tell the person that `sh` downloaded a hundred
     // megabytes because it `exec`ed `wget`.
-    netmon.task_clear(state, me, sched.tget(state, me, sched.T_PID))
+    netmon.task_clear(state, me, taskslot.tget(state, me, taskconst.T_PID))
     netmon.name_set(state, me, name)
     // ROUND A11Y-2: the rights of the accessibility tree fall -- they
     // were given to the program that is gone (the spawn paths drop them
@@ -1032,7 +1040,7 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64, envp: u64) -
 // exited with 255.
 fn do_wait4(state: u64, me: u64, pid: u64, status: u64, options: u64) -> u64 {
     if status != 0 {
-        if !proc.user_ok(state, me, status, 4) {
+        if !procfault.user_ok(state, me, status, 4) {
             return sysuser.neg(errno.E_FAULT)
         }
     }
@@ -1049,7 +1057,7 @@ fn do_wait4(state: u64, me: u64, pid: u64, status: u64, options: u64) -> u64 {
             var zi: u64 = find_zombie_child(state, me, 0)
             var zn: u64 = 0
             while zi < kstate.MAX_TASKS && zn < 64 {
-                proc.reap(state, zi)
+                procswap.reap(state, zi)
                 zn = zn + 1
                 zi = find_zombie_child(state, me, 0)
             }
@@ -1069,20 +1077,20 @@ fn do_wait4(state: u64, me: u64, pid: u64, status: u64, options: u64) -> u64 {
             }
         }
         if child < kstate.MAX_TASKS
-            && sched.tget(state, child, sched.T_STATE) == sched.S_ZOMBIE {
-            let code: u64 = sched.tget(state, child, sched.T_EXIT)
-            let who: u64 = sched.tget(state, child, sched.T_PID)
-            // (the descriptors are closed inside proc.reap, by the caller
+            && taskslot.tget(state, child, taskconst.T_STATE) == taskconst.S_ZOMBIE {
+            let code: u64 = taskslot.tget(state, child, taskconst.T_EXIT)
+            let who: u64 = taskslot.tget(state, child, taskconst.T_PID)
+            // (the descriptors are closed inside procswap.reap, by the caller
             // that wins the claim -- DELL STABILITY)
-            proc.reap(state, child)
+            procswap.reap(state, child)
             if status != 0 {
                 // RUNDE UNTERBAU: a task that died of a signal reports it the way POSIX does -- the signal number in the low bits (WIFSIGNALED,
                 // WTERMSIG) -- and not as an exit with code 128 + n. Everything else keeps `exit code << 8`.
                 // ONLY for the waiter that is a libc program (it has set its thread pointer: T_FSBASE != 0). The programs of this system read
                 // `(status >> 8) & 255` and have measured 128 + n there since round 62; for them nothing changes.
                 var st: u64 = (code & 255) << 8
-                let sl: u64 = sched.tget(state, child, sched.T_SIGLAST)
-                if (sl & 256) != 0 && sched.tget(state, me, sched.T_FSBASE) != 0 {
+                let sl: u64 = taskslot.tget(state, child, taskconst.T_SIGLAST)
+                if (sl & 256) != 0 && taskslot.tget(state, me, taskconst.T_FSBASE) != 0 {
                     st = sl & 127
                 }
                 if !sysuser.put32(state, me, status, st) {
@@ -1094,7 +1102,7 @@ fn do_wait4(state: u64, me: u64, pid: u64, status: u64, options: u64) -> u64 {
         if (options & WUNTRACED) != 0 {
             let stopped: u64 = sched.stopped_child(state, me, want)
             if stopped < kstate.MAX_TASKS {
-                let who: u64 = sched.tget(state, stopped, sched.T_PID)
+                let who: u64 = taskslot.tget(state, stopped, taskconst.T_PID)
                 let sig: u64 = sched.stop_claim(state, stopped)
                 if sig != 0 {
                     if status != 0 {
@@ -1120,9 +1128,9 @@ fn find_zombie_child(state: u64, me: u64, pid: u64) -> u64 {
     let n: u64 = kstate.get(state, kstate.TASKS)
     var i: u64 = 0
     while i < n {
-        if sched.tget(state, i, sched.T_STATE) == sched.S_ZOMBIE {
-            if sched.tget(state, i, sched.T_PARENT) == me {
-                if (pid == 0 || sched.tget(state, i, sched.T_PID) == pid) && !sched.group_live(state, i) {
+        if taskslot.tget(state, i, taskconst.T_STATE) == taskconst.S_ZOMBIE {
+            if taskslot.tget(state, i, taskconst.T_PARENT) == me {
+                if (pid == 0 || taskslot.tget(state, i, taskconst.T_PID) == pid) && !sched.group_live(state, i) {
                     return i
                 }
             }
@@ -1137,9 +1145,9 @@ fn find_child(state: u64, me: u64, pid: u64) -> u64 {
     let n: u64 = kstate.get(state, kstate.TASKS)
     var i: u64 = 0
     while i < n {
-        if sched.tget(state, i, sched.T_STATE) != sched.S_FREE {
-            if sched.tget(state, i, sched.T_PARENT) == me {
-                if pid == 0 || sched.tget(state, i, sched.T_PID) == pid {
+        if taskslot.tget(state, i, taskconst.T_STATE) != taskconst.S_FREE {
+            if taskslot.tget(state, i, taskconst.T_PARENT) == me {
+                if pid == 0 || taskslot.tget(state, i, taskconst.T_PID) == pid {
                     return i
                 }
             }
@@ -1157,14 +1165,14 @@ fn do_spawn(state: u64, me: u64, prog: u64, arg: u64) -> u64 {
     if prog == 0 || (prog > 16 && prog != P_BUSB_SPAWN) {
         return sysuser.neg(errno.E_INVAL)
     }
-    let i: u64 = proc.create(state, prog, arg, 2)
+    let i: u64 = procspace.create(state, prog, arg, 2)
     if i == 0 {
         return sysuser.neg(errno.E_NOMEM)
     }
     netview.inherit(state, me, i)
     ctr.inherit(state, me, i)
     origin.inherit(state, me, i)
-    return sched.tget(state, i, sched.T_PID)
+    return taskslot.tget(state, i, taskconst.T_PID)
 }
 
 // `exec(path, argv, argc)` -- a program off the disk, in a process of its
@@ -1177,7 +1185,7 @@ fn do_exec(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
     if kstate.get(state, kstate.FS_READY) == 0 {
         return sysuser.neg(errno.E_NOSYS)
     }
-    if argc > proc.MAX_ARGS {
+    if argc > procbase.MAX_ARGS {
         return sysuser.neg(errno.E_2BIG)
     }
     let name: u64 = sysuser.nameb(state)
@@ -1192,7 +1200,7 @@ fn do_exec(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
     var at: u64 = 0
     var k: u64 = 0
     while k < argc {
-        if !proc.user_ok(state, me, argv + k * 8, 8) {
+        if !procfault.user_ok(state, me, argv + k * 8, 8) {
             return sysuser.neg(errno.E_FAULT)
         }
         if at + MAX_ARG + 1 > kstate.EARG_MAX {
@@ -1219,9 +1227,9 @@ fn do_exec(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
     ctr.inherit(state, me, t)
     // ROUND NETMON: a new task, a fresh set of counters, and the name
     // of the program they are counted under.
-    netmon.task_clear(state, t, sched.tget(state, t, sched.T_PID))
+    netmon.task_clear(state, t, taskslot.tget(state, t, taskconst.T_PID))
     netmon.name_set(state, t, name)
-    return sched.tget(state, t, sched.T_PID)
+    return taskslot.tget(state, t, taskconst.T_PID)
 }
 
 // ROUND SESSUID: `exec` for the session (see SYS_OSUM_EXECAS above). The
@@ -1235,7 +1243,7 @@ fn do_exec_as(state: u64, me: u64, path: u64, argv: u64, packed: u64) -> u64 {
     if mode > EXECAS_PRIV {
         return sysuser.neg(errno.E_INVAL)
     }
-    let euid: u64 = sched.tget(state, me, sched.T_EUID)
+    let euid: u64 = taskslot.tget(state, me, taskconst.T_EUID)
     if mode == EXECAS_PRIV {
         if euid != 0 {
             var s_no: [u8; 24] = "execas: priv refused\n\0\0\0"
@@ -1257,9 +1265,9 @@ fn do_exec_as(state: u64, me: u64, path: u64, argv: u64, packed: u64) -> u64 {
     if euid != 0 || kstate.get(state, kstate.K11_OFF + kstate.SP_UID) == 0 {
         return do_exec(state, me, path, argv, argc)
     }
-    sched.tset(state, me, sched.T_EXAS, 1)
+    taskslot.tset(state, me, taskconst.T_EXAS, 1)
     let r: u64 = do_exec(state, me, path, argv, argc)
-    sched.tset(state, me, sched.T_EXAS, 0)
+    taskslot.tset(state, me, taskconst.T_EXAS, 0)
     // The trail (gate tools/sessuid): which identity the child really got.
     if !errno.is_error(r) {
         let sl: u64 = sched.find_pid(state, r)
@@ -1269,7 +1277,7 @@ fn do_exec_as(state: u64, me: u64, path: u64, argv: u64, packed: u64) -> u64 {
             serial.puts((&s_u[0]) as u64)
             serial.dec(r)
             serial.puts((&s_i[0]) as u64)
-            serial.dec(sched.tget(state, sl, sched.T_UID))
+            serial.dec(taskslot.tget(state, sl, taskconst.T_UID))
             serial.nl()
         }
     }
@@ -1282,7 +1290,7 @@ fn do_setenv(state: u64, me: u64, buf: u64, len: u64) -> u64 {
     if len > kstate.ENV_MAX {
         return sysuser.neg(errno.E_2BIG)
     }
-    if len != 0 && !proc.user_ok(state, me, buf, len) {
+    if len != 0 && !procfault.user_ok(state, me, buf, len) {
         return sysuser.neg(errno.E_FAULT)
     }
     let dst: u64 = state + kstate.K11_OFF + kstate.ENV_BUF
@@ -1312,17 +1320,17 @@ fn do_pstat(state: u64, me: u64, index: u64, field: u64) -> u64 {
         return 0
     }
     if field == uio.P_CPU || field == uio.P_PAGES {
-        if sched.tget(state, index, sched.T_STATE) == sched.S_FREE {
+        if taskslot.tget(state, index, taskconst.T_STATE) == taskconst.S_FREE {
             return 0
         }
         if field == uio.P_CPU {
             return sched.cpu_of(state, index)
         }
-        return proc.space_pages(state, index)
+        return procpt.space_pages(state, index)
     }
     if field == uio.P_NAME0 || field == uio.P_NAME1 {
-        if sched.tget(state, index, sched.T_STATE) == sched.S_FREE
-            || sched.tget(state, index, sched.T_KIND) != sched.K_USER {
+        if taskslot.tget(state, index, taskconst.T_STATE) == taskconst.S_FREE
+            || taskslot.tget(state, index, taskconst.T_KIND) != taskconst.K_USER {
             return 0
         }
         guard.stac(state)
@@ -1332,10 +1340,10 @@ fn do_pstat(state: u64, me: u64, index: u64, field: u64) -> u64 {
     }
     // r146: age (ms) and command line (octets, 8 per number)
     if field == uio.P_AGE {
-        if sched.tget(state, index, sched.T_STATE) == sched.S_FREE {
+        if taskslot.tget(state, index, taskconst.T_STATE) == taskconst.S_FREE {
             return 0
         }
-        let born: u64 = sched.tget(state, index, sched.T_BORN)
+        let born: u64 = taskslot.tget(state, index, taskconst.T_BORN)
         let now: u64 = kstate.get(state, kstate.TICKS)
         if now < born {
             return 0
@@ -1346,8 +1354,8 @@ fn do_pstat(state: u64, me: u64, index: u64, field: u64) -> u64 {
         return pstat_count(state, index, field)
     }
     if field >= uio.P_CMD0 && field < uio.P_CMD0 + uio.P_CMD_WORDS {
-        if sched.tget(state, index, sched.T_STATE) == sched.S_FREE
-            || sched.tget(state, index, sched.T_KIND) != sched.K_USER {
+        if taskslot.tget(state, index, taskconst.T_STATE) == taskconst.S_FREE
+            || taskslot.tget(state, index, taskconst.T_KIND) != taskconst.K_USER {
             return 0
         }
         guard.stac(state)
@@ -1359,31 +1367,31 @@ fn do_pstat(state: u64, me: u64, index: u64, field: u64) -> u64 {
 }
 
 fn pstat_count(state: u64, index: u64, field: u64) -> u64 {
-    if sched.tget(state, index, sched.T_STATE) == sched.S_FREE {
+    if taskslot.tget(state, index, taskconst.T_STATE) == taskconst.S_FREE {
         return 0
     }
     if field == uio.P_UID {
-        return sched.tget(state, index, sched.T_UID)
+        return taskslot.tget(state, index, taskconst.T_UID)
     }
     if field == uio.P_DISKR {
-        return sched.tget(state, index, sched.T_DISKR)
+        return taskslot.tget(state, index, taskconst.T_DISKR)
     }
     if field == uio.P_DISKW {
-        return sched.tget(state, index, sched.T_DISKW)
+        return taskslot.tget(state, index, taskconst.T_DISKW)
     }
-    var group: u64 = sched.tget(state, index, sched.T_TGID)
+    var group: u64 = taskslot.tget(state, index, taskconst.T_TGID)
     if group == 0 {
-        group = sched.tget(state, index, sched.T_PID)
+        group = taskslot.tget(state, index, taskconst.T_PID)
     }
     var n: u64 = 0
     var j: u64 = 0
     let top: u64 = kstate.get(state, kstate.TASKS)
     while j < top && j < kstate.MAX_TASKS {
-        let st: u64 = sched.tget(state, j, sched.T_STATE)
-        if st != sched.S_FREE && st != sched.S_ZOMBIE && st != sched.S_NEW {
-            var g: u64 = sched.tget(state, j, sched.T_TGID)
+        let st: u64 = taskslot.tget(state, j, taskconst.T_STATE)
+        if st != taskconst.S_FREE && st != taskconst.S_ZOMBIE && st != taskconst.S_NEW {
+            var g: u64 = taskslot.tget(state, j, taskconst.T_TGID)
             if g == 0 {
-                g = sched.tget(state, j, sched.T_PID)
+                g = taskslot.tget(state, j, taskconst.T_PID)
             }
             if g == group {
                 n = n + 1
@@ -1402,14 +1410,14 @@ fn do_setprio(state: u64, me: u64, pid: u64, prio: u64) -> u64 {
     if t >= kstate.MAX_TASKS {
         return sysuser.neg(errno.E_SRCH)
     }
-    let st: u64 = sched.tget(state, t, sched.T_STATE)
-    if st == sched.S_FREE || st == sched.S_ZOMBIE || sched.tget(state, t, sched.T_KIND) != sched.K_USER {
+    let st: u64 = taskslot.tget(state, t, taskconst.T_STATE)
+    if st == taskconst.S_FREE || st == taskconst.S_ZOMBIE || taskslot.tget(state, t, taskconst.T_KIND) != taskconst.K_USER {
         return sysuser.neg(errno.E_SRCH)
     }
     if !perm.may_signal(state, me, t) {
         return sysuser.neg(errno.E_PERM)
     }
-    sched.tset(state, t, sched.T_PRIO, prio)
+    taskslot.tset(state, t, taskconst.T_PRIO, prio)
     return 0
 }
 
@@ -1417,12 +1425,12 @@ fn do_setprio(state: u64, me: u64, pid: u64, prio: u64) -> u64 {
 // argv[0], argv[1] .. joined by one blank, read from the task's argument page like pstat_name. A task
 // without arguments, or whose page is not mapped, has none (0).
 fn pstat_cmd(state: u64, t: u64, word: u64) -> u64 {
-    let frame: u64 = proc.translate(state, t, proc.ARGS_BASE)
+    let frame: u64 = procmap.translate(state, t, procspace.ARGS_BASE)
     if frame == 0 {
         return 0
     }
     let argc: u64 = __mmio_read64(frame as *mut u64)
-    if argc == 0 || argc > proc.MAX_ARGS {
+    if argc == 0 || argc > procbase.MAX_ARGS {
         return 0
     }
     let from: u64 = word * 8
@@ -1433,10 +1441,10 @@ fn pstat_cmd(state: u64, t: u64, word: u64) -> u64 {
     var a: u64 = 0
     while a < argc && pos < upto {
         let ptr: u64 = __mmio_read64((frame + 8 + a * 8) as *mut u64)
-        if ptr < proc.ARGS_BASE || ptr >= proc.ARGS_BASE + 4096 {
+        if ptr < procspace.ARGS_BASE || ptr >= procspace.ARGS_BASE + 4096 {
             a = argc
         } else {
-            var at: u64 = frame + (ptr - proc.ARGS_BASE)
+            var at: u64 = frame + (ptr - procspace.ARGS_BASE)
             while at < lim && kstate.get8(at) != 0 && pos < upto {
                 if pos >= from {
                     v = v | (kstate.get8(at) << ((pos - from) * 8))
@@ -1458,22 +1466,22 @@ fn pstat_cmd(state: u64, t: u64, word: u64) -> u64 {
 
 // ROADMAP-7 (r191): the basename of argv[0], eight octets of it. Read
 // from the task's own argument page the way /proc/<pid>/cmdline reads it
-// (procfs.make_cmdline): the page at proc.ARGS_BASE holds argc, then the
+// (procfs.make_cmdline): the page at procspace.ARGS_BASE holds argc, then the
 // pointers, then the strings -- all inside that one page.
 fn pstat_name(state: u64, t: u64, second: bool) -> u64 {
-    let frame: u64 = proc.translate(state, t, proc.ARGS_BASE)
+    let frame: u64 = procmap.translate(state, t, procspace.ARGS_BASE)
     if frame == 0 {
         return 0
     }
     let argc: u64 = __mmio_read64(frame as *mut u64)
-    if argc == 0 || argc > proc.MAX_ARGS {
+    if argc == 0 || argc > procbase.MAX_ARGS {
         return 0
     }
     let ptr: u64 = __mmio_read64((frame + 8) as *mut u64)
-    if ptr < proc.ARGS_BASE || ptr >= proc.ARGS_BASE + 4096 {
+    if ptr < procspace.ARGS_BASE || ptr >= procspace.ARGS_BASE + 4096 {
         return 0
     }
-    let s0: u64 = frame + (ptr - proc.ARGS_BASE)
+    let s0: u64 = frame + (ptr - procspace.ARGS_BASE)
     let lim: u64 = frame + 4096
     // the basename: after the last '/'
     var at: u64 = s0
@@ -1504,23 +1512,23 @@ fn pstat_name(state: u64, t: u64, second: bool) -> u64 {
 }
 
 fn do_getid(state: u64, me: u64, which: u64) -> u64 {
-    return sched.tget(state, me, which)
+    return taskslot.tget(state, me, which)
 }
 
 fn do_getres(state: u64, me: u64, a: u64, b: u64, c: u64,
     fr: u64, fe: u64, fs_: u64) -> u64 {
     if a != 0 {
-        if !sysuser.put32(state, me, a, sched.tget(state, me, fr)) {
+        if !sysuser.put32(state, me, a, taskslot.tget(state, me, fr)) {
             return sysuser.neg(errno.E_FAULT)
         }
     }
     if b != 0 {
-        if !sysuser.put32(state, me, b, sched.tget(state, me, fe)) {
+        if !sysuser.put32(state, me, b, taskslot.tget(state, me, fe)) {
             return sysuser.neg(errno.E_FAULT)
         }
     }
     if c != 0 {
-        if !sysuser.put32(state, me, c, sched.tget(state, me, fs_)) {
+        if !sysuser.put32(state, me, c, taskslot.tget(state, me, fs_)) {
             return sysuser.neg(errno.E_FAULT)
         }
     }
@@ -1528,8 +1536,8 @@ fn do_getres(state: u64, me: u64, a: u64, b: u64, c: u64,
 }
 
 fn do_umask(state: u64, me: u64, m: u64) -> u64 {
-    let old: u64 = sched.tget(state, me, sched.T_UMASK) & 4095
-    sched.tset(state, me, sched.T_UMASK, m & 4095)
+    let old: u64 = taskslot.tget(state, me, taskconst.T_UMASK) & 4095
+    taskslot.tset(state, me, taskconst.T_UMASK, m & 4095)
     return old
 }
 
@@ -1541,18 +1549,18 @@ fn ids_ok(state: u64, me: u64, want: u64, real_f: u64, eff_f: u64,
     if perm.is_root(state, me) {
         return true
     }
-    if want == sched.tget(state, me, real_f) {
+    if want == taskslot.tget(state, me, real_f) {
         return true
     }
-    if want == sched.tget(state, me, eff_f) {
+    if want == taskslot.tget(state, me, eff_f) {
         return true
     }
-    return want == sched.tget(state, me, sav_f)
+    return want == taskslot.tget(state, me, sav_f)
 }
 
 fn ids_set(state: u64, me: u64, f: u64, v: u64) {
     if v != (0 -% 1) {
-        sched.tset(state, me, f, v)
+        taskslot.tset(state, me, f, v)
     }
 }
 
@@ -1576,32 +1584,32 @@ fn do_setres(state: u64, me: u64, r: u64, e: u64, sv: u64,
 
 fn do_setuid(state: u64, me: u64, u: u64) -> u64 {
     if perm.is_root(state, me) {
-        sched.tset(state, me, sched.T_UID, u)
-        sched.tset(state, me, sched.T_EUID, u)
-        sched.tset(state, me, sched.T_SUID, u)
+        taskslot.tset(state, me, taskconst.T_UID, u)
+        taskslot.tset(state, me, taskconst.T_EUID, u)
+        taskslot.tset(state, me, taskconst.T_SUID, u)
         kstate.add(state, kstate.K13_OFF + kstate.U_SETIDS, 1)
         return 0
     }
-    if !ids_ok(state, me, u, sched.T_UID, sched.T_EUID, sched.T_SUID) {
+    if !ids_ok(state, me, u, taskconst.T_UID, taskconst.T_EUID, taskconst.T_SUID) {
         return sysuser.neg(errno.E_PERM)
     }
-    sched.tset(state, me, sched.T_EUID, u)
+    taskslot.tset(state, me, taskconst.T_EUID, u)
     kstate.add(state, kstate.K13_OFF + kstate.U_SETIDS, 1)
     return 0
 }
 
 fn do_setgid(state: u64, me: u64, g: u64) -> u64 {
     if perm.is_root(state, me) {
-        sched.tset(state, me, sched.T_GID, g)
-        sched.tset(state, me, sched.T_EGID, g)
-        sched.tset(state, me, sched.T_SGID, g)
+        taskslot.tset(state, me, taskconst.T_GID, g)
+        taskslot.tset(state, me, taskconst.T_EGID, g)
+        taskslot.tset(state, me, taskconst.T_SGID, g)
         kstate.add(state, kstate.K13_OFF + kstate.U_SETIDS, 1)
         return 0
     }
-    if !ids_ok(state, me, g, sched.T_GID, sched.T_EGID, sched.T_SGID) {
+    if !ids_ok(state, me, g, taskconst.T_GID, taskconst.T_EGID, taskconst.T_SGID) {
         return sysuser.neg(errno.E_PERM)
     }
-    sched.tset(state, me, sched.T_EGID, g)
+    taskslot.tset(state, me, taskconst.T_EGID, g)
     kstate.add(state, kstate.K13_OFF + kstate.U_SETIDS, 1)
     return 0
 }
@@ -1614,11 +1622,11 @@ fn do_setre(state: u64, me: u64, r: u64, e: u64,
     if !ids_ok(state, me, e, real_f, eff_f, sav_f) {
         return sysuser.neg(errno.E_PERM)
     }
-    let old_real: u64 = sched.tget(state, me, real_f)
+    let old_real: u64 = taskslot.tget(state, me, real_f)
     ids_set(state, me, real_f, r)
     ids_set(state, me, eff_f, e)
     if r != (0 -% 1) || (e != (0 -% 1) && e != old_real) {
-        sched.tset(state, me, sav_f, sched.tget(state, me, eff_f))
+        taskslot.tset(state, me, sav_f, taskslot.tget(state, me, eff_f))
     }
     kstate.add(state, kstate.K13_OFF + kstate.U_SETIDS, 1)
     return 0
@@ -1682,7 +1690,7 @@ fn do_getgroups(state: u64, me: u64, n: u64, out: u64) -> u64 {
     if n < have {
         return sysuser.neg(errno.E_INVAL)
     }
-    if !proc.user_ok(state, me, out, have * 8) {
+    if !procfault.user_ok(state, me, out, have * 8) {
         return sysuser.neg(errno.E_FAULT)
     }
     let w: u64 = state + kstate.MU_OFF + 0x800
@@ -1705,7 +1713,7 @@ fn do_setgroups(state: u64, me: u64, n: u64, src: u64) -> u64 {
         kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)
         return sysuser.neg(errno.E_PERM)
     }
-    if n > sched.GROUPS_MAX {
+    if n > taskconst.GROUPS_MAX {
         return sysuser.neg(errno.E_INVAL)
     }
     if n == 0 {
@@ -1713,7 +1721,7 @@ fn do_setgroups(state: u64, me: u64, n: u64, src: u64) -> u64 {
         kstate.add(state, kstate.MU_OFF + kstate.MU_SUPPSET, 1)
         return 0
     }
-    if !proc.user_ok(state, me, src, n * 8) {
+    if !procfault.user_ok(state, me, src, n * 8) {
         return sysuser.neg(errno.E_FAULT)
     }
     let w: u64 = state + kstate.MU_OFF + 0x800
@@ -1747,7 +1755,7 @@ fn do_mustat(state: u64, me: u64, was: u64) -> u64 {
 }
 
 fn do_userinfo(state: u64, me: u64, out: u64) -> u64 {
-    if !proc.user_ok(state, me, out, UI_COUNT * 8) {
+    if !procfault.user_ok(state, me, out, UI_COUNT * 8) {
         return sysuser.neg(errno.E_FAULT)
     }
     let w: u64 = state + kstate.K13_OFF + 0x1000
@@ -1762,13 +1770,13 @@ fn do_userinfo(state: u64, me: u64, out: u64) -> u64 {
     kstate.set(state, kstate.K13_OFF + 0x1000 + 6 * 8, fs.version(state))
     kstate.set(state, kstate.K13_OFF + 0x1000 + 7 * 8, kstate.get(state, b + kstate.U_INITSLOT))
     kstate.set(state, kstate.K13_OFF + 0x1000 + 8 * 8, kstate.get(state, b + kstate.U_ORPHANS))
-    kstate.set(state, kstate.K13_OFF + 0x1000 + 9 * 8, sched.zombies(state, sched.K_USER))
-    kstate.set(state, kstate.K13_OFF + 0x1000 + 10 * 8, sched.tget(state, me, sched.T_UID))
-    kstate.set(state, kstate.K13_OFF + 0x1000 + 11 * 8, sched.tget(state, me, sched.T_EUID))
-    kstate.set(state, kstate.K13_OFF + 0x1000 + 12 * 8, sched.tget(state, me, sched.T_GID))
-    kstate.set(state, kstate.K13_OFF + 0x1000 + 13 * 8, sched.tget(state, me, sched.T_EGID))
-    kstate.set(state, kstate.K13_OFF + 0x1000 + 14 * 8, sched.tget(state, me, sched.T_SUID))
-    kstate.set(state, kstate.K13_OFF + 0x1000 + 15 * 8, sched.tget(state, me, sched.T_UMASK))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 9 * 8, sched.zombies(state, taskconst.K_USER))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 10 * 8, taskslot.tget(state, me, taskconst.T_UID))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 11 * 8, taskslot.tget(state, me, taskconst.T_EUID))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 12 * 8, taskslot.tget(state, me, taskconst.T_GID))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 13 * 8, taskslot.tget(state, me, taskconst.T_EGID))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 14 * 8, taskslot.tget(state, me, taskconst.T_SUID))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 15 * 8, taskslot.tget(state, me, taskconst.T_UMASK))
     kstate.set(state, kstate.K13_OFF + 0x1000 + 16 * 8, 0)
     if kstate.mode_on(state, kstate.M_NOPERM) {
         kstate.set(state, kstate.K13_OFF + 0x1000 + 16 * 8, 1)
@@ -1837,14 +1845,14 @@ fn do_rlimit(state: u64, me: u64, res: u64, newp: u64, oldp: u64) -> u64 {
         return sysuser.neg(errno.E_INVAL)
     }
     if oldp != 0 {
-        if !proc.user_ok(state, me, oldp, 16) {
+        if !procfault.user_ok(state, me, oldp, 16) {
             return sysuser.neg(errno.E_FAULT)
         }
         let _a: bool = sysuser.put64(state, me, oldp, rlimit_cur(res))
         let _b: bool = sysuser.put64(state, me, oldp + 8, rlimit_max(res))
     }
     if newp != 0 {
-        if !proc.user_ok(state, me, newp, 16) {
+        if !procfault.user_ok(state, me, newp, 16) {
             return sysuser.neg(errno.E_FAULT)
         }
         let cur: u64 = sysuser.user_word(state, me, newp)
@@ -1858,7 +1866,7 @@ fn do_rlimit(state: u64, me: u64, res: u64, newp: u64, oldp: u64) -> u64 {
 
 // The Linux `sysinfo`: uptime, load, memory in bytes (unit 1). The memory numbers are the frame allocator's.
 fn do_sysinfo_linux(state: u64, me: u64, out: u64) -> u64 {
-    if !proc.user_ok(state, me, out, 112) {
+    if !procfault.user_ok(state, me, out, 112) {
         return sysuser.neg(errno.E_FAULT)
     }
     var k: u64 = 0
@@ -1878,7 +1886,7 @@ fn do_sysinfo_linux(state: u64, me: u64, out: u64) -> u64 {
 
 // getrusage: the kernel keeps no per-process times of this kind; zeros are the honest "not accounted" and every field is there.
 fn do_getrusage(state: u64, me: u64, who: u64, out: u64) -> u64 {
-    if !proc.user_ok(state, me, out, 144) {
+    if !procfault.user_ok(state, me, out, 144) {
         return sysuser.neg(errno.E_FAULT)
     }
     var k: u64 = 0
@@ -1911,7 +1919,7 @@ fn do_getaffinity(state: u64, me: u64, pid: u64, size: u64, out: u64) -> u64 {
     if n > 64 {
         n = 64
     }
-    if !proc.user_ok(state, me, out, size) {
+    if !procfault.user_ok(state, me, out, size) {
         return sysuser.neg(errno.E_FAULT)
     }
     // (words through `put64`, which opens the SMAP window: a plain store to a user address from ring 0 is a #PF)

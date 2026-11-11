@@ -3,7 +3,10 @@
 import gfx.gfx
 import lib.kstate
 import sched.sched
-import sched.proc
+import sched.taskconst
+import sched.taskslot
+import sched.proc.procbase
+import sched.proc.procfault
 import arch.cpu
 import fs.fs
 import fs.statsane
@@ -31,9 +34,10 @@ import fs.syncall
 import sys.sysconst
 import sys.sysuser
 import sys.sysfd
+import sys.sysfifo
 
 export {
-    at_enter1, do_access, do_chdir, do_chmod, do_chown, do_chroot, do_diskup, do_fallocate, do_fchdir, do_fchmod, do_fchown, do_flist, do_fopen, do_freg, do_fstat, do_ftype, do_getcwd, do_getdents, do_jrnl, do_link, do_lstat, do_memfd, do_mkdir_mode, do_mntstat, do_mount, do_readlink, do_rename, do_rmdir, do_scan, do_stat, do_statfs, do_statx, do_symlink, do_sync, do_unlink, do_utimensat, do_vfs_mount, do_vfs_umount, ev_in_any, ev_in_path, ev_in_rename, ev_open_create, lc_at
+    at_enter1, do_access, do_chdir, do_chmod, do_chown, do_chown_at, do_chroot, do_lchown, do_diskup, do_fallocate, do_fchdir, do_fchmod, do_fchown, do_flist, do_fopen, do_freg, do_fstat, do_ftype, do_getcwd, do_getdents, do_jrnl, do_link, do_lstat, do_memfd, do_mkdir_mode, do_mntstat, do_mount, do_readlink, do_rename, do_rmdir, do_scan, do_stat, do_statfs, do_statx, do_symlink, do_sync, do_unlink, do_utimensat, do_vfs_mount, do_vfs_umount, ev_in_any, ev_in_path, ev_in_rename, ev_open_create, lc_at
 }
 
 const UTIME_NOW: u64 = 1073741823 // (1 << 30) - 1
@@ -60,6 +64,7 @@ const S_IFBLK: u64 = 24576 // 0o60000
 const S_IFIFO: u64 = 4096 // 0o10000
 const S_IFLNK: u64 = 40960 // 0o120000
 
+const DT_FIFO: u64 = 1
 const DT_DIR: u64 = 4
 const DT_REG: u64 = 8
 const DT_LNK: u64 = 10
@@ -74,6 +79,7 @@ const ST_INO: u64 = 8
 const ST_NLINK: u64 = 16
 const ST_MODE: u64 = 24 // 32 bit
 const ST_UID: u64 = 28 // 32 bit
+const ID32_MASK: u64 = 4294967295
 const ST_GID: u64 = 32 // 32 bit
 const ST_RDEV: u64 = 40
 const ST_SIZE: u64 = 48
@@ -270,6 +276,9 @@ fn fill_stat(state: u64, ino: u64) -> bool {
     if kind == fs.T_LINK {
         mode = S_IFLNK | 511
     }
+    if kind == fs.T_FILE && fs.inode_is_fifo(state, ino) {
+        mode = S_IFIFO | fs.inode_mode(state, ino)
+    }
     let size: u64 = fs.inode_size(state, ino)
     let uid: u64 = fs.inode_uid(state, ino)
     let gid: u64 = fs.inode_gid(state, ino)
@@ -316,6 +325,8 @@ fn fill_vstat(state: u64, m: u64, node: u64) -> bool {
         mode = mode | S_IFBLK
     } else if art == vfsops.N_LNK {
         mode = mode | S_IFLNK
+    } else if m == 0 && fs.inode_is_fifo(state, node) {
+        mode = mode | S_IFIFO
     } else {
         mode = mode | S_IFREG
     }
@@ -325,6 +336,10 @@ fn fill_vstat(state: u64, m: u64, node: u64) -> bool {
     __mmio_write64((s + ST_NLINK) as *mut u64,
         vfs.v_attr(state, m, node, vfsops.A_NLINK))
     __mmio_write32((s + ST_MODE) as *mut u32, mode as u32)
+    let vuid: u64 = vfs.v_attr(state, m, node, vfsops.A_UID)
+    let vgid: u64 = vfs.v_attr(state, m, node, vfsops.A_GID)
+    __mmio_write32((s + ST_UID) as *mut u32, statsane.id32(state, vuid) as u32)
+    __mmio_write32((s + ST_GID) as *mut u32, statsane.id32(state, vgid) as u32)
     __mmio_write64((s + ST_RDEV) as *mut u64,
         vfs.v_attr(state, m, node, vfsops.A_RDEV))
     __mmio_write64((s + ST_SIZE) as *mut u64, size)
@@ -342,7 +357,7 @@ fn fill_vstat(state: u64, m: u64, node: u64) -> bool {
 }
 
 fn do_stat(state: u64, me: u64, name: u64, out: u64) -> u64 {
-    if !proc.user_ok(state, me, out, STAT_BYTES) {
+    if !procfault.user_ok(state, me, out, STAT_BYTES) {
         return sysuser.neg(errno.E_FAULT)
     }
     let buf: u64 = sysuser.nameb(state)
@@ -379,7 +394,7 @@ fn do_stat(state: u64, me: u64, name: u64, out: u64) -> u64 {
 
 // ======================================================== RUNDE OFS3
 fn do_lstat(state: u64, me: u64, name: u64, out: u64) -> u64 {
-    if !proc.user_ok(state, me, out, STAT_BYTES) {
+    if !procfault.user_ok(state, me, out, STAT_BYTES) {
         return sysuser.neg(errno.E_FAULT)
     }
     let buf: u64 = sysuser.nameb(state)
@@ -394,7 +409,7 @@ fn do_lstat(state: u64, me: u64, name: u64, out: u64) -> u64 {
         let m: u64 = vfs.mount_for(state, buf)
         if m < vfs.MAX_MNT {
             if m != 0 || vfs.all_mode(state) {
-                let node: u64 = vfs.node_for(state, m, buf)
+                let node: u64 = vfs.node_for_nofollow(state, m, buf)
                 if node == 0 {
                     return sysuser.neg(errno.E_NOENT)
                 }
@@ -465,7 +480,7 @@ fn do_readlink(state: u64, me: u64, name: u64, out: u64,
     if size == 0 {
         return sysuser.neg(errno.E_INVAL)
     }
-    if !proc.user_ok(state, me, out, size) {
+    if !procfault.user_ok(state, me, out, size) {
         return sysuser.neg(errno.E_FAULT)
     }
     let buf: u64 = sysuser.nameb(state)
@@ -480,7 +495,7 @@ fn do_readlink(state: u64, me: u64, name: u64, out: u64,
         let m: u64 = vfs.mount_for(state, buf)
         if m < vfs.MAX_MNT {
             if m != 0 || vfs.all_mode(state) {
-                let vnode: u64 = vfs.node_for(state, m, buf)
+                let vnode: u64 = vfs.node_for_nofollow(state, m, buf)
                 if vnode == 0 {
                     return sysuser.neg(errno.E_NOENT)
                 }
@@ -538,12 +553,15 @@ fn do_utimensat(state: u64, me: u64, fd: u64, name: u64, zeiten: u64,
             return sysuser.neg(errno.E_BADF)
         }
         let kd: u64 = file.open_kind(state, ofd)
-        if kd != file.K_FILE && kd != file.K_DIR {
-            return sysuser.neg(errno.E_PERM) // pipes, consoles and virtual files carry no times
+        if kd == file.K_DIR {
+            ino = file.open_ino(state, ofd)
+        } else if kd == file.K_VDIR && vfs.type_of(state, file.open_mnt(state, ofd)) == vfsops.FS_OFS {
+            ino = file.open_ino(state, ofd)
+        } else {
+            ino = sysuser.ofs_ino_of_open(state, ofd)
         }
-        ino = file.open_ino(state, ofd)
         if ino == 0 {
-            return sysuser.neg(errno.E_BADF)
+            return sysuser.neg(errno.E_PERM)
         }
     } else {
         let buf: u64 = sysuser.nameb(state)
@@ -566,7 +584,7 @@ fn do_utimensat(state: u64, me: u64, fd: u64, name: u64, zeiten: u64,
     var a: u64 = nun
     var m: u64 = nun
     if zeiten != 0 {
-        if !proc.user_ok(state, me, zeiten, 32) {
+        if !procfault.user_ok(state, me, zeiten, 32) {
             return sysuser.neg(errno.E_FAULT)
         }
         let as_: u64 = sysuser.user_word(state, me, zeiten)
@@ -598,7 +616,7 @@ fn do_fstat(state: u64, me: u64, fd: u64, out: u64) -> u64 {
     if of >= file.MAX_OPEN {
         return sysuser.neg(errno.E_BADF)
     }
-    if !proc.user_ok(state, me, out, STAT_BYTES) {
+    if !procfault.user_ok(state, me, out, STAT_BYTES) {
         return sysuser.neg(errno.E_FAULT)
     }
     let kind: u64 = file.open_kind(state, of)
@@ -684,6 +702,8 @@ fn do_getdents_vfs(state: u64, me: u64, of: u64, out: u64,
                     kind = DT_DIR
                 } else if vart == vfsops.N_LNK {
                     kind = DT_LNK
+                } else if m == 0 && fs.inode_is_fifo(state, node) {
+                    kind = DT_FIFO
                 }
                 kstate.set8(build + 18, kind as u8)
                 var k: u64 = 0
@@ -710,7 +730,7 @@ fn do_getdents(state: u64, me: u64, fd: u64, out: u64, size: u64) -> u64 {
         return sysuser.neg(errno.E_BADF)
     }
     if file.open_kind(state, of) == file.K_VDIR {
-        if !proc.user_ok(state, me, out, size) {
+        if !procfault.user_ok(state, me, out, size) {
             return sysuser.neg(errno.E_FAULT)
         }
         return do_getdents_vfs(state, me, of, out, size)
@@ -718,7 +738,7 @@ fn do_getdents(state: u64, me: u64, fd: u64, out: u64, size: u64) -> u64 {
     if file.open_kind(state, of) != file.K_DIR {
         return sysuser.neg(errno.E_NOTDIR)
     }
-    if !proc.user_ok(state, me, out, size) {
+    if !procfault.user_ok(state, me, out, size) {
         return sysuser.neg(errno.E_FAULT)
     }
     let dir: u64 = file.open_ino(state, of)
@@ -766,6 +786,8 @@ fn do_getdents(state: u64, me: u64, fd: u64, out: u64, size: u64) -> u64 {
                     kind = DT_DIR
                 } else if art == fs.T_LINK {
                     kind = DT_LNK
+                } else if fs.inode_is_fifo(state, ino) {
+                    kind = DT_FIFO
                 }
                 kstate.set8(build + 18, kind as u8)
                 var k: u64 = 0
@@ -1219,7 +1241,7 @@ fn do_fopen(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
     if kstate.get(state, kstate.FS_READY) == 0 {
         return sysuser.neg(errno.E_NOSYS)
     }
-    if argc > proc.MAX_ARGS {
+    if argc > procbase.MAX_ARGS {
         return sysuser.neg(errno.E_2BIG)
     }
     let name: u64 = sysuser.nameb(state)
@@ -1267,7 +1289,7 @@ fn do_fopen(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
     }
     var k: u64 = 0
     while k < argc {
-        if !proc.user_ok(state, me, argv + k * 8, 8) {
+        if !procfault.user_ok(state, me, argv + k * 8, 8) {
             return sysuser.neg(errno.E_FAULT)
         }
         let m: u64 = sysuser.fetch_name(state, me,
@@ -1279,7 +1301,7 @@ fn do_fopen(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
         anz = anz + 1
         k = k + 1
     }
-    if anz > proc.MAX_ARGS {
+    if anz > procbase.MAX_ARGS {
         return sysuser.neg(errno.E_2BIG)
     }
     let t: u64 = elf.spawn(state, start, abuf, anz, 2)
@@ -1292,7 +1314,7 @@ fn do_fopen(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
     ftype.opened(state)
     netview.inherit(state, me, t)
     ctr.inherit(state, me, t)
-    return sched.tget(state, t, sched.T_PID)
+    return taskslot.tget(state, t, taskconst.T_PID)
 }
 
 // `chdir(path)` -- Linux's number 80, and Linux's meaning. What is stored
@@ -1361,7 +1383,7 @@ fn do_getcwd(state: u64, me: u64, out: u64, size: u64) -> u64 {
     if size <= n {
         return sysuser.neg(errno.E_RANGE)
     }
-    if !proc.user_ok(state, me, out, n + 1) {
+    if !procfault.user_ok(state, me, out, n + 1) {
         return sysuser.neg(errno.E_FAULT)
     }
     var i: u64 = 0
@@ -1398,7 +1420,16 @@ fn chmod_ino(state: u64, me: u64, ino: u64, mode: u64) -> u64 {
     return 0
 }
 
-fn chown_ino(state: u64, me: u64, ino: u64, uid: u64, gid: u64) -> u64 {
+fn id_arg(v: u64) -> u64 {
+    if (v & ID32_MASK) == ID32_MASK {
+        return 0 -% 1
+    }
+    return v & ID32_MASK
+}
+
+fn chown_ino(state: u64, me: u64, ino: u64, uid_arg: u64, gid_arg: u64) -> u64 {
+    let uid: u64 = id_arg(uid_arg)
+    let gid: u64 = id_arg(gid_arg)
     let root: bool = perm.is_root(state, me)
     if uid != (0 -% 1) && !root {
         kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)
@@ -1439,10 +1470,27 @@ fn do_chmod(state: u64, me: u64, name: u64, mode: u64) -> u64 {
 }
 
 fn do_chown(state: u64, me: u64, name: u64, uid: u64, gid: u64) -> u64 {
+    return chown_path(state, me, name, uid, gid, false)
+}
+
+fn do_lchown(state: u64, me: u64, name: u64, uid: u64, gid: u64) -> u64 {
+    return chown_path(state, me, name, uid, gid, true)
+}
+
+fn do_chown_at(state: u64, me: u64, name: u64, uid: u64, gid: u64, flags: u64) -> u64 {
+    return chown_path(state, me, name, uid, gid, (flags & LC_AT_SYMLINK_NOFOLLOW) != 0)
+}
+
+fn chown_path(state: u64, me: u64, name: u64, uid: u64, gid: u64, nofollow: bool) -> u64 {
     if !appfs.free_ok(state, me) {
         return sysuser.neg(errno.E_ACCES)
     }
-    let ino: u64 = sysuser.ino_of_path(state, me, name)
+    var ino: u64 = 0
+    if nofollow {
+        ino = sysuser.ino_of_path_nofollow(state, me, name)
+    } else {
+        ino = sysuser.ino_of_path(state, me, name)
+    }
     if errno.is_error(ino) {
         return ino
     }
@@ -1508,10 +1556,10 @@ fn do_scan(state: u64, me: u64, curp: u64, dst: u64, max: u64) -> u64 {
     if n > SCAN_MAX {
         n = SCAN_MAX
     }
-    if !proc.user_ok(state, me, curp, 8) {
+    if !procfault.user_ok(state, me, curp, 8) {
         return sysuser.neg(errno.E_FAULT)
     }
-    if !proc.user_ok(state, me, dst, n * nidx.REC) {
+    if !procfault.user_ok(state, me, dst, n * nidx.REC) {
         return sysuser.neg(errno.E_FAULT)
     }
     //   panic: integer overflow casting 'u64 as u32'
@@ -1546,7 +1594,7 @@ fn do_jrnl(state: u64, me: u64, from: u64, dst: u64, max: u64) -> u64 {
     if n > nidx.MAXJ {
         n = nidx.MAXJ
     }
-    if !proc.user_ok(state, me, dst, n * nidx.REC) {
+    if !procfault.user_ok(state, me, dst, n * nidx.REC) {
         return sysuser.neg(errno.E_FAULT)
     }
     if n * nidx.REC > kstate.BLOCK_MAX {
@@ -1582,8 +1630,8 @@ fn do_fallocate(state: u64, me: u64, fd: u64, mode: u64, off: u64,
     // ROUND UNTERBAU: on a plain file the size only GROWS (never shrinks), as posix_fallocate does. The blocks are not reserved:
     // the file has a hole there and a full disk is found out when the hole is written (documented in docs/RUNDE-UNTERBAU-FIREFOX.md).
     let of: u64 = sysuser.of_of(state, me, fd)
-    if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_FILE {
-        if fs.inode_size(state, file.open_ino(state, of)) >= off + len {
+    if of < file.MAX_OPEN && sysuser.ofs_ino_of_open(state, of) != 0 {
+        if fs.inode_size(state, sysuser.ofs_ino_of_open(state, of)) >= off + len {
             return 0
         }
     }
@@ -1593,7 +1641,7 @@ fn do_fallocate(state: u64, me: u64, fd: u64, mode: u64, off: u64,
 // ------------------------------------------------------- memfd_create()
 
 fn do_memfd(state: u64, me: u64, name: u64, flags: u64) -> u64 {
-    if name != 0 && !proc.user_ok(state, me, name, 1) {
+    if name != 0 && !procfault.user_ok(state, me, name, 1) {
         return sysuser.neg(errno.E_FAULT)
     }
     var i: u64 = unixsock.USHM_MAX
@@ -1631,7 +1679,7 @@ fn do_chroot(state: u64, me: u64, name: u64) -> u64 {
     if kstate.get(state, kstate.FS_READY) == 0 {
         return sysuser.neg(errno.E_NOSYS)
     }
-    if sched.tget(state, me, sched.T_EUID) != 0 {
+    if taskslot.tget(state, me, taskconst.T_EUID) != 0 {
         return sysuser.neg(errno.E_PERM)
     }
     let buf: u64 = sysuser.nameb(state)
@@ -1691,7 +1739,7 @@ fn do_chroot(state: u64, me: u64, name: u64) -> u64 {
 // statfs/fstatfs (struct statfs, 120 octets): the numbers of the root file system (OFS). The path/descriptor is only checked; every
 // mount of this kernel except /proc, /dev answers with the root numbers. f_files/f_ffree stay 0 (not counted), f_type is the OFS tag.
 fn do_statfs(state: u64, me: u64, out: u64) -> u64 {
-    if !proc.user_ok(state, me, out, 120) {
+    if !procfault.user_ok(state, me, out, 120) {
         return sysuser.neg(errno.E_FAULT)
     }
     var k: u64 = 0
@@ -1814,6 +1862,7 @@ fn ev_open_create(state: u64, me: u64, name: u64, flags: u64, mode: u64) -> u64 
     return sysfd.cx_result(state, me, r, flags)
 }
 const LC_MKDIRAT: u64 = 258
+const LC_MKNODAT: u64 = 259
 const LC_NEWFSTATAT: u64 = 262
 const LC_UNLINKAT: u64 = 263
 const LC_RENAMEAT: u64 = 264
@@ -1825,7 +1874,7 @@ const LC_AT_REMOVEDIR: u64 = 0x200
 const LC_AT_EMPTY_PATH: u64 = 0x1000
 
 fn do_statx(state: u64, me: u64, dirfd: u64, path: u64, flags: u64, out: u64) -> u64 {
-    if !proc.user_ok(state, me, out, statxconv.STATX_BYTES) {
+    if !procfault.user_ok(state, me, out, statxconv.STATX_BYTES) {
         return sysuser.neg(errno.E_FAULT)
     }
     let r: u64 = lc_at(state, me, LC_NEWFSTATAT, dirfd, path, out, flags, 0)
@@ -1848,7 +1897,7 @@ const AT_REL_CWD: u64 = 1 // relative to AT_FDCWD
 const AT_REL_DIR: u64 = 2 // relative to a real directory descriptor
 
 fn at_class(state: u64, me: u64, dirfd: u64, path: u64) -> u64 {
-    if !proc.user_ok(state, me, path, 1) {
+    if !procfault.user_ok(state, me, path, 1) {
         return AT_REL_NONE
     }
     if sysuser.peek(state, me, path) == 47 {
@@ -1944,7 +1993,7 @@ fn lc_at(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a
         en = at_enter1(state, me, a1, a2)
     } else if number == LC_RENAMEAT || number == sysconst.LC_RENAMEAT2 || number == LC_LINKAT {
         en = at_enter2(state, me, a0, a1, a2, a3)
-    } else if number == LC_NEWFSTATAT && (a3 & LC_AT_EMPTY_PATH) != 0 && proc.user_ok(state, me, a1, 1)
+    } else if number == LC_NEWFSTATAT && (a3 & LC_AT_EMPTY_PATH) != 0 && procfault.user_ok(state, me, a1, 1)
         && sysuser.peek(state, me, a1) == 0 {
         en = 0 // fstat(dirfd) itself: no base
     } else {
@@ -1979,7 +2028,7 @@ fn lc_at_inner(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: 
     }
     // the rest: (dirfd, path, ...)
     if number == LC_NEWFSTATAT && (a3 & LC_AT_EMPTY_PATH) != 0 {
-        if proc.user_ok(state, me, a1, 1) && sysuser.peek(state, me, a1) == 0 {
+        if procfault.user_ok(state, me, a1, 1) && sysuser.peek(state, me, a1) == 0 {
             return do_fstat(state, me, a0, a2)
         }
     }
@@ -1988,6 +2037,9 @@ fn lc_at_inner(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: 
             return ev_open_create(state, me, a1, a2, a3)
         }
         return sysfd.cx_result(state, me, sysfd.do_open_mode(state, me, a1, a2, a3), a2)
+    }
+    if number == LC_MKNODAT {
+        return sysfifo.do_mknod(state, me, a1, a2)
     }
     if number == LC_MKDIRAT {
         let r: u64 = do_mkdir_mode(state, me, a1, a2)

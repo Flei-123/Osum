@@ -532,22 +532,17 @@ EOF
 FOTO_QUIT=1 foto "$K0" "gfx wm wmhold wmshell wmdauer nosched noproc nofs" "$TMPD/le.txt" "$TMPD/le.ppm" \
     "$TMPD/live.mon"
 gefunden=""
-fehlt=""
-for ch in x y z q; do
-    hit=""
-    for z in 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do
-        if python3 tools/gfx/checkshot.py tgrid "$TMPD/le.ppm" \
-            assets/osum-mono.ttf 16 26 62 10 19 "$z" 0 \
-            224 230 236 16 20 26 "$ch" >/dev/null 2>&1; then
-            hit="$z"; break
-        fi
-    done
-    if [ -n "$hit" ]; then gefunden="$gefunden$ch@$hit "; else fehlt="$fehlt$ch"; fi
+for z in 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do
+    if python3 tools/gfx/checkshot.py tgrid "$TMPD/le.ppm" \
+        assets/osum-mono.ttf 16 26 62 10 19 "$z" 0 \
+        224 230 236 16 20 26 "xyzq" >/dev/null 2>&1; then
+        gefunden="$z"; break
+    fi
 done
-if [ -z "$fehlt" ]; then
-    ok "the typed line stands in the window before Enter (rows: $gefunden)"
+if [ -n "$gefunden" ]; then
+    ok "the typed line stands in the window before Enter (row $gefunden)"
 else
-    bad "the typed line 'xyzq' is not in the window before Enter (missing: $fehlt)"
+    bad "the typed line 'xyzq' is not in the window before Enter"
     [ -n "${WM_KEEP:-}" ] && cp "$TMPD/le.ppm" "$TMPD/le.txt" "$WM_KEEP/" 2>/dev/null
     grep -a -E 'sh:|key:' "$TMPD/le.txt" | tail -8 | sed 's/^/        /'
 fi

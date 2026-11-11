@@ -14,7 +14,7 @@
  * Hier steht sie nicht in Firn. `extern fn` (Runde 75) geht in BEIDEN
  * Profilen, und was dahinter liegt, sind acht Befehlsfolgen, die
  * genau das tun, was die `asm`-Bloecke in lib/libc/kcall.fi und
- * kernel/user/wlibc.fi bisher taten:
+ * what the former wlibc.fi did:
  *
  *     Aufruf (System V):  rdi rsi rdx rcx r8  r9
  *     Systemaufruf:       rax rdi rsi rdx r10 r8  r9

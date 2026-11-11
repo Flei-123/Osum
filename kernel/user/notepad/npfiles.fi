@@ -1,0 +1,92 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import libc.octets
+import libc.text
+import services.svcosum
+import services.svcrules
+import services.svcqueue
+import services.svcreply
+import npstr
+import npdoc
+
+export { pad_import, pad_export, pad_file_name, pad_file_len }
+
+const RESULT_BYTES: u64 = 8
+const MODE_IMPORT: u64 = 0
+const MODE_EXPORT: u64 = 1
+
+static mut pick_result: [u8; 8] = [0 as u8; 8]
+static mut name_buf: [u8; 128] = [0 as u8; 128]
+static mut file_len: u64 = 0
+
+fn pick_result_ptr() -> u64 {
+    return (&pick_result[0 as usize]) as u64
+}
+
+fn pad_file_name() -> u64 {
+    return (&name_buf[0 as usize]) as u64
+}
+
+fn pad_file_len() -> u64 {
+    return file_len
+}
+
+fn keep_name() {
+    let name: u64 = svcreply.reply_name_ptr()
+    let n: u64 = text.length(name)
+    octets.copy(pad_file_name(), name, n)
+    octets.st8(pad_file_name(), n, 0)
+}
+
+fn take_item(mode: u64) -> u64 {
+    keep_name()
+    if mode == MODE_EXPORT {
+        return svcrules.OK
+    }
+    let n: u64 = svcreply.data_len()
+    if n > npdoc.PAD_TEXT_CAP {
+        return svcrules.FAILED
+    }
+    octets.copy(npdoc.pad_text_ptr(), svcreply.data_ptr(), n)
+    file_len = n
+    return svcrules.OK
+}
+
+fn drain(mode: u64) -> u64 {
+    var result: u64 = svcrules.FAILED
+    while svcreply.next() {
+        if svcreply.op() == svcqueue.OP_FILE_END && svcreply.status() != svcrules.OK {
+            result = svcreply.status()
+        }
+        if svcreply.op() == svcqueue.OP_FILE_ITEM && svcreply.status() == svcrules.OK {
+            result = take_item(mode)
+        }
+    }
+    return result
+}
+
+fn pad_import() -> u64 {
+    file_len = 0
+    octets.zero(pick_result_ptr(), RESULT_BYTES)
+    var status: u64 = svcosum.pick_open(npstr.pad_import_title(), npstr.pad_accept(), pick_result_ptr())
+    if status == svcrules.NO_BACKEND {
+        status = svcosum.file_open(npstr.pad_import_title(), npstr.pad_accept(), pick_result_ptr())
+    }
+    if status != svcrules.OK {
+        return status
+    }
+    return drain(MODE_IMPORT)
+}
+
+fn pad_export(name: u64, n: u64) -> u64 {
+    octets.zero(pick_result_ptr(), RESULT_BYTES)
+    var status: u64 = svcosum.pick_save(npstr.pad_export_title(), name, npdoc.pad_text_ptr(), n, pick_result_ptr())
+    if status == svcrules.NO_BACKEND {
+        status = svcosum.file_save(npstr.pad_export_title(), name, npdoc.pad_text_ptr(), n, pick_result_ptr())
+    }
+    if status != svcrules.OK {
+        return status
+    }
+    return drain(MODE_EXPORT)
+}

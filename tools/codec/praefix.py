@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 import re, sys
 
-SOURCE = 'kernel/user/h264tab.fi'
+SOURCE = 'kernel/user/codec/h264tab.fi'
 
 def felder(path):
     s = open(path, encoding='utf-8').read()

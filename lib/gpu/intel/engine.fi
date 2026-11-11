@@ -1,0 +1,120 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.octets
+import gpu.intel.engregs
+import gpu.intel.fwake
+import gpu.intel.ring
+import gpu.intel.lrc
+import gpu.intel.elsp
+
+export {
+    Engine, Layout, layout_new, engine_new, setup, enable_execlists, state_page, descriptor, seqno_seen,
+    E_OFF, E_READY, E_DEAD, S_OK, S_ARG, S_NO_WAKE, S_MODE, S_DEAD, S_FULL, S_HUNG, S_DEAD_RESET,
+    SEQNO_OFFSET, CTX_ID
+}
+
+const E_OFF: u64 = 0
+const E_READY: u64 = 1
+const E_DEAD: u64 = 2
+
+const S_OK: u64 = 0
+const S_ARG: u64 = 1
+const S_NO_WAKE: u64 = 2
+const S_MODE: u64 = 3
+const S_DEAD: u64 = 4
+const S_FULL: u64 = 5
+const S_HUNG: u64 = 6
+const S_DEAD_RESET: u64 = 7
+
+const PAGE_MASK: u64 = 0xfff
+const SEQNO_OFFSET: u64 = 0x400
+const CTX_ID: u64 = 1
+
+struct Layout {
+    base: u64,
+    domain: u64,
+    ring_cpu: u64,
+    ring_ggtt: u64,
+    ring_bytes: u64,
+    ctx_cpu: u64,
+    ctx_ggtt: u64,
+    hws_cpu: u64,
+    hws_ggtt: u64
+}
+
+struct Engine {
+    lay: Layout,
+    ring: ring.Ring,
+    csb: elsp.Csb,
+    status: u64,
+    seqno: u64,
+    submits: u64,
+    hangs: u64,
+    resets: u64
+}
+
+fn layout_new(base: u64, domain: u64, ring_cpu: u64, ring_ggtt: u64, ring_bytes: u64, ctx_cpu: u64, ctx_ggtt: u64, hws_cpu: u64, hws_ggtt: u64) -> Layout {
+    var l: Layout = Layout {
+        base: base, domain: domain, ring_cpu: ring_cpu, ring_ggtt: ring_ggtt, ring_bytes: ring_bytes,
+        ctx_cpu: ctx_cpu, ctx_ggtt: ctx_ggtt, hws_cpu: hws_cpu, hws_ggtt: hws_ggtt
+    }
+    return l
+}
+
+fn engine_new(l: Layout) -> Engine {
+    var e: Engine = Engine {
+        lay: l,
+        ring: ring.ring_new(l.ring_cpu, l.ring_ggtt, l.ring_bytes),
+        csb: elsp.csb_new(),
+        status: E_OFF, seqno: 0, submits: 0, hangs: 0, resets: 0
+    }
+    return e
+}
+
+fn aligned(l: *mut Layout) -> bool {
+    return ((*l).ring_ggtt & PAGE_MASK) == 0 && ((*l).ctx_ggtt & PAGE_MASK) == 0 && ((*l).hws_ggtt & PAGE_MASK) == 0
+        && ((*l).ring_cpu & PAGE_MASK) == 0 && ((*l).ctx_cpu & PAGE_MASK) == 0 && ((*l).hws_cpu & PAGE_MASK) == 0
+        && ring.valid_size((*l).ring_bytes)
+}
+
+fn state_page(e: *mut Engine) -> u64 {
+    return (*e).lay.ctx_cpu + lrc.STATE_OFFSET
+}
+
+fn descriptor(e: *mut Engine) -> u64 {
+    return lrc.descriptor((*e).lay.ctx_ggtt, CTX_ID)
+}
+
+fn seqno_seen(e: *mut Engine) -> u64 {
+    return octets.ld32((*e).lay.hws_cpu, SEQNO_OFFSET)
+}
+
+fn enable_execlists(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, e: *mut Engine) -> bool {
+    let base: u64 = (*e).lay.base
+    wr(engregs.eng(base, engregs.RING_HWS_PGA), (*e).lay.hws_ggtt)
+    wr(engregs.eng(base, engregs.RING_MODE), engregs.masked_on(engregs.RUN_LIST_ENABLE))
+    wr(engregs.eng(base, engregs.RING_MI_MODE), engregs.masked_off(engregs.STOP_RING))
+    if (rd(engregs.eng(base, engregs.RING_MODE)) & engregs.RUN_LIST_ENABLE) == 0 {
+        return false
+    }
+    elsp.resync(rd, base, &(*e).csb)
+    return true
+}
+
+fn setup(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, e: *mut Engine) -> u64 {
+    if !aligned(&(*e).lay) {
+        return S_ARG
+    }
+    if fwake.get(rd, wr, us, engregs.FORCEWAKE_GT, engregs.FORCEWAKE_ACK_GT) != fwake.W_OK {
+        return S_NO_WAKE
+    }
+    octets.st32((*e).lay.hws_cpu, SEQNO_OFFSET, 0)
+    lrc.init_xcs(state_page(e), (*e).lay.base, (*e).lay.ring_ggtt, (*e).lay.ring_bytes)
+    var r: u64 = S_OK
+    if enable_execlists(rd, wr, e) {
+        (*e).status = E_READY
+    } else {
+        r = S_MODE
+    }
+    fwake.put(rd, wr, us, engregs.FORCEWAKE_GT, engregs.FORCEWAKE_ACK_GT)
+    return r
+}

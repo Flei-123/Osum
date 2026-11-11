@@ -20,8 +20,12 @@ import fui.transform
 import fui.uiimage
 import libc.text
 import fui.widget
-import wlib
-import wlibc
+import fuiapp.apphost
+import fuiapp.hostkey
+import uikit.uitext
+import uitheme
+import uitheme.thquery
+import uikit.uisurface
 import fuiscene.fsbase
 import fuiscene.fscore
 import fuiscene.fsctl
@@ -32,15 +36,26 @@ static mut ct_trail: [u64; 8] = [0 as u64; 8]
 
 static mut ct_font: [u64; 8] = [0 as u64; 8]
 
+fn theme_rgb(role: u64) -> u32 {
+    let rgb: u64 = thquery.theme_live(role)
+    return (((rgb & 255) << 16) | (rgb & 65280) | ((rgb >> 16) & 255)) as u32
+}
+
 fn draw_strip(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
     let z: *mut painter.Painter = render.ctx_painter(c)
-    var rgb: u64 = wlibc.theme_live(wlibc.C_TITLEBAR_OFF_BG)
+    var role: u64 = uitheme.C_TITLEBAR_OFF_BG
     if fsbase.st_foc {
-        rgb = wlibc.theme_live(wlibc.C_TITLEBAR_BG)
+        role = uitheme.C_TITLEBAR_BG
     }
-    let col: u32 = (((rgb & 255) << 16) | (rgb & 65280) | ((rgb >> 16) & 255)) as u32
     painter.round_rect(z, widget.w_x(e), widget.w_y(e), widget.w_w(e),
-        widget.w_h(e), 0.0, col | 4278190080 as u32)
+        widget.w_h(e), 0.0, theme_rgb(role) | 4278190080 as u32)
+}
+
+fn strip_text_color() -> u32 {
+    if fsbase.st_foc {
+        return style.color_token(style.TOK_TEXT_ON_ACCENT)
+    }
+    return style.color_literal(theme_rgb(uitheme.C_TITLEBAR_OFF_TEXT))
 }
 
 fn draw_entry(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
@@ -211,7 +226,7 @@ fn memo_key(key: u64, h: u64) {
     let l: u64 = memo_caret_line()
     let st: u64 = memo_line_start(l)
     let col: u64 = (fsbase.S.s_mcar as u64) - st
-    if key == wlib.KEY_ENTER {
+    if key == hostkey.KEY_ENTER {
         let n: u64 = text.length(fscore.mbuf())
         if n + 1 < fsbase.MEMO_CAP {
             var i: u64 = n
@@ -224,17 +239,17 @@ fn memo_key(key: u64, h: u64) {
             __mmio_write8((fscore.mbuf() + n + 1) as *mut u8, 0 as u8)
             fsbase.S.s_mcar = fsbase.S.s_mcar + 1
         }
-    } else if key == wlib.KEY_UP {
+    } else if key == hostkey.KEY_UP {
         if l > 0 {
             memo_goto(l - 1, col)
         }
-    } else if key == wlib.KEY_DOWN {
+    } else if key == hostkey.KEY_DOWN {
         if l + 1 < memo_lines() {
             memo_goto(l + 1, col)
         }
-    } else if key == wlib.KEY_HOME {
+    } else if key == hostkey.KEY_HOME {
         fsbase.S.s_mcar = st as usize
-    } else if key == wlib.KEY_END {
+    } else if key == hostkey.KEY_END {
         fsbase.S.s_mcar = (st + memo_line_len(st)) as usize
     } else {
         fuiapp.edit(fscore.mbuf(), (fsbase.MEMO_CAP - 1) as usize, (&fsbase.S.s_mcar) as *mut usize, key, false)
@@ -478,7 +493,7 @@ fn draw_strip_tab(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
     let ls: *mut style.Style = widget.w_style(&l)
     *ls = style.style_set_align(*ls, style.ALIGN_CENTER)
     *ls = style.style_set_pad(*ls, 0, 0)
-    *ls = style.style_set_fg(*ls, style.color_token(style.TOK_TEXT_ON_ACCENT))
+    *ls = style.style_set_fg(*ls, strip_text_color())
     widget.w_set_focus(&l, false)
     render.draw_text(c, &l)
     render.draw_focus_ring(c, e)
@@ -505,6 +520,9 @@ fn draw_ibtn(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
     var col: u32 = (*t).text
     if ud == 1 {
         col = (*t).text_on_accent
+        if !fsbase.st_foc {
+            col = theme_rgb(uitheme.C_TITLEBAR_OFF_TEXT)
+        }
     }
     if widget.w_is_disabled(e) {
         col = (*t).text_disabled
@@ -658,7 +676,7 @@ fn icon_at(word: u64, x: u64, y: u64, size: u64, txt: u64) {
     }
     let z: *mut painter.Painter = render.ctx_painter(fuiapp.ctx())
     let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
-    if (word & wlib.ICON_TAG) != 0 {
+    if (word & apphost.ICON_TAG) != 0 {
         var c0: u32 = (*t).text | 4278190080 as u32
         if (word & 72057594037927936) != 0 {
             c0 = fscore.tint_col(word)
@@ -666,7 +684,7 @@ fn icon_at(word: u64, x: u64, y: u64, size: u64, txt: u64) {
         fuiapp.glyph(word & 65535, x, y, size, c0)
         return
     }
-    if wlib.is_image_pub(word) {
+    if apphost.is_image_pub(word) {
         let src: u64 = symvar.pick(word, size)
         let iw: u64 = __mmio_read32((src + 4) as *mut u32) as u64
         let ih: u64 = __mmio_read32((src + 8) as *mut u32) as u64
@@ -968,7 +986,7 @@ fn draw_ct(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
             if fsbase.S.s_ct_exact[(k) as usize] {
                 var hx0: u64 = cx + fscore.sp(10) + hoff
                 if ((fsbase.S.s_ct_ral[(k) as usize] >> col) & 1) != 0 {
-                    let htw: u64 = wlibc.text_w(wlibc.F_UI, fscore.sp(15), ct_text(k, fsbase.HEAD_ROW, col),
+                    let htw: u64 = uitext.text_w(uitext.F_UI, fscore.sp(15), ct_text(k, fsbase.HEAD_ROW, col),
                         text.length(ct_text(k, fsbase.HEAD_ROW, col)))
                     if fscore.colw_of(k, col, w) > fscore.sp(14) + htw + hoff {
                         hx0 = cx + fscore.colw_of(k, col, w) - fscore.sp(14) - htw
@@ -986,7 +1004,7 @@ fn draw_ct(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
             if fscore.trace_on() {
 
                 let hpx: u64 = fscore.ui_px()
-                let hasc: u64 = wlibc.ascent_of(wlibc.F_UI, hpx)
+                let hasc: u64 = uitext.ascent_of(uitext.F_UI, hpx)
                 var hbase: u64 = y + (fscore.HEAD_H() - fscore.sp(24)) / 2 + (fscore.sp(24) + hasc) / 2
                 if fsbase.S.s_ct_exact[(k) as usize] {
                     hbase = fscore.mid_base(y, fscore.HEAD_H(), fscore.sp(15))
@@ -1159,7 +1177,7 @@ fn draw_ct(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
                     var tx: u64 = cx2 + fscore.sp(10) + off
                     var clipw: u64 = avail
                     if ((fsbase.S.s_ct_ral[(k) as usize] >> col2) & 1) != 0 {
-                        let tw2: u64 = wlibc.text_w(wlibc.F_UI, fs, cp, text.length(cp))
+                        let tw2: u64 = uitext.text_w(uitext.F_UI, fs, cp, text.length(cp))
                         if cw > fscore.sp(14) + shift + tw2 + off {
                             tx = cx2 + cw - fscore.sp(14) - shift - tw2
                             clipw = tw2 + fscore.sp(14)
@@ -1763,7 +1781,7 @@ fn ct_key(k: u64, key: u64) -> u64 {
     let rows: u64 = fsbase.S.s_ct_rows[(k) as usize]
     let vis: u64 = ct_visible(k, fscore.node_h(i))
     var sel: u64 = fsbase.S.s_ct_sel[(k) as usize]
-    if key == wlib.KEY_ENTER {
+    if key == hostkey.KEY_ENTER {
         return fsbase.S.s_ct_key[(k) as usize]
     }
     if rows == 0 {
@@ -1771,38 +1789,38 @@ fn ct_key(k: u64, key: u64) -> u64 {
     }
     if sel >= rows {
 
-        if key == wlib.KEY_DOWN || key == wlib.KEY_HOME || key == wlib.KEY_PGDN {
+        if key == hostkey.KEY_DOWN || key == hostkey.KEY_HOME || key == hostkey.KEY_PGDN {
             sel = 0
-        } else if key == wlib.KEY_UP || key == wlib.KEY_END || key == wlib.KEY_PGUP {
+        } else if key == hostkey.KEY_UP || key == hostkey.KEY_END || key == hostkey.KEY_PGUP {
             sel = rows - 1
         }
-    } else if key == wlib.KEY_DOWN && sel + 1 < rows {
+    } else if key == hostkey.KEY_DOWN && sel + 1 < rows {
         sel = sel + 1
-    } else if key == wlib.KEY_UP && sel > 0 {
+    } else if key == hostkey.KEY_UP && sel > 0 {
         sel = sel - 1
-    } else if key == wlib.KEY_PGDN {
+    } else if key == hostkey.KEY_PGDN {
         sel = sel + vis
         if sel >= rows {
             sel = rows - 1
         }
-    } else if key == wlib.KEY_PGUP {
+    } else if key == hostkey.KEY_PGUP {
         if sel > vis {
             sel = sel - vis
         } else {
             sel = 0
         }
-    } else if key == wlib.KEY_HOME {
+    } else if key == hostkey.KEY_HOME {
         sel = 0
-    } else if key == wlib.KEY_END {
+    } else if key == hostkey.KEY_END {
         sel = rows - 1
     }
     if sel < rows && fscore.row_head(k, sel) {
-        sel = fscore.skip_head(k, sel, rows, key == wlib.KEY_UP || key == wlib.KEY_PGUP || key == wlib.KEY_HOME)
+        sel = fscore.skip_head(k, sel, rows, key == hostkey.KEY_UP || key == hostkey.KEY_PGUP || key == hostkey.KEY_HOME)
     }
     if sel != fsbase.S.s_ct_sel[(k) as usize] {
         fsbase.S.s_ct_sel[(k) as usize] = sel
         if fsbase.S.s_ct_multi[(k) as usize] {
-            if wlib.key_shift() {
+            if apphost.key_shift() {
                 fscore.ctb_range(k, fsbase.S.s_ct_anch[(k) as usize], sel)
             } else {
                 fscore.ctb_clear(k)
@@ -2288,12 +2306,8 @@ fn card_rp() -> f64 {
 }
 
 fn draw_card(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
-    let z: *mut painter.Painter = render.ctx_painter(c)
-    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
-    painter.round_rect(z, widget.w_x(e), widget.w_y(e), widget.w_w(e),
-        widget.w_h(e), card_rp(), (*t).surface_raised | 4278190080 as u32)
-    painter.round_ring(z, widget.w_x(e), widget.w_y(e), widget.w_w(e),
-        widget.w_h(e), card_rp(), 1.0, (*t).border_col | 4278190080 as u32)
+    uisurface.paint_scene(render.ctx_painter(c), uisurface.K_CARD, widget.w_x(e), widget.w_y(e),
+        widget.w_w(e), widget.w_h(e), card_rp())
 }
 
 fn draw_glasscard(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
@@ -2325,29 +2339,14 @@ fn card(parent: usize) -> usize {
 }
 
 fn draw_card_soft(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
-    let z: *mut painter.Painter = render.ctx_painter(c)
-    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
-    let x: f64 = widget.w_x(e)
-    let y: f64 = widget.w_y(e)
-    let w: f64 = widget.w_w(e)
-    let h: f64 = widget.w_h(e)
-    let r: f64 = fscore.spf(8.0)
-    painter.round_rect(z, x - 1.0, y, w + 2.0, h + 2.0, r + 1.0, 0x0A000000 as u32)
-    painter.round_rect(z, x, y + 1.0, w, h + 1.0, r, 0x08000000 as u32)
-    painter.round_rect(z, x, y, w, h, r, (*t).surface_raised | 4278190080 as u32)
-    painter.round_ring(z, x, y, w, h, r, 1.0, 0x0F000000 as u32)
+    uisurface.paint_scene(render.ctx_painter(c), uisurface.K_CARD_SOFT, widget.w_x(e), widget.w_y(e),
+        widget.w_w(e), widget.w_h(e), fscore.spf(8.0))
 }
 
 fn draw_layer(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
-    let z: *mut painter.Painter = render.ctx_painter(c)
-    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
-    let x: f64 = widget.w_x(e)
-    let y: f64 = widget.w_y(e)
-    let w: f64 = widget.w_w(e)
-    let h: f64 = widget.w_h(e)
     let r: f64 = fscore.spf(8.0)
-    painter.round_rect(z, x, y, w + r, h + r, r, (*t).surface_raised | 2566914048 as u32)
-    painter.round_ring(z, x, y, w + r, h + r, r, 1.0, 0x14000000 as u32)
+    uisurface.paint_scene(render.ctx_painter(c), uisurface.K_LAYER, widget.w_x(e), widget.w_y(e),
+        widget.w_w(e) + r, widget.w_h(e) + r, r)
 }
 
 fn card_soft(parent: usize) -> usize {

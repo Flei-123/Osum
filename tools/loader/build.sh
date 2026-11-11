@@ -67,7 +67,7 @@ for p in $APPS; do
     echo "   app       $p ($(stat -c%s "$OUT/bin/$p") Oktette)"
 done
 
-if [ -d "${CERTUS_REPO:-/root/certus-sammeln}/lib/browser" ]; then
+if [ -d "${CERTUS_REPO:-/root/certus-ui}/lib/browser" ]; then
     if bash kernel/user/certus/build.sh "$OUT/bin/certus" \
             > "$OUT/certus.log" 2>&1; then
         echo "   browser   certus ($(stat -c%s "$OUT/bin/certus") Oktette)"
@@ -76,6 +76,6 @@ if [ -d "${CERTUS_REPO:-/root/certus-sammeln}/lib/browser" ]; then
         tail -12 "$OUT/certus.log"
     fi
 else
-    echo "   browser   skipped (no Certus tree in ${CERTUS_REPO:-/root/certus-sammeln})"
+    echo "   browser   skipped (no Certus tree in ${CERTUS_REPO:-/root/certus-ui})"
 fi
 exit 0

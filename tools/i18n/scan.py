@@ -4,7 +4,6 @@ import os
 import re
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
-import brand
 
 WOERTER = [
     "Einstellungen", "Darstellung", "Bildschirm", "Benutzer",
@@ -52,18 +51,27 @@ OBERFLAECHE = [
     "kernel/user/explorer/expnav.fi",
     "kernel/user/explorer/expwork.fi",
     "kernel/user/launcher.fi",
-    "kernel/user/wlib.fi",
-    "kernel/user/wlib/wlax.fi",
-    "kernel/user/wlib/wlbase.fi",
-    "kernel/user/wlib/wldraw.fi",
-    "kernel/user/wlib/wlevent.fi",
-    "kernel/user/wlib/wlstate.fi",
-    "kernel/user/wlib/wlwidget.fi",
-    "kernel/user/wlibc.fi",
-    "kernel/user/wlibc/wcbase.fi",
-    "kernel/user/wlibc/wcgfx.fi",
-    "kernel/user/wlibc/wcpaint.fi",
-    "kernel/user/wlibc/wctheme.fi",
+    "kernel/user/fuiapp/hostui/hostaxtree.fi",
+    "kernel/user/fuiapp/hostui/hostbase.fi",
+    "kernel/user/fuiapp/hostui/hostdraw.fi",
+    "kernel/user/fuiapp/hostui/hostevent.fi",
+    "kernel/user/fuiapp/hostui/hoststate.fi",
+    "kernel/user/fuiapp/hostui/hostwidget.fi",
+    "kernel/user/uitheme/thtokens.fi",
+    "kernel/user/uitheme/thengine.fi",
+    "kernel/user/uitheme/thapply.fi",
+    "kernel/user/uitheme/thbase.fi",
+    "kernel/user/uitheme/thcolor.fi",
+    "kernel/user/uitheme/thfile.fi",
+    "kernel/user/uitheme/thload.fi",
+    "kernel/user/uitheme/thprobe.fi",
+    "kernel/user/uitheme/thpush.fi",
+    "kernel/user/uitheme/thquery.fi",
+    "kernel/user/fuiapp/hosthead.fi",
+    "kernel/user/uikit/uiglyph.fi",
+    "kernel/user/uikit/uisys.fi",
+    "kernel/user/fuiapp/hoststart.fi",
+    "kernel/user/fuiapp/hostwin.fi",
     "kernel/user/msg.fi",
     "kernel/ui/wm.fi",
     "kernel/ui/wm/wmtrust.fi",
@@ -109,8 +117,6 @@ def erlaubt(text):
     if re.match(r"^[a-z0-9]+: ", t):
         return True
     if re.match(r"^[a-z0-9_]+(\.[a-z0-9_]+)+(\\0)*$", t):
-        return True
-    if t.startswith(brand.PRODUKT + " - Bestaetigung"):
         return True
     if re.match(r"^[ ]?[a-z0-9_]+=", t):
         return True

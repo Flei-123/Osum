@@ -1,0 +1,115 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.octets
+import gpu.intel.engregs
+import gpu.intel.micmd
+import gpu.intel.ring
+
+export {
+    init_xcs, set_tail, set_head, head, tail, descriptor, context_control, image_dwords,
+    CTX_BYTES, STATE_OFFSET, CTX_CONTROL, CTX_RING_HEAD, CTX_RING_TAIL, CTX_RING_START, CTX_RING_CTL,
+    DESC_VALID, DESC_PRIVILEGE, DESC_LEGACY_32B, CTX_ID_SHIFT, CTX_ID_MAX
+}
+
+const PAGE: u64 = 0x1000
+const CTX_BYTES: u64 = 0x2000
+const STATE_OFFSET: u64 = 0x1000
+const DWORD: u64 = 4
+
+const CTX_CONTROL: u64 = 3
+const CTX_RING_HEAD: u64 = 5
+const CTX_RING_TAIL: u64 = 7
+const CTX_RING_START: u64 = 9
+const CTX_RING_CTL: u64 = 11
+
+const CTRL_RESTORE_INHIBIT: u64 = 0x1
+const CTRL_RS_CTX_ENABLE: u64 = 0x2
+const CTRL_SAVE_INHIBIT: u64 = 0x4
+const CTRL_INHIBIT_SYN_SWITCH: u64 = 0x8
+
+const DESC_VALID: u64 = 0x1
+const DESC_LEGACY_32B: u64 = 0x8
+const DESC_PRIVILEGE: u64 = 0x100
+const LRCA_MASK: u64 = 0xfffff000
+const CTX_ID_SHIFT: u64 = 32
+const CTX_ID_MAX: u64 = 0x1fffff
+const HEAD_ADDR: u64 = 0x1ffffc
+const TAIL_ADDR: u64 = 0x1ffff8
+
+const BLOCK1_COUNT: u64 = 14
+const BLOCK1_NOPS_BEFORE: u64 = 1
+const BLOCK2_COUNT: u64 = 9
+const BLOCK2_NOPS_BEFORE: u64 = 3
+const BLOCK3_COUNT: u64 = 1
+const BLOCK3_NOPS_BEFORE: u64 = 13
+const IMAGE_DWORDS: u64 = 69
+
+static BLOCK1_REGS: [u64; 14] = [0x244, 0x34, 0x30, 0x38, 0x3c, 0x168, 0x140, 0x110, 0x11c, 0x114, 0x118, 0x1c0, 0x1c4, 0x1c8]
+static BLOCK2_REGS: [u64; 9] = [0x3a8, 0x28c, 0x288, 0x284, 0x280, 0x27c, 0x278, 0x274, 0x270]
+static BLOCK3_REGS: [u64; 1] = [0x200]
+
+fn image_dwords() -> u64 {
+    return IMAGE_DWORDS
+}
+
+fn context_control() -> u64 {
+    return engregs.masked_on(CTRL_INHIBIT_SYN_SWITCH | CTRL_RESTORE_INHIBIT)
+        | engregs.masked_off(CTRL_SAVE_INHIBIT | CTRL_RS_CTX_ENABLE)
+}
+
+fn put(state: u64, idx: u64, v: u64) {
+    octets.st32(state, idx * DWORD, v)
+}
+
+fn block(state: u64, at: u64, nops: u64, regs: u64, count: u64, base: u64) -> u64 {
+    var i: u64 = at
+    var n: u64 = 0
+    while n < nops {
+        put(state, i, micmd.MI_NOOP)
+        i = i + 1
+        n = n + 1
+    }
+    put(state, i, micmd.lri_header(count, true))
+    i = i + 1
+    n = 0
+    while n < count {
+        put(state, i, base + octets.ld64(regs, n * 8))
+        put(state, i + 1, 0)
+        i = i + 2
+        n = n + 1
+    }
+    return i
+}
+
+fn init_xcs(state: u64, base: u64, ring_ggtt: u64, ring_bytes: u64) -> bool {
+    if (state & (PAGE - 1)) != 0 || (ring_ggtt & (PAGE - 1)) != 0 || !ring.valid_size(ring_bytes) {
+        return false
+    }
+    var i: u64 = block(state, 0, BLOCK1_NOPS_BEFORE, (&BLOCK1_REGS[0]) as u64, BLOCK1_COUNT, base)
+    i = block(state, i, BLOCK2_NOPS_BEFORE, (&BLOCK2_REGS[0]) as u64, BLOCK2_COUNT, base)
+    i = block(state, i, BLOCK3_NOPS_BEFORE, (&BLOCK3_REGS[0]) as u64, BLOCK3_COUNT, base)
+    put(state, i, micmd.MI_BATCH_BUFFER_END)
+    put(state, CTX_CONTROL, context_control())
+    put(state, CTX_RING_START, ring_ggtt)
+    put(state, CTX_RING_CTL, ring.ring_ctl(ring_bytes))
+    return i + 1 == IMAGE_DWORDS
+}
+
+fn set_tail(state: u64, t: u64) {
+    put(state, CTX_RING_TAIL, t & TAIL_ADDR)
+}
+
+fn set_head(state: u64, h: u64) {
+    put(state, CTX_RING_HEAD, h & HEAD_ADDR)
+}
+
+fn head(state: u64) -> u64 {
+    return octets.ld32(state, CTX_RING_HEAD * DWORD) & HEAD_ADDR
+}
+
+fn tail(state: u64) -> u64 {
+    return octets.ld32(state, CTX_RING_TAIL * DWORD) & TAIL_ADDR
+}
+
+fn descriptor(lrca: u64, id: u64) -> u64 {
+    return ((id & CTX_ID_MAX) << CTX_ID_SHIFT) | (lrca & LRCA_MASK) | DESC_LEGACY_32B | DESC_PRIVILEGE | DESC_VALID
+}

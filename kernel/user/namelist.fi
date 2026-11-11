@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.io
+
+export { read, write, NAME_BYTES, NAME_MAX, FILE_BYTES, MISSING }
+
+const NAME_BYTES: u64 = 24
+const NAME_MAX: u64 = 23
+const FILE_BYTES: u64 = 600
+const MISSING: u64 = 0
+const SEPARATOR: u8 = 44
+const NEWLINE: u8 = 10
+const EQUALS: u8 = 61
+
+fn key_len(key: u64) -> u64 {
+    var n: u64 = 0
+    while __mmio_read8((key + n) as *mut u8) != 0 as u8 {
+        n = n + 1
+    }
+    return n
+}
+
+fn line_has_key(b: u64, n: u64, at: u64, key: u64, klen: u64) -> bool {
+    if at + klen + 1 > n || (at != 0 && __mmio_read8((b + at - 1) as *mut u8) != NEWLINE) {
+        return false
+    }
+    var k: u64 = 0
+    while k < klen {
+        if __mmio_read8((b + at + k) as *mut u8) != __mmio_read8((key + k) as *mut u8) {
+            return false
+        }
+        k = k + 1
+    }
+    return __mmio_read8((b + at + klen) as *mut u8) == EQUALS
+}
+
+fn parse_names(b: u64, n: u64, from: u64, tok: u64, cap: u64) -> u64 {
+    var count: u64 = 0
+    var q: u64 = from
+    while q < n && __mmio_read8((b + q) as *mut u8) != NEWLINE && count < cap {
+        var l: u64 = 0
+        let slot: u64 = tok + count * NAME_BYTES
+        while q < n && l < NAME_MAX {
+            let ch: u8 = __mmio_read8((b + q) as *mut u8)
+            if ch == SEPARATOR || ch == NEWLINE {
+                break
+            }
+            __mmio_write8((slot + l) as *mut u8, ch)
+            l = l + 1
+            q = q + 1
+        }
+        __mmio_write8((slot + l) as *mut u8, 0 as u8)
+        if l > 0 {
+            count = count + 1
+        }
+        if q < n && __mmio_read8((b + q) as *mut u8) == SEPARATOR {
+            q = q + 1
+        }
+    }
+    return count
+}
+
+fn fill(fd: u64, b: u64, cap: u64) -> u64 {
+    var done: u64 = 0
+    var going: bool = true
+    while going {
+        if done >= cap {
+            going = false
+        } else {
+            let r: u64 = ulib.sys(ulib.SYS_READ, fd, b + done, cap - done)
+            if ulib.bad(r) {
+                return r
+            }
+            if r == 0 {
+                going = false
+            } else {
+                done = done + r
+            }
+        }
+    }
+    return done
+}
+
+fn read(path: u64, key: u64, tok: u64, cap: u64) -> u64 {
+    var buf: [u8; 600] = [0 as u8; 600]
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return MISSING
+    }
+    let b: u64 = (&buf[0 as usize]) as u64
+    let n: u64 = fill(fd, b, FILE_BYTES - 1)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) {
+        return MISSING
+    }
+    let klen: u64 = key_len(key)
+    var i: u64 = 0
+    while i + klen + 1 <= n {
+        if line_has_key(b, n, i, key, klen) {
+            return parse_names(b, n, i + klen + 1, tok, cap) + 1
+        }
+        i = i + 1
+    }
+    return MISSING
+}
+
+fn write(path: u64, key: u64, tok: u64, count: u64) {
+    var buf: [u8; 600] = [0 as u8; 600]
+    let b: u64 = (&buf[0 as usize]) as u64
+    let klen: u64 = key_len(key)
+    var at: u64 = 0
+    while at < klen {
+        __mmio_write8((b + at) as *mut u8, __mmio_read8((key + at) as *mut u8))
+        at = at + 1
+    }
+    __mmio_write8((b + at) as *mut u8, EQUALS)
+    at = at + 1
+    var t: u64 = 0
+    while t < count {
+        if t > 0 {
+            __mmio_write8((b + at) as *mut u8, SEPARATOR)
+            at = at + 1
+        }
+        let slot: u64 = tok + t * NAME_BYTES
+        var j: u64 = 0
+        while j < NAME_MAX && __mmio_read8((slot + j) as *mut u8) != 0 as u8 {
+            __mmio_write8((b + at) as *mut u8, __mmio_read8((slot + j) as *mut u8))
+            at = at + 1
+            j = j + 1
+        }
+        t = t + 1
+    }
+    __mmio_write8((b + at) as *mut u8, NEWLINE)
+    at = at + 1
+    let fd: u64 = io.create(path)
+    if ulib.bad(fd) {
+        return
+    }
+    let _w: u64 = io.write_all(fd, b, at)
+    io.close(fd)
+}

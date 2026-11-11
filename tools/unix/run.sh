@@ -126,7 +126,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
         --defsym=KERNEL_TRAP="_F$s.trap__entry" \
         --defsym=KERNEL_SYSCALL="_F$s.sys__entry" \
         --defsym=KERNEL_TASK_MAIN="_F$s.tasks__main" \
-        --defsym=KERNEL_USER_START="_F$s.proc__user_start" \
+        --defsym=KERNEL_USER_START="_F$s.proccopy__user_start" \
         --defsym=KERNEL_AP_MAIN="_F$s.smp__ap_main" \
         --defsym=USER_MAIN="_F$s.u_enter" \
         -o "$TMPD/k$s.elf" "$TMPD/boot.o" "$TMPD/isr.o" "$TMPD/switch.o" \
@@ -191,7 +191,7 @@ say "$F" "ignore" 0 "ein ueberhoertes Signal kommt nie an"
 echo "   -- and every way to be wrong"
 say "$F" "act kill" -22 "SIGKILL laesst sich nicht abfangen: -EINVAL"
 say "$F" "act zero" -22 "Signal 0 gibt es nicht: -EINVAL"
-say "$F" "act big" -22 "Signal 64 gibt es nicht: -EINVAL"
+say "$F" "act big" -22 "signal 65 does not exist (32..64 are real-time): -EINVAL"
 say "$F" "kill srch" -3 "ein Prozess, den es nicht gibt: -ESRCH"
 say "$F" "kill probe" 0 "kill(pid, 0) schickt nichts und sagt, dass es ihn gibt"
 

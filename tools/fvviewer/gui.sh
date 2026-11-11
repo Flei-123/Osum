@@ -79,7 +79,7 @@ gui_stage() { # name tls(0|1) oldclient(0|1) [pkg(0|1)]
         EXTRA_APPS="/apps/ /system/ /store/ /tmp/ /system/schluessel.pub=$P/schluessel.pub"
         local x
         for x in $(cd "$W" && find store apps system/generations -type d | sort); do EXTRA_APPS="$EXTRA_APPS /$x/"; done
-        for x in $(cd "$W" && find store apps system/generations system/AKTUELL -type f | sort); do
+        for x in $(cd "$W" && find store apps system/generations system/CURRENT -type f | sort); do
             EXTRA_APPS="$EXTRA_APPS /$x=$W/$x"
         done
     fi

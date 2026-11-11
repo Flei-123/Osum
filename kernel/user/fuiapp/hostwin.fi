@@ -1,0 +1,210 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import fuiapp.hostwinp
+import libc.text
+import ulib
+
+const SYS_MMAP: u64 = 9
+
+const PROT_RW: u64 = 3
+
+const MFD_FRAMES: u64 = 0x40000000
+
+const SYS_MEMFD_CREATE: u64 = 319
+
+const SYS_FTRUNCATE: u64 = 77
+
+const SYS_MUNMAP: u64 = 11
+
+const SYS_CLOSE_FD: u64 = 3
+
+const MAP_SHARED_FLAG: u64 = 1
+
+static mut s_shfd: u64 = 0
+
+static mut s_panel: u64 = 0
+
+
+fn shm_last_fd() -> u64 {
+    return s_shfd
+}
+
+fn shm_close(fd: u64) {
+    let _r: u64 = ulib.sys(SYS_CLOSE_FD, fd, 0, 0)
+}
+
+fn shm_unmap(p: u64, bytes: u64) {
+    let _r: u64 = ulib.sys(SYS_MUNMAP, p, bytes, 0)
+}
+
+fn shm_buffer(bytes: u64) -> u64 {
+    if bytes == 0 {
+        return 0
+    }
+    let fd: u64 = ulib.sys(SYS_MEMFD_CREATE, 0, MFD_FRAMES, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    if ulib.bad(ulib.sys(SYS_FTRUNCATE, fd, bytes, 0)) {
+        shm_close(fd)
+        return 0
+    }
+    let p: u64 = asm("syscall", out("rax"), in("rax") SYS_MMAP, in("rdi") 0,
+        in("rsi") bytes, in("rdx") PROT_RW, in("r10") MAP_SHARED_FLAG,
+        in("r8") fd, in("r9") 0, clobber("rcx"), clobber("r11"),
+        clobber("memory"))
+    if ulib.bad(p) || p == 0 {
+        shm_close(fd)
+        return 0
+    }
+    s_shfd = fd
+    return p
+}
+
+fn layer_rank(l: u64) -> u64 {
+    if l == hostwinp.L_FLOAT {
+        return 3
+    }
+    return l * 2
+}
+
+fn win_opts(frameless: bool, keys: bool, opac: u64) -> u64 {
+    var o: u64 = 0
+    if frameless {
+        o = o | hostwinp.WO_FRAMELESS
+    }
+    if keys {
+        o = o | hostwinp.WO_KEYS
+    }
+    if opac <= 255 {
+        o = o | hostwinp.WO_OPAC | (opac << hostwinp.WO_SHIFT)
+    }
+    return o
+}
+
+fn win_set_opac(h: u64, v: u64) -> u64 {
+    return ulib.sys(hostwinp.WM_STATE, h, hostwinp.WS_OPAC, v)
+}
+
+fn win_backlum(h: u64, which: u64) -> u64 {
+    return ulib.sys(hostwinp.WM_INFO, h, which, 0)
+}
+
+fn win_setbuf(h: u64, fd: u64) -> bool {
+    return !ulib.bad(ulib.sys(hostwinp.WM_SETBUF, h, fd, 0))
+}
+
+fn win_damage(h: u64, x: u64, y: u64, w: u64, hh: u64) -> u64 {
+    return ulib.sys(hostwinp.WM_DAMAGE, h, (x << 16) | y, (w << 16) | hh)
+}
+
+fn win_shared(h: u64) -> bool {
+    return ulib.sys(hostwinp.WM_INFO, h, hostwinp.WI_SHARED, 0) == 1
+}
+
+fn win_state(h: u64, was: u64, value: u64) -> u64 {
+    return ulib.sys(hostwinp.WM_STATE, h, was, value)
+}
+
+fn win_list(cur_space: u64, aus: u64) -> u64 {
+    return ulib.sys(hostwinp.WM_LIST, cur_space, aus, hostwinp.WL_BYTES)
+}
+
+fn win_app(h: u64, name: u64) -> u64 {
+    return ulib.sys(hostwinp.WM_APP, h, name, text.length(name) + 1)
+}
+
+fn win_title(h: u64, text: u64) -> u64 {
+    return ulib.sys(hostwinp.WM_TITLE, h, text, text.length(text) + 1)
+}
+
+fn win_act(id: u64, was: u64) -> u64 {
+    return ulib.sys(hostwinp.WM_ACT, id, was, 0)
+}
+
+fn win_minrect(id: u64, x: u64, y: u64, w: u64, h: u64) -> u64 {
+    return ulib.sys(hostwinp.WM_MINRECT, id,
+        (x & 0xFFFFFFFF) | ((y & 0xFFFFFFFF) << 32),
+        (w & 0xFFFFFFFF) | ((h & 0xFFFFFFFF) << 32))
+}
+
+fn win_strut(h: u64, edge: u64, size: u64) -> u64 {
+    let rc: u64 = ulib.sys(hostwinp.WM_STRUT, h, edge, size)
+    if !ulib.bad(rc) {
+        s_panel = 1
+    }
+    return rc
+}
+
+fn win_move(h: u64, x: u64, y: u64) -> u64 {
+    return ulib.sys(hostwinp.WM_MOVE, h, (x << 16) | y, 0)
+}
+
+fn win_size(h: u64, w: u64, hh: u64) -> u64 {
+    return ulib.sys(hostwinp.WM_SIZE, h, (w << 16) | hh, 0)
+}
+
+fn win_max(h: u64, on: bool) -> u64 {
+    var v: u64 = 0
+    if on {
+        v = 1
+    }
+    return ulib.sys(hostwinp.WM_STATE, h, hostwinp.WS_MAXIMIZED, v)
+}
+
+fn win_info(h: u64, field: u64) -> u64 {
+    return ulib.sys(hostwinp.WM_INFO, h, field, 0)
+}
+
+fn work_x(h: u64) -> u64 {
+    return ulib.sys(hostwinp.WM_INFO, h, hostwinp.WI_WORKX, 0)
+}
+
+fn work_y(h: u64) -> u64 {
+    return ulib.sys(hostwinp.WM_INFO, h, hostwinp.WI_WORKY, 0)
+}
+
+fn work_w(h: u64) -> u64 {
+    return ulib.sys(hostwinp.WM_INFO, h, hostwinp.WI_WORKW, 0)
+}
+
+fn work_h(h: u64) -> u64 {
+    return ulib.sys(hostwinp.WM_INFO, h, hostwinp.WI_WORKH, 0)
+}
+
+static mut e_names: [u8; 23] = "bottom\0top\0left\0right\0\0"
+
+fn edge_name(e: u64) -> u64 {
+    let b: u64 = (&e_names[0 as usize]) as u64
+    var i: u64 = 0
+    var k: u64 = 0
+    while k < e && i < 24 {
+        if __mmio_read8((b + i) as *mut u8) == 0 as u8 {
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return b + i
+}
+
+fn edge_by_name(p: u64) -> u64 {
+    var e: u64 = 0
+    while e < 4 {
+        let q: u64 = edge_name(e)
+        var i: u64 = 0
+        var equal: bool = true
+        while __mmio_read8((q + i) as *mut u8) != 0 as u8 {
+            if __mmio_read8((p + i) as *mut u8)
+                != __mmio_read8((q + i) as *mut u8) {
+                equal = false
+            }
+            i = i + 1
+        }
+        if equal && __mmio_read8((p + i) as *mut u8) == 0 as u8 {
+            return e
+        }
+        e = e + 1
+    }
+    return 4
+}

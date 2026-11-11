@@ -11,8 +11,13 @@ PAT_RGB = re.compile(r"\brgb\(\s*state\s*,\s*(0x[0-9A-Fa-f]{1,2}|\d{1,3})"
 
 FILES = [
     "kernel/ui/wm.fi",
-    "kernel/user/wlibc.fi",
-    "kernel/user/wlib.fi",
+    "kernel/user/uitheme/thengine.fi",
+    "kernel/user/uikit/uitextat.fi",
+    "kernel/user/fuiapp/hostui/hostbase.fi",
+    "kernel/user/fuiapp/hostui/hoststate.fi",
+    "kernel/user/fuiapp/hostui/hostevent.fi",
+    "kernel/user/fuiapp/hostui/hostwidget.fi",
+    "kernel/user/fuiapp/hostui/hostdraw.fi",
     "kernel/user/taskbar.fi",
     "kernel/user/taskbar/tbbase.fi",
     "kernel/user/taskbar/tbhover.fi",
@@ -42,7 +47,8 @@ ALLOWED_CONSTS = ("const RGB24", "const RGB_WHITE", "const RGB_BLACK",
                   "const STRUT_MAX", "const PROBE_IN", "const PROBE_OUT",
                   "const CURSOR_BODY", "const CURSOR_EDGE")
 ALLOWED_FN = {
-    "kernel/user/wlibc.fi": ["fn primitives_builtin", "fn platte", "fn plate_ink"],
+    "kernel/user/uitheme/thengine.fi": ["fn primitives_builtin"],
+    "kernel/user/uikit/uitextat.fi": ["fn plate", "fn plate_ink"],
     "kernel/user/taskbar/tbstatus.fi": ["fn glas_say"],
     "kernel/user/taskbar/tbmetrics.fi": ["fn schild_say"],
     "kernel/ui/wm.fi": [

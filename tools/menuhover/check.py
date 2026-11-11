@@ -18,7 +18,7 @@ rows = {}
 for m in re.finditer(r"launcher: rect id=2 kind=5 x=(\d+) y=(\d+) w=(\d+) h=(\d+)", ser):
     rows["list"] = tuple(int(v) for v in m.groups())
 lx, ly, lw, lh = rows["list"]
-ox, oy = wx + 2, wy + 22
+ox, oy = wx, wy
 rowh = 52
 base = Image.open(d + "/01-menu.ppm").convert("RGB")
 bpx = base.load()

@@ -1,0 +1,288 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.errno
+import fs.vfsops
+import fs.ext4
+import fs.ext4alloc
+import fs.ext4ino
+import libc.octets
+
+export { dir_lookup, dir_add, dir_remove, dir_is_empty, dir_init_block,
+    dir_set_dotdot, FT_REG, FT_DIR }
+
+const FT_REG: u64 = 1
+const FT_DIR: u64 = 2
+const INC_FILETYPE: u64 = 2
+const INDEX_FL: u64 = 0x1000
+const NAME_LIMIT: u64 = 255
+const ENTRY_HDR: u64 = 8
+const DOTDOT_AT: u64 = 12
+const DOT_RECLEN: u64 = 12
+
+fn align4(n: u64) -> u64 {
+    return (n + 3) & 0xFFFFFFFC
+}
+
+fn entry_ftype(state: u64, m: u64, ft: u64) -> u64 {
+    if (ext4.sget(state, m, ext4.S_INCOMPAT) & INC_FILETYPE) != 0 {
+        return ft
+    }
+    return 0
+}
+
+fn put_entry(state: u64, m: u64, e: u64, ino: u64, reclen: u64, name: u64,
+    nlen: u64, ft: u64) {
+    octets.put32(e, ino)
+    octets.put16(e + 4, reclen)
+    kstate.set8(e + 6, nlen as u8)
+    kstate.set8(e + 7, entry_ftype(state, m, ft) as u8)
+    octets.copy(e + ENTRY_HDR, name, nlen)
+}
+
+fn name_matches(e: u64, name: u64, nlen: u64) -> bool {
+    if kstate.get8(e + 6) != nlen {
+        return false
+    }
+    var i: u64 = 0
+    while i < nlen {
+        if kstate.get8(e + ENTRY_HDR + i) != kstate.get8(name + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn dir_lookup(state: u64, m: u64, dir: u64, name: u64) -> u64 {
+    ext4.copy_name(ext4.buf(state, ext4.NAMBUF), name, NAME_LIMIT + 1)
+    return ext4.dir_walk(state, m, dir, 0, 0)
+}
+
+fn dir_init_block(state: u64, m: u64, db: u64, self_ino: u64,
+    parent: u64) {
+    let bs: u64 = ext4.sget(state, m, ext4.S_BSIZE)
+    let ft: u64 = entry_ftype(state, m, FT_DIR)
+    let dd: u64 = db + DOTDOT_AT
+    octets.zero(db, bs)
+    octets.put32(db, self_ino)
+    octets.put16(db + 4, DOT_RECLEN)
+    kstate.set8(db + 6, 1 as u8)
+    kstate.set8(db + 7, ft as u8)
+    kstate.set8(db + ENTRY_HDR, 46 as u8)
+    octets.put32(dd, parent)
+    octets.put16(dd + 4, bs - DOT_RECLEN)
+    kstate.set8(dd + 6, 2 as u8)
+    kstate.set8(dd + 7, ft as u8)
+    kstate.set8(dd + ENTRY_HDR, 46 as u8)
+    kstate.set8(dd + ENTRY_HDR + 1, 46 as u8)
+}
+
+fn dir_add_in_block(state: u64, m: u64, pb: u64, db: u64, bs: u64,
+    child: u64, name: u64, nlen: u64, ft: u64) -> u64 {
+    let need: u64 = align4(ENTRY_HDR + nlen)
+    var off: u64 = 0
+    while off + ENTRY_HDR <= bs {
+        let e: u64 = db + off
+        let eino: u64 = octets.le32(e)
+        let reclen: u64 = octets.le16(e + 4)
+        if reclen < ENTRY_HDR || off + reclen > bs {
+            return 0
+        }
+        if eino == 0 && reclen >= need {
+            put_entry(state, m, e, child, reclen, name, nlen, ft)
+            if ext4alloc.block_write(state, m, pb, db) {
+                return 1
+            }
+            return 2
+        }
+        if eino != 0 {
+            let used: u64 = align4(ENTRY_HDR + kstate.get8(e + 6))
+            if reclen >= used + need {
+                octets.put16(e + 4, used)
+                put_entry(state, m, e + used, child, reclen - used, name,
+                    nlen, ft)
+                if ext4alloc.block_write(state, m, pb, db) {
+                    return 1
+                }
+                return 2
+            }
+        }
+        off = off + reclen
+    }
+    return 0
+}
+
+fn dir_extend(state: u64, m: u64, dir: u64, iptr: u64, child: u64,
+    name: u64, nlen: u64, ft: u64) -> u64 {
+    let bs: u64 = ext4.sget(state, m, ext4.S_BSIZE)
+    let size: u64 = ext4.ino_size(iptr)
+    let nb: u64 = ext4alloc.block_alloc(state, m,
+        ext4ino.last_pblock(iptr) + 1)
+    if nb == 0 {
+        return errno.E_NOSPC
+    }
+    if !ext4ino.map_append(iptr, size / bs, nb) {
+        ext4alloc.block_free_run(state, m, nb, 1)
+        return errno.E_NOSPC
+    }
+    let db: u64 = ext4alloc.bm_buf(state)
+    octets.zero(db, bs)
+    put_entry(state, m, db, child, bs, name, nlen, ft)
+    if !ext4alloc.block_write(state, m, nb, db) {
+        return errno.E_IO
+    }
+    ext4ino.cache_flush(state, m)
+    ext4ino.blocks_add(state, m, iptr, 1, true)
+    ext4ino.set_size(iptr, size + bs)
+    ext4ino.touch(state, iptr)
+    if !ext4ino.inode_save(state, m, dir) {
+        return errno.E_IO
+    }
+    return 0
+}
+
+fn dir_add(state: u64, m: u64, dir: u64, name: u64, child: u64,
+    ft: u64) -> u64 {
+    let nlen: u64 = octets.cstr_len(name)
+    if nlen == 0 || nlen > NAME_LIMIT {
+        return errno.E_NAMETOOLONG
+    }
+    let iptr: u64 = ext4.inode_load(state, m, dir)
+    if iptr == 0 {
+        return errno.E_IO
+    }
+    if ext4.art_von(ext4.ino_mode(iptr)) != vfsops.N_DIR {
+        return errno.E_NOTDIR
+    }
+    if (ext4.ino_flags(iptr) & INDEX_FL) != 0 {
+        return errno.E_OPNOTSUPP
+    }
+    let bs: u64 = ext4.sget(state, m, ext4.S_BSIZE)
+    let size: u64 = ext4.ino_size(iptr)
+    let db: u64 = ext4alloc.bm_buf(state)
+    var lb: u64 = 0
+    while lb * bs < size {
+        let pb: u64 = ext4.block_of(state, m, iptr, lb, dir)
+        if pb != 0 {
+            if !ext4.block_read(state, m, pb, db) {
+                return errno.E_IO
+            }
+            let r: u64 = dir_add_in_block(state, m, pb, db, bs, child, name,
+                nlen, ft)
+            if r == 1 {
+                return 0
+            }
+            if r == 2 {
+                return errno.E_IO
+            }
+        }
+        lb = lb + 1
+    }
+    return dir_extend(state, m, dir, iptr, child, name, nlen, ft)
+}
+
+fn dir_remove(state: u64, m: u64, dir: u64, name: u64) -> u64 {
+    let nlen: u64 = octets.cstr_len(name)
+    let iptr: u64 = ext4.inode_load(state, m, dir)
+    if iptr == 0 {
+        return 0
+    }
+    let bs: u64 = ext4.sget(state, m, ext4.S_BSIZE)
+    let size: u64 = ext4.ino_size(iptr)
+    let db: u64 = ext4alloc.bm_buf(state)
+    var lb: u64 = 0
+    while lb * bs < size {
+        let pb: u64 = ext4.block_of(state, m, iptr, lb, dir)
+        if pb != 0 {
+            if !ext4.block_read(state, m, pb, db) {
+                return 0
+            }
+            var off: u64 = 0
+            var prev: u64 = 0
+            while off + ENTRY_HDR <= bs {
+                let e: u64 = db + off
+                let eino: u64 = octets.le32(e)
+                let reclen: u64 = octets.le16(e + 4)
+                if reclen < ENTRY_HDR || off + reclen > bs {
+                    off = bs
+                } else {
+                    if eino != 0 && name_matches(e, name, nlen) {
+                        if prev != 0 {
+                            octets.put16(prev + 4,
+                                octets.le16(prev + 4) + reclen)
+                        } else {
+                            octets.put32(e, 0)
+                        }
+                        if !ext4alloc.block_write(state, m, pb, db) {
+                            return 0
+                        }
+                        return eino
+                    }
+                    prev = e
+                    off = off + reclen
+                }
+            }
+        }
+        lb = lb + 1
+    }
+    return 0
+}
+
+fn is_dot_entry(e: u64) -> bool {
+    let nl: u64 = kstate.get8(e + 6)
+    if nl == 1 && kstate.get8(e + ENTRY_HDR) == 46 {
+        return true
+    }
+    return nl == 2 && kstate.get8(e + ENTRY_HDR) == 46
+        && kstate.get8(e + ENTRY_HDR + 1) == 46
+}
+
+fn dir_is_empty(state: u64, m: u64, dir: u64) -> bool {
+    let iptr: u64 = ext4.inode_load(state, m, dir)
+    if iptr == 0 {
+        return false
+    }
+    let bs: u64 = ext4.sget(state, m, ext4.S_BSIZE)
+    let size: u64 = ext4.ino_size(iptr)
+    let db: u64 = ext4alloc.bm_buf(state)
+    var lb: u64 = 0
+    while lb * bs < size {
+        let pb: u64 = ext4.block_of(state, m, iptr, lb, dir)
+        if pb != 0 {
+            if !ext4.block_read(state, m, pb, db) {
+                return false
+            }
+            var off: u64 = 0
+            while off + ENTRY_HDR <= bs {
+                let e: u64 = db + off
+                let reclen: u64 = octets.le16(e + 4)
+                if reclen < ENTRY_HDR || off + reclen > bs {
+                    off = bs
+                } else {
+                    if octets.le32(e) != 0 && !is_dot_entry(e) {
+                        return false
+                    }
+                    off = off + reclen
+                }
+            }
+        }
+        lb = lb + 1
+    }
+    return true
+}
+
+fn dir_set_dotdot(state: u64, m: u64, dir: u64, parent: u64) -> bool {
+    let iptr: u64 = ext4.inode_load(state, m, dir)
+    if iptr == 0 {
+        return false
+    }
+    let pb: u64 = ext4.block_of(state, m, iptr, 0, dir)
+    let db: u64 = ext4alloc.bm_buf(state)
+    if pb == 0 || !ext4.block_read(state, m, pb, db) {
+        return false
+    }
+    octets.put32(db + DOTDOT_AT, parent)
+    return ext4alloc.block_write(state, m, pb, db)
+}

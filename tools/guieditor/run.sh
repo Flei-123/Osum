@@ -12,7 +12,7 @@ osum_tmp_guard "${1:-}" "$OUT"
 mkdir -p "$OUT"
 SHOTS=${GUIEDITOR_SHOTS:-$ROOT/.editor-shots}
 mkdir -p "$SHOTS"
-export ALLTAGBUILD=${ALLTAGBUILD:-/tmp/osum-guieditor-build}
+export ALLTAGBUILD=${ALLTAGBUILD:-$OUT/build}
 
 pass=0
 fail=0

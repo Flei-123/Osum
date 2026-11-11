@@ -1,0 +1,181 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+import libc.kcall
+import libc.octets
+import libc.text
+import services.svcrules
+import services.svcqueue
+import services.dlgproto
+
+export { available, picker_available, run, pick, pick_save, queue_result }
+
+const ARGV_MAX: u64 = 8
+const KEY_CAP: u64 = 48
+const PATH_CAP: u64 = 160
+const ID_CAP: u64 = 26
+const REPLY_CAP: u64 = 131200
+
+static mut DIALOGD_PATH: [u8; 14] = "/bin/dialogd\0\0"
+static mut PICKER_PATH: [u8; 14] = "/bin/explorer\0"
+static mut PICK_FLAG: [u8; 7] = "--pick\0"
+static mut reply_buf: [u8; 131200] = [0 as u8; 131200]
+static mut key_buf: [u8; 48] = [0 as u8; 48]
+static mut path_buf: [u8; 160] = [0 as u8; 160]
+static mut id_buf: [u8; 26] = [0 as u8; 26]
+static mut argv_buf: [u64; 8] = [0 as u64; 8]
+static mut answer_buf: [u8; 8] = [0 as u8; 8]
+static mut name_len_buf: [u8; 8] = [0 as u8; 8]
+static mut content_at: u64 = 0
+static mut content_size: u64 = 0
+
+fn dialogd_path() -> u64 {
+    return (&DIALOGD_PATH[0 as usize]) as u64
+}
+
+fn available() -> bool {
+    return !errno.failed(io.stat_mode(dialogd_path()))
+}
+
+fn picker_path() -> u64 {
+    return (&PICKER_PATH[0 as usize]) as u64
+}
+
+fn picker_available() -> bool {
+    return !errno.failed(io.stat_mode(picker_path()))
+}
+
+fn push_arg(value: u64, argc: u64) -> u64 {
+    argv_buf[argc as usize] = value
+    return argc + 1
+}
+
+fn spawn(program: u64, lead: u64, id: u64, mode: u64, app: u64, title: u64, extra: u64) -> u64 {
+    let digits: u64 = (&id_buf[0 as usize]) as u64
+    let n: u64 = text.digits(id, digits, false)
+    octets.st8(digits, n, 0)
+    var argc: u64 = push_arg(program, 0)
+    if lead != 0 {
+        argc = push_arg(lead, argc)
+    }
+    argc = push_arg(digits, argc)
+    argc = push_arg(dlgproto.mode_name(mode), argc)
+    argc = push_arg(app, argc)
+    argc = push_arg(title, argc)
+    if extra != 0 && text.length(extra) > 0 {
+        argc = push_arg(extra, argc)
+    }
+    let pid: u64 = ulib.spawn_app(program, (&argv_buf[0 as usize]) as u64, argc)
+    if errno.failed(pid) {
+        return pid
+    }
+    return ulib.wait_code(pid)
+}
+
+fn reply_path(app: u64, app_len: u64, id: u64) -> u64 {
+    let key: u64 = (&key_buf[0 as usize]) as u64
+    let key_len: u64 = dlgproto.reply_key(id, key, KEY_CAP)
+    if key_len == 0 {
+        return 0
+    }
+    let path: u64 = (&path_buf[0 as usize]) as u64
+    if svcrules.store_path(app, app_len, key, key_len, path, PATH_CAP) == 0 {
+        return 0
+    }
+    return path
+}
+
+fn load_reply(path: u64) -> u64 {
+    let size: u64 = io.size_of(path)
+    if errno.failed(size) || size > REPLY_CAP {
+        return 0
+    }
+    let fd: u64 = io.open(path, kcall.O_RDONLY)
+    if errno.failed(fd) {
+        return 0
+    }
+    let buf: u64 = (&reply_buf[0 as usize]) as u64
+    let got: u64 = io.read_full(fd, buf, size)
+    io.close(fd)
+    if errno.failed(got) {
+        return 0
+    }
+    return got
+}
+
+fn run_with(program: u64, lead: u64, id: u64, mode: u64, app: u64, app_len: u64, title: u64, extra: u64) -> u64 {
+    content_at = 0
+    content_size = 0
+    let path: u64 = reply_path(app, app_len, id)
+    if path == 0 {
+        return dlgproto.ANSWER_FAILED
+    }
+    io.unlink(path)
+    let code: u64 = spawn(program, lead, id, mode, app, title, extra)
+    if errno.failed(code) {
+        return dlgproto.ANSWER_FAILED
+    }
+    let got: u64 = load_reply(path)
+    io.unlink(path)
+    let buf: u64 = (&reply_buf[0 as usize]) as u64
+    let answer: u64 = (&answer_buf[0 as usize]) as u64
+    let name_len: u64 = (&name_len_buf[0 as usize]) as u64
+    let head: u64 = dlgproto.parse_head(buf, got, answer, name_len)
+    if head == 0 {
+        return dlgproto.ANSWER_FAILED
+    }
+    content_at = buf + head
+    content_size = got - head
+    return octets.le32(answer)
+}
+
+fn run(id: u64, mode: u64, app: u64, app_len: u64, title: u64, extra: u64) -> u64 {
+    return run_with(dialogd_path(), 0, id, mode, app, app_len, title, extra)
+}
+
+fn pick(id: u64, app: u64, app_len: u64, title: u64, extra: u64) -> u64 {
+    return run_with(picker_path(), (&PICK_FLAG[0 as usize]) as u64, id, dlgproto.MODE_OPEN, app, app_len, title, extra)
+}
+
+fn pick_save(id: u64, app: u64, app_len: u64, title: u64, name: u64) -> u64 {
+    return run_with(picker_path(), (&PICK_FLAG[0 as usize]) as u64, id, dlgproto.MODE_SAVE, app, app_len, title, name)
+}
+
+fn name_ptr() -> u64 {
+    return (&reply_buf[0 as usize]) as u64 + 2
+}
+
+fn name_size() -> u64 {
+    return octets.le32((&name_len_buf[0 as usize]) as u64)
+}
+
+fn finish(id: u64, status: u64) -> u64 {
+    var index: u64 = 0
+    if status == svcrules.OK {
+        index = 1
+    }
+    if !svcqueue.push(id, svcqueue.OP_FILE_END, status, index, 0, 0, 0, 0) {
+        return svcrules.FAILED
+    }
+    return svcrules.OK
+}
+
+fn queue_result(id: u64, answer: u64, with_data: bool) -> u64 {
+    if answer == dlgproto.ANSWER_CANCEL {
+        return finish(id, svcrules.CANCELED)
+    }
+    if answer != dlgproto.ANSWER_OK {
+        return finish(id, svcrules.FAILED)
+    }
+    var data_len: u64 = 0
+    if with_data {
+        data_len = content_size
+    }
+    if !svcqueue.push(id, svcqueue.OP_FILE_ITEM, svcrules.OK, 0, name_ptr(), name_size(), content_at, data_len) {
+        return finish(id, svcrules.FAILED)
+    }
+    return finish(id, svcrules.OK)
+}

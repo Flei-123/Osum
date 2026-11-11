@@ -125,7 +125,7 @@ if [ -n "${maxnr:-}" ] && [ "$maxnr" -ge 2126 ] && [ "$maxnr" = "${highest:-x}" 
 else
     bad "WM_MAXNR='$maxnr' does not match the calls (highest found: '$highest', expected >= 2126)"
 fi
-for f in kernel/ui/wm/wmlayout.fi kernel/sys/sys.fi kernel/user/wlibc.fi; do
+for f in kernel/ui/wm/wmlayout.fi kernel/sys/sys.fi kernel/user/uitheme/thpush.fi; do
     a=$(bash tools/structure/srcview.sh "$f" | grep -cE '(FM|WF)_RADIUS: u64 = 0')
     b=$(bash tools/structure/srcview.sh "$f" | grep -cE '(FM|WF)_SHADOW_C: u64 = 3')
     if [ "$a" = 1 ] && [ "$b" = 1 ]; then
@@ -135,14 +135,14 @@ for f in kernel/ui/wm/wmlayout.fi kernel/sys/sys.fi kernel/user/wlibc.fi; do
     fi
 done
 sa=$(grep -c 'const WL_BYTES: u64 = 128' kernel/sys/sys.fi)
-sb=$(grep -c 'const WL_BYTES: u64 = 128' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi))
+sb=$(grep -c 'const WL_BYTES: u64 = 128' kernel/user/fuiapp/hostwinp.fi)
 if [ "$sa" = 1 ] && [ "$sb" = 1 ]; then
     ok "the WM_LIST record is 128 octets long on both sides"
 else
     bad "WL_BYTES diverges between kernel and library"
 fi
 ka=$(grep -c 'const APP_LEN: u64 = 24' kernel/ui/wm/wmcore.fi)
-kb=$(grep -c 'const APP_LEN: u64 = 24' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi))
+kb=$(grep -c 'const APP_LEN: u64 = 24' kernel/user/taskview.fi)
 if [ "$ka" = 1 ] && [ "$kb" = 1 ]; then
     ok "and the bundle name is 24 octets long on both sides"
 else

@@ -39,12 +39,12 @@ LDREAL=$(readlink -f "$LDSO" 2>/dev/null || true)
 [ -r "$LDREAL" ] || { echo "UNTERBAU: no musl libc.so, skipped"; exit 0; }
 
 echo "== 0. text constants of the kernel files this round touched (firnc1 aborts SILENTLY on one that is too long) =="
-python3 - kernel/fs/procfs.fi kernel/fs/procfs/*.fi kernel/sys/sys.fi kernel/sched/proc.fi kernel/sched/signal.fi kernel/sched/sched.fi > "$D/texte.txt" 2>&1 <<'PY'
+python3 - kernel/fs/procfs.fi kernel/fs/procfs/*.fi kernel/sys/sys.fi kernel/sched/proc/*.fi kernel/sched/signal.fi kernel/sched/sched.fi > "$D/texte.txt" 2>&1 <<'PY'
 import re, sys
 bad = n = 0
 for p in sys.argv[1:]:
     s = open(p, 'rb').read().decode('utf-8', errors='surrogateescape')
-    for m in re.finditer(r'var (\w+): \[u8; (\d+)\] = "((?:[^"\\]|\\.)*)"', s):
+    for m in re.finditer(r'(?:var|static mut) (\w+): \[u8; (\d+)\] = "((?:[^"\\]|\\.)*)"', s):
         real = m.group(3).replace('\\0', '\0').replace('\\n', '\n').replace('\\\\', '\\')
         n += 1
         if int(m.group(2)) != len(real):
@@ -74,46 +74,7 @@ for f in hello threads forktest locktest; do
 done
 ok "tests:$TESTS  foreign:$FOREIGN"
 
-build_kernel() { # build_kernel <srcdir> <out.mb>
-    ( cd "$1" && bash tools/build-kernel.sh "$2" --stufe 1 ) > "$2.log" 2>&1
-}
-build_image() { # build_image <srcdir> <outdir>   (user programs of the system + our tests)
-    local S=$1 O=$2
-    mkdir -p "$O/p"
-    as --64 -o "$O/crt.o" "$S/kernel/user/crt.s" || return 1
-    local progs="sh ls cat echo"
-    for p in $progs; do
-        "$FIRNC1" "$S/kernel/user/$p.fi" -o "$O/p/$p.o" > "$O/p/$p.log" 2>&1 || return 1
-        ld -T "$S/kernel/user/user.ld" --defsym=USER_ENTRY="_F1.u_start" -o "$O/p/$p.elf" "$O/crt.o" "$O/p/$p.o" 2>>"$O/p/$p.log" || return 1
-        strip --strip-all "$O/p/$p.elf" 2>/dev/null
-    done
-    local spec="/lib/ /bin/ /tmp/ /etc/ /var/ /var/tmp/ /dev/ /proc/ /sys/ /mnt/ /root/ /run/ /w/"
-    for p in $progs; do spec="$spec /bin/$p=$O/p/$p.elf"; done
-    spec="$spec /lib/ld-musl-x86_64.so.1=$LDREAL"
-    # the proof stone busybox (dynamic, musl): as /bin/busybox (t_proc points /bin/sh at it for system() and popen())
-    if [ -r "${BBDYN:-/nonexistent}" ]; then
-        spec="$spec /bin/busybox=$BBDYN /etc/bb.sh=$D/bb.sh /etc/pruef.txt=$D/pruef.txt"
-    fi
-    for f in "$D"/bin/*; do spec="$spec /bin/$(basename $f)=$f"; done
-    for f in "$D"/lib/*.so; do spec="$spec /lib/$(basename $f)=$f"; done
-    printf 'root:x:0:0:root:/root:/bin/sh\n' > "$D/passwd"; printf '127.0.0.1 localhost\n' > "$D/hosts"
-    spec="$spec /etc/passwd=$D/passwd /etc/hosts=$D/hosts"
-    # the files and directories a Linux package set puts under /etc and /usr/share (not kernel business; the real image
-    # builder tools/usbimg/build.sh does not ship them yet -- roadmap): stat() by name is what the checks measure.
-    printf 'nameserver 10.0.2.3\n' > "$D/resolv.conf"; printf '0123456789abcdef0123456789abcdef\n' > "$D/machine-id"
-    printf '<?xml version="1.0"?>\n<fontconfig></fontconfig>\n' > "$D/fonts.conf"; printf 'UTC\n' > "$D/localtime"
-    spec="$spec /etc/ssl/ /etc/ssl/certs/ /etc/fonts/ /usr/ /usr/lib/ /usr/share/ /usr/share/fonts/ /usr/share/zoneinfo/"
-    spec="$spec /etc/resolv.conf=$D/resolv.conf /etc/machine-id=$D/machine-id /etc/fonts/fonts.conf=$D/fonts.conf /etc/localtime=$D/localtime"
-    spec="$spec ${EXTRA_SPEC:-}"
-    bash "$S/tools/mkfsfi/mkfs.sh" build "$O/disk.img" ${UB_BLOCKS:-98304} --v3 --inodes=1024 ${UB_MKFSX:-} $spec > "$O/mkfs.txt" 2>&1
-}
-boot() { # boot <kernel> <disk> <script> <serial-out>
-    cp -f "$2" "$2.live"
-    timeout "$TMO" $QEMU "${KVM[@]}" -smp "$SMP" -kernel "$1" -m 512 \
-        -append "osum vfs nokbd nosched noproc nofs ${KARGS:-} script=$3;exit" -serial "file:$4" -display none -no-reboot \
-        ${NETARGS:-} -drive "file=$2.live,format=raw,if=ide,index=0${UB_DRIVEX:-}" -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
-    local rc=$?; rm -f "$2.live"; return $rc
-}
+. "$HERE/image.sh"
 word_counter_proofs() {
     local word name line t wt tests_save=$TESTS
     for word in $(awk '$1!~/^#/ && $2!=""{print $2}' "$HERE/words.txt" | sort -u); do
@@ -205,11 +166,13 @@ echo "BB xargs $(echo 1 2 3 | /bin/busybox xargs -n1 echo | /bin/busybox wc -l)"
 /bin/busybox cp /etc/pruef.txt /tmp/p2 && /bin/busybox mv /tmp/p2 /tmp/p3 && /bin/busybox cmp /etc/pruef.txt /tmp/p3 && /bin/busybox rm /tmp/p3 && echo "BB cp-mv-rm ok"
 /bin/busybox ln -s /etc/pruef.txt /tmp/lnk 2>/dev/null; echo "BB symlink $(/bin/busybox cat /tmp/lnk 2>/dev/null | /bin/busybox wc -l)"
 /bin/busybox chmod 600 /tmp/bbd/g; echo "BB chmod-stat $(/bin/busybox stat -c %a /tmp/bbd/g 2>/dev/null)"
+/bin/busybox mkfifo /tmp/bbf 2>/dev/null; echo "BB mkfifo $(/bin/busybox stat -c %F /tmp/bbf 2>/dev/null)"
 echo "BB id $(/bin/busybox id -u)"
 echo "BB uname $(/bin/busybox uname -s >/dev/null 2>&1 && echo ok || echo FAIL)"
 echo "BB hostname $(/bin/busybox hostname >/dev/null 2>&1 && echo ok || echo FAIL)"
 echo "BB pwd $(cd /tmp && /bin/busybox pwd)"
 /bin/busybox tar cf /tmp/t.tar /etc/pruef.txt 2>/dev/null; echo "BB tar $(/bin/busybox tar tf /tmp/t.tar 2>/dev/null)"
+/bin/busybox tar tf /tmp/t.tar > /tmp/t.lst 2>/dev/null; echo "BB tar-file $(/bin/busybox cat /tmp/t.lst)"
 echo "BB gzip $(/bin/busybox gzip -c /etc/pruef.txt | /bin/busybox gunzip | /bin/busybox wc -l)"
 echo "BB diff $(/bin/busybox diff /etc/pruef.txt /etc/pruef.txt >/dev/null && echo same)"
 echo "BB seq $(/bin/busybox seq 1 5 | /bin/busybox tail -n 1)"
@@ -273,8 +236,8 @@ if [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ONLY " | grep -q " busybox
     bbchk echo ok; bbchk cmdsubst ok; bbchk arith 42; bbchk pipe 3; bbchk forloop 123; bbchk nested-sh ok; bbchk exitstatus 3
     bbchk grep 1; bbchk sort two; bbchk mkdir-touch f; bbchk redirect hello; bbchk awk 3; bbchk sed aXc; bbchk sha256 "$SHA12"
     bbchk loadavg 0.00; bbchk uptime-cmd ok; bbchk df-cmd ok; bbchk free-cmd ok; bbchk ps-cmd ok; bbchk date-cmd ok
-    bbchk head-n 2; bbchk tail three; bbchk tr ABC; bbchk find 2; bbchk xargs 3; bbchk cp-mv-rm ok; bbchk symlink 3; bbchk chmod-stat 600; bbchk id 0
-    bbchk uname ok; bbchk hostname ok; bbchk pwd /tmp; bbchk tar etc/pruef.txt; bbchk gzip 3; bbchk diff same; bbchk seq 5; bbchk dd 4096; bbchk sort-uniq 2
+    bbchk head-n 2; bbchk tail three; bbchk tr ABC; bbchk find 2; bbchk xargs 3; bbchk cp-mv-rm ok; bbchk symlink 3; bbchk chmod-stat 600; bbchk mkfifo fifo; bbchk id 0
+    bbchk uname ok; bbchk hostname ok; bbchk pwd /tmp; bbchk tar etc/pruef.txt; bbchk tar-file etc/pruef.txt; bbchk gzip 3; bbchk diff same; bbchk seq 5; bbchk dd 4096; bbchk sort-uniq 2
     bbchk date-fmt 5; bbchk mktemp ok; bbchk realpath /etc/pruef.txt; bbchk ash-func 42; bbchk heredoc hd; bbchk sed-i y; bbchk sleep ok; bbchk bg-wait ok; bbchk kill done
     bbchk mounts ok; bbchk mount-cmd ok; bbchk ip-cmd ok; bbchk ip-addr 1; bbchk ip-link 1; bbchk ip-route 2; bbchk ifconfig-cmd ok; bbchk top-cmd ok; bbchk lsof-cmd ok
     grep -aq '^BB end' "$D/bb.res" && ok "busybox sh ran its script to the end" || bad "busybox sh did not reach the end of its script"
@@ -290,12 +253,7 @@ if [ -n "${STONES:-}" ] && [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ON
     echo "== 3d. proof stones python3 / curl / git (from $STONES) =="
     # python lives in /usr/bin and its stdlib in /usr/lib (getpath walks up from the executable dir and never tests "/" itself when the
     # executable is directly in /bin -> that needed PYTHONHOME=/ before r698); stones.sh links /bin/python3 -> /usr/bin/python3
-    SX="/usr/bin/ /usr/lib/python3.12/ /usr/lib/python3.12/lib-dynload/ /w/"
-    [ -r "$STONES/python3" ] && SX="$SX /usr/bin/python3=$STONES/python3 /usr/lib/python312.zip=$STONES/lib/python312.zip"
-    [ -r "$STONES/lib/os.pyc" ] && SX="$SX /usr/lib/python3.12/os.pyc=$STONES/lib/os.pyc"   # landmark: getpath finds the prefix by it
-    for so in "$STONES"/lib/ext/*.so; do [ -e "$so" ] && SX="$SX /usr/lib/python3.12/lib-dynload/$(basename "$so")=$so"; done
-    [ -r "$STONES/curl" ] && SX="$SX /bin/curl=$STONES/curl"
-    [ -r "$STONES/git" ] && SX="$SX /bin/git=$STONES/git /share/ /share/git-core/ /share/git-core/templates/"   # empty template dir: no "templates not found" warning
+    SX=$(stones_spec "$STONES")
     cp "${STSCRIPT:-$HERE/stones.sh}" "$D/st.sh"
     # host port of the throw-away web server: a free one (two gate runs at once must not collide); the script names the default 18765
     STPORT=$(python3 -I -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])' 2>/dev/null || echo 18765)

@@ -116,7 +116,7 @@ for SKRIPT in "$@"; do
             -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
     fi
     grep -aE '^konto:|user fault|too many|panic' "$TMPD/out.txt"
-    Z=$(grep -aoE '^konto: zwischen = .*' "$TMPD/out.txt" | tail -1 | sed 's/^konto: zwischen = //')
+    Z=$(grep -aoE '^konto: continue = .*' "$TMPD/out.txt" | tail -1 | sed 's/^konto: continue = //')
     [ -n "$Z" ] && ZW="$Z"
 done
 echo "== Attrappe =="

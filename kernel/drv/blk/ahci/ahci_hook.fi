@@ -1,0 +1,86 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import lib.kstate
+import bus.pci
+import libc.regio
+import drv.blk.ahci.ahci_clock
+import drv.blk.ahci.ahci_defs
+import drv.blk.ahci.ahci_state
+
+const HW_MODE_AT: u64 = 0x1B0
+const T_SLOWSATA: u64 = 1048576
+const T_LOSTSIG: u64 = 4194304
+const SLOW_T: u64 = 0x600
+const SLOW_C: u64 = 0x700
+
+fn hwmode(state: u64) -> u64 {
+    return kstate.get(state, pci.K2_SCALARS + HW_MODE_AT)
+}
+
+fn hook_on(state: u64) -> bool {
+    if (hwmode(state) & (T_SLOWSATA | T_LOSTSIG)) == 0 {
+        return false
+    }
+    return ahci_clock.have_clock(state)
+}
+
+fn hook_hba_reset(state: u64) {
+    if !hook_on(state) {
+        return
+    }
+    var p: u64 = 0
+    while p < 32 {
+        kstate.set(state, ahci_state.sc(SLOW_T + p * 8), ahci_clock.usec(state) + 1)
+        kstate.set(state, ahci_state.sc(SLOW_C + p * 8), 0)
+        p = p + 1
+    }
+}
+
+fn hook_comreset(state: u64, p: u64) {
+    if !hook_on(state) {
+        return
+    }
+    kstate.set(state, ahci_state.sc(SLOW_T + p * 8), ahci_clock.usec(state) + 1)
+    kstate.set(state, ahci_state.sc(SLOW_C + p * 8), 1)
+}
+
+fn hook_view(state: u64, p: u64, off: u64, v: u64) -> u64 {
+    let hm: u64 = hwmode(state)
+    let real: u64 = regio.read32_at(ahci_state.abar(state) + ahci_defs.PORT_BASE + p * ahci_defs.PORT_SIZE, ahci_defs.P_SSTS)
+    if (real & 0xF) != ahci_defs.DET_PRESENT {
+        return v
+    }
+    if (hm & T_LOSTSIG) != 0 && kstate.get(state, ahci_state.sc(SLOW_C + p * 8)) == 0 {
+        if off == ahci_defs.P_SIG {
+            return 0xFFFFFFFF
+        }
+        if off == ahci_defs.P_TFD {
+            return 0x7F
+        }
+    }
+    if (hm & T_SLOWSATA) != 0 {
+        let t0: u64 = kstate.get(state, ahci_state.sc(SLOW_T + p * 8))
+        if t0 == 0 {
+            return v
+        }
+        var el: u64 = 0
+        let nu: u64 = ahci_clock.usec(state)
+        if nu > t0 {
+            el = nu - t0
+        }
+        if off == ahci_defs.P_SSTS {
+            if el < 700000 {
+                return 0
+            }
+            if el < 1000000 {
+                return 1
+            }
+        }
+        if off == ahci_defs.P_SIG && el < 1000000 {
+            return 0xFFFFFFFF
+        }
+        if off == ahci_defs.P_TFD && el < 2500000 {
+            return 0x80
+        }
+    }
+    return v
+}

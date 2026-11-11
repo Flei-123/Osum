@@ -104,13 +104,7 @@ def kcall(s):
     return s + EXT
 
 
-def wlibc(s):
-    s = profil_gone(s, 'wlibc')
-    s = wlibc_asm(s)
-    return s + EXT
-
-
-def wlibc_asm(s):
+def host_asm(s):
     s = re.sub(r'fn sys5\(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64\) -> u64 \{\n    return asm\([^}]*?\n\}',
                '''fn sys5(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     return osum_sys5(number, a0, a1, a2, a3, a4)
@@ -130,7 +124,7 @@ def wlibc_asm(s):
     s = re.sub(r'let p: u64 = asm\("syscall", out\("rax"\), in\("rax"\) SYS_MMAP, in\("rdi"\) 0,\n.*?clobber\("memory"\)\)',
                'let p: u64 = osum_map_fd(bytes, PROT_RW, MAP_SHARED_FLAG, fd, 0)', s, count=1, flags=re.S)
     if 'asm(' in s:
-        print('wlibc: asm( still present', file=sys.stderr)
+        print('host: asm( still present', file=sys.stderr)
         sys.exit(1)
     return s
 
@@ -149,9 +143,16 @@ def schlicht(s, name='?'):
     return osum_bus5(op, a1, a2, a3, a4)
 }''', s, count=1, flags=re.S)
         s += '\nextern fn osum_bus5(op: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64;\n'
-    if name == 'wlevent.fi':
+    if name == 'hostevent.fi':
         s = s.replace('return asm("rdtsc\\nshl rdx, 32\\nor rax, rdx", out("rax"))', 'return osum_rdtsc()', 1)
         s += '\nextern fn osum_rdtsc() -> u64;\n'
+    if name == 'libc/net.fi':
+        s = re.sub(r'asm\("syscall", out\("rax"\), in\("rax"\) kcall\.SYS_GETSOCKOPT,.*?clobber\("memory"\)\)',
+                   'kcall.sys5(kcall.SYS_GETSOCKOPT, fd, SOL_SOCKET, SO_ERROR, (&val[0]) as u64, (&len[0]) as u64)',
+                   s, count=1, flags=re.S)
+    if name == 'libc/threads.fi':
+        s = re.sub(r'(fn clone_call\([^)]*\) -> u64 \{\n)    return asm\(.*?clobber\("memory"\)\)',
+                   r'\1    return 0 -% 38', s, count=1, flags=re.S)
     if 'asm(' in s:
         print('unexpected asm( in ' + name, file=sys.stderr)
         sys.exit(1)
@@ -171,21 +172,24 @@ def main():
     p = os.path.join(bau, 'libc/kcall.fi')
     write_2(p, kcall(read_2(p)))
     print('entkernt libc/kcall.fi')
-    p = os.path.join(bau, 'wlibc.fi')
-    write_2(p, profil_gone(read_2(p), 'wlibc'))
-    print('entkernt wlibc.fi')
-    for p in split_files(bau, 'wlibc'):
-        text = profil_gone(read_2(p), os.path.basename(p))
-        if os.path.basename(p) == 'wcpaint.fi':
-            text = wlibc_asm(text) + EXT
+    for p in split_files(bau, 'uitheme'):
+        write_2(p, profil_gone(read_2(p), os.path.basename(p)))
+    for name in ('hosthead.fi', 'hostwin.fi', 'hoststart.fi'):
+        p = os.path.join(bau, name)
+        text = profil_gone(read_2(p), name)
+        if name != 'hoststart.fi':
+            text = host_asm(text) + EXT
         write_2(p, text)
-    for p in split_files(bau, 'wlib'):
+    p = os.path.join(bau, 'uisys.fi')
+    if os.path.exists(p):
+        write_2(p, host_asm(profil_gone(read_2(p), 'uisys.fi')) + EXT)
+    for p in split_files(bau, 'hostui'):
         write_2(p, schlicht(read_2(p), os.path.basename(p)))
-    for name in ('ulib.fi', 'wlib.fi', 'icons.fi', 'utf8.fi'):
+    for name in ('ulib.fi', 'icons.fi', 'utf8.fi'):
         p = os.path.join(bau, name)
         if os.path.exists(p):
             write_2(p, schlicht(read_2(p), name))
-    done = ('libc', 'ulib.fi', 'wlib.fi', 'wlibc.fi', 'icons.fi', 'utf8.fi')
+    done = ('libc', 'ulib.fi', 'icons.fi', 'utf8.fi', 'uisys.fi')
     for f in sorted(os.listdir(bau)):
         p = os.path.join(bau, f)
         if f.endswith('.fi') and f not in done and not os.path.islink(p) and os.path.isfile(p) \
@@ -195,7 +199,7 @@ def main():
     for f in sorted(os.listdir(d)):
         if f.endswith('.fi') and f != 'kcall.fi':
             p = os.path.join(d, f)
-            write_2(p, schlicht(read_2(p)))
+            write_2(p, schlicht(read_2(p), 'libc/' + f))
     print('fertig')
 
 

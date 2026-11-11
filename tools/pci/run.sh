@@ -111,7 +111,7 @@ for s in 0 1; do
           --defsym=KERNEL_TRAP="_F$s.trap__entry" \
           --defsym=KERNEL_SYSCALL="_F$s.sys__entry" \
           --defsym=KERNEL_TASK_MAIN="_F$s.tasks__main" \
-          --defsym=KERNEL_USER_START="_F$s.proc__user_start" \
+          --defsym=KERNEL_USER_START="_F$s.proccopy__user_start" \
         --defsym=KERNEL_AP_MAIN="_F$s.smp__ap_main" \
           --defsym=USER_MAIN="_F$s.u_enter" \
           -o "$TMPD/k$s.elf" "$TMPD/boot.o" "$TMPD/isr.o" "$TMPD/switch.o" "$TMPD/smp.o" "$TMPD/hv.o" \
@@ -137,7 +137,7 @@ for s in 0 1; do
     # for it and must not grow one. Resolved out of boot.o at link time,
     # exactly like `osum_panic` out of isr.o. The reason is written out in
     # tools/kernel/run.sh and in kernel/fb.fi.
-    undef=$(nm -u "$TMPD/k$s.o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vE '^(osum_panic|kdata|osym_tab)$')
+    undef=$(nm -u "$TMPD/k$s.o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vE '^(osum_panic|kdata|osym_tab|kernel_start)$')
     [ -z "$undef" ] && ok "k$s.o: no undefined name other than osum_panic, kdata and osym_tab (ROUND PROTOCOL: the symbol table, weak in boot.s)" \
                     || { bad "k$s.o: undefined symbols"; echo "$undef" | sed 's/^/        /'; }
     n=$(objdump -d "$TMPD/k$s.o" | grep -cE '^\s+[0-9a-f]+:.*\bsyscall\b')

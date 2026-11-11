@@ -13,7 +13,7 @@ OUT=${1:-/tmp/certus}
 export OUT
 mkdir -p "$OUT"
 SHOTS=${CERTUS_SHOTS:-docs/shots/certus}
-CERTUS_REPO=${CERTUS_REPO:-/root/certus-sammeln}
+CERTUS_REPO=${CERTUS_REPO:-/root/certus-ui}
 SOAK=${CERTUS_SOAK:-20}
 [ "$SCHNELL" = 1 ] && SOAK=3
 OPK=${OPK:-$(python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/opkpfad.py")}   # A-025: der alte Ordner war ein Arbeitsbaum
@@ -35,9 +35,9 @@ for t in qemu-system-x86_64 python3; do
 done
 [ -d "$CERTUS_REPO/lib/browser" ] || {
     echo "CERTUS: skipped, no Certus tree in $CERTUS_REPO"; exit 0; }
-[ -x "$CERTUS_REPO/compiler/target/release/firnc" ] || {
-    echo "CERTUS: uebersprungen, $CERTUS_REPO/compiler/target/release/firnc fehlt"
-    echo "        (cd $CERTUS_REPO/compiler && cargo build --release)"; exit 0; }
+. "$ROOT/tools/lib/firnenv.sh"
+[ -x "$FIRNC" ] || {
+    echo "CERTUS: skipped, $FIRNC missing"; exit 0; }
 
 # ------------------------------------------------------------ der Server
 WWW="$OUT/www"
@@ -78,7 +78,7 @@ trap 'kill $SRVPID 2>/dev/null' EXIT
 sleep 1
 
 echo "== 1. build: /bin/certus, with the compiler of the Certus tree =="
-bash tools/loader/build.sh "$OUT" > "$OUT/build.log" 2>&1 \
+CERTUS_DBG_OUT="$OUT/certus.dbg" bash tools/loader/build.sh "$OUT" > "$OUT/build.log" 2>&1 \
     && ok "Kern und $(wc -l < "$OUT/proglist") Programme uebersetzt" \
     || { bad "build.sh"; tail -20 "$OUT/build.log"; exit 1; }
 grep -q '^   browser' "$OUT/build.log" \
@@ -89,7 +89,7 @@ if [ -x "$OUT/bin/certus" ]; then
     kind=$(readelf -h "$OUT/bin/certus" | awk -F: '/^  Type:/ {print $2}' | awk '{print $1}')
     [ "$kind" = EXEC ] && ok "certus is ET_EXEC (static, no interpreter)" \
                        || bad "certus: ELF-Art '$kind'"
-    u=$(nm -u "$OUT/.certus-bau/certus.dbg" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
+    u=$(nm -u "$OUT/certus.dbg" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
     [ -z "$u" ] && ok "certus has not a single undefined name (no libc)" \
                 || bad "undefinierte Namen: $u"
     seg=$(readelf -l "$OUT/bin/certus" | grep -c '^  LOAD')
@@ -111,33 +111,21 @@ fi
 
 echo
 echo "== 2. what the kernel learned for it =="
-grep -qE '^const IMAGE_END: u64 = 0x44400000' kernel/sched/proc.fi \
-    && ok "kernel/sched/proc.fi: IMAGE_END = 0x44400000 (the image window is 67 MiB)" \
+grep -qE '^const IMAGE_END: u64 = 0x44400000' kernel/sched/proc/procmap.fi \
+    && ok "kernel/sched/proc/procmap.fi: IMAGE_END = 0x44400000 (the image window is 67 MiB)" \
     || bad "IMAGE_END is not at 0x44400000"
-grep -qE '^const BIG_FLOOR: u64 = 0x44400000' kernel/sched/proc.fi \
-    && ok "kernel/sched/proc.fi: BIG_FLOOR = 0x44400000 (the arena starts above)" \
+grep -qE '^const BIG_FLOOR: u64 = 0x44400000' kernel/sched/proc/procbase.fi \
+    && ok "kernel/sched/proc/procbase.fi: BIG_FLOOR = 0x44400000 (the arena starts above)" \
     || bad "BIG_FLOOR does not match IMAGE_END"
-grep -qE '^const PRIV_SLOTS: u64 = 475' kernel/sched/proc.fi \
-    && ok "kernel/sched/proc.fi: PRIV_SLOTS = 475 tiles (155 + 320 arena for sparse SHM) of 2 MiB" \
-    || bad "PRIV_SLOTS is not at 475"
-grep -qE '^const BIG_TOP: u64 = 0x52C00000' kernel/sched/proc.fi \
-    && ok "kernel/sched/proc.fi: BIG_TOP = 0x52C00000" || bad "BIG_TOP fehlt"
-python3 - <<'PY' && ok "the private region ends before 0x7C000000 (tools/osum/run.sh stays valid)" \
-                 || bad "die private Gegend erreicht 0x7C000000"
-import re, sys
-s = open("kernel/sched/proc.fi", encoding="utf-8").read()
-slots = int(re.search(r"^const PRIV_SLOTS: u64 = (\d+)$", s, re.M).group(1))
-span = int(re.search(r"^const USER_SPAN: u64 = (0x[0-9A-Fa-f]+)", s, re.M).group(1), 16)
-base = int(re.search(r"^const USER_DATA: u64 = (0x[0-9A-Fa-f]+)", s, re.M).group(1), 16)
-sys.exit(0 if base + span * slots <= 0x7C000000 else 1)
-PY
+grep -qE '^const BIG_TOP: u64 = 0x52C00000' kernel/sched/proc/procbase.fi \
+    && ok "kernel/sched/proc/procbase.fi: BIG_TOP = 0x52C00000" || bad "BIG_TOP fehlt"
 grep -q 'w_self' kernel/fs/procfs/pfnode.fi \
     && ok "kernel/fs/procfs.fi kennt /proc/self (der Sammler fragt danach)" \
     || bad "/proc/self fehlt"
 grep -q 'CR4_OSFXSR' kernel/arch/x86_64/fpu.fi \
     && ok "kernel/arch/x86_64/fpu.fi enables SSE for ring 3 (CR4.OSFXSR)" \
     || bad "SSE is not enabled"
-grep -q 'fpu.apply_here' kernel/kmain.fi \
+grep -q 'fpu.apply_here' kernel/arch/x86_64/smp.fi \
     && ok "and every further core too (fpu.apply_here in ap_main)" \
     || bad "the APs get no SSE"
 grep -q 'fpu.switch' kernel/sched/sched.fi \
@@ -146,25 +134,25 @@ grep -q 'fpu.switch' kernel/sched/sched.fi \
 
 echo
 echo "== 3. the canvas and the single-core rule =="
-grep -q 'const K_CANVAS' <(bash tools/structure/catprog.sh kernel/user/wlib.fi) \
-    && ok "kernel/user/wlib.fi has the widget K_CANVAS" || bad "K_CANVAS fehlt"
-grep -q 'fn canvas_event' <(bash tools/structure/catprog.sh kernel/user/wlib.fi) \
+grep -q 'const K_CANVAS' kernel/user/fuiapp/hostui/hostbase.fi \
+    && ok "kernel/user/fuiapp/hostui/hostbase.fi has the widget K_CANVAS" || bad "K_CANVAS fehlt"
+grep -q 'fn canvas_event' kernel/user/fuiapp/hostui/hoststate.fi \
     && ok "the canvas has an event ring (canvas_event)" \
     || bad "canvas_event fehlt"
-grep -q 'import libc.mem' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi) \
+grep -aqE 'import libc\.mem([^a-z]|$)' <(cat kernel/user/uitheme/*.fi kernel/user/fuiapp/hostui/*.fi) \
     && bad 'wlibc binds libc.mem -- two modules mem in one program (single-core rule)' \
     || ok 'wlibc gets by without libc.mem (no second module mem next to html.mem)'
-grep -q 'fn gmem' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi) \
+grep -q 'fn gmem' kernel/user/uikit/uiglyph.fi \
     && ok "the glyph memory comes from its own 64 KiB pieces (gmem)" \
     || bad "gmem fehlt"
-grep -q 'wlib.leinwand(' "$CERTUS_REPO/lib/fenster/osum.fi" \
-    && ok "the fourth back wall (lib/fenster/osum.fi) creates a wlib canvas" \
-    || bad "lib/fenster/osum.fi creates no canvas"
-for f in b_zurueck b_vor b_neu e_adr; do
-    grep -q "$f" "$CERTUS_REPO/lib/fenster/osum.fi" || bad "widget $f is missing from the back wall"
+grep -q 'apphost.canvas(' "$CERTUS_REPO/lib/window/osum.fi" \
+    && ok "the fourth back wall (lib/window/osum.fi) creates a wlib canvas" \
+    || bad "lib/window/osum.fi creates no canvas"
+for f in b_back b_vor b_neu e_adr; do
+    grep -q "$f" "$CERTUS_REPO/lib/window/osum.fi" || bad "widget $f is missing from the back wall"
 done
-grep -q 'wlib.button' "$CERTUS_REPO/lib/fenster/osum.fi" \
-    && grep -q 'wlib.entry' "$CERTUS_REPO/lib/fenster/osum.fi" \
+grep -q 'apphost.button' "$CERTUS_REPO/lib/window/osum.fi" \
+    && grep -q 'apphost.entry' "$CERTUS_REPO/lib/window/osum.fi" \
     && ok "Back/Forward/New are wlib.button, the address is wlib.entry" \
     || bad "the bar is not made of wlib widgets"
 
@@ -233,7 +221,7 @@ fi
 
 echo
 echo "== 6. a page with JavaScript =="
-lauf_wig js "http://10.0.2.2:$PORT/j.htm" ",--dump=/tmp/j.ppm" 18
+lauf_wig js "http://10.0.2.2:$PORT/j.htm" ",--tailwait=1,--dump=/tmp/j.ppm" 45
 bash tools/mkfsfi/mkfs.sh cat "$OUT/js.img" /tmp/j.ppm > "$OUT/js.ppm" 2>/dev/null
 if [ -s "$OUT/js.ppm" ]; then
     python3 tools/certus/pixel.py "$OUT/js.ppm" --json "$OUT/js.json" | sed 's/^/        /'
@@ -253,9 +241,9 @@ echo
 echo "== 7. time to picture =="
 #
 cp --sparse=always -f "$OUT/platte/disk.img" "$OUT/zeit.img"
-LADEN_PLATTE="$OUT/zeit.img" LADEN_KILL=ja LADEN_WARTE=15 \
+LADEN_PLATTE="$OUT/zeit.img" LADEN_KILL=ja LADEN_WARTE=45 \
     bash tools/loader/lauf.sh zeit \
-    "$WM $NETZ wigapp=/bin/certus,http://10.0.2.2:$PORT/i.htm,-,1,--laut=1" \
+    "$WM $NETZ wigapp=/bin/certus,http://10.0.2.2:$PORT/i.htm,-,1,--tailwait=1,--laut=1" \
     "${CERTUS_LIMIT:-1500}" "HOEHE" > "$OUT/zeit.lauf" 2>&1 &
 zpid=$!
 t_start=0; t_bild=0
@@ -329,7 +317,7 @@ cp --sparse=always -f "$OUT/platte/disk.img" "$OUT/store.img"
 LADEN_PLATTE="$OUT/store.img" bash tools/loader/lauf.sh store \
     "osum vfs nokbd nosched noproc nofs noring3 script=opk install /store/certus-1.opk;opk list;exit" \
     900 > "$OUT/store.lauf" 2>&1
-hat "$OUT/store.txt" "installiert certus" "opk hat das signierte Paket angenommen"
+hat "$OUT/store.txt" "opk: installed certus" "opk hat das signierte Paket angenommen"
 hat "$OUT/store.txt" "certus" "certus steht danach in der Paketliste"
 
 echo

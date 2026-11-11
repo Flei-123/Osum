@@ -561,7 +561,7 @@ if [ -n "$WBACK" ] && [ "$WBACK" -ge 3 ]; then
 else
     bad "PUNKT 1: there came back ${WBACK:-0} tasks"
 fi
-KSF=$(grep -aoE '^const KSTACK_FRAMES: u64 = [0-9]+' kernel/sched/sched.fi | grep -oE '[0-9]+$')
+KSF=$(grep -aoE '^const KSTACK_FRAMES: u64 = [0-9]+' kernel/sched/taskconst.fi | grep -oE '[0-9]+$')
 KSF=$(( ${KSF:-0} + 1 ))
 if [ -n "$WKST" ] && [ -n "$WBACK" ] && [ "$KSF" -gt 1 ] && [ "$WKST" -eq $((WBACK * KSF)) ]; then
     ok "PUNKT 1: $WKST kernel stack frames == $WBACK tasks * $KSF"

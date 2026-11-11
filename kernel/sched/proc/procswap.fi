@@ -1,0 +1,444 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import arch.arch
+import sync.atomic
+import ui.ax
+import ipc.cap
+import sched.ctr
+import ipc.handle
+import lib.kstate
+import mm.mmframe
+import mm.mmswap
+import sched.sched
+import serial
+import sched.taskconst
+import sched.taskslot
+import mm.mmlock
+import sched.proc.prochooks
+import sched.proc.procbase
+import sched.proc.procmap
+import sched.proc.procpt
+
+fn free_space(state: u64, i: u64) -> u64 {
+    let pml4: u64 = taskslot.tget(state, i, taskconst.T_CR3)
+    if pml4 == 0 || pml4 == kstate.get(state, kstate.KPML4) {
+        return 0
+    }
+    if taskslot.tget(state, i, taskconst.T_SHARED) != 0 {
+        taskslot.tset(state, i, taskconst.T_CR3, 0)
+        taskslot.tset(state, i, taskconst.T_PT, 0)
+        taskslot.tset(state, i, taskconst.T_PD, 0)
+        taskslot.tset(state, i, taskconst.T_PDPT, 0)
+        taskslot.tset(state, i, taskconst.T_DATA, 0)
+        return 0
+    }
+    var freed: u64 = 0
+    let pt: u64 = taskslot.tget(state, i, taskconst.T_PT)
+    if pt != 0 {
+        freed = freed + procmap.free_pt(state, pt)
+    }
+    let pd: u64 = taskslot.tget(state, i, taskconst.T_PD)
+    if pd != 0 {
+        var k: u64 = 1
+        while k < procbase.MAIN_SLOTS {
+            k = k + arch.zero_run(pd + k * 8, procbase.MAIN_SLOTS - k)
+            if k >= procbase.MAIN_SLOTS {
+                break
+            }
+            let e: u64 = procpt.read_entry(pd, k)
+            if (e & procbase.PAGE_PRESENT) != 0 {
+                if (e & procbase.PAGE_HUGE) == 0 {
+                    freed = freed + procmap.free_pt(state, e & procbase.ADDR_MASK)
+                }
+                procpt.write_entry(pd, k, 0)
+            }
+            k = k + 1
+        }
+        mmframe.frame_free(state, pd)
+        freed = freed + 1
+    }
+    let pdpt: u64 = taskslot.tget(state, i, taskconst.T_PDPT)
+    if pdpt != 0 {
+        var j: u64 = 2
+        while j <= 63 {
+            let e2: u64 = procpt.read_entry(pdpt, j)
+            if (e2 & procbase.PAGE_PRESENT) != 0 {
+                let pdx: u64 = e2 & procbase.ADDR_MASK
+                var q: u64 = 0
+                while q < 512 {
+                    q = q + arch.zero_run(pdx + q * 8, 512 - q)
+                    if q >= 512 {
+                        break
+                    }
+                    let eq: u64 = procpt.read_entry(pdx, q)
+                    if (eq & procbase.PAGE_PRESENT) != 0 && (eq & procbase.PAGE_HUGE) == 0 {
+                        freed = freed + procmap.free_pt(state, eq & procbase.ADDR_MASK)
+                    }
+                    q = q + 1
+                }
+                mmframe.frame_free(state, pdx)
+                freed = freed + 1
+                procpt.write_entry(pdpt, j, 0)
+            }
+            j = j + 1
+        }
+        mmframe.frame_free(state, pdpt)
+        freed = freed + 1
+    }
+    mmframe.frame_free(state, pml4)
+    freed = freed + 1
+    ctr.mem_uncharge(state, ctr.ctr_of(state, i), freed)
+    taskslot.tset(state, i, taskconst.T_CR3, 0)
+    taskslot.tset(state, i, taskconst.T_PT, 0)
+    taskslot.tset(state, i, taskconst.T_PD, 0)
+    taskslot.tset(state, i, taskconst.T_PDPT, 0)
+    taskslot.tset(state, i, taskconst.T_DATA, 0)
+    return freed
+}
+
+fn reap_group_corpses(state: u64, leader: u64) {
+    let g: u64 = sched.group_of(state, leader)
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var j: u64 = 0
+    while j < n {
+        if j != leader && taskslot.tget(state, j, taskconst.T_KIND) == taskconst.K_USER
+            && taskslot.tget(state, j, taskconst.T_TGID) == g
+            && taskslot.tget(state, j, taskconst.T_STATE) == taskconst.S_ZOMBIE {
+            let _r: bool = reap(state, j)
+        }
+        j = j + 1
+    }
+}
+
+fn reap(state: u64, i: u64) -> bool {
+    if taskslot.tget(state, i, taskconst.T_SHARED) == 0 && sched.group_live(state, i) {
+        return false
+    }
+    if !sched.claim_zombie(state, i) {
+        return false
+    }
+    if taskslot.tget(state, i, taskconst.T_SHARED) == 0 {
+        reap_group_corpses(state, i)
+    }
+    prochooks.task_release(state, i)
+    ax.clear_task(state, i)
+    free_space(state, i)
+    return sched.reap_claimed(state, i)
+}
+
+const PAGE_ACCESSED: u64 = 0x20
+
+const SWAP_SLOTS: u64 = 16384
+
+const SWAP_BATCH: u64 = 16
+
+static mut swap_bounce: u64 = 0
+
+const SWAP_SCAN_MAX: u64 = 8192
+
+const SWAP_ITER_MAX: u64 = 4096
+
+const SB_FRAME: u64 = 0
+
+const SB_SLOT: u64 = 128
+
+const SB_PT: u64 = 256
+
+const SB_IDX: u64 = 384
+
+const SB_ENT: u64 = 512
+
+static mut swap_booted: u64 = 0
+
+static mut swap_broken: u64 = 0
+
+static mut swap_batch_at: u64 = 0
+
+static mut swap_hand_task: u64 = 0
+
+static mut swap_hand_addr: u64 = 0
+
+static mut swap_busy: [u64; 1] = [0]
+
+static mut swap_reported: u64 = 0
+
+fn swap_entry_of(slot: u64, e: u64) -> u64 {
+    var b: u64 = procbase.PAGE_SWAP | (slot << 12) | procbase.PAGE_USER | (e & procbase.PAGE_WRITE)
+    if (e & procbase.PAGE_NX) == 0 {
+        b = b | procbase.PAGE_EXEC_SW
+    }
+    return b
+}
+
+fn swap_low(state: u64) -> u64 {
+    return kstate.get(state, kstate.RESERVE_FRAMES) * 2
+}
+
+fn swap_boot(state: u64) {
+    if swap_booted != 0 {
+        return
+    }
+    swap_booted = 1
+    let ino: u64 = prochooks.swap_file(state)
+    let batch: u64 = mmframe.frame_alloc(state)
+    let bounce: u64 = mmframe.frame_alloc(state)
+    if ino == 0 || batch == 0 || bounce == 0 || !mmswap.configure(state, ino, SWAP_SLOTS) {
+        swap_broken = 1
+        return
+    }
+    swap_batch_at = batch
+    swap_bounce = bounce
+}
+
+fn copy_frame_words(dst: u64, src: u64) {
+    var o: u64 = 0
+    while o < mmframe.FRAME_SIZE / 8 {
+        __mmio_write64((dst + o * 8) as *mut u64, __mmio_read64((src + o * 8) as *mut u64))
+        o = o + 1
+    }
+}
+
+fn swap_cr3_busy(state: u64, cr3: u64, me: u64) -> bool {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var j: u64 = 0
+    while j < n {
+        if j != me && taskslot.tget(state, j, taskconst.T_STATE) == taskconst.S_RUN && taskslot.tget(state, j, taskconst.T_CR3) == cr3 {
+            return true
+        }
+        j = j + 1
+    }
+    return false
+}
+
+fn swap_evictable(state: u64, t: u64, cur: u64, allow_self: bool) -> bool {
+    if taskslot.tget(state, t, taskconst.T_KIND) != taskconst.K_USER {
+        return false
+    }
+    let st: u64 = taskslot.tget(state, t, taskconst.T_STATE)
+    if st == taskconst.S_FREE || st == taskconst.S_ZOMBIE || st == taskconst.S_NEW || st == taskconst.S_REAPING {
+        return false
+    }
+    let cr3: u64 = taskslot.tget(state, t, taskconst.T_CR3)
+    if cr3 == taskslot.tget(state, cur, taskconst.T_CR3) && !allow_self {
+        return false
+    }
+    return !swap_cr3_busy(state, cr3, cur)
+}
+
+fn swap_collect(state: u64, cur: u64, allow_self: bool, advanced: u64) -> u64 {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var t: u64 = swap_hand_task
+    if t >= n {
+        t = 0
+        swap_hand_task = 0
+    }
+    if !swap_evictable(state, t, cur, allow_self) {
+        swap_hand_task = t + 1
+        swap_hand_addr = procbase.LAZY_BASE
+        return 0 -% 1
+    }
+    var a: u64 = swap_hand_addr
+    if a < procbase.LAZY_BASE {
+        a = procbase.LAZY_BASE
+    }
+    var got: u64 = 0
+    var examined: u64 = 0
+    var full: bool = false
+    mmlock.demand_lock(state)
+    while a < procbase.LAZY_TOP && got < SWAP_BATCH && examined < SWAP_SCAN_MAX && !full {
+        let pt: u64 = procpt.pt_for(state, t, a, false)
+        let tile_end: u64 = ((a >> 21) + 1) << 21
+        if pt == 0 {
+            a = tile_end
+            examined = examined + 8
+        } else {
+            while a < tile_end && got < SWAP_BATCH && examined < SWAP_SCAN_MAX && !full {
+                let s: u64 = procpt.pt_slot(a)
+                let e: u64 = procpt.read_entry(pt, s)
+                examined = examined + 1
+                if (e & procbase.PAGE_PRESENT) != 0 && (e & procbase.PAGE_USER) != 0 && (e & procbase.PAGE_SHARED) == 0 {
+                    if (e & PAGE_ACCESSED) != 0 {
+                        procpt.write_entry(pt, s, e & (~PAGE_ACCESSED))
+                    } else {
+                        let slot1: u64 = mmswap.alloc(state)
+                        if slot1 == 0 {
+                            full = true
+                        } else {
+                            let ne: u64 = swap_entry_of(slot1 - 1, e)
+                            procpt.write_entry(pt, s, ne)
+                            kstate.set(swap_batch_at, SB_FRAME + got * 8, e & procbase.ADDR_MASK)
+                            kstate.set(swap_batch_at, SB_SLOT + got * 8, slot1 - 1)
+                            kstate.set(swap_batch_at, SB_PT + got * 8, pt)
+                            kstate.set(swap_batch_at, SB_IDX + got * 8, s)
+                            kstate.set(swap_batch_at, SB_ENT + got * 8, e)
+                            got = got + 1
+                        }
+                    }
+                }
+                a = a + 4096
+            }
+        }
+    }
+    var exhausted: u64 = 0
+    if a >= procbase.LAZY_TOP {
+        swap_hand_task = t + 1
+        swap_hand_addr = procbase.LAZY_BASE
+        exhausted = 1
+    } else {
+        swap_hand_addr = a
+    }
+    if got > 0 {
+        let had: u64 = taskslot.tget(state, t, taskconst.T_UPAGES)
+        if had >= got {
+            taskslot.tset(state, t, taskconst.T_UPAGES, had - got)
+        } else {
+            taskslot.tset(state, t, taskconst.T_UPAGES, 0)
+        }
+        ctr.mem_uncharge(state, ctr.ctr_of(state, t), got)
+        let now: u64 = asm("mov rax, cr3", out("rax"))
+        if taskslot.tget(state, t, taskconst.T_CR3) == now {
+            asm("mov rax, cr3\nmov cr3, rax", out("rax"))
+        }
+    }
+    mmlock.demand_unlock(state)
+    if full {
+        swap_broken = 1
+    }
+    if got == 0 && exhausted != 0 {
+        return 0 -% 1
+    }
+    return got
+}
+
+fn swap_flush(state: u64, t: u64, got: u64) {
+    var k: u64 = 0
+    while k < got {
+        let frame: u64 = kstate.get(swap_batch_at, SB_FRAME + k * 8)
+        let slot: u64 = kstate.get(swap_batch_at, SB_SLOT + k * 8)
+        let pt: u64 = kstate.get(swap_batch_at, SB_PT + k * 8)
+        let idx: u64 = kstate.get(swap_batch_at, SB_IDX + k * 8)
+        let old: u64 = kstate.get(swap_batch_at, SB_ENT + k * 8)
+        var src: u64 = frame
+        if frame >= mmframe.REACH_FRAMES * mmframe.FRAME_SIZE {
+            src = swap_bounce
+            copy_frame_words(src, mmframe.kva(frame))
+        }
+        let wrote: u64 = prochooks.write_at(state, mmswap.inode(), slot * mmswap.SLOT_BYTES, src, mmframe.FRAME_SIZE)
+        if wrote == mmframe.FRAME_SIZE {
+            mmswap.publish(state, slot)
+            mmswap.count_out()
+            mmframe.frame_free(state, frame)
+        } else {
+            mmswap.count_fail()
+            swap_broken = 1
+            mmlock.demand_lock(state)
+            let cur_e: u64 = procpt.read_entry(pt, idx)
+            if procmap.is_swap_entry(cur_e) && procmap.swap_slot_of(cur_e) == slot {
+                procpt.write_entry(pt, idx, old)
+                taskslot.tset(state, t, taskconst.T_UPAGES, taskslot.tget(state, t, taskconst.T_UPAGES) + 1)
+                let _c: bool = ctr.mem_charge(state, ctr.ctr_of(state, t), 1)
+                mmswap.publish(state, slot)
+                mmswap.release(state, slot)
+            } else {
+                mmswap.publish(state, slot)
+            }
+            mmlock.demand_unlock(state)
+        }
+        k = k + 1
+    }
+}
+
+fn swap_report(state: u64) {
+    let o: u64 = mmswap.outs()
+    if o / 1024 == swap_reported {
+        return
+    }
+    swap_reported = o / 1024
+    var s_a: [u8; 11] = "swap: out=\0"
+    var s_b: [u8; 5] = " in=\0"
+    var s_c: [u8; 7] = " used=\0"
+    var s_d: [u8; 7] = " free=\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(o)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(mmswap.ins())
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(mmswap.used())
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(mmframe.frames_free(state))
+    serial.nl()
+}
+
+fn swap_reclaim(state: u64, cur: u64, allow_self: bool) -> u64 {
+    if swap_broken != 0 || !mmswap.active() {
+        return 0
+    }
+    if atomic.cas((&swap_busy[0]) as u64, 0, 1) != 0 {
+        sched.yield_now(state)
+        return 0
+    }
+    let want: u64 = swap_low(state) + 256
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var total: u64 = 0
+    var stalls: u64 = 0
+    var iter: u64 = 0
+    while mmframe.frames_free(state) < want && stalls < 2 * (n + 1) && iter < SWAP_ITER_MAX && swap_broken == 0 {
+        let t: u64 = swap_hand_task
+        let got: u64 = swap_collect(state, cur, allow_self, 0)
+        if got == 0 -% 1 {
+            stalls = stalls + 1
+        } else if got > 0 {
+            stalls = 0
+            swap_flush(state, t, got)
+            total = total + got
+        }
+        iter = iter + 1
+    }
+    atomic.store((&swap_busy[0]) as u64, 0)
+    if total > 0 {
+        swap_report(state)
+    }
+    return total
+}
+
+fn swap_relieve(state: u64, cur: u64, err: u64) {
+    if !kstate.mode_on(state, kstate.M_SWAP) || swap_broken != 0 {
+        return
+    }
+    if mmframe.frames_free(state) >= swap_low(state) {
+        return
+    }
+    swap_boot(state)
+    let _r: u64 = swap_reclaim(state, cur, (err & 4) != 0)
+}
+
+fn create_thread(state: u64, erzeuger: u64, prio: u64) -> u64 {
+    let i: u64 = sched.create(state, taskconst.K_USER, prio, 0,
+        procpt.vector(state, procbase.V_USER_START))
+    if i == 0 {
+        return 0
+    }
+    prochooks.task_reset(state, i)
+    taskslot.tset(state, i, taskconst.T_CR3,
+        taskslot.tget(state, erzeuger, taskconst.T_CR3))
+    taskslot.tset(state, i, taskconst.T_PDPT,
+        taskslot.tget(state, erzeuger, taskconst.T_PDPT))
+    taskslot.tset(state, i, taskconst.T_PD,
+        taskslot.tget(state, erzeuger, taskconst.T_PD))
+    taskslot.tset(state, i, taskconst.T_PT,
+        taskslot.tget(state, erzeuger, taskconst.T_PT))
+    taskslot.tset(state, i, taskconst.T_DATA,
+        taskslot.tget(state, erzeuger, taskconst.T_DATA))
+    taskslot.tset(state, i, taskconst.T_SHARED, 1)
+    handle.clear_task(state, i, taskslot.tget(state, i, taskconst.T_PID))
+    prochooks.task_files(state, i)
+    cap.clear_task(state, i, taskslot.tget(state, i, taskconst.T_PID))
+    ax.clear_task(state, i)
+    return i
+}
+
+fn discard(state: u64, i: u64) {
+    taskslot.tset(state, i, taskconst.T_STATE, taskconst.S_REAPING)
+    free_space(state, i)
+    sched.reap_claimed(state, i)
+}

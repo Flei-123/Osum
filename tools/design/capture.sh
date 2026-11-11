@@ -111,7 +111,7 @@ if [ ! -s "$BUILDD/crt.o" ] || [ -n "${DESIGNREBUILD:-}" ]; then
     as --64 -o "$BUILDD/crt.o" kernel/user/crt.s 2>"$BUILDD/as.err" \
         || { echo "FEHLGESCHLAGEN: crt.s"; cat "$BUILDD/as.err"; exit 1; }
 fi
-USERNEW=$(ls -t kernel/user/*.fi 2>/dev/null | head -1)
+USERNEW=$(bash tools/design/newest-source.sh)
 for p in $progs; do
     if [ -s "$BUILDD/$p.elf" ] && [ -z "${DESIGNREBUILD:-}" ] \
        && [ "$BUILDD/$p.elf" -nt "kernel/user/$p.fi" ] \

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/settingsaudit/run.sh -- settings audit: one screenshot per page for ALL 33 pages + serial trace for runtime.py.
+# tools/settingsaudit/run.sh -- settings audit: one screenshot per page for ALL 35 pages + serial trace for runtime.py.
 #
 #   /root/jarvis/bin/heavy bash tools/settingsaudit/run.sh [<outdir>] [mode=light|dark] [scale=1|2]
 #   AUDIT_PAGES=1,32,19 limits the run to those page numbers (shorter run, needs less halt=)

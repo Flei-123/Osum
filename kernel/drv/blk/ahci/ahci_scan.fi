@@ -1,0 +1,176 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import klog
+import lib.kstate
+import libc.regio
+import drv.blk.ahci.ahci_clock
+import drv.blk.ahci.ahci_defs
+import drv.blk.ahci.ahci_hook
+import drv.blk.ahci.ahci_link
+import drv.blk.ahci.ahci_port
+import drv.blk.ahci.ahci_reg
+import drv.blk.ahci.ahci_state
+
+const POLL_US: u64 = 100
+const T_OLDSATA: u64 = 2097152
+
+fn pack_port(state: u64, p: u64) -> u64 {
+    return (0xF << 40) | ((ahci_reg.prd(state, p, ahci_defs.P_SSTS) & 0xFFF) << 28)
+        | ((ahci_reg.prd(state, p, ahci_defs.P_TFD) & 0xFFFF) << 12)
+        | (ahci_reg.prd(state, p, ahci_defs.P_SCTL) & 0xFFF)
+}
+
+fn log_ports(state: u64, pi: u64, all: bool, lv: u64) {
+    var l_port: [u8; 16] = "port, verdict: \0"
+    var l_regs: [u8; 38] = "  regs F<ssts:3><tfd:4><sctl:3> hex: \0"
+    var l_sig: [u8; 21] = "  sig (1 = marker): \0"
+    var l_cmd: [u8; 21] = "  cmd (1 = marker): \0"
+    var i: u64 = 0
+    while i < 32 {
+        if ((pi >> i) & 1) != 0 {
+            let v: u64 = ahci_link.pget(state, i, ahci_defs.F_STATE)
+            if all || v == ahci_defs.V_ATA || v == ahci_defs.V_OTHER || v == ahci_defs.V_NOSIG || v == ahci_defs.V_BROKEN {
+                klog.say2(state, lv, ahci_state.lq(), (&l_port[0]) as u64, i, v)
+                klog.sayh(state, lv, ahci_state.lq(), (&l_regs[0]) as u64, pack_port(state, i))
+                klog.sayh(state, lv, ahci_state.lq(), (&l_sig[0]) as u64, (1 << 32) | ahci_reg.prd(state, i, ahci_defs.P_SIG))
+                klog.sayh(state, lv, ahci_state.lq(), (&l_cmd[0]) as u64, (1 << 32) | ahci_reg.prd(state, i, ahci_defs.P_CMD))
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn find_disk(state: u64, pi: u64) -> u64 {
+    var l_scan: [u8; 34] = "link scan done, us / ports left: \0"
+    let legacy: bool = (ahci_hook.hwmode(state) & T_OLDSATA) != 0
+    let cl: u64 = state + ahci_defs.AHCI_OFF + ahci_defs.CLB_AT
+    let fis: u64 = state + ahci_defs.AHCI_OFF + ahci_defs.FB_AT
+    regio.zero64(cl, 1024)
+    regio.zero64(fis, 256)
+
+    var i: u64 = 0
+    while i < 32 {
+        if ((pi >> i) & 1) != 0 {
+            ahci_link.pset(state, i, ahci_defs.F_STATE, ahci_defs.V_PENDING)
+            ahci_link.pset(state, i, ahci_defs.F_T0, 0)
+            ahci_link.pset(state, i, ahci_defs.F_TLINK, 0)
+            ahci_link.pset(state, i, ahci_defs.F_RESETS, 0)
+            if !ahci_port.port_arm(state, i, cl, fis) {
+                ahci_link.pset(state, i, ahci_defs.F_STATE, ahci_defs.V_BROKEN)
+            }
+        }
+        i = i + 1
+    }
+
+    let t_start: u64 = ahci_clock.tnow(state, 0)
+    if !legacy {
+        i = 0
+        while i < 32 {
+            if ((pi >> i) & 1) != 0 && ahci_link.pget(state, i, ahci_defs.F_STATE) == ahci_defs.V_PENDING {
+                ahci_link.comreset_assert(state, i)
+            }
+            i = i + 1
+        }
+        ahci_link.udelay(state, ahci_defs.COMRESET_US)
+    }
+    let t_rel: u64 = ahci_clock.tnow(state, 0)
+    i = 0
+    while i < 32 {
+        if ((pi >> i) & 1) != 0 && ahci_link.pget(state, i, ahci_defs.F_STATE) == ahci_defs.V_PENDING {
+            if legacy {
+                ahci_link.pset(state, i, ahci_defs.F_T0, t_rel + 1)
+            } else {
+                ahci_link.comreset_release(state, i, t_rel)
+            }
+        }
+        i = i + 1
+    }
+
+    var total: u64 = ahci_defs.READY_US + ahci_defs.EMPTY_US
+    if legacy {
+        total = ahci_defs.PROBE_US
+    }
+    var polls: u64 = 0
+    var pending: u64 = 0
+    var best: u64 = 32
+    var done: bool = false
+    while !done {
+        let now: u64 = ahci_clock.tnow(state, polls)
+        pending = 0
+        best = 32
+        var low_pending: u64 = 32
+        i = 0
+        while i < 32 {
+            if ((pi >> i) & 1) != 0 {
+                ahci_link.scan_port(state, i, now, legacy)
+                let v: u64 = ahci_link.pget(state, i, ahci_defs.F_STATE)
+                if v == ahci_defs.V_PENDING {
+                    pending = pending + 1
+                    if low_pending == 32 {
+                        low_pending = i
+                    }
+                }
+                if v == ahci_defs.V_ATA && best == 32 {
+                    best = i
+                }
+            }
+            i = i + 1
+        }
+        let el: u64 = now - t_start
+        if pending == 0 {
+            done = true
+        } else if best < 32 && low_pending > best {
+            done = true
+        } else if el >= total {
+            done = true
+        }
+        if !done && ahci_clock.have_clock(state) {
+            ahci_link.udelay(state, POLL_US)
+        }
+        polls = polls + 1
+    }
+    var elapsed: u64 = 0
+    let t_end: u64 = ahci_clock.tnow(state, polls)
+    if t_end > t_start {
+        elapsed = t_end - t_start
+    }
+    kstate.set(state, ahci_state.sc(ahci_defs.S_SCAN_US), elapsed)
+
+    var seen: u64 = 0
+    var nosig: u64 = 32
+    i = 0
+    while i < 32 {
+        if ((pi >> i) & 1) != 0 {
+            var v: u64 = ahci_link.pget(state, i, ahci_defs.F_STATE)
+
+            if v == ahci_defs.V_PENDING && (ahci_reg.prd(state, i, ahci_defs.P_SSTS) & 0xF) == ahci_defs.DET_PRESENT {
+                if (ahci_reg.prd(state, i, ahci_defs.P_TFD) & (ahci_defs.TFD_BSY | ahci_defs.TFD_DRQ)) == 0 {
+                    ahci_link.pset(state, i, ahci_defs.F_STATE, ahci_defs.V_NOSIG)
+                    v = ahci_defs.V_NOSIG
+                }
+            }
+            if v == ahci_defs.V_ATA || v == ahci_defs.V_OTHER || v == ahci_defs.V_NOSIG {
+                seen = seen + 1
+            }
+            if v == ahci_defs.V_NOSIG && nosig == 32 {
+                nosig = i
+            }
+        }
+        i = i + 1
+    }
+    kstate.set(state, ahci_state.sc(ahci_defs.S_SEEN), seen)
+    var found: u64 = best
+    if found >= 32 && nosig < 32 {
+
+        found = nosig
+    }
+    if found < 32 {
+        kstate.set(state, ahci_state.sc(ahci_defs.S_SIG), ahci_reg.prd(state, found, ahci_defs.P_SIG))
+    }
+    var lv: u64 = klog.L_INFO
+    if found >= 32 {
+        lv = klog.L_WARN
+    }
+    klog.say2(state, lv, ahci_state.lq(), (&l_scan[0]) as u64, elapsed, pending)
+    log_ports(state, pi, found >= 32, lv)
+    return found
+}

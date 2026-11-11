@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import libc.io
+import libc.errno
+import libc.kcall
+import libc.text
+import services.dlgproto
+import services.svcrules
+
+export { write, read_file, write_file, READ_FAILED }
+
+const KEY_CAP: u64 = 48
+const PATH_CAP: u64 = 160
+const HEAD_CAP: u64 = 96
+const READ_FAILED: u64 = 0xFFFFFFFFFFFFFFFF
+
+static mut key_buf: [u8; 48] = [0 as u8; 48]
+static mut path_buf: [u8; 160] = [0 as u8; 160]
+static mut head_buf: [u8; 96] = [0 as u8; 96]
+
+fn reply_path(app: u64, id: u64) -> u64 {
+    let key: u64 = (&key_buf[0 as usize]) as u64
+    let key_len: u64 = dlgproto.reply_key(id, key, KEY_CAP)
+    let path: u64 = (&path_buf[0 as usize]) as u64
+    if key_len == 0 || svcrules.store_path(app, text.length(app), key, key_len, path, PATH_CAP) == 0 {
+        return 0
+    }
+    return path
+}
+
+fn write(app: u64, id: u64, answer: u64, name: u64, content: u64, content_len: u64) -> bool {
+    let path: u64 = reply_path(app, id)
+    let head: u64 = (&head_buf[0 as usize]) as u64
+    let head_len: u64 = dlgproto.format_head(answer, name, text.length(name), head, HEAD_CAP)
+    if path == 0 || head_len == 0 {
+        return false
+    }
+    let fd: u64 = io.create(path)
+    if errno.failed(fd) {
+        return false
+    }
+    var ok: bool = !errno.failed(io.write_all(fd, head, head_len))
+    if ok && content_len > 0 && answer == dlgproto.ANSWER_OK {
+        ok = !errno.failed(io.write_all(fd, content, content_len))
+    }
+    io.close(fd)
+    return ok
+}
+
+fn read_file(path: u64, dst: u64, cap: u64) -> u64 {
+    let size: u64 = io.size_of(path)
+    if errno.failed(size) || size > cap {
+        return READ_FAILED
+    }
+    let fd: u64 = io.open(path, kcall.O_RDONLY)
+    if errno.failed(fd) {
+        return READ_FAILED
+    }
+    let got: u64 = io.read_full(fd, dst, size)
+    io.close(fd)
+    if errno.failed(got) {
+        return READ_FAILED
+    }
+    return got
+}
+
+fn write_file(path: u64, data: u64, len: u64) -> bool {
+    let fd: u64 = io.create(path)
+    if errno.failed(fd) {
+        return false
+    }
+    let wrote: u64 = io.write_all(fd, data, len)
+    io.close(fd)
+    return !errno.failed(wrote) && wrote == len
+}

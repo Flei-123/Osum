@@ -1,0 +1,397 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import acpi.acpi
+import arch.arch
+import lib.kstate
+import mm.mmframe
+import sched.taskconst
+import sched.taskslot
+import arch.x86_64.user
+import sched.proc.procbase
+
+const STACK_PAGES: u64 = 8
+
+fn vector(state: u64, i: u64) -> u64 {
+    return __mmio_read64((kstate.get(state, kstate.VECTORS) + i * 8) as *mut u64)
+}
+
+fn nx(state: u64) -> u64 {
+    if kstate.get(state, kstate.NX_OK) != 0 {
+        return procbase.PAGE_NX
+    }
+    return 0
+}
+
+fn read_entry(table: u64, i: u64) -> u64 {
+    return __mmio_read64((table + i * 8) as *mut u64)
+}
+
+fn write_entry(table: u64, i: u64, v: u64) {
+    __mmio_write64((table + i * 8) as *mut u64, v)
+}
+
+fn zero_frame(frame: u64) {
+    arch.fill_words(mmframe.kva(frame), 0, mmframe.FRAME_SIZE / 8)
+}
+
+fn map_programs(state: u64) -> u64 {
+    let begin: u64 = vector(state, 59)
+    let end: u64 = vector(state, 60)
+    var p: u64 = begin & 0xFFFFFFFFFFFFF000
+    var n: u64 = 0
+    var kachel: u64 = p & 0xFFFFFFFFFFE00000
+    var page_table: u64 = state + kstate.PT_OFF
+    while p < end {
+        if (p & 0xFFFFFFFFFFE00000) != kachel {
+            kachel = p & 0xFFFFFFFFFFE00000
+            page_table = mmframe.frame_alloc(state)
+            if page_table == 0 {
+                return 0
+            }
+        }
+        if !user.map_user_pt(state, p, false, page_table) {
+            return 0
+        }
+        n = n + 1
+        p = p + mmframe.FRAME_SIZE
+    }
+    return n
+}
+
+fn space_build(state: u64, i: u64) -> u64 {
+    let pml4: u64 = mmframe.frame_alloc(state)
+    let pdpt: u64 = mmframe.frame_alloc(state)
+    let pd: u64 = mmframe.frame_alloc(state)
+    let pt: u64 = mmframe.frame_alloc(state)
+    let data: u64 = mmframe.frame_alloc(state)
+    if pml4 == 0 || pdpt == 0 || pd == 0 || pt == 0 || data == 0 {
+        return 0
+    }
+    zero_frame(pml4)
+    zero_frame(pdpt)
+    zero_frame(pd)
+    zero_frame(pt)
+    zero_frame(data)
+
+    let kpml4: u64 = kstate.get(state, kstate.KPML4)
+    let kpdpt: u64 = read_entry(kpml4, 0) & procbase.ADDR_MASK
+    write_entry(pdpt, 0, read_entry(kpdpt, 0) | procbase.PAGE_USER)
+    acpi.only_first_give()
+    write_entry(pml4, mmframe.DM_SLOT, read_entry(kpml4, mmframe.DM_SLOT))
+
+    write_entry(pml4, 0, pdpt | procbase.PAGE_PRESENT | procbase.PAGE_WRITE | procbase.PAGE_USER)
+    write_entry(pdpt, 1, pd | procbase.PAGE_PRESENT | procbase.PAGE_WRITE | procbase.PAGE_USER)
+    write_entry(pd, 0, pt | procbase.PAGE_PRESENT | procbase.PAGE_WRITE | procbase.PAGE_USER)
+    write_entry(pt, 0, data | procbase.PAGE_PRESENT | procbase.PAGE_WRITE | procbase.PAGE_USER | nx(state))
+    var k: u64 = 0
+    while k < STACK_PAGES {
+        let f: u64 = mmframe.frame_alloc(state)
+        if f == 0 {
+            return 0
+        }
+        zero_frame(f)
+        write_entry(pt, 1 + k,
+            f | procbase.PAGE_PRESENT | procbase.PAGE_WRITE | procbase.PAGE_USER | nx(state))
+        k = k + 1
+    }
+
+    taskslot.tset(state, i, taskconst.T_PDPT, pdpt)
+    taskslot.tset(state, i, taskconst.T_PD, pd)
+    taskslot.tset(state, i, taskconst.T_PT, pt)
+    taskslot.tset(state, i, taskconst.T_DATA, data)
+    return pml4
+}
+
+fn space_pages(state: u64, i: u64) -> u64 {
+    let pml4: u64 = taskslot.tget(state, i, taskconst.T_CR3)
+    if pml4 == 0 || pml4 == kstate.get(state, kstate.KPML4) {
+        return 0
+    }
+    var n: u64 = 1
+    if taskslot.tget(state, i, taskconst.T_PDPT) != 0 {
+        n = n + 1
+    }
+    let pd: u64 = taskslot.tget(state, i, taskconst.T_PD)
+    if pd != 0 {
+        n = n + 1
+        var k: u64 = 1
+        while k < procbase.MAIN_SLOTS {
+            let e: u64 = read_entry(pd, k)
+            if (e & procbase.PAGE_PRESENT) != 0 && (e & procbase.PAGE_HUGE) == 0 {
+                n = n + count_pt(e & procbase.ADDR_MASK)
+            }
+            k = k + 1
+        }
+    }
+    let pt: u64 = taskslot.tget(state, i, taskconst.T_PT)
+    if pt != 0 {
+        n = n + count_pt(pt)
+    }
+    return n
+}
+
+fn count_pt(pt: u64) -> u64 {
+    var n: u64 = 1
+    var k: u64 = 0
+    while k < 512 {
+        if (read_entry(pt, k) & procbase.PAGE_PRESENT) != 0 {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn pt_data_count(pt: u64) -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < 512 {
+        let e: u64 = read_entry(pt, k)
+        if (e & procbase.PAGE_PRESENT) != 0 && (e & procbase.PAGE_SHARED) == 0 {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn pt_data_nth(pt: u64, want: u64, vor: u64) -> u64 {
+    var n: u64 = vor
+    var k: u64 = 0
+    while k < 512 {
+        let e: u64 = read_entry(pt, k)
+        if (e & procbase.PAGE_PRESENT) != 0 && (e & procbase.PAGE_SHARED) == 0 {
+            if n == want {
+                return e & procbase.ADDR_MASK
+            }
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+fn frame_count(state: u64, i: u64) -> u64 {
+    let pml4: u64 = taskslot.tget(state, i, taskconst.T_CR3)
+    if pml4 == 0 || pml4 == kstate.get(state, kstate.KPML4) {
+        return 0
+    }
+    var n: u64 = 0
+    let pt0: u64 = taskslot.tget(state, i, taskconst.T_PT)
+    if pt0 != 0 {
+        n = n + pt_data_count(pt0)
+    }
+    let pd: u64 = taskslot.tget(state, i, taskconst.T_PD)
+    if pd != 0 {
+        var k: u64 = 1
+        while k < procbase.MAIN_SLOTS {
+            let e: u64 = read_entry(pd, k)
+            if (e & procbase.PAGE_PRESENT) != 0 && (e & procbase.PAGE_HUGE) == 0 {
+                n = n + pt_data_count(e & procbase.ADDR_MASK)
+            }
+            k = k + 1
+        }
+    }
+    return n
+}
+
+fn frame_at(state: u64, i: u64, want: u64) -> u64 {
+    let pml4: u64 = taskslot.tget(state, i, taskconst.T_CR3)
+    if pml4 == 0 || pml4 == kstate.get(state, kstate.KPML4) {
+        return 0
+    }
+    var vor: u64 = 0
+    let pt0: u64 = taskslot.tget(state, i, taskconst.T_PT)
+    if pt0 != 0 {
+        let c: u64 = pt_data_count(pt0)
+        if want < vor + c {
+            return pt_data_nth(pt0, want, vor)
+        }
+        vor = vor + c
+    }
+    let pd: u64 = taskslot.tget(state, i, taskconst.T_PD)
+    if pd != 0 {
+        var k: u64 = 1
+        while k < procbase.MAIN_SLOTS {
+            let e: u64 = read_entry(pd, k)
+            if (e & procbase.PAGE_PRESENT) != 0 && (e & procbase.PAGE_HUGE) == 0 {
+                let t: u64 = e & procbase.ADDR_MASK
+                let c: u64 = pt_data_count(t)
+                if want < vor + c {
+                    return pt_data_nth(t, want, vor)
+                }
+                vor = vor + c
+            }
+            k = k + 1
+        }
+    }
+    return 0
+}
+
+fn pt_data_virt_nth(pt: u64, want: u64, vor: u64, basis: u64) -> u64 {
+    var n: u64 = vor
+    var k: u64 = 0
+    while k < 512 {
+        let e: u64 = read_entry(pt, k)
+        if (e & procbase.PAGE_PRESENT) != 0 && (e & procbase.PAGE_SHARED) == 0 {
+            if n == want {
+                return basis + k * mmframe.FRAME_SIZE
+            }
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+fn frame_virt_at(state: u64, i: u64, want: u64) -> u64 {
+    let pml4: u64 = taskslot.tget(state, i, taskconst.T_CR3)
+    if pml4 == 0 || pml4 == kstate.get(state, kstate.KPML4) {
+        return 0
+    }
+    var vor: u64 = 0
+    let pt0: u64 = taskslot.tget(state, i, taskconst.T_PT)
+    if pt0 != 0 {
+        let c: u64 = pt_data_count(pt0)
+        if want < vor + c {
+            return pt_data_virt_nth(pt0, want, vor, procbase.USER_DATA)
+        }
+        vor = vor + c
+    }
+    let pd: u64 = taskslot.tget(state, i, taskconst.T_PD)
+    if pd != 0 {
+        var k: u64 = 1
+        while k < procbase.MAIN_SLOTS {
+            let e: u64 = read_entry(pd, k)
+            if (e & procbase.PAGE_PRESENT) != 0 && (e & procbase.PAGE_HUGE) == 0 {
+                let t: u64 = e & procbase.ADDR_MASK
+                let c: u64 = pt_data_count(t)
+                if want < vor + c {
+                    return pt_data_virt_nth(t, want, vor,
+                        procbase.USER_DATA + k * procbase.USER_SPAN)
+                }
+                vor = vor + c
+            }
+            k = k + 1
+        }
+    }
+    return 0
+}
+
+fn space_build_empty(state: u64, i: u64) -> u64 {
+    let pml4: u64 = mmframe.frame_alloc(state)
+    let pdpt: u64 = mmframe.frame_alloc(state)
+    let pd: u64 = mmframe.frame_alloc(state)
+    let pt: u64 = mmframe.frame_alloc(state)
+    if pml4 == 0 || pdpt == 0 || pd == 0 || pt == 0 {
+        return 0
+    }
+    zero_frame(pml4)
+    zero_frame(pdpt)
+    zero_frame(pd)
+    zero_frame(pt)
+    let kpml4: u64 = kstate.get(state, kstate.KPML4)
+    let kpdpt: u64 = read_entry(kpml4, 0) & procbase.ADDR_MASK
+    write_entry(pdpt, 0, read_entry(kpdpt, 0) | procbase.PAGE_USER)
+    acpi.only_first_give()
+    write_entry(pml4, mmframe.DM_SLOT, read_entry(kpml4, mmframe.DM_SLOT))
+    write_entry(pml4, 0, pdpt | procbase.PAGE_PRESENT | procbase.PAGE_WRITE | procbase.PAGE_USER)
+    write_entry(pdpt, 1, pd | procbase.PAGE_PRESENT | procbase.PAGE_WRITE | procbase.PAGE_USER)
+    write_entry(pd, 0, pt | procbase.PAGE_PRESENT | procbase.PAGE_WRITE | procbase.PAGE_USER)
+    taskslot.tset(state, i, taskconst.T_PDPT, pdpt)
+    taskslot.tset(state, i, taskconst.T_PD, pd)
+    taskslot.tset(state, i, taskconst.T_PT, pt)
+    return pml4
+}
+
+fn inherit(state: u64, parent: u64, child: u64) -> bool {
+    if taskslot.tget(state, parent, taskconst.T_KIND) != taskconst.K_USER {
+        return false
+    }
+    let src: u64 = taskslot.tget(state, parent, taskconst.T_DATA)
+    let dst: u64 = taskslot.tget(state, child, taskconst.T_DATA)
+    if src == 0 || dst == 0 {
+        return false
+    }
+    var i: u64 = 0
+    while i < mmframe.FRAME_SIZE / 8 {
+        __mmio_write64((dst + i * 8) as *mut u64,
+            __mmio_read64((src + i * 8) as *mut u64))
+        i = i + 1
+    }
+    return true
+}
+
+fn pt_slot(addr: u64) -> u64 {
+    if addr < procbase.USER_DATA {
+        return 512
+    }
+    if addr >= procbase.USER_DATA + procbase.USER_SPAN * procbase.PRIV_SLOTS {
+        return 512
+    }
+    return ((addr - procbase.USER_DATA) >> 12) & 511
+}
+
+fn pd_slot(addr: u64) -> u64 {
+    if addr < procbase.USER_DATA {
+        return procbase.PRIV_SLOTS
+    }
+    if addr >= procbase.USER_DATA + procbase.USER_SPAN * procbase.PRIV_SLOTS {
+        return procbase.PRIV_SLOTS
+    }
+    return (addr - procbase.USER_DATA) >> 21
+}
+
+fn pt_for(state: u64, i: u64, addr: u64, allocate: bool) -> u64 {
+    let k: u64 = pd_slot(addr)
+    if k >= procbase.PRIV_SLOTS {
+        return 0
+    }
+    if k == 0 {
+        return taskslot.tget(state, i, taskconst.T_PT)
+    }
+    var pd: u64 = taskslot.tget(state, i, taskconst.T_PD)
+    var idx: u64 = k
+    if k >= 512 {
+        let pdpt: u64 = taskslot.tget(state, i, taskconst.T_PDPT)
+        if pdpt == 0 {
+            return 0
+        }
+        let pe: u64 = read_entry(pdpt, 1 + (k >> 9))
+        if (pe & procbase.PAGE_PRESENT) != 0 {
+            pd = pe & procbase.ADDR_MASK
+        } else {
+            if !allocate {
+                return 0
+            }
+            let nf: u64 = mmframe.frame_alloc(state)
+            if nf == 0 {
+                return 0
+            }
+            zero_frame(nf)
+            write_entry(pdpt, 1 + (k >> 9), nf | procbase.PAGE_PRESENT | procbase.PAGE_WRITE | procbase.PAGE_USER)
+            pd = nf
+        }
+        idx = k & 511
+    }
+    if pd == 0 {
+        return 0
+    }
+    let e: u64 = read_entry(pd, idx)
+    if (e & procbase.PAGE_PRESENT) != 0 {
+        if (e & procbase.PAGE_HUGE) != 0 {
+            return 0
+        }
+        return e & procbase.ADDR_MASK
+    }
+    if !allocate {
+        return 0
+    }
+    let f: u64 = mmframe.frame_alloc(state)
+    if f == 0 {
+        return 0
+    }
+    zero_frame(f)
+    write_entry(pd, idx, f | procbase.PAGE_PRESENT | procbase.PAGE_WRITE | procbase.PAGE_USER)
+    return f
+}

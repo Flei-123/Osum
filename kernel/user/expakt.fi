@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // kernel/user/expakt.fi -- RUNDE EXPLORER-2: DIE TATEN.
 
-profile kernel
+profile app
 
 import ulib
 import libc.text
 import lineout
 import libc.io
 import libc.errno
-import wlib
-import xfer
+import services.svcosum
+import services.svcrules
 import urilist
 import fileop
 import expsmb
@@ -148,16 +148,7 @@ fn schnitt_an() -> bool {
 
 static mut xbuf: [u8; 65536] = [0 as u8; 65536]
 static mut xpath: [u8; 512] = [0 as u8; 512]
-static mut x_cut: u64 = 0
 static mut x_seq: u64 = 0
-static mut n_cut_name: [u8; 22] = "application/x-osum-cut"
-
-fn cut_mask() -> u64 {
-    if x_cut == 0 {
-        x_cut = xfer.mime_of((&n_cut_name[(0) as usize]) as u64, 22)
-    }
-    return x_cut
-}
 
 fn stage(schnitt: bool) {
     n_clipboard = 0
@@ -174,23 +165,21 @@ fn stage(schnitt: bool) {
 }
 
 fn load_from_bus() -> u64 {
-    if !xfer.available() {
+    var got: u64 = 0
+    var cut: u64 = 0
+    let rc: u64 = svcosum.paste_files((&xbuf[(0) as usize]) as u64, 65000, (&got) as u64, (&cut) as u64)
+    if rc == svcrules.NO_BACKEND {
         return n_clipboard
     }
     n_clipboard = 0
     ist_schnitt = 0
     x_seq = 0
-    let kinds: u64 = xfer.types(xfer.SEL_CLIPBOARD, 0)
-    if (kinds & (xfer.MIME_URIS | xfer.MIME_PATH)) == 0 {
-        return 0
-    }
-    let n: u64 = xfer.get_files(xfer.SEL_CLIPBOARD, 0, (&xbuf[(0) as usize]) as u64, 65000)
-    if ulib.bad(n) || n > 65000 {
+    if rc != svcrules.OK {
         return 0
     }
     var pos: u64 = 0
     while n_clipboard < MAXLIST {
-        let nx: u64 = urilist.list_next((&xbuf[(0) as usize]) as u64, n, pos, (&xpath[(0) as usize]) as u64, 512)
+        let nx: u64 = urilist.list_next((&xbuf[(0) as usize]) as u64, got, pos, (&xpath[(0) as usize]) as u64, 512)
         if nx == 0 {
             break
         }
@@ -198,16 +187,14 @@ fn load_from_bus() -> u64 {
         n_clipboard = n_clipboard + 1
         pos = nx
     }
-    if (kinds & cut_mask()) != 0 {
-        ist_schnitt = 1
-    }
-    x_seq = xfer.seq(xfer.SEL_CLIPBOARD, 0)
+    ist_schnitt = cut
+    x_seq = svcosum.files_seq()
     return n_clipboard
 }
 
 fn drop_cut_entry() {
-    if x_seq != 0 && xfer.seq(xfer.SEL_CLIPBOARD, 0) == x_seq {
-        let _c: u64 = xfer.clear(xfer.SEL_CLIPBOARD)
+    if x_seq != 0 && svcosum.files_seq() == x_seq {
+        let _c: u64 = svcosum.clear_files()
     }
     x_seq = 0
 }
@@ -226,15 +213,15 @@ fn copy_remember(schnitt: bool) -> u64 {
     }
     var rc: u64 = 0
     if at != 0 {
-        var kinds: u64 = xfer.MIME_URIS
+        var cut: u64 = 0
         if schnitt {
-            kinds = kinds | cut_mask()
+            cut = 1
         }
-        let r: u64 = xfer.set(xfer.SEL_CLIPBOARD, kinds, (&xbuf[(0) as usize]) as u64, at)
-        if ulib.bad(r) {
+        let r: u64 = svcosum.copy_files((&xbuf[(0) as usize]) as u64, at, cut)
+        if r == svcrules.OK {
+            x_seq = svcosum.files_seq()
+        } else if r != svcrules.NO_BACKEND {
             rc = r
-        } else {
-            x_seq = xfer.seq(xfer.SEL_CLIPBOARD, 0)
         }
     }
     lineout.add_text((&s_clip[(0) as usize]) as u64)

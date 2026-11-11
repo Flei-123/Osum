@@ -207,7 +207,7 @@ echo "== 6b. counter-proof: decoder without the end-of-slice peek fix =="
 OLD="$TMPD/old"
 mkdir -p "$OLD/kernel"
 cp -a kernel/user "$OLD/kernel/user"
-python3 - "$OLD/kernel/user/h264.fi" <<'PYEOF'
+python3 - "$OLD/kernel/user/codec/h264.fi" <<'PYEOF'
 import sys
 p = sys.argv[1]
 s = open(p).read()

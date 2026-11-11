@@ -1,0 +1,141 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import arch.x86_64.apic
+import bus.drvreg
+import klog
+import lib.kstate
+import bus.pci
+import libc.regio
+import drv.blk.ahci.ahci_defs
+import drv.blk.ahci.ahci_hba
+import drv.blk.ahci.ahci_ident
+import drv.blk.ahci.ahci_port
+import drv.blk.ahci.ahci_present
+import drv.blk.ahci.ahci_scan
+import drv.blk.ahci.ahci_state
+import drv.blk.ahci.ahci_wait
+
+const S_IDX: u64 = 0x10
+const S_S64A: u64 = 0x70
+const R_PI: u64 = 0x0C
+const CAP_S64A: u64 = 0x80000000
+const MODE_NONE: u64 = 0
+const MODE_IDE: u64 = 2
+
+fn init(state: u64) -> bool {
+    var l_fail: [u8; 23] = "AHCI init failed, why=\0"
+    if init_inner(state) {
+        return true
+    }
+    klog.sayn(state, klog.L_WARN, ahci_state.lq(), (&l_fail[0]) as u64, kstate.get(state, ahci_state.sc(ahci_defs.S_WHY)))
+
+    kstate.set(state, ahci_state.sc(ahci_defs.S_MODE), MODE_NONE)
+    return false
+}
+
+fn init_inner(state: u64) -> bool {
+    var l_no_ctrl: [u8; 41] = "no AHCI controller; IDE fallback checked\0"
+    kstate.set(state, ahci_state.sc(ahci_defs.S_READY), 0)
+    kstate.set(state, ahci_state.sc(ahci_defs.S_MODE), MODE_NONE)
+    kstate.set(state, ahci_state.sc(ahci_defs.S_ERRS), 0)
+    kstate.set(state, ahci_state.sc(ahci_defs.S_CMDS), 0)
+    kstate.set(state, ahci_state.sc(ahci_defs.S_SEEN), 0)
+    kstate.set(state, ahci_state.sc(ahci_defs.S_WHY), 0)
+    kstate.set(state, ahci_state.sc(ahci_defs.S_DEAD), 0)
+    kstate.set(state, ahci_state.sc(ahci_defs.S_IRQ_ON), 0)
+
+    if pci.rst_nvme_hidden(state) {
+        var l_rst: [u8; 86] = "storage: Intel RST (RAID) mode, NVMe disks may be hidden. BIOS: set SATA mode to AHCI\0"
+        klog.say(state, klog.L_WARN, ahci_state.lq(), (&l_rst[0]) as u64)
+    }
+    let idx: u64 = drvreg.find_either(state, drvreg.D_AHCI, drvreg.D_AHCI_RAID)
+    if idx >= pci.MAX_DEV {
+        if ahci_present.ide_mode(state) {
+            kstate.set(state, ahci_state.sc(ahci_defs.S_MODE), MODE_IDE)
+        }
+        klog.say(state, klog.L_INFO, ahci_state.lq(), (&l_no_ctrl[0]) as u64)
+        ahci_hba.log_storage(state)
+        kstate.set(state, ahci_state.sc(ahci_defs.S_WHY), 1)
+        return false
+    }
+
+    let phys: u64 = pci.bar(state, idx, 5)
+    if phys == 0 || pci.bar_is_io(state, idx, 5) {
+        kstate.set(state, ahci_state.sc(ahci_defs.S_WHY), 2)
+        return false
+    }
+    let b: u64 = apic.map_device(state, phys)
+    if b == 0 {
+        kstate.set(state, ahci_state.sc(ahci_defs.S_WHY), 3)
+        return false
+    }
+    if pci.is_raid_class(state, idx) {
+        var l_raid: [u8; 63] = "AHCI controller in RAID mode (Intel, class 01:04) used as AHCI\0"
+        klog.say(state, klog.L_INFO, ahci_state.lq(), (&l_raid[0]) as u64)
+    }
+    kstate.set(state, ahci_state.sc(S_IDX), idx)
+    kstate.set(state, ahci_state.sc(ahci_defs.S_ABAR), b)
+    kstate.set(state, ahci_state.sc(ahci_defs.S_BDF), pci.get(state, idx, pci.E_BDF))
+    kstate.set(state, ahci_state.sc(ahci_defs.S_MODE), ahci_defs.MODE_AHCI)
+
+    let cap: u64 = regio.read32_at(b, ahci_defs.R_CAP)
+    if cap == 0 || cap == 0xFFFFFFFF {
+        kstate.set(state, ahci_state.sc(ahci_defs.S_WHY), 4)
+        return false
+    }
+    kstate.set(state, ahci_state.sc(ahci_defs.S_SLOTS), ((cap >> 8) & 0x1F) + 1)
+    kstate.set(state, ahci_state.sc(S_S64A), (cap & CAP_S64A) >> 31)
+
+    pci.enable_master(ahci_state.bdf(state))
+
+    if !ahci_hba.handoff(state, b) {
+        kstate.set(state, ahci_state.sc(ahci_defs.S_WHY), 5)
+        return false
+    }
+
+    regio.write32_at(b, ahci_defs.R_GHC, regio.read32_at(b, ahci_defs.R_GHC) | ahci_defs.GHC_AE)
+
+    let cap_before: u64 = regio.read32_at(b, ahci_defs.R_CAP)
+    let pi_before: u64 = regio.read32_at(b, R_PI)
+    if !ahci_hba.hba_reset(state, b) {
+        kstate.set(state, ahci_state.sc(ahci_defs.S_WHY), 6)
+        return false
+    }
+    if regio.read32_at(b, ahci_defs.R_CAP) != cap_before {
+        regio.write32_at(b, ahci_defs.R_CAP, cap_before)
+        var l_capb: [u8; 42] = "HBA reset changed CAP, restored; CAP now \0"
+        klog.sayh(state, klog.L_INFO, ahci_state.lq(), (&l_capb[0]) as u64, regio.read32_at(b, ahci_defs.R_CAP))
+    }
+    if pi_before != 0 && regio.read32_at(b, R_PI) != pi_before {
+        var l_pib: [u8; 32] = "HBA reset changed PI (before): \0"
+        klog.sayh(state, klog.L_INFO, ahci_state.lq(), (&l_pib[0]) as u64, pi_before)
+        regio.write32_at(b, R_PI, pi_before)
+    }
+
+    let pi: u64 = regio.read32_at(b, R_PI)
+    kstate.set(state, ahci_state.sc(ahci_defs.S_PI), pi)
+    ahci_hba.log_hba(state, b, pi)
+    if pi == 0 {
+        kstate.set(state, ahci_state.sc(ahci_defs.S_WHY), 7)
+        return false
+    }
+    ahci_hba.intel_ports_enable(state, idx, pi)
+
+    let p: u64 = ahci_scan.find_disk(state, pi)
+    if p >= 32 {
+        kstate.set(state, ahci_state.sc(ahci_defs.S_WHY), 8)
+        return false
+    }
+    kstate.set(state, ahci_state.sc(ahci_defs.S_PORT), p)
+
+    if !ahci_port.port_setup(state, p) {
+        kstate.set(state, ahci_state.sc(ahci_defs.S_WHY), 9)
+        return false
+    }
+    if !ahci_ident.identify(state) {
+        kstate.set(state, ahci_state.sc(ahci_defs.S_WHY), 10)
+        return false
+    }
+    ahci_wait.irq_enable(state, b, p)
+    kstate.set(state, ahci_state.sc(ahci_defs.S_READY), 1)
+    return true
+}

@@ -1,0 +1,1005 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import fuiapp.hostax
+import fuiapp.hosthead
+import fuiapp.hostwin
+import fuiapp.hostwinp
+import msg
+import fuiapp.svcclip
+import uikit.uiscale
+import uikit.uitext
+import ulib
+import libc.clockapi
+import uitheme
+import uikit.uiglyph
+import xfer
+import fuiapp.hostui.hostbase
+import fuiapp.hostui.hostdraw
+import fuiapp.hostui.hostevent
+import fuiapp.hostui.hoststate
+import fuiapp.hostui.hostwidget
+import uikit.uisys
+
+const K_DROP: u64 = 18
+
+const K_DRAG: u64 = 19
+
+const LE_UP: u64 = 2
+
+static mut s_dragwd: u64 = 0
+
+static mut s_ticks: u64 = 0
+
+const AN_MENU: u64 = 3
+
+const AN_HOVER: u64 = 4
+
+static mut ev: [u8; 16] = [0 as u8; 16]
+
+fn on_up(w: u64, x: u64, y: u64) {
+    s_dragwd = 0
+    if hostbase.s_zugwin != 0 {
+        hostevent.zug_zu()
+    }
+    if hostbase.s_zugziel != 0 {
+        let zalt: u64 = hostbase.s_zugziel - 1
+        hostbase.s_zugziel = 0
+        hoststate.dirty_wd(zalt)
+    }
+
+    if hostbase.s_dropan != 0 && svcclip.drag_an() {
+        let d: u64 = hostwidget.hit_at(w, x, y)
+        if d < hostbase.MAXWD {
+            let kd: u64 = hoststate.g(d, hostbase.D_KIND)
+            var line: u64 = hostbase.MAXWD
+            if kd == hostbase.K_LIST || kd == hostbase.K_TABLE {
+                line = hostevent.row_under(d, y)
+            }
+            hostbase.s_drops = hostbase.s_drops + 1
+            hostbase.s_down = 0
+            hostbase.s_dropx = x
+            hostbase.s_dropy = y
+            hostdraw.fire(d, K_DROP, line, w)
+            return
+        }
+    }
+    if hostbase.s_down != 0 {
+        let i: u64 = hostbase.s_down - 1
+        hostbase.s_down = 0
+        if hoststate.g(i, hostbase.D_KIND) == hostbase.K_CANVAS {
+            hoststate.lw_push(i, LE_UP, (hoststate.sub(x, hoststate.g(i, hostbase.D_X)) << 16) | hoststate.sub(y, hoststate.g(i, hostbase.D_Y)),
+                0)
+            return
+        }
+        if hoststate.g(i, hostbase.D_KIND) == hostbase.K_SLIDER {
+            hoststate.s(i, hostbase.D_FLAGS, hoststate.g(i, hostbase.D_FLAGS) & ~hostbase.F_PRESSED)
+            hoststate.dirty_wd(i)
+            hostdraw.fire(i, hostbase.K_SLIDER, hoststate.g(i, hostbase.D_VAL), w)
+            return
+        }
+        if hoststate.g(i, hostbase.D_KIND) == hostbase.K_IMAGE {
+            hostdraw.fire(i, hostbase.K_IMAGE, 0, w)
+            return
+        }
+        if hoststate.g(i, hostbase.D_KIND) == hostbase.K_BUTTON {
+            hoststate.s(i, hostbase.D_FLAGS, hoststate.g(i, hostbase.D_FLAGS) & ~hostbase.F_PRESSED)
+            hoststate.dirty_wd(i)
+            if hostwidget.hit_at(w, x, y) == i {
+                hostdraw.fire(i, hostbase.K_BUTTON, 0, w)
+            }
+        }
+    }
+}
+
+fn on_move(w: u64, x: u64, y: u64, btn: u64) {
+    if hoststate.ng(w, hostbase.N_KIND) == hostbase.NK_MENU {
+        let zh: u64 = hoststate.lines_height() + 2
+        var k: u64 = hoststate.ng(w, hostbase.N_CNT)
+        if y >= 2 {
+            k = (y - 2) / zh
+        }
+        if k < hoststate.ng(w, hostbase.N_CNT) && hoststate.ng(w, hostbase.N_VAL) != k + 1 {
+            hoststate.ns(w, hostbase.N_VAL, k + 1)
+            hoststate.dirty_all(w)
+        }
+        return
+    }
+
+    if hostbase.s_zugwin != 0 {
+        hostevent.zug_zieh(hoststate.ng(w, hostbase.N_X) + x, hoststate.ng(w, hostbase.N_Y) + y)
+        var zz: u64 = 0
+        if hostbase.s_dropan != 0 {
+            let dz: u64 = hostwidget.hit_at(w, x, y)
+            if dz < hostbase.MAXWD && (hoststate.g(dz, hostbase.D_KIND) == hostbase.K_LIST
+                || hoststate.g(dz, hostbase.D_KIND) == hostbase.K_TABLE || hoststate.g(dz, hostbase.D_KIND) == hostbase.K_TILE) {
+                zz = dz + 1
+            }
+        }
+        if zz != hostbase.s_zugziel {
+            if hostbase.s_zugziel != 0 {
+                hoststate.dirty_wd(hostbase.s_zugziel - 1)
+            }
+            hostbase.s_zugziel = zz
+            if hostbase.s_zugziel != 0 {
+                hoststate.dirty_wd(hostbase.s_zugziel - 1)
+            }
+        }
+    }
+    let i: u64 = hostwidget.hit_at(w, x, y)
+    if i < hostbase.MAXWD && hoststate.g(i, hostbase.D_KIND) == hostbase.K_CANVAS {
+        hoststate.lw_push(i, hostbase.LE_MOVE, ((x - hoststate.g(i, hostbase.D_X)) << 16) | (y - hoststate.g(i, hostbase.D_Y)), btn)
+    }
+    if i < hostbase.MAXWD && hoststate.g(i, hostbase.D_KIND) == hostbase.K_ENTRY && hostwidget.eye_hit(i, x) {
+        uiglyph.cursor_shape(2)
+    } else if i < hostbase.MAXWD && hoststate.g(i, hostbase.D_KIND) == hostbase.K_ENTRY {
+        uiglyph.cursor_shape(1)
+    } else if i < hostbase.MAXWD && hostwidget.anklickbar(i) {
+        uiglyph.cursor_shape(2)
+    } else if i < hostbase.MAXWD && hoststate.g(i, hostbase.D_KIND) == hostbase.K_CANVAS && uiglyph.cursor_scene() {
+
+        let _keep: u64 = 0
+    } else {
+        uiglyph.cursor_shape(0)
+    }
+    if hostbase.s_down != 0 && (btn & 1) != 0 {
+        let dd: u64 = hostbase.s_down - 1
+        if hoststate.g(dd, hostbase.D_KIND) == hostbase.K_TEXTAREA {
+            let ty: u64 = hoststate.g(dd, hostbase.D_VAL)
+            if ty < hostbase.TA_MAX {
+                let ay: u64 = hostdraw.tag(ty, hostbase.TS_AY)
+                let ax: u64 = hostdraw.tag(ty, hostbase.TS_AX)
+                hostdraw.ta_hit(dd, x, y)
+                hostdraw.tas(ty, hostbase.TS_AY, ay)
+                hostdraw.tas(ty, hostbase.TS_AX, ax)
+                hoststate.dirty_wd(dd)
+            }
+            return
+        }
+        if hoststate.g(dd, hostbase.D_KIND) == hostbase.K_SLIDER {
+            hoststate.slider_set(dd, x)
+            hostdraw.fire(dd, hostbase.K_SLIDER, hoststate.g(dd, hostbase.D_VAL), w)
+            return
+        }
+        if hoststate.g(dd, hostbase.D_KIND) == hostbase.K_IMAGE {
+            if hoststate.g(dd, hostbase.D_WZ) == 1 {
+                hostbase.s_aus_x1 = hoststate.image_px(dd, x)
+                hostbase.s_aus_y1 = hoststate.image_py(dd, y)
+                hoststate.dirty_wd(dd)
+                return
+            }
+            hoststate.image_pan(dd, x -% hostbase.s_dragx, y -% hostbase.s_dragy)
+            hostbase.s_dragx = x
+            hostbase.s_dragy = y
+            return
+        }
+
+        let kz: u64 = hoststate.g(dd, hostbase.D_KIND)
+        if (kz == hostbase.K_LIST || kz == hostbase.K_TABLE) && hoststate.g(dd, hostbase.D_SELP) != 0 {
+            let r: u64 = hostevent.row_under(dd, y)
+            if r < hostbase.MAXWD && r != hoststate.g(dd, hostbase.D_VAL) {
+
+                if hostbase.s_dropan != 0 && s_dragwd == 0 {
+                    s_dragwd = dd + 1
+                    hostbase.s_drags = hostbase.s_drags + 1
+                    hostevent.zug_auf(hostwidget.zug_name_von(dd, hostwidget.sel_anker_von(dd)),
+                        hoststate.ng(w, hostbase.N_X) + x, hoststate.ng(w, hostbase.N_Y) + y)
+                    hostdraw.fire(dd, K_DRAG, hostwidget.sel_anker_von(dd), w)
+                } else {
+                    hostwidget.sel_bereich(dd, r)
+                    hoststate.s(dd, hostbase.D_VAL, r)
+                    hostbase.s_frame = hostbase.s_frame + 1
+                    hoststate.dirty_wd(dd)
+                }
+            }
+            return
+        }
+    }
+    if hostbase.s_down != 0 && (btn & 1) != 0 {
+        let d: u64 = hostbase.s_down - 1
+        if hoststate.g(d, hostbase.D_KIND) == hostbase.K_ENTRY {
+            let p: u64 = hoststate.g(d, hostbase.D_TEXT)
+            let n: u64 = hoststate.tlen(p)
+            var at: u64 = 0
+            var fertig: bool = false
+            while at < n && !fertig {
+                let w2: u64 = at + hostdraw.cp_len(p, n, at)
+                if hoststate.entry_x(d, w2) > x {
+                    fertig = true
+                } else {
+                    at = w2
+                }
+            }
+            if at != hoststate.g(d, hostbase.D_B) {
+                hoststate.s(d, hostbase.D_B, at)
+                hoststate.dirty_wd(d)
+            }
+            return
+        }
+    }
+    var k2: u64 = 0
+    while k2 < hostbase.nwd {
+        if hoststate.g(k2, hostbase.D_WIN) == w {
+            let alt: bool = (hoststate.g(k2, hostbase.D_FLAGS) & hostbase.F_HOVER) != 0
+            let created: bool = k2 == i
+            if alt != created {
+                if created {
+                    hoststate.s(k2, hostbase.D_FLAGS, hoststate.g(k2, hostbase.D_FLAGS) | hostbase.F_HOVER)
+                    let _a1: u64 = hostwidget.anim_start(AN_HOVER, hoststate.g(k2, hostbase.D_WIN),
+                        k2, uitheme.MO_FAST, hostbase.EASE_OUT)
+                } else {
+                    hoststate.s(k2, hostbase.D_FLAGS, hoststate.g(k2, hostbase.D_FLAGS) & ~hostbase.F_HOVER)
+                    let _a2: u64 = hostwidget.anim_start(AN_HOVER, hoststate.g(k2, hostbase.D_WIN),
+                        k2, uitheme.MO_FAST, hostbase.EASE_OUT)
+                }
+                if hoststate.g(k2, hostbase.D_KIND) == hostbase.K_BUTTON {
+                    hoststate.dirty_wd(k2)
+                }
+            }
+        }
+        k2 = k2 + 1
+    }
+}
+
+fn menu_open(owner: u64, sx: u64, sy: u64, items: u64, n: u64) -> u64 {
+    if hostbase.mn_win != 0xFFFFFFFFFFFFFFFF {
+        return hostbase.MAXWN
+    }
+
+    var title: [u8; 6] = "Menu\0\0"
+    var tp: u64 = (&title[0 as usize]) as u64
+    if hostbase.mn_title != 0 {
+        tp = hostbase.mn_title
+    }
+    let zh: u64 = hoststate.lines_height() + 2
+    var bw: u64 = 60
+    var k: u64 = 0
+    while k < n {
+        let q: u64 = hoststate.row_at(items, k)
+        if q != 0 {
+            let tw: u64 = uitext.text_w(uitext.F_UI, uiscale.px_ui(), q,
+                hoststate.row_len(q)) + 24
+            if tw > bw {
+                bw = tw
+            }
+        }
+        k = k + 1
+    }
+    let bh: u64 = n * zh + 4
+
+    var y: u64 = sy
+    if y + bh + 4 > hosthead.screen_h() {
+        y = hoststate.sub(sy, bh + 4)
+    }
+    var x: u64 = sx
+    if x + bw + 4 > hosthead.screen_w() {
+        x = hoststate.sub(hosthead.screen_w(), bw + 4)
+    }
+    let w: u64 = hostevent.new_win(x, y, bw, bh, tp, hostbase.NK_MENU)
+
+    if w < hostbase.MAXWN {
+        let _wd: u64 = hostwin.win_state(hoststate.ng(w, hostbase.N_H), hostwinp.WS_DECO, 0)
+        let _wl: u64 = hostwin.win_state(hoststate.ng(w, hostbase.N_H), hostwinp.WS_LAYER,
+            hostwinp.L_POPUP)
+        let _wk: u64 = hostwin.win_state(hoststate.ng(w, hostbase.N_H), hostwinp.WS_KEYS, 1)
+        hostevent.menu_an_arbeit(w, sy, bh)
+        hoststate.say_window(w)
+    }
+    let _a4: u64 = hostwidget.anim_start(AN_MENU, w, hostbase.MAXWD, uitheme.MO_FAST,
+        hostbase.EASE_OUT)
+    if w >= hostbase.MAXWN {
+        return hostbase.MAXWN
+    }
+    hoststate.ns(w, hostbase.N_DATA, items)
+    hoststate.ns(w, hostbase.N_CNT, n)
+    hoststate.ns(w, hostbase.N_VAL, 0)
+    hoststate.ns(w, hostbase.N_OWNER, owner)
+    hostbase.mn_win = w
+    hostbase.mn_res = 0xFFFFFFFFFFFFFFFF
+    hoststate.dirty_all(w)
+    return w
+}
+
+fn dlg_open(title: u64, ask: u64, cur_begin: u64) -> u64 {
+    return dlg_new(title, ask, cur_begin, true)
+}
+
+fn dlg_ask(title: u64, ask: u64) -> u64 {
+    return dlg_new(title, ask, 0, false)
+}
+
+static mut d_ok: [u8; 10] = "dialog.ok\0"
+
+static mut d_ja: [u8; 11] = "dialog.yes\0"
+
+static mut d_ab: [u8; 14] = "dialog.cancel\0"
+
+static mut d_nein: [u8; 10] = "dialog.no\0"
+
+fn dlg_new(title: u64, ask: u64, cur_begin: u64, with_field: bool) -> u64 {
+    if hostbase.dl_win != 0xFFFFFFFFFFFFFFFF {
+        return hostbase.MAXWN
+    }
+    let bw: u64 = 340
+    let d_pad: u64 = 12
+    let d_gap: u64 = 10
+    let d_th: u64 = hoststate.r4auf(uitext.text_h(uiscale.px_ui()))
+    let d_ch: u64 = hoststate.r4auf(uitheme.metric(uitheme.M_CTRL_H))
+    let d_kh: u64 = hoststate.r4auf(uitheme.metric(uitheme.M_CTRL_H) + 2)
+    var d_inhalt: u64 = d_th + d_gap
+    if with_field {
+        d_inhalt = d_inhalt + d_ch + d_gap
+    }
+    let bh: u64 = d_pad + d_inhalt + d_kh + d_pad
+    let x: u64 = hoststate.sub(hosthead.screen_w(), bw) / 2
+    let y: u64 = hoststate.sub(hosthead.screen_h(), bh) / 2
+    let w: u64 = hostevent.new_win(x, y, bw, bh, title, hostbase.NK_DLG)
+    if w >= hostbase.MAXWN {
+        return hostbase.MAXWN
+    }
+    hostbase.dl_win = w
+    hostbase.dl_state = 1
+    var i: u64 = 0
+    while i < 160 {
+        hostbase.dlgbuf[(i) as usize] = 0 as u8
+        i = i + 1
+    }
+    if cur_begin != 0 {
+        ulib.strncpy((&hostbase.dlgbuf[0 as usize]) as u64, cur_begin, 158)
+    }
+    hoststate.box_v(w, 0, 0, bw, bh, d_pad, d_gap)
+    hoststate.size(0, uitext.text_h(uiscale.px_ui()))
+    hostbase.dl_lbl = hostwidget.label(ask)
+    hostbase.dl_ent = hostbase.MAXWD
+    if with_field {
+        hoststate.size(0, uitheme.metric(uitheme.M_CTRL_H))
+        hostbase.dl_ent = hostwidget.entry((&hostbase.dlgbuf[0 as usize]) as u64, 158)
+        hoststate.set_focus(hostbase.dl_ent)
+    }
+    let bottom: u64 = hoststate.cg(hostbase.ctcur, hostbase.C_CY)
+    hoststate.box_end()
+    let d_kluft: u64 = uitheme.metric(uitheme.M_GAP)
+    let d_kw: u64 = hoststate.dlg_btn_w()
+    let d_reihe: u64 = d_kw * 2 + d_kluft
+    hoststate.box_h(w, hoststate.sub(bw, d_reihe + d_pad), bottom, d_reihe, d_kh, 0, d_kluft)
+    hoststate.size(hoststate.dlg_btn_w(), uitheme.metric(uitheme.M_CTRL_H) + 2)
+    if with_field {
+        hostbase.dl_ok = hostwidget.button(msg.get((&d_ok[0 as usize]) as u64))
+    } else {
+        hostbase.dl_ok = hostwidget.button(msg.get((&d_ja[0 as usize]) as u64))
+    }
+    hoststate.size(hoststate.dlg_btn_w(), uitheme.metric(uitheme.M_CTRL_H) + 2)
+    if with_field {
+        hostbase.dl_no = hostwidget.button(msg.get((&d_ab[0 as usize]) as u64))
+    } else {
+        hostbase.dl_no = hostwidget.button(msg.get((&d_nein[0 as usize]) as u64))
+    }
+    hoststate.box_end()
+    hoststate.dirty_all(w)
+    return w
+}
+
+const DLG_MAXB: u64 = 4
+
+static mut dl_btn: [u64; 4] = [0 as u64; 4]
+
+static mut dl_choice: u64 = 0xFFFF
+
+static mut dw_buf: [u8; 256] = [0 as u8; 256]
+
+static mut dw_off: [u64; 4] = [0 as u64; 4]
+
+fn dlg_choice_at() -> u64 {
+    return dl_choice
+}
+
+fn dlg_hinweis(title: u64, ask: u64) -> u64 {
+    return dlg_choice(title, ask, 0, 1)
+}
+
+fn dlg_choice(title: u64, ask: u64, block: u64, n: u64) -> u64 {
+    if hostbase.dl_win != 0xFFFFFFFFFFFFFFFF {
+        return hostbase.MAXWN
+    }
+    var nk: u64 = n
+    if nk == 0 {
+        nk = 1
+    }
+    if nk > DLG_MAXB {
+        nk = DLG_MAXB
+    }
+    var p: u64 = 0
+    var i: u64 = 0
+    while i < nk {
+        dw_off[(i) as usize] = p
+        let q: u64 = hoststate.row_at(block, i)
+        if q != 0 {
+            let l: u64 = hoststate.row_len(q)
+            var k: u64 = 0
+            while k < l && p < 250 {
+                dw_buf[(p) as usize] = __mmio_read8((q + k) as *mut u8)
+                p = p + 1
+                k = k + 1
+            }
+        }
+        dw_buf[(p) as usize] = 0 as u8
+        p = p + 1
+        i = i + 1
+    }
+    let d_pad: u64 = 12
+    let d_gap: u64 = 10
+    let d_th: u64 = hoststate.r4auf(uitext.text_h(uiscale.px_ui()))
+    let d_kh: u64 = hoststate.r4auf(uitheme.metric(uitheme.M_CTRL_H) + 2)
+    let d_kluft: u64 = uitheme.metric(uitheme.M_GAP)
+    let d_kw: u64 = hoststate.dlg_btn_w()
+    let d_reihe: u64 = d_kw * nk + d_kluft * hoststate.sub(nk, 1)
+    var bw: u64 = 340
+    if d_reihe + 2 * d_pad > bw {
+        bw = d_reihe + 2 * d_pad
+    }
+    let bh: u64 = d_pad + d_th + d_gap + d_kh + d_pad
+    let x: u64 = hoststate.sub(hosthead.screen_w(), bw) / 2
+    let y: u64 = hoststate.sub(hosthead.screen_h(), bh) / 2
+    let w: u64 = hostevent.new_win(x, y, bw, bh, title, hostbase.NK_DLG)
+    if w >= hostbase.MAXWN {
+        return hostbase.MAXWN
+    }
+    hostbase.dl_win = w
+    hostbase.dl_state = 1
+    dl_choice = 0xFFFF
+    hostbase.dl_nb = nk
+    hostbase.dl_ent = hostbase.MAXWD
+    hoststate.box_v(w, 0, 0, bw, bh, d_pad, d_gap)
+    hoststate.size(0, uitext.text_h(uiscale.px_ui()))
+    hostbase.dl_lbl = hostwidget.label(ask)
+    let bottom: u64 = hoststate.cg(hostbase.ctcur, hostbase.C_CY)
+    hoststate.box_end()
+    hoststate.box_h(w, hoststate.sub(bw, d_reihe + d_pad), bottom, d_reihe, d_kh, 0, d_kluft)
+    i = 0
+    while i < nk {
+        var txt: u64 = msg.get((&d_ok[0 as usize]) as u64)
+        if block != 0 {
+            txt = (&dw_buf[0 as usize]) as u64 + dw_off[(i) as usize]
+        }
+        hoststate.size(d_kw, uitheme.metric(uitheme.M_CTRL_H) + 2)
+        dl_btn[(i) as usize] = hostwidget.button(txt)
+        i = i + 1
+    }
+    hoststate.box_end()
+    hostbase.dl_ok = dl_btn[(0) as usize]
+    hostbase.dl_no = dl_btn[(0) as usize]
+    if nk > 1 {
+        hostbase.dl_no = dl_btn[(hoststate.sub(nk, 1)) as usize]
+    }
+    hoststate.dirty_all(w)
+    return w
+}
+
+const IDLE_SPIN: u64 = 200
+
+const IDLE_DEEP: u64 = 300
+
+static mut s_idle_run: u64 = 0
+
+fn step() -> u64 {
+    let _served: u64 = xfer.pump()
+    hostbase.s_fired = 0
+    hostbase.s_fkind = 0
+    hostbase.s_findex = 0
+    s_ticks = s_ticks + 1
+    var etwas: bool = false
+    var w: u64 = 0
+    while w < hostbase.nwn {
+        if hoststate.ng(w, hostbase.N_H) != 0 {
+            var n: u64 = 0
+            while n < 64 && uisys.sys3w(hostwinp.WM_EVENT, hoststate.ng(w, hostbase.N_H),
+                (&ev[0 as usize]) as u64, 0) == 1 {
+                etwas = true
+                n = n + 1
+                let b: u64 = (&ev[0 as usize]) as u64
+                let typ: u64 = __mmio_read64((b) as *mut u64)
+                let d: u64 = __mmio_read64((b + 8) as *mut u64)
+                let ex: u64 = (d >> 32) & 0xFFFF
+                let ey: u64 = (d >> 16) & 0xFFFF
+                let btn: u64 = d & 0xFFFF
+                if typ == hostwinp.EV_DOWN {
+                    hostevent.on_down(w, ex, ey, btn)
+                } else if typ == hostwinp.EV_UP {
+                    on_up(w, ex, ey)
+                } else if typ == hostwinp.EV_MOVE {
+                    on_move(w, ex, ey, btn)
+                } else if typ == hostwinp.EV_KEY {
+                    hostevent.on_key(w, ex)
+                } else if typ == hostwinp.EV_WHEEL {
+                    hostdraw.on_wheel(w, ex, ey, btn)
+                } else if typ == hostwinp.EV_HWHEEL {
+                    hostdraw.on_hwheel(w, ex, ey, btn)
+                } else if typ == hostax.EV_AXPRESS {
+                    ax_on_press(w, ex)
+                } else if typ == hostwinp.EV_CLOSE && w == hostbase.mn_win {
+                    hostbase.mn_res = 0xFFFF
+                } else if typ == hostwinp.EV_CLOSE {
+                    hoststate.ns(w, hostbase.N_H, 0)
+                    if w == hostbase.dl_win {
+                        hostbase.dl_state = 3
+                    } else if hoststate.ng(w, hostbase.N_KIND) == hostbase.NK_MAIN {
+                        hostbase.s_alive = 0
+                    }
+                } else if typ == hostwinp.EV_RESIZE {
+                    hoststate.ns(w, hostbase.N_W, ex)
+                    hoststate.ns(w, hostbase.N_HH, ey)
+                    hostwidget.relayout()
+                    hoststate.dirty_all(w)
+                    hostbase.s_reseq = hostbase.s_reseq + 1
+                }
+            }
+            hostevent.esc_spuelen(w)
+        }
+        w = w + 1
+    }
+    if hostbase.mn_win != 0xFFFFFFFFFFFFFFFF && hostbase.s_fired != 0 {
+        if hostbase.s_fwin == hostbase.mn_win {
+            hostbase.mn_res = hostbase.s_findex
+            let besitzer: u64 = hostbase.s_fired - 1
+            hostevent.menu_close()
+            if hostbase.mn_res == 0xFFFF {
+                hostbase.s_fired = 0
+            } else {
+                hostbase.s_fired = besitzer + 1
+                hostbase.s_fkind = hostbase.K_MENUBAR
+                hostbase.s_findex = hostbase.mn_res
+            }
+        }
+    }
+    if hostbase.dl_win != 0xFFFFFFFFFFFFFFFF && hostbase.s_fired != 0 {
+        let i: u64 = hostbase.s_fired - 1
+        var b: u64 = 0
+        while b < hostbase.dl_nb {
+            if i == dl_btn[(b) as usize] {
+                dl_choice = b
+                hostbase.dl_state = 2
+                hostbase.s_fired = 0
+            }
+            b = b + 1
+        }
+        if hostbase.dl_nb == 0 {
+            if i == hostbase.dl_ok {
+                hostbase.dl_state = 2
+                hostbase.s_fired = 0
+            } else if i == hostbase.dl_no {
+                hostbase.dl_state = 3
+                hostbase.s_fired = 0
+            } else if i == hostbase.dl_ent && hostbase.s_fkind == hostbase.K_ENTRY {
+                hostbase.dl_state = 2
+                hostbase.s_fired = 0
+            }
+        }
+    }
+    let gewechselt: bool = hostevent.theme_watch()
+    let laufend: u64 = hostwidget.anim_tick()
+    hoststate.blink_tick()
+    let gemalt: u64 = hostevent.paint_all()
+    if gewechselt {
+        hostbase.s_thpx = hostbase.s_thpx + gemalt
+    }
+
+    ax_tick(etwas || gemalt != 0)
+    if !etwas && gemalt == 0 && laufend == 0 {
+        s_idle_run = s_idle_run + 1
+        if hostbase.s_idle_sleep != 0 && s_idle_run > IDLE_SPIN {
+
+            if s_idle_run > IDLE_SPIN + IDLE_DEEP {
+                let _sd: u64 = clockapi.sleep_ms(40)
+            } else {
+                let _sl: u64 = clockapi.sleep_ms(8)
+            }
+        } else {
+            ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+        }
+    } else {
+        s_idle_run = 0
+    }
+    if hostbase.s_fired == 0 {
+        return hostbase.MAXWD
+    }
+    return hostbase.s_fired - 1
+}
+
+const AXN_BYTES: u64 = hostax.AXN_BYTES
+
+const AXN_NAME: u64 = hostax.AXN_NAME
+
+const AXN_NAMEMAX: u64 = hostax.AXN_NAMEMAX
+
+const AXN_ACT: u64 = hostax.AXN_ACT
+
+const AXN_ACTMAX: u64 = hostax.AXN_ACTMAX
+
+const AXN_MAX: u64 = hostax.AXN_MAX
+
+const AXR_WINDOW: u64 = hostax.AXR_WINDOW
+
+const AXR_LABEL: u64 = hostax.AXR_LABEL
+
+const AXR_BUTTON: u64 = hostax.AXR_BUTTON
+
+const AXR_CHECK: u64 = hostax.AXR_CHECK
+
+const AXR_ENTRY: u64 = hostax.AXR_ENTRY
+
+const AXR_PASSWORD: u64 = hostax.AXR_PASSWORD
+
+const AXR_LIST: u64 = hostax.AXR_LIST
+
+const AXR_TABLE: u64 = hostax.AXR_TABLE
+
+const AXR_TAB: u64 = hostax.AXR_TAB
+
+const AXR_MENUBAR: u64 = hostax.AXR_MENUBAR
+
+const AXR_CHOICE: u64 = hostax.AXR_CHOICE
+
+const AXR_SEPARATOR: u64 = hostax.AXR_SEPARATOR
+
+const AXR_SCROLLBAR: u64 = hostax.AXR_SCROLLBAR
+
+const AXR_MENU: u64 = hostax.AXR_MENU
+
+const AXR_DIALOG: u64 = hostax.AXR_DIALOG
+
+const AXR_SLIDER: u64 = hostax.AXR_SLIDER
+
+const AXS_ENABLED: u64 = hostax.AXS_ENABLED
+
+const AXS_FOCUSABLE: u64 = hostax.AXS_FOCUSABLE
+
+const AXS_FOCUSED: u64 = hostax.AXS_FOCUSED
+
+const AXS_HIDDEN: u64 = hostax.AXS_HIDDEN
+
+const AXS_CHECKED: u64 = hostax.AXS_CHECKED
+
+const AXS_PROTECTED: u64 = hostax.AXS_PROTECTED
+
+const AX_SIDE: u64 = 32
+
+static mut ax_buf: [u8; 21504] = [0 as u8; 21504]
+
+static mut ax_nm_wd: [u64; 32] = [0 as u64; 32]
+
+static mut ax_nm_p: [u64; 32] = [0 as u64; 32]
+
+static mut ax_ac_wd: [u64; 32] = [0 as u64; 32]
+
+static mut ax_ac_p: [u64; 32] = [0 as u64; 32]
+
+static mut ax_on: u64 = 0
+
+static mut ax_onpoll: u64 = 0
+
+static mut ax_hash: u64 = 0
+
+static mut ax_step: u64 = 0
+
+fn ax_side_set(tw: u64, tp: u64, i: u64, p: u64) {
+    var k: u64 = 0
+    var free: u64 = AX_SIDE
+    while k < AX_SIDE {
+        let at: u64 = *((tw + k * 8) as *mut u64)
+        if at == i + 1 {
+            *((tp + k * 8) as *mut u64) = p
+            return
+        }
+        if at == 0 && free == AX_SIDE {
+            free = k
+        }
+        k = k + 1
+    }
+    if free < AX_SIDE {
+        *((tw + free * 8) as *mut u64) = i + 1
+        *((tp + free * 8) as *mut u64) = p
+    }
+}
+
+fn ax_side_get(tw: u64, tp: u64, i: u64) -> u64 {
+    var k: u64 = 0
+    while k < AX_SIDE {
+        if *((tw + k * 8) as *mut u64) == i + 1 {
+            return *((tp + k * 8) as *mut u64)
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+fn ax_name(i: u64, txt: u64) {
+    if i < hostbase.MAXWD {
+        ax_side_set((&ax_nm_wd[0 as usize]) as u64,
+            (&ax_nm_p[0 as usize]) as u64, i, txt)
+    }
+}
+
+fn ax_action(i: u64, name: u64) {
+    if i < hostbase.MAXWD {
+        ax_side_set((&ax_ac_wd[0 as usize]) as u64,
+            (&ax_ac_p[0 as usize]) as u64, i, name)
+    }
+}
+
+fn ax_role(i: u64) -> u64 {
+    let k: u64 = hoststate.g(i, hostbase.D_KIND)
+    if k == hostbase.K_LABEL {
+        return AXR_LABEL
+    }
+    if k == hostbase.K_BUTTON || k == hostbase.K_TILE {
+        return AXR_BUTTON
+    }
+    if k == hostbase.K_CHECK {
+        return AXR_CHECK
+    }
+    if k == hostbase.K_ENTRY || k == hostbase.K_TEXTAREA {
+        if (hoststate.g(i, hostbase.D_FLAGS) & (hostbase.F_SECRET | hostbase.F_PASSWORD)) != 0 {
+            return AXR_PASSWORD
+        }
+        return AXR_ENTRY
+    }
+    if k == hostbase.K_LIST {
+        return AXR_LIST
+    }
+    if k == hostbase.K_TABLE {
+        return AXR_TABLE
+    }
+    if k == hostbase.K_TABS {
+        return AXR_TAB
+    }
+    if k == hostbase.K_MENUBAR {
+        return AXR_MENUBAR
+    }
+    if k == hostbase.K_CHOICE {
+        return AXR_CHOICE
+    }
+    if k == hostbase.K_SEP {
+        return AXR_SEPARATOR
+    }
+    if k == hostbase.K_SCROLL {
+        return AXR_SCROLLBAR
+    }
+    if k == hostbase.K_SLIDER {
+        return AXR_SLIDER
+    }
+    return 0
+}
+
+fn ax_put(dst: u64, src: u64, max: u64) {
+    var k: u64 = 0
+    var end: bool = src == 0
+    while k < max {
+        var c: u8 = 0 as u8
+        if !end {
+            c = *((src + k) as *mut u8)
+
+            if c == 10 as u8 || c == 9 as u8 {
+                c = 0 as u8
+            }
+            if c == 0 as u8 {
+                end = true
+            }
+        }
+        if k + 1 == max {
+            c = 0 as u8
+        }
+        *((dst + k) as *mut u8) = c
+        k = k + 1
+    }
+}
+
+fn ax_clear(p: u64) {
+    var k: u64 = 0
+    while k < AXN_BYTES {
+        *((p + k) as *mut u64) = 0
+        k = k + 8
+    }
+}
+
+const AXP_BASE: u64 = hostax.AXP_BASE
+
+static mut ax_hooks: [u8; 16] = [0 as u8; 16]
+
+fn ax_hook_build() -> *mut fn(u64, u64, u64) -> u64 {
+    return ((&ax_hooks[0 as usize]) as u64) as *mut fn(u64, u64, u64) -> u64
+}
+
+fn ax_hook_press() -> *mut fn(u64) {
+    return (((&ax_hooks[0 as usize]) as u64) + 8) as *mut fn(u64)
+}
+
+fn ax_set_hooks(b: fn(u64, u64, u64) -> u64, p: fn(u64)) {
+    *ax_hook_build() = b
+    *ax_hook_press() = p
+}
+
+fn ax_build() -> u64 {
+    let b: u64 = (&ax_buf[0 as usize]) as u64
+    var n: u64 = 0
+    var w: u64 = 0
+    while w < hostbase.nwn && n < AXN_MAX {
+        if hoststate.ng(w, hostbase.N_H) != 0 {
+            let p: u64 = b + n * AXN_BYTES
+            ax_clear(p)
+            var r: u64 = AXR_WINDOW
+            if hoststate.ng(w, hostbase.N_KIND) == hostbase.NK_DLG {
+                r = AXR_DIALOG
+            } else if hoststate.ng(w, hostbase.N_KIND) == hostbase.NK_MENU {
+                r = AXR_MENU
+            }
+
+            let id: u64 = uisys.sys3w(hostwinp.WM_INFO, hoststate.ng(w, hostbase.N_H),
+                hostwinp.WI_ID, 0)
+            *((p) as *mut u64) = r | (AXS_ENABLED << 8) | (w << 16)
+            *((p + 8) as *mut u64) = (hoststate.ng(w, hostbase.N_W) & 0xFFFF) << 32
+                | ((hoststate.ng(w, hostbase.N_HH) & 0xFFFF) << 48)
+            *((p + 16) as *mut u64) = id
+            ax_put(p + AXN_NAME, (&hostbase.ax_wtitle[0 as usize]) as u64 + w * 40,
+                AXN_NAMEMAX)
+            n = n + 1
+        }
+        w = w + 1
+    }
+    var i: u64 = 0
+    while i < hostbase.nwd && n < AXN_MAX {
+        let role: u64 = ax_role(i)
+        let wi: u64 = hoststate.g(i, hostbase.D_WIN)
+        if role != 0 && wi < hostbase.nwn && hoststate.ng(wi, hostbase.N_H) != 0 {
+            let p: u64 = b + n * AXN_BYTES
+            ax_clear(p)
+            let fl: u64 = hoststate.g(i, hostbase.D_FLAGS)
+            var st: u64 = 0
+            if (fl & hostbase.F_OFF) == 0 {
+                st = st | AXS_ENABLED
+            }
+            if (fl & hostbase.F_FOCUSABLE) != 0 {
+                st = st | AXS_FOCUSABLE
+            }
+            if hostbase.s_focus == i + 1 {
+                st = st | AXS_FOCUSED
+            }
+            if (fl & hostbase.F_HIDE) != 0 {
+                st = st | AXS_HIDDEN
+            }
+            var value: u64 = 0
+            if role == AXR_CHECK {
+                if hoststate.g(i, hostbase.D_VAL) != 0 {
+                    st = st | AXS_CHECKED
+                    value = 1
+                }
+            } else if role == AXR_LIST || role == AXR_TABLE
+                || role == AXR_TAB || role == AXR_CHOICE
+                || role == AXR_SLIDER || role == AXR_MENUBAR {
+                value = hoststate.g(i, hostbase.D_VAL)
+            }
+            let nm: u64 = ax_side_get((&ax_nm_wd[0 as usize]) as u64,
+                (&ax_nm_p[0 as usize]) as u64, i)
+            if role == AXR_PASSWORD {
+
+                st = st | AXS_PROTECTED
+                value = 0
+                ax_put(p + AXN_NAME, nm, AXN_NAMEMAX)
+            } else if nm != 0 {
+                ax_put(p + AXN_NAME, nm, AXN_NAMEMAX)
+            } else if role != AXR_LIST && role != AXR_TABLE {
+                ax_put(p + AXN_NAME, hoststate.g(i, hostbase.D_TEXT), AXN_NAMEMAX)
+            }
+            ax_put(p + AXN_ACT, ax_side_get((&ax_ac_wd[0 as usize]) as u64,
+                (&ax_ac_p[0 as usize]) as u64, i), AXN_ACTMAX)
+            *((p) as *mut u64) = role | (st << 8) | (wi << 16) | (wi << 24)
+                | ((i & 0xFFFF) << 48)
+            *((p + 8) as *mut u64) = (hoststate.g(i, hostbase.D_X) & 0xFFFF)
+                | ((hoststate.g(i, hostbase.D_Y) & 0xFFFF) << 16)
+                | ((hoststate.g(i, hostbase.D_W) & 0xFFFF) << 32)
+                | ((hoststate.g(i, hostbase.D_H) & 0xFFFF) << 48)
+            *((p + 16) as *mut u64) = value
+            n = n + 1
+        }
+        i = i + 1
+    }
+    if *((&ax_hooks[0 as usize]) as *mut u64) != 0 && n < AXN_MAX {
+        let hb: fn(u64, u64, u64) -> u64 = *ax_hook_build()
+        n = n + hb(b + n * AXN_BYTES, n, AXN_MAX - n)
+    }
+    return n
+}
+
+fn ax_sum(n: u64) -> u64 {
+    let b: u64 = (&ax_buf[0 as usize]) as u64
+    var h: u64 = 0xCBF29CE484222325
+    var k: u64 = 0
+    while k < n * AXN_BYTES {
+        h = (h ^ *((b + k) as *mut u64)) *% 0x100000001B3
+        k = k + 8
+    }
+    return h ^ n
+}
+
+fn ax_flush() -> u64 {
+    if ax_on == 0 {
+        return 0
+    }
+    let n: u64 = ax_build()
+    let h: u64 = ax_sum(n)
+    if h == ax_hash {
+        return n
+    }
+    if ulib.bad(hostax.ax_begin()) {
+        return 0
+    }
+    let b: u64 = (&ax_buf[0 as usize]) as u64
+    var k: u64 = 0
+    while k < n {
+        var m: u64 = n - k
+        if m > 32 {
+            m = 32
+        }
+        let _t: u64 = hostax.ax_send(b + k * AXN_BYTES, m)
+        k = k + m
+    }
+    let _e: u64 = hostax.ax_end()
+    ax_hash = h
+    hostbase.ax_n = n
+    hostbase.ax_nflush = hostbase.ax_nflush + 1
+    return n
+}
+
+fn ax_tick(changed: bool) {
+    ax_step = ax_step + 1
+    var fresh: bool = false
+    if ax_step >= ax_onpoll {
+
+        ax_onpoll = ax_step + 4
+        var v: u64 = 0
+        if hostax.ax_info(hostax.AXI_ON) == 1 {
+            v = 1
+        }
+        if v != ax_on {
+            ax_on = v
+            ax_hash = 0
+            fresh = v == 1
+        }
+    }
+    if ax_on == 0 {
+        return
+    }
+    if changed || fresh || (ax_step & 15) == 0 {
+        let _n: u64 = ax_flush()
+    }
+}
+
+fn ax_on_press(w: u64, i: u64) {
+    if i >= AXP_BASE {
+        if *(((&ax_hooks[0 as usize]) as u64 + 8) as *mut u64) != 0 {
+            hostbase.ax_npress = hostbase.ax_npress + 1
+            let hp: fn(u64) = *ax_hook_press()
+            hp(i)
+        }
+        return
+    }
+    if i >= hostbase.nwd || hoststate.g(i, hostbase.D_WIN) != w {
+        return
+    }
+    let fl: u64 = hoststate.g(i, hostbase.D_FLAGS)
+    if (fl & (hostbase.F_OFF | hostbase.F_HIDE)) != 0 {
+        return
+    }
+    let k: u64 = hoststate.g(i, hostbase.D_KIND)
+    if k == hostbase.K_BUTTON || k == hostbase.K_TILE {
+        hostbase.ax_npress = hostbase.ax_npress + 1
+        hoststate.dirty_wd(i)
+        hostdraw.fire(i, k, 0, w)
+        return
+    }
+    if k == hostbase.K_CHECK {
+        hostbase.ax_npress = hostbase.ax_npress + 1
+        hoststate.s(i, hostbase.D_VAL, 1 - hoststate.g(i, hostbase.D_VAL))
+        hoststate.dirty_wd(i)
+        hostdraw.fire(i, hostbase.K_CHECK, hoststate.g(i, hostbase.D_VAL), w)
+    }
+}

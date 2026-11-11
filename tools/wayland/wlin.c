@@ -22,6 +22,8 @@
  *               partly outside the window), commit, roundtrip; prints `sub: up` / `sub: no wl_subcompositor`
  *   proto       bind wp_viewporter + zxdg_decoration_manager_v1: get_viewport + set_destination, get_toplevel_decoration + set_mode(client side),
  *               roundtrip; prints `proto: viewport ok deco-mode=<n>` (server must answer 2 = server side) or `proto: no viewporter/decoration`
+ *   seat2       bind wl_seat a second time (as Firefox does: GDK and nsWaylandDisplay) and log its events as `kb2 ...` / `ptr2 ...`;
+ *               the key 'x' releases the second keyboard + pointer (`seat2 released`)
  *   noseat      do not bind the seat (counter-proof: such a client gets no input at all)
  */
 #ifndef _GNU_SOURCE
@@ -57,7 +59,7 @@ static struct xdg_wm_base *wmbase;
 static struct wl_seat *seat;
 static struct wl_data_device_manager *ddm;
 static struct wl_subcompositor *subcomp;
-static int do_sub, do_proto;
+static int do_sub, do_proto, do_frame;
 static struct wp_viewporter *vporter;
 static struct zxdg_decoration_manager_v1 *decoman;
 static int deco_mode = -1;
@@ -70,7 +72,10 @@ static struct wl_buffer *buf;
 static struct wl_data_source *src;
 static struct wl_data_offer *cur_offer;
 static int configured, done;
-static int do_copy, do_paste, do_bad, no_seat;
+static int do_copy, do_paste, do_bad, no_seat, do_seat2;
+static struct wl_seat *seat_two;
+static struct wl_keyboard *kb_two;
+static struct wl_pointer *ptr_two;
 static const char *copy_text = "";
 static char offered[8][64];
 static int n_offered;
@@ -276,6 +281,13 @@ static void sysclip_get(const char *tag, int wait)
 static void kb_key(void *d, struct wl_keyboard *k, uint32_t s, uint32_t t, uint32_t key, uint32_t st)
 {
     say("key serial=%u key=%u state=%u", s, key, st);
+    if (st == 1 && key == 45 && kb_two) {
+        wl_keyboard_release(kb_two);
+        wl_pointer_release(ptr_two);
+        kb_two = NULL;
+        ptr_two = NULL;
+        say("seat2 released");
+    }
     if (st == 1 && key == 67) { /* F9: a NATIVE copy: the system clipboard is set by this process through the bus system call */
         const char *txt = "native-says-hi";
         long r = syscall(SYS_OSUM_BUS, 10, 1, txt, (long)strlen(txt), 0, 0);
@@ -347,6 +359,52 @@ static void p_axis_stop(void *d, struct wl_pointer *p, uint32_t t, uint32_t a) {
 static void p_axis_discrete(void *d, struct wl_pointer *p, uint32_t a, int32_t v) {}
 static const struct wl_pointer_listener p_l = { p_enter, p_leave, p_motion, p_button, p_axis, p_frame, p_axis_source, p_axis_stop, p_axis_discrete };
 
+/* ------------------------------------------------------ second seat binding */
+static void kb2_keymap(void *d, struct wl_keyboard *k, uint32_t fmt, int32_t fd, uint32_t size) { say("kb2 map fmt=%u size=%u", fmt, size); close(fd); }
+static void kb2_enter(void *d, struct wl_keyboard *k, uint32_t s, struct wl_surface *sf, struct wl_array *keys)
+{
+    say("kb2 enter serial=%u surface=%s", s, sf == surf ? "ours" : "other");
+}
+static void kb2_leave(void *d, struct wl_keyboard *k, uint32_t s, struct wl_surface *sf) { say("kb2 leave serial=%u", s); }
+static void kb2_key(void *d, struct wl_keyboard *k, uint32_t s, uint32_t t, uint32_t key, uint32_t st)
+{
+    say("kb2 key serial=%u key=%u state=%u", s, key, st);
+}
+static void kb2_mods(void *d, struct wl_keyboard *k, uint32_t s, uint32_t a, uint32_t b, uint32_t c, uint32_t g) {}
+static void kb2_repeat(void *d, struct wl_keyboard *k, int32_t rate, int32_t delay) {}
+static const struct wl_keyboard_listener kb2_l = { kb2_keymap, kb2_enter, kb2_leave, kb2_key, kb2_mods, kb2_repeat };
+static void p2_enter(void *d, struct wl_pointer *p, uint32_t s, struct wl_surface *sf, wl_fixed_t x, wl_fixed_t y)
+{
+    say("ptr2 enter serial=%u x=%d y=%d", s, wl_fixed_to_int(x), wl_fixed_to_int(y));
+}
+static void p2_leave(void *d, struct wl_pointer *p, uint32_t s, struct wl_surface *sf) { say("ptr2 leave serial=%u", s); }
+static void p2_motion(void *d, struct wl_pointer *p, uint32_t t, wl_fixed_t x, wl_fixed_t y)
+{
+    say("ptr2 motion x=%d y=%d", wl_fixed_to_int(x), wl_fixed_to_int(y));
+}
+static void p2_button(void *d, struct wl_pointer *p, uint32_t s, uint32_t t, uint32_t b, uint32_t st)
+{
+    say("ptr2 button button=%u state=%u", b, st);
+}
+static void p2_axis(void *d, struct wl_pointer *p, uint32_t t, uint32_t a, wl_fixed_t v)
+{
+    say("ptr2 axis axis=%u value=%d", a, wl_fixed_to_int(v));
+}
+static void p2_frame(void *d, struct wl_pointer *p) { say("ptr2 frame"); }
+static void p2_axis_source(void *d, struct wl_pointer *p, uint32_t s) {}
+static void p2_axis_stop(void *d, struct wl_pointer *p, uint32_t t, uint32_t a) {}
+static void p2_axis_discrete(void *d, struct wl_pointer *p, uint32_t a, int32_t v) {}
+static const struct wl_pointer_listener p2_l = { p2_enter, p2_leave, p2_motion, p2_button, p2_axis, p2_frame, p2_axis_source, p2_axis_stop, p2_axis_discrete };
+static void bind_second_seat(struct wl_registry *r, uint32_t n)
+{
+    seat_two = wl_registry_bind(r, n, &wl_seat_interface, seat_ver);
+    kb_two = wl_seat_get_keyboard(seat_two);
+    wl_keyboard_add_listener(kb_two, &kb2_l, NULL);
+    ptr_two = wl_seat_get_pointer(seat_two);
+    wl_pointer_add_listener(ptr_two, &p2_l, NULL);
+    say("seat2 bound");
+}
+
 /* ----------------------------------------------------------------- seat */
 static void seat_caps(void *d, struct wl_seat *s, uint32_t caps)
 {
@@ -400,6 +458,8 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t n, const char *i
         seat_ver = v < 5 ? v : 5;
         seat = wl_registry_bind(r, n, &wl_seat_interface, seat_ver);
         wl_seat_add_listener(seat, &seat_l, NULL);
+        if (do_seat2)
+            bind_second_seat(r, n);
     }
 }
 static void reg_remove(void *d, struct wl_registry *r, uint32_t n) {}
@@ -485,6 +545,65 @@ static struct wl_buffer *make_buffer(void)
     return b;
 }
 
+static int frame_done;
+static void frame_cb(void *d, struct wl_callback *cb, uint32_t t)
+{
+    frame_done++;
+    wl_callback_destroy(cb);
+}
+static const struct wl_callback_listener frame_l = { frame_cb };
+
+static long now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+static void pump_ms(struct wl_display *dpy, long ms)
+{
+    long end = now_ms() + ms;
+    while (now_ms() < end) {
+        struct pollfd pfd;
+        while (wl_display_prepare_read(dpy) != 0)
+            wl_display_dispatch_pending(dpy);
+        wl_display_flush(dpy);
+        pfd.fd = wl_display_get_fd(dpy);
+        pfd.events = POLLIN;
+        if (poll(&pfd, 1, 20) > 0)
+            wl_display_read_events(dpy);
+        else
+            wl_display_cancel_read(dpy);
+        wl_display_dispatch_pending(dpy);
+    }
+}
+
+static void run_frame(struct wl_display *dpy)
+{
+    long t0;
+    int n = 0;
+    struct wl_callback *cb = wl_surface_frame(surf);
+    wl_callback_add_listener(cb, &frame_l, NULL);
+    pump_ms(dpy, 500);
+    say("frame: before-commit done=%d", frame_done);
+    wl_surface_damage(surf, 0, 0, W, H);
+    wl_surface_commit(surf);
+    pump_ms(dpy, 1000);
+    say("frame: after-commit done=%d", frame_done);
+    t0 = now_ms();
+    while (now_ms() - t0 < 2000) {
+        int before = frame_done;
+        cb = wl_surface_frame(surf);
+        wl_callback_add_listener(cb, &frame_l, NULL);
+        wl_surface_damage(surf, 0, 0, W, H);
+        wl_surface_commit(surf);
+        while (frame_done == before && now_ms() - t0 < 2000)
+            pump_ms(dpy, 5);
+        n++;
+    }
+    say("frame: loop cycles=%d done=%d in 2000 ms", n, frame_done);
+}
+
 int main(int argc, char **argv)
 {
     const char *sock = argc > 1 ? argv[1] : "/tmp/wayland-0";
@@ -509,6 +628,10 @@ int main(int argc, char **argv)
             do_sub = 1;
         } else if (!strcmp(argv[i], "proto")) {
             do_proto = 1;
+        } else if (!strcmp(argv[i], "frame")) {
+            do_frame = 1;
+        } else if (!strcmp(argv[i], "seat2")) {
+            do_seat2 = 1;
         } else if (!strcmp(argv[i], "noseat")) {
             no_seat = 1;
         }
@@ -554,6 +677,8 @@ int main(int argc, char **argv)
     say("window up %dx%d", W, H);
     if (do_sub)
         make_subs(dpy);
+    if (do_frame)
+        run_frame(dpy);
     if (do_proto) {
         if (!vporter || !decoman) {
             say("proto: no viewporter/decoration");

@@ -173,7 +173,7 @@ hasnt "$OUT/d/serial.txt" "snipt: saved" "nothing saved for the bad region"
 
 echo
 echo "== 6. rules =="
-Z=$(cat kernel/user/snipt.fi kernel/user/snipgrab.fi kernel/user/snipsave.fi | grep -ac 'wlibc\.\(px\|rect\|rrect\|frame\|hline\|vline\|text\|glyph\|blit\)(' || true)
+Z=$(cat kernel/user/snipt.fi kernel/user/snipgrab.fi kernel/user/snipsave.fi | grep -ac 'uidraw\.\(px\|rect\|rrect\|frame\|hline\|vline\|text\|glyph\|blit\)(' || true)
 num "direct draw calls outside fuiscene" "$Z" eq 0
 
 echo

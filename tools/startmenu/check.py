@@ -65,7 +65,7 @@ def main(out):
     check(len(first) >= 3, "the pinned tiles are reported (%d)" % len(first))
     check("Widgets" not in first and "Search" not in first and "Suchen" not in first,
           "no Widgets demo and no Search entry among the tiles (%s)" % ", ".join(sorted(first)))
-    german = {"Programme", "Papierkorb", "Willkommen", "PDF-Betrachter", "Aufgabenverwaltung", "Datei-Explorer", "Einstellungen"}
+    german = {"Programme", "Papierkorb", "Willkommen", "PDF-Betrachter", "Task-Manager", "Datei-Explorer", "Einstellungen"}
     check(not (german & set(first)), "no German names mixed into the English menu (%s)" % ", ".join(sorted(german & set(first))))
     check(all(w == 100 and h == 88 for (_, _, w, h) in first.values()),
           "every pinned tile is 100 x 88")

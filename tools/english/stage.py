@@ -16,7 +16,7 @@ sys.path.insert(0,HERE)
 from firnlex import rename_code_only, spans
 
 TSV=os.path.join(HERE,'rename_final.tsv')
-LAST={'./kernel/user/wlib.fi','./kernel/user/wlibc.fi','./kernel/user/taskbar.fi','./kernel/user/fuib.fi'}
+LAST={'./kernel/user/taskbar.fi','./kernel/user/fuib.fi'}
 
 def group(files):
     fs=files.split(';')
@@ -34,7 +34,7 @@ def build(stage):
     all_rows=list(csv.DictReader(open(TSV),delimiter='\t'))
     if stage.startswith('FILE:'):
         # one single declaring file at a time -- used for the four reserved
-        # files (wlib, wlibc, taskbar, fuib), which come last and separately.
+        # files (taskbar, fuib), which come last and separately.
         want=stage[5:]
         rows=[r for r in all_rows if want in r['decl_files'].split(';')]
     else:

@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import block.blkperf
+import lib.kstate
+import lib.tscdelta
+import block.wlock
+import drv.blk.ahci.ahci_clock
+import drv.blk.ahci.ahci_cmd
+import drv.blk.ahci.ahci_defs
+import drv.blk.ahci.ahci_port
+import drv.blk.ahci.ahci_recover
+import drv.blk.ahci.ahci_reg
+import drv.blk.ahci.ahci_state
+import drv.blk.ahci.ahci_wait
+
+const TFD_ERR: u64 = 0x01
+
+fn run(state: u64, cmd: u64, lba: u64, count: u64, addr: u64, len: u64,
+    write: bool) -> bool {
+    if write && !wlock.allowed(wlock.D_AHCI) {
+        return false
+    }
+    if ahci_state.mode(state) != ahci_defs.MODE_AHCI {
+        return false
+    }
+    if kstate.get(state, ahci_state.sc(ahci_defs.S_DEAD)) != 0 {
+        return false
+    }
+    let p: u64 = ahci_state.port(state)
+    let cl: u64 = state + ahci_defs.AHCI_OFF + ahci_defs.CLB_AT
+    let ct: u64 = state + ahci_defs.AHCI_OFF + ahci_defs.CT_AT
+
+    let t_start: u64 = blkperf.now()
+    let known_idle: bool = ahci_defs.idle_known
+    ahci_defs.idle_known = false
+    if !known_idle {
+        ahci_wait.clear_status(state, p)
+        if !ahci_port.await_idle(state, p) {
+            kstate.add(state, ahci_state.sc(ahci_defs.S_ERRS), 1)
+            return false
+        }
+    }
+    let t_idle: u64 = blkperf.now()
+
+    var prdtl: u64 = 0
+    if len > 0 {
+        prdtl = ahci_cmd.build_prdt(ct, addr, len)
+        if prdtl == 0 {
+            return false
+        }
+    }
+    ahci_cmd.build_hdr(cl, ct, write, prdtl)
+    ahci_cmd.build_fis(ct, cmd, lba, count)
+
+    kstate.set(state, ahci_state.sc(ahci_defs.S_IRQ_ERR), 0)
+    ahci_reg.pwr(state, p, ahci_defs.P_CI, 1)
+    kstate.add(state, ahci_state.sc(ahci_defs.S_CMDS), 1)
+
+    let deadline: u64 = ahci_clock.timeout(state, ahci_defs.CMD_US)
+    let t_issued: u64 = blkperf.now()
+    let verdict: u64 = ahci_wait.wait_done(state, p, deadline)
+    if verdict == ahci_defs.W_DONE {
+        let tfd: u64 = ahci_reg.prd(state, p, ahci_defs.P_TFD)
+        let t_done: u64 = blkperf.now()
+        blkperf.add(blkperf.K_AHCI_CMDS, 1)
+        blkperf.add(blkperf.K_AHCI_POLLS, ahci_defs.wait_polls)
+        blkperf.add(blkperf.K_AHCI_IDLE_CYCLES, tscdelta.between(t_start, t_idle))
+        blkperf.add(blkperf.K_AHCI_SETUP_CYCLES, tscdelta.between(t_idle, t_issued))
+        blkperf.add(blkperf.K_AHCI_WAIT_CYCLES, tscdelta.between(t_issued, t_done))
+        kstate.set(state, ahci_state.sc(ahci_defs.S_TFD), tfd)
+        if (tfd & TFD_ERR) != 0 {
+            kstate.add(state, ahci_state.sc(ahci_defs.S_ERRS), 1)
+            ahci_wait.clear_status(state, p)
+            return false
+        }
+        ahci_defs.idle_known = (tfd & (ahci_defs.TFD_BSY | ahci_defs.TFD_DRQ)) == 0
+        return true
+    }
+    kstate.set(state, ahci_state.sc(ahci_defs.S_TFD), ahci_reg.prd(state, p, ahci_defs.P_TFD))
+    kstate.add(state, ahci_state.sc(ahci_defs.S_ERRS), 1)
+    if verdict == ahci_defs.W_FAULT {
+        ahci_recover.recover(state, p)
+        return false
+    }
+    kstate.add(state, ahci_state.sc(ahci_defs.S_DEAD), 1)
+    kstate.set(state, ahci_state.sc(ahci_defs.S_READY), 0)
+    ahci_recover.recover(state, p)
+    return false
+}

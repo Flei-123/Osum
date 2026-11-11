@@ -1,0 +1,150 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import libc.octets
+import libc.text
+import lineout
+import msg
+import services.svcosum
+import services.svcrules
+import services.dlgproto
+import settings.setbase
+
+export { restore_start_page, remember_page, confirm_restore, confirm_uninstall, VERDICT_GO, VERDICT_NO_BACKEND }
+
+const APP_LEN: u64 = 8
+const KEY_LEN: u64 = 9
+const VALUE_CAP: u64 = 16
+const RESULT_CAP: u64 = 8
+const PAGE_DIGITS_MAX: u64 = 3
+const NO_PAGE: u64 = 4294967295
+const VERDICT_NO: u64 = 0
+const VERDICT_GO: u64 = 1
+const VERDICT_NO_BACKEND: u64 = 2
+
+static mut APP: [u8; 9] = "settings\0"
+static mut KEY: [u8; 10] = "last-page\0"
+static mut K_TITLE: [u8; 31] = "settings.confirm.restore.title\0"
+static mut K_TEXT: [u8; 30] = "settings.confirm.restore.text\0"
+static mut LOADED: [u8; 30] = "settings: page restored page=\0"
+static mut SAVED: [u8; 27] = "settings: page saved page=\0"
+static mut CONFIRM_RESTORE: [u8; 34] = "settings: confirm restore status=\0"
+static mut CONFIRM_UNINSTALL: [u8; 36] = "settings: confirm uninstall status=\0"
+static mut K_UNINSTALL_TITLE: [u8; 33] = "settings.confirm.uninstall.title\0"
+static mut K_UNINSTALL_TEXT: [u8; 32] = "settings.confirm.uninstall.text\0"
+static mut STATUS: [u8; 9] = " status=\0"
+static mut ANSWER: [u8; 9] = " answer=\0"
+static mut GO: [u8; 5] = " go=\0"
+static mut value_buf: [u8; 16] = [0 as u8; 16]
+static mut result_buf: [u8; 8] = [0 as u8; 8]
+static mut saved_page: u64 = 4294967295
+
+fn stored_ptr() -> u64 {
+    return (&value_buf[0 as usize]) as u64
+}
+
+fn reply_ptr() -> u64 {
+    return (&result_buf[0 as usize]) as u64
+}
+
+fn key_ptr() -> u64 {
+    return (&KEY[0 as usize]) as u64
+}
+
+fn bind() {
+    let _status: u64 = svcosum.set_app((&APP[0 as usize]) as u64, APP_LEN)
+}
+
+fn say_text(buf: u64) {
+    lineout.add_text(buf)
+}
+
+fn say_field(name: u64, value: u64) {
+    say_text(name)
+    lineout.add_num(value)
+}
+
+fn stored_digits_valid(n: u64) -> bool {
+    if n == 0 || n > PAGE_DIGITS_MAX {
+        return false
+    }
+    var at: u64 = 0
+    while at < n {
+        if !text.is_digit(octets.ld8(stored_ptr(), at)) {
+            return false
+        }
+        at = at + 1
+    }
+    return true
+}
+
+fn read_page() -> u64 {
+    octets.zero(stored_ptr(), VALUE_CAP)
+    octets.zero(reply_ptr(), RESULT_CAP)
+    bind()
+    let status: u64 = svcosum.store_get(key_ptr(), KEY_LEN, stored_ptr(), VALUE_CAP - 1, reply_ptr())
+    if status != svcrules.OK {
+        return NO_PAGE
+    }
+    if !stored_digits_valid(octets.le32(reply_ptr())) {
+        return NO_PAGE
+    }
+    return text.number(stored_ptr())
+}
+
+fn restore_start_page() {
+    if setbase.start_page != setbase.R_DARST {
+        return
+    }
+    let page: u64 = read_page()
+    if page == NO_PAGE || page >= setbase.R_ANZ {
+        return
+    }
+    setbase.start_page = page
+    saved_page = page
+    say_field((&LOADED[0 as usize]) as u64, page)
+    lineout.end_line()
+}
+
+fn remember_page(page: u64) {
+    if page >= setbase.R_ANZ || page == saved_page {
+        return
+    }
+    saved_page = page
+    octets.zero(stored_ptr(), VALUE_CAP)
+    let digits: u64 = text.digits(page, stored_ptr(), false)
+    bind()
+    let status: u64 = svcosum.store_set(key_ptr(), KEY_LEN, stored_ptr(), digits)
+    say_field((&SAVED[0 as usize]) as u64, page)
+    say_field((&STATUS[0 as usize]) as u64, status)
+    lineout.end_line()
+}
+
+fn ask(title_key: u64, text_key: u64, log_prefix: u64) -> u64 {
+    octets.zero(reply_ptr(), RESULT_CAP)
+    bind()
+    let status: u64 = svcosum.confirm(msg.get(title_key), msg.get(text_key), reply_ptr())
+    let answer: u64 = octets.le32(reply_ptr())
+    var verdict: u64 = VERDICT_NO
+    if status == svcrules.NO_BACKEND {
+        verdict = VERDICT_NO_BACKEND
+    } else if status == svcrules.OK && answer == dlgproto.ANSWER_OK {
+        verdict = VERDICT_GO
+    }
+    say_field(log_prefix, status)
+    say_field((&ANSWER[0 as usize]) as u64, answer)
+    say_field((&GO[0 as usize]) as u64, verdict)
+    lineout.end_line()
+    return verdict
+}
+
+fn confirm_restore() -> bool {
+    let verdict: u64 = ask((&K_TITLE[0 as usize]) as u64, (&K_TEXT[0 as usize]) as u64,
+        (&CONFIRM_RESTORE[0 as usize]) as u64)
+    return verdict != VERDICT_NO
+}
+
+fn confirm_uninstall() -> u64 {
+    return ask((&K_UNINSTALL_TITLE[0 as usize]) as u64, (&K_UNINSTALL_TEXT[0 as usize]) as u64,
+        (&CONFIRM_UNINSTALL[0 as usize]) as u64)
+}

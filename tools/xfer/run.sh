@@ -74,7 +74,7 @@ mutant() { # name file sed-expression expected-red-checks...
 }
 mutant noadopt kernel/bus/bus.fi 's/seg_set(state, id, G_OWNER, ADOPT_PID)/seg_set(state, id, G_OWNER, seg_at(state, id, G_OWNER))/' \
     roundtrip_1048576 roundtrip_2097152
-mutant eagerlazy kernel/bus/slots.fi 's/if (bus.item_get(a, bus.I_PRIO) & bit) == 0 {/if false {/' \
+mutant eagerlazy kernel/bus/slots.fi 's/if (kstate.get(a, bus.I_PRIO) & bit) == 0 {/if false {/' \
     lazy_fill_on_paste lazy_data_exact
 mutant norelease kernel/bus/slots.fi 's/        bus.seg_release(state, seg1 - 1)/        let _z: u64 = seg1/' \
     eviction_frees_segments no_segment_leak

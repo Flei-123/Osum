@@ -21,8 +21,8 @@ import socket
 import sys
 import time
 
-BORDER = 2
-TITLE_H = 22
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+import shapechrome
 
 
 SERIAL_SPLICE = re.compile(r"(?<=[^\n])wm: schlieren grow=\d+ alpha=\d+ blur=\d+ aus=\d+ unterpx=\d+\n")
@@ -416,7 +416,7 @@ class Fahrer:
         if m is None:
             return None
         if prog == "launcher":
-            return (int(m.group(1)) + BORDER, int(m.group(2)) + TITLE_H)
+            return (int(m.group(1)), int(m.group(2)))
         b, th = self.chrome()
         if re.search(r"%s: strip h=\d+" % prog, t):
             th = b
@@ -430,19 +430,7 @@ class Fahrer:
     def chrome(self):
         if getattr(self, "_chrome", None):
             return self._chrome
-        shape = "osum"
-        for z in read_2(os.path.join(self.out, "theme.conf")).splitlines():
-            if z.startswith("shape="):
-                shape = z[6:].strip()
-        bar, frame = 19, 2
-        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        for z in read_2(os.path.join(root, "assets", "shapes", shape + ".shape")).splitlines():
-            m = re.match(r"\s*(title_bar|frame)\s*=\s*(\d+)", z)
-            if m and m.group(1) == "title_bar":
-                bar = int(m.group(2))
-            elif m:
-                frame = int(m.group(2))
-        self._chrome = (frame, frame + bar + 1)
+        self._chrome = shapechrome.client_inset(self.out)
         return self._chrome
 
     def fenstergeom(self, wid):
@@ -539,6 +527,14 @@ class Fahrer:
             return (int(g.group(1)) + int(m.group(1)),
                     int(g.group(2)) + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
+        if name.startswith("qsnetkey"):
+            key = int(name[8:])
+            m = last_2(r"qsnet: box k=%d x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % key)
+            g = last_2(r"qs: geo x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            if m is None or g is None:
+                return None
+            return (int(g.group(1)) + int(m.group(1)), int(g.group(2)) + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
         if name in ("qsmprev", "qsmplay", "qsmnext"):
             word = {"qsmprev": "mprev", "qsmplay": "mplay", "qsmnext": "mnext"}[name]
             m = last_2(r"qs: %s +x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % word)
@@ -610,19 +606,15 @@ class Fahrer:
             return (int(o.group(1)) + int(m.group(1)), int(o.group(2)) + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("ncrow") and name[5:].isdigit():
-            m = last_2(r"notifc: open n=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            m = last_2(r"notifc: card %s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % name[5:])
             if m is None:
                 return None
-            ox, oy, ow = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            k = ow / 400.0
-            return (ox + int(10 * k), oy + int((38 + 32 * int(name[5:])) * k), int((400 - 20) * k), int(28 * k))
+            return (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
         if name.startswith("ncsec") and name[5:].isdigit():
-            m = last_2(r"notifc: open n=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            m = last_2(r"notifc: btn %s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % name[5:])
             if m is None:
                 return None
-            ox, oy, ow = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            k = ow / 400.0
-            return (ox + int((400 - 10 - 96) * k), oy + int((38 + 32 * int(name[5:])) * k), int(96 * k), int(28 * k))
+            return (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
         if name == "toast":
             m = last_2(r"taskbar: toast \[.*\] x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
@@ -778,6 +770,15 @@ class Fahrer:
             header = int(z.group(2)) if z.group(2) else zh + 4
             y0 = int(m.group(2)) + header + 2 + n * zh
             return (o[0] + int(m.group(1)), o[1] + y0, int(m.group(3)), zh)
+        if name == "ftabkopf0":
+            m = last_2(r"explorer: rect id=\d+ kind=6 "
+                       r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            z = last_2(r"explorer: rows x=\d+ base=\d+ zh=(\d+)(?: head=\d+ headh=(\d+))?")
+            o = self.window("explorer")
+            if m is None or z is None or o is None:
+                return None
+            header = int(z.group(2)) if z.group(2) else int(z.group(1)) + 4
+            return (o[0] + int(m.group(1)) + 20, o[1] + int(m.group(2)) + 2, 20, header - 4)
         if name.startswith("fkante"):
             n = int(name[6:])
             sp = last_2(r"explorer: columns (\d+) (\d+) (\d+) (\d+)")
@@ -987,6 +988,12 @@ def main():
             for k in range(n):
                 sg = 1 if (k // 20) % 2 == 0 else -1
                 f.cmd("mouse_move %d %d" % (sg * sdx, sg * sdy))
+        elif b in ("moveby", "clickby"):
+            x, y = (int(v) for v in arg.split(","))
+            if b == "moveby":
+                f.fahre_nahe(x, y)
+            else:
+                f.klick_nahe(x, y)
         elif b == "fahreauf":
             r = f.rechteck(arg)
             if r is None:

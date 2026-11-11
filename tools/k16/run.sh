@@ -56,7 +56,7 @@ mkdir -p "$TMPD/s"
 PROGS=""
 for f in kernel/user/*.fi; do
     n=$(basename "$f" .fi)
-    case "$n" in appdir|flate|nidx|pw|tools|ulib|wlib|wlibc) continue;; esac
+    case "$n" in appdir|flate|nidx|pw|tools|ulib) continue;; esac
     grep -q "fn u_start" "$f" || continue
     PROGS="$PROGS $n"
 done
@@ -182,11 +182,11 @@ gleich "GEGENPROBE: mit acht KiB weniger Stapel geht es nicht" \
 echo "== 2b. the silent abort of firnc1 (D-019) =="
 LEER="$TMPD/leerimport"
 rm -rf "$LEER"; mkdir -p "$LEER"
-cp kernel/user/wlib.fi "$LEER/" 2>/dev/null
-FIRNLIB="$PWD/lib" "$FC1" -c -o "$LEER/x.o" "$LEER/wlib.fi" \
+cp kernel/user/fuiapp/apphost.fi "$LEER/" 2>/dev/null
+FIRNLIB="$PWD/lib" "$FC1" -c -o "$LEER/x.o" "$LEER/apphost.fi" \
     > "$LEER/c1.out" 2> "$LEER/c1.err"
 RC1=$?
-FIRNLIB="$PWD/lib" "$FIRNC" -c -o "$LEER/x0.o" "$LEER/wlib.fi" \
+FIRNLIB="$PWD/lib" "$FIRNC" -c -o "$LEER/x0.o" "$LEER/apphost.fi" \
     > "$LEER/c0.out" 2> "$LEER/c0.err"
 RC0=$?
 gleich "firnc1 geht bei fehlendem Import mit 2" "$RC1" "2"

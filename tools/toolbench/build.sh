@@ -33,6 +33,7 @@ progs="desktop taskbar settings launcher theme explorer taskmgr sh echo ls cat s
 extra=""
 lang=de
 second=""
+bare=""
 flaky=""
 svcstate=""
 for a in "$@"; do
@@ -54,6 +55,7 @@ for a in "$@"; do
         extra=*) extra=${a#*=} ;;
         lang=*) lang=${a#*=} ;;
         second=*) second=${a#*=} ;;
+        bare=*) bare=${a#*=} ;;
         flaky=*) flaky=${a#*=} ;;
         svcstate=*) svcstate=${a#*=} ;;
         *) echo "unbekannte Option: $a" >&2; exit 2 ;;
@@ -76,7 +78,7 @@ if [ ! -s "$BUILDD/crt.o" ] || [ -n "${WZREBUILD:-}" ]; then
     as --64 -o "$BUILDD/crt.o" kernel/user/crt.s 2>"$BUILDD/as.err" \
         || { echo "FEHLGESCHLAGEN: crt.s"; cat "$BUILDD/as.err"; exit 1; }
 fi
-USERNEW=$(ls -t kernel/user/*.fi 2>/dev/null | head -1)
+USERNEW=$(bash tools/design/newest-source.sh)
 for p in $progs; do
     if [ -s "$BUILDD/$p.elf" ] && [ -z "${WZREBUILD:-}" ] \
        && [ "$BUILDD/$p.elf" -nt "kernel/user/$p.fi" ] \
@@ -199,6 +201,9 @@ else
     APPEND="gfx wm wig wmhold wiglong wmdauer wigapp=$app nokbd nosched noproc nofs $extra"
     WAITFOR='^wm: hold|^k15: start'
 fi
+case " $extra " in
+    *" vfs "*) case " $APPEND " in *" osum "*) ;; *) [ -z "$bare" ] && APPEND="osum $APPEND" ;; esac ;;
+esac
 T0=$(date +%s%N)
 SECOND=()
 if [ -n "$second" ]; then

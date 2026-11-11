@@ -1,0 +1,103 @@
+import lib.kstate
+import sched.sched
+import sync.atomic
+
+export {
+    demand_lock, demand_unlock, mm_lock, mm_unlock, scratch_lock, scratch_unlock, vm_lock, vm_unlock, vm_held, vm_oom_note, vm_oom_take, LOCK_BASE
+}
+
+const LOCK_BASE: u64 = 0xF4000
+
+const DEMAND_LOCK: u64 = 32
+
+fn demand_lock(state: u64) {
+    let lock: u64 = state + LOCK_BASE + DEMAND_LOCK
+    while atomic.cas(lock, 0, 1) != 0 {
+        atomic.pause()
+    }
+}
+
+fn demand_unlock(state: u64) {
+    atomic.store(state + LOCK_BASE + DEMAND_LOCK, 0)
+}
+
+const MM_LOCK: u64 = 40
+const SCRATCH_LOCK: u64 = 48
+
+fn spin_irq_lock(state: u64, off: u64) -> u64 {
+    let fl: u64 = sched.irq_save()
+    let lock: u64 = state + LOCK_BASE + off
+    while atomic.cas(lock, 0, 1) != 0 {
+        atomic.pause()
+    }
+    return fl
+}
+
+fn spin_irq_unlock(state: u64, off: u64, fl: u64) {
+    atomic.store(state + LOCK_BASE + off, 0)
+    sched.irq_restore(fl)
+}
+
+const LOCK_SKIPPED: u64 = 0x8000000000000000
+
+fn mm_lock(state: u64) -> u64 {
+    if kstate.mode_on(state, kstate.M_NOMMLOCK) {
+        return LOCK_SKIPPED
+    }
+    return spin_irq_lock(state, MM_LOCK)
+}
+
+fn mm_unlock(state: u64, fl: u64) {
+    if fl != LOCK_SKIPPED {
+        spin_irq_unlock(state, MM_LOCK, fl)
+    }
+}
+
+fn scratch_lock(state: u64) -> u64 {
+    if kstate.mode_on(state, kstate.M_NOSCRATCH) {
+        return LOCK_SKIPPED
+    }
+    return spin_irq_lock(state, SCRATCH_LOCK)
+}
+
+fn scratch_unlock(state: u64, fl: u64) {
+    if fl != LOCK_SKIPPED {
+        spin_irq_unlock(state, SCRATCH_LOCK, fl)
+    }
+}
+
+const VM_LOCK: u64 = 56
+const VM_OOM: u64 = 64
+
+fn vm_lock(state: u64, task: u64) {
+    if kstate.mode_on(state, kstate.M_NOVMLOCK) {
+        return
+    }
+    let lock: u64 = state + LOCK_BASE + VM_LOCK
+    while atomic.cas(lock, 0, task + 1) != 0 {
+        atomic.pause()
+    }
+}
+
+fn vm_unlock(state: u64, task: u64) {
+    if kstate.mode_on(state, kstate.M_NOVMLOCK) {
+        return
+    }
+    atomic.store(state + LOCK_BASE + VM_LOCK, 0)
+}
+
+fn vm_held(state: u64, task: u64) -> bool {
+    return atomic.load(state + LOCK_BASE + VM_LOCK) == task + 1
+}
+
+fn vm_oom_note(state: u64) {
+    atomic.store(state + LOCK_BASE + VM_OOM, 1)
+}
+
+fn vm_oom_take(state: u64) -> bool {
+    let lock: u64 = state + LOCK_BASE + VM_OOM
+    if atomic.load(lock) == 0 {
+        return false
+    }
+    return atomic.cas(lock, 1, 0) == 1
+}

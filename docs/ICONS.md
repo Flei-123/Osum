@@ -195,7 +195,7 @@ to a byte. A private-use code point went through it on the first try.
 
 ### Colour comes from the theme, never from here
 
-`wlibc.icon_at(id, x, y, px, colour)` takes the colour from the caller,
+`uiicon.icon_at(id, x, y, px, colour)` takes the colour from the caller,
 and the caller takes it from `theme(T_…)`. There is no colour value
 anywhere in the icon path. That is round THEME's rule and this round does
 not break it; what this round adds is that **the same call works in light
@@ -557,7 +557,7 @@ after. `main` has no taskbar — `kernel/user/taskbar.fi` exists only on the
 DESKTOP branch, which is not merged. The network and battery icons this
 round cut (`E000`–`E005`, `E020`–`E025`) exist and are measured, but
 nothing draws them yet. Round DESKTOP can, with
-`wlibc.icon_at(icons.NETWORK_WIRED, …, wlibc.ICON_TASKBAR, theme(…))`
+`uiicon.icon_at(icons.NETWORK_WIRED, …, wlibc.ICON_TASKBAR, theme(…))`
 and no further work here.
 
 **Round NETVIEW's three states.** `faked`, `blocked` and `filtered` are

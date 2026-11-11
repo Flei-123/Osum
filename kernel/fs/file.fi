@@ -7,6 +7,8 @@ import fs.ntfs
 import fs.exfat
 import fs.fat
 import sched.sched
+import sched.taskconst
+import sched.taskslot
 import sync.atomic
 import arch.cpu
 import ipc.handle
@@ -14,12 +16,13 @@ import mm.mmframe
 
 export {
     init, init_task, clear_task, close_all, inherit_task, inherit_std,
+    next_used_fd,
     owner, share_table, release_use, release_table,
     fd_of, fd_set, fd_alloc, fd_free,
     open_alloc, open_ref, open_unref, open_kind, open_ino, open_off,
     open_set_off, open_flags, open_set_flags, open_used, open_refs,
     pipe_new, pipe_get, pipe_put, pipe_room, pipe_bytes, pipe_writers,
-    pipe_readers,
+    pipe_readers, pipe_open_named, pipe_attach, pipe_drop, pipe_owner, pipe_find,
     K_FREE, K_FILE, K_DIR, K_CONIN, K_CONOUT, K_PIPER, K_PIPEW, K_FB,
     K_TTY, K_SOCK, K_VFILE, K_VDIR, K_USOCK, K_SHM,
     K_EVENT, K_TIMER, K_SIGFD, K_EPOLL, K_INOTIFY, K_NETLINK,
@@ -69,7 +72,7 @@ const OF_X1: u64 = 48
 const OF_X2: u64 = 56
 
 const CON_IN: u64 = 0
-const CON_OUT: u64 = 1
+const CON_OUT: u64 = taskconst.CON_OUT
 const CON_ERR: u64 = 2
 
 const MAX_FD: u64 = 512
@@ -85,6 +88,7 @@ const PH_WRITE: u64 = 8
 const PH_READERS: u64 = 16
 const PH_WRITERS: u64 = 24
 const PH_USED: u64 = 32
+const PH_INO: u64 = 40
 
 fn of_at(i: u64) -> u64 {
     return kstate.OFILE_OFF + i * OF_BYTES
@@ -124,7 +128,7 @@ fn fd_check(state: u64, task: u64, fd: u64, need: u64) -> u64 {
     }
     var t: u64 = task
     if (__mmio_read64((state + kstate.TASK_OFF + task * kstate.TASK_BYTES
-        + sched.T_FDOWN) as *mut u64) & FDOWN_SLOT) != 0 {
+        + taskconst.T_FDOWN) as *mut u64) & FDOWN_SLOT) != 0 {
         t = owner(state, task)
     }
     let h: u64 = __mmio_read64(
@@ -166,6 +170,7 @@ fn fd_set_rights(state: u64, task0: u64, fd: u64, open: u64,
         return false
     }
     kstate.set(state, slot_at(task, fd), h)
+    high_raise(state, task, fd + 1)
     return true
 }
 
@@ -228,6 +233,7 @@ fn fd_pass(state: u64, from0: u64, to0: u64, fd: u64, mask: u64,
     }
     open_ref(state, of)
     kstate.set(state, slot_at(to, tofd), nh)
+    high_raise(state, to, tofd + 1)
     return tofd
 }
 
@@ -253,20 +259,76 @@ fn init_task(state: u64, task: u64) {
     fd_set(state, task, 2, CON_ERR)
 }
 
+const FD_HIGH_FIELD: u64 = 24
+
+fn high_addr(state: u64, table: u64) -> u64 {
+    return state + kstate.TCPU_OFF + table * kstate.TCPU_BYTES + FD_HIGH_FIELD
+}
+
+fn high_mark(state: u64, table: u64) -> u64 {
+    let n: u64 = __mmio_read64(high_addr(state, table) as *mut u64)
+    if n > MAX_FD {
+        return MAX_FD
+    }
+    return n
+}
+
+fn high_raise(state: u64, table: u64, n: u64) {
+    let a: u64 = high_addr(state, table)
+    while true {
+        let cur: u64 = __mmio_read64(a as *mut u64)
+        if cur >= n || atomic.cas(a, cur, n) == cur {
+            return
+        }
+    }
+}
+
+fn high_reset(state: u64, table: u64) {
+    __mmio_write64(high_addr(state, table) as *mut u64, 0)
+}
+
+fn used_from(state: u64, table: u64, from: u64) -> u64 {
+    let limit: u64 = high_mark(state, table)
+    var fd: u64 = from
+    var p: u64 = state + slot_at(table, from)
+    while fd < limit {
+        if __mmio_read64(p as *mut u64) != (0 as u64) {
+            return fd
+        }
+        p = p + 8
+        fd = fd + 1
+    }
+    return MAX_FD
+}
+
+fn next_used_fd(state: u64, task: u64, from: u64) -> u64 {
+    if task >= kstate.MAX_TASKS || from >= MAX_FD {
+        return MAX_FD
+    }
+    return used_from(state, owner(state, task), from)
+}
+
 fn clear_task(state: u64, task: u64) {
     if task >= kstate.MAX_TASKS {
         return
     }
-    var fd: u64 = 0
+    var fd: u64 = used_from(state, task, 0)
     while fd < MAX_FD {
         fd_free_t(state, task, fd)
-        fd = fd + 1
+        fd = used_from(state, task, fd + 1)
     }
+    let cx: u64 = kstate.CX_OFF + task * kstate.CX_BYTES
+    var w: u64 = 0
+    while w < kstate.CX_BYTES {
+        kstate.set(state, cx + w, 0)
+        w = w + 8
+    }
+    high_reset(state, task)
 }
 
 fn inherit_task(state: u64, parent: u64, child: u64) {
     clear_task(state, child)
-    var fd: u64 = 0
+    var fd: u64 = next_used_fd(state, parent, 0)
     while fd < MAX_FD {
         let of: u64 = fd_of(state, parent, fd)
         if of < MAX_OPEN {
@@ -274,7 +336,7 @@ fn inherit_task(state: u64, parent: u64, child: u64) {
             fd_set_rights(state, child, fd, of,
                 fd_rights(state, parent, fd))
         }
-        fd = fd + 1
+        fd = next_used_fd(state, parent, fd + 1)
     }
 }
 
@@ -314,7 +376,7 @@ fn release_table(state: u64, t: u64) {
     if t >= kstate.MAX_TASKS {
         return
     }
-    var fd: u64 = 0
+    var fd: u64 = used_from(state, t, 0)
     while fd < MAX_FD {
         let a: u64 = state + slot_at(t, fd)
         let h: u64 = __mmio_read64(a as *mut u64)
@@ -327,8 +389,9 @@ fn release_table(state: u64, t: u64) {
             let cxo: u64 = kstate.CX_OFF + t * kstate.CX_BYTES + (fd >> 6) * 8
             kstate.set(state, cxo, kstate.get(state, cxo) & (0xFFFFFFFFFFFFFFFF -% (1 << (fd & 63))))
         }
-        fd = fd + 1
+        fd = used_from(state, t, fd + 1)
     }
+    high_reset(state, t)
 }
 
 const FDOWN_SLOT: u64 = 0xFFFF
@@ -338,7 +401,7 @@ fn owner(state: u64, task: u64) -> u64 {
     if task >= kstate.MAX_TASKS {
         return task
     }
-    let w: u64 = sched.tget(state, task, sched.T_FDOWN)
+    let w: u64 = taskslot.tget(state, task, taskconst.T_FDOWN)
     let s: u64 = w & FDOWN_SLOT
     if s == 0 {
         return task
@@ -347,10 +410,10 @@ fn owner(state: u64, task: u64) -> u64 {
     if o >= kstate.MAX_TASKS {
         return task
     }
-    if (sched.tget(state, o, sched.T_PID) & 0xFFFFFFFF) != ((w >> 16) & 0xFFFFFFFF) {
+    if (taskslot.tget(state, o, taskconst.T_PID) & 0xFFFFFFFF) != ((w >> 16) & 0xFFFFFFFF) {
         return task
     }
-    if sched.tget(state, o, sched.T_STATE) == sched.S_FREE {
+    if taskslot.tget(state, o, taskconst.T_STATE) == taskconst.S_FREE {
         return task
     }
     return o
@@ -359,17 +422,17 @@ fn owner(state: u64, task: u64) -> u64 {
 fn share_table(state: u64, me: u64, thread: u64) {
     clear_task(state, thread)
     let o: u64 = owner(state, me)
-    sched.tset(state, thread, sched.T_FDOWN,
-        (((sched.tget(state, o, sched.T_PID) & 0xFFFFFFFF)) << 16) | (o + 1))
+    taskslot.tset(state, thread, taskconst.T_FDOWN,
+        (((taskslot.tget(state, o, taskconst.T_PID) & 0xFFFFFFFF)) << 16) | (o + 1))
 }
 
 fn uses_table(state: u64, i: u64, t: u64) -> bool {
-    let st: u64 = sched.tget(state, i, sched.T_STATE)
-    if st == sched.S_FREE || st == sched.S_ZOMBIE || st == sched.S_REAPING
-        || st == sched.S_NEW {
+    let st: u64 = taskslot.tget(state, i, taskconst.T_STATE)
+    if st == taskconst.S_FREE || st == taskconst.S_ZOMBIE || st == taskconst.S_REAPING
+        || st == taskconst.S_NEW {
         return false
     }
-    let w: u64 = sched.tget(state, i, sched.T_FDOWN)
+    let w: u64 = taskslot.tget(state, i, taskconst.T_FDOWN)
     if (w & FDOWN_REL) != 0 {
         return false
     }
@@ -386,8 +449,8 @@ fn release_use(state: u64, task: u64) -> bool {
     let t: u64 = owner(state, task)
     let flags: u64 = sched.irq_save()
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
-    sched.tset(state, task, sched.T_FDOWN,
-        sched.tget(state, task, sched.T_FDOWN) | FDOWN_REL)
+    taskslot.tset(state, task, taskconst.T_FDOWN,
+        taskslot.tget(state, task, taskconst.T_FDOWN) | FDOWN_REL)
     var last: bool = true
     var i: u64 = 0
     while i < kstate.MAX_TASKS {
@@ -456,6 +519,9 @@ fn open_teardown(state: u64, i: u64) {
     let kind: u64 = kstate.get(state, of_at(i) + OF_KIND)
     let p: u64 = kstate.get(state, of_at(i) + OF_INO)
     if kind == K_PIPER {
+        if pipe_owner(state, p) != 0 && (kstate.get(state, of_at(i) + OF_FLAGS) & 3) == 2 {
+            pipe_drop(state, p, false)
+        }
         pipe_drop(state, p, true)
     }
     if kind == K_PIPEW {
@@ -597,12 +663,57 @@ fn pipe_new(state: u64) -> u64 {
             kstate.set(state, ph_at(i) + PH_WRITE, 0)
             kstate.set(state, ph_at(i) + PH_READERS, 1)
             kstate.set(state, ph_at(i) + PH_WRITERS, 1)
+            kstate.set(state, ph_at(i) + PH_INO, 0)
             kstate.add(state, kstate.PIPES, 1)
             return i
         }
         i = i + 1
     }
     return MAX_PIPES
+}
+
+fn pipe_find(state: u64, ino: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_PIPES {
+        if kstate.get(state, ph_at(i) + PH_USED) != 0 && kstate.get(state, ph_at(i) + PH_INO) == ino {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_PIPES
+}
+
+fn pipe_open_named(state: u64, ino: u64) -> u64 {
+    let found: u64 = pipe_find(state, ino)
+    if found < MAX_PIPES {
+        return found
+    }
+    let i: u64 = pipe_new(state)
+    if i >= MAX_PIPES {
+        return MAX_PIPES
+    }
+    kstate.set(state, ph_at(i) + PH_READERS, 0)
+    kstate.set(state, ph_at(i) + PH_WRITERS, 0)
+    kstate.set(state, ph_at(i) + PH_INO, ino)
+    return i
+}
+
+fn pipe_owner(state: u64, i: u64) -> u64 {
+    if i >= MAX_PIPES {
+        return 0
+    }
+    return kstate.get(state, ph_at(i) + PH_INO)
+}
+
+fn pipe_attach(state: u64, i: u64, reader: bool) {
+    if i >= MAX_PIPES {
+        return
+    }
+    if reader {
+        kstate.add(state, ph_at(i) + PH_READERS, 1)
+    } else {
+        kstate.add(state, ph_at(i) + PH_WRITERS, 1)
+    }
 }
 
 fn pipe_drop(state: u64, i: u64, reader: bool) {

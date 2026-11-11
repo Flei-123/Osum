@@ -32,7 +32,7 @@ import wl_keytab
 import libc.clockapi
 
 export {
-    MAXC, serial_next, client_init, seat_bound, keyboard_new, pointer_new, keyboard_gone, pointer_gone,
+    MAXC, serial_next, client_init, seat_bound, keyboard_new, pointer_new, keyboard_gone, pointer_gone, keyboard_count, keyboard_at,
     keymap_fd, keymap_msg, keymap_msg_len, layout_now, layout_changed, keyboard_ready, sync_focus, on_axis,
     on_focus, on_key, esc_flush, on_ptr, ptr_check, surf_drop, serial_ok, has_focus, last_serial, keymap_ptr,
     n_keys_sent, n_ptr_sent, n_axis_sent, n_enters, n_leaves,
@@ -40,6 +40,7 @@ export {
 
 const MAXC: u64 = 4
 const MAXS: u64 = 16 // surfaces tracked per client
+const MAXI: u64 = 4 // keyboard / pointer objects per client (a client may bind the seat more than once)
 
 // evdev codes of the modifier keys
 const KEY_LEFTSHIFT: u64 = 42
@@ -53,6 +54,10 @@ const SYS_SYSINFO_TICKS: u64 = 0
 static mut i_serial: u64 = 100
 static mut i_kbd: [u64; 4] = [0 as u64; 4]
 static mut i_ptr: [u64; 4] = [0 as u64; 4]
+static mut k_ids: [u64; 16] = [0 as u64; 16]
+static mut k_n: [u64; 4] = [0 as u64; 4]
+static mut p_ids: [u64; 16] = [0 as u64; 16]
+static mut p_n: [u64; 4] = [0 as u64; 4]
 static mut i_ver: [u64; 4] = [0 as u64; 4]
 static mut i_enter: [u64; 4] = [0 as u64; 4] // serial of the latest keyboard enter
 static mut i_last: [u64; 4] = [0 as u64; 4] // serial of the latest event handed to this client
@@ -87,6 +92,8 @@ fn ms_now() -> u64 {
 fn client_init(c: u64) {
     i_kbd[c as usize] = 0
     i_ptr[c as usize] = 0
+    k_n[c as usize] = 0
+    p_n[c as usize] = 0
     i_ver[c as usize] = 1
     i_enter[c as usize] = 0
     i_last[c as usize] = 0
@@ -108,30 +115,80 @@ fn seat_bound(c: u64, ver: u64) {
     i_ver[c as usize] = ver
 }
 
-fn keyboard_new(c: u64, id: u64) {
+fn keyboard_new(c: u64, id: u64) -> bool {
+    let n: u64 = k_n[c as usize]
+    if n >= MAXI {
+        return false
+    }
+    k_ids[(c * MAXI + n) as usize] = id
+    k_n[c as usize] = n + 1
     i_kbd[c as usize] = id
     var k: u64 = 0
     while k < MAXS {
         s_kent[(c * MAXS + k) as usize] = 0
         k = k + 1
     }
+    return true
 }
 
-fn pointer_new(c: u64, id: u64) {
+fn pointer_new(c: u64, id: u64) -> bool {
+    let n: u64 = p_n[c as usize]
+    if n >= MAXI {
+        return false
+    }
+    p_ids[(c * MAXI + n) as usize] = id
+    p_n[c as usize] = n + 1
     i_ptr[c as usize] = id
     var k: u64 = 0
     while k < MAXS {
         s_pin[(c * MAXS + k) as usize] = 0
         k = k + 1
     }
+    return true
 }
 
-fn keyboard_gone(c: u64) {
+fn keyboard_count(c: u64) -> u64 {
+    return k_n[c as usize]
+}
+
+fn keyboard_at(c: u64, j: u64) -> u64 {
+    return k_ids[(c * MAXI + j) as usize]
+}
+
+fn keyboard_gone(c: u64, id: u64) {
+    var n: u64 = k_n[c as usize]
+    var j: u64 = 0
+    while j < n {
+        if k_ids[(c * MAXI + j) as usize] == id {
+            k_ids[(c * MAXI + j) as usize] = k_ids[(c * MAXI + n - 1) as usize]
+            n = n - 1
+            k_n[c as usize] = n
+        } else {
+            j = j + 1
+        }
+    }
     i_kbd[c as usize] = 0
+    if n > 0 {
+        i_kbd[c as usize] = k_ids[(c * MAXI + n - 1) as usize]
+    }
 }
 
-fn pointer_gone(c: u64) {
+fn pointer_gone(c: u64, id: u64) {
+    var n: u64 = p_n[c as usize]
+    var j: u64 = 0
+    while j < n {
+        if p_ids[(c * MAXI + j) as usize] == id {
+            p_ids[(c * MAXI + j) as usize] = p_ids[(c * MAXI + n - 1) as usize]
+            n = n - 1
+            p_n[c as usize] = n
+        } else {
+            j = j + 1
+        }
+    }
     i_ptr[c as usize] = 0
+    if n > 0 {
+        i_ptr[c as usize] = p_ids[(c * MAXI + n - 1) as usize]
+    }
 }
 
 // The slot of a surface (allocated on first sight), MAXS = none left.
@@ -315,7 +372,7 @@ fn keymap_msg_len() -> u64 {
 }
 
 // Builds wl_keyboard.keymap(format, fd, size) for client c into km_msg and returns its length. format 1 = xkb_v1, 0 = no_keymap.
-fn keymap_msg(c: u64) -> u64 {
+fn keymap_msg(id: u64) -> u64 {
     let fd: u64 = keymap_fd()
     var fmt: u64 = 1
     var size: u64 = km_size[lay_seen as usize]
@@ -324,7 +381,7 @@ fn keymap_msg(c: u64) -> u64 {
         size = 1
     }
     let base: u64 = (&km_msg[0 as usize]) as u64
-    wl_msg.begin(base, 0, i_kbd[c as usize], 0)
+    wl_msg.begin(base, 0, id, 0)
     wl_msg.arg(fmt)
     wl_msg.arg(size)
     km_msg_len = wl_msg.end()
@@ -335,13 +392,16 @@ fn keymap_msg(c: u64) -> u64 {
 
 fn kb_enter(c: u64, sid: u64, buf: u64, len: u64) -> u64 {
     var l: u64 = len
-    let kb: u64 = i_kbd[c as usize]
     let s: u64 = serial_next()
-    l = wl_msg.begin(buf, l, kb, wlproto.EV_WL_KEYBOARD_ENTER)
-    wl_msg.arg(s)
-    wl_msg.arg(sid)
-    wl_msg.arr0()
-    l = wl_msg.end()
+    var j: u64 = 0
+    while j < k_n[c as usize] {
+        l = wl_msg.begin(buf, l, k_ids[(c * MAXI + j) as usize], wlproto.EV_WL_KEYBOARD_ENTER)
+        wl_msg.arg(s)
+        wl_msg.arg(sid)
+        wl_msg.arr0()
+        l = wl_msg.end()
+        j = j + 1
+    }
     i_enter[c as usize] = s
     i_last[c as usize] = s
     l = kb_mods(c, buf, l, 0)
@@ -352,10 +412,14 @@ fn kb_enter(c: u64, sid: u64, buf: u64, len: u64) -> u64 {
 fn kb_leave(c: u64, sid: u64, buf: u64, len: u64) -> u64 {
     var l: u64 = len
     let s: u64 = serial_next()
-    l = wl_msg.begin(buf, l, i_kbd[c as usize], wlproto.EV_WL_KEYBOARD_LEAVE)
-    wl_msg.arg(s)
-    wl_msg.arg(sid)
-    l = wl_msg.end()
+    var j: u64 = 0
+    while j < k_n[c as usize] {
+        l = wl_msg.begin(buf, l, k_ids[(c * MAXI + j) as usize], wlproto.EV_WL_KEYBOARD_LEAVE)
+        wl_msg.arg(s)
+        wl_msg.arg(sid)
+        l = wl_msg.end()
+        j = j + 1
+    }
     i_last[c as usize] = s
     n_leaves = n_leaves + 1
     return l
@@ -363,25 +427,36 @@ fn kb_leave(c: u64, sid: u64, buf: u64, len: u64) -> u64 {
 
 fn kb_mods(c: u64, buf: u64, len: u64, mask: u64) -> u64 {
     let s: u64 = serial_next()
-    var l: u64 = wl_msg.begin(buf, len, i_kbd[c as usize], wlproto.EV_WL_KEYBOARD_MODIFIERS)
-    wl_msg.arg(s)
-    wl_msg.arg(mask)
-    wl_msg.arg(0)
-    wl_msg.arg(0)
-    wl_msg.arg(0)
-    l = wl_msg.end()
+    var l: u64 = len
+    var j: u64 = 0
+    while j < k_n[c as usize] {
+        l = wl_msg.begin(buf, l, k_ids[(c * MAXI + j) as usize], wlproto.EV_WL_KEYBOARD_MODIFIERS)
+        wl_msg.arg(s)
+        wl_msg.arg(mask)
+        wl_msg.arg(0)
+        wl_msg.arg(0)
+        wl_msg.arg(0)
+        l = wl_msg.end()
+        j = j + 1
+    }
     i_last[c as usize] = s
     return l
 }
 
 fn kb_key(c: u64, buf: u64, len: u64, code: u64, pressed: u64) -> u64 {
     let s: u64 = serial_next()
-    var l: u64 = wl_msg.begin(buf, len, i_kbd[c as usize], wlproto.EV_WL_KEYBOARD_KEY)
-    wl_msg.arg(s)
-    wl_msg.arg(ms_now())
-    wl_msg.arg(code)
-    wl_msg.arg(pressed)
-    l = wl_msg.end()
+    var l: u64 = len
+    let now: u64 = ms_now()
+    var j: u64 = 0
+    while j < k_n[c as usize] {
+        l = wl_msg.begin(buf, l, k_ids[(c * MAXI + j) as usize], wlproto.EV_WL_KEYBOARD_KEY)
+        wl_msg.arg(s)
+        wl_msg.arg(now)
+        wl_msg.arg(code)
+        wl_msg.arg(pressed)
+        l = wl_msg.end()
+        j = j + 1
+    }
     i_last[c as usize] = s
     n_keys_sent = n_keys_sent + 1
     return l
@@ -756,59 +831,77 @@ fn emit_key(c: u64, sid: u64, e: u64, buf: u64, len: u64) -> u64 {
 
 // ================================================== POINTER EVENTS
 
-fn ptr_frame(c: u64, buf: u64, len: u64) -> u64 {
+fn ptr_frame(c: u64, pt: u64, buf: u64, len: u64) -> u64 {
     if i_ver[c as usize] < 5 {
         return len
     }
-    var l: u64 = wl_msg.begin(buf, len, i_ptr[c as usize], wlproto.EV_WL_POINTER_FRAME)
+    var l: u64 = wl_msg.begin(buf, len, pt, wlproto.EV_WL_POINTER_FRAME)
     l = wl_msg.end()
+    return l
+}
+
+fn ptr_enter_once(c: u64, sid: u64, x: u64, y: u64, buf: u64, len: u64) -> u64 {
+    var l: u64 = len
+    let k: u64 = slot_of(c, sid)
+    if k >= MAXS || s_pin[(c * MAXS + k) as usize] != 0 {
+        return l
+    }
+    let s: u64 = serial_next()
+    var j: u64 = 0
+    while j < p_n[c as usize] {
+        l = wl_msg.begin(buf, l, p_ids[(c * MAXI + j) as usize], wlproto.EV_WL_POINTER_ENTER)
+        wl_msg.arg(s)
+        wl_msg.arg(sid)
+        wl_msg.arg(x * 256)
+        wl_msg.arg(y * 256)
+        l = wl_msg.end()
+        j = j + 1
+    }
+    i_last[c as usize] = s
+    s_pin[(c * MAXS + k) as usize] = 1
+    n_enters = n_enters + 1
     return l
 }
 
 // typ: 2 = button pressed, 3 = button released, 4 = motion. x, y: window coordinates in pixels. btn: the button mask of the window server.
 fn on_ptr(c: u64, sid: u64, typ: u64, x: u64, y: u64, btn: u64, buf: u64, len: u64) -> u64 {
     var l: u64 = len
-    let pt: u64 = i_ptr[c as usize]
-    if pt == 0 {
+    if p_n[c as usize] == 0 {
         return l
     }
-    let k: u64 = slot_of(c, sid)
-    if k < MAXS && s_pin[(c * MAXS + k) as usize] == 0 {
-        let s: u64 = serial_next()
-        l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_ENTER)
-        wl_msg.arg(s)
-        wl_msg.arg(sid)
+    l = ptr_enter_once(c, sid, x, y, buf, l)
+    let now: u64 = ms_now()
+    var code: u64 = 0x110 // BTN_LEFT
+    if (btn & 2) != 0 {
+        code = 0x111 // BTN_RIGHT
+    }
+    var st: u64 = 0
+    if typ == 2 {
+        st = 1
+    }
+    let s2: u64 = serial_next()
+    var j: u64 = 0
+    while j < p_n[c as usize] {
+        let pt: u64 = p_ids[(c * MAXI + j) as usize]
+        l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_MOTION)
+        wl_msg.arg(now)
         wl_msg.arg(x * 256)
         wl_msg.arg(y * 256)
         l = wl_msg.end()
-        i_last[c as usize] = s
-        s_pin[(c * MAXS + k) as usize] = 1
-        n_enters = n_enters + 1
+        if typ == 2 || typ == 3 {
+            l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_BUTTON)
+            wl_msg.arg(s2)
+            wl_msg.arg(now)
+            wl_msg.arg(code)
+            wl_msg.arg(st)
+            l = wl_msg.end()
+        }
+        l = ptr_frame(c, pt, buf, l)
+        j = j + 1
     }
-    l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_MOTION)
-    wl_msg.arg(ms_now())
-    wl_msg.arg(x * 256)
-    wl_msg.arg(y * 256)
-    l = wl_msg.end()
     if typ == 2 || typ == 3 {
-        var code: u64 = 0x110 // BTN_LEFT
-        if (btn & 2) != 0 {
-            code = 0x111 // BTN_RIGHT
-        }
-        var st: u64 = 0
-        if typ == 2 {
-            st = 1
-        }
-        let s2: u64 = serial_next()
-        l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_BUTTON)
-        wl_msg.arg(s2)
-        wl_msg.arg(ms_now())
-        wl_msg.arg(code)
-        wl_msg.arg(st)
-        l = wl_msg.end()
         i_last[c as usize] = s2
     }
-    l = ptr_frame(c, buf, l)
     n_ptr_sent = n_ptr_sent + 1
     return l
 }
@@ -823,23 +916,10 @@ fn axis_notch(d: u64) -> u64 {
 
 fn on_axis(c: u64, sid: u64, horizontal: bool, x: u64, y: u64, raw: u64, buf: u64, len: u64) -> u64 {
     var l: u64 = len
-    let pt: u64 = i_ptr[c as usize]
-    if pt == 0 {
+    if p_n[c as usize] == 0 {
         return l
     }
-    let k: u64 = slot_of(c, sid)
-    if k < MAXS && s_pin[(c * MAXS + k) as usize] == 0 {
-        let s: u64 = serial_next()
-        l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_ENTER)
-        wl_msg.arg(s)
-        wl_msg.arg(sid)
-        wl_msg.arg(x * 256)
-        wl_msg.arg(y * 256)
-        l = wl_msg.end()
-        i_last[c as usize] = s
-        s_pin[(c * MAXS + k) as usize] = 1
-        n_enters = n_enters + 1
-    }
+    l = ptr_enter_once(c, sid, x, y, buf, l)
     var notch: u64 = axis_notch(raw)
     if !horizontal {
         notch = 0 - notch
@@ -849,28 +929,34 @@ fn on_axis(c: u64, sid: u64, horizontal: bool, x: u64, y: u64, raw: u64, buf: u6
         axis = 1
     }
     let ver: u64 = i_ver[c as usize]
-    if ver >= 5 {
-        l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_AXIS_SOURCE)
-        wl_msg.arg(0)
-        l = wl_msg.end()
-    }
-    l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_AXIS)
-    wl_msg.arg(ms_now())
-    wl_msg.arg(axis)
-    wl_msg.arg((notch * 10 * 256) & 0xFFFFFFFF)
-    l = wl_msg.end()
-    if ver >= 8 {
-        l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_AXIS_VALUE120)
+    let now: u64 = ms_now()
+    var j: u64 = 0
+    while j < p_n[c as usize] {
+        let pt: u64 = p_ids[(c * MAXI + j) as usize]
+        if ver >= 5 {
+            l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_AXIS_SOURCE)
+            wl_msg.arg(0)
+            l = wl_msg.end()
+        }
+        l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_AXIS)
+        wl_msg.arg(now)
         wl_msg.arg(axis)
-        wl_msg.arg((notch * 120) & 0xFFFFFFFF)
+        wl_msg.arg((notch * 10 * 256) & 0xFFFFFFFF)
         l = wl_msg.end()
-    } else if ver >= 5 {
-        l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_AXIS_DISCRETE)
-        wl_msg.arg(axis)
-        wl_msg.arg(notch & 0xFFFFFFFF)
-        l = wl_msg.end()
+        if ver >= 8 {
+            l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_AXIS_VALUE120)
+            wl_msg.arg(axis)
+            wl_msg.arg((notch * 120) & 0xFFFFFFFF)
+            l = wl_msg.end()
+        } else if ver >= 5 {
+            l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_AXIS_DISCRETE)
+            wl_msg.arg(axis)
+            wl_msg.arg(notch & 0xFFFFFFFF)
+            l = wl_msg.end()
+        }
+        l = ptr_frame(c, pt, buf, l)
+        j = j + 1
     }
-    l = ptr_frame(c, buf, l)
     n_axis_sent = n_axis_sent + 1
     return l
 }
@@ -878,8 +964,7 @@ fn on_axis(c: u64, sid: u64, horizontal: bool, x: u64, y: u64, raw: u64, buf: u6
 // Polled: is the pointer still over this window's content? If not, pointer.leave (the window server only reports motion INSIDE).
 fn ptr_check(c: u64, sid: u64, win: u64, buf: u64, len: u64) -> u64 {
     var l: u64 = len
-    let pt: u64 = i_ptr[c as usize]
-    if pt == 0 || win == 0 {
+    if p_n[c as usize] == 0 || win == 0 {
         return l
     }
     let k: u64 = slot_of(c, sid)
@@ -896,13 +981,18 @@ fn ptr_check(c: u64, sid: u64, win: u64, buf: u64, len: u64) -> u64 {
         return l
     }
     let s: u64 = serial_next()
-    l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_LEAVE)
-    wl_msg.arg(s)
-    wl_msg.arg(sid)
-    l = wl_msg.end()
+    var j: u64 = 0
+    while j < p_n[c as usize] {
+        let pt: u64 = p_ids[(c * MAXI + j) as usize]
+        l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_LEAVE)
+        wl_msg.arg(s)
+        wl_msg.arg(sid)
+        l = wl_msg.end()
+        l = ptr_frame(c, pt, buf, l)
+        j = j + 1
+    }
     i_last[c as usize] = s
     s_pin[(c * MAXS + k) as usize] = 0
     n_leaves = n_leaves + 1
-    l = ptr_frame(c, buf, l)
     return l
 }

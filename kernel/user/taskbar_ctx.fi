@@ -2,29 +2,24 @@
 // kernel/user/taskbar_ctx.fi -- THE TASK BAR'S CONTEXT MENU (split out of taskbar.fi; menus come from kernel/user/ctxreg.fi).
 //
 // WHAT LIVES HERE. The life cycle of the bar's right-click menu: which context is open (empty bar, pinned program, window
-// button), the `wlib` menu window, its own event pump, and the registration of the bar's built-in rows in the registry.
+// button), the scene popup menu (uikit/uipopmenu), its event pump, and the registration of the bar's built-in rows in the registry.
 // WHAT STAYS IN taskbar.fi. Everything that needs the bar's data: starting a pinned program, minimising a window, pinning a
 // button. `step` only says WHICH action was chosen (and `picked_ctx` / `picked_arg` say for what); taskbar.fi carries it out.
-//
-// ============ WHY THE MENU NEEDS ITS OWN EVENT LOOP (kept from round ECHTHARDWARE-2)
-// The bar fetches its events itself (WM_EVENT on its own window) and never calls `wlib.step`. The menu is a wlib window of its
-// own, and `mn_res` -- the answer "which row was chosen" -- is set ONLY in `wlib.step`. Without the call below the menu opens, takes
-// clicks and never says what was chosen. `wlib.menu_open` puts the menu on the popup layer (above the bar), so nothing to fix up.
 //
 // Window buttons offer MINIMISE (WA_HIDE) and PIN; there is no "close" because the kernel has no WA_CLOSE for foreign windows
 // (kernel/sys.fi WM_ACT) and a row that does nothing would be a lie.
 
-profile kernel
+profile app
 
+import fuiapp.hosthead
 import ulib
-import wlibc
-import wlib
+import uikit.uipopmenu
 import msg
 import ctxreg
 
 export {
     ACT_NEW_WINDOW, ACT_MINIMISE, ACT_PIN, ACT_TASKMGR, ACT_SETTINGS, ACT_DISPLAY, NONE, DISMISSED,
-    init, open_pin, open_button, open_empty, is_open, win, rows, key, step, picked_ctx, picked_arg, run_common
+    init, open_pin, open_button, open_empty, is_open, rows, step, picked_ctx, picked_arg, run_common
 }
 
 // Action ids: the first three equal the row numbers the menu had before the registry (the bar's log lines print them).
@@ -41,7 +36,6 @@ static mut c_open: u64 = 0
 static mut c_ctx: u64 = 0
 static mut c_arg: u64 = 0
 static mut c_inited: u64 = 0
-static mut c_win: u64 = 0
 static mut c_rows: u64 = 0
 
 // catalogue keys of the rows
@@ -78,21 +72,15 @@ fn open_ctx(ctx: u64, arg: u64) -> bool {
         let _d: u64 = step()
     }
     let n: u64 = ctxreg.build(ctx, 0)
-    c_rows = n
     if n == 0 {
-        c_win = 1
+        return false
+    }
+    if !uipopmenu.open(hosthead.mouse_x(), hosthead.mouse_y(), ctxreg.text_nul(), n) {
         return false
     }
     c_ctx = ctx
     c_arg = arg
-    // the menu stands above the bar: `menu_open` opens upwards when there is no room below
-    let mw: u64 = wlib.menu_open(0, wlibc.mouse_x(), wlibc.mouse_y(), ctxreg.text(), n)
-    if mw >= wlib.MAXWN {
-        c_win = 2000 + mw
-        return false
-    }
     c_open = 1
-    c_win = mw
     c_rows = n
     return true
 }
@@ -112,24 +100,12 @@ fn open_empty() -> bool {
     return open_ctx(ctxreg.CTX_TASKBAR, 0)
 }
 
-// the wlib window of the open menu (for the log line the gates read) and its row count
-fn win() -> u64 {
-    return c_win
-}
-
 fn rows() -> u64 {
     return c_rows
 }
 
 fn is_open() -> bool {
     return c_open != 0
-}
-
-// A key while the menu is open belongs to it (up, down, enter, escape).
-fn key(c: u64) {
-    if c_open != 0 {
-        wlib.feed_key(c)
-    }
 }
 
 fn picked_ctx() -> u64 {
@@ -145,14 +121,12 @@ fn step() -> u64 {
     if c_open == 0 {
         return NONE
     }
-    let _st: u64 = wlib.step()
-    let r: u64 = wlib.menu_at()
-    if r == 0xFFFFFFFFFFFFFFFF {
+    let r: u64 = uipopmenu.step()
+    if r == uipopmenu.NONE {
         return NONE
     }
     c_open = 0
-    wlib.menu_close()
-    if r == 0xFFFF {
+    if r == uipopmenu.DISMISSED {
         return DISMISSED
     }
     let a: u64 = ctxreg.act_at(r)

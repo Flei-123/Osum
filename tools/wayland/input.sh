@@ -93,9 +93,9 @@ cat > "$TMPD/g.sh" <<'EOS'
 wayd /tmp/wayland-0 2000000000 &
 sleep 2
 idle 5000 wayd-alone
-wlin /tmp/wayland-0 900 C badserial sub proto &
+wlin /tmp/wayland-0 900 C badserial sub proto frame &
 sleep 5
-wlin /tmp/wayland-0 900 A copy=hello-from-A &
+wlin /tmp/wayland-0 900 A copy=hello-from-A seat2 &
 sleep 5
 wlin /tmp/wayland-0 900 B paste &
 sleep 5
@@ -204,6 +204,15 @@ n0=$(num "$ID0" syscalls)
 echo "== 2c. sub-surfaces (wl_subcompositor): C made two children of its window =="
 has "$(L C | grep -a 'sub:')" "sub: up" "wlin[C]: wl_subcompositor bound, two get_subsurface + commits + roundtrip -- no protocol error"
 hasnot "$(L C)" "protocol error" "wlin[C]: no protocol error from the server"
+has "$(L C | grep -a 'frame: before-commit')" "before-commit done=0" "wlin[C]: a wl_surface.frame request is NOT answered before the surface commits"
+has "$(L C | grep -a 'frame: after-commit')" "after-commit done=1" "wlin[C]: the frame callback arrives after the commit"
+FL=$(L C | grep -a 'frame: loop' | head -1)
+FC=$(sed -n 's/.*cycles=\([0-9]*\) .*/\1/p' <<< "$FL")
+if [ -n "$FC" ] && [ "$FC" -ge 5 ] && [ "$FC" -le 400 ]; then
+    ok "wlin[C]: frame+commit cycles are paced by the server (cycles=$FC in 2 s, not a busy loop)"
+else
+    bad "wlin[C]: frame loop cycles='$FC' ('$FL')"
+fi
 has "$(L C | grep -a 'proto:')" "proto: viewport ok deco-mode=2" "wlin[C]: wp_viewporter (get_viewport, set_source/destination) accepted; xdg-decoration answers server_side (2) although the client asked client_side"
 printf 'screendump %s\n' "$TMPD/sub.ppm" | timeout 20 socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
 sleep 3
@@ -276,11 +285,23 @@ has "$sa" "ptr button serial=" "A: wl_pointer.button"
 has "$sa" "button=272 state=1" "... BTN_LEFT pressed"
 has "$sa" "button=272 state=0" "... and released"
 has "$sa" "ptr frame" "wl_pointer.frame closes the group"
+has "$sa" "kb2 enter" "SECOND seat binding of A: wl_keyboard.enter too (Firefox binds wl_seat twice)"
+has "$sa" "ptr2 enter" "... and wl_pointer.enter"
+has "$sa" "ptr2 button button=272 state=1" "... and the button press"
+has "$sa" "ptr2 frame" "... and wl_pointer.frame"
 hasnot "$sb" "ptr button" "COUNTER-PROOF: B (the click was not on it) got no button, though the pointer passed over it on its way"
 # a key now goes to A
 mark
 keys b
 has "$(since A ${M[A]})" "key=48 state=1" "the key 'b' (evdev 48) goes to A now"
+has "$(since A ${M[A]} | grep -a 'kb2 key')" "key=48 state=1" "... and to the second keyboard object of A"
+mark
+keys x
+has "$(since A ${M[A]})" "seat2 released" "A releases its second keyboard + pointer (key x)"
+mark
+keys c
+has "$(since A ${M[A]})" "key=46 state=1" "the key 'c' still reaches the first keyboard of A after the second one was released"
+hasnot "$(since A ${M[A]})" "kb2 key" "COUNTER-PROOF: the released second keyboard gets nothing (release removed only its own id)"
 hasnot "$(since B ${M[B]})" "key=" "... and not to B"
 # the wheel: pointer is still over A
 mark

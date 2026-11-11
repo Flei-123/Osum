@@ -1,0 +1,250 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import arch.arch
+import lib.kstate
+import mm.mmframe
+import mm.mmswap
+import sched.sched
+import serial
+import sched.taskconst
+import sched.taskslot
+import sched.proc.procbase
+import sched.proc.procfault
+import sched.proc.procmap
+import sched.proc.procpt
+
+const V_ENTER_TASK: u64 = 56
+
+const V_USER_RESUME: u64 = 64
+
+const ARG_RESUME: u64 = 0xF04B
+
+fn page_copy(state: u64, i: u64, from: u64, to: u64) -> bool {
+    var a: u64 = procmap.translate(state, i, from)
+    var b: u64 = procmap.translate(state, i, to)
+    if a == 0 && from >= procbase.LAZY_BASE && from < procbase.LAZY_TOP && procmap.lazy_is_file(state, i, from) {
+        if procfault.lazy_fault(state, i, from, 0) {
+            a = procmap.translate(state, i, from)
+        }
+    }
+    if a == 0 {
+        return false
+    }
+    if b == 0 {
+        if !procfault.lazy_fault(state, i, to, 2) {
+            return false
+        }
+        b = procmap.translate(state, i, to)
+    }
+    if b == 0 {
+        return false
+    }
+    var k: u64 = 0
+    while k < mmframe.FRAME_SIZE / 8 {
+        __mmio_write64((b + k * 8) as *mut u64, __mmio_read64((a + k * 8) as *mut u64))
+        k = k + 1
+    }
+    return true
+}
+
+fn next_pt_entry(table: u64, from: u64) -> u64 {
+    var j: u64 = from
+    while j < 512 {
+        j = j + arch.zero_run(table + j * 8, 512 - j)
+        if j >= 512 {
+            return 512
+        }
+        let e: u64 = procpt.read_entry(table, j)
+        if (e & procbase.PAGE_PRESENT) != 0 && (e & procbase.PAGE_HUGE) == 0 {
+            return j
+        }
+        j = j + 1
+    }
+    return 512
+}
+
+fn next_priv_slot(state: u64, from: u64, start: u64) -> u64 {
+    var k: u64 = start
+    if k == 0 {
+        if taskslot.tget(state, from, taskconst.T_PT) != 0 {
+            return 0
+        }
+        k = 1
+    }
+    if k < 512 {
+        let pd: u64 = taskslot.tget(state, from, taskconst.T_PD)
+        if pd != 0 {
+            let j: u64 = next_pt_entry(pd, k)
+            if j < 512 {
+                return j
+            }
+        }
+        k = 512
+    }
+    let pdpt: u64 = taskslot.tget(state, from, taskconst.T_PDPT)
+    if pdpt == 0 {
+        return procbase.PRIV_SLOTS
+    }
+    var group: u64 = k >> 9
+    var idx: u64 = k & 511
+    while (group << 9) < procbase.PRIV_SLOTS {
+        let pe: u64 = procpt.read_entry(pdpt, 1 + group)
+        if (pe & procbase.PAGE_PRESENT) != 0 {
+            let j: u64 = next_pt_entry(pe & procbase.ADDR_MASK, idx)
+            if j < 512 {
+                return (group << 9) + j
+            }
+        }
+        group = group + 1
+        idx = 0
+    }
+    return procbase.PRIV_SLOTS
+}
+
+fn copy_space(state: u64, from: u64, to: u64) -> u64 {
+    var n: u64 = 0
+    var kachel: u64 = next_priv_slot(state, from, 0)
+    while kachel < procbase.PRIV_SLOTS {
+        let a: u64 = procbase.USER_DATA + kachel * procbase.USER_SPAN
+        let s2: u64 = procpt.pt_for(state, from, a, false)
+        if s2 != 0 {
+            let d2: u64 = procpt.pt_for(state, to, a, true)
+            if d2 == 0 {
+                return 0
+            }
+            let m: u64 = copy_pt(state, s2, d2)
+            if m == 0 {
+                if pt_used(s2) != 0 {
+                    return 0
+                }
+            }
+            n = n + m
+        }
+        kachel = next_priv_slot(state, from, kachel + 1)
+    }
+    return n
+}
+
+fn pt_used(pt: u64) -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < 512 {
+        if (procpt.read_entry(pt, k) & procbase.PAGE_PRESENT) != 0 {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn copy_pt(state: u64, src: u64, dst: u64) -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < 512 {
+        k = k + arch.zero_run(src + k * 8, 512 - k)
+        if k >= 512 {
+            break
+        }
+        let e: u64 = procpt.read_entry(src, k)
+        if (e & procbase.PAGE_PRESENT) == 0 && (e & procbase.PAGE_LAZY) != 0 {
+            procpt.write_entry(dst, k, e)
+        }
+        if procmap.is_swap_entry(e) {
+            procpt.write_entry(dst, k, e)
+            mmswap.share(state, procmap.swap_slot_of(e))
+        }
+        if (e & procbase.PAGE_PRESENT) != 0 && (e & procbase.PAGE_PCACHE) != 0 {
+            procpt.write_entry(dst, k, e)
+            n = n + 1
+        } else if (e & procbase.PAGE_PRESENT) != 0 {
+            var d: u64 = procpt.read_entry(dst, k)
+            if (d & procbase.PAGE_PRESENT) == 0 {
+                let f: u64 = mmframe.frame_alloc_user(state)
+                if f == 0 {
+                    return 0
+                }
+                procpt.write_entry(dst, k, f | (e & 0xFFF) | (e & procbase.PAGE_NX))
+                d = procpt.read_entry(dst, k)
+            }
+            arch.copy_words(mmframe.kva(d & procbase.ADDR_MASK), mmframe.kva(e & procbase.ADDR_MASK),
+                mmframe.FRAME_SIZE / 8)
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn swap_space(state: u64, a: u64, b: u64) {
+    let cr3: u64 = taskslot.tget(state, a, taskconst.T_CR3)
+    let pdpt: u64 = taskslot.tget(state, a, taskconst.T_PDPT)
+    let pd: u64 = taskslot.tget(state, a, taskconst.T_PD)
+    let pt: u64 = taskslot.tget(state, a, taskconst.T_PT)
+    let data: u64 = taskslot.tget(state, a, taskconst.T_DATA)
+    taskslot.tset(state, a, taskconst.T_CR3, taskslot.tget(state, b, taskconst.T_CR3))
+    taskslot.tset(state, a, taskconst.T_PDPT, taskslot.tget(state, b, taskconst.T_PDPT))
+    taskslot.tset(state, a, taskconst.T_PD, taskslot.tget(state, b, taskconst.T_PD))
+    taskslot.tset(state, a, taskconst.T_PT, taskslot.tget(state, b, taskconst.T_PT))
+    taskslot.tset(state, a, taskconst.T_DATA, taskslot.tget(state, b, taskconst.T_DATA))
+    taskslot.tset(state, b, taskconst.T_CR3, cr3)
+    taskslot.tset(state, b, taskconst.T_PDPT, pdpt)
+    taskslot.tset(state, b, taskconst.T_PD, pd)
+    taskslot.tset(state, b, taskconst.T_PT, pt)
+    taskslot.tset(state, b, taskconst.T_DATA, data)
+}
+
+fn use_space(state: u64, i: u64) {
+    let cr3: u64 = taskslot.tget(state, i, taskconst.T_CR3)
+    if cr3 != 0 {
+        asm("mov cr3, rax", in("rax") cr3, clobber("memory"))
+    }
+}
+
+fn user_start(state: u64, i: u64, kind: u64) {
+    sched.enter_task(state)
+
+    if taskslot.tget(state, i, taskconst.T_ARG) == ARG_RESUME {
+        taskslot.tset(state, i, taskconst.T_ARG, 0)
+        asm("call rax", in("rax") procpt.vector(state, V_USER_RESUME),
+            in("rdi") state + kstate.CTX_OFF + i * 128, clobber("memory"))
+        sched.exit_task(state, 0)
+        return
+    }
+    let arg: u64 = taskslot.tget(state, i, taskconst.T_WORK)
+    taskslot.tset(state, i, taskconst.T_WORK, 0)
+    let e: u64 = taskslot.tget(state, i, taskconst.T_ENTRY)
+    let sp: u64 = taskslot.tget(state, i, taskconst.T_USTACK)
+    if e == 0 || (e >> 47) != 0 || sp == 0 || (sp >> 47) != 0 {
+        say_badentry(state, i, e, sp)
+        sched.exit_task(state, 127)
+        return
+    }
+    asm("call rax", in("rax") procpt.vector(state, V_ENTER_TASK),
+        in("rdi") e,
+        in("rsi") sp,
+        in("rdx")(taskslot.tget(state, i, taskconst.T_ARG) << 32) | arg,
+        clobber("memory"))
+    sched.exit_task(state, 0)
+}
+
+static mut bad_entries: u64 = 0
+
+fn badentry_num() -> u64 {
+    return bad_entries
+}
+
+fn say_badentry(state: u64, i: u64, e: u64, sp: u64) {
+    var s_a: [u8; 27] = "proc: bad entry -- pid=\0\0\0\0"
+    var s_e: [u8; 9] = "  entry=\0"
+    var s_u: [u8; 10] = "  ustack=\0"
+    var s_t: [u8; 34] = "  (kein sysret, Prozess beendet)\0\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(taskslot.tget(state, i, taskconst.T_PID))
+    serial.puts((&s_e[0]) as u64)
+    serial.hex(e)
+    serial.puts((&s_u[0]) as u64)
+    serial.hex(sp)
+    serial.puts((&s_t[0]) as u64)
+    serial.nl()
+    bad_entries = bad_entries + 1
+}

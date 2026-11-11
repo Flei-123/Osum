@@ -33,11 +33,11 @@ BEREICHE = [
     ("I2CHID",     "i2chid.fi", "I2C_OFF",       "0x1000"),
     ("R3D",        "r3dsoft.fi", "R3D_OFF",      "R3D_MAX"),
     ("I2CBUF",     "i2chid.fi", "BUF_OFF",       "0x1000"),
-    ("AHCI",       "ahci.fi",   "AHCI_OFF",       "0x1000"),
-    ("AHCI_ID",    "ahci.fi",   "AHCI_ID_OFF",    "0x1000"),
-    ("AHCI_BUF_A", "ahci.fi",   "AHCI_BUFA_OFF",  "0x1000"),
-    ("AHCI_BUF_B", "ahci.fi",   "AHCI_BUFB_OFF",  "0x1000"),
-    ("AHCI_SC",    "ahci.fi",   "AHCI_SC_OFF",    "0x1000"),
+    ("AHCI",       "ahci_defs.fi",   "AHCI_OFF",       "0x1000"),
+    ("AHCI_ID",    "ahci_defs.fi",   "AHCI_ID_OFF",    "0x1000"),
+    ("AHCI_BUF_A", "ahci_defs.fi",   "AHCI_BUFA_OFF",  "0x1000"),
+    ("AHCI_BUF_B", "ahci_defs.fi",   "AHCI_BUFB_OFF",  "0x1000"),
+    ("AHCI_SC",    "ahci_defs.fi",   "AHCI_SC_OFF",    "0x1000"),
     ("CPU",        "kstate.fi", "CPU_OFF",        "CPU_BYTES * MAX_CPUS"),
     ("LOCK",       "kstate.fi", "LOCK_OFF",       "LOCK_BYTES * LOCK_COUNT"),
     ("CPUX",       "kstate.fi", "CPUX_OFF",       "CPUX_BYTES * MAX_CPUS"),
@@ -91,7 +91,7 @@ BEREICHE = [
     ("VMSVGA",     "kstate.fi", "VMSVGA_OFF",     "VMSVGA_MAX"),
     ("USOCK",      "unixsock.fi", "USOCK_OFF",   "USOCK_MAX * USOCK_BYTES"),
     ("UNAME",      "unixsock.fi", "UNAME_OFF",   "UNAME_MAX * UNAME_BYTES"),
-    ("UCNT",       "unixsock.fi", "UCNT_OFF",    "0x40"),
+    ("UCNT",       "mmlock.fi",   "LOCK_BASE",   "0x40"),
     ("USHM",       "unixsock.fi", "USHM_OFF",    "USHM_MAX * USHM_BYTES"),
     ("USHMPG",     "unixsock.fi", "USHMPG_OFF",  "USHM_PAGED * SHM_PAGES_MAX * 8"),
     ("UMAP",       "unixsock.fi", "UMAP_OFF",    "UMAP_MAX * UMAP_BYTES"),
@@ -221,6 +221,8 @@ EHCI_STUECKE = [
 ]
 
 NO_KDATA = {
+    ("pci.fi", "PM_CSR_OFF"),
+    ("xhci.fi", "PCI_COMMAND_OFF"),
     ("fb.fi", "FB_OFF"),
     ("fb.fi", "FONT_OFF"),
     ("fb.fi", "VMS_OFF"),
@@ -332,7 +334,7 @@ def main():
 
     dateien = {}
     for d in ("kstate.fi", "pci.fi", "nvme.fi", "fb.fi", "inet.fi",
-              "ahci.fi",
+              "ahci_defs.fi",
               "virtio.fi", "hv.fi",
               "xhci.fi", "usbbase.fi", "usbbind.fi", "usbdev.fi",
               "vfs.fi", "mnt.fi", "fat.fi", "procfs.fi", "devfs.fi",
@@ -342,7 +344,7 @@ def main():
               "rootsel.fi", "ehci.fi", "blkdev.fi",
               "hidrep.fi", "hidin.fi", "i2chid.fi",
               "r3dsoft.fi",
-              "unixsock.fi", "sys.fi", "sysconst.fi"):
+              "unixsock.fi", "mmlock.fi", "sys.fi", "sysconst.fi"):
         p = None
         for stamm, verz, names in os.walk(kdir):
             verz[:] = [v for v in verz if v not in ("user", "app")]

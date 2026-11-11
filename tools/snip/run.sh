@@ -44,7 +44,7 @@ has()    { grep -qaF "$2" "$1" 2>/dev/null && ok "$3" || bad "$3 -- '$2' missing
 command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "SNIP: skipped, no qemu"; exit 0; }
 python3 -c "import PIL" 2>/dev/null || { echo "SNIP: skipped, no Pillow"; exit 0; }
 
-PROGS="desktop taskbar launcher settings theme explorer snip sh echo ls cat"
+PROGS="desktop taskbar launcher settings theme explorer snip snipt sh echo ls cat"
 
 # compare a guest PNG with a window of the host screendump; prints promille equal, or -1/-2
 cmp_png() { # png ppm x y w h
@@ -109,7 +109,7 @@ num "region pixels equal to the host crop (promille; 972 measured, a transient w
 
 echo
 echo "== 5. rules =="
-Z=$(grep -ac 'wlibc\.\(px\|rect\|rrect\|frame\|hline\|vline\|text\|glyph\|blit\)(' kernel/user/snip.fi || true)
+Z=$(grep -ac 'uidraw\.\(px\|rect\|rrect\|frame\|hline\|vline\|text\|glyph\|blit\)(' kernel/user/snip.fi || true)
 num "direct draw calls outside wlib in snip.fi" "$Z" eq 0
 
 echo

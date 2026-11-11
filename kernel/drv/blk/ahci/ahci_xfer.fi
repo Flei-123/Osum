@@ -1,0 +1,134 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import lib.kstate
+import drv.blk.ahci.ahci_defs
+import drv.blk.ahci.ahci_lock
+import drv.blk.ahci.ahci_run
+import drv.blk.ahci.ahci_state
+
+const MAX_TRANSFER: u64 = (ahci_defs.PRDT_MAX - 1) * ahci_defs.PAGE
+const ATA_READ_DMA_EXT: u64 = 0x25
+const ATA_WRITE_DMA_EXT: u64 = 0x35
+const ATA_FLUSH_EXT: u64 = 0xEA
+const SECTOR: u64 = 512
+
+fn bounce_copy(from: u64, to: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        __mmio_write64((to + i) as *mut u64, __mmio_read64((from + i) as *mut u64))
+        i = i + 8
+    }
+}
+
+fn read_block(state: u64, lba: u64, dst: u64) -> bool {
+    let t: u64 = ahci_lock.lock_in(state)
+    if t == ahci_defs.DL_REFUSE {
+        return false
+    }
+    let ok: bool = read_block_locked(state, lba, dst)
+    ahci_lock.lock_out(t)
+    return ok
+}
+
+fn read_block_locked(state: u64, lba: u64, dst: u64) -> bool {
+    if !ahci_state.ready(state) {
+        return false
+    }
+    let b: u64 = ahci_state.buffer(state, 0)
+    if !ahci_run.run(state, ATA_READ_DMA_EXT, lba, 1, b, SECTOR, false) {
+        return false
+    }
+    bounce_copy(b, dst, SECTOR)
+    return true
+}
+
+fn write_block(state: u64, lba: u64, src: u64) -> bool {
+    let t: u64 = ahci_lock.lock_in(state)
+    if t == ahci_defs.DL_REFUSE {
+        return false
+    }
+    let ok: bool = write_block_locked(state, lba, src)
+    ahci_lock.lock_out(t)
+    return ok
+}
+
+fn write_block_locked(state: u64, lba: u64, src: u64) -> bool {
+    if !ahci_state.ready(state) {
+        return false
+    }
+    let b: u64 = ahci_state.buffer(state, 0)
+    bounce_copy(src, b, SECTOR)
+
+    if !ahci_run.run(state, ATA_WRITE_DMA_EXT, lba, 1, b, SECTOR, true) {
+        return false
+    }
+    if kstate.mode_on(state, kstate.M_AHCISLOW) {
+        return flush_locked(state)
+    }
+    return true
+}
+
+fn read_many(state: u64, lba: u64, count: u64, dst: u64) -> bool {
+    let t: u64 = ahci_lock.lock_in(state)
+    if t == ahci_defs.DL_REFUSE {
+        return false
+    }
+    let ok: bool = read_many_locked(state, lba, count, dst)
+    ahci_lock.lock_out(t)
+    return ok
+}
+
+fn read_many_locked(state: u64, lba: u64, count: u64, dst: u64) -> bool {
+    if !ahci_state.ready(state) || count == 0 {
+        return false
+    }
+    if count * SECTOR > MAX_TRANSFER {
+        return false
+    }
+    return ahci_run.run(state, ATA_READ_DMA_EXT, lba, count, dst, count * SECTOR,
+        false)
+}
+
+fn write_many(state: u64, lba: u64, count: u64, src: u64) -> bool {
+    let t: u64 = ahci_lock.lock_in(state)
+    if t == ahci_defs.DL_REFUSE {
+        return false
+    }
+    let ok: bool = write_many_locked(state, lba, count, src)
+    ahci_lock.lock_out(t)
+    return ok
+}
+
+fn write_many_locked(state: u64, lba: u64, count: u64, src: u64) -> bool {
+    if !ahci_state.ready(state) || count == 0 {
+        return false
+    }
+    if count * SECTOR > MAX_TRANSFER {
+        return false
+    }
+
+    if !ahci_run.run(state, ATA_WRITE_DMA_EXT, lba, count, src, count * SECTOR,
+        true) {
+        return false
+    }
+    if kstate.mode_on(state, kstate.M_AHCISLOW) {
+        return flush_locked(state)
+    }
+    return true
+}
+
+fn flush(state: u64) -> bool {
+    let t: u64 = ahci_lock.lock_in(state)
+    if t == ahci_defs.DL_REFUSE {
+        return false
+    }
+    let ok: bool = flush_locked(state)
+    ahci_lock.lock_out(t)
+    return ok
+}
+
+fn flush_locked(state: u64) -> bool {
+    if ahci_state.mode(state) != ahci_defs.MODE_AHCI {
+        return false
+    }
+    return ahci_run.run(state, ATA_FLUSH_EXT, 0, 0, 0, 0, false)
+}

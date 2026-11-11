@@ -1,0 +1,90 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import libc.clockapi
+
+export { client_init, request, commit, drop_surface, open_gate, take_due, due_time }
+
+const MAX_CLIENTS: u64 = 4
+const SLOTS: u64 = 16
+const STATE_FREE: u64 = 0
+const STATE_WAIT_COMMIT: u64 = 1
+const STATE_READY: u64 = 2
+const MS_PER_TICK: u64 = 10
+const MIN_TICKS_BETWEEN_RELEASES: u64 = 1
+
+static mut cb_id: [u64; 64] = [0 as u64; 64]
+static mut cb_surface: [u64; 64] = [0 as u64; 64]
+static mut cb_state: [u64; 64] = [0 as u64; 64]
+static mut last_release: u64 = 0
+
+fn client_init(c: u64) {
+    var k: u64 = 0
+    while k < SLOTS {
+        cb_state[(c * SLOTS + k) as usize] = STATE_FREE
+        k = k + 1
+    }
+}
+
+fn request(c: u64, sid: u64, cb: u64) -> bool {
+    var k: u64 = 0
+    while k < SLOTS {
+        let i: u64 = c * SLOTS + k
+        if cb_state[i as usize] == STATE_FREE {
+            cb_id[i as usize] = cb
+            cb_surface[i as usize] = sid
+            cb_state[i as usize] = STATE_WAIT_COMMIT
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+fn commit(c: u64, sid: u64) {
+    var k: u64 = 0
+    while k < SLOTS {
+        let i: u64 = c * SLOTS + k
+        if cb_state[i as usize] == STATE_WAIT_COMMIT && cb_surface[i as usize] == sid {
+            cb_state[i as usize] = STATE_READY
+        }
+        k = k + 1
+    }
+}
+
+fn drop_surface(c: u64, sid: u64) {
+    var k: u64 = 0
+    while k < SLOTS {
+        let i: u64 = c * SLOTS + k
+        if cb_state[i as usize] != STATE_FREE && cb_surface[i as usize] == sid {
+            cb_state[i as usize] = STATE_FREE
+        }
+        k = k + 1
+    }
+}
+
+fn open_gate() -> bool {
+    let now: u64 = clockapi.ticks()
+    if now - last_release < MIN_TICKS_BETWEEN_RELEASES {
+        return false
+    }
+    last_release = now
+    return true
+}
+
+fn take_due(c: u64) -> u64 {
+    var k: u64 = 0
+    while k < SLOTS {
+        let i: u64 = c * SLOTS + k
+        if cb_state[i as usize] == STATE_READY {
+            cb_state[i as usize] = STATE_FREE
+            return cb_id[i as usize]
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+fn due_time() -> u64 {
+    return clockapi.ticks() * MS_PER_TICK
+}

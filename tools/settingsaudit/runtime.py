@@ -41,7 +41,7 @@ def main():
                     ov += 1
         rows.append((i, len(page), ov))
     ids = ["appearance", "screen", "time", "network", "users", "netview", "language", "presets", "accounts", "sync",
-           "bridge", "system", "approights", "log", "updates", "mouse", "power", "about", "apps", "screen2", "taskbar", "effects", "wifi", "usbnet", "scheme", "accent", "password", "pin", "transfer", "sound", "touchpad", "bluetooth", "monitors"]
+           "bridge", "system", "approights", "log", "updates", "mouse", "power", "about", "apps", "screen2", "taskbar", "effects", "wifi", "usbnet", "scheme", "accent", "password", "pin", "transfer", "sound", "touchpad", "bluetooth", "monitors", "netdetails", "developer"]
     bad = 0
     for i, n, ov in rows:
         name = "(initial)" if i == 0 else (ids[owner[i]] if owner[i] is not None and owner[i] < len(ids) else "(search)")

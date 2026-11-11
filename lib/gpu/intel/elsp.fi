@@ -1,0 +1,78 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import gpu.intel.engregs
+
+export {
+    submit, write_ptr, entry, ack, drain, resync, Csb, csb_new,
+    ST_IDLE_ACTIVE, ST_PREEMPTED, ST_ELEMENT_SWITCH, ST_ACTIVE_IDLE, ST_COMPLETE, PTR_RESET
+}
+
+const ST_IDLE_ACTIVE: u64 = 0x1
+const ST_PREEMPTED: u64 = 0x2
+const ST_ELEMENT_SWITCH: u64 = 0x4
+const ST_ACTIVE_IDLE: u64 = 0x8
+const ST_COMPLETE: u64 = 0x10
+const PTR_MASK: u64 = 0x7
+const READ_SHIFT: u64 = 8
+const PTR_RESET: u64 = 0x7
+const LOW32: u64 = 0xffffffff
+
+struct Csb {
+    read: u64,
+    completes: u64,
+    events: u64
+}
+
+fn csb_new() -> Csb {
+    var c: Csb = Csb { read: engregs.CSB_ENTRIES - 1, completes: 0, events: 0 }
+    return c
+}
+
+fn resync(rd: fn(u64) -> u64, base: u64, c: *mut Csb) {
+    (*c).read = normal(write_ptr(rd, base))
+}
+
+fn normal(p: u64) -> u64 {
+    if p >= engregs.CSB_ENTRIES {
+        return engregs.CSB_ENTRIES - 1
+    }
+    return p
+}
+
+fn submit(wr: fn(u64, u64) -> u64, base: u64, desc: u64) {
+    let port: u64 = engregs.eng(base, engregs.RING_ELSP)
+    wr(port, 0)
+    wr(port, 0)
+    wr(port, desc >> 32)
+    wr(port, desc & LOW32)
+}
+
+fn write_ptr(rd: fn(u64) -> u64, base: u64) -> u64 {
+    return rd(engregs.eng(base, engregs.RING_CSB_PTR)) & PTR_MASK
+}
+
+fn entry(rd: fn(u64) -> u64, base: u64, i: u64) -> u64 {
+    return rd(engregs.eng(base, engregs.RING_CSB_BUF + i * engregs.CSB_ENTRY_BYTES))
+}
+
+fn ack(wr: fn(u64, u64) -> u64, base: u64, read: u64) {
+    wr(engregs.eng(base, engregs.RING_CSB_PTR), ((PTR_MASK << READ_SHIFT) << 16) | (read << READ_SHIFT))
+}
+
+fn drain(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, base: u64, c: *mut Csb) -> u64 {
+    let w: u64 = write_ptr(rd, base)
+    if w >= engregs.CSB_ENTRIES {
+        return 0
+    }
+    var seen: u64 = 0
+    while (*c).read != w && seen < engregs.CSB_ENTRIES {
+        (*c).read = ((*c).read + 1) % engregs.CSB_ENTRIES
+        let st: u64 = entry(rd, base, (*c).read)
+        (*c).events = (*c).events + 1
+        if (st & ST_COMPLETE) != 0 {
+            (*c).completes = (*c).completes + 1
+        }
+        seen = seen + 1
+    }
+    ack(wr, base, (*c).read)
+    return seen
+}

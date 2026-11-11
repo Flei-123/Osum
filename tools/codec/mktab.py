@@ -27,7 +27,7 @@ def field(name, values, typ='u64', je=16, kommentar=None):
     z()
 
 z('// SPDX-License-Identifier: GPL-2.0-only')
-z('// kernel/user/h264tab.fi -- DIE ZAHLENTAFELN DES H.264-DEKODIERERS.')
+z('// kernel/user/codec/h264tab.fi -- DIE ZAHLENTAFELN DES H.264-DEKODIERERS.')
 z('//')
 z('// ERZEUGT von tools/codec/mktab.py. NICHT VON HAND AENDERN --')
 z('// jede Aenderung hier geht beim naechsten Lauf verloren, und die')

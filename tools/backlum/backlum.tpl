@@ -16,8 +16,11 @@
 
 profile kernel
 
+import fuiapp.hoststart
+import fuiapp.hostwin
+import fuiapp.hostwinp
 import ulib
-import wlibc
+import uikit.uisys
 import fui.backlum
 
 export { u_start }
@@ -122,46 +125,46 @@ fn fill_rect(p: u64, color: u64) {
 }
 
 fn damage_rect(hb: u64) {
-    let _d: u64 = wlibc.win_damage(hb, PX0, 60, PW, PH)
+    let _d: u64 = hostwin.win_damage(hb, PX0, 60, PW, PH)
 }
 
 // A frameless shared-buffer window at (x, y), w x h, solid colour. Returns the handle (0 = failed); the buffer is left in g_p.
 fn mkwin(x: u64, y: u64, w: u64, h: u64, color: u64) -> u64 {
     let bytes: u64 = w * h * 4
-    let p: u64 = wlibc.shm_buffer(bytes)
+    let p: u64 = hostwin.shm_buffer(bytes)
     if p == 0 || ulib.bad(p) {
         return 0
     }
-    let fd: u64 = wlibc.shm_last_fd()
-    let hd: u64 = wlibc.sys5(wlibc.WM_CREATE, (x << 16) | y, (w << 16) | h, (&s_title[0 as usize]) as u64, wlibc.win_opts(true, false, 256), fd + 1)
-    wlibc.shm_close(fd)
+    let fd: u64 = hostwin.shm_last_fd()
+    let hd: u64 = uisys.sys5(hostwinp.WM_CREATE, (x << 16) | y, (w << 16) | h, (&s_title[0 as usize]) as u64, hostwin.win_opts(true, false, 256), fd + 1)
+    hostwin.shm_close(fd)
     if ulib.bad(hd) || hd == 0 {
         return 0
     }
     fill_solid(p, w * h, color)
-    let _d: u64 = wlibc.win_damage(hd, 0, 0, w, h)
+    let _d: u64 = hostwin.win_damage(hd, 0, 0, w, h)
     g_p = p
     return hd
 }
 
 fn mean_of(h: u64) -> u64 {
-    return wlibc.win_backlum(h, wlibc.WI_BACKLUM)
+    return hostwin.win_backlum(h, hostwinp.WI_BACKLUM)
 }
 
 fn hi_of(h: u64) -> u64 {
-    return wlibc.win_backlum(h, wlibc.WI_BACKLUM_HI)
+    return hostwin.win_backlum(h, hostwinp.WI_BACKLUM_HI)
 }
 
 fn lo_of(h: u64) -> u64 {
-    return wlibc.win_backlum(h, wlibc.WI_BACKLUM_LO)
+    return hostwin.win_backlum(h, hostwinp.WI_BACKLUM_LO)
 }
 
 fn runs_of(h: u64) -> u64 {
-    return wlibc.win_backlum(h, wlibc.WI_BACKLUM_RUNS)
+    return hostwin.win_backlum(h, hostwinp.WI_BACKLUM_RUNS)
 }
 
 fn hits_of(h: u64) -> u64 {
-    return wlibc.win_backlum(h, wlibc.WI_BACKLUM_HITS)
+    return hostwin.win_backlum(h, hostwinp.WI_BACKLUM_HITS)
 }
 
 // the contrast (x100) of the text colour the mean decides for, on the WORST of the two robust samples; the tint repairs what is left
@@ -187,7 +190,7 @@ fn scrim_contrast(h: u64) -> u64 {
 
 // repaint B and read the probe's answers: one line `<name> mean hi`, one `<name>-lo lo contrast`
 fn probe(hp: u64, hb: u64, pb: u64, name: u64, nlo: u64) {
-    let _d: u64 = wlibc.win_damage(hb, 0, 0, BW, BH)
+    let _d: u64 = hostwin.win_damage(hb, 0, 0, BW, BH)
     line(name, mean_of(hp), hi_of(hp))
     line(nlo, lo_of(hp), worst_contrast(hp))
 }
@@ -263,7 +266,7 @@ fn ramp_run(hp: u64, hb: u64, pb: u64) {
 }
 
 fn u_start(args: u64) -> u64 {
-    wlibc.start(false)
+    hoststart.start(false)
     line(@begin@, 1, 0)
     let hb: u64 = mkwin(100, 100, BW, BH, 0)
     let pb: u64 = g_p
@@ -306,7 +309,7 @@ fn u_start(args: u64) -> u64 {
     line(@c-repeat@, runs_of(hp) - r0, hits_of(hp) - h0)
     // P repaints itself (its own contents): the cache stays
     fill_solid(pp, PW * PH, 0x0000FF)
-    let _d1: u64 = wlibc.win_damage(hp, 0, 0, PW, PH)
+    let _d1: u64 = hostwin.win_damage(hp, 0, 0, PW, PH)
     let r1: u64 = runs_of(hp)
     let h1: u64 = hits_of(hp)
     let m3: u64 = mean_of(hp)
@@ -314,14 +317,14 @@ fn u_start(args: u64) -> u64 {
     line(@c-own-mean@, m3, 0)
     // a window far away repaints: the cache stays
     fill_solid(pu, 60 * 60, 0xFF00FF)
-    let _d2: u64 = wlibc.win_damage(hu, 0, 0, 60, 60)
+    let _d2: u64 = hostwin.win_damage(hu, 0, 0, 60, 60)
     let r2: u64 = runs_of(hp)
     let h2: u64 = hits_of(hp)
     let _m4: u64 = mean_of(hp)
     line(@c-far@, runs_of(hp) - r2, hits_of(hp) - h2)
     // B repaints white: the cache is spoiled, one new run, the new value
     fill_solid(pb, BW * BH, 0xFFFFFF)
-    let _d3: u64 = wlibc.win_damage(hb, 0, 0, BW, BH)
+    let _d3: u64 = hostwin.win_damage(hb, 0, 0, BW, BH)
     let r3: u64 = runs_of(hp)
     let h3: u64 = hits_of(hp)
     let m5: u64 = mean_of(hp)

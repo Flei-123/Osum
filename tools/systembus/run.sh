@@ -241,7 +241,7 @@ python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
     || bad "tools/k15/tree.py faellt"
 printf '# taskbar.conf\nedge=0\nheight=40\nwidth=0\nautohide=0\nontop=1\n' > "$TMPD/tb.conf"
 ARGS=(build "$TMPD/disk.img" 65536 --v3 /lib/
-    "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
+    "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" "/lib/icons.ttf=assets/osum-icons.ttf" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
 printf 'on\n' > "$TMPD/uitrace"
@@ -305,10 +305,15 @@ warteauf 'taskbar: text noti' || 90
 foto 01-leiste-meldung
 DREH
 gui leiste "bus notidemo" "$TMPD/dreh1"
-if grep -qa 'Meldg' "$TMPD/leiste.txt"; then
-    ok "the bar shows the messages of the bus: $(grep -aom1 'Meldg [0-9]*' "$TMPD/leiste.txt")"
+if grep -qa 'taskbar: icon field=noti id=' "$TMPD/leiste.txt" && grep -qaE 'taskbar: text noti .* t=[0-9]+' "$TMPD/leiste.txt"; then
+    ok "the bar shows the bell with the message count of the bus: $(grep -aom1 'taskbar: text noti .* t=[0-9]*' "$TMPD/leiste.txt" | grep -aom1 ' t=[0-9]*')"
 else
-    bad "no message in the bar"
+    bad "no bell and count in the bar"
+fi
+if grep -qa 'Meldg' "$TMPD/leiste.txt"; then
+    bad "the bar still shows the text Meldg"
+else
+    ok "no Meldg text in the bar (counter-probe)"
 fi
 bild 01-leiste-meldung
 

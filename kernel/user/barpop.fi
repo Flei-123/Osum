@@ -2,8 +2,8 @@
 // kernel/user/barpop.fi -- THE TASK BAR'S TOOLTIP AND TOAST ON THE SCENE HOST.
 //
 // FUI-ALL (05.10.2026). The bar opened a wlib window for every tooltip and for
-// every toast (`wlib.tip_win_open`, `wlib.toast_win_open`), painted it with
-// `wlib.draw_*` and closed it again; the scene host could not take them
+// every toast (`tip_win_open`, `toast_win_open`), painted it with
+// `draw_*` and closed it again; the scene host could not take them
 // because it could not give a window back (docs/FUI-MULTIWINDOW.md). Now there
 // is ONE window of each kind for the whole life of the bar, created hidden at
 // the largest size it will ever need, and every showing is
@@ -22,21 +22,27 @@
 // bar's own raw window (`fuiscene.foreign_main`, called by `qs.init`) and
 // window 1 is the quick settings. `init` must therefore come after `qs.init`.
 
-profile kernel
+profile app
 
+import fuiapp.hostwin
+import fuiapp.hostwinp
 import libc.memcopy
 import libc.text
-import wlibc
-import wlib
+import uikit.uiscale
+import uikit.uitext
+import uitheme
 import fuiscene
+import notify.notecard
+import uikit.uisurface
+import uikit.uisys
 
 export { init, tip_show, tip_hide, toast_show, toast_hide }
 
 const NONE: u64 = 0xFFFFFFFFFFFFFFFF
 const TIP_MAXW: u64 = 480 // points
 const TIP_MAXH: u64 = 40
-const TOAST_MAXW: u64 = 640
-const TOAST_MAXH: u64 = 64
+const TOAST_MAXW: u64 = 368
+const TOAST_MAXH: u64 = 144
 
 static mut w_tip: u64 = 0xFFFFFFFFFFFFFFFF
 static mut w_toast: u64 = 0xFFFFFFFFFFFFFFFF
@@ -44,19 +50,13 @@ static mut h_tip: u64 = 0
 static mut h_toast: u64 = 0
 
 static mut tip_txt: [u8; 100] = [0 as u8; 100]
-static mut toast_txt: [u8; 100] = [0 as u8; 100]
 static mut tip_wp: u64 = 100 // the size of the node, in points
 static mut tip_hp: u64 = 24
 static mut toast_wp: u64 = 240
 static mut toast_hp: u64 = 40
-static mut toast_prio: u64 = 1
 
 static mut t_tip: [u8; 8] = "tooltip\0"
 static mut t_toast: [u8; 6] = "toast\0"
-
-fn pt(px: u64) -> u64 {
-    return (px + wlibc.ui_scale() - 1) / wlibc.ui_scale()
-}
 
 fn copy_text(dst: u64, src: u64, max: u64) {
     var n: u64 = text.length(src)
@@ -69,57 +69,20 @@ fn copy_text(dst: u64, src: u64, max: u64) {
 
 // ------------------------------------------------------------ the pictures
 
-// AA-CORNER: the window server cuts these frameless windows to the window
-// radius (`wm.nodeco_radius` = `wlibc.win_round`). The plate used to be
-// painted with the BUTTON radius, so the cut and the plate were two
-// different circles: a dark fringe between the outline and the fill, and an
-// outline that ended in the air at the corners. Now the whole window is first
-// painted in the outline colour and the fill is a rounded plate one point
-// inside with the radius one less -- the server's cut falls on rim colour and
-// the rim follows the arc with coverage alpha. `aa_old` = counter-proof (the
-// plate and ring of before).
-fn plate(x: u64, y: u64, w: u64, h: u64) {
-    if wlibc.aa_old() || w < 3 || h < 3 {
-        let r: u64 = fuiscene.rb_px()
-        fuiscene.cv_round_rgb(x, y, w, h, r, wlibc.theme(wlibc.T_MENU))
-        fuiscene.cv_ring_rgb(x, y, w, h, r, 1, wlibc.theme(wlibc.T_LINE))
-        return
-    }
-    var ri: u64 = wlibc.win_round(w, h)
-    if ri > 0 {
-        ri = ri - 1
-    }
-    fuiscene.cv_round_rgb(x, y, w, h, 0, wlibc.theme(wlibc.T_LINE))
-    fuiscene.cv_round_rgb(x + 1, y + 1, w - 2, h - 2, ri, wlibc.theme(wlibc.T_MENU))
-}
-
 fn tip_draw(x: u64, y: u64, w: u64, h: u64) {
-    plate(x, y, w, h)
-    let pad: u64 = 6 * wlibc.ui_scale()
-    let base: u64 = y + (h + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2
+    uisurface.paint_window(uisurface.K_TIP, x, y, w, h)
+    let pad: u64 = 6 * uiscale.ui_scale()
+    let base: u64 = y + (h + uitext.ascent_of(uitext.F_UI, uiscale.px_ui())) / 2
     var tw: u64 = 0
     if w > 2 * pad {
         tw = w - 2 * pad
     }
     fuiscene.cv_text_rgb(x + pad, base, tw, (&tip_txt[0 as usize]) as u64,
-        wlibc.px_ui(), false, wlibc.theme(wlibc.T_FG))
+        uiscale.px_ui(), false, uitheme.theme(uitheme.T_FG))
 }
 
 fn toast_draw(x: u64, y: u64, w: u64, h: u64) {
-    plate(x, y, w, h)
-    var st: u64 = wlibc.theme(wlibc.T_LINE)
-    if toast_prio >= 2 {
-        st = wlibc.theme(wlibc.T_ACCENT)
-    }
-    fuiscene.cv_round_rgb(x, y, 3 * wlibc.ui_scale(), h, 0, st)
-    let pad: u64 = 10 * wlibc.ui_scale()
-    let base: u64 = y + (h + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2
-    var tw: u64 = 0
-    if w > 2 * pad {
-        tw = w - 2 * pad
-    }
-    fuiscene.cv_text_rgb(x + pad, base, tw, (&toast_txt[0 as usize]) as u64,
-        wlibc.px_ui(), false, wlibc.theme(wlibc.T_FG))
+    notecard.draw_card(x, y, w, h, notecard.TOAST_SLOT)
 }
 
 fn build_tip() {
@@ -141,17 +104,17 @@ fn build_toast() {
 // Both windows, hidden. false if the scene host has no room (the bar then has
 // no tooltips and no toasts -- and says so).
 fn init() -> bool {
-    w_tip = fuiscene.win_open_plain(0, 0, TIP_MAXW * wlibc.ui_scale(), TIP_MAXH * wlibc.ui_scale(),
-        (&t_tip[0 as usize]) as u64, wlibc.L_TIP, build_tip)
+    w_tip = fuiscene.win_open_plain(0, 0, TIP_MAXW * uiscale.ui_scale(), TIP_MAXH * uiscale.ui_scale(),
+        (&t_tip[0 as usize]) as u64, hostwinp.L_TIP, build_tip)
     if w_tip == fuiscene.BADWIN {
         w_tip = NONE
         return false
     }
     let _s1: bool = fuiscene.win_select(w_tip)
     h_tip = fuiscene.handle()
-    let _h1: u64 = wlibc.win_state(h_tip, wlibc.WS_HIDDEN, 1)
-    w_toast = fuiscene.win_open_plain(0, 0, TOAST_MAXW * wlibc.ui_scale(), TOAST_MAXH * wlibc.ui_scale(),
-        (&t_toast[0 as usize]) as u64, wlibc.L_TIP, build_toast)
+    let _h1: u64 = hostwin.win_state(h_tip, hostwinp.WS_HIDDEN, 1)
+    w_toast = fuiscene.win_open_plain(0, 0, TOAST_MAXW * uiscale.ui_scale(), TOAST_MAXH * uiscale.ui_scale(),
+        (&t_toast[0 as usize]) as u64, hostwinp.L_TIP, build_toast)
     if w_toast == fuiscene.BADWIN {
         w_toast = NONE
         let _s0: bool = fuiscene.win_select(0)
@@ -159,7 +122,7 @@ fn init() -> bool {
     }
     let _s2: bool = fuiscene.win_select(w_toast)
     h_toast = fuiscene.handle()
-    let _h2: u64 = wlibc.win_state(h_toast, wlibc.WS_HIDDEN, 1)
+    let _h2: u64 = hostwin.win_state(h_toast, hostwinp.WS_HIDDEN, 1)
     let _s3: bool = fuiscene.win_select(0)
     return true
 }
@@ -180,8 +143,8 @@ fn tip_show(x: u64, y: u64, bw: u64, bh: u64, text: u64) -> u64 {
         return 1
     }
     copy_text((&tip_txt[0 as usize]) as u64, text, 98)
-    var wp: u64 = pt(bw)
-    var hp: u64 = pt(bh)
+    var wp: u64 = uiscale.px_to_pt(bw)
+    var hp: u64 = uiscale.px_to_pt(bh)
     if wp > TIP_MAXW {
         wp = TIP_MAXW
     }
@@ -191,7 +154,7 @@ fn tip_show(x: u64, y: u64, bw: u64, bh: u64, text: u64) -> u64 {
     tip_wp = wp
     tip_hp = hp
     let _s: bool = fuiscene.win_select(w_tip)
-    if !fuiscene.win_size(wp * wlibc.ui_scale(), hp * wlibc.ui_scale()) {
+    if !fuiscene.win_size(wp * uiscale.ui_scale(), hp * uiscale.ui_scale()) {
         let _s0: bool = fuiscene.win_select(0)
         return 2
     }
@@ -199,8 +162,8 @@ fn tip_show(x: u64, y: u64, bw: u64, bh: u64, text: u64) -> u64 {
     fuiscene.touch()
     let _s1: bool = fuiscene.win_select(0)
     paint(w_tip)
-    let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, h_tip, (x << 16) | y, 0)
-    let _v: u64 = wlibc.win_state(h_tip, wlibc.WS_HIDDEN, 0)
+    let _m: u64 = uisys.sys3w(hostwinp.WM_MOVE, h_tip, (x << 16) | y, 0)
+    let _v: u64 = hostwin.win_state(h_tip, hostwinp.WS_HIDDEN, 0)
     return 0
 }
 
@@ -208,17 +171,15 @@ fn tip_hide() {
     if w_tip == NONE {
         return
     }
-    let _v: u64 = wlibc.win_state(h_tip, wlibc.WS_HIDDEN, 1)
+    let _v: u64 = hostwin.win_state(h_tip, hostwinp.WS_HIDDEN, 1)
 }
 
-fn toast_show(x: u64, y: u64, bw: u64, bh: u64, text: u64, prio: u64) -> u64 {
+fn toast_show(x: u64, y: u64, bw: u64, bh: u64) -> u64 {
     if w_toast == NONE {
         return 1
     }
-    copy_text((&toast_txt[0 as usize]) as u64, text, 98)
-    toast_prio = prio
-    var wp: u64 = pt(bw)
-    var hp: u64 = pt(bh)
+    var wp: u64 = uiscale.px_to_pt(bw)
+    var hp: u64 = uiscale.px_to_pt(bh)
     if wp > TOAST_MAXW {
         wp = TOAST_MAXW
     }
@@ -228,7 +189,7 @@ fn toast_show(x: u64, y: u64, bw: u64, bh: u64, text: u64, prio: u64) -> u64 {
     toast_wp = wp
     toast_hp = hp
     let _s: bool = fuiscene.win_select(w_toast)
-    if !fuiscene.win_size(wp * wlibc.ui_scale(), hp * wlibc.ui_scale()) {
+    if !fuiscene.win_size(wp * uiscale.ui_scale(), hp * uiscale.ui_scale()) {
         let _s0: bool = fuiscene.win_select(0)
         return 2
     }
@@ -236,8 +197,8 @@ fn toast_show(x: u64, y: u64, bw: u64, bh: u64, text: u64, prio: u64) -> u64 {
     fuiscene.touch()
     let _s1: bool = fuiscene.win_select(0)
     paint(w_toast)
-    let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, h_toast, (x << 16) | y, 0)
-    let _v: u64 = wlibc.win_state(h_toast, wlibc.WS_HIDDEN, 0)
+    let _m: u64 = uisys.sys3w(hostwinp.WM_MOVE, h_toast, (x << 16) | y, 0)
+    let _v: u64 = hostwin.win_state(h_toast, hostwinp.WS_HIDDEN, 0)
     return 0
 }
 
@@ -245,5 +206,5 @@ fn toast_hide() {
     if w_toast == NONE {
         return
     }
-    let _v: u64 = wlibc.win_state(h_toast, wlibc.WS_HIDDEN, 1)
+    let _v: u64 = hostwin.win_state(h_toast, hostwinp.WS_HIDDEN, 1)
 }

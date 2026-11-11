@@ -2,12 +2,15 @@
 
 import lib.kstate
 import sched.sched
-import sched.proc
+import sched.taskconst
+import sched.taskslot
+import sched.proc.procfault
 import lib.errno
 import fs.file
 import net.inet
 import net.netlink
 import net.netview
+import mm.mmlock
 import fs.unixsock
 import net.netmon
 import net.ebpf
@@ -159,7 +162,7 @@ fn do_wgget(state: u64, me: u64, field: u64, ptr: u64, len: u64) -> u64 {
 }
 
 fn do_wgset(state: u64, me: u64, field: u64, ptr: u64, n: u64) -> u64 {
-    if sched.tget(state, me, sched.T_EUID) != 0 {
+    if taskslot.tget(state, me, taskconst.T_EUID) != 0 {
         return sysuser.neg(errno.E_PERM)
     }
     if field == WS_INIT {
@@ -288,6 +291,21 @@ const WS_UP: u64 = 9
 const WS_KILL: u64 = 10
 const WS_AWG: u64 = 11 // jc,jmin,jmax,s1,s2,h1,h2,h3,h4
 
+fn first_holder_count(state: u64, me: u64, fd: u64, of: u64) -> u64 {
+    var count: u64 = 0
+    var scan: u64 = file.next_used_fd(state, me, 0)
+    while scan < file.MAX_FD {
+        if sysuser.of_of(state, me, scan) == of {
+            if scan < fd {
+                return 0
+            }
+            count = count + 1
+        }
+        scan = file.next_used_fd(state, me, scan + 1)
+    }
+    return count
+}
+
 // The end of a process. Every socket it still holds and nobody else
 // does is closed in an orderly way -- the FIN travels, and the state
 // machine of round K3 walks through TIME_WAIT on its own afterwards.
@@ -298,28 +316,25 @@ fn sock_close_all(state: u64, me: u64, last_use: bool) {
     if !last_use {
         return
     }
-    var fd: u64 = 0
+    var fd: u64 = file.next_used_fd(state, me, 0)
     while fd < file.MAX_FD {
         let of: u64 = sysuser.of_of(state, me, fd)
-        if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_SOCK {
-            if file.open_refs(state, of) <= 1 {
+        let held: u64 = first_holder_count(state, me, fd, of)
+        if of < file.MAX_OPEN && held != 0 && file.open_refs(state, of) <= held {
+            let kind: u64 = file.open_kind(state, of)
+            if kind == file.K_SOCK {
                 netview.release(state, file.open_ino(state, of))
                 inet.sock_close(state, file.open_ino(state, of))
             }
-        }
-        if of < file.MAX_OPEN
-            && file.open_kind(state, of) == file.K_USOCK {
-            if file.open_refs(state, of) <= 1 {
+            if kind == file.K_USOCK {
                 unixsock.sock_free(state, file.open_ino(state, of))
                 sched.poll_kick(state)
             }
-        }
-        if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_SHM {
-            if file.open_refs(state, of) <= 1 {
+            if kind == file.K_SHM {
                 unixsock.shm_unref(state, file.open_ino(state, of))
             }
         }
-        fd = fd + 1
+        fd = file.next_used_fd(state, me, fd + 1)
     }
 }
 
@@ -376,7 +391,7 @@ fn do_socket(state: u64, me: u64, domain: u64, kind: u64,
     // frame that arrives four milliseconds later arrives while somebody
     // else holds the processor, and asking the scheduler THEN would put
     // the octets on the wrong program.
-    netmon.sock_open(state, si, me, sched.tget(state, me, sched.T_PID), k)
+    netmon.sock_open(state, si, me, taskslot.tget(state, me, taskconst.T_PID), k)
     if (flags & sysconst.SOCK_NONBLOCK) != 0 {
         inet.sock_set_nonblock(state, si)
     }
@@ -487,7 +502,7 @@ fn do_accept(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
     // ROUND NETMON: the accepted connection belongs to whoever accepted
     // it, not to whoever is listening -- with `fork` after `accept`
     // those are two different processes.
-    netmon.sock_open(state, got, me, sched.tget(state, me, sched.T_PID),
+    netmon.sock_open(state, got, me, taskslot.tget(state, me, taskconst.T_PID),
         netmon.K_TCP)
     var pip: u64 = 0
     var pport: u64 = 0
@@ -584,7 +599,7 @@ fn usock_sockname(state: u64, me: u64, si: u64, addr: u64, lenp: u64,
     if addr == 0 {
         return 0
     }
-    if lenp == 0 || !proc.user_ok(state, me, lenp, 4) {
+    if lenp == 0 || !procfault.user_ok(state, me, lenp, 4) {
         return sysuser.neg(errno.E_FAULT)
     }
     var room: u64 = 0
@@ -682,7 +697,7 @@ fn do_setsockopt(state: u64, me: u64, fd: u64, level: u64,
         if optlen < 16 {
             return sysuser.neg(errno.E_INVAL)
         }
-        if !proc.user_ok(state, me, val, 16) {
+        if !procfault.user_ok(state, me, val, 16) {
             return sysuser.neg(errno.E_FAULT)
         }
         var sec: u64 = 0
@@ -724,7 +739,7 @@ fn do_setsockopt(state: u64, me: u64, fd: u64, level: u64,
     if optlen < 4 {
         return sysuser.neg(errno.E_INVAL)
     }
-    if !proc.user_ok(state, me, val, 4) {
+    if !procfault.user_ok(state, me, val, 4) {
         return sysuser.neg(errno.E_FAULT)
     }
     var v: u64 = 0
@@ -764,7 +779,7 @@ fn do_getsockopt(state: u64, me: u64, fd: u64, level: u64, name: u64,
     if si >= inet.SOCK_MAX && ui >= unixsock.USOCK_MAX {
         return sysuser.neg(errno.E_BADF)
     }
-    if !proc.user_ok(state, me, lenp, 4) {
+    if !procfault.user_ok(state, me, lenp, 4) {
         return sysuser.neg(errno.E_FAULT)
     }
     var room: u64 = 0
@@ -873,7 +888,7 @@ fn do_netvget(state: u64, me: u64, pid: u64, what: u64) -> u64 {
     if t == 0 || t >= kstate.MAX_TASKS {
         return sysuser.neg(errno.E_SRCH)
     }
-    if sched.tget(state, t, sched.T_STATE) == sched.S_FREE {
+    if taskslot.tget(state, t, taskconst.T_STATE) == taskconst.S_FREE {
         return sysuser.neg(errno.E_SRCH)
     }
     if what == NV_MODE {
@@ -883,9 +898,9 @@ fn do_netvget(state: u64, me: u64, pid: u64, what: u64) -> u64 {
         return netview.allow_count(state, t)
     }
     if what == NV_PID {
-        return sched.tget(state, t, sched.T_PID)
+        return taskslot.tget(state, t, taskconst.T_PID)
     }
-    if what >= NV_ALLOW && what < NV_ALLOW + sched.NETOK_MAX {
+    if what >= NV_ALLOW && what < NV_ALLOW + taskconst.NETOK_MAX {
         return netview.allow_at(state, t, what - NV_ALLOW)
     }
     return sysuser.neg(errno.E_INVAL)
@@ -896,7 +911,7 @@ fn do_netvset(state: u64, me: u64, pid: u64, want: u64) -> u64 {
     if t == 0 || t >= kstate.MAX_TASKS {
         return sysuser.neg(errno.E_SRCH)
     }
-    if sched.tget(state, t, sched.T_STATE) == sched.S_FREE {
+    if taskslot.tget(state, t, taskconst.T_STATE) == taskconst.S_FREE {
         return sysuser.neg(errno.E_SRCH)
     }
     let v: u64 = want & 0xFF
@@ -916,7 +931,7 @@ fn do_netvallow(state: u64, me: u64, pid: u64, addr: u64,
     if t == 0 || t >= kstate.MAX_TASKS {
         return sysuser.neg(errno.E_SRCH)
     }
-    if sched.tget(state, t, sched.T_STATE) == sched.S_FREE {
+    if taskslot.tget(state, t, taskconst.T_STATE) == taskconst.S_FREE {
         return sysuser.neg(errno.E_SRCH)
     }
     if !netview.may_set(state, me, t, netview.view_of(state, t)) {
@@ -937,11 +952,11 @@ fn ctr_admin(state: u64, me: u64) -> bool {
     if ctr.ctr_of(state, me) != ctr.HOST {
         return false
     }
-    return sched.tget(state, me, sched.T_EUID) == 0
+    return taskslot.tget(state, me, taskconst.T_EUID) == 0
 }
 
 fn do_netvfb(state: u64, me: u64, want: u64) -> u64 {
-    if sched.tget(state, me, sched.T_EUID) != 0 {
+    if taskslot.tget(state, me, taskconst.T_EUID) != 0 {
         return sysuser.neg(errno.E_PERM)
     }
     if want > netview.FB_LAST {
@@ -1011,11 +1026,11 @@ fn do_netmon(state: u64, me: u64, kind: u64, index: u64,
             return netmon.tget(state, index, field)
         }
         if field == NT_PID {
-            return sched.tget(state, index, sched.T_PID)
+            return taskslot.tget(state, index, taskconst.T_PID)
         }
         if field == NT_ALIVE {
-            let st: u64 = sched.tget(state, index, sched.T_STATE)
-            if st == sched.S_FREE || st == sched.S_ZOMBIE {
+            let st: u64 = taskslot.tget(state, index, taskconst.T_STATE)
+            if st == taskconst.S_FREE || st == taskconst.S_ZOMBIE {
                 return 0
             }
             return 1
@@ -1024,7 +1039,7 @@ fn do_netmon(state: u64, me: u64, kind: u64, index: u64,
             return netview.view_of(state, index)
         }
         if field == NT_STATE {
-            return sched.tget(state, index, sched.T_STATE)
+            return taskslot.tget(state, index, taskconst.T_STATE)
         }
         return sysuser.neg(errno.E_INVAL)
     }
@@ -1080,7 +1095,7 @@ fn do_netmon(state: u64, me: u64, kind: u64, index: u64,
 // ROUND NETMON PART TWO: one number about the sharing.
 fn do_share(state: u64, me: u64, what: u64, index: u64) -> u64 {
     if what == SH_SET {
-        if sched.tget(state, me, sched.T_EUID) != 0 {
+        if taskslot.tget(state, me, taskconst.T_EUID) != 0 {
             return sysuser.neg(errno.E_PERM)
         }
         // SWITCHED ON MEANS SWITCHED ON, not brought up: the card is
@@ -1160,7 +1175,7 @@ fn do_share(state: u64, me: u64, what: u64, index: u64) -> u64 {
 // ================================================== RUNDE O-EBPF
 fn do_ebpf_load(state: u64, me: u64, slot: u64, uptr: u64,
     len: u64) -> u64 {
-    if sched.tget(state, me, sched.T_EUID) != 0 {
+    if taskslot.tget(state, me, taskconst.T_EUID) != 0 {
         return sysuser.neg(errno.E_PERM)
     }
     if slot >= ebpf.PROG_MAX {
@@ -1179,7 +1194,7 @@ fn do_ebpf_load(state: u64, me: u64, slot: u64, uptr: u64,
 //   was 0 = anhaengen, 1 = aushaengen, 2 = entladen
 fn do_ebpf_attach(state: u64, me: u64, was: u64, kind: u64,
     slot: u64) -> u64 {
-    if sched.tget(state, me, sched.T_EUID) != 0 {
+    if taskslot.tget(state, me, taskconst.T_EUID) != 0 {
         return sysuser.neg(errno.E_PERM)
     }
     if was == 0 {
@@ -1204,7 +1219,7 @@ fn do_ebpf_attach(state: u64, me: u64, was: u64, kind: u64,
 }
 
 fn do_ebpf_map(state: u64, me: u64, was: u64, a: u64, b: u64) -> u64 {
-    if sched.tget(state, me, sched.T_EUID) != 0 {
+    if taskslot.tget(state, me, taskconst.T_EUID) != 0 {
         return sysuser.neg(errno.E_PERM)
     }
     if was == 0 {
@@ -1399,10 +1414,10 @@ fn do_ubind(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
         return sysuser.neg(errno.E_BADF)
     }
     var plen: u64 = 0
-    let pfl: u64 = unixsock.scratch_lock(state)
+    let pfl: u64 = mmlock.scratch_lock(state)
     let r: u64 = sysfd.sa_un(state, me, addr, len, &plen)
     if errno.is_error(r) {
-        unixsock.scratch_unlock(state, pfl)
+        mmlock.scratch_unlock(state, pfl)
         return r
     }
     var b: u64 = 0
@@ -1411,7 +1426,7 @@ fn do_ubind(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
     } else {
         b = unixsock.bind_path(state, si, sysconst.WL_PATH + 2, plen)
     }
-    unixsock.scratch_unlock(state, pfl)
+    mmlock.scratch_unlock(state, pfl)
     if b != 0 {
         return sysuser.neg(b)
     }
@@ -1436,25 +1451,25 @@ fn do_uconnect(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
         return sysuser.neg(errno.E_BADF)
     }
     var plen: u64 = 0
-    let pfl: u64 = unixsock.scratch_lock(state)
+    let pfl: u64 = mmlock.scratch_lock(state)
     let r: u64 = sysfd.sa_un(state, me, addr, len, &plen)
     if errno.is_error(r) {
-        unixsock.scratch_unlock(state, pfl)
+        mmlock.scratch_unlock(state, pfl)
         return r
     }
     if unixsock.sock_kind(state, si) == unixsock.UK_DGRAM {
         // r731: a datagram connect() just picks the default destination
         let dst: u64 = unixsock.find_dgram(state, sysconst.WL_PATH + 2, plen)
         if dst >= unixsock.USOCK_MAX {
-            unixsock.scratch_unlock(state, pfl)
+            mmlock.scratch_unlock(state, pfl)
             return sysuser.neg(errno.E_CONNREFUSED)
         }
         unixsock.connect_dgram(state, si, dst)
-        unixsock.scratch_unlock(state, pfl)
+        mmlock.scratch_unlock(state, pfl)
         return 0
     }
     let lst: u64 = unixsock.find_listener(state, sysconst.WL_PATH + 2, plen)
-    unixsock.scratch_unlock(state, pfl)
+    mmlock.scratch_unlock(state, pfl)
     if lst >= unixsock.USOCK_MAX {
         return sysuser.neg(errno.E_CONNREFUSED)
     }
@@ -1523,7 +1538,7 @@ fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
     if si >= unixsock.USOCK_MAX {
         return sysuser.neg(errno.E_BADF)
     }
-    if !proc.user_ok(state, me, mh, sysconst.MH_BYTES) {
+    if !procfault.user_ok(state, me, mh, sysconst.MH_BYTES) {
         return sysuser.neg(errno.E_FAULT)
     }
     if unixsock.peer_gone(state, si) {
@@ -1538,7 +1553,7 @@ fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
     let ctllen: u64 = sysuser.get64u(state, me, mh + sysconst.MH_CONTROLLEN)
     var passed: u64 = 0
     if ctl != 0 && ctllen >= 16 {
-        if !proc.user_ok(state, me, ctl, ctllen) {
+        if !procfault.user_ok(state, me, ctl, ctllen) {
             return sysuser.neg(errno.E_FAULT)
         }
         let clen: u64 = sysuser.get64u(state, me, ctl)
@@ -1586,7 +1601,7 @@ fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
     var sent: u64 = 0
     var v: u64 = 0
     while v < iovlen {
-        if !proc.user_ok(state, me, iov + v * 16, 16) {
+        if !procfault.user_ok(state, me, iov + v * 16, 16) {
             return sysuser.neg(errno.E_FAULT)
         }
         let base: u64 = sysuser.get64u(state, me, iov + v * 16)
@@ -1653,7 +1668,7 @@ fn sendmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
     var total: u64 = 0
     var v: u64 = 0
     while v < iovlen {
-        if !proc.user_ok(state, me, iov + v * 16, 16) {
+        if !procfault.user_ok(state, me, iov + v * 16, 16) {
             return sysuser.neg(errno.E_FAULT)
         }
         total = total + sysuser.get64u(state, me, iov + v * 16 + 8)
@@ -1666,7 +1681,7 @@ fn sendmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
     let ctllen: u64 = sysuser.get64u(state, me, mh + sysconst.MH_CONTROLLEN)
     var nfds: u64 = 0
     if ctl != 0 && ctllen >= 16 {
-        if !proc.user_ok(state, me, ctl, ctllen) {
+        if !procfault.user_ok(state, me, ctl, ctllen) {
             return sysuser.neg(errno.E_FAULT)
         }
         let clen: u64 = sysuser.get64u(state, me, ctl)
@@ -1692,7 +1707,7 @@ fn sendmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
             return sysuser.neg(errno.E_PIPE)
         }
         if unixsock.dgram_room(state, unixsock.sock_peer(state, si)) >= total && unixsock.fd_room(state, si) >= nfds {
-            let fl: u64 = unixsock.scratch_lock(state)
+            let fl: u64 = mmlock.scratch_lock(state)
             var ok: bool = true
             var off: u64 = 0
             v = 0
@@ -1705,7 +1720,7 @@ fn sendmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
                 v = v + 1
             }
             if !ok {
-                unixsock.scratch_unlock(state, fl)
+                mmlock.scratch_unlock(state, fl)
                 return sysuser.neg(errno.E_FAULT)
             }
             var k: u64 = 0
@@ -1714,7 +1729,7 @@ fn sendmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
                 k = k + 1
             }
             let w: u64 = unixsock.send_dgram(state, si, sysconst.WL_SCRATCH, total)
-            unixsock.scratch_unlock(state, fl)
+            mmlock.scratch_unlock(state, fl)
             if errno.is_error(w) {
                 return sysuser.neg(w)
             }
@@ -1750,7 +1765,7 @@ fn recvmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
     var cap: u64 = 0
     var v: u64 = 0
     while v < iovlen {
-        if !proc.user_ok(state, me, iov + v * 16, 16) {
+        if !procfault.user_ok(state, me, iov + v * 16, 16) {
             return sysuser.neg(errno.E_FAULT)
         }
         cap = cap + sysuser.get64u(state, me, iov + v * 16 + 8)
@@ -1762,7 +1777,7 @@ fn recvmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
     let mlen: u64 = unixsock.dgram_len(state, si)
     let ctl: u64 = sysuser.get64u(state, me, mh + MH_CONTROL)
     let ctllen: u64 = sysuser.get64u(state, me, mh + sysconst.MH_CONTROLLEN)
-    if ctl != 0 && ctllen != 0 && !proc.user_ok(state, me, ctl, ctllen) {
+    if ctl != 0 && ctllen != 0 && !procfault.user_ok(state, me, ctl, ctllen) {
         return sysuser.neg(errno.E_FAULT)
     }
     var room: u64 = 0
@@ -1811,7 +1826,7 @@ fn recvmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
     if !sysuser.put32(state, me, mh + sysconst.MH_FLAGS, rflags) {
         return sysuser.neg(errno.E_FAULT)
     }
-    let fl: u64 = unixsock.scratch_lock(state)
+    let fl: u64 = mmlock.scratch_lock(state)
     let got: u64 = unixsock.recv_dgram(state, si, sysconst.WL_SCRATCH, cap)
     var ok: bool = true
     var off: u64 = 0
@@ -1827,7 +1842,7 @@ fn recvmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
         off = off + chunk
         v = v + 1
     }
-    unixsock.scratch_unlock(state, fl)
+    mmlock.scratch_unlock(state, fl)
     if !ok {
         return sysuser.neg(errno.E_FAULT)
     }
@@ -1846,7 +1861,7 @@ fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
     if si >= unixsock.USOCK_MAX {
         return sysuser.neg(errno.E_BADF)
     }
-    if !proc.user_ok(state, me, mh, sysconst.MH_BYTES) {
+    if !procfault.user_ok(state, me, mh, sysconst.MH_BYTES) {
         return sysuser.neg(errno.E_FAULT)
     }
     if unixsock.sock_kind(state, si) == unixsock.UK_DGRAM {
@@ -1872,7 +1887,7 @@ fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
     let ctl: u64 = sysuser.get64u(state, me, mh + MH_CONTROL)
     let ctllen: u64 = sysuser.get64u(state, me, mh + sysconst.MH_CONTROLLEN)
     if ctl != 0 && ctllen >= 20 && unixsock.fd_waiting(state, si) != 0 {
-        if !proc.user_ok(state, me, ctl, ctllen) {
+        if !procfault.user_ok(state, me, ctl, ctllen) {
             return sysuser.neg(errno.E_FAULT)
         }
         var room: u64 = (ctllen - 16) / 4
@@ -1928,7 +1943,7 @@ fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
     var got: u64 = 0
     var v: u64 = 0
     while v < iovlen && unixsock.waiting(state, si) != 0 {
-        if !proc.user_ok(state, me, iov + v * 16, 16) {
+        if !procfault.user_ok(state, me, iov + v * 16, 16) {
             return sysuser.neg(errno.E_FAULT)
         }
         let base: u64 = sysuser.get64u(state, me, iov + v * 16)
@@ -1966,7 +1981,7 @@ fn do_socketpair(state: u64, me: u64, domain: u64, kind: u64, protocol: u64, sv:
     if ((kind & 0xFF) != SOCK_STREAM && (kind & 0xFF) != sysconst.SOCK_DGRAM && (kind & 0xFF) != SOCK_SEQPACKET) || protocol != 0 {
         return sysuser.neg(errno.E_PROTONOSUPPORT)
     }
-    if !proc.user_ok(state, me, sv, 8) {
+    if !procfault.user_ok(state, me, sv, 8) {
         return sysuser.neg(errno.E_FAULT)
     }
     var uk: u64 = unixsock.UK_STREAM

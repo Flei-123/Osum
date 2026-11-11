@@ -27,6 +27,8 @@
 #                       instead of 12, for the frosting shots) -- the
 #                       light and the dark case the contrast promise of
 #                       round GLAS has to survive.
+#     terminal_only=yes boot the plain window server: the terminal window
+#                       shows the two boot lines, no desktop, no taskbar
 #     script=<cmd>      run this in the guest shell instead of the desktop
 #     user=<name>       put /users/<name>/config/ on the disk (the
 #                       account store lives under it)
@@ -90,6 +92,7 @@ clicks=""
 xscheme=""
 xfiles=""
 keep=no
+terminal_only=no
 progs="desktop taskbar settings launcher theme explorer sh echo ls cat"
 for a in "$@"; do
     case "$a" in
@@ -115,6 +118,7 @@ for a in "$@"; do
         progs=*) progs=${a#*=} ;;
         accel=*) accel=${a#*=} ;;
         keep=*) keep=${a#*=} ;;
+        terminal_only=*) terminal_only=${a#*=} ;;
         uitrace=*) uitrace=${a#*=} ;;
         sidebar=*) sidebar=${a#*=} ;;
         xscheme=*) xscheme=${a#*=} ;;
@@ -168,7 +172,7 @@ fi
 # A program is not only its own file: every one of these imports wlib,
 # wlibc and now vorlage.  The newest file in kernel/user decides for all
 # of them -- round LOOK found that out the slow way.
-USERNEW=$(ls -t kernel/user/*.fi 2>/dev/null | head -1)
+USERNEW=$(bash tools/design/newest-source.sh)
 for p in $progs; do
     if [ -s "$BUILDD/$p.elf" ] && [ -z "${TSREBUILD:-}" ] \
        && [ "$BUILDD/$p.elf" -nt "kernel/user/$p.fi" ] \
@@ -370,6 +374,9 @@ SOCK="$OUT/mon.sock"; rm -f "$SOCK" "$OUT/serial.txt"
 if [ -n "$script" ]; then
     APPEND="osum nokbd nosched noproc nofs script=$script"
     WAITFOR='^kernel: done'
+elif [ "$terminal_only" = yes ]; then
+    APPEND="gfx wm wmhold nokbd nosched noproc nofs $extra"
+    WAITFOR='^wm: hold'
 else
     case "$extra" in *wighalt=*) ;; *) [ -n "$clicks" ] && extra="$extra wighalt=60" ;; esac
     APPEND="gfx wm wig wigicons desk wmhold wiglong nokbd nosched noproc nofs $extra"

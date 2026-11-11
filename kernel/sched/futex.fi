@@ -1,7 +1,10 @@
 import lib.kstate
 import lib.errno
 import sched.sched
-import sched.proc
+import sched.taskconst
+import sched.taskslot
+import sched.proc.procfault
+import sched.proc.procmap
 import sched.signal
 import sched.time
 import sched.hrt
@@ -69,7 +72,7 @@ fn queued_count() -> u64 {
 
 
 fn rd32(state: u64, me: u64, addr: u64) -> u64 {
-    let phys: u64 = proc.translate(state, me, addr)
+    let phys: u64 = procmap.translate(state, me, addr)
     if phys == 0 {
         return 0
     }
@@ -118,8 +121,8 @@ fn cas32(state: u64, phys: u64, old: u64, new: u64) -> bool {
 }
 
 fn space_of(state: u64, me: u64) -> u64 {
-    let g: u64 = sched.tget(state, me, sched.T_TGID)
-    if g == 0 || g == sched.tget(state, me, sched.T_PID) {
+    let g: u64 = taskslot.tget(state, me, taskconst.T_TGID)
+    if g == 0 || g == taskslot.tget(state, me, taskconst.T_PID) {
         return me
     }
     let l: u64 = sched.find_pid(state, g)
@@ -149,11 +152,11 @@ fn live(state: u64, j: u64) -> bool {
     if fq_vkey[j as usize] == 0 {
         return false
     }
-    if sched.tget(state, j, sched.T_PID) != fq_pid[j as usize] {
+    if taskslot.tget(state, j, taskconst.T_PID) != fq_pid[j as usize] {
         fq_vkey[j as usize] = 0
         return false
     }
-    return sched.tget(state, j, sched.T_STATE) == sched.S_SLEEP
+    return taskslot.tget(state, j, taskconst.T_STATE) == taskconst.S_SLEEP
 }
 
 fn matches(j: u64, pkey: u64, vkey: u64, pass: u64) -> bool {
@@ -181,7 +184,7 @@ fn oldest(state: u64, pkey: u64, vkey: u64, bits: u64, pass: u64) -> u64 {
 
 fn wake_slot(state: u64, j: u64) {
     fq_vkey[j as usize] = 0
-    sched.state_cas(state, j, sched.S_SLEEP, sched.S_READY)
+    sched.state_cas(state, j, taskconst.S_SLEEP, taskconst.S_READY)
     fq_count[2 as usize] = fq_count[2 as usize] + 1
 }
 
@@ -247,7 +250,7 @@ fn sleep_on(state: u64, me: u64, phys: u64, vkey: u64, expect: u64, bits: u64, d
     fq_vkey[me as usize] = vkey
     fq_pkey[me as usize] = phys
     fq_bits[me as usize] = bits
-    fq_pid[me as usize] = sched.tget(state, me, sched.T_PID)
+    fq_pid[me as usize] = taskslot.tget(state, me, taskconst.T_PID)
     fq_ticket[me as usize] = fq_count[0 as usize]
     fq_count[0 as usize] = fq_count[0 as usize] + 1
     fq_count[1 as usize] = fq_count[1 as usize] + 1
@@ -255,17 +258,17 @@ fn sleep_on(state: u64, me: u64, phys: u64, vkey: u64, expect: u64, bits: u64, d
     if deadline != 0 && deadline < due {
         due = deadline
     }
-    sched.tset(state, me, sched.T_WAKE, due)
+    taskslot.tset(state, me, taskconst.T_WAKE, due)
     hrt.set_wake(me, fine)
     if fine != 0 {
         hrt.arm_here(state)
     }
-    sched.tset(state, me, sched.T_STATE, sched.S_SLEEP)
+    taskslot.tset(state, me, taskconst.T_STATE, taskconst.S_SLEEP)
     sched.schedule_locked(state)
     sched.irq_restore(flags)
     let f2: u64 = lock(state)
     var queued: bool = false
-    if fq_vkey[me as usize] != 0 && fq_pid[me as usize] == sched.tget(state, me, sched.T_PID) {
+    if fq_vkey[me as usize] != 0 && fq_pid[me as usize] == taskslot.tget(state, me, taskconst.T_PID) {
         queued = true
         fq_vkey[me as usize] = 0
     }
@@ -289,7 +292,7 @@ fn deadline_of(state: u64, me: u64, ts: u64, absolute: bool, on_real: bool, fine
     if ts == 0 {
         return 0
     }
-    if !proc.user_ok(state, me, ts, 16) {
+    if !procfault.user_ok(state, me, ts, 16) {
         return DL_ERR | errno.E_FAULT
     }
     let sec: u64 = rd64(state, me, ts)
@@ -332,12 +335,12 @@ fn deadline_of(state: u64, me: u64, ts: u64, absolute: bool, on_real: bool, fine
 
 
 fn lock_pi(state: u64, me: u64, uaddr: u64, ts: u64) -> u64 {
-    var phys: u64 = proc.translate(state, me, uaddr)
+    var phys: u64 = procmap.translate(state, me, uaddr)
     if phys == 0 {
         return neg(errno.E_FAULT)
     }
     let vkey: u64 = vkey_of(state, me, uaddr)
-    let tid: u64 = sched.tget(state, me, sched.T_PID) & TID_MASK
+    let tid: u64 = taskslot.tget(state, me, taskconst.T_PID) & TID_MASK
     var fine: u64 = 0
     let deadline: u64 = deadline_of(state, me, ts, true, true, &fine)
     if deadline >= DL_ERR {
@@ -345,7 +348,7 @@ fn lock_pi(state: u64, me: u64, uaddr: u64, ts: u64) -> u64 {
     }
     var rounds: u64 = 0
     while rounds < 100000 {
-        phys = proc.translate(state, me, uaddr)
+        phys = procmap.translate(state, me, uaddr)
         if phys == 0 {
             return neg(errno.E_FAULT)
         }
@@ -382,11 +385,11 @@ fn take_done(state: u64, phys: u64, vkey: u64, tid: u64) -> u64 {
 }
 
 fn trylock_pi(state: u64, me: u64, uaddr: u64) -> u64 {
-    let phys: u64 = proc.translate(state, me, uaddr)
+    let phys: u64 = procmap.translate(state, me, uaddr)
     if phys == 0 {
         return neg(errno.E_FAULT)
     }
-    let tid: u64 = sched.tget(state, me, sched.T_PID) & TID_MASK
+    let tid: u64 = taskslot.tget(state, me, taskconst.T_PID) & TID_MASK
     let v: u64 = rd32_phys(state, phys)
     if v != 0 {
         if (v & TID_MASK) == tid {
@@ -401,12 +404,12 @@ fn trylock_pi(state: u64, me: u64, uaddr: u64) -> u64 {
 }
 
 fn unlock_pi(state: u64, me: u64, uaddr: u64) -> u64 {
-    let phys: u64 = proc.translate(state, me, uaddr)
+    let phys: u64 = procmap.translate(state, me, uaddr)
     if phys == 0 {
         return neg(errno.E_FAULT)
     }
     let vkey: u64 = vkey_of(state, me, uaddr)
-    let tid: u64 = sched.tget(state, me, sched.T_PID) & TID_MASK
+    let tid: u64 = taskslot.tget(state, me, taskconst.T_PID) & TID_MASK
     var tries: u64 = 0
     while tries < 1000 {
         let v: u64 = rd32_phys(state, phys)
@@ -455,8 +458,8 @@ fn cmp_ok(cmp: u64, a: u64, b: u64) -> bool {
 }
 
 fn wake_op(state: u64, me: u64, uaddr: u64, nwake: u64, uaddr2: u64, nwake2: u64, enc: u64) -> u64 {
-    let phys: u64 = proc.translate(state, me, uaddr)
-    let phys2: u64 = proc.translate(state, me, uaddr2)
+    let phys: u64 = procmap.translate(state, me, uaddr)
+    let phys2: u64 = procmap.translate(state, me, uaddr2)
     if phys == 0 || phys2 == 0 {
         return neg(errno.E_FAULT)
     }
@@ -528,7 +531,7 @@ fn call(state: u64, me: u64, uaddr: u64, op: u64, val: u64, a3: u64, uaddr2: u64
     if (uaddr & 3) != 0 {
         return neg(errno.E_INVAL)
     }
-    if !proc.user_ok(state, me, uaddr, 4) {
+    if !procfault.user_ok(state, me, uaddr, 4) {
         return neg(errno.E_FAULT)
     }
     if cmd == OP_LOCK_PI {
@@ -540,7 +543,7 @@ fn call(state: u64, me: u64, uaddr: u64, op: u64, val: u64, a3: u64, uaddr2: u64
     if cmd == OP_TRYLOCK_PI {
         return trylock_pi(state, me, uaddr)
     }
-    let phys: u64 = proc.translate(state, me, uaddr)
+    let phys: u64 = procmap.translate(state, me, uaddr)
     if phys == 0 {
         return neg(errno.E_FAULT)
     }
@@ -581,10 +584,10 @@ fn call(state: u64, me: u64, uaddr: u64, op: u64, val: u64, a3: u64, uaddr2: u64
         return n
     }
     if cmd == OP_REQUEUE || cmd == OP_CMP_REQUEUE {
-        if (uaddr2 & 3) != 0 || !proc.user_ok(state, me, uaddr2, 4) {
+        if (uaddr2 & 3) != 0 || !procfault.user_ok(state, me, uaddr2, 4) {
             return neg(errno.E_FAULT)
         }
-        let phys2: u64 = proc.translate(state, me, uaddr2)
+        let phys2: u64 = procmap.translate(state, me, uaddr2)
         if phys2 == 0 {
             return neg(errno.E_FAULT)
         }
@@ -614,7 +617,7 @@ fn wake_cleared(state: u64, me: u64, addr: u64) -> u64 {
     if (addr & 3) != 0 {
         return 0
     }
-    let phys: u64 = proc.translate(state, me, addr)
+    let phys: u64 = procmap.translate(state, me, addr)
     if phys == 0 {
         return 0
     }

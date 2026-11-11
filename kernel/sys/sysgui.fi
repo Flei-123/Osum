@@ -10,10 +10,13 @@ import lib.kstate
 import net.netview
 import fs.nidx
 import ipc.perm
-import sched.proc
+import sched.proc.procfault
+import sched.proc.procmap
 import drv.hid.ps2m
 import drv.gpu.vgpu
 import sched.sched
+import sched.taskconst
+import sched.taskslot
 import sched.origin
 import ui.shot
 import ipc.tip
@@ -41,7 +44,7 @@ export { wm_call, wig_call, tile_call, disp_call, shot_call, tipp_call, ax_call,
 
 fn blockb(state: u64) -> u64 {
     let cur: u64 = sched.current(state)
-    if sched.tget(state, cur, sched.T_KIND) != sched.K_USER {
+    if taskslot.tget(state, cur, taskconst.T_KIND) != taskconst.K_USER {
         return state + kstate.BLOCK_OFF
     }
     var k: u64 = sched.hier(state)
@@ -273,7 +276,7 @@ fn do_dispset(state: u64, me: u64, field: u64, v: u64) -> u64 {
         return disp_night(state, me, v)
     }
     if field == sys.DS_BRIGHT && bl_route(state) {
-        if sched.tget(state, me, sched.T_EUID) != 0 {
+        if taskslot.tget(state, me, taskconst.T_EUID) != 0 {
             return sysuser.neg(errno.E_PERM)
         }
         if blchain.set_k(state, v) == blchain.SRC_NONE {
@@ -284,7 +287,7 @@ fn do_dispset(state: u64, me: u64, field: u64, v: u64) -> u64 {
     if !vmode.ready(state) {
         return sysuser.neg(errno.E_NODEV)
     }
-    if sched.tget(state, me, sched.T_EUID) != 0 {
+    if taskslot.tget(state, me, taskconst.T_EUID) != 0 {
         return sysuser.neg(errno.E_PERM)
     }
     vmode.poll(state)
@@ -379,7 +382,7 @@ fn do_dispset(state: u64, me: u64, field: u64, v: u64) -> u64 {
 }
 
 fn disp_night(state: u64, me: u64, strength: u64) -> u64 {
-    if sched.tget(state, me, sched.T_EUID) != 0 {
+    if taskslot.tget(state, me, taskconst.T_EUID) != 0 {
         return sysuser.neg(errno.E_PERM)
     }
     if !vmode.set_night(state, strength) {
@@ -527,7 +530,7 @@ fn wl_fill(state: u64, me: u64, slot: u64, aus: u64, n: u64) -> u64 {
     }
     if n >= sys.FW_BYTES {
         kstate.set(buffer, sys.FW_OWNER,
-            sched.tget(state, wm.win_owner(state, slot), sched.T_PID))
+            taskslot.tget(state, wm.win_owner(state, slot), taskconst.T_PID))
         kstate.set(buffer, sys.FW_KIND, wm.win_kind(state, slot))
     }
     kstate.set(buffer, sys.WL_ID, wm.win_id(state, slot))
@@ -605,7 +608,7 @@ fn fwin_target(state: u64, me: u64, id: u64) -> u64 {
 }
 
 fn wm_fwin(state: u64, me: u64, op: u64, a: u64, b: u64, c: u64) -> u64 {
-    if sched.tget(state, me, sched.T_EUID) != 0 {
+    if taskslot.tget(state, me, taskconst.T_EUID) != 0 {
         return cap.err(cap.E_RIGHTS)
     }
     if op == sys.FW_LIST {
@@ -664,7 +667,7 @@ static mut trust_buf: [u8; 1040] = [0 as u8; 1040]
 static mut start_head: u64 = 0
 
 fn wm_trust(state: u64, me: u64, op: u64, no: u64, p: u64, n: u64) -> u64 {
-    if sched.tget(state, me, sched.T_EUID) != 0 {
+    if taskslot.tget(state, me, taskconst.T_EUID) != 0 {
         return cap.err(cap.E_RIGHTS)
     }
     if op == sys.TR_ASK {
@@ -797,7 +800,7 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         while k < 31 {
             var c: u64 = 0
             if a2 != 0 {
-                if !proc.user_ok(state, me, a2 + k, 1) {
+                if !procfault.user_ok(state, me, a2 + k, 1) {
                     return cap.err(cap.E_INVALID)
                 }
                 c = sysuser.peek(state, me, a2 + k)
@@ -965,6 +968,9 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             } else {
                 wm.set_hidden(state, w, true)
             }
+        } else if a1 == sys.WA_CLOSE {
+            wm.ev_push(state, w, wm.E_CLOSE, 0, 0, 0)
+            return 0
         } else {
             return cap.err(cap.E_INVALID)
         }
@@ -1002,7 +1008,7 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if n > 256 {
             n = 256
         }
-        if !proc.user_ok(state, me, a2, n) {
+        if !procfault.user_ok(state, me, a2, n) {
             return cap.err(cap.E_INVALID)
         }
         let buffer: u64 = blockb(state) + 3200
@@ -1025,7 +1031,7 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if !wm.ev_pop(state, i, buffer) {
             return 0
         }
-        if !proc.user_ok(state, me, a1, 16) {
+        if !procfault.user_ok(state, me, a1, 16) {
             return cap.err(cap.E_INVALID)
         }
         if !sysuser.copy_out(state, me, a1, buffer, 16) {
@@ -1345,7 +1351,7 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if n > 256 {
             n = 256
         }
-        if !proc.user_ok(state, me, a1, n) {
+        if !procfault.user_ok(state, me, a1, n) {
             return cap.err(cap.E_INVALID)
         }
         let buffer: u64 = blockb(state) + 3200
@@ -1684,7 +1690,7 @@ fn shot_key_ok(state: u64, me: u64) -> bool {
 }
 
 fn shot_may_arm(state: u64, me: u64) -> bool {
-    if sched.tget(state, me, sched.T_EUID) == 0 {
+    if taskslot.tget(state, me, taskconst.T_EUID) == 0 {
         return true
     }
     return is_taskbar(state, me)
@@ -1705,7 +1711,7 @@ fn shot_copy(state: u64, me: u64, dst: u64, rows: u64, from: u64) -> u64 {
                 let a: u64 = at +% k
                 let pg: u64 = a & 0xFFFFFFFFFFFFF000
                 if pg != page {
-                    phys = proc.translate(state, me, pg)
+                    phys = procmap.translate(state, me, pg)
                     if phys == 0 {
                         return sysuser.neg(errno.E_FAULT)
                     }
@@ -1831,7 +1837,7 @@ fn shot_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
         }
         var pid: u64 = a1
         if pid == 0 {
-            pid = sched.tget(state, me, sched.T_PID)
+            pid = taskslot.tget(state, me, taskconst.T_PID)
         }
         shot.arm(state, pid)
         return 0
@@ -1842,12 +1848,12 @@ fn shot_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
             return sysuser.neg(errno.E_PERM)
         }
         shot.set_keyseq(state, kstate.get(state, kstate.K11_OFF + kstate.HK_SEQ))
-        shot.arm(state, sched.tget(state, me, sched.T_PID))
+        shot.arm(state, taskslot.tget(state, me, taskconst.T_PID))
         return 0
     }
     if what == sys.SH_DROP {
         if shot.armed(state)
-            && shot.arm_pid(state) == sched.tget(state, me, sched.T_PID) {
+            && shot.arm_pid(state) == taskslot.tget(state, me, taskconst.T_PID) {
             shot.drop(state)
             return 0
         }
@@ -1855,7 +1861,7 @@ fn shot_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
         return sysuser.neg(errno.E_PERM)
     }
     if what == sys.SH_GRAB {
-        let mine: u64 = sched.tget(state, me, sched.T_PID)
+        let mine: u64 = taskslot.tget(state, me, taskconst.T_PID)
         let from: u64 = shot.next_row(state)
         if !shot.may_grab(state, mine, from) {
             shot.deny(state)
@@ -1877,7 +1883,7 @@ fn shot_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
         if rows == 0 {
             return 0
         }
-        if !proc.user_ok(state, me, a1, rows *% rb) {
+        if !procfault.user_ok(state, me, a1, rows *% rb) {
             return sysuser.neg(errno.E_FAULT)
         }
         let n: u64 = shot_copy(state, me, a1, rows, from)
@@ -2002,7 +2008,7 @@ fn tipp_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
             tip.lock(state)
             return 0
         }
-        if sched.tget(state, me, sched.T_EUID) == 0 {
+        if taskslot.tget(state, me, taskconst.T_EUID) == 0 {
             tip.unlock(state)
             return 0
         }
@@ -2016,6 +2022,7 @@ fn tipp_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
         if !perm.is_root(state, me) && !is_taskbar(state, me) && !origin.is_empty(state, me) {
             return sysuser.neg(errno.E_PERM)
         }
+        tip.mark(state)
         let fl: u64 = sched.irq_save()
         kbd.on_code(state, a1)
         sched.irq_restore(fl)
@@ -2024,7 +2031,7 @@ fn tipp_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
 
     if what == sys.TI_DROP {
         if tip.arm_pid(state) == me
-            || sched.tget(state, me, sched.T_EUID) == 0 {
+            || taskslot.tget(state, me, taskconst.T_EUID) == 0 {
             tip.drop(state)
             return 0
         }
@@ -2037,6 +2044,7 @@ fn tipp_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
     }
 
     if what == sys.TI_KEY {
+        tip.mark(state)
         if a1 > 0xFF || a2 > 0xFF {
             return sysuser.neg(errno.E_INVAL)
         }
@@ -2046,6 +2054,7 @@ fn tipp_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
     }
 
     if what == sys.TI_MOVE {
+        tip.mark(state)
         if !ps2m.present(state) {
             ps2m.adopt(state, fb.width(state), fb.height(state))
         }
@@ -2055,6 +2064,7 @@ fn tipp_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
     }
 
     if what == sys.TI_SCAN {
+        tip.mark(state)
         if a1 > 0xFF {
             return sysuser.neg(errno.E_INVAL)
         }
@@ -2066,6 +2076,7 @@ fn tipp_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
     }
 
     if what == sys.TI_WHEEL {
+        tip.mark(state)
         let down: bool = (a1 >> 63) == 0
         var steps: u64 = a1
         if !down {
@@ -2103,6 +2114,7 @@ fn tipp_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
     }
 
     if what == sys.TI_BUTTON {
+        tip.mark(state)
         if a1 > 7 {
             return sysuser.neg(errno.E_INVAL)
         }
@@ -2257,7 +2269,7 @@ fn do_plugreg(state: u64, me: u64, abi: u64, name: u64, maske: u64,
 }
 
 fn do_pluggrant(state: u64, me: u64, name: u64, rechte: u64) -> u64 {
-    if sched.tget(state, me, sched.T_EUID) != 0 {
+    if taskslot.tget(state, me, taskconst.T_EUID) != 0 {
         return cap.err(cap.E_RIGHTS)
     }
     let buffer: u64 = blockb(state) + 3936
@@ -2574,7 +2586,7 @@ fn ax_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
         if a0 == sys.AP_COUNT {
             return ax.granted(state)
         }
-        if sched.tget(state, me, sched.T_EUID) != 0 {
+        if taskslot.tget(state, me, taskconst.T_EUID) != 0 {
             return errno.neg(errno.E_PERM)
         }
         var t: u64 = a1
@@ -2595,7 +2607,7 @@ fn ax_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
         return errno.neg(errno.E_INVAL)
     }
     if number == sys.AX_SET {
-        if sched.tget(state, me, sched.T_EUID) != 0 {
+        if taskslot.tget(state, me, taskconst.T_EUID) != 0 {
             return errno.neg(errno.E_PERM)
         }
         if a0 == sys.AX_DUMP {
