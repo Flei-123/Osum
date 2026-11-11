@@ -1,4 +1,5 @@
 echo "FX start"
+export MOZ_LOG="${FX7_MOZLOG:-WidgetKeyboard:5,Widget:3}"
 export HOME=/root XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=/tmp/wayland-0 MOZ_ENABLE_WAYLAND=1 GDK_BACKEND=wayland MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 MOZ_CRASHREPORTER_DISABLE=1 FONTCONFIG_FILE=/etc/fonts/fonts.conf
 mkdir -p /tmp/p
 echo 'user_pref("gfx.webrender.software", true);' > /tmp/p/user.js
@@ -29,4 +30,6 @@ echo "FX7 launch t=$(up)"
 sleep ${FX7_WAIT:-420}
 echo "FX7 all events:"
 grep -a '^FX[A-Z]* ' /tmp/fx3.log | head -60
+echo "FX7 widget log:"
+grep -a -i "key\|focus\|enter\|leave\|seat" /tmp/fx3.log | grep -av "^FX" | tail -${FX7_LOGTAIL:-40} | cut -c1-200
 echo FX-END
