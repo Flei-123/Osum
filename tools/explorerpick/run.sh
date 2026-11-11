@@ -77,7 +77,7 @@ mutant notitle kernel/user/explorer/exppick.fi 's/if enabled \&\& text.length((&
     save_window_title open_window_title
 mutant smallcap kernel/user/explorer/exppick.fi 's/const CONTENT_CAP: u64 = 131072/const CONTENT_CAP: u64 = 65536/' \
     big_file_over_64k_picked
-mutant noreplaceask kernel/user/explorer/exppick.fi 's/let allowed: bool = busy.confirm(.*/let allowed: bool = true/' \
+mutant noreplaceask kernel/user/explorer/exppick.fi 's/let allowed: bool = busy.confirm(/let allowed: bool = true || busy.confirm(/' \
     replace_declined_then_accepted
 mutant replaceignoresno kernel/user/explorer/exppick.fi 's/^    return allowed$/    return true/' \
     replace_declined_then_accepted
