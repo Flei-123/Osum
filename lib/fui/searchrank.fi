@@ -1,0 +1,228 @@
+// SPDX-License-Identifier: GPL-2.0-only
+export {
+    name_tier, fields_tier, fuzzy_tier, rank_key, key_before, name_before, is_default_token,
+    CAT_APP, CAT_SETTING, CAT_FILE,
+    T_EXACT, T_PREFIX, T_WORD, T_SUBSTR, T_KEYWORD, T_INFO, T_FUZZY, NO_MATCH,
+    USE_CAP, FUZZY_MIN_LEN,
+}
+
+const CAT_APP: u64 = 0
+const CAT_SETTING: u64 = 1
+const CAT_FILE: u64 = 2
+
+const T_EXACT: u64 = 0
+const T_PREFIX: u64 = 1
+const T_WORD: u64 = 2
+const T_SUBSTR: u64 = 3
+const T_KEYWORD: u64 = 4
+const T_INFO: u64 = 5
+const T_FUZZY: u64 = 6
+const NO_MATCH: u64 = 15
+
+const USE_CAP: u64 = 255
+const FUZZY_MIN_LEN: u64 = 3
+const KEY_SHIFT_CAT: u64 = 32
+const KEY_SHIFT_TIER: u64 = 24
+const KEY_SHIFT_USE: u64 = 16
+const KEY_SHIFT_DEFAULT: u64 = 8
+const COMMA: u64 = 44
+const SLASH: u64 = 47
+
+fn at(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn lower(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+fn length(p: u64) -> u64 {
+    var n: u64 = 0
+    while at(p, n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn is_word_char(c: u64) -> bool {
+    return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c >= 128
+}
+
+fn matches_at(hay: u64, pos: u64, needle: u64, n: u64) -> bool {
+    var k: u64 = 0
+    while k < n {
+        if lower(at(hay, pos + k)) != lower(at(needle, k)) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn is_word_start(hay: u64, pos: u64) -> bool {
+    if pos == 0 {
+        return true
+    }
+    return !is_word_char(at(hay, pos - 1)) && is_word_char(at(hay, pos))
+}
+
+fn name_tier(name: u64, query: u64) -> u64 {
+    let n: u64 = length(query)
+    let h: u64 = length(name)
+    if n == 0 || n > h {
+        return NO_MATCH
+    }
+    if n == h && matches_at(name, 0, query, n) {
+        return T_EXACT
+    }
+    if matches_at(name, 0, query, n) {
+        return T_PREFIX
+    }
+    var found_sub: bool = false
+    var i: u64 = 1
+    while i + n <= h {
+        if matches_at(name, i, query, n) {
+            if is_word_start(name, i) {
+                return T_WORD
+            }
+            found_sub = true
+        }
+        i = i + 1
+    }
+    if found_sub {
+        return T_SUBSTR
+    }
+    return NO_MATCH
+}
+
+fn keyword_tier(keys: u64, query: u64) -> u64 {
+    let n: u64 = length(query)
+    let h: u64 = length(keys)
+    if n == 0 {
+        return NO_MATCH
+    }
+    var i: u64 = 0
+    while i + n <= h {
+        let starts: bool = i == 0 || at(keys, i - 1) == COMMA
+        if starts && matches_at(keys, i, query, n) {
+            return T_KEYWORD
+        }
+        i = i + 1
+    }
+    return NO_MATCH
+}
+
+fn contains_any(hay: u64, query: u64) -> bool {
+    let n: u64 = length(query)
+    let h: u64 = length(hay)
+    var i: u64 = 0
+    while i + n <= h {
+        if matches_at(hay, i, query, n) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn fuzzy_tier(name: u64, query: u64) -> u64 {
+    let n: u64 = length(query)
+    let h: u64 = length(name)
+    if n < FUZZY_MIN_LEN || h == 0 || lower(at(name, 0)) != lower(at(query, 0)) {
+        return NO_MATCH
+    }
+    var qi: u64 = 0
+    var i: u64 = 0
+    while i < h && qi < n {
+        if lower(at(name, i)) == lower(at(query, qi)) {
+            qi = qi + 1
+        }
+        i = i + 1
+    }
+    if qi == n {
+        return T_FUZZY
+    }
+    return NO_MATCH
+}
+
+fn min_tier(a: u64, b: u64) -> u64 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn fields_tier(name: u64, info: u64, keys: u64, query: u64, allow_fuzzy: bool) -> u64 {
+    var best: u64 = name_tier(name, query)
+    if best == T_EXACT {
+        return best
+    }
+    best = min_tier(best, keyword_tier(keys, query))
+    if best == NO_MATCH && (contains_any(info, query) || contains_any(keys, query)) {
+        best = T_INFO
+    }
+    if best == NO_MATCH && allow_fuzzy {
+        best = fuzzy_tier(name, query)
+    }
+    return best
+}
+
+fn rank_key(cat: u64, tier: u64, uses: u64, is_default: bool) -> u64 {
+    var used: u64 = uses
+    if used > USE_CAP {
+        used = USE_CAP
+    }
+    var def_part: u64 = 1
+    if is_default {
+        def_part = 0
+    }
+    return (cat << KEY_SHIFT_CAT) | (tier << KEY_SHIFT_TIER) | ((USE_CAP - used) << KEY_SHIFT_USE)
+        | (def_part << KEY_SHIFT_DEFAULT)
+}
+
+fn name_before(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while true {
+        let ca: u64 = lower(at(a, i))
+        let cb: u64 = lower(at(b, i))
+        if ca != cb {
+            return ca < cb
+        }
+        if ca == 0 {
+            return false
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn key_before(key_a: u64, name_a: u64, key_b: u64, name_b: u64) -> bool {
+    if key_a != key_b {
+        return key_a < key_b
+    }
+    return name_before(name_a, name_b)
+}
+
+fn basename_start(path: u64) -> u64 {
+    var start: u64 = 0
+    var i: u64 = 0
+    while at(path, i) != 0 {
+        if at(path, i) == SLASH {
+            start = i + 1
+        }
+        i = i + 1
+    }
+    return start
+}
+
+fn is_default_token(token: u64, handler_path: u64) -> bool {
+    if at(token, 0) == 0 || at(handler_path, 0) == 0 {
+        return false
+    }
+    let base: u64 = handler_path + basename_start(handler_path)
+    let n: u64 = length(token)
+    return length(base) == n && matches_at(base, 0, token, n)
+}

@@ -1,0 +1,132 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import fui.searchrank
+import appdir
+import nidx
+import handler
+import startuse
+import ulib
+import libc.text
+
+export { rank_apps, rank_files, MAX_APPS, MAX_FILES }
+
+const MAX_APPS: u64 = 24
+const MAX_FILES: u64 = 64
+
+static mut keys: [u64; 64] = [0 as u64; 64]
+static mut all_apps: [u64; 24] = [0 as u64; 24]
+static mut empty_q: [u8; 1] = [0 as u8; 1]
+static mut kind_scheme: [u8; 7] = "scheme\0"
+static mut key_http: [u8; 5] = "http\0"
+static mut handler_path: [u8; 96] = [0 as u8; 96]
+static mut token: [u8; 24] = [0 as u8; 24]
+
+fn sort_by_key(idx: u64, n: u64, name_of_app: bool) {
+    var i: u64 = 1
+    while i < n {
+        let cur_idx: u64 = *((idx + i * 8) as *mut u64)
+        let cur_key: u64 = keys[(i) as usize]
+        var j: u64 = i
+        while j > 0 && key_less(cur_idx, cur_key, *((idx + (j - 1) * 8) as *mut u64), keys[(j - 1) as usize], name_of_app) {
+            __mmio_write64((idx + j * 8) as *mut u64, *((idx + (j - 1) * 8) as *mut u64))
+            keys[(j) as usize] = keys[(j - 1) as usize]
+            j = j - 1
+        }
+        __mmio_write64((idx + j * 8) as *mut u64, cur_idx)
+        keys[(j) as usize] = cur_key
+        i = i + 1
+    }
+}
+
+fn display_name(i: u64, name_of_app: bool) -> u64 {
+    if name_of_app {
+        return appdir.name_of(i)
+    }
+    return nidx.name_at(i)
+}
+
+fn key_less(ia: u64, ka: u64, ib: u64, kb: u64, name_of_app: bool) -> bool {
+    return searchrank.key_before(ka, display_name(ia, name_of_app), kb, display_name(ib, name_of_app))
+}
+
+fn contains_index(idx: u64, n: u64, value: u64) -> bool {
+    var k: u64 = 0
+    while k < n {
+        if *((idx + k * 8) as *mut u64) == value {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+fn add_fuzzy_candidates(term: u64, out: u64, n: u64, max: u64) -> u64 {
+    var count: u64 = n
+    if text.length(term) < searchrank.FUZZY_MIN_LEN {
+        return count
+    }
+    let m: u64 = appdir.search((&empty_q[0 as usize]) as u64, (&all_apps[0 as usize]) as u64, MAX_APPS)
+    var k: u64 = 0
+    while k < m && count < max {
+        let a: u64 = all_apps[(k) as usize]
+        if !contains_index(out, count, a)
+            && searchrank.fuzzy_tier(appdir.name_of(a), term) == searchrank.T_FUZZY {
+            __mmio_write64((out + count * 8) as *mut u64, a)
+            count = count + 1
+        }
+        k = k + 1
+    }
+    return count
+}
+
+fn default_prog_known() -> bool {
+    handler_path[0 as usize] = 0 as u8
+    return handler.find((&kind_scheme[0 as usize]) as u64, (&key_http[0 as usize]) as u64,
+        (&handler_path[0 as usize]) as u64, 95)
+}
+
+fn rank_apps(term: u64, out: u64, max: u64) -> u64 {
+    var n: u64 = appdir.search(term, out, max)
+    if text.length(term) == 0 {
+        return n
+    }
+    n = add_fuzzy_candidates(term, out, n, max)
+    let has_default: bool = default_prog_known()
+    var kept: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let a: u64 = *((out + k * 8) as *mut u64)
+        let tier: u64 = searchrank.fields_tier(appdir.name_of(a), appdir.info_of(a), appdir.keys_of(a), term, true)
+        if tier != searchrank.NO_MATCH {
+            startuse.app_token(appdir.file_of(a), (&token[0 as usize]) as u64)
+            let is_default: bool = has_default
+                && searchrank.is_default_token((&token[0 as usize]) as u64, (&handler_path[0 as usize]) as u64)
+            keys[(kept) as usize] = searchrank.rank_key(searchrank.CAT_APP, tier,
+                startuse.uses_of((&token[0 as usize]) as u64), is_default)
+            __mmio_write64((out + kept * 8) as *mut u64, a)
+            kept = kept + 1
+        }
+        k = k + 1
+    }
+    sort_by_key(out, kept, true)
+    return kept
+}
+
+fn rank_files(term: u64, out: u64, max: u64) -> u64 {
+    let n: u64 = nidx.find(term, out, max)
+    var kept: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let f: u64 = *((out + k * 8) as *mut u64)
+        let tier: u64 = searchrank.name_tier(nidx.name_at(f), term)
+        if tier != searchrank.NO_MATCH {
+            keys[(kept) as usize] = searchrank.rank_key(searchrank.CAT_FILE, tier, 0, false)
+            __mmio_write64((out + kept * 8) as *mut u64, f)
+            kept = kept + 1
+        }
+        k = k + 1
+    }
+    sort_by_key(out, kept, false)
+    return kept
+}

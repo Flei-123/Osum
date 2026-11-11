@@ -1,0 +1,175 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import fui.searchrank
+
+struct T {
+    fails: i32,
+    checks: i32,
+}
+
+static mut cbuf: [u8; 2048] = [0 as u8; 2048]
+static mut cslot: usize = 0
+
+fn c(s: str) -> u64 {
+    let base: usize = (cslot % 32) * 64
+    cslot = cslot + 1
+    var i: usize = 0
+    while i < s.length() && i < 63 {
+        cbuf[base + i] = *((s.p as u64 + i as u64) as *mut u8)
+        i = i + 1
+    }
+    cbuf[base + i] = 0 as u8
+    return ((&cbuf[0 as usize]) as u64) + base as u64
+}
+
+fn check(t: *mut T, ok: bool, what: str) {
+    (*t).checks = (*t).checks + 1
+    if ok {
+        io.fmt_print(f"ok   {what}\n")
+    } else {
+        io.fmt_print(f"FAIL {what}\n")
+        (*t).fails = (*t).fails + 1
+    }
+}
+
+struct Item {
+    name: u64,
+    key: u64,
+}
+
+static mut items: [Item; 16] = [Item { name: 0, key: 0 }; 16]
+
+fn sort_items(n: usize) {
+    var i: usize = 1
+    while i < n {
+        let cur: Item = items[i]
+        var j: usize = i
+        while j > 0 && searchrank.key_before(cur.key, cur.name, items[j - 1].key, items[j - 1].name) {
+            items[j] = items[j - 1]
+            j = j - 1
+        }
+        items[j] = cur
+        i = i + 1
+    }
+}
+
+fn add_app(n: usize, name: str, info: str, keys: str, q: str, uses: u64, def: bool) -> usize {
+    let tier: u64 = searchrank.fields_tier(c(name), c(info), c(keys), c(q), true)
+    if tier == searchrank.NO_MATCH {
+        return n
+    }
+    items[n] = Item { name: c(name), key: searchrank.rank_key(searchrank.CAT_APP, tier, uses, def) }
+    return n + 1
+}
+
+fn add_file(n: usize, name: str, q: str) -> usize {
+    let tier: u64 = searchrank.name_tier(c(name), c(q))
+    if tier == searchrank.NO_MATCH {
+        return n
+    }
+    items[n] = Item { name: c(name), key: searchrank.rank_key(searchrank.CAT_FILE, tier, 0, false) }
+    return n + 1
+}
+
+fn is_name(p: u64, s: str) -> bool {
+    var i: usize = 0
+    while i < s.length() {
+        if rt.ld8(p, i) != rt.ld8(s.p as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return rt.ld8(p, i) == 0 as u8
+}
+
+fn main() -> i32 {
+    var t: T = T { fails: 0, checks: 0 }
+    let no: u64 = searchrank.NO_MATCH
+    check(&t, searchrank.name_tier(c("certus"), c("certus")) == searchrank.T_EXACT, "exact name")
+    check(&t, searchrank.name_tier(c("Certus"), c("CERTUS")) == searchrank.T_EXACT, "exact ignores case")
+    check(&t, searchrank.name_tier(c("Certus"), c("cer")) == searchrank.T_PREFIX, "prefix")
+    check(&t, searchrank.name_tier(c("Task Manager"), c("man")) == searchrank.T_WORD, "word start")
+    check(&t, searchrank.name_tier(c("my-certus.txt"), c("certus")) == searchrank.T_WORD, "word start after dash")
+    check(&t, searchrank.name_tier(c("Tattoo"), c("too")) == searchrank.T_SUBSTR, "substring")
+    check(&t, searchrank.name_tier(c("spinatus"), c("certus")) == no, "spinatus no match for certus")
+    check(&t, searchrank.name_tier(c("tattoo"), c("certus")) == no, "tattoo no match for certus")
+    check(&t, searchrank.name_tier(c("ab"), c("abc")) == no, "query longer than name")
+    check(&t, searchrank.name_tier(c("abc"), c("")) == no, "empty query")
+
+    let keys: u64 = c("browser,certus,web,internet")
+    check(&t, searchrank.fields_tier(c("Certus"), c("View pages"), keys, c("certus"), true) == searchrank.T_EXACT, "app exact")
+    check(&t, searchrank.fields_tier(c("Certus"), c("View pages"), keys, c("brow"), true) == searchrank.T_KEYWORD, "keyword prefix")
+    check(&t, searchrank.fields_tier(c("Certus"), c("View pages"), keys, c("pages"), true) == searchrank.T_INFO, "info substring")
+    check(&t, searchrank.fields_tier(c("Certus"), c("View pages"), keys, c("ctz"), true) == no, "short fuzzy needs 3 letters and same first letter")
+    check(&t, searchrank.fields_tier(c("Certus"), c("x"), c("x"), c("cts"), true) == searchrank.T_FUZZY, "fuzzy subsequence")
+    check(&t, searchrank.fields_tier(c("Certus"), c("x"), c("x"), c("cts"), false) == no, "fuzzy off")
+    check(&t, searchrank.fields_tier(c("Certus"), c("x"), c("x"), c("ets"), true) == no, "fuzzy needs first letter")
+
+    var n: usize = 0
+    n = add_file(n, "spinatus", "certus")
+    n = add_file(n, "certus.txt", "certus")
+    n = add_file(n, "tattoo", "certus")
+    n = add_app(n, "Charmap", "Characters", "char,zeichen", "certus", 0, false)
+    n = add_app(n, "Certus", "View pages", "browser,certus", "certus", 0, false)
+    n = add_app(n, "Certus Helper", "Helps", "helper", "certus", 0, false)
+    sort_items(n)
+    check(&t, is_name(items[0].name, "Certus"), "certus: app Certus first")
+    check(&t, is_name(items[1].name, "Certus Helper"), "certus: prefix app second")
+    check(&t, is_name(items[2].name, "certus.txt"), "certus: matching file after apps")
+    var first_file: usize = 99
+    var last_app: usize = 1
+    var k: usize = 0
+    while k < 3 {
+        if is_name(items[k].name, "certus.txt") {
+            first_file = k
+        }
+        k = k + 1
+    }
+    check(&t, first_file > last_app, "files never before apps")
+
+    n = 0
+    n = add_app(n, "Notes", "Edit notes", "text", "n", 0, false)
+    n = add_app(n, "Nova", "Viewer", "image", "n", 0, false)
+    n = add_app(n, "Nano", "Editor", "text", "n", 0, false)
+    sort_items(n)
+    check(&t, is_name(items[0].name, "Nano") && is_name(items[1].name, "Notes") && is_name(items[2].name, "Nova"), "alphabet tie-break")
+
+    n = 0
+    n = add_app(n, "Notes", "Edit notes", "text", "n", 0, false)
+    n = add_app(n, "Nova", "Viewer", "image", "n", 5, false)
+    n = add_app(n, "Nano", "Editor", "text", "n", 0, false)
+    sort_items(n)
+    check(&t, is_name(items[0].name, "Nova"), "more used first")
+
+    n = 0
+    n = add_app(n, "Nano", "Editor", "text", "n", 3, false)
+    n = add_app(n, "Nova", "Viewer", "image", "n", 3, true)
+    sort_items(n)
+    check(&t, is_name(items[0].name, "Nova"), "default app wins equal use")
+
+    n = 0
+    n = add_app(n, "Nano", "Editor", "text", "no", 255, false)
+    n = add_app(n, "Nova", "Viewer", "image", "no", 0, true)
+    n = add_app(n, "No", "Exact", "x", "no", 0, false)
+    sort_items(n)
+    check(&t, is_name(items[0].name, "No"), "tier beats usage")
+
+    n = 0
+    n = add_file(n, "readme.md", "read")
+    n = add_app(n, "Zed", "Edits files to read", "z", "read", 0, false)
+    sort_items(n)
+    check(&t, is_name(items[0].name, "Zed"), "info-only app beats prefix file")
+
+    check(&t, searchrank.is_default_token(c("certus"), c("/bin/certus")), "default token matches handler basename")
+    check(&t, !searchrank.is_default_token(c("cert"), c("/bin/certus")), "default token needs full basename")
+    check(&t, !searchrank.is_default_token(c("certus"), c("")), "default token empty handler")
+    check(&t, searchrank.name_before(c("abc"), c("abd")), "alphabet before")
+    check(&t, !searchrank.name_before(c("abc"), c("ABC")), "alphabet equal ignores case")
+
+    io.fmt_print(f"checks={t.checks} fails={t.fails}\n")
+    if t.fails != 0 {
+        return 1
+    }
+    return 0
+}

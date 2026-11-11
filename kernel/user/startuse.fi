@@ -1,0 +1,176 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import namelist
+
+export { app_token, uses_of, bump }
+
+const MAX_ENTRIES: u64 = 24
+const TOKEN_BYTES: u64 = 24
+const TOKEN_MAX: u64 = 23
+const COLON: u8 = 58
+const ZERO_CHAR: u8 = 48
+const DOT: u8 = 46
+const COUNT_MAX: u64 = 9999999
+
+static mut conf_path: [u8; 19] = "/etc/startuse.conf\0"
+static mut conf_key: [u8; 4] = "use\0"
+static mut raw: [u8; 576] = [0 as u8; 576]
+static mut names: [u8; 576] = [0 as u8; 576]
+static mut counts: [u64; 24] = [0 as u64; 24]
+static mut entry_n: u64 = 0
+static mut loaded: bool = false
+
+fn app_token(app_file: u64, out: u64) {
+    var n: u64 = 0
+    while n < TOKEN_MAX {
+        let c: u8 = *((app_file + n) as *mut u8)
+        if c == 0 as u8 || c == DOT {
+            break
+        }
+        __mmio_write8((out + n) as *mut u8, c)
+        n = n + 1
+    }
+    __mmio_write8((out + n) as *mut u8, 0 as u8)
+}
+
+fn slot(i: u64) -> u64 {
+    return (&names[0 as usize]) as u64 + i * TOKEN_BYTES
+}
+
+fn parse_entry(src: u64, i: u64) {
+    var n: u64 = 0
+    while n < TOKEN_MAX && *((src + n) as *mut u8) != 0 as u8 && *((src + n) as *mut u8) != COLON {
+        __mmio_write8((slot(i) + n) as *mut u8, *((src + n) as *mut u8))
+        n = n + 1
+    }
+    __mmio_write8((slot(i) + n) as *mut u8, 0 as u8)
+    var value: u64 = 0
+    if *((src + n) as *mut u8) == COLON {
+        n = n + 1
+        while *((src + n) as *mut u8) >= ZERO_CHAR && *((src + n) as *mut u8) <= ZERO_CHAR + 9 as u8 && value < COUNT_MAX {
+            value = value * 10 + ((*((src + n) as *mut u8)) - ZERO_CHAR) as u64
+            n = n + 1
+        }
+    }
+    counts[(i) as usize] = value
+}
+
+fn load() {
+    loaded = true
+    entry_n = 0
+    let found: u64 = namelist.read((&conf_path[0 as usize]) as u64, (&conf_key[0 as usize]) as u64,
+        (&raw[0 as usize]) as u64, MAX_ENTRIES)
+    if found == namelist.MISSING {
+        return
+    }
+    var k: u64 = 0
+    while k + 1 < found {
+        parse_entry((&raw[0 as usize]) as u64 + k * TOKEN_BYTES, k)
+        k = k + 1
+    }
+    entry_n = found - 1
+}
+
+fn find_entry(token: u64) -> u64 {
+    var k: u64 = 0
+    while k < entry_n {
+        if ulib.streq(slot(k), token) {
+            return k
+        }
+        k = k + 1
+    }
+    return MAX_ENTRIES
+}
+
+fn uses_of(token: u64) -> u64 {
+    if !loaded {
+        load()
+    }
+    let k: u64 = find_entry(token)
+    if k == MAX_ENTRIES {
+        return 0
+    }
+    return counts[(k) as usize]
+}
+
+fn write_number(dst: u64, value: u64) -> u64 {
+    var digits: [u8; 12] = [0 as u8; 12]
+    var n: u64 = 0
+    var v: u64 = value
+    if v == 0 {
+        digits[0 as usize] = ZERO_CHAR
+        n = 1
+    }
+    while v > 0 {
+        digits[(n) as usize] = ZERO_CHAR + (v % 10) as u8
+        v = v / 10
+        n = n + 1
+    }
+    var k: u64 = 0
+    while k < n {
+        __mmio_write8((dst + k) as *mut u8, digits[(n - 1 - k) as usize])
+        k = k + 1
+    }
+    return n
+}
+
+fn save() {
+    var k: u64 = 0
+    while k < entry_n {
+        let out: u64 = (&raw[0 as usize]) as u64 + k * TOKEN_BYTES
+        var n: u64 = 0
+        while n < 14 && *((slot(k) + n) as *mut u8) != 0 as u8 {
+            __mmio_write8((out + n) as *mut u8, *((slot(k) + n) as *mut u8))
+            n = n + 1
+        }
+        __mmio_write8((out + n) as *mut u8, COLON)
+        n = n + 1
+        n = n + write_number(out + n, counts[(k) as usize])
+        __mmio_write8((out + n) as *mut u8, 0 as u8)
+        k = k + 1
+    }
+    namelist.write((&conf_path[0 as usize]) as u64, (&conf_key[0 as usize]) as u64, (&raw[0 as usize]) as u64, entry_n)
+}
+
+fn weakest() -> u64 {
+    var best: u64 = 0
+    var k: u64 = 1
+    while k < entry_n {
+        if counts[(k) as usize] < counts[(best) as usize] {
+            best = k
+        }
+        k = k + 1
+    }
+    return best
+}
+
+fn bump(token: u64) {
+    if !loaded {
+        load()
+    }
+    if *(token as *mut u8) == 0 as u8 {
+        return
+    }
+    var k: u64 = find_entry(token)
+    if k == MAX_ENTRIES {
+        if entry_n < MAX_ENTRIES {
+            k = entry_n
+            entry_n = entry_n + 1
+        } else {
+            k = weakest()
+        }
+        var n: u64 = 0
+        while n < TOKEN_MAX && n < 14 && *((token + n) as *mut u8) != 0 as u8 {
+            __mmio_write8((slot(k) + n) as *mut u8, *((token + n) as *mut u8))
+            n = n + 1
+        }
+        __mmio_write8((slot(k) + n) as *mut u8, 0 as u8)
+        counts[(k) as usize] = 0
+    }
+    if counts[(k) as usize] < COUNT_MAX {
+        counts[(k) as usize] = counts[(k) as usize] + 1
+    }
+    save()
+}
