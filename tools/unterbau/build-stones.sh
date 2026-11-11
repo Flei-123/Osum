@@ -19,6 +19,7 @@ PYV=3.12.7; CURLV=8.10.1; GITV=2.46.2; ZV=1.3.1
 J=${JOBS:-6}
 # STONES_ONLY="curl" builds just those stones (names: busybox zlib mbedtls curl git gitremote make tcc python3); curl needs zlib+mbedtls, empty = all
 want() { [ -z "${STONES_ONLY:-}" ] || echo " $STONES_ONLY " | grep -q " $1 "; }
+want_any() { local n; for n in "$@"; do want "$n" && return 0; done; return 1; }
 dl() { [ -s "$W/dl/$2" ] || curl -sfL --max-time 300 -o "$W/dl/$2" "$1"; }
 if want python3; then dl https://www.python.org/ftp/python/$PYV/Python-$PYV.tar.xz py.tar.xz; else cp /root/fremdquellen/Python-$PYV.tar.xz "$W/dl/py.tar.xz"; fi
 dl https://curl.se/download/curl-$CURLV.tar.xz curl.tar.xz
@@ -54,6 +55,7 @@ echo "== busybox (defconfig; no tc/hwclock/mtd/ubi: the musl headers lack linux/
   make -j"$J" CC=musl-gcc HOSTCC=gcc SKIP_STRIP=y >/dev/null 2>&1 && strip -o "$OUT/busybox" busybox )
 }
 
+want_any curl gitremote python3 && {
 echo "== zlib (static, PIC) =="
 ( cd "$W/x/zlib" && CC=musl-gcc CFLAGS="-O2 -fPIC" ./configure --prefix="$P" --static >/dev/null && make -j"$J" >/dev/null 2>&1 && make install >/dev/null 2>&1 )
 
@@ -65,6 +67,7 @@ echo "== curl (static libcurl + mbedtls, https; CA bundle /etc/ssl/roots.pem) ==
 ( cd "$W/x/curl" && CC=musl-gcc CPPFLAGS="-I$P/include" LDFLAGS="-L$P/lib" ./configure --prefix="$P" --disable-shared --enable-static --with-mbedtls="$P" --with-ca-bundle=/etc/ssl/roots.pem --with-zlib="$P" \
     --disable-ldap --disable-ldaps --disable-rtsp --disable-docs --disable-manual --without-libpsl --without-brotli --without-zstd --without-nghttp2 --without-libidn2 \
     --disable-threaded-resolver --disable-ipv6 >/dev/null 2>&1 && make -j"$J" >/dev/null 2>&1 && strip -o "$OUT/curl" src/curl )
+}
 
 want git && {
 echo "== git (no openssl/curl/expat/perl/python/gettext) =="
