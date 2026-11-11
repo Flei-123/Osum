@@ -37,12 +37,12 @@ LDREAL=$(readlink -f "$LDSO" 2>/dev/null || true)
 [ -r "$LDREAL" ] || { echo "UNTERBAU: no musl libc.so, skipped"; exit 0; }
 
 echo "== 0. text constants of the kernel files this round touched (firnc1 aborts SILENTLY on one that is too long) =="
-python3 - kernel/fs/procfs.fi kernel/fs/procfs/*.fi kernel/sys/sys.fi kernel/sched/proc.fi kernel/sched/proc/*.fi kernel/sched/signal.fi kernel/sched/sched.fi > "$D/texte.txt" 2>&1 <<'PY'
+python3 - kernel/fs/procfs.fi kernel/fs/procfs/*.fi kernel/sys/sys.fi kernel/sched/proc/*.fi kernel/sched/signal.fi kernel/sched/sched.fi > "$D/texte.txt" 2>&1 <<'PY'
 import re, sys
 bad = n = 0
 for p in sys.argv[1:]:
     s = open(p, 'rb').read().decode('utf-8', errors='surrogateescape')
-    for m in re.finditer(r'var (\w+): \[u8; (\d+)\] = "((?:[^"\\]|\\.)*)"', s):
+    for m in re.finditer(r'(?:var|static mut) (\w+): \[u8; (\d+)\] = "((?:[^"\\]|\\.)*)"', s):
         real = m.group(3).replace('\\0', '\0').replace('\\n', '\n').replace('\\\\', '\\')
         n += 1
         if int(m.group(2)) != len(real):
