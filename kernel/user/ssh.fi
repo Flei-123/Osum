@@ -1,0 +1,161 @@
+profile kernel
+
+import ulib
+import libc.errno
+import libc.io
+import libc.octets
+import libc.text
+import ssh.link
+import ssh.session
+import sshconn
+
+export { u_start }
+
+const CMD_MAX: u64 = 1023
+const IO_CHUNK: u64 = 4096
+const TERM_COLS: u64 = 80
+const TERM_ROWS: u64 = 24
+const SYS_IOCTL: u64 = 16
+const TCGETS: u64 = 0x5401
+const TCSETS: u64 = 0x5402
+const LFLAG_OFFSET: u64 = 12
+const RAW_MASK: u64 = 0xFFFFFFF4
+const NO_EXIT: u64 = 0xFFFFFFFF
+const STATUS_FAILED: u64 = 255
+const POLL_IDLE_MS: u64 = 600000
+
+static mut cmdbuf: [u8; 1024] = [0 as u8; 1024]
+static mut iobuf: [u8; 4096] = [0 as u8; 4096]
+static mut saved_termios: [u8; 40] = [0 as u8; 40]
+static mut raw_active: bool = false
+
+static mut M_USAGE: [u8; 144] = "usage: ssh [-p port] [-i key] [-l user] [-w password] [-s] [-o StrictHostKeyChecking=yes|no] [-o UserKnownHostsFile=path] [user@]host [command]\0"
+static mut M_CHANNEL: [u8; 33] = "ssh: cannot open session channel\0"
+static mut M_REQUEST: [u8; 32] = "ssh: server refused the request\0"
+
+fn raw_on() {
+    let p: u64 = (&saved_termios[0 as usize]) as u64
+    if ulib.bad(ulib.sys(SYS_IOCTL, ulib.IN, TCGETS, p)) {
+        return
+    }
+    var t: [u8; 40] = [0 as u8; 40]
+    let q: u64 = (&t[0 as usize]) as u64
+    var i: u64 = 0
+    while i < 36 {
+        octets.st8(q, i, octets.ld8(p, i))
+        i = i + 1
+    }
+    octets.st32(q, LFLAG_OFFSET, octets.ld32(q, LFLAG_OFFSET) & RAW_MASK)
+    octets.st32(q, 0, octets.ld32(q, 0) & 0xFFFFFEFF)
+    ulib.sys(SYS_IOCTL, ulib.IN, TCSETS, q)
+    raw_active = true
+}
+
+fn raw_off() {
+    if raw_active {
+        ulib.sys(SYS_IOCTL, ulib.IN, TCSETS, (&saved_termios[0 as usize]) as u64)
+        raw_active = false
+    }
+}
+
+fn join_command(args: u64, first: u64, argc: u64) {
+    var n: u64 = 0
+    var i: u64 = first
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        let len: u64 = text.length(a)
+        if n + len + 1 > CMD_MAX {
+            i = argc
+        } else {
+            if n > 0 {
+                octets.st8((&cmdbuf[0 as usize]) as u64, n, 32)
+                n = n + 1
+            }
+            var k: u64 = 0
+            while k < len {
+                octets.st8((&cmdbuf[0 as usize]) as u64, n + k, octets.ld8(a, k))
+                k = k + 1
+            }
+            n = n + len
+            i = i + 1
+        }
+    }
+    octets.st8((&cmdbuf[0 as usize]) as u64, n, 0)
+}
+
+fn forward_stdin() -> bool {
+    let n: u64 = io.read(ulib.IN, (&iobuf[0 as usize]) as u64, IO_CHUNK)
+    if errno.failed(n) || n == 0 {
+        session.chan_send_eof()
+        return false
+    }
+    return session.chan_send((&iobuf[0 as usize]) as u64, n)
+}
+
+fn pump_session(with_stdin: bool) {
+    var other: u64 = session.NO_FD
+    if with_stdin {
+        other = ulib.IN
+    }
+    var going: bool = true
+    while going {
+        let r: u64 = session.chan_recv((&iobuf[0 as usize]) as u64, IO_CHUNK,
+            POLL_IDLE_MS, other)
+        if r == session.FAILED || r == 0 {
+            going = false
+        } else if r == session.STDIN_READY {
+            if !forward_stdin() {
+                other = session.NO_FD
+            }
+        } else if r != session.TIMEOUT {
+            io.write_all(ulib.OUT, (&iobuf[0 as usize]) as u64, r)
+        }
+    }
+}
+
+fn run_session(has_command: bool, with_stdin: bool) -> u64 {
+    if !session.chan_open() {
+        ulib.esay_line((&M_CHANNEL[0 as usize]) as u64, 0)
+        return STATUS_FAILED
+    }
+    var ok: bool = true
+    if has_command {
+        ok = session.chan_request_exec((&cmdbuf[0 as usize]) as u64)
+    } else {
+        ok = session.chan_request_pty(TERM_COLS, TERM_ROWS)
+            && session.chan_request_shell()
+        raw_on()
+    }
+    if !ok {
+        raw_off()
+        ulib.esay_line((&M_REQUEST[0 as usize]) as u64, 0)
+        return STATUS_FAILED
+    }
+    pump_session(with_stdin || !has_command)
+    raw_off()
+    session.chan_finish()
+    let code: u64 = session.exit_code()
+    if code == NO_EXIT {
+        return 0
+    }
+    return code
+}
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    let at: u64 = sshconn.parse_options(args, 112)
+    if at == sshconn.BAD_INDEX || at >= argc {
+        ulib.esay_line((&M_USAGE[0 as usize]) as u64, 0)
+        return 2
+    }
+    let target: u64 = ulib.arg_at(args, at)
+    sshconn.set_target(target, text.length(target))
+    join_command(args, at + 1, argc)
+    let rc: u64 = sshconn.connect_session()
+    if rc != 0 {
+        return rc
+    }
+    let status: u64 = run_session(at + 1 < argc, sshconn.stdin_wanted())
+    link.shutdown_link()
+    return status
+}

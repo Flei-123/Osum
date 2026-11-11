@@ -1,0 +1,367 @@
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.errno
+import libc.io
+import libc.octets
+import libc.text
+import ssh.link
+import ssh.session
+import sshconn
+
+export { u_start }
+
+const CHUNK: u64 = 8192
+const RECV_MS: u64 = 30000
+const STATUS_FAILED: u64 = 1
+const NAME_MAX: u64 = 255
+const REMOTE_MAX: u64 = 700
+const LINE_MAX: u64 = 400
+const FILE_MODE: u64 = 0x1A4
+const TIMEOUTS_MAX: u64 = 4
+
+static mut iobuf: [u8; 8192] = [0 as u8; 8192]
+static mut linebuf: [u8; 416] = [0 as u8; 416]
+static mut cmdbuf: [u8; 768] = [0 as u8; 768]
+static mut zero: [u8; 1] = [0 as u8; 1]
+
+static mut M_USAGE: [u8; 109] = "usage: scp [-P port] [-i key] [-l user] [-w password] [-o opt] file [user@]host:path | [user@]host:path file\0"
+static mut M_NOREMOTE: [u8; 40] = "scp: exactly one side must be host:path\0"
+static mut M_OPENSRC: [u8; 17] = "scp: cannot open\0"
+static mut M_OPENDST: [u8; 19] = "scp: cannot create\0"
+static mut M_CHANNEL: [u8; 33] = "scp: cannot open session channel\0"
+static mut M_REQUEST: [u8; 32] = "scp: server refused the command\0"
+static mut M_NACK: [u8; 21] = "scp: remote refused:\0"
+static mut M_PROTO: [u8; 20] = "scp: protocol error\0"
+static mut M_SHORT: [u8; 26] = "scp: transfer ended early\0"
+static mut M_SEND: [u8; 17] = "scp: send failed\0"
+static mut T_SCP_T: [u8; 7] = "scp -t\0"
+static mut T_SCP_F: [u8; 7] = "scp -f\0"
+static mut T_SPACE: [u8; 2] = " \0"
+static mut T_NL: [u8; 2] = "\n\0"
+static mut T_C0644: [u8; 6] = "C0644\0"
+
+fn recv_some(out: u64, cap: u64) -> u64 {
+    var idle: u64 = 0
+    while idle < TIMEOUTS_MAX {
+        let r: u64 = session.chan_recv(out, cap, RECV_MS, session.NO_FD)
+        if r != session.TIMEOUT {
+            if r == session.FAILED {
+                return 0
+            }
+            return r
+        }
+        idle = idle + 1
+    }
+    return 0
+}
+
+fn recv_exact(out: u64, n: u64) -> bool {
+    var got: u64 = 0
+    while got < n {
+        let r: u64 = recv_some(out + got, n - got)
+        if r == 0 {
+            return false
+        }
+        got = got + r
+    }
+    return true
+}
+
+fn recv_line() -> u64 {
+    var n: u64 = 0
+    var one: [u8; 1] = [0 as u8; 1]
+    while n < LINE_MAX {
+        if !recv_exact((&one[0 as usize]) as u64, 1) {
+            return 0xFFFFFFFFFFFFFFFF
+        }
+        if one[0 as usize] == 10 {
+            octets.st8((&linebuf[0 as usize]) as u64, n, 0)
+            return n
+        }
+        octets.st8((&linebuf[0 as usize]) as u64, n, one[0 as usize] as u64)
+        n = n + 1
+    }
+    return 0xFFFFFFFFFFFFFFFF
+}
+
+fn read_ack() -> bool {
+    var b: [u8; 1] = [0 as u8; 1]
+    if !recv_exact((&b[0 as usize]) as u64, 1) {
+        ulib.esay_line((&M_SHORT[0 as usize]) as u64, 0)
+        return false
+    }
+    if b[0 as usize] == 0 {
+        return true
+    }
+    let n: u64 = recv_line()
+    ulib.esay_line((&M_NACK[0 as usize]) as u64, (&linebuf[0 as usize]) as u64)
+    return false
+}
+
+fn send_ack() -> bool {
+    return session.chan_send((&zero[0 as usize]) as u64, 1)
+}
+
+fn put_text(dst: u64, at: u64, src: u64) -> u64 {
+    let n: u64 = text.length(src)
+    var i: u64 = 0
+    while i < n {
+        octets.st8(dst, at + i, octets.ld8(src, i))
+        i = i + 1
+    }
+    return at + n
+}
+
+fn put_number(dst: u64, at: u64, v: u64) -> u64 {
+    var tmp: [u8; 26] = [0 as u8; 26]
+    let n: u64 = text.digits(v, (&tmp[0 as usize]) as u64, false)
+    var i: u64 = 0
+    while i < n {
+        octets.st8(dst, at + i, tmp[i as usize] as u64)
+        i = i + 1
+    }
+    return at + n
+}
+
+fn base_name(path: u64) -> u64 {
+    var last: u64 = 0
+    var i: u64 = 0
+    while octets.ld8(path, i) != 0 {
+        if octets.ld8(path, i) == 47 {
+            last = i + 1
+        }
+        i = i + 1
+    }
+    return path + last
+}
+
+fn build_command(mode: u64, remote: u64) {
+    let c: u64 = (&cmdbuf[0 as usize]) as u64
+    var n: u64 = put_text(c, 0, mode)
+    n = put_text(c, n, (&T_SPACE[0 as usize]) as u64)
+    n = put_text(c, n, remote)
+    octets.st8(c, n, 0)
+}
+
+fn open_channel(mode: u64, remote: u64) -> bool {
+    build_command(mode, remote)
+    if !session.chan_open() {
+        ulib.esay_line((&M_CHANNEL[0 as usize]) as u64, 0)
+        return false
+    }
+    if !session.chan_request_exec((&cmdbuf[0 as usize]) as u64) {
+        ulib.esay_line((&M_REQUEST[0 as usize]) as u64, 0)
+        return false
+    }
+    return true
+}
+
+fn send_header(size: u64, name: u64) -> bool {
+    let l: u64 = (&linebuf[0 as usize]) as u64
+    var n: u64 = put_text(l, 0, (&T_C0644[0 as usize]) as u64)
+    n = put_text(l, n, (&T_SPACE[0 as usize]) as u64)
+    n = put_number(l, n, size)
+    n = put_text(l, n, (&T_SPACE[0 as usize]) as u64)
+    n = put_text(l, n, name)
+    n = put_text(l, n, (&T_NL[0 as usize]) as u64)
+    return session.chan_send(l, n)
+}
+
+fn send_body(fd: u64, size: u64) -> bool {
+    var left: u64 = size
+    while left > 0 {
+        var want: u64 = left
+        if want > CHUNK {
+            want = CHUNK
+        }
+        let r: u64 = io.read(fd, (&iobuf[0 as usize]) as u64, want)
+        if errno.failed(r) || r == 0 {
+            return false
+        }
+        if !session.chan_send((&iobuf[0 as usize]) as u64, r) {
+            return false
+        }
+        left = left - r
+    }
+    return true
+}
+
+fn upload(local: u64, remote: u64) -> u64 {
+    let fd: u64 = io.open(local, kcall.O_RDONLY)
+    if errno.failed(fd) {
+        ulib.esay_line((&M_OPENSRC[0 as usize]) as u64, local)
+        return STATUS_FAILED
+    }
+    let size: u64 = io.size_of(local)
+    if errno.failed(size) || !open_channel((&T_SCP_T[0 as usize]) as u64, remote) {
+        io.close(fd)
+        return STATUS_FAILED
+    }
+    var ok: bool = read_ack()
+    ok = ok && send_header(size, base_name(local)) && read_ack()
+    ok = ok && send_body(fd, size)
+    ok = ok && send_ack() && read_ack()
+    io.close(fd)
+    session.chan_send_eof()
+    if !ok {
+        ulib.esay_line((&M_SEND[0 as usize]) as u64, 0)
+        return STATUS_FAILED
+    }
+    return 0
+}
+
+fn parse_header(size_out: u64) -> bool {
+    let l: u64 = (&linebuf[0 as usize]) as u64
+    if octets.ld8(l, 0) != 67 {
+        return false
+    }
+    var i: u64 = 1
+    while octets.ld8(l, i) != 32 && octets.ld8(l, i) != 0 {
+        i = i + 1
+    }
+    var size: u64 = 0
+    i = i + 1
+    while octets.ld8(l, i) >= 48 && octets.ld8(l, i) <= 57 {
+        size = size * 10 + (octets.ld8(l, i) - 48)
+        i = i + 1
+    }
+    octets.st64(size_out, 0, size)
+    return octets.ld8(l, i) == 32
+}
+
+fn receive_body(fd: u64, size: u64) -> bool {
+    var left: u64 = size
+    while left > 0 {
+        var want: u64 = left
+        if want > CHUNK {
+            want = CHUNK
+        }
+        let r: u64 = recv_some((&iobuf[0 as usize]) as u64, want)
+        if r == 0 {
+            return false
+        }
+        if errno.failed(io.write_all(fd, (&iobuf[0 as usize]) as u64, r)) {
+            return false
+        }
+        left = left - r
+    }
+    return true
+}
+
+fn skip_time_lines() -> bool {
+    var going: bool = true
+    while going {
+        var b: [u8; 1] = [0 as u8; 1]
+        if !recv_exact((&b[0 as usize]) as u64, 1) {
+            return false
+        }
+        if b[0 as usize] == 84 {
+            if recv_line() == 0xFFFFFFFFFFFFFFFF || !send_ack() {
+                return false
+            }
+        } else {
+            octets.st8((&linebuf[0 as usize]) as u64, 0, b[0 as usize] as u64)
+            return true
+        }
+    }
+    return false
+}
+
+fn read_header() -> bool {
+    if !skip_time_lines() {
+        return false
+    }
+    let l: u64 = (&linebuf[0 as usize]) as u64
+    if octets.ld8(l, 0) == 1 || octets.ld8(l, 0) == 2 {
+        recv_line()
+        ulib.esay_line((&M_NACK[0 as usize]) as u64, l + 1)
+        return false
+    }
+    var rest: [u8; 1] = [0 as u8; 1]
+    var n: u64 = 1
+    while n < LINE_MAX {
+        if !recv_exact((&rest[0 as usize]) as u64, 1) {
+            return false
+        }
+        if rest[0 as usize] == 10 {
+            octets.st8(l, n, 0)
+            return true
+        }
+        octets.st8(l, n, rest[0 as usize] as u64)
+        n = n + 1
+    }
+    return false
+}
+
+fn download(remote: u64, local: u64) -> u64 {
+    if !open_channel((&T_SCP_F[0 as usize]) as u64, remote) {
+        return STATUS_FAILED
+    }
+    if !send_ack() || !read_header() {
+        ulib.esay_line((&M_PROTO[0 as usize]) as u64, 0)
+        return STATUS_FAILED
+    }
+    var size: [u8; 8] = [0 as u8; 8]
+    if !parse_header((&size[0 as usize]) as u64) {
+        ulib.esay_line((&M_PROTO[0 as usize]) as u64, 0)
+        return STATUS_FAILED
+    }
+    let fd: u64 = io.create(local)
+    if errno.failed(fd) {
+        ulib.esay_line((&M_OPENDST[0 as usize]) as u64, local)
+        return STATUS_FAILED
+    }
+    var ok: bool = send_ack()
+    ok = ok && receive_body(fd, octets.ld64((&size[0 as usize]) as u64, 0))
+    io.close(fd)
+    ok = ok && read_ack() && send_ack()
+    session.chan_send_eof()
+    if !ok {
+        ulib.esay_line((&M_SHORT[0 as usize]) as u64, 0)
+        return STATUS_FAILED
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    let at: u64 = sshconn.parse_options(args, 80)
+    if at == sshconn.BAD_INDEX || at + 2 != argc {
+        ulib.esay_line((&M_USAGE[0 as usize]) as u64, 0)
+        return 2
+    }
+    let a: u64 = ulib.arg_at(args, at)
+    let b: u64 = ulib.arg_at(args, at + 1)
+    let ca: u64 = sshconn.find_char(a, text.length(a), 58)
+    let cb: u64 = sshconn.find_char(b, text.length(b), 58)
+    let up: bool = cb != sshconn.BAD_INDEX && ca == sshconn.BAD_INDEX
+    let down: bool = ca != sshconn.BAD_INDEX && cb == sshconn.BAD_INDEX
+    if !up && !down {
+        ulib.esay_line((&M_NOREMOTE[0 as usize]) as u64, 0)
+        return 2
+    }
+    var remote: u64 = b + cb + 1
+    var local: u64 = a
+    if down {
+        sshconn.set_target(a, ca)
+        remote = a + ca + 1
+        local = b
+    } else {
+        sshconn.set_target(b, cb)
+    }
+    let rc: u64 = sshconn.connect_session()
+    if rc != 0 {
+        return rc
+    }
+    var status: u64 = 0
+    if up {
+        status = upload(local, remote)
+    } else {
+        status = download(remote, local)
+    }
+    session.chan_finish()
+    link.shutdown_link()
+    return status
+}

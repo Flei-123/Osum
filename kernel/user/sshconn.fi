@@ -1,0 +1,366 @@
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.errno
+import libc.io
+import libc.net
+import libc.dns
+import libc.octets
+import libc.text
+import libc.memcopy
+import ssh.link
+import ssh.auth
+import ssh.hosts
+
+export { parse_options, set_target, find_char, connect_session, host_ptr,
+    user_ptr, port_value, stdin_wanted, tty_echo, read_secret, BAD_INDEX, CONNECT_FAILED }
+
+const BAD_INDEX: u64 = 0xFFFFFFFFFFFFFFFF
+const CONNECT_FAILED: u64 = 255
+const DEFAULT_PORT: u64 = 22
+const STRICT_ASK: u64 = 0
+const STRICT_YES: u64 = 1
+const STRICT_NO: u64 = 2
+const SYS_IOCTL: u64 = 16
+const TCGETS: u64 = 0x5401
+const TCSETS: u64 = 0x5402
+const TERMIOS_BYTES: u64 = 36
+const LFLAG_OFFSET: u64 = 12
+const ECHO_BIT: u64 = 8
+const SECRET_MAX: u64 = 127
+const NAME_MAX: u64 = 63
+const HOST_MAX: u64 = 127
+const FP_MAX: u64 = 64
+const MAX_PORT: u64 = 65535
+
+static mut userbuf: [u8; 64] = [0 as u8; 64]
+static mut hostbuf: [u8; 128] = [0 as u8; 128]
+static mut secret: [u8; 128] = [0 as u8; 128]
+static mut fpbuf: [u8; 64] = [0 as u8; 64]
+static mut opt_port: u64 = 22
+static mut opt_key: u64 = 0
+static mut opt_pass: u64 = 0
+static mut opt_strict: u64 = 0
+static mut opt_known: u64 = 0
+static mut opt_stdin: bool = false
+
+static mut T_KNOWN_DEFAULT: [u8; 21] = "/etc/ssh_known_hosts\0"
+static mut T_DEFAULT_KEY: [u8; 22] = "/root/.ssh/id_ed25519\0"
+static mut T_ROOT: [u8; 5] = "root\0"
+static mut T_DASH_P: [u8; 3] = "-p\0"
+static mut T_DASH_BP: [u8; 3] = "-P\0"
+static mut T_DASH_I: [u8; 3] = "-i\0"
+static mut T_DASH_L: [u8; 3] = "-l\0"
+static mut T_DASH_W: [u8; 3] = "-w\0"
+static mut T_DASH_O: [u8; 3] = "-o\0"
+static mut T_DASH_S: [u8; 3] = "-s\0"
+static mut T_STRICT: [u8; 23] = "StrictHostKeyChecking=\0"
+static mut T_KNOWNOPT: [u8; 20] = "UserKnownHostsFile=\0"
+static mut T_YES: [u8; 4] = "yes\0"
+static mut T_NO: [u8; 3] = "no\0"
+static mut M_RESOLVE: [u8; 25] = "ssh: cannot resolve host\0"
+static mut M_CONNECT: [u8; 23] = "ssh: cannot connect to\0"
+static mut M_HANDSHAKE: [u8; 25] = "ssh: key exchange failed\0"
+static mut M_CHANGED: [u8; 26] = "ssh: HOST KEY CHANGED for\0"
+static mut M_UNKNOWN: [u8; 55] = "ssh: host key not known and StrictHostKeyChecking=yes:\0"
+static mut M_ADDED: [u8; 29] = "ssh: host key added, SHA256:\0"
+static mut M_SERVICE: [u8; 33] = "ssh: server refused ssh-userauth\0"
+static mut M_DENIED: [u8; 27] = "ssh: authentication failed\0"
+static mut M_BROKEN: [u8; 43] = "ssh: connection lost during authentication\0"
+static mut M_PROMPT: [u8; 11] = "Password: \0"
+static mut M_NL: [u8; 2] = "\n\0"
+
+fn host_ptr() -> u64 {
+    return (&hostbuf[0 as usize]) as u64
+}
+
+fn user_ptr() -> u64 {
+    return (&userbuf[0 as usize]) as u64
+}
+
+fn stdin_wanted() -> bool {
+    return opt_stdin
+}
+
+fn port_value() -> u64 {
+    return opt_port
+}
+
+fn find_char(p: u64, n: u64, c: u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        if octets.ld8(p, i) == c {
+            return i
+        }
+        i = i + 1
+    }
+    return BAD_INDEX
+}
+
+fn starts_with(p: u64, prefix: u64) -> bool {
+    let n: u64 = text.length(prefix)
+    var i: u64 = 0
+    while i < n {
+        if octets.ld8(p, i) != octets.ld8(prefix, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn copy_name(dst: u64, src: u64, n: u64, cap: u64) {
+    var k: u64 = n
+    if k > cap {
+        k = cap
+    }
+    memcopy.copy(dst, src, k)
+    octets.st8(dst, k, 0)
+}
+
+fn set_target(p: u64, n: u64) {
+    let at: u64 = find_char(p, n, 64)
+    if at == BAD_INDEX {
+        copy_name(host_ptr(), p, n, HOST_MAX)
+        return
+    }
+    copy_name(user_ptr(), p, at, NAME_MAX)
+    copy_name(host_ptr(), p + at + 1, n - at - 1, HOST_MAX)
+}
+
+fn parse_number(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while octets.ld8(p, i) != 0 {
+        let c: u64 = octets.ld8(p, i)
+        if c < 48 || c > 57 {
+            return 0
+        }
+        v = v * 10 + (c - 48)
+        if v > MAX_PORT {
+            return 0
+        }
+        i = i + 1
+    }
+    return v
+}
+
+fn apply_option(v: u64) -> bool {
+    if starts_with(v, (&T_STRICT[0 as usize]) as u64) {
+        let w: u64 = v + text.length((&T_STRICT[0 as usize]) as u64)
+        if ulib.streq(w, (&T_YES[0 as usize]) as u64) {
+            opt_strict = STRICT_YES
+            return true
+        }
+        if ulib.streq(w, (&T_NO[0 as usize]) as u64) {
+            opt_strict = STRICT_NO
+            return true
+        }
+        return false
+    }
+    if starts_with(v, (&T_KNOWNOPT[0 as usize]) as u64) {
+        opt_known = v + text.length((&T_KNOWNOPT[0 as usize]) as u64)
+        return true
+    }
+    return false
+}
+
+fn parse_options(args: u64, portflag: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    opt_port = DEFAULT_PORT
+    var i: u64 = 1
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if octets.ld8(a, 0) != 45 || octets.ld8(a, 1) == 0 {
+            return i
+        }
+        if ulib.streq(a, (&T_DASH_P[0 as usize]) as u64) && portflag == 112 {
+            i = i + 1
+            if i >= argc {
+                return BAD_INDEX
+            }
+            opt_port = parse_number(ulib.arg_at(args, i))
+            if opt_port == 0 {
+                return BAD_INDEX
+            }
+        } else if ulib.streq(a, (&T_DASH_BP[0 as usize]) as u64) && portflag == 80 {
+            i = i + 1
+            if i >= argc {
+                return BAD_INDEX
+            }
+            opt_port = parse_number(ulib.arg_at(args, i))
+            if opt_port == 0 {
+                return BAD_INDEX
+            }
+        } else if ulib.streq(a, (&T_DASH_I[0 as usize]) as u64) {
+            i = i + 1
+            if i >= argc {
+                return BAD_INDEX
+            }
+            opt_key = ulib.arg_at(args, i)
+        } else if ulib.streq(a, (&T_DASH_L[0 as usize]) as u64) {
+            i = i + 1
+            if i >= argc {
+                return BAD_INDEX
+            }
+            let u: u64 = ulib.arg_at(args, i)
+            copy_name(user_ptr(), u, text.length(u), NAME_MAX)
+        } else if ulib.streq(a, (&T_DASH_W[0 as usize]) as u64) {
+            i = i + 1
+            if i >= argc {
+                return BAD_INDEX
+            }
+            opt_pass = ulib.arg_at(args, i)
+        } else if ulib.streq(a, (&T_DASH_S[0 as usize]) as u64) {
+            opt_stdin = true
+        } else if ulib.streq(a, (&T_DASH_O[0 as usize]) as u64) {
+            i = i + 1
+            if i >= argc || !apply_option(ulib.arg_at(args, i)) {
+                return BAD_INDEX
+            }
+        } else {
+            return BAD_INDEX
+        }
+        i = i + 1
+    }
+    return i
+}
+
+fn tty_echo(on: bool) -> bool {
+    var t: [u8; 40] = [0 as u8; 40]
+    let p: u64 = (&t[0 as usize]) as u64
+    if ulib.bad(ulib.sys(SYS_IOCTL, ulib.IN, TCGETS, p)) {
+        return false
+    }
+    var lf: u64 = octets.ld32(p, LFLAG_OFFSET)
+    if on {
+        lf = lf | ECHO_BIT
+    } else {
+        lf = lf & 0xFFFFFFF7
+    }
+    octets.st32(p, LFLAG_OFFSET, lf)
+    ulib.sys(SYS_IOCTL, ulib.IN, TCSETS, p)
+    return true
+}
+
+fn read_secret() -> u64 {
+    ulib.eput((&M_PROMPT[0 as usize]) as u64)
+    let had: bool = tty_echo(false)
+    var n: u64 = 0
+    var one: [u8; 1] = [0 as u8; 1]
+    var going: bool = true
+    while going {
+        let r: u64 = io.read(ulib.IN, (&one[0 as usize]) as u64, 1)
+        if errno.failed(r) || r == 0 || one[0 as usize] == 10 {
+            going = false
+        } else if n < SECRET_MAX {
+            octets.st8((&secret[0 as usize]) as u64, n, one[0 as usize] as u64)
+            n = n + 1
+        }
+    }
+    octets.st8((&secret[0 as usize]) as u64, n, 0)
+    if had {
+        tty_echo(true)
+    }
+    ulib.eput((&M_NL[0 as usize]) as u64)
+    return n
+}
+
+fn known_path() -> u64 {
+    if opt_known != 0 {
+        return opt_known
+    }
+    return (&T_KNOWN_DEFAULT[0 as usize]) as u64
+}
+
+fn fail_with(msg: u64, extra: u64) -> u64 {
+    ulib.esay_line(msg, extra)
+    link.shutdown_link()
+    return CONNECT_FAILED
+}
+
+fn check_host_key() -> u64 {
+    let state: u64 = hosts.check_host(known_path(), host_ptr(), opt_port)
+    if state == hosts.HOST_MATCH {
+        return 0
+    }
+    if state == hosts.HOST_CHANGED {
+        return fail_with((&M_CHANGED[0 as usize]) as u64, host_ptr())
+    }
+    if opt_strict == STRICT_YES {
+        return fail_with((&M_UNKNOWN[0 as usize]) as u64, host_ptr())
+    }
+    hosts.fingerprint((&fpbuf[0 as usize]) as u64)
+    hosts.add_host(known_path(), host_ptr(), opt_port)
+    ulib.esay_line((&M_ADDED[0 as usize]) as u64, (&fpbuf[0 as usize]) as u64)
+    return 0
+}
+
+fn login_name() -> u64 {
+    if octets.ld8(user_ptr(), 0) == 0 {
+        copy_name(user_ptr(), (&T_ROOT[0 as usize]) as u64, 4, NAME_MAX)
+    }
+    return text.length(user_ptr())
+}
+
+fn try_key(path: u64, ulen: u64) -> u64 {
+    if !auth.load_key(path) {
+        return auth.AUTH_DENIED
+    }
+    return auth.auth_key(user_ptr(), ulen)
+}
+
+fn authenticate() -> u64 {
+    let ulen: u64 = login_name()
+    var res: u64 = auth.AUTH_DENIED
+    if opt_key != 0 {
+        res = try_key(opt_key, ulen)
+    } else if opt_pass == 0 {
+        res = try_key((&T_DEFAULT_KEY[0 as usize]) as u64, ulen)
+    }
+    if res == auth.AUTH_DENIED && opt_key == 0 {
+        var plen: u64 = 0
+        var pw: u64 = opt_pass
+        if pw == 0 {
+            plen = read_secret()
+            pw = (&secret[0 as usize]) as u64
+        } else {
+            plen = text.length(pw)
+        }
+        res = auth.auth_password(user_ptr(), ulen, pw, plen)
+    }
+    if res == auth.AUTH_OK {
+        return 0
+    }
+    if res == auth.AUTH_BROKEN {
+        return fail_with((&M_BROKEN[0 as usize]) as u64, 0)
+    }
+    return fail_with((&M_DENIED[0 as usize]) as u64, 0)
+}
+
+fn connect_session() -> u64 {
+    var ip: u64 = net.parse_ip(host_ptr())
+    if ip == 0 {
+        ip = dns.resolve_a(host_ptr())
+    }
+    if ip == 0 {
+        ulib.esay_line((&M_RESOLVE[0 as usize]) as u64, host_ptr())
+        return CONNECT_FAILED
+    }
+    if !link.connect_ip(ip, opt_port) {
+        ulib.esay_line((&M_CONNECT[0 as usize]) as u64, host_ptr())
+        return CONNECT_FAILED
+    }
+    if !link.handshake() {
+        return fail_with((&M_HANDSHAKE[0 as usize]) as u64, 0)
+    }
+    let hk: u64 = check_host_key()
+    if hk != 0 {
+        return hk
+    }
+    if !auth.request_service() {
+        return fail_with((&M_SERVICE[0 as usize]) as u64, 0)
+    }
+    return authenticate()
+}
