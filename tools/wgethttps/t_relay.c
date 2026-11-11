@@ -26,10 +26,13 @@ static void relay_child(int net_fd)
     char buf[2048];
     int open_count = 2;
     while (open_count > 0) {
-        if (poll(pfd, 2, 20000) <= 0) _exit(3);
+        int pr = poll(pfd, 2, 20000);
+        dprintf(2, "CH poll=%d r0=%x r1=%x\n", pr, pfd[0].revents, pfd[1].revents);
+        if (pr <= 0) _exit(3);
         for (int i = 0; i < 2; i++) {
             if (!(pfd[i].revents & (POLLIN | POLLHUP))) continue;
             ssize_t n = read(pfd[i].fd, buf, sizeof buf);
+            dprintf(2, "CH read i=%d n=%zd errno=%d\n", i, n, errno);
             if (n < 0) _exit(4);
             if (n == 0) { pfd[i].fd = -1; open_count--; if (i == 1) _exit(0); continue; }
             if (write(i == 0 ? net_fd : 1, buf, n) != n) _exit(5);
@@ -53,13 +56,14 @@ int main(int argc, char **argv)
         relay_child(net_fd);
     }
     close(sp[1]);
-    dup2(sp[0], net_fd); close(sp[0]);
+    int use_fd = sp[0];
+    if (argc < 3 || argv[2][0] != 'd') { dup2(sp[0], net_fd); close(sp[0]); use_fd = net_fd; }
     const char *req = "GET /h.txt HTTP/1.0\r\n\r\n";
-    if (write(net_fd, req, strlen(req)) < 0) { report("relay-write", strerror(errno)); return 1; }
+    if (write(use_fd, req, strlen(req)) < 0) { report("relay-write", strerror(errno)); return 1; }
     char buf[1024]; size_t have = 0;
     for (;;) {
-        ssize_t n = read(net_fd, buf + have, sizeof buf - 1 - have);
-        if (n < 0) { char m[64]; snprintf(m, sizeof m, "read errno %d", errno); report("relay-read", m); return 1; }
+        ssize_t n = read(use_fd, buf + have, sizeof buf - 1 - have);
+        if (n < 0) { char m[64]; snprintf(m, sizeof m, "read errno %d after %zu bytes", errno, have); report("relay-read", m); return 1; }
         if (n == 0) break;
         have += n;
     }

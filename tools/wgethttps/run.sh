@@ -30,7 +30,7 @@ free_port() { python3 -I -c 'import socket;s=socket.socket();s.bind(("127.0.0.1"
 HTTPPORT=$(free_port); TLSPORT=$(free_port)
 mkdir -p "$D/www" "$D/bin" "$D/lib"
 echo wgethttps > "$D/bin/wt-marker"
-musl-gcc -O1 -o "$D/bin/t_relay" "$HERE/t_relay.c" || { echo "WGETHTTPS: t_relay does not build"; exit 1; }
+for t in t_relay t_eof; do musl-gcc -O1 -o "$D/bin/$t" "$HERE/$t.c" || { echo "WGETHTTPS: $t does not build"; exit 1; }; done
 echo hello-net > "$D/www/h.txt"
 head -c 300000 /dev/urandom > "$D/www/big.bin"
 BIGSHA=$(sha256sum "$D/www/big.bin" | cut -c1-16)
