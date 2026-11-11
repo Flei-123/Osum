@@ -14,6 +14,7 @@ METRICS = [
     ("pagefault_filemap_page", "page fault file mmap sequential (per page)", "ns", 1.0),
     ("file_write_4mib", "file write 4 MiB (64 KiB chunks)", "ms", 1e-6),
     ("file_read_4mib_warm", "file read 4 MiB warm", "ms", 1e-6),
+    ("file_read_512kib_warm", "file read 512 KiB warm", "ms", 1e-6),
     ("file_write_4mib_fsync", "file write 4 MiB + fsync", "ms", 1e-6),
     ("fork_exit_wait", "fork + exit + wait", "us", 1e-3),
     ("fork_exec_exit_wait", "fork + exec + exit + wait", "us", 1e-3),

@@ -18,6 +18,7 @@
 #define MIB (1024 * 1024)
 #define IO_BYTES (4 * MIB)
 #define IO_CHUNK 65536
+#define SMALL_FILE_BYTES (512 * 1024)
 #define ANON_PAGES 8192
 #define FILE_PAGES 2048
 #define SMALL_BUF 64
@@ -132,6 +133,15 @@ static void run_read_4m(long n)
     }
 }
 
+static void run_read_512k(long n)
+{
+    for (long i = 0; i < n; i++) {
+        lseek(data_fd, 0, SEEK_SET);
+        for (long off = 0; off < SMALL_FILE_BYTES; off += IO_CHUNK)
+            (void)!read(data_fd, io_buf, IO_CHUNK);
+    }
+}
+
 static void run_write_fsync(long n)
 {
     for (long i = 0; i < n; i++) {
@@ -225,6 +235,8 @@ int main(int argc, char **argv)
     measure("pagefault_filemap_page", run_file_fault, 1, 1, FILE_PAGES);
     measure("file_write_4mib", run_write_4m, 1, 3, 1);
     measure("file_read_4mib_warm", run_read_4m, 1, 3, 1);
+    ftruncate(data_fd, SMALL_FILE_BYTES);
+    measure("file_read_512kib_warm", run_read_512k, 1, 3, 1);
     measure("file_write_4mib_fsync", run_write_fsync, 1, 3, 1);
     measure("fork_exit_wait", run_fork, 50, 1, 1);
     measure("fork_exec_exit_wait", run_exec, 20, 1, 1);
