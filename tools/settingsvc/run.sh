@@ -16,9 +16,9 @@ guest() {
     local apps="$out.apps"
     rm -rf "$apps"; cp -a "$tree/assets/apps" "$apps"
     printf 'perm=notify\n' >> "$apps/charmap.osp/INFO"
-    ( cd "$tree" && export APPS_DIR="$apps" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+    ( cd "$tree" && export APPS_DIR="$apps" BUNDLE_USER_APPS=charmap.osp && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
       DESIGNREBUILD=1 DESIGNBUILD="$out.build" bash tools/design/eh6.sh "$out" res=1920x1080 accel=kvm \
-        mode="$MODE" uiscale="$SCALE" lang=en drehbuch="$ROOT/tools/settingsvc/script.txt" moreprogs="dialogd apprights" ) > "$out.log" 2>&1
+        mode="$MODE" uiscale="$SCALE" lang=en drehbuch="$ROOT/tools/settingsvc/script.txt" moreprogs="dialogd apprights charmap" ) > "$out.log" 2>&1
     rm -rf "$out.build" "$apps"
     [ -s "$out/serial.txt" ] && grep -aq "settings: ready" "$out/serial.txt"
 }
