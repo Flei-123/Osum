@@ -66,6 +66,9 @@ case "$IMAGE_PROFILE" in
     personal|public) ;;
     *) fehler "IMAGE_PROFILE=$IMAGE_PROFILE (personal oder public)" ;;
 esac
+. tools/unterbau/devstones.sh
+DEVSTONES_DEFAULT=${DEVSTONES_DEFAULT:-/root/stones}
+if [ -z "${STONES+set}" ] && [ "$IMAGE_PROFILE" = personal ] && [ -r "$DEVSTONES_DEFAULT/python3" ]; then STONES=$DEVSTONES_DEFAULT; fi
 # LCSH (LC-006): busybox as /bin/sh. musl's system() and popen() run "/bin/sh -c ..." and Osum's own shell has no -c, so a
 # Linux program that starts a command (Firefox helpers, git, make, scripts with #!/bin/sh) needs a POSIX sh at that path.
 #   BBSH=1     /bin/sh = busybox (dynamic musl, hard link of /bin/busybox) + /lib/ld-musl-x86_64.so.1; the Osum shell moves to /bin/osh
@@ -783,6 +786,9 @@ fi
 if [ -n "${STONES:-}" ]; then
     [ -r "$STONES/curl" ] && ARGS+=("/bin/curl=$STONES/curl")
     [ -r "$STONES/git" ] && ARGS+=("/bin/git=$STONES/git" /share/ /share/git-core/ /share/git-core/templates/)
+    # shellcheck disable=SC2207
+    ARGS+=($(devstones_spec "$STONES"))
+    sagen "stein        curl git (+https helpers) make tcc aus $STONES"
 fi
 # WLAN-8265 (HP EliteBook): bundle Intel's firmware on the PRIVATE stick only. The blob is never in git: it is taken from a
 # cache file (WLAN_FW_FILE, default /root/fw-cache/iwlwifi-8265-36.ucode), checked against its SHA-256 pin, and copied unmodified to
