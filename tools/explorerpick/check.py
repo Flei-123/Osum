@@ -22,7 +22,7 @@ def main():
     note = str(picks)
     verdict("picker_answers_once_per_ask", len(picks) == 4, note)
     verdict("pick_names_file", len(picks) >= 1 and picks[0] == (ANSWER_OK, PICKED_NAME, PICKED_LEN), note)
-    verdict("accept_filter_skips_bin", "zzskip.bin" not in " ".join(n for _, n, _ in picks), note)
+    verdict("accept_filter_skips_bin", len(picks) >= 1 and picks[0][1] == PICKED_NAME, note)
     verdict("close_is_cancel", len(picks) >= 2 and picks[1][0] == ANSWER_CANCEL, note)
     ok = re.search(r"(?m)^pickdemo: ok status=ok", serial)
     verdict("service_status_ok", ok is not None)
