@@ -47,7 +47,7 @@ tar xjf /root/fremdquellen/mbedtls-3.6.2.tar.bz2 -C "$W/x/mbed" --strip-componen
 want busybox && {
 echo "== busybox (defconfig; no tc/hwclock/mtd/ubi: the musl headers lack linux/ and mtd/) =="
 ( cd "$W/x/bb" && make defconfig >/dev/null 2>&1
-  sed -i 's/^CONFIG_TC=y/# CONFIG_TC is not set/;s/^CONFIG_FEATURE_TC_INGRESS=y/# CONFIG_FEATURE_TC_INGRESS is not set/;s/^CONFIG_HWCLOCK=y/# CONFIG_HWCLOCK is not set/;s/^CONFIG_SELINUX=y/# CONFIG_SELINUX is not set/' .config
+  sed -i 's/^CONFIG_TC=y/# CONFIG_TC is not set/;s/^CONFIG_FEATURE_TC_INGRESS=y/# CONFIG_FEATURE_TC_INGRESS is not set/;s/^CONFIG_HWCLOCK=y/# CONFIG_HWCLOCK is not set/;s/^CONFIG_SELINUX=y/# CONFIG_SELINUX is not set/;s/^CONFIG_FEATURE_WGET_OPENSSL=y/# CONFIG_FEATURE_WGET_OPENSSL is not set/' .config
   for k in NANDWRITE NANDDUMP FLASHCP FLASH_ERASEALL FLASH_LOCK FLASH_UNLOCK UBIATTACH UBIDETACH UBIMKVOL UBIRMVOL UBIRSVOL UBIUPDATEVOL UBIRENAME MTD_INFO; do sed -i "s/^CONFIG_$k=y/# CONFIG_$k is not set/" .config; done
   { yes "" | make oldconfig; } >/dev/null 2>&1 || true
   make -j"$J" CC=musl-gcc HOSTCC=gcc SKIP_STRIP=y >/dev/null 2>&1 && strip -o "$OUT/busybox" busybox )
