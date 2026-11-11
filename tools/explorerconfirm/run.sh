@@ -80,7 +80,7 @@ mutant() {
 }
 mutant noconfirm kernel/user/explorer/expwork.fi 's/let verdict: u64 = expconfirm.ask(title_key, text_key, wait)/let verdict: u64 = expconfirm.VERDICT_GO/' \
     script-dialogd.txt dialogd service confirm_cancel confirm_accept
-mutant nofallback kernel/user/explorer/expconfirm.fi 's/return VERDICT_NO_BACKEND/return VERDICT_NO/' \
+mutant nofallback kernel/user/explorer/expconfirm.fi 's/return VERDICT_FALLBACK/return VERDICT_NO/' \
     script-fallback.txt "" fallback fallback_verdict fallback_scene_dialog fallback_trashes
 
 echo "EXPLORERCONFIRM: $pass passed, $fail failed"
