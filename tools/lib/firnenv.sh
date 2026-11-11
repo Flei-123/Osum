@@ -32,6 +32,7 @@ firnenv_link_font_alias() {
 firnenv_need_firnc1() {
     [ -x "$FIRNC1" ] && return 0
     mkdir -p "$(dirname "$FIRNC1")"
+    ln -sfn "$FIRN_TOOLCHAIN/lib" "$FIRN_CACHE/lib"
     local tmp
     tmp=$(mktemp "$FIRNC1.XXXXXX") || firnenv_fail "cannot create a temporary file for firnc1"
     if ! "$FIRNC" "$FIRN_TOOLCHAIN/src/firnc1.fi" -o "$tmp" > "$tmp.log" 2>&1; then
@@ -51,7 +52,8 @@ FIRN_TOOLCHAIN="$FIRN_HOME/versions/$FIRN_VERSION_USED"
 
 FIRNC=${FIRNC:-$FIRN_TOOLCHAIN/bin/firnc}
 FIRN_STD="$FIRN_TOOLCHAIN/lib/std"
-FIRNC1=${FIRNC1:-${XDG_CACHE_HOME:-$HOME/.cache}/osum-firn/$FIRN_VERSION_USED/firnc1}
+FIRN_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/osum-firn/$FIRN_VERSION_USED"
+FIRNC1=${FIRNC1:-$FIRN_CACHE/bin/firnc1}
 export FIRN_USE_AS="${FIRN_USE_AS-1}"
 export FIRNLIB="$FIRN_ROOT/lib"
 export FIRNC FIRNC1 FIRN_STD FIRN_TOOLCHAIN
