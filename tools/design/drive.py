@@ -770,6 +770,15 @@ class Fahrer:
             header = int(z.group(2)) if z.group(2) else zh + 4
             y0 = int(m.group(2)) + header + 2 + n * zh
             return (o[0] + int(m.group(1)), o[1] + y0, int(m.group(3)), zh)
+        if name == "ftabkopf0":
+            m = last_2(r"explorer: rect id=\d+ kind=6 "
+                       r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            z = last_2(r"explorer: rows x=\d+ base=\d+ zh=(\d+)(?: head=\d+ headh=(\d+))?")
+            o = self.window("explorer")
+            if m is None or z is None or o is None:
+                return None
+            header = int(z.group(2)) if z.group(2) else int(z.group(1)) + 4
+            return (o[0] + int(m.group(1)) + 20, o[1] + int(m.group(2)) + 2, 20, header - 4)
         if name.startswith("fkante"):
             n = int(name[6:])
             sp = last_2(r"explorer: columns (\d+) (\d+) (\d+) (\d+)")

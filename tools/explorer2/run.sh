@@ -159,6 +159,9 @@ warte 3
 # --- NEU LADEN, F5 (Punkt 7)
 taste f5
 warte 4
+klickauf ftabkopf0
+warteauf explorer: view save || 60
+warte 3
 # --- UMBENENNEN, F2 (Punkt 2)
 klickauf ftab
 warte 2
@@ -247,6 +250,10 @@ hat "$S" 'explorer: (undo|taste 26)' "Punkt 9: Strg+Z meldet sich"
 
 hat "$S" 'explorer: openwith n=[0-9]+' "Punkt 10: die Programmliste ist gelesen"
 
+
+hat "$S" 'explorer: view load status=[0-9]+ sort=[0-9]+ rev=[0-9]+' "view state: loaded from the store at start"
+hat "$S" 'explorer: view save status=0 sort=[0-9]+ rev=[0-9]+ readback=1' "view state: sort change is saved and read back"
+
 # ---------------------------------------------- 6. die Bilder, gemessen
 echo "== 6. die Bilder =="
 python3 - "$OUT/lauf" <<'PY'
@@ -274,6 +281,28 @@ for f in "$OUT/lauf"/*.png; do
         bad "Bild $b: cut=${cut:-?}"
     fi
 done
+
+if [ -z "${EXPLORER2_NOMUT:-}" ]; then
+echo "== 7. counter-probe: store write removed =="
+MT="$OUT/mut-noviewwrite"
+mkdir -p "$MT"
+tar -C "$ROOT" --exclude=.git -cf - . | tar -C "$MT" -xf -
+sed -i 's/last_status = svcosum.store_set(.*/last_status = svcrules.OK/' "$MT/kernel/user/explorer/expview.fi"
+if cmp -s "$MT/kernel/user/explorer/expview.fi" "$ROOT/kernel/user/explorer/expview.fi"; then
+    bad "mutant noviewwrite: the sed expression changed nothing"
+else
+    printf 'warteauf explorer: ready || 240\nwarte 8\nklickauf ftabkopf0\nwarteauf explorer: view save || 60\nwarte 3\n' > "$OUT/dreh-mut.txt"
+    if (cd "$MT" && DESIGNBUILD="$OUT/build-mut" DESIGNREBUILD=1 bash tools/design/capture.sh "$OUT/mut" res="$RES" uitrace=yes lang=de \
+            extra='nostart wigapp=/bin/explorer' drehbuch="$OUT/dreh-mut.txt") > "$OUT/mut.log" 2>&1; then
+        grep -qaE 'explorer: view save status=0 sort=[0-9]+ rev=[0-9]+ readback=0' "$OUT/mut/serial.txt" \
+            && ok "counter-probe: without the store write the read-back turns red" \
+            || bad "counter-probe: the mutant still reads back"
+    else
+        bad "mutant noviewwrite did not run"; tail -n 8 "$OUT/mut.log"
+    fi
+fi
+rm -rf "$MT"
+fi
 
 echo
 echo "======================================================="

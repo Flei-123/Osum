@@ -1,0 +1,118 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import libc.octets
+import libc.text
+import services.svcosum
+import services.svcrules
+import explorer.expbase
+
+export { attach, detach, load, save, enabled, status_last, read_back_matches }
+
+const VALUE_LEN: u64 = 3
+const SORT_MAX: u64 = 9
+const DIGIT_ZERO: u64 = 48
+const SEPARATOR: u64 = 32
+
+static mut app_name: [u8; 9] = "explorer\0"
+
+static mut key_name: [u8; 5] = "view\0"
+
+static mut value_buf: [u8; 8] = [0 as u8; 8]
+
+static mut check_buf: [u8; 8] = [0 as u8; 8]
+
+static mut active: bool = false
+
+static mut last_status: u64 = 0
+
+fn view_app_ptr() -> u64 {
+    return (&app_name[0 as usize]) as u64
+}
+
+fn key_ptr() -> u64 {
+    return (&key_name[0 as usize]) as u64
+}
+
+fn view_value_ptr() -> u64 {
+    return (&value_buf[0 as usize]) as u64
+}
+
+fn check_ptr() -> u64 {
+    return (&check_buf[0 as usize]) as u64
+}
+
+fn enabled() -> bool {
+    return active
+}
+
+fn status_last() -> u64 {
+    return last_status
+}
+
+fn attach() {
+    let rc: u64 = svcosum.set_app(view_app_ptr(), text.length(view_app_ptr()))
+    active = rc == svcrules.OK
+    last_status = rc
+}
+
+fn detach() {
+    active = false
+    last_status = svcrules.INVALID
+}
+
+fn encode() {
+    octets.zero(view_value_ptr(), 8)
+    octets.st8(view_value_ptr(), 0, DIGIT_ZERO + expbase.sortby)
+    octets.st8(view_value_ptr(), 1, SEPARATOR)
+    octets.st8(view_value_ptr(), 2, DIGIT_ZERO + expbase.sortrev)
+}
+
+fn read_digit(at: u64) -> u64 {
+    return octets.ld8(view_value_ptr(), at) - DIGIT_ZERO
+}
+
+fn load() -> u64 {
+    if !active {
+        return svcrules.INVALID
+    }
+    var got: u64 = 0
+    octets.zero(view_value_ptr(), 8)
+    let rc: u64 = svcosum.store_get(key_ptr(), text.length(key_ptr()), view_value_ptr(), 8, (&got) as u64)
+    last_status = rc
+    if rc != svcrules.OK || got != VALUE_LEN {
+        return rc
+    }
+    let sort: u64 = read_digit(0)
+    let rev: u64 = read_digit(2)
+    if sort > SORT_MAX || rev > 1 {
+        last_status = svcrules.INVALID
+        return last_status
+    }
+    expbase.sortby = sort
+    expbase.sortrev = rev
+    return rc
+}
+
+fn save() -> u64 {
+    if !active {
+        return svcrules.INVALID
+    }
+    encode()
+    last_status = svcosum.store_set(key_ptr(), text.length(key_ptr()), view_value_ptr(), VALUE_LEN)
+    return last_status
+}
+
+fn read_back_matches() -> bool {
+    if !active {
+        return false
+    }
+    var got: u64 = 0
+    octets.zero(check_ptr(), 8)
+    let rc: u64 = svcosum.store_get(key_ptr(), text.length(key_ptr()), check_ptr(), 8, (&got) as u64)
+    if rc != svcrules.OK || got != VALUE_LEN {
+        return false
+    }
+    return octets.ld8(check_ptr(), 0) == octets.ld8(view_value_ptr(), 0)
+        && octets.ld8(check_ptr(), 2) == octets.ld8(view_value_ptr(), 2)
+}
