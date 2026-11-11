@@ -1796,7 +1796,7 @@ num "GEGENPROBE: eine gemalte Linie durch die Schrift wird gefunden" \
 
 echo
 echo "== 11i. the line under the bar button follows the text =="
-PI=$(python3 - "$TLOG" <<'PYP'
+PI=$(python3 - "$TMPD/al100/serial.txt" <<'PYP'
 import re
 import sys
 txt = open(sys.argv[1], 'rb').read().decode('latin1')
