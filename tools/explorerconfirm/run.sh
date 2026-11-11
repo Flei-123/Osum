@@ -17,7 +17,7 @@ guest() {
     local tree=$1 out=$2 script=$3 progs=$4
     ( cd "$tree" && export EH_MKFS_EXTRA="/proc/ /trashme/ /trashme/victim.txt=$VICTIM@0644" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
       DESIGNREBUILD=1 DESIGNBUILD="$out.build" bash tools/design/eh6.sh "$out" res=1920x1080 accel=kvm \
-        mode="$MODE" uiscale="$SCALE" "extra=vfs lang=en" drehbuch="$ROOT/tools/explorerconfirm/$script" moreprogs="$progs" ) > "$out.log" 2>&1
+        mode="$MODE" uiscale="$SCALE" "extra=vfs lang=en nostart wigapp=/bin/explorer,/trashme" drehbuch="$ROOT/tools/explorerconfirm/$script" moreprogs="$progs" ) > "$out.log" 2>&1
     rm -rf "$out.build"
     [ -s "$out/serial.txt" ] && grep -aq "explorer: ready" "$out/serial.txt"
 }
