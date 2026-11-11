@@ -57,7 +57,7 @@ static struct xdg_wm_base *wmbase;
 static struct wl_seat *seat;
 static struct wl_data_device_manager *ddm;
 static struct wl_subcompositor *subcomp;
-static int do_sub, do_proto;
+static int do_sub, do_proto, do_frame;
 static struct wp_viewporter *vporter;
 static struct zxdg_decoration_manager_v1 *decoman;
 static int deco_mode = -1;
@@ -485,6 +485,65 @@ static struct wl_buffer *make_buffer(void)
     return b;
 }
 
+static int frame_done;
+static void frame_cb(void *d, struct wl_callback *cb, uint32_t t)
+{
+    frame_done++;
+    wl_callback_destroy(cb);
+}
+static const struct wl_callback_listener frame_l = { frame_cb };
+
+static long now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+static void pump_ms(struct wl_display *dpy, long ms)
+{
+    long end = now_ms() + ms;
+    while (now_ms() < end) {
+        struct pollfd pfd;
+        while (wl_display_prepare_read(dpy) != 0)
+            wl_display_dispatch_pending(dpy);
+        wl_display_flush(dpy);
+        pfd.fd = wl_display_get_fd(dpy);
+        pfd.events = POLLIN;
+        if (poll(&pfd, 1, 20) > 0)
+            wl_display_read_events(dpy);
+        else
+            wl_display_cancel_read(dpy);
+        wl_display_dispatch_pending(dpy);
+    }
+}
+
+static void run_frame(struct wl_display *dpy)
+{
+    long t0;
+    int n = 0;
+    struct wl_callback *cb = wl_surface_frame(surf);
+    wl_callback_add_listener(cb, &frame_l, NULL);
+    pump_ms(dpy, 500);
+    say("frame: before-commit done=%d", frame_done);
+    wl_surface_damage(surf, 0, 0, W, H);
+    wl_surface_commit(surf);
+    pump_ms(dpy, 1000);
+    say("frame: after-commit done=%d", frame_done);
+    t0 = now_ms();
+    while (now_ms() - t0 < 2000) {
+        int before = frame_done;
+        cb = wl_surface_frame(surf);
+        wl_callback_add_listener(cb, &frame_l, NULL);
+        wl_surface_damage(surf, 0, 0, W, H);
+        wl_surface_commit(surf);
+        while (frame_done == before && now_ms() - t0 < 2000)
+            pump_ms(dpy, 5);
+        n++;
+    }
+    say("frame: loop cycles=%d done=%d in 2000 ms", n, frame_done);
+}
+
 int main(int argc, char **argv)
 {
     const char *sock = argc > 1 ? argv[1] : "/tmp/wayland-0";
@@ -509,6 +568,8 @@ int main(int argc, char **argv)
             do_sub = 1;
         } else if (!strcmp(argv[i], "proto")) {
             do_proto = 1;
+        } else if (!strcmp(argv[i], "frame")) {
+            do_frame = 1;
         } else if (!strcmp(argv[i], "noseat")) {
             no_seat = 1;
         }
@@ -554,6 +615,8 @@ int main(int argc, char **argv)
     say("window up %dx%d", W, H);
     if (do_sub)
         make_subs(dpy);
+    if (do_frame)
+        run_frame(dpy);
     if (do_proto) {
         if (!vporter || !decoman) {
             say("proto: no viewporter/decoration");

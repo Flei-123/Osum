@@ -93,7 +93,7 @@ cat > "$TMPD/g.sh" <<'EOS'
 wayd /tmp/wayland-0 2000000000 &
 sleep 2
 idle 5000 wayd-alone
-wlin /tmp/wayland-0 900 C badserial sub proto &
+wlin /tmp/wayland-0 900 C badserial sub proto frame &
 sleep 5
 wlin /tmp/wayland-0 900 A copy=hello-from-A &
 sleep 5
@@ -204,6 +204,15 @@ n0=$(num "$ID0" syscalls)
 echo "== 2c. sub-surfaces (wl_subcompositor): C made two children of its window =="
 has "$(L C | grep -a 'sub:')" "sub: up" "wlin[C]: wl_subcompositor bound, two get_subsurface + commits + roundtrip -- no protocol error"
 hasnot "$(L C)" "protocol error" "wlin[C]: no protocol error from the server"
+has "$(L C | grep -a 'frame: before-commit')" "before-commit done=0" "wlin[C]: a wl_surface.frame request is NOT answered before the surface commits"
+has "$(L C | grep -a 'frame: after-commit')" "after-commit done=1" "wlin[C]: the frame callback arrives after the commit"
+FL=$(L C | grep -a 'frame: loop' | head -1)
+FC=$(sed -n 's/.*cycles=\([0-9]*\) .*/\1/p' <<< "$FL")
+if [ -n "$FC" ] && [ "$FC" -ge 5 ] && [ "$FC" -le 400 ]; then
+    ok "wlin[C]: frame+commit cycles are paced by the server (cycles=$FC in 2 s, not a busy loop)"
+else
+    bad "wlin[C]: frame loop cycles='$FC' ('$FL')"
+fi
 has "$(L C | grep -a 'proto:')" "proto: viewport ok deco-mode=2" "wlin[C]: wp_viewporter (get_viewport, set_source/destination) accepted; xdg-decoration answers server_side (2) although the client asked client_side"
 printf 'screendump %s\n' "$TMPD/sub.ppm" | timeout 20 socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
 sleep 3
