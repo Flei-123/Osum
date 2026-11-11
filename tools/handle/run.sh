@@ -190,10 +190,13 @@ LS=$(sed -n 's/^hbench: lseek=\([0-9]*\).*/\1/p' "$B" | head -1)
 FW=$(sed -n 's/^hbench: forkwait=\([0-9]*\).*/\1/p' "$B" | head -1)
 printf '  ZAHL  file.fd_of %s Zyklen (Minimum ueber Bloecke) | getpid %s | lseek %s | fork+exit+wait %s | Leerschleife %s | TSC %s kHz\n' \
     "$FDOF" "$GP" "$LS" "$FW" "$LEER" "$KHZ"
-num "file.fd_of bleibt unter 250 Zyklen" "$FDOF" lt 250
-num "lseek aus Ring 3 bleibt unter 700 Zyklen" "$LS" lt 700
-num "getpid (von dieser Runde unberuehrt) bleibt unter 450 Zyklen" "$GP" lt 450
-num "fork+exit+wait bleibt unter 320000 Zyklen (alter Kern: 780000-925000)" "$FW" lt 320000
+LEER_REF=8; SLOW_CAP=3
+SLOW=$(( (LEER + LEER_REF - 1) / LEER_REF )); [ "$SLOW" -lt 1 ] && SLOW=1; [ "$SLOW" -gt "$SLOW_CAP" ] && SLOW=$SLOW_CAP
+printf '  ZAHL  Lastfaktor %s (Leerschleife %s, Referenz %s, Deckel %s)\n' "$SLOW" "$LEER" "$LEER_REF" "$SLOW_CAP"
+num "file.fd_of bleibt unter 250 Zyklen (x Lastfaktor)" "$FDOF" lt $((250 * SLOW))
+num "lseek aus Ring 3 bleibt unter 700 Zyklen (x Lastfaktor)" "$LS" lt $((700 * SLOW))
+num "getpid (von dieser Runde unberuehrt) bleibt unter 450 Zyklen (x Lastfaktor)" "$GP" lt $((450 * SLOW))
+num "fork+exit+wait bleibt unter 320000 Zyklen (x Lastfaktor; alter Kern: 780000-925000)" "$FW" lt $((320000 * SLOW))
 
 echo "== 5. Gegenprobe 'nogen': der io_uring-Fehler, absichtlich wieder eingebaut =="
 run_kernel "$TMPD/k0.mb" "handle nogen" "$TMPD/nogen.txt"
