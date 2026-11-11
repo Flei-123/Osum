@@ -1,0 +1,347 @@
+import libc.errno
+import libc.io
+import libc.octets
+import ssh.wire
+import ssh.link
+
+export { chan_open, chan_request_pty, chan_request_exec, chan_request_shell,
+    chan_send, chan_recv, chan_send_eof, chan_finish, exit_code,
+    TIMEOUT, STDIN_READY, FAILED, NO_FD }
+
+const WINDOW: u64 = 131072
+const WINDOW_STEP: u64 = 65536
+const MAX_PACKET: u64 = 32768
+const SEND_CHUNK: u64 = 30000
+const QUEUE_CAP: u64 = 140000
+const READ_MS: u64 = 20000
+const FINISH_MS: u64 = 2000
+const TIMEOUT: u64 = 0xFFFFFFFFFFFFFFFE
+const STDIN_READY: u64 = 0xFFFFFFFFFFFFFFFD
+const FAILED: u64 = 0xFFFFFFFFFFFFFFFF
+const NO_FD: u64 = 0xFFFFFFFF
+const NO_EXIT: u64 = 0xFFFFFFFF
+const EXT_STDERR: u64 = 1
+const STDERR_FD: u64 = 2
+const REQUEST_NAME_MAX: u64 = 32
+
+static mut T_SESSION: [u8; 8] = "session\0"
+static mut T_PTYREQ: [u8; 8] = "pty-req\0"
+static mut T_EXEC: [u8; 5] = "exec\0"
+static mut T_SHELL: [u8; 6] = "shell\0"
+static mut T_EXITSTATUS: [u8; 12] = "exit-status\0"
+static mut T_TERM: [u8; 6] = "xterm\0"
+
+static mut queue: [u8; 140000] = [0 as u8; 140000]
+static mut qhead: u64 = 0
+static mut qtail: u64 = 0
+static mut peer_chan: u64 = 0
+static mut peer_win: u64 = 0
+static mut peer_max: u64 = 0
+static mut consumed: u64 = 0
+static mut eof_seen: u64 = 0
+static mut closed: u64 = 0
+static mut exit_status: u64 = 0xFFFFFFFF
+static mut reply_code: u64 = 0
+
+fn exit_code() -> u64 {
+    return exit_status
+}
+
+fn queue_put(p: u64, n: u64) {
+    if qhead == qtail {
+        qhead = 0
+        qtail = 0
+    }
+    if qtail + n > QUEUE_CAP {
+        return
+    }
+    wire.copy_bytes(((&queue[0 as usize]) as u64) + qtail, p, n as usize)
+    qtail = qtail + n
+}
+
+fn adjust_window() {
+    if consumed < WINDOW_STEP {
+        return
+    }
+    var b: wire.Buf = link.out_buf()
+    wire.w8(&b, link.M_CH_WINDOW)
+    wire.w32(&b, peer_chan)
+    wire.w32(&b, consumed)
+    link.send_buf(&b)
+    consumed = 0
+}
+
+fn handle_request(b: *mut wire.Buf) {
+    var n: usize = 0
+    let name: u64 = wire.rstring(b, &n)
+    let want: bool = wire.rbool(b)
+    if (*b).bad {
+        return
+    }
+    if wire.same_text(name, n, (&T_EXITSTATUS[0 as usize]) as u64) {
+        exit_status = wire.r32(b)
+    }
+    if want {
+        var o: wire.Buf = link.out_buf()
+        wire.w8(&o, link.M_CH_FAILURE)
+        wire.w32(&o, peer_chan)
+        link.send_buf(&o)
+    }
+}
+
+fn handle_global(b: *mut wire.Buf) {
+    var n: usize = 0
+    wire.rstring(b, &n)
+    if wire.rbool(b) {
+        link.send_one(link.M_REQUEST_FAILURE)
+    }
+}
+
+fn handle_packet(n: u64) -> u64 {
+    var b: wire.Buf = wire.buf_read(link.pkt_ptr(), n as usize)
+    let code: u64 = wire.r8(&b)
+    var sn: usize = 0
+    if code == link.M_CH_DATA {
+        wire.r32(&b)
+        let p: u64 = wire.rstring(&b, &sn)
+        queue_put(p, sn as u64)
+    } else if code == link.M_CH_EXTENDED {
+        wire.r32(&b)
+        let kind: u64 = wire.r32(&b)
+        let p: u64 = wire.rstring(&b, &sn)
+        if kind == EXT_STDERR && !b.bad {
+            io.write_all(STDERR_FD, p, sn as u64)
+        }
+        consumed = consumed + (sn as u64)
+    } else if code == link.M_CH_WINDOW {
+        wire.r32(&b)
+        peer_win = peer_win + wire.r32(&b)
+    } else if code == link.M_CH_EOF {
+        eof_seen = 1
+    } else if code == link.M_CH_CLOSE {
+        closed = 1
+    } else if code == link.M_CH_REQUEST {
+        wire.r32(&b)
+        handle_request(&b)
+    } else if code == link.M_GLOBAL_REQUEST {
+        handle_global(&b)
+    } else if code == link.M_CH_SUCCESS || code == link.M_CH_FAILURE {
+        reply_code = code
+    } else if code == link.M_DISCONNECT {
+        closed = 1
+    }
+    return code
+}
+
+fn chan_open() -> bool {
+    var b: wire.Buf = link.out_buf()
+    wire.w8(&b, link.M_CH_OPEN)
+    wire.wtext(&b, (&T_SESSION[0 as usize]) as u64)
+    wire.w32(&b, 0)
+    wire.w32(&b, WINDOW)
+    wire.w32(&b, MAX_PACKET)
+    if !link.send_buf(&b) {
+        return false
+    }
+    qhead = 0
+    qtail = 0
+    consumed = 0
+    eof_seen = 0
+    closed = 0
+    exit_status = NO_EXIT
+    while true {
+        let n: u64 = link.read_packet(READ_MS)
+        if n == link.BROKEN || n == 0 {
+            return false
+        }
+        var r: wire.Buf = wire.buf_read(link.pkt_ptr(), n as usize)
+        let code: u64 = wire.r8(&r)
+        if code == link.M_CH_CONFIRM {
+            wire.r32(&r)
+            peer_chan = wire.r32(&r)
+            peer_win = wire.r32(&r)
+            peer_max = wire.r32(&r)
+            return !r.bad
+        }
+        if code == link.M_CH_OPEN_FAIL {
+            return false
+        }
+        if code != link.M_IGNORE && code != link.M_DEBUG
+            && code != link.M_GLOBAL_REQUEST {
+            return false
+        }
+        handle_packet(n)
+    }
+    return false
+}
+
+fn await_reply() -> bool {
+    reply_code = 0
+    while reply_code == 0 {
+        let n: u64 = link.read_packet(READ_MS)
+        if n == link.BROKEN || n == 0 {
+            return false
+        }
+        handle_packet(n)
+        if closed != 0 {
+            return false
+        }
+    }
+    return reply_code == link.M_CH_SUCCESS
+}
+
+fn begin_request(b: *mut wire.Buf, name: u64) {
+    wire.w8(b, link.M_CH_REQUEST)
+    wire.w32(b, peer_chan)
+    wire.wtext(b, name)
+    wire.wbool(b, true)
+}
+
+fn chan_request_pty(cols: u64, rows: u64) -> bool {
+    var b: wire.Buf = link.out_buf()
+    begin_request(&b, (&T_PTYREQ[0 as usize]) as u64)
+    wire.wtext(&b, (&T_TERM[0 as usize]) as u64)
+    wire.w32(&b, cols)
+    wire.w32(&b, rows)
+    wire.w32(&b, 0)
+    wire.w32(&b, 0)
+    var modes: [u8; 1] = [0 as u8; 1]
+    wire.wstring(&b, (&modes[0 as usize]) as u64, 1)
+    if !link.send_buf(&b) {
+        return false
+    }
+    return await_reply()
+}
+
+fn chan_request_exec(cmd: u64) -> bool {
+    var b: wire.Buf = link.out_buf()
+    begin_request(&b, (&T_EXEC[0 as usize]) as u64)
+    wire.wstring(&b, cmd, wire.text_len(cmd))
+    if !link.send_buf(&b) {
+        return false
+    }
+    return await_reply()
+}
+
+fn chan_request_shell() -> bool {
+    var b: wire.Buf = link.out_buf()
+    begin_request(&b, (&T_SHELL[0 as usize]) as u64)
+    if !link.send_buf(&b) {
+        return false
+    }
+    return await_reply()
+}
+
+fn chan_send(p: u64, n: u64) -> bool {
+    var off: u64 = 0
+    while off < n {
+        if closed != 0 {
+            return false
+        }
+        if peer_win == 0 {
+            let r: u64 = link.read_packet(READ_MS)
+            if r == link.BROKEN || r == 0 {
+                return false
+            }
+            handle_packet(r)
+        } else {
+            var chunk: u64 = n - off
+            if chunk > peer_win {
+                chunk = peer_win
+            }
+            if chunk > peer_max {
+                chunk = peer_max
+            }
+            if chunk > SEND_CHUNK {
+                chunk = SEND_CHUNK
+            }
+            var b: wire.Buf = link.out_buf()
+            wire.w8(&b, link.M_CH_DATA)
+            wire.w32(&b, peer_chan)
+            wire.wstring(&b, p + off, chunk as usize)
+            if !link.send_buf(&b) {
+                return false
+            }
+            peer_win = peer_win - chunk
+            off = off + chunk
+        }
+    }
+    return true
+}
+
+fn chan_send_eof() -> bool {
+    var b: wire.Buf = link.out_buf()
+    wire.w8(&b, link.M_CH_EOF)
+    wire.w32(&b, peer_chan)
+    return link.send_buf(&b)
+}
+
+fn queue_take(out: u64, cap: u64) -> u64 {
+    var k: u64 = qtail - qhead
+    if k > cap {
+        k = cap
+    }
+    wire.copy_bytes(out, ((&queue[0 as usize]) as u64) + qhead, k as usize)
+    qhead = qhead + k
+    consumed = consumed + k
+    adjust_window()
+    return k
+}
+
+fn chan_recv(out: u64, cap: u64, ms: u64, other: u64) -> u64 {
+    while true {
+        if qtail > qhead {
+            return queue_take(out, cap)
+        }
+        if eof_seen != 0 || closed != 0 {
+            return 0
+        }
+        let r: u64 = link.take_packet()
+        if r == link.NEED_MORE {
+            if other != NO_FD {
+                let mask: u64 = link.wait_any(other, ms)
+                if mask == 0 {
+                    return TIMEOUT
+                }
+                if mask == 4 {
+                    return FAILED
+                }
+                if mask == 2 {
+                    return STDIN_READY
+                }
+                if (mask & 1) != 0 && !link.pump() {
+                    return FAILED
+                }
+            } else {
+                if !link.wait_readable(ms) {
+                    return TIMEOUT
+                }
+                if !link.pump() {
+                    return FAILED
+                }
+            }
+        } else if r == link.BROKEN || r == 0 {
+            return FAILED
+        } else {
+            handle_packet(r)
+        }
+    }
+    return FAILED
+}
+
+fn chan_finish() {
+    var guard: u64 = 0
+    while closed == 0 && guard < 8 {
+        let r: u64 = link.read_packet(FINISH_MS)
+        if r == link.BROKEN || r == 0 {
+            guard = 8
+        } else {
+            handle_packet(r)
+        }
+        guard = guard + 1
+    }
+    var b: wire.Buf = link.out_buf()
+    wire.w8(&b, link.M_CH_CLOSE)
+    wire.w32(&b, peer_chan)
+    link.send_buf(&b)
+}

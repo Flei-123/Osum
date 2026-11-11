@@ -1,0 +1,259 @@
+import libc.kcall
+import libc.errno
+import libc.io
+import libc.octets
+import crypto.ed25519
+import codec.b64
+import ssh.wire
+import ssh.link
+
+export { request_service, auth_password, auth_key, load_key, AUTH_OK,
+    AUTH_DENIED, AUTH_BROKEN }
+
+const AUTH_OK: u64 = 1
+const AUTH_DENIED: u64 = 0
+const AUTH_BROKEN: u64 = 2
+const READ_MS: u64 = 20000
+const KEYFILE_MAX: u64 = 2048
+const KEY_MAGIC_LEN: usize = 15
+const SEED_LEN: usize = 32
+const SIG_LEN: usize = 64
+
+static mut T_USERAUTH: [u8; 13] = "ssh-userauth\0"
+static mut T_CONNECTION: [u8; 15] = "ssh-connection\0"
+static mut T_PUBKEY: [u8; 10] = "publickey\0"
+static mut T_PASSWORD: [u8; 9] = "password\0"
+static mut T_MAGIC: [u8; 15] = "openssh-key-v1\0"
+static mut T_NONE: [u8; 5] = "none\0"
+
+static mut seed: [u8; 32] = [0 as u8; 32]
+static mut pubk: [u8; 32] = [0 as u8; 32]
+static mut keytext: [u8; 2048] = [0 as u8; 2048]
+static mut keyb64: [u8; 2048] = [0 as u8; 2048]
+static mut keybin: [u8; 2048] = [0 as u8; 2048]
+static mut have_key: u64 = 0
+static mut blobtmp: [u8; 64] = [0 as u8; 64]
+
+fn skip_noise(code: u64) -> bool {
+    return code == link.M_IGNORE || code == link.M_DEBUG
+        || code == link.M_EXT_INFO || code == link.M_UA_BANNER
+}
+
+fn request_service() -> bool {
+    var b: wire.Buf = link.out_buf()
+    wire.w8(&b, link.M_SERVICE_REQUEST)
+    wire.wtext(&b, (&T_USERAUTH[0 as usize]) as u64)
+    if !link.send_buf(&b) {
+        return false
+    }
+    while true {
+        let n: u64 = link.read_packet(READ_MS)
+        if n == link.BROKEN || n == 0 {
+            return false
+        }
+        let code: u64 = octets.ld8(link.pkt_ptr(), 0)
+        if code == link.M_SERVICE_ACCEPT {
+            return true
+        }
+        if !skip_noise(code) {
+            return false
+        }
+    }
+    return false
+}
+
+fn wait_result() -> u64 {
+    while true {
+        let n: u64 = link.read_packet(READ_MS)
+        if n == link.BROKEN || n == 0 {
+            return AUTH_BROKEN
+        }
+        let code: u64 = octets.ld8(link.pkt_ptr(), 0)
+        if code == link.M_UA_SUCCESS {
+            return AUTH_OK
+        }
+        if code == link.M_UA_FAILURE {
+            return AUTH_DENIED
+        }
+        if !skip_noise(code) && code != 60 {
+            return AUTH_BROKEN
+        }
+        if code == 60 {
+            return AUTH_DENIED
+        }
+    }
+    return AUTH_BROKEN
+}
+
+fn begin_request(b: *mut wire.Buf, user: u64, ulen: u64, method: u64) {
+    wire.w8(b, link.M_UA_REQUEST)
+    wire.wstring(b, user, ulen as usize)
+    wire.wtext(b, (&T_CONNECTION[0 as usize]) as u64)
+    wire.wtext(b, method)
+}
+
+fn auth_password(user: u64, ulen: u64, pass: u64, plen: u64) -> u64 {
+    var b: wire.Buf = link.out_buf()
+    begin_request(&b, user, ulen, (&T_PASSWORD[0 as usize]) as u64)
+    wire.wbool(&b, false)
+    wire.wstring(&b, pass, plen as usize)
+    if !link.send_buf(&b) {
+        return AUTH_BROKEN
+    }
+    return wait_result()
+}
+
+fn read_text_file(path: u64) -> u64 {
+    let fd: u64 = io.open(path, kcall.O_RDONLY)
+    if errno.failed(fd) {
+        return 0
+    }
+    let n: u64 = io.read_full(fd, (&keytext[0 as usize]) as u64, KEYFILE_MAX)
+    io.close(fd)
+    if errno.failed(n) {
+        return 0
+    }
+    return n
+}
+
+fn collect_base64(n: u64) -> u64 {
+    var out: u64 = 0
+    var line_start: bool = true
+    var in_header: bool = false
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = octets.ld8((&keytext[0 as usize]) as u64, i)
+        if line_start && c == 45 {
+            in_header = true
+        }
+        if c == 10 {
+            in_header = false
+            line_start = true
+        } else {
+            line_start = false
+            if !in_header && c != 13 && c != 32 && out < KEYFILE_MAX {
+                octets.st8((&keyb64[0 as usize]) as u64, out, c)
+                out = out + 1
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fn parse_key(len: u64) -> bool {
+    var b: wire.Buf = wire.buf_read((&keybin[0 as usize]) as u64, len as usize)
+    var n: usize = 0
+    let magic: u64 = (&keybin[0 as usize]) as u64
+    if len < (KEY_MAGIC_LEN as u64) || !wire.equal_bytes(magic,
+        (&T_MAGIC[0 as usize]) as u64, KEY_MAGIC_LEN) {
+        return false
+    }
+    wire.rskip(&b, KEY_MAGIC_LEN)
+    let cipher: u64 = wire.rstring(&b, &n)
+    if b.bad || !wire.same_text(cipher, n, (&T_NONE[0 as usize]) as u64) {
+        return false
+    }
+    let kdf: u64 = wire.rstring(&b, &n)
+    if b.bad || !wire.same_text(kdf, n, (&T_NONE[0 as usize]) as u64) {
+        return false
+    }
+    wire.rstring(&b, &n)
+    if wire.r32(&b) != 1 {
+        return false
+    }
+    wire.rstring(&b, &n)
+    let priv: u64 = wire.rstring(&b, &n)
+    if b.bad {
+        return false
+    }
+    var pb: wire.Buf = wire.buf_read(priv, n)
+    let check1: u64 = wire.r32(&pb)
+    let check2: u64 = wire.r32(&pb)
+    if pb.bad || check1 != check2 {
+        return false
+    }
+    let kt: u64 = wire.rstring(&pb, &n)
+    if pb.bad || !wire.same_text(kt, n, link.hostalg_ptr()) {
+        return false
+    }
+    let pubp: u64 = wire.rstring(&pb, &n)
+    if pb.bad || n != 32 {
+        return false
+    }
+    wire.copy_bytes((&pubk[0 as usize]) as u64, pubp, 32)
+    let privp: u64 = wire.rstring(&pb, &n)
+    if pb.bad || n != 64 {
+        return false
+    }
+    wire.copy_bytes((&seed[0 as usize]) as u64, privp, SEED_LEN)
+    return true
+}
+
+fn load_key(path: u64) -> bool {
+    have_key = 0
+    let n: u64 = read_text_file(path)
+    if n == 0 {
+        return false
+    }
+    let m: u64 = collect_base64(n)
+    if m == 0 {
+        return false
+    }
+    let d: u64 = b64.b64_decode_cap((&keyb64[0 as usize]) as u64, m,
+        (&keybin[0 as usize]) as u64, KEYFILE_MAX, false)
+    if d == 0 || d > KEYFILE_MAX {
+        return false
+    }
+    if !parse_key(d) {
+        return false
+    }
+    have_key = 1
+    return true
+}
+
+fn write_blob(b: *mut wire.Buf) {
+    var bb: wire.Buf = wire.buf_write((&blobtmp[0 as usize]) as u64, 64)
+    wire.wtext(&bb, link.hostalg_ptr())
+    wire.wstring(&bb, (&pubk[0 as usize]) as u64, 32)
+    wire.wstring(b, (&blobtmp[0 as usize]) as u64, bb.len)
+}
+
+fn auth_key(user: u64, ulen: u64) -> u64 {
+    if have_key == 0 {
+        return AUTH_DENIED
+    }
+    var c: ed25519.Ctx = ed25519.ctx_new()
+    if !ed25519.ctx_init(&c) {
+        return AUTH_BROKEN
+    }
+    var sd: [u8; 1024] = [0 as u8; 1024]
+    var s: wire.Buf = wire.buf_write((&sd[0 as usize]) as u64, 1024)
+    wire.wstring(&s, link.session_id(), 32)
+    wire.w8(&s, link.M_UA_REQUEST)
+    wire.wstring(&s, user, ulen as usize)
+    wire.wtext(&s, (&T_CONNECTION[0 as usize]) as u64)
+    wire.wtext(&s, (&T_PUBKEY[0 as usize]) as u64)
+    wire.wbool(&s, true)
+    wire.wtext(&s, link.hostalg_ptr())
+    write_blob(&s)
+    var sig: [u8; 64] = [0 as u8; 64]
+    if s.bad || !ed25519.ed25519_sign(&c, (&seed[0 as usize]) as u64,
+        (&sd[0 as usize]) as u64, s.len, (&sig[0 as usize]) as u64) {
+        return AUTH_BROKEN
+    }
+    var sb: [u8; 128] = [0 as u8; 128]
+    var sw: wire.Buf = wire.buf_write((&sb[0 as usize]) as u64, 128)
+    wire.wtext(&sw, link.hostalg_ptr())
+    wire.wstring(&sw, (&sig[0 as usize]) as u64, SIG_LEN)
+    var b: wire.Buf = link.out_buf()
+    begin_request(&b, user, ulen, (&T_PUBKEY[0 as usize]) as u64)
+    wire.wbool(&b, true)
+    wire.wtext(&b, link.hostalg_ptr())
+    write_blob(&b)
+    wire.wstring(&b, (&sb[0 as usize]) as u64, sw.len)
+    if !link.send_buf(&b) {
+        return AUTH_BROKEN
+    }
+    return wait_result()
+}

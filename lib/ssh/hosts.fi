@@ -1,0 +1,157 @@
+import libc.kcall
+import libc.errno
+import libc.io
+import libc.octets
+import crypto.sha256
+import codec.b64
+import ssh.wire
+import ssh.link
+
+export { HOST_UNKNOWN, HOST_MATCH, HOST_CHANGED, fingerprint, check_host,
+    add_host }
+
+const HOST_UNKNOWN: u64 = 0
+const HOST_MATCH: u64 = 1
+const HOST_CHANGED: u64 = 2
+const FILE_MAX: u64 = 16384
+const LINE_MAX: u64 = 512
+
+static mut T_SPACE: [u8; 2] = " \0"
+static mut T_NL: [u8; 2] = "\n\0"
+static mut T_LB: [u8; 2] = "[\0"
+static mut T_RBC: [u8; 3] = "]:\0"
+
+static mut filebuf: [u8; 16384] = [0 as u8; 16384]
+static mut b64buf: [u8; 256] = [0 as u8; 256]
+static mut keybuf: [u8; 320] = [0 as u8; 320]
+
+fn fingerprint(out: u64) -> u64 {
+    var dig: [u8; 32] = [0 as u8; 32]
+    sha256.hash(link.host_blob(), link.host_blob_len() as usize,
+        (&dig[0 as usize]) as u64)
+    let n: u64 = b64.b64_encode_opt((&dig[0 as usize]) as u64, 32, out, false)
+    octets.st8(out, n, 0)
+    return n
+}
+
+fn host_key_text() -> u64 {
+    let n: u64 = b64.b64_encode_opt(link.host_blob(), link.host_blob_len(),
+        (&b64buf[0 as usize]) as u64, true)
+    octets.st8((&b64buf[0 as usize]) as u64, n, 0)
+    return n
+}
+
+fn host_token(host: u64, port: u64, out: u64) {
+    var digits: [u8; 24] = [0 as u8; 24]
+    if port == 22 {
+        wire.copy_bytes(out, host, wire.text_len(host) + 1)
+        return
+    }
+    var n: u64 = 0
+    var x: u64 = port
+    var tmp: [u8; 24] = [0 as u8; 24]
+    while x > 0 {
+        tmp[n as usize] = (48 + (x % 10)) as u8
+        n = n + 1
+        x = x / 10
+    }
+    var i: u64 = 0
+    while i < n {
+        digits[i as usize] = tmp[(n - 1 - i) as usize]
+        i = i + 1
+    }
+    var at: u64 = 0
+    octets.st8(out, at, 91)
+    at = at + 1
+    let hl: u64 = wire.text_len(host) as u64
+    wire.copy_bytes(out + at, host, hl as usize)
+    at = at + hl
+    octets.st8(out, at, 93)
+    octets.st8(out, at + 1, 58)
+    at = at + 2
+    wire.copy_bytes(out + at, (&digits[0 as usize]) as u64, n as usize)
+    at = at + n
+    octets.st8(out, at, 0)
+}
+
+fn token_end(p: u64, from: u64, n: u64) -> u64 {
+    var i: u64 = from
+    while i < n && octets.ld8(p, i) != 32 && octets.ld8(p, i) != 10 {
+        i = i + 1
+    }
+    return i
+}
+
+fn same_range(p: u64, a: u64, alen: u64, text: u64) -> bool {
+    return alen == (wire.text_len(text) as u64)
+        && wire.equal_bytes(p + a, text, alen as usize)
+}
+
+fn check_host(path: u64, host: u64, port: u64) -> u64 {
+    let fd: u64 = io.open(path, kcall.O_RDONLY)
+    if errno.failed(fd) {
+        return HOST_UNKNOWN
+    }
+    let n: u64 = io.read_full(fd, (&filebuf[0 as usize]) as u64, FILE_MAX)
+    io.close(fd)
+    if errno.failed(n) {
+        return HOST_UNKNOWN
+    }
+    host_key_text()
+    host_token(host, port, (&keybuf[0 as usize]) as u64)
+    let p: u64 = (&filebuf[0 as usize]) as u64
+    var seen: bool = false
+    var i: u64 = 0
+    while i < n {
+        let h_end: u64 = token_end(p, i, n)
+        let t_end: u64 = token_end(p, h_end + 1, n)
+        let k_end: u64 = token_end(p, t_end + 1, n)
+        if same_range(p, i, h_end - i, (&keybuf[0 as usize]) as u64)
+            && t_end < n {
+            if same_range(p, t_end + 1, k_end - t_end - 1,
+                (&b64buf[0 as usize]) as u64) {
+                return HOST_MATCH
+            }
+            seen = true
+        }
+        i = k_end
+        while i < n && octets.ld8(p, i) != 10 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    if seen {
+        return HOST_CHANGED
+    }
+    return HOST_UNKNOWN
+}
+
+fn add_host(path: u64, host: u64, port: u64) -> bool {
+    var line: [u8; 512] = [0 as u8; 512]
+    let lp: u64 = (&line[0 as usize]) as u64
+    host_key_text()
+    host_token(host, port, (&keybuf[0 as usize]) as u64)
+    var at: u64 = 0
+    let hl: u64 = wire.text_len((&keybuf[0 as usize]) as u64) as u64
+    wire.copy_bytes(lp, (&keybuf[0 as usize]) as u64, hl as usize)
+    at = hl
+    octets.st8(lp, at, 32)
+    at = at + 1
+    let al: u64 = wire.text_len(link.hostalg_ptr()) as u64
+    wire.copy_bytes(lp + at, link.hostalg_ptr(), al as usize)
+    at = at + al
+    octets.st8(lp, at, 32)
+    at = at + 1
+    let bl: u64 = wire.text_len((&b64buf[0 as usize]) as u64) as u64
+    wire.copy_bytes(lp + at, (&b64buf[0 as usize]) as u64, bl as usize)
+    at = at + bl
+    octets.st8(lp, at, 10)
+    at = at + 1
+    let fd: u64 = io.open(path, kcall.O_WRONLY | kcall.O_APPEND | kcall.O_CREAT)
+    if errno.failed(fd) {
+        return false
+    }
+    let w: u64 = io.write_all(fd, lp, at)
+    io.close(fd)
+    return !errno.failed(w) && w == at
+}

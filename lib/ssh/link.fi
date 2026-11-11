@@ -1,0 +1,611 @@
+import libc.kcall
+import libc.errno
+import libc.io
+import libc.net
+import libc.octets
+import libc.regio
+import crypto.sha256
+import crypto.x25519
+import crypto.ed25519
+import ssh.wire
+import ssh.pack
+import ssh.kex
+
+export {
+    M_DISCONNECT, M_IGNORE, M_DEBUG, M_SERVICE_REQUEST, M_SERVICE_ACCEPT,
+    M_EXT_INFO, M_UA_REQUEST, M_UA_FAILURE, M_UA_SUCCESS, M_UA_BANNER,
+    M_GLOBAL_REQUEST, M_REQUEST_FAILURE, M_CH_OPEN, M_CH_CONFIRM,
+    M_CH_OPEN_FAIL, M_CH_WINDOW, M_CH_DATA, M_CH_EXTENDED, M_CH_EOF,
+    M_CH_CLOSE, M_CH_REQUEST, M_CH_SUCCESS, M_CH_FAILURE,
+    NEED_MORE, BROKEN, PAYCAP,
+    connect_ip, handshake, shutdown_link, link_fd, host_blob, host_blob_len,
+    session_id, pkt_ptr, take_packet, pump, wait_readable, wait_any,
+    send_buf, send_one, out_buf, random_bytes, mono_ms, send_disconnect,
+    read_packet, hostalg_ptr, empty_ptr
+}
+
+const M_DISCONNECT: u64 = 1
+const M_IGNORE: u64 = 2
+const M_DEBUG: u64 = 4
+const M_SERVICE_REQUEST: u64 = 5
+const M_SERVICE_ACCEPT: u64 = 6
+const M_EXT_INFO: u64 = 7
+const M_KEXINIT: u64 = 20
+const M_NEWKEYS: u64 = 21
+const M_KEX_ECDH_INIT: u64 = 30
+const M_KEX_ECDH_REPLY: u64 = 31
+const M_UA_REQUEST: u64 = 50
+const M_UA_FAILURE: u64 = 51
+const M_UA_SUCCESS: u64 = 52
+const M_UA_BANNER: u64 = 53
+const M_GLOBAL_REQUEST: u64 = 80
+const M_REQUEST_FAILURE: u64 = 82
+const M_CH_OPEN: u64 = 90
+const M_CH_CONFIRM: u64 = 91
+const M_CH_OPEN_FAIL: u64 = 92
+const M_CH_WINDOW: u64 = 93
+const M_CH_DATA: u64 = 94
+const M_CH_EXTENDED: u64 = 95
+const M_CH_EOF: u64 = 96
+const M_CH_CLOSE: u64 = 97
+const M_CH_REQUEST: u64 = 98
+const M_CH_SUCCESS: u64 = 99
+const M_CH_FAILURE: u64 = 100
+
+const RXCAP: usize = 42000
+const TXCAP: usize = 42000
+const PKTCAP: usize = 36000
+const PAYCAP: usize = 36000
+const HANDSHAKE_MS: u64 = 20000
+const NEED_MORE: u64 = 0xFFFFFFFFFFFFFFFF
+const BROKEN: u64 = 0xFFFFFFFFFFFFFFFE
+const SYS_GETRANDOM: u64 = 318
+const SYS_CLOCK_GETTIME: u64 = 228
+const CLOCK_MONOTONIC: u64 = 1
+const POLL_RETRIES: u64 = 8
+const MAX_BANNER_LINES: u64 = 64
+const MAX_VERSION_LEN: u64 = 255
+
+static mut T_VERSION: [u8; 22] = "SSH-2.0-OsumSSH_1.0\r\n\0"
+static mut T_BANNER: [u8; 20] = "SSH-2.0-OsumSSH_1.0\0"
+static mut T_KEXALGS: [u8; 47] = "curve25519-sha256,kex-strict-c-v00@openssh.com\0"
+static mut T_KEXSTRICT: [u8; 29] = "kex-strict-s-v00@openssh.com\0"
+static mut T_CURVE: [u8; 18] = "curve25519-sha256\0"
+static mut T_HOSTALG: [u8; 12] = "ssh-ed25519\0"
+static mut T_CIPHER: [u8; 30] = "chacha20-poly1305@openssh.com\0"
+static mut T_MACS: [u8; 14] = "hmac-sha2-256\0"
+static mut T_NONE: [u8; 5] = "none\0"
+static mut T_EMPTY: [u8; 1] = "\0"
+
+static mut rxraw: [u8; 42000] = [0 as u8; 42000]
+static mut rxlen: u64 = 0
+static mut pktbuf: [u8; 36000] = [0 as u8; 36000]
+static mut txbuf: [u8; 42000] = [0 as u8; 42000]
+static mut outpay: [u8; 36000] = [0 as u8; 36000]
+static mut icbuf: [u8; 4096] = [0 as u8; 4096]
+static mut iclen: u64 = 0
+static mut isbuf: [u8; 1024] = [0 as u8; 1024]
+static mut islen: u64 = 0
+static mut vsbuf: [u8; 256] = [0 as u8; 256]
+static mut vslen: u64 = 0
+static mut blobbuf: [u8; 128] = [0 as u8; 128]
+static mut bloblen: u64 = 0
+static mut fdsbuf: [u8; 32] = [0 as u8; 32]
+static mut kmat: [u8; 128] = [0 as u8; 128]
+static mut sock: u64 = 0
+static mut strict_kex: u64 = 0
+
+static mut cin: pack.Cipher = pack.Cipher { on: false, k1: [0 as u8; 32],
+    k2: [0 as u8; 32], seq: 0 }
+static mut cout: pack.Cipher = pack.Cipher { on: false, k1: [0 as u8; 32],
+    k2: [0 as u8; 32], seq: 0 }
+static mut kx: kex.Kex = kex.Kex { kmp: [0 as u8; 40], kmplen: 0,
+    h: [0 as u8; 32], sid: [0 as u8; 32] }
+
+fn hostalg_ptr() -> u64 {
+    return (&T_HOSTALG[0 as usize]) as u64
+}
+
+fn empty_ptr() -> u64 {
+    return (&T_EMPTY[0 as usize]) as u64
+}
+
+fn link_fd() -> u64 {
+    return sock
+}
+
+fn host_blob() -> u64 {
+    return (&blobbuf[0 as usize]) as u64
+}
+
+fn host_blob_len() -> u64 {
+    return bloblen
+}
+
+fn session_id() -> u64 {
+    return kex.kex_sid(&kx)
+}
+
+fn pkt_ptr() -> u64 {
+    return (&pktbuf[0 as usize]) as u64
+}
+
+fn out_buf() -> wire.Buf {
+    return wire.buf_write((&outpay[0 as usize]) as u64, PAYCAP)
+}
+
+fn random_bytes(p: u64, n: u64) -> bool {
+    let r: u64 = kcall.sys3(SYS_GETRANDOM, p, n, 0)
+    return !errno.failed(r) && r == n
+}
+
+fn mono_ms() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    kcall.sys2(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC, (&ts[0 as usize]) as u64)
+    return (ts[0 as usize] *% 1000) +% (ts[1 as usize] / 1000000)
+}
+
+fn connect_ip(ip: u64, port: u64) -> bool {
+    let s: u64 = net.tcp_socket()
+    if net.failed(s) {
+        return false
+    }
+    if net.failed(net.connect_to(s, ip, port)) {
+        net.close(s)
+        return false
+    }
+    sock = s
+    rxlen = 0
+    iclen = 0
+    vslen = 0
+    strict_kex = 0
+    cin = pack.cipher_new()
+    cout = pack.cipher_new()
+    return true
+}
+
+fn shutdown_link() {
+    if sock != 0 {
+        net.close(sock)
+        sock = 0
+    }
+}
+
+fn rx_consume(n: u64) {
+    if n >= rxlen {
+        rxlen = 0
+        return
+    }
+    let p: u64 = (&rxraw[0 as usize]) as u64
+    wire.copy_bytes(p, p + n, (rxlen - n) as usize)
+    rxlen = rxlen - n
+}
+
+fn poll_wait(f: u64, n: u64, ms: u64) -> u64 {
+    var tries: u64 = 0
+    while tries < POLL_RETRIES {
+        let r: u64 = io.poll(f, n, ms)
+        if !errno.failed(r) {
+            return r
+        }
+        if errno.errno() != errno.E_INTR {
+            return r
+        }
+        tries = tries + 1
+    }
+    return 0
+}
+
+fn wait_readable(ms: u64) -> bool {
+    let f: u64 = (&fdsbuf[0 as usize]) as u64
+    io.poll_set(f, 0, sock, io.POLLIN)
+    let r: u64 = poll_wait(f, 1, ms)
+    return !errno.failed(r) && r != 0
+}
+
+fn wait_any(other: u64, ms: u64) -> u64 {
+    let f: u64 = (&fdsbuf[0 as usize]) as u64
+    io.poll_set(f, 0, sock, io.POLLIN)
+    io.poll_set(f, 1, other, io.POLLIN)
+    let r: u64 = poll_wait(f, 2, ms)
+    if errno.failed(r) {
+        return 4
+    }
+    var mask: u64 = 0
+    if io.poll_ready(f, 0, io.POLLIN | io.POLLHUP | io.POLLERR) {
+        mask = mask | 1
+    }
+    if io.poll_ready(f, 1, io.POLLIN | io.POLLHUP) {
+        mask = mask | 2
+    }
+    return mask
+}
+
+fn pump() -> bool {
+    if rxlen >= (RXCAP as u64) {
+        return false
+    }
+    let n: u64 = net.recv_some(sock, ((&rxraw[0 as usize]) as u64) + rxlen,
+        (RXCAP as u64) - rxlen)
+    if errno.failed(n) {
+        return errno.errno() == errno.E_INTR
+    }
+    if n == 0 {
+        return false
+    }
+    rxlen = rxlen + n
+    return true
+}
+
+fn take_packet() -> u64 {
+    if rxlen < 4 {
+        return NEED_MORE
+    }
+    let raw: u64 = (&rxraw[0 as usize]) as u64
+    let packlen: u64 = pack.pack_len(&cin, raw)
+    if packlen < 5 || packlen > (pack.MAXPACK as u64) {
+        return BROKEN
+    }
+    var total: u64 = 4 + packlen
+    if pack.cipher_on(&cin) {
+        total = total + (pack.TAG as u64)
+    }
+    if total > (RXCAP as u64) {
+        return BROKEN
+    }
+    if rxlen < total {
+        return NEED_MORE
+    }
+    var plen: usize = 0
+    if !pack.pack_in(&cin, raw, packlen as usize,
+        (&pktbuf[0 as usize]) as u64, PKTCAP, &plen) {
+        return BROKEN
+    }
+    rx_consume(total)
+    return plen as u64
+}
+
+fn read_packet(ms: u64) -> u64 {
+    var going: bool = true
+    while going {
+        let r: u64 = take_packet()
+        if r != NEED_MORE {
+            return r
+        }
+        if !wait_readable(ms) {
+            return BROKEN
+        }
+        if !pump() {
+            return BROKEN
+        }
+    }
+    return BROKEN
+}
+
+fn send_payload(p: u64, n: u64) -> bool {
+    var r: [u8; 24] = [0 as u8; 24]
+    if !random_bytes((&r[0 as usize]) as u64, 24) {
+        return false
+    }
+    let w: usize = pack.pack_out(&cout, p, n as usize,
+        (&r[0 as usize]) as u64, (&txbuf[0 as usize]) as u64, TXCAP)
+    if w == 0 {
+        return false
+    }
+    let s: u64 = net.send_all(sock, (&txbuf[0 as usize]) as u64, w as u64)
+    return !errno.failed(s) && s == (w as u64)
+}
+
+fn send_buf(b: *mut wire.Buf) -> bool {
+    if (*b).bad {
+        return false
+    }
+    return send_payload((*b).p, (*b).len as u64)
+}
+
+fn send_one(code: u64) -> bool {
+    var b: wire.Buf = out_buf()
+    wire.w8(&b, code)
+    return send_buf(&b)
+}
+
+fn send_disconnect(reason: u64, text: u64) {
+    var b: wire.Buf = out_buf()
+    wire.w8(&b, M_DISCONNECT)
+    wire.w32(&b, reason)
+    wire.wtext(&b, text)
+    wire.wtext(&b, (&T_EMPTY[0 as usize]) as u64)
+    send_buf(&b)
+}
+
+fn is_banner_start() -> bool {
+    let p: u64 = (&rxraw[0 as usize]) as u64
+    return octets.ld8(p, 0) == 83 && octets.ld8(p, 1) == 83
+        && octets.ld8(p, 2) == 72 && octets.ld8(p, 3) == 45
+}
+
+fn find_newline() -> u64 {
+    var i: u64 = 0
+    while i < rxlen {
+        if octets.ld8((&rxraw[0 as usize]) as u64, i) == 10 {
+            return i
+        }
+        i = i + 1
+    }
+    return NEED_MORE
+}
+
+fn version_exchange() -> bool {
+    let v: u64 = (&T_VERSION[0 as usize]) as u64
+    if errno.failed(net.send_all(sock, v, wire.text_len(v) as u64)) {
+        return false
+    }
+    var lines: u64 = 0
+    while lines < MAX_BANNER_LINES {
+        let end: u64 = find_newline()
+        if end == NEED_MORE {
+            if rxlen > 1024 || !wait_readable(HANDSHAKE_MS) || !pump() {
+                return false
+            }
+        } else {
+            var n: u64 = end
+            if n > 0 && octets.ld8((&rxraw[0 as usize]) as u64, n - 1) == 13 {
+                n = n - 1
+            }
+            if n >= 4 && is_banner_start() {
+                if n > MAX_VERSION_LEN {
+                    return false
+                }
+                wire.copy_bytes((&vsbuf[0 as usize]) as u64,
+                    (&rxraw[0 as usize]) as u64, n as usize)
+                vslen = n
+                rx_consume(end + 1)
+                return true
+            }
+            rx_consume(end + 1)
+            lines = lines + 1
+        }
+    }
+    return false
+}
+
+fn build_kexinit() -> bool {
+    var b: wire.Buf = wire.buf_write((&isbuf[0 as usize]) as u64, 1024)
+    wire.w8(&b, M_KEXINIT)
+    var cookie: [u8; 16] = [0 as u8; 16]
+    if !random_bytes((&cookie[0 as usize]) as u64, 16) {
+        return false
+    }
+    wire.wbytes(&b, (&cookie[0 as usize]) as u64, 16)
+    wire.wname(&b, (&T_KEXALGS[0 as usize]) as u64)
+    wire.wname(&b, (&T_HOSTALG[0 as usize]) as u64)
+    wire.wname(&b, (&T_CIPHER[0 as usize]) as u64)
+    wire.wname(&b, (&T_CIPHER[0 as usize]) as u64)
+    wire.wname(&b, (&T_MACS[0 as usize]) as u64)
+    wire.wname(&b, (&T_MACS[0 as usize]) as u64)
+    wire.wname(&b, (&T_NONE[0 as usize]) as u64)
+    wire.wname(&b, (&T_NONE[0 as usize]) as u64)
+    wire.wname(&b, (&T_EMPTY[0 as usize]) as u64)
+    wire.wname(&b, (&T_EMPTY[0 as usize]) as u64)
+    wire.wbool(&b, false)
+    wire.w32(&b, 0)
+    islen = b.len as u64
+    return !b.bad
+}
+
+fn check_kexinit() -> bool {
+    var b: wire.Buf = wire.buf_read((&icbuf[0 as usize]) as u64,
+        iclen as usize)
+    wire.rskip(&b, 17)
+    var n: usize = 0
+    let kexp: u64 = wire.rstring(&b, &n)
+    let okkex: bool = wire.list_has(kexp, n, (&T_CURVE[0 as usize]) as u64)
+    if wire.list_has(kexp, n, (&T_KEXSTRICT[0 as usize]) as u64) {
+        strict_kex = 1
+    }
+    let hostp: u64 = wire.rstring(&b, &n)
+    let okhost: bool = wire.list_has(hostp, n, (&T_HOSTALG[0 as usize]) as u64)
+    let e1: u64 = wire.rstring(&b, &n)
+    let ok1: bool = wire.list_has(e1, n, (&T_CIPHER[0 as usize]) as u64)
+    let e2: u64 = wire.rstring(&b, &n)
+    let ok2: bool = wire.list_has(e2, n, (&T_CIPHER[0 as usize]) as u64)
+    if b.bad {
+        return false
+    }
+    return okkex && okhost && ok1 && ok2
+}
+
+fn exchange_kexinit() -> bool {
+    if !build_kexinit() {
+        return false
+    }
+    if !send_payload((&isbuf[0 as usize]) as u64, islen) {
+        return false
+    }
+    while true {
+        let n: u64 = read_packet(HANDSHAKE_MS)
+        if n == BROKEN || n == 0 {
+            return false
+        }
+        let code: u64 = octets.ld8((&pktbuf[0 as usize]) as u64, 0)
+        if code == M_KEXINIT {
+            if n > 4096 {
+                return false
+            }
+            wire.copy_bytes((&icbuf[0 as usize]) as u64,
+                (&pktbuf[0 as usize]) as u64, n as usize)
+            iclen = n
+            return check_kexinit()
+        }
+        if code != M_IGNORE && code != M_DEBUG {
+            return false
+        }
+    }
+    return false
+}
+
+fn hstr(s: *mut sha256.Sha256, p: u64, n: u64) {
+    var l: [u8; 4] = [0 as u8; 4]
+    wire.put_be32((&l[0 as usize]) as u64, 0, n)
+    sha256.update(s, (&l[0 as usize]) as u64, 4)
+    sha256.update(s, p, n as usize)
+}
+
+fn all_zero(p: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if octets.ld8(p, i) != 0 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn store_host_blob(p: u64, n: usize) -> bool {
+    if n == 0 || n > 128 {
+        return false
+    }
+    wire.copy_bytes((&blobbuf[0 as usize]) as u64, p, n)
+    bloblen = n as u64
+    return true
+}
+
+fn parse_host_blob(pubout: u64) -> bool {
+    var b: wire.Buf = wire.buf_read((&blobbuf[0 as usize]) as u64,
+        bloblen as usize)
+    var n: usize = 0
+    let alg: u64 = wire.rstring(&b, &n)
+    if b.bad || !wire.same_text(alg, n, (&T_HOSTALG[0 as usize]) as u64) {
+        return false
+    }
+    let pubp: u64 = wire.rstring(&b, &n)
+    if b.bad || n != 32 {
+        return false
+    }
+    wire.copy_bytes(pubout, pubp, 32)
+    return true
+}
+
+fn verify_signature(c: *mut ed25519.Ctx, h: u64, sigp: u64, sign: usize) -> bool {
+    var pubk: [u8; 32] = [0 as u8; 32]
+    if !parse_host_blob((&pubk[0 as usize]) as u64) {
+        return false
+    }
+    var sb: wire.Buf = wire.buf_read(sigp, sign)
+    var n: usize = 0
+    let alg: u64 = wire.rstring(&sb, &n)
+    if sb.bad || !wire.same_text(alg, n, (&T_HOSTALG[0 as usize]) as u64) {
+        return false
+    }
+    let raw: u64 = wire.rstring(&sb, &n)
+    if sb.bad || n != 64 {
+        return false
+    }
+    return ed25519.ed25519_verify(c, (&pubk[0 as usize]) as u64, h, 32, raw)
+}
+
+fn exchange_keys(c: *mut ed25519.Ctx) -> bool {
+    var epriv: [u8; 32] = [0 as u8; 32]
+    var qc: [u8; 32] = [0 as u8; 32]
+    if !random_bytes((&epriv[0 as usize]) as u64, 32) {
+        return false
+    }
+    if !x25519.x25519_base((&epriv[0 as usize]) as u64,
+        (&qc[0 as usize]) as u64) {
+        return false
+    }
+    var ob: wire.Buf = out_buf()
+    wire.w8(&ob, M_KEX_ECDH_INIT)
+    wire.wstring(&ob, (&qc[0 as usize]) as u64, 32)
+    if !send_buf(&ob) {
+        return false
+    }
+    let n: u64 = read_packet(HANDSHAKE_MS)
+    if n == BROKEN || n == 0 {
+        return false
+    }
+    if octets.ld8((&pktbuf[0 as usize]) as u64, 0) != M_KEX_ECDH_REPLY {
+        return false
+    }
+    var rb: wire.Buf = wire.buf_read((&pktbuf[0 as usize]) as u64, n as usize)
+    wire.rskip(&rb, 1)
+    var kn: usize = 0
+    let ks: u64 = wire.rstring(&rb, &kn)
+    var qn: usize = 0
+    let qs: u64 = wire.rstring(&rb, &qn)
+    var sn: usize = 0
+    let sg: u64 = wire.rstring(&rb, &sn)
+    if rb.bad || qn != 32 || !store_host_blob(ks, kn) {
+        return false
+    }
+    var secret: [u8; 32] = [0 as u8; 32]
+    if !x25519.x25519((&epriv[0 as usize]) as u64, qs,
+        (&secret[0 as usize]) as u64) {
+        return false
+    }
+    if all_zero((&secret[0 as usize]) as u64, 32) {
+        return false
+    }
+    kex.kex_set_secret(&kx, (&secret[0 as usize]) as u64)
+    var hs: sha256.Sha256 = sha256.sha256_new()
+    sha256.begin(&hs)
+    hstr(&hs, (&T_BANNER[0 as usize]) as u64,
+        wire.text_len((&T_BANNER[0 as usize]) as u64) as u64)
+    hstr(&hs, (&vsbuf[0 as usize]) as u64, vslen)
+    hstr(&hs, (&isbuf[0 as usize]) as u64, islen)
+    hstr(&hs, (&icbuf[0 as usize]) as u64, iclen)
+    hstr(&hs, ks, kn as u64)
+    hstr(&hs, (&qc[0 as usize]) as u64, 32)
+    hstr(&hs, qs, 32)
+    sha256.update(&hs, kex.kex_k(&kx), kex.kex_klen(&kx))
+    var h: [u8; 32] = [0 as u8; 32]
+    sha256.finish(&hs, (&h[0 as usize]) as u64)
+    if !verify_signature(c, (&h[0 as usize]) as u64, sg, sn) {
+        return false
+    }
+    kex.kex_set_hash(&kx, (&h[0 as usize]) as u64, true)
+    return true
+}
+
+fn switch_keys() -> bool {
+    if !send_one(M_NEWKEYS) {
+        return false
+    }
+    kex.derive(&kx, kex.ENC_CS, (&kmat[0 as usize]) as u64, pack.KEYMAT)
+    pack.cipher_set(&cout, (&kmat[0 as usize]) as u64)
+    if strict_kex != 0 {
+        pack.cipher_reseq(&cout)
+    }
+    let n: u64 = read_packet(HANDSHAKE_MS)
+    if n == BROKEN || n == 0 {
+        return false
+    }
+    if octets.ld8((&pktbuf[0 as usize]) as u64, 0) != M_NEWKEYS {
+        return false
+    }
+    kex.derive(&kx, kex.ENC_SC, (&kmat[0 as usize]) as u64, pack.KEYMAT)
+    pack.cipher_set(&cin, (&kmat[0 as usize]) as u64)
+    if strict_kex != 0 {
+        pack.cipher_reseq(&cin)
+    }
+    return true
+}
+
+fn handshake() -> bool {
+    var c: ed25519.Ctx = ed25519.ctx_new()
+    if !ed25519.ctx_init(&c) {
+        return false
+    }
+    kx = kex.kex_new()
+    if !version_exchange() {
+        return false
+    }
+    if !exchange_kexinit() {
+        return false
+    }
+    if !exchange_keys(&c) {
+        return false
+    }
+    return switch_keys()
+}
