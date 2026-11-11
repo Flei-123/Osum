@@ -85,8 +85,6 @@ static mut n_wins: u64 = 0
 static mut n_commits: u64 = 0
 static mut n_fds: u64 = 0
 
-static mut c_kbd: [u64; 4] = [0 as u64; 4]
-static mut c_ptr: [u64; 4] = [0 as u64; 4]
 static mut c_kfoc: [u64; 4] = [0 as u64; 4]
 static mut c_pfoc: [u64; 4] = [0 as u64; 4]
 static mut c_title: [u8; 128] = [0 as u8; 128]
@@ -1235,18 +1233,12 @@ fn dispatch(c: u64, at: u64, len: u64, fd: u64) -> bool {
         on_seat(c, id, op, argp)
     } else if iface == wlproto.IF_WL_KEYBOARD {
         if op == wlproto.RQ_WL_KEYBOARD_RELEASE {
-            if c_kbd[c as usize] == id {
-                c_kbd[c as usize] = 0
-                wl_input.keyboard_gone(c)
-            }
+            wl_input.keyboard_gone(c, id)
             obj_drop(c, id)
         }
     } else if iface == wlproto.IF_WL_POINTER {
         if op == wlproto.RQ_WL_POINTER_RELEASE {
-            if c_ptr[c as usize] == id {
-                c_ptr[c as usize] = 0
-                wl_input.pointer_gone(c)
-            }
+            wl_input.pointer_gone(c, id)
             obj_drop(c, id)
         }
     } else if iface == wlproto.IF_WL_DATA_DEVICE_MANAGER {
@@ -1297,9 +1289,12 @@ fn on_seat(c: u64, id: u64, op: u64, argp: u64) {
             send_error(c, id, 0)
             return
         }
-        c_ptr[c as usize] = nid
+        if !wl_input.pointer_new(c, nid) {
+            obj_drop(c, nid)
+            send_error(c, id, 0)
+            return
+        }
         c_pfoc[c as usize] = 0
-        wl_input.pointer_new(c, nid)
         return
     }
     if op == wlproto.RQ_WL_SEAT_GET_KEYBOARD {
@@ -1308,10 +1303,13 @@ fn on_seat(c: u64, id: u64, op: u64, argp: u64) {
             send_error(c, id, 0)
             return
         }
-        c_kbd[c as usize] = nid
+        if !wl_input.keyboard_new(c, nid) {
+            obj_drop(c, nid)
+            send_error(c, id, 0)
+            return
+        }
         c_kfoc[c as usize] = 0
-        wl_input.keyboard_new(c, nid)
-        send_keymap(c)
+        send_keymap(c, nid)
         c_outlen[c as usize] = wl_input.keyboard_ready(c, out_base(c), c_outlen[c as usize])
         var so: u64 = 0
         while so < MAX_OBJ {
@@ -1596,8 +1594,8 @@ fn send_fd_msg(c: u64, ptr: u64, len: u64, fd: u64) {
     ulib.sys(SYS_SENDMSG, c_fd[c as usize], (&mh[0 as usize]) as u64, MSG_DONTWAIT)
 }
 
-fn send_keymap(c: u64) {
-    let len: u64 = wl_input.keymap_msg(c)
+fn send_keymap(c: u64, kid: u64) {
+    let len: u64 = wl_input.keymap_msg(kid)
     let fd: u64 = wl_input.keymap_fd()
     send_fd_msg(c, wl_input.keymap_ptr(), len, fd)
 }
@@ -1820,8 +1818,6 @@ fn u_start(args: u64) -> u64 {
                 c_inlen[slot as usize] = 0
                 c_outlen[slot as usize] = 0
                 c_nextid[slot as usize] = 0xFF000000
-                c_kbd[slot as usize] = 0
-                c_ptr[slot as usize] = 0
                 c_kfoc[slot as usize] = 0
                 c_pfoc[slot as usize] = 0
                 wl_input.client_init(slot)
@@ -1852,8 +1848,12 @@ fn u_start(args: u64) -> u64 {
         if wl_input.layout_changed() {
             var kc: u64 = 0
             while kc < MAX_CLIENTS {
-                if c_used[kc as usize] != 0 && c_kbd[kc as usize] != 0 {
-                    send_keymap(kc)
+                if c_used[kc as usize] != 0 && wl_input.keyboard_count(kc) != 0 {
+                    var kj: u64 = 0
+                    while kj < wl_input.keyboard_count(kc) {
+                        send_keymap(kc, wl_input.keyboard_at(kc, kj))
+                        kj = kj + 1
+                    }
                 }
                 kc = kc + 1
             }
