@@ -1,0 +1,516 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.errno
+import sys.sysuser
+
+export {
+    handles, call
+}
+
+const SYS_SEMGET: u64 = 64
+const SYS_SEMOP: u64 = 65
+const SYS_SEMCTL: u64 = 66
+const SYS_MSGGET: u64 = 68
+const SYS_MSGSND: u64 = 69
+const SYS_MSGRCV: u64 = 70
+const SYS_MSGCTL: u64 = 71
+const SYS_SEMTIMEDOP: u64 = 220
+
+const E_NOMSG: u64 = 42
+
+const IPC_CREAT: u64 = 512
+const IPC_EXCL: u64 = 1024
+const IPC_NOWAIT: u64 = 2048
+const MSG_NOERROR: u64 = 4096
+const MSG_EXCEPT: u64 = 8192
+
+const IPC_RMID: u64 = 0
+const IPC_SET: u64 = 1
+const IPC_STAT: u64 = 2
+const GETPID: u64 = 11
+const GETVAL: u64 = 12
+const GETALL: u64 = 13
+const GETNCNT: u64 = 14
+const GETZCNT: u64 = 15
+const SETVAL: u64 = 16
+const SETALL: u64 = 17
+
+const SETS_MAX: u64 = 8
+const SEMS_PER_SET: u64 = 16
+const SEMOPS_MAX: u64 = 16
+const SEM_VALUE_MAX: u64 = 32767
+const SEMBUF_BYTES: u64 = 6
+
+const QUEUES_MAX: u64 = 8
+const QUEUE_DEPTH: u64 = 16
+const MSG_MAX_BYTES: u64 = 256
+const MSG_WORDS: u64 = 32
+const STAT_BYTES: u64 = 128
+const ID_SLOT_MASK: u64 = 255
+const ID_GEN_SHIFT: u64 = 8
+
+static mut set_key: [u64; 8] = [0 as u64; 8]
+static mut set_live: [u64; 8] = [0 as u64; 8]
+static mut set_gen: [u64; 8] = [0 as u64; 8]
+static mut set_count: [u64; 8] = [0 as u64; 8]
+static mut sem_val: [u64; 128] = [0 as u64; 128]
+
+static mut q_key: [u64; 8] = [0 as u64; 8]
+static mut q_live: [u64; 8] = [0 as u64; 8]
+static mut q_gen: [u64; 8] = [0 as u64; 8]
+static mut q_head: [u64; 8] = [0 as u64; 8]
+static mut q_count: [u64; 8] = [0 as u64; 8]
+static mut m_type: [u64; 128] = [0 as u64; 128]
+static mut m_len: [u64; 128] = [0 as u64; 128]
+static mut m_data: [u64; 4096] = [0 as u64; 4096]
+
+fn fail(e: u64) -> u64 {
+    return errno.neg(e)
+}
+
+fn handles(number: u64) -> bool {
+    return (number >= SYS_SEMGET && number <= SYS_SEMCTL)
+        || (number >= SYS_MSGGET && number <= SYS_MSGCTL)
+        || number == SYS_SEMTIMEDOP
+}
+
+fn call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
+    a3: u64, a4: u64) -> u64 {
+    if number == SYS_SEMGET {
+        return semget(a0, a1, a2)
+    }
+    if number == SYS_SEMOP || number == SYS_SEMTIMEDOP {
+        return semop(state, me, a0, a1, a2)
+    }
+    if number == SYS_SEMCTL {
+        return semctl(state, me, a0, a1, a2, a3)
+    }
+    if number == SYS_MSGGET {
+        return msgget(a0, a1)
+    }
+    if number == SYS_MSGSND {
+        return msgsnd(state, me, a0, a1, a2, a3)
+    }
+    if number == SYS_MSGRCV {
+        return msgrcv(state, me, a0, a1, a2, a3, a4)
+    }
+    return msgctl(a0, a1)
+}
+
+fn id_make(slot: u64, gen: u64) -> u64 {
+    return (gen << ID_GEN_SHIFT) | slot
+}
+
+fn sem_slot(id: u64) -> u64 {
+    let slot: u64 = id & ID_SLOT_MASK
+    if slot >= SETS_MAX || set_live[slot as usize] == 0 {
+        return SETS_MAX
+    }
+    if (id >> ID_GEN_SHIFT) != set_gen[slot as usize] {
+        return SETS_MAX
+    }
+    return slot
+}
+
+fn q_slot(id: u64) -> u64 {
+    let slot: u64 = id & ID_SLOT_MASK
+    if slot >= QUEUES_MAX || q_live[slot as usize] == 0 {
+        return QUEUES_MAX
+    }
+    if (id >> ID_GEN_SHIFT) != q_gen[slot as usize] {
+        return QUEUES_MAX
+    }
+    return slot
+}
+
+fn sem_find(key: u64) -> u64 {
+    var i: u64 = 0
+    while i < SETS_MAX {
+        if set_live[i as usize] != 0 && set_key[i as usize] == key {
+            return i
+        }
+        i = i + 1
+    }
+    return SETS_MAX
+}
+
+fn sem_free_slot() -> u64 {
+    var i: u64 = 0
+    while i < SETS_MAX {
+        if set_live[i as usize] == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return SETS_MAX
+}
+
+fn semget(key: u64, nsems: u64, flags: u64) -> u64 {
+    let k: u64 = key & 0xFFFFFFFF
+    if k != 0 {
+        let found: u64 = sem_find(k)
+        if found < SETS_MAX {
+            if (flags & IPC_CREAT) != 0 && (flags & IPC_EXCL) != 0 {
+                return fail(errno.E_EXIST)
+            }
+            if nsems > set_count[found as usize] {
+                return fail(errno.E_INVAL)
+            }
+            return id_make(found, set_gen[found as usize])
+        }
+        if (flags & IPC_CREAT) == 0 {
+            return fail(errno.E_NOENT)
+        }
+    }
+    if nsems == 0 || nsems > SEMS_PER_SET {
+        return fail(errno.E_INVAL)
+    }
+    let slot: u64 = sem_free_slot()
+    if slot >= SETS_MAX {
+        return fail(errno.E_NOSPC)
+    }
+    set_live[slot as usize] = 1
+    set_key[slot as usize] = k
+    set_count[slot as usize] = nsems
+    set_gen[slot as usize] = set_gen[slot as usize] + 1
+    var i: u64 = 0
+    while i < SEMS_PER_SET {
+        sem_val[(slot * SEMS_PER_SET + i) as usize] = 0
+        i = i + 1
+    }
+    return id_make(slot, set_gen[slot as usize])
+}
+
+fn sext16(v: u64) -> u64 {
+    if (v & 0x8000) != 0 {
+        return v | 0xFFFFFFFFFFFF0000
+    }
+    return v
+}
+
+fn semop_ready(state: u64, me: u64, slot: u64, ops: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        let base: u64 = ops + i * SEMBUF_BYTES
+        let num: u64 = sysuser.get16(state, me, base)
+        let op: u64 = sext16(sysuser.get16(state, me, base + 2))
+        if num >= set_count[slot as usize] {
+            return fail(errno.E_FBIG)
+        }
+        let cur: u64 = sem_val[(slot * SEMS_PER_SET + num) as usize]
+        if op == 0 && cur != 0 {
+            return fail(errno.E_AGAIN)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn semop_apply(state: u64, me: u64, slot: u64, ops: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        let base: u64 = ops + i * SEMBUF_BYTES
+        let num: u64 = sysuser.get16(state, me, base)
+        let op: u64 = sext16(sysuser.get16(state, me, base + 2))
+        let at: u64 = slot * SEMS_PER_SET + num
+        let next: u64 = sem_val[at as usize] +% op
+        if next > SEM_VALUE_MAX && (next & 0x8000000000000000) == 0 {
+            return fail(errno.E_RANGE)
+        }
+        sem_val[at as usize] = next
+        i = i + 1
+    }
+    return 0
+}
+
+fn semop(state: u64, me: u64, id: u64, ops: u64, n: u64) -> u64 {
+    let slot: u64 = sem_slot(id & 0xFFFFFFFF)
+    if slot >= SETS_MAX {
+        return fail(errno.E_INVAL)
+    }
+    if n == 0 || n > SEMOPS_MAX {
+        return fail(errno.E_2BIG)
+    }
+    var i: u64 = 0
+    while i < n {
+        if sem_would_underflow(state, me, slot, ops, n, i) {
+            return fail(errno.E_AGAIN)
+        }
+        i = i + 1
+    }
+    let ready: u64 = semop_ready(state, me, slot, ops, n)
+    if errno.is_error(ready) {
+        return ready
+    }
+    return semop_apply(state, me, slot, ops, n)
+}
+
+fn sem_would_underflow(state: u64, me: u64, slot: u64, ops: u64, n: u64, idx: u64) -> bool {
+    let base: u64 = ops + idx * SEMBUF_BYTES
+    let num: u64 = sysuser.get16(state, me, base)
+    let op: u64 = sext16(sysuser.get16(state, me, base + 2))
+    if (op & 0x8000000000000000) == 0 || num >= set_count[slot as usize] {
+        return false
+    }
+    var total: u64 = sem_val[(slot * SEMS_PER_SET + num) as usize] +% op
+    var j: u64 = 0
+    while j < n {
+        let b2: u64 = ops + j * SEMBUF_BYTES
+        if j != idx && sysuser.get16(state, me, b2) == num {
+            total = total +% sext16(sysuser.get16(state, me, b2 + 2))
+        }
+        j = j + 1
+    }
+    return (total & 0x8000000000000000) != 0
+}
+
+fn semctl(state: u64, me: u64, id: u64, num: u64, cmd: u64, arg: u64) -> u64 {
+    let slot: u64 = sem_slot(id & 0xFFFFFFFF)
+    if slot >= SETS_MAX {
+        return fail(errno.E_INVAL)
+    }
+    let c: u64 = cmd & 0xFF
+    if c == IPC_RMID {
+        set_live[slot as usize] = 0
+        return 0
+    }
+    if c == IPC_SET {
+        return 0
+    }
+    if c == IPC_STAT {
+        return zero_user(state, me, arg, STAT_BYTES)
+    }
+    return semctl_value(state, me, slot, num, c, arg)
+}
+
+fn semctl_value(state: u64, me: u64, slot: u64, num: u64, c: u64, arg: u64) -> u64 {
+    if c == GETALL || c == SETALL {
+        return semctl_all(state, me, slot, c, arg)
+    }
+    if c == GETPID || c == GETNCNT || c == GETZCNT {
+        return 0
+    }
+    if num >= set_count[slot as usize] {
+        return fail(errno.E_INVAL)
+    }
+    let at: u64 = slot * SEMS_PER_SET + num
+    if c == GETVAL {
+        return sem_val[at as usize]
+    }
+    if c == SETVAL {
+        let v: u64 = arg & 0xFFFFFFFF
+        if v > SEM_VALUE_MAX {
+            return fail(errno.E_RANGE)
+        }
+        sem_val[at as usize] = v
+        return 0
+    }
+    return fail(errno.E_INVAL)
+}
+
+fn semctl_all(state: u64, me: u64, slot: u64, c: u64, arg: u64) -> u64 {
+    var i: u64 = 0
+    while i < set_count[slot as usize] {
+        let at: u64 = slot * SEMS_PER_SET + i
+        if c == GETALL {
+            if !sysuser.put16(state, me, arg + i * 2, sem_val[at as usize]) {
+                return fail(errno.E_FAULT)
+            }
+        } else {
+            sem_val[at as usize] = sysuser.get16(state, me, arg + i * 2)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn zero_user(state: u64, me: u64, dst: u64, len: u64) -> u64 {
+    var i: u64 = 0
+    while i < len {
+        if !sysuser.poke(state, me, dst + i, 0) {
+            return fail(errno.E_FAULT)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn q_find(key: u64) -> u64 {
+    var i: u64 = 0
+    while i < QUEUES_MAX {
+        if q_live[i as usize] != 0 && q_key[i as usize] == key {
+            return i
+        }
+        i = i + 1
+    }
+    return QUEUES_MAX
+}
+
+fn q_free_slot() -> u64 {
+    var i: u64 = 0
+    while i < QUEUES_MAX {
+        if q_live[i as usize] == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return QUEUES_MAX
+}
+
+fn msgget(key: u64, flags: u64) -> u64 {
+    let k: u64 = key & 0xFFFFFFFF
+    if k != 0 {
+        let found: u64 = q_find(k)
+        if found < QUEUES_MAX {
+            if (flags & IPC_CREAT) != 0 && (flags & IPC_EXCL) != 0 {
+                return fail(errno.E_EXIST)
+            }
+            return id_make(found, q_gen[found as usize])
+        }
+        if (flags & IPC_CREAT) == 0 {
+            return fail(errno.E_NOENT)
+        }
+    }
+    let slot: u64 = q_free_slot()
+    if slot >= QUEUES_MAX {
+        return fail(errno.E_NOSPC)
+    }
+    q_live[slot as usize] = 1
+    q_key[slot as usize] = k
+    q_head[slot as usize] = 0
+    q_count[slot as usize] = 0
+    q_gen[slot as usize] = q_gen[slot as usize] + 1
+    return id_make(slot, q_gen[slot as usize])
+}
+
+fn msgctl(id: u64, cmd: u64) -> u64 {
+    let slot: u64 = q_slot(id & 0xFFFFFFFF)
+    if slot >= QUEUES_MAX {
+        return fail(errno.E_INVAL)
+    }
+    if (cmd & 0xFF) == IPC_RMID {
+        q_live[slot as usize] = 0
+    }
+    return 0
+}
+
+fn msgsnd(state: u64, me: u64, id: u64, msgp: u64, size: u64, flags: u64) -> u64 {
+    let slot: u64 = q_slot(id & 0xFFFFFFFF)
+    if slot >= QUEUES_MAX {
+        return fail(errno.E_INVAL)
+    }
+    let mtype: u64 = sysuser.get64u(state, me, msgp)
+    if (mtype & 0x8000000000000000) != 0 || mtype == 0 || size > MSG_MAX_BYTES {
+        return fail(errno.E_INVAL)
+    }
+    if q_count[slot as usize] >= QUEUE_DEPTH {
+        return fail(errno.E_AGAIN)
+    }
+    let idx: u64 = slot * QUEUE_DEPTH
+        + (q_head[slot as usize] + q_count[slot as usize]) % QUEUE_DEPTH
+    var i: u64 = 0
+    while i < size {
+        let w: u64 = idx * MSG_WORDS + i / 8
+        let shift: u64 = (i % 8) * 8
+        let b: u64 = sysuser.peek(state, me, msgp + 8 + i)
+        if i % 8 == 0 {
+            m_data[w as usize] = 0
+        }
+        m_data[w as usize] = m_data[w as usize] | (b << shift)
+        i = i + 1
+    }
+    m_type[idx as usize] = mtype
+    m_len[idx as usize] = size
+    q_count[slot as usize] = q_count[slot as usize] + 1
+    return 0
+}
+
+fn msg_pick(slot: u64, want: u64, flags: u64) -> u64 {
+    var i: u64 = 0
+    var best: u64 = QUEUE_DEPTH
+    while i < q_count[slot as usize] {
+        let pos: u64 = (q_head[slot as usize] + i) % QUEUE_DEPTH
+        let t: u64 = m_type[(slot * QUEUE_DEPTH + pos) as usize]
+        if msg_matches(t, want, flags) {
+            if best == QUEUE_DEPTH {
+                best = i
+            }
+            if want == 0 || (want & 0x8000000000000000) == 0 {
+                return i
+            }
+            let tb: u64 = m_type[(slot * QUEUE_DEPTH
+                + (q_head[slot as usize] + best) % QUEUE_DEPTH) as usize]
+            if t < tb {
+                best = i
+            }
+        }
+        i = i + 1
+    }
+    return best
+}
+
+fn msg_matches(t: u64, want: u64, flags: u64) -> bool {
+    if want == 0 {
+        return true
+    }
+    if (want & 0x8000000000000000) != 0 {
+        return t <= (0 -% want)
+    }
+    if (flags & MSG_EXCEPT) != 0 {
+        return t != want
+    }
+    return t == want
+}
+
+fn msgrcv(state: u64, me: u64, id: u64, msgp: u64, size: u64, want: u64,
+    flags: u64) -> u64 {
+    let slot: u64 = q_slot(id & 0xFFFFFFFF)
+    if slot >= QUEUES_MAX {
+        return fail(errno.E_INVAL)
+    }
+    let pick: u64 = msg_pick(slot, want, flags)
+    if pick >= QUEUE_DEPTH {
+        if (flags & IPC_NOWAIT) != 0 {
+            return fail(E_NOMSG)
+        }
+        return fail(errno.E_AGAIN)
+    }
+    let idx: u64 = slot * QUEUE_DEPTH + (q_head[slot as usize] + pick) % QUEUE_DEPTH
+    var n: u64 = m_len[idx as usize]
+    if n > size {
+        if (flags & MSG_NOERROR) == 0 {
+            return fail(errno.E_2BIG)
+        }
+        n = size
+    }
+    if !sysuser.put64(state, me, msgp, m_type[idx as usize]) {
+        return fail(errno.E_FAULT)
+    }
+    var i: u64 = 0
+    while i < n {
+        let b: u64 = (m_data[(idx * MSG_WORDS + i / 8) as usize] >> ((i % 8) * 8)) & 255
+        if !sysuser.poke(state, me, msgp + 8 + i, b) {
+            return fail(errno.E_FAULT)
+        }
+        i = i + 1
+    }
+    msg_remove(slot, pick)
+    return n
+}
+
+fn msg_remove(slot: u64, pick: u64) {
+    var i: u64 = pick
+    while i + 1 < q_count[slot as usize] {
+        let dst: u64 = slot * QUEUE_DEPTH + (q_head[slot as usize] + i) % QUEUE_DEPTH
+        let src: u64 = slot * QUEUE_DEPTH + (q_head[slot as usize] + i + 1) % QUEUE_DEPTH
+        m_type[dst as usize] = m_type[src as usize]
+        m_len[dst as usize] = m_len[src as usize]
+        var w: u64 = 0
+        while w < MSG_WORDS {
+            m_data[(dst * MSG_WORDS + w) as usize] = m_data[(src * MSG_WORDS + w) as usize]
+            w = w + 1
+        }
+        i = i + 1
+    }
+    q_count[slot as usize] = q_count[slot as usize] - 1
+}
