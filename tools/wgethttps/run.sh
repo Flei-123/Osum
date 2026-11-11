@@ -20,7 +20,7 @@ pass=0; fail=0
 ok() { pass=$((pass+1)); echo "  ok   $*"; }
 bad() { fail=$((fail+1)); echo "  FAIL $*"; }
 
-for t in "$QEMU" openssl python3; do command -v "$t" >/dev/null 2>&1 || { echo "WGETHTTPS: $t missing, skipped"; exit 0; }; done
+for t in "$QEMU" openssl python3 musl-gcc; do command -v "$t" >/dev/null 2>&1 || { echo "WGETHTTPS: $t missing, skipped"; exit 0; }; done
 LDREAL=$(readlink -f "${LDSO:-/lib/ld-musl-x86_64.so.1}" 2>/dev/null || true)
 [ -r "$LDREAL" ] || LDREAL=/usr/lib/x86_64-linux-musl/libc.so
 { [ -r "$LDREAL" ] && [ -r "$BBDYN" ] && [ -r "$STONES/curl" ]; } || { echo "WGETHTTPS: busybox/musl/curl stones missing, skipped"; exit 0; }
@@ -30,6 +30,7 @@ free_port() { python3 -I -c 'import socket;s=socket.socket();s.bind(("127.0.0.1"
 HTTPPORT=$(free_port); TLSPORT=$(free_port)
 mkdir -p "$D/www" "$D/bin" "$D/lib"
 echo wgethttps > "$D/bin/wt-marker"
+musl-gcc -O1 -o "$D/bin/t_relay" "$HERE/t_relay.c" || { echo "WGETHTTPS: t_relay does not build"; exit 1; }
 echo hello-net > "$D/www/h.txt"
 head -c 300000 /dev/urandom > "$D/www/big.bin"
 BIGSHA=$(sha256sum "$D/www/big.bin" | cut -c1-16)
