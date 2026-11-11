@@ -157,7 +157,7 @@ n=$(grep -rl 'wayd\.' kernel/*.fi kernel/user/desktop.fi \
 
 echo
 echo "== 7. keyboard, pointer, clipboard (round WAYLAND-INPUT; the acceptance on a screen is tools/wayland/input.sh) =="
-for f in wl_msg wl_input wl_data wl_keytab; do
+for f in wl_msg wl_input wl_data wl_frame wl_keytab; do
     [ -s "kernel/user/$f.fi" ] && ok "kernel/user/$f.fi is there" || bad "kernel/user/$f.fi is missing"
 done
 if python3 tools/wayland/genkeys.py 2>/dev/null | cmp -s - kernel/user/wl_keytab.fi; then

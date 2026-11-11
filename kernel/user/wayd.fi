@@ -12,6 +12,7 @@ import utf8
 import wl_msg
 import wl_input
 import wl_data
+import wl_frame
 import libc.clockapi
 
 export { u_start }
@@ -1037,6 +1038,30 @@ fn on_deco(c: u64, id: u64, op: u64, argp: u64) {
     deco_configure(c, id)
 }
 
+fn send_frame_done(c: u64, cb: u64) {
+    let p: u64 = ev_begin(c, cb, 0)
+    ev_arg(c, p, 0, wl_frame.due_time())
+    ev_end(c, p, 1)
+    send_delete_id(c, cb)
+}
+
+fn release_frame_callbacks() {
+    if !wl_frame.open_gate() {
+        return
+    }
+    var c: u64 = 0
+    while c < MAX_CLIENTS {
+        if c_used[c as usize] != 0 {
+            var cb: u64 = wl_frame.take_due(c)
+            while cb != 0 {
+                send_frame_done(c, cb)
+                cb = wl_frame.take_due(c)
+            }
+        }
+        c = c + 1
+    }
+}
+
 fn on_surface(c: u64, id: u64, op: u64, argp: u64) {
     if op == wlproto.RQ_WL_SURFACE_ATTACH {
         obj_set(c, id, O_B, rd32(argp))
@@ -1047,17 +1072,18 @@ fn on_surface(c: u64, id: u64, op: u64, argp: u64) {
     }
     if op == wlproto.RQ_WL_SURFACE_COMMIT {
         surface_commit(c, id)
+        wl_frame.commit(c, id)
         return
     }
     if op == wlproto.RQ_WL_SURFACE_FRAME {
         let cb: u64 = rd32(argp)
-        let p: u64 = ev_begin(c, cb, 0)
-        ev_arg(c, p, 0, n_commits)
-        ev_end(c, p, 1)
-        send_delete_id(c, cb)
+        if !wl_frame.request(c, id, cb) {
+            send_frame_done(c, cb)
+        }
         return
     }
     if op == wlproto.RQ_WL_SURFACE_DESTROY {
+        wl_frame.drop_surface(c, id)
         let held: u64 = obj_get(c, id, O_F)
         if held != 0 {
             let ph: u64 = ev_begin(c, held, 0)
@@ -1800,6 +1826,7 @@ fn u_start(args: u64) -> u64 {
                 c_pfoc[slot as usize] = 0
                 wl_input.client_init(slot)
                 wl_data.client_init(slot)
+                wl_frame.client_init(slot)
                 fdq_n[slot as usize] = 0
                 c_title[(slot * 32) as usize] = 0 as u8
                 c_appid[(slot * 24) as usize] = 0 as u8
@@ -1821,6 +1848,7 @@ fn u_start(args: u64) -> u64 {
 
         pump_input()
         wl_data.tick()
+        release_frame_callbacks()
         if wl_input.layout_changed() {
             var kc: u64 = 0
             while kc < MAX_CLIENTS {

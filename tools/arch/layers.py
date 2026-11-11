@@ -46,7 +46,7 @@ def _s(x):
 
 TABLE = {
     'base': _s("""ulib msg nv pw grp sha tools nidx actwire actcli act image gif jpeg pngenc flate inflate media
-        unix kbund bstore jenc jsig key vault pin trash chacha dcrypt bsec aiot setschema wl_data wl_input
+        unix kbund bstore jenc jsig key vault pin trash chacha dcrypt bsec aiot setschema wl_data wl_frame wl_input
         wl_keytab wl_msg wlproto h264 h264tab mp3tab sync serline instaccount diskscan drvpkg drvmatch instkern dualkern
         brand_start hwid dbgio"""),
     'cmd': _s("""cat chmod chown cp cut date df diff dirname du echo env false find grep gunzip gzip head id kill ln
