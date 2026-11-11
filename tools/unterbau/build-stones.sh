@@ -76,7 +76,7 @@ want gitremote && {
 echo "== git remote helpers (static libcurl + mbedtls; dumb http fetch + https remote) =="
 mkdir -p "$W/x/gitr"; tar xJf "$W/dl/git.tar.xz" -C "$W/x/gitr" --strip-components=1
 ( cd "$W/x/gitr" && make -j"$J" CC=musl-gcc NO_OPENSSL=1 NO_EXPAT=1 NO_TCLTCK=1 NO_GETTEXT=1 NO_PERL=1 NO_PYTHON=1 NO_ICONV=1 NO_REGEX=NeedsStartEnd \
-    CURLDIR="$P" CURL_LDFLAGS="-L$P/lib -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz" ZLIB_PATH="$P" CFLAGS="-O2 -I$P/include" LDFLAGS="-L$P/lib" prefix=/ \
+    CURL_CONFIG=/bin/false CURL_LDFLAGS="-L$W/x/curl/lib/.libs -L$P/lib -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz" ZLIB_PATH="$P" CFLAGS="-O2 -I$W/x/curl/include -I$P/include" LDFLAGS="-L$P/lib" prefix=/ \
     git-remote-http git-http-fetch >/dev/null 2>&1 && mkdir -p "$OUT/gitexec" && strip -o "$OUT/gitexec/git-remote-http" git-remote-http && strip -o "$OUT/gitexec/git-http-fetch" git-http-fetch )
 }
 
@@ -90,9 +90,11 @@ want tcc && {
 echo "== tcc (tinycc, musl, dynamic) + musl headers and crt files =="
 mkdir -p "$W/x/tcc" "$OUT/lib/tcc/include" "$OUT/lib/musl"
 tar xzf /root/fremdquellen/tinycc-aade7ba.tar.gz -C "$W/x/tcc" --strip-components=1
-( cd "$W/x/tcc" && ./configure --cc=musl-gcc --prefix=/usr --config-musl --sysincludepaths=/usr/include:/usr/lib/tcc/include --libpaths=/usr/lib --crtprefix=/usr/lib --tccdir=/usr/lib/tcc \
-    --elfinterp=/lib/ld-musl-x86_64.so.1 >/dev/null 2>&1 && make -j"$J" >/dev/null 2>&1 && strip -o "$OUT/tcc" tcc \
-  && cp libtcc1.a "$OUT/lib/tcc/" && cp include/*.h "$OUT/lib/tcc/include/" )
+( cd "$W/x/tcc" && TCCCFG="--cc=musl-gcc --prefix=/usr --config-musl --libpaths=/usr/lib --crtprefix=/usr/lib --tccdir=/usr/lib/tcc --elfinterp=/lib/ld-musl-x86_64.so.1"
+  ./configure $TCCCFG --sysincludepaths=/usr/include/x86_64-linux-musl:$PWD/include >/dev/null 2>&1 && make -j"$J" >/dev/null 2>&1 \
+  && cp libtcc1.a "$W/libtcc1.a" && ./configure $TCCCFG --sysincludepaths=/usr/include:/usr/lib/tcc/include >/dev/null 2>&1 \
+  && rm -f tcc ./*.o && make tcc >/dev/null 2>&1 && strip -o "$OUT/tcc" tcc \
+  && cp "$W/libtcc1.a" "$OUT/lib/tcc/" && cp include/*.h "$OUT/lib/tcc/include/" )
 rm -rf "$OUT/include" && mkdir -p "$OUT/include" && ( cd /usr/include/x86_64-linux-musl && find . -type f | cpio -pdm "$OUT/include" >/dev/null 2>&1 )
 cp /usr/lib/x86_64-linux-musl/crt1.o /usr/lib/x86_64-linux-musl/crti.o /usr/lib/x86_64-linux-musl/crtn.o "$OUT/lib/musl/"
 }

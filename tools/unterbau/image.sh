@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
+. "$(dirname "${BASH_SOURCE[0]}")/devstones.sh"
 build_kernel() { # build_kernel <srcdir> <out.mb>
     ( cd "$1" && bash tools/build-kernel.sh "$2" --stufe 1 ) > "$2.log" 2>&1
 }
@@ -50,5 +51,6 @@ stones_spec() { # stones_spec <stonesdir>
     for so in "$STONES"/lib/ext/*.so; do [ -e "$so" ] && SX="$SX /usr/lib/python3.12/lib-dynload/$(basename "$so")=$so"; done
     [ -r "$STONES/curl" ] && SX="$SX /bin/curl=$STONES/curl"
     [ -r "$STONES/git" ] && SX="$SX /bin/git=$STONES/git /share/ /share/git-core/ /share/git-core/templates/"
+    SX="$SX $(devstones_spec "$STONES")"
     echo "$SX"
 }

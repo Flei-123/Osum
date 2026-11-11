@@ -8,6 +8,7 @@
 #        HP_ONLY="a b c" limits the overlay to the listed programs (small first step for a slow bridge)
 #        HP_NO_EXTRAS=1 drops the absolute-path files (a device with an old ota refuses them: first step only /bin)
 #        HP_SAME_KERNEL=1 publishes the kernel of HP_BASE (what the HP runs): the HP applies the overlay live, no trial boot
+#        HP_DEVBIN=<stones dir> adds the single-file dev tools (curl git make tcc + git https helpers) as absolute-path overlay files
 #        HP_FX_PACK=<dir from tools/linuxapps/hppack.py> adds usr/share/xfx/{firefox.tar.partNNN (gz <= 3.9 MB each, from HP_FX_PACK/parts or packsplit.py),firefox.manifest,user.js} to the overlay (HP_ONLY must then list wayd tar xfx);
 #                   the HP needs a root of >= 1 GiB (HP_STICK=1 images since ba9f4ee5), the apply refuses cleanly below 2x the size
 #        HP_DEV=1 ships assets/jarvis/rechte-hp-dev.conf (devmode = yes, screenshot = always, input = yes) as /etc/jarvis/permissions.conf;
@@ -68,6 +69,14 @@ if [ -n "${HP_FX_PACK:-}" ]; then
     fi
     cp "$HP_FX_PACK/firefox.manifest" assets/xfx/user.js "$EXTRA/usr/share/xfx/"
     echo "republish-hp: firefox pack $(stat -c%s "$HP_FX_PACK/firefox.tar") octets in $(ls "$EXTRA/usr/share/xfx" | grep -c '\.part') parts"
+fi
+if [ -n "${HP_DEVBIN:-}" ]; then
+    for pair in curl:/bin/curl git:/bin/git make:/bin/make tcc:/bin/tcc gitexec/git-remote-http:/libexec/git-core/git-remote-http gitexec/git-http-fetch:/libexec/git-core/git-http-fetch; do
+        [ -s "$HP_DEVBIN/${pair%%:*}" ] || continue
+        mkdir -p "$EXTRA/$(dirname "${pair#*:}" | cut -c2-)"
+        cp "$HP_DEVBIN/${pair%%:*}" "$EXTRA${pair#*:}"
+        echo "republish-hp: devbin ${pair#*:}"
+    done
 fi
 ALLPROGS=()
 for f in "$IMG"/*.elf; do n=$(basename "$f" .elf); [ "$n" = "osum.mb" ] || ALLPROGS+=("$n"); done
