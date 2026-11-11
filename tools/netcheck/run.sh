@@ -3,6 +3,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$HERE"
+. tools/lib/firnenv.sh
 export FIRNLIB="$HERE/lib"
 T=${NETCHECK_WORK:-$(mktemp -d)}
 mkdir -p "$T"
@@ -13,9 +14,8 @@ command -v qemu-system-x86_64 >/dev/null || { echo "NETCHECK: skipped, no qemu";
 CASES="${*:-ok nogw nodns noinet noicmp flap quiet}"
 trap 'for f in "$T"/*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done; [ -n "${NETCHECK_WORK:-}" ] || rm -rf "$T"' EXIT
 if [ ! -f "$T/k.img" ] || [ ! -f "$T/bin/sh.elf" ]; then
-    bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
     bash tools/sync/build.sh "$T/bin" 0 sh sleep echo dhcp cat > "$T/b.txt" 2>&1 || { tail "$T/b.txt"; exit 1; }
-    vendor/firn/bin/firnc -c --profile=app -o "$T/netcheck.o" kernel/app/netcheck.fi > "$T/app.txt" 2>&1 || { tail "$T/app.txt"; exit 1; }
+    "$FIRNC" -c --profile=app -o "$T/netcheck.o" kernel/app/netcheck.fi > "$T/app.txt" 2>&1 || { tail "$T/app.txt"; exit 1; }
     ld -T kernel/user/user.ld -o "$T/bin/netcheck.elf" "$T/netcheck.o" >> "$T/app.txt" 2>&1 || { tail "$T/app.txt"; exit 1; }
     ./tools/build-kernel.sh "$T/k.img" --stufe 0 > "$T/k.txt" 2>&1 || { tail "$T/k.txt"; exit 1; }
 fi

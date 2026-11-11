@@ -85,7 +85,7 @@ ip netns add "$NS" 2>/dev/null || { echo "ANBFLEITEC: skipped, no network namesp
 ip netns del "$NS" 2>/dev/null
 
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 
 # ======================================================================
 echo "== 0. the account program links the shared crypto modules =="
@@ -100,7 +100,6 @@ fi
 # ======================================================================
 echo "== 1. programs build =="
 # ======================================================================
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 build() { # <src> <name>
     if ! "$FIRNC" -c --profile=app -o "$TMPD/$2.o" "$1" > "$TMPD/cc_$2.log" 2>&1; then
         bad "$1 does not compile"; head -12 "$TMPD/cc_$2.log" | sed 's/^/        /'

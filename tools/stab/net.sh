@@ -30,6 +30,7 @@ if [ -z "${STABNET_INNER:-}" ]; then
 fi
 ip link set lo up
 cd "$HERE"
+. tools/lib/firnenv.sh
 IDLE=${1:-60}; OUT=${2:-40}; RECOV=${3:-90}
 TREE=${STAB_TREE:-$HERE}
 LABEL=${STAB_LABEL:-run}
@@ -42,7 +43,7 @@ for t in qemu-system-x86_64 python3; do command -v $t >/dev/null || { echo "STAB
 python3 -c 'import cryptography' 2>/dev/null || { echo "STABNET: skipped, python3-cryptography missing"; exit 0; }
 
 # ---- build the guest from $TREE
-( cd "$TREE" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+( cd "$TREE" && firnenv_prepare_old_tree . >/dev/null 2>&1
   BRIDGE_PROGS="sh ls cat echo chmod jsig jarvisctl ps sleep kill" bash tools/bridge/build.sh "$T/w0" 0 ) > "$T/build.txt" 2>&1 \
     || { tail -15 "$T/build.txt"; echo "STABNET: build failed"; exit 1; }
 K="$T/w0/k.mb"

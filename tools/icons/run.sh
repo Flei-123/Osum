@@ -48,7 +48,8 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 
-CC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
+CC=$FIRNC
 ULD=kernel/user/user.ld
 LUCIDE=${LUCIDE:-/root/icon-src/lucide/font/lucide.ttf}
 LUCIDE_INFO=${LUCIDE_INFO:-/root/icon-src/lucide/font/info.json}
@@ -70,8 +71,6 @@ num() { # name value op expected
 same() { if [ "$2" = "$3" ]; then ok "$1: $2"; else bad "$1: '$2', wanted '$3'"; fi; }
 wert() { grep -a -m1 -oE "$2" "$1" 2>/dev/null | head -1; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
-    echo "icons: fetch-firnc.sh failed"; exit 1; }
 
 # ===================================================================
 echo "== 1. the font comes back out of the map =="

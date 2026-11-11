@@ -15,7 +15,7 @@ count_ge() { local c; c=$(grep -ac -- "$2" "$1"); [ "$c" -ge "$3" ] && ok "$4 ($
 field() { grep -aoE "$2=[0-9]+" "$1" | tail -1 | cut -d= -f2; }
 command -v qemu-system-x86_64 >/dev/null || { echo "WLANBULK: skipped, no qemu"; exit 0; }
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 SNAPS=${WLANBULK_SNAPS:-8}
 SNAP_SEC=${WLANBULK_SNAP_SEC:-6}
 BODY=1048576

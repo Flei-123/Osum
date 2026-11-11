@@ -27,7 +27,7 @@ command -v swtpm >/dev/null 2>&1 || { echo "VAULTD-TPM: swtpm missing"; exit 1; 
 command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "VAULTD-TPM: qemu missing"; exit 1; }
 
 echo "== 1. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 PROGS="sh ls cat echo sleep mkdir grep su chmod vaultd vaultctl pinctl"
 mkdir -p "$TMPD/bin"
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then ok "programs build"; else bad "programs do not build"; tail -15 "$TMPD/b.txt"; echo "VAULTD-TPM: $pass passed, $fail failed"; exit 1; fi

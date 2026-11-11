@@ -70,7 +70,6 @@ done
 
 echo "== 3. the settings program builds =="
 mkdir -p "$T/bin"
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 if bash tools/sync/build.sh "$T/bin" 0 settings > "$T/b.txt" 2>&1 && [ -s "$T/bin/settings.elf" ]; then ok "settings builds with the new status check"; else bad "settings build failed"; tail -8 "$T/b.txt"; fi
 
 summary_emit "$pass" "$fail" 19

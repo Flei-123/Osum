@@ -18,7 +18,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc.sh failed"; exit 1; }
+. tools/lib/firnenv.sh
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
@@ -28,7 +28,7 @@ PY="python3 -I tools/settingsman/manifest.py"
 MAN=kernel/user/settings.d/builtin.settings
 
 build() { # libdir out
-    FIRNLIB="$1" vendor/firn/bin/firnc --profile=app tools/settingsman/dump.fi -o "$2" > "$2.build" 2>&1
+    FIRNLIB="$1" "$FIRNC" --profile=app tools/settingsman/dump.fi -o "$2" > "$2.build" 2>&1
 }
 
 echo "== 1. both readers + golden =="
@@ -155,7 +155,7 @@ for fnname in ("page_time", "page_benut", "page_passw", "page_pin", "page_sprach
 sys.exit(rc)
 PY
 
-FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc --profile=app tools/settingsman/bind.fi -o "$T/bind" > "$T/bind.build" 2>&1 \
+FIRNLIB="$ROOT/lib" "$FIRNC" --profile=app tools/settingsman/bind.fi -o "$T/bind" > "$T/bind.build" 2>&1 \
     && "$T/bind" > "$T/bind.out"
 python3 -I - > "$T/bind.exp" <<'PY'
 names = [x for x in open("kernel/user/settings.d/accounts.bind").read().split("\n") if x]
@@ -171,7 +171,7 @@ if cmp -s "$T/bind.out" "$T/bind.exp"; then ok "names_index (fn acct_bind) gives
 
 echo "== 4. catalogue: several manifests (r143) =="
 build_cat() { # libdir out
-    FIRNLIB="$1" vendor/firn/bin/firnc --profile=app tools/settingsman/catalog.fi -o "$2" > "$2.build" 2>&1
+    FIRNLIB="$1" "$FIRNC" --profile=app tools/settingsman/catalog.fi -o "$2" > "$2.build" 2>&1
 }
 if build_cat "$ROOT/lib" "$T/cat"; then ok "catalog.fi builds against lib/settingsman"; else
     bad "catalog.fi does not build"; grep -v '^warning' "$T/cat.build" | head; fi
@@ -290,7 +290,7 @@ PY
             *) b=$(basename "$f" .txt); cmp -s "$d/o.txt" "$T/$b.py" || n=$((n+1)) ;;
         esac
     done
-    if FIRNLIB="$d/lib" vendor/firn/bin/firnc --profile=app tools/settingsman/bind.fi -o "$d/bind" > /dev/null 2>&1; then
+    if FIRNLIB="$d/lib" "$FIRNC" --profile=app tools/settingsman/bind.fi -o "$d/bind" > /dev/null 2>&1; then
         timeout 10 "$d/bind" > "$d/b.txt" 2>/dev/null; cmp -s "$d/b.txt" "$T/bind.exp" || n=$((n+1))
     else n=$((n+1)); fi
     if build_cat "$d/lib" "$d/cat"; then

@@ -6,8 +6,7 @@ cd "$(dirname "$0")/../.."
 WD=${1:?workdir}
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 export FIRNLIB="$(pwd)/lib"
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-FIRNC=vendor/firn/bin/firnc
+. tools/lib/firnenv.sh
 pass=0; fail=0
 ck() { if [ "$2" = ok ]; then pass=$((pass+1)); echo "  ok   $1"; else fail=$((fail+1)); echo "  FAIL $1"; fi; }
 $FIRNC --shared -o "$D/libicd.so" tools/gpu3/icd.fi && $FIRNC --shared -o "$D/libicd_partial.so" tools/gpu3/partial.fi && ck "firnc --shared builds the ICD" ok || ck "firnc --shared builds the ICD" no

@@ -5,12 +5,12 @@
 #   bash tools/gfx/run.sh bench    + measurements (tools/gfx/bench.fi), prints a table
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc.sh failed"; exit 1; }
+. tools/lib/firnenv.sh
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 rc=0
 for p in test test_clip test_ops test_fui test_fuikind test_fuiloop $( [ "${1:-}" = bench ] && echo bench ); do
-    OPT=""; [ "$p" = bench ] && OPT="--opt-level=release-fast"; FIRNLIB="$PWD/lib" vendor/firn/bin/firnc --profile=app $OPT tools/gfx/$p.fi -o "$T/$p" > "$T/$p.build" 2>&1 \
+    OPT=""; [ "$p" = bench ] && OPT="--opt-level=release-fast"; FIRNLIB="$PWD/lib" "$FIRNC" --profile=app $OPT tools/gfx/$p.fi -o "$T/$p" > "$T/$p.build" 2>&1 \
         || { echo "FAIL  build $p"; grep -v '^warning' "$T/$p.build" | head -30; rc=1; continue; }
     ARGS=()
     if [ "$p" = test_fui ]; then

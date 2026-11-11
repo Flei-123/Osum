@@ -46,8 +46,7 @@ lauf() { # name skript [limit] [zusatzwoerter]
 # =====================================================================
 echo "== 1. the delivery: packages, key ring, two versions =="
 # =====================================================================
-bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || {
-    bad "fetch-firnc.sh"; exit 1; }
+. tools/lib/firnenv.sh
 bash tools/install/pakete.sh "$OUT" > "$OUT/pak1.log" 2>&1 \
     && ok "two signed versions of the sample package" \
     || { bad "install/pakete.sh"; tail -5 "$OUT/pak1.log"; exit 1; }

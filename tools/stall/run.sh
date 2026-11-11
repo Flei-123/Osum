@@ -32,7 +32,7 @@ run_one() { # <name> <extra words>
     ( DESIGNBUILD="$TMPD/$1/build" bash tools/design/eh6.sh "$TMPD/$1/o" res=1280x800 accel=kvm tafel=nein progs="$PROGS" \
         extra="$2" drehbuch="$TMPD/dreh.txt" > "$TMPD/$1/o.log" 2>&1 )
 }
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 run_one a "stallspin=400" &
 run_one b "" &
 wait

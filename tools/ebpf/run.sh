@@ -8,7 +8,7 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 PROGS="sh ls cat echo ping wget sleep ebpfctl"
 BLOCKS=16384
@@ -58,8 +58,6 @@ for w in qemu-system-x86_64 gcc python3; do
 done
 ok "the tools are there (accel=$OSUM_QEMU_ACCEL)"
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
-    [ -x "$FIRNC" ] || { echo "EBPF: kein firnc"; exit 1; }; }
 
 # =====================================================================
 echo

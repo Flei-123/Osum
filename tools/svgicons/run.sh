@@ -12,7 +12,8 @@ ok() { echo "  OK    $*"; pass=$((pass+1)); }
 bad() { echo "  FAIL  $*"; fail=$((fail+1)); }
 LIMIT=3.0
 export FIRNLIB="$ROOT/lib"
-vendor/firn/bin/firnc --profile=app tools/svg/bake.fi -o "$D/bake" > "$D/bake.log" 2>&1 || { bad "baker build"; exit 1; }
+. tools/lib/firnenv.sh
+"$FIRNC" --profile=app tools/svg/bake.fi -o "$D/bake" > "$D/bake.log" 2>&1 || { bad "baker build"; exit 1; }
 mkdir -p "$D/old/assets/apps"; cp -r assets/apps/. "$D/old/assets/apps/"
 for f in "$D"/old/assets/apps/*/symbol.svg; do "$D/bake" "$f" "$(dirname "$f")/symbol.osym" 32 || { bad "low-resolution bake"; exit 1; }; done
 res() { python3 -I tools/svgicons/check.py "$@" | tee "$D/last.txt" | grep -v '^RESULT'; grep '^RESULT' "$D/last.txt" | tail -n 1; }

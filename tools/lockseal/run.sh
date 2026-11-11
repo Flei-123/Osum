@@ -54,7 +54,7 @@ PROGS="sh ls cat echo sleep a11ydemo lock tiling"
 [ -w /dev/kvm ] && export OSUM_ACCEL=kvm
 
 echo "== 1. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then
     ok "firnc0 builds $(echo $PROGS | wc -w) programs"
 else

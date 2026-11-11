@@ -2,7 +2,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 OLDREF=${OLDREF:-7c767dae}
 BLOCKS=${OFSBIG_FILE_BLOCKS:-280000}
@@ -21,7 +21,6 @@ num() {
 }
 val() { tr -d '\000' < "$1" 2>/dev/null | grep -a "^$2: $3 = " | head -1 | sed 's/.* = //'; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh failed"; exit 1; }
 command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "OFSBIG: skipped, qemu missing"; exit 0; }
 
 echo "== 1. build =="
@@ -86,7 +85,7 @@ python3 tools/fsrobust/check.py struktur "$TMPD/live.img" >/dev/null 2>&1 && ok 
 echo "== 5. counter-proofs on the old code ($OLDREF) =="
 mkdir -p "$TMPD/old"
 git archive "$OLDREF" | tar -x -C "$TMPD/old"
-cp -rn vendor/firn/. "$TMPD/old/vendor/firn/"
+firnenv_prepare_old_tree "$TMPD/old"
 python3 "$TMPD/old/tools/osum/mkfs.py" build "$TMPD/oldbig.img" "$FSBLOCKS" --v3 --inodes=256 --time=1780000000 $SPEC "/big.bin=$TMPD/big.bin" > "$TMPD/oldmk.txt" 2>&1
 [ $? -ne 0 ] && ok "the old mkfs refuses the big file" || bad "the old mkfs accepted the big file"
 FIRNLIB="$TMPD/old/lib" bash -c "cd $TMPD/old && bash tools/build-kernel.sh $TMPD/old.mb" >"$TMPD/oldbuild.txt" 2>&1 || { bad "old kernel build failed"; tail -4 "$TMPD/oldbuild.txt" | sed 's/^/        /'; }

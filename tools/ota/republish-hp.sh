@@ -23,6 +23,7 @@ for a in "$@"; do [ "$a" = "--dry" ] && DRY=--dry; done
 [ "$NOTES" = "--dry" ] && NOTES="HP update from $HP_REF"
 [ -d "$HP_BASE" ] || { echo "republish-hp: baseline $HP_BASE missing"; exit 1; }
 cd "$REPO"
+. tools/lib/firnenv.sh
 git fetch -q origin
 WT=$(mktemp -d /root/jarvis/data/staff_wt/orientos/republish.XXXXXX)
 IMG=/root/abbilder/hp-feed-$$
@@ -34,7 +35,7 @@ cleanup() {
 trap cleanup EXIT
 rm -rf "$WT"
 git worktree add -q --detach "$WT" "$HP_REF"
-for d in bin lib .gebaut; do [ -e "$REPO/vendor/firn/$d" ] && cp -a "$REPO/vendor/firn/$d" "$WT/vendor/firn/"; done
+firnenv_prepare_old_tree "$WT"
 cd "$WT"
 COUNT=$(git rev-list --count HEAD)
 echo "republish-hp: $(git rev-parse --short HEAD) count $COUNT"

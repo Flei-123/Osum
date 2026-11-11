@@ -48,7 +48,7 @@ for t in qemu-system-x86_64 python3; do
     command -v "$t" >/dev/null 2>&1 || { echo "TIME-BOOT: skipped, $t missing"; exit 0; }
 done
 
-bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || { echo "fetch-firnc.sh failed"; exit 1; }
+. tools/lib/firnenv.sh
 bash tools/install/build.sh "$OUT" > "$OUT/build.log" 2>&1 || { echo "build failed"; tail -20 "$OUT/build.log"; exit 1; }
 head -c $((64 * 1024 * 1024)) /dev/zero > "$OUT/ziel0.img"
 

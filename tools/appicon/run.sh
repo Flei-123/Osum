@@ -7,7 +7,7 @@
 set -uo pipefail
 ROOT=${1:-$(cd "$(dirname "$0")/../.." && pwd)}
 cd "$ROOT"
-[ -x vendor/firn/bin/firnc ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 PASS=0; FAIL=0
@@ -20,8 +20,8 @@ fn main() -> i32 {
     return appicon.hash_of(0) as i32
 }
 FI
-if FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc --profile=kernel -c "$T/kcheck.fi" -o "$T/kcheck.o" > "$T/kcheck.log" 2>&1; then ok "lib/appicon.fi compiles in profile kernel"; else bad "kernel compile"; grep -v '^warning' "$T/kcheck.log" | head; fi
-if FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc --profile=app tools/appicon/host.fi -o "$T/host" > "$T/host.log" 2>&1; then
+if FIRNLIB="$ROOT/lib" "$FIRNC" --profile=kernel -c "$T/kcheck.fi" -o "$T/kcheck.o" > "$T/kcheck.log" 2>&1; then ok "lib/appicon.fi compiles in profile kernel"; else bad "kernel compile"; grep -v '^warning' "$T/kcheck.log" | head; fi
+if FIRNLIB="$ROOT/lib" "$FIRNC" --profile=app tools/appicon/host.fi -o "$T/host" > "$T/host.log" 2>&1; then
     "$T/host" > "$T/host.out"; rc=$?
     grep '^FAIL' "$T/host.out" | head -20
     tail -1 "$T/host.out"

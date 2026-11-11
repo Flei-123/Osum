@@ -3,7 +3,8 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-CC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
+CC=$FIRNC
 P=${1:?programm}
 OUT=${2:-/tmp/betrieb-wirt}
 . "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/lock.sh" && osum_sperre "$OUT"   # A-024

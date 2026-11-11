@@ -7,8 +7,9 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 LDSCRIPT=kernel/kernel.ld
 ULD=kernel/user/user.ld
 PROGS="sh ls cat echo id whoami sleep wc true false seq svc init sshd"
@@ -42,7 +43,6 @@ num() { # name wert op erwartet
     else bad "$name: $value, erwartet $op $want"; fi
 }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh fehlgeschlagen"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 fehlt: $FIRNC"; exit 1; }
 for t in qemu-system-x86_64 ssh ssh-keygen ssh-keyscan python3; do
     command -v "$t" >/dev/null 2>&1 || { echo "SSHD: uebersprungen, $t fehlt"; exit 0; }

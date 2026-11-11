@@ -29,7 +29,8 @@ lauf() { # name skript [limit]
 echo "== 1. the computation: SHA-512 and Ed25519 against their standards =="
 # =====================================================================
 mkdir -p .probe
-vendor/firn/bin/firnc tools/update/oracle.fi -o .probe/uoracle \
+. tools/lib/firnenv.sh
+"$FIRNC" tools/update/oracle.fi -o .probe/uoracle \
     2> "$OUT/oracle.err" \
     && ok "tools/update/oracle.fi builds against lib/crypto/ (the same files as the kernel)" \
     || { bad "tools/update/oracle.fi cannot be built"; head -20 "$OUT/oracle.err"; }

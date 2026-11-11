@@ -2,10 +2,8 @@
 # SPDX-License-Identifier: GPL-2.0-only
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-export FIRNLIB="$(pwd)/lib"
+. tools/lib/firnenv.sh
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-[ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 rc=0
 for m in packet select policy; do
     printf 'import ntp.%s\nfn main() -> i32 {\n    return 0\n}\n' "$m" > "$T/k_$m.fi"

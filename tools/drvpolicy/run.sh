@@ -11,7 +11,7 @@ hasnot() { grep -qaF -- "$2" "$1" && bad "$3 -- '$2' is there" || ok "$3"; }
 D=$(mktemp -d); [ -z "${DRVPOLICY_KEEP:-}" ] && trap 'rm -rf "$D"' EXIT
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 fin() { echo "DRVPOLICY: $pass passed, $fail failed"; [ "$fail" -eq 0 ]; exit $?; }
 
 python3 tools/module/mkpolicy.py lib/modpolicy/policydata.fi --check > "$D/chk.txt" 2>&1 && ok "checked-in policydata matches keys.default + banfloor.txt" || { bad "policydata stale"; cat "$D/chk.txt"; }

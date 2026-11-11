@@ -10,8 +10,9 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
@@ -42,8 +43,6 @@ lauf() {
 # ------------------------------------------------------------ 1. bauen
 
 echo "== 1. the kernel and a userland, from both compilers =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 \
-    || { echo "GUARD: vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 
 for s in 0 1; do
     if bash tools/build-kernel.sh "$TMPD/k$s.mb" --stufe "$s" > "$TMPD/b$s.log" 2>&1; then

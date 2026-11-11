@@ -67,7 +67,7 @@ PY
 }
 
 echo "== 1. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc failed"; exit 1; }
+. tools/lib/firnenv.sh
 if bash "$B" "$OUT/b0" script='echo ready;exit' progs="$PROGS" > "$OUT/build.log" 2>&1; then
     ok "kernel and programs built"
 else

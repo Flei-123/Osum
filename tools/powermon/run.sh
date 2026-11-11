@@ -60,7 +60,7 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 BLOCKS=8192
 PROGS="sh echo cat ls power powermon burn"
@@ -117,7 +117,6 @@ ksays() { # file name want description
 number_in() { grep -aE "^const $2: u64 = [0-9]+" "$1" | head -1 \
     | sed -E 's/^const [A-Za-z0-9_]+: u64 = ([0-9]+).*/\1/'; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "POWERMON: skipped, qemu-system-x86_64 is missing"
     exit 0

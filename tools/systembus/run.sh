@@ -6,6 +6,7 @@
 #
 set -u
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 TMPD=${SYSBUS_TMPD:-$(mktemp -d)}
 . tools/lib/summary.sh; summary_begin SYSTEMBUS
 trap 'summary_guard; [ -n "${SYSBUS_KEEP:-}" ] || rm -rf "$TMPD"; summary_exit_status || exit 1' EXIT
@@ -102,7 +103,7 @@ bauen_ok=1
 for p in $PROGS; do
     UPROF=""; UCRT="$TMPD/crt.o"
     grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
-    vendor/firn/bin/firnc $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/e$p" 2>&1 \
+    "$FIRNC" $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/e$p" 2>&1 \
         || { bauen_ok=0; echo "        $p:"; head -6 "$TMPD/e$p" | sed 's/^/        /'; break; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY=_F0.u_start \
         -o "$TMPD/$p.elf" $UCRT "$TMPD/$p.o" 2>/dev/null || { bauen_ok=0; break; }

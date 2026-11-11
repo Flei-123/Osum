@@ -44,7 +44,7 @@
 # would be like measuring how portable a port is.
 #
 # WHICH COMPILER. The PINNED one, since round OSUM-ARM2 moved
-# `vendor/firn/COMMIT` to the Firn commit that finished the freestanding
+# `firn.toolchain` to the Firn commit that finished the freestanding
 # AArch64 target. When round ARM first ran this script the pinned compiler
 # answered `--target=aarch64-linux` with "does not support the kernel profile
 # yet (round 80)" and the measurement had to borrow a work-in-progress binary
@@ -59,15 +59,14 @@
 #   FIRNC_A64=/path/to/firnc ./tools/arch/a64probe.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 
-FIRNC=${FIRNC_A64:-$ROOT/vendor/firn/bin/firnc}
+FIRNC=${FIRNC_A64:-"$FIRNC"}
 if [[ ! -x $FIRNC ]]; then
-    bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 fi
 [[ -x $FIRNC ]] || { echo "the compiler is missing: $FIRNC" >&2; exit 2; }
 
-export FIRNLIB="$ROOT/lib"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 

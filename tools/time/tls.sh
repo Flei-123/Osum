@@ -52,7 +52,7 @@ done
 python3 -c "import cryptography" 2>/dev/null || { echo "TIME-TLS: skipped, python cryptography missing"; exit 0; }
 
 echo "== 1. the build: certificates, image with the CA in its trust store =="
-bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 && ok "the pinned compiler" || bad "fetch-firnc.sh"
+[ -x "$FIRNC" ]  && ok "the pinned compiler" || bad "pinned compiler missing"
 python3 tools/ota/mkcerts.py "$OUT/certs" ota.test 10.0.2.2 > "$OUT/certs.log" 2>&1 \
     && ok "certificates made by Python's cryptography" || { bad "mkcerts.py"; cat "$OUT/certs.log"; }
 OTA_ROOTS="$OUT/certs/ca.pem" bash tools/install/build.sh "$OUT" > "$OUT/build.log" 2>&1 \

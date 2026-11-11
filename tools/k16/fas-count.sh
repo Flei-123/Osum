@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"
-FIRNC=vendor/firn/bin/firnc
-FC1=vendor/firn/bin/firnc1
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 ULD=kernel/user/user.ld
 TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT
 as --64 -o "$TMPD/hostcrt.o" tools/k11/hostcrt.s 2>/dev/null || { echo "as hostcrt FAIL"; exit 1; }

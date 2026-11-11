@@ -3,8 +3,7 @@
 # tools/smb/url.sh -- host gate for lib/smb/url.fi (smb:// paths and listing lines) with counter-proofs.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-[ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }

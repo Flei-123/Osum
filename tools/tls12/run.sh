@@ -9,10 +9,8 @@
 # Needs: openssl, python3 with `cryptography`. Slow (~6 min): run under heavy.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-export FIRNLIB="$(pwd)/lib"
+. tools/lib/firnenv.sh
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-[ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 "$FIRNC" --profile=app -o "$T/tls_main" lib/tls/tls_main.fi > "$T/b.err" 2>&1 \
     || { echo "  FAIL tls_main does not build"; grep -v RWX "$T/b.err" | head -8; exit 1; }
 echo "  OK   tls_main builds against the pinned compiler"

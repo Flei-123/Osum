@@ -122,7 +122,9 @@ fi
 echo "== 3b. the userland programs =="
 PROGS=${PROGS:-"sh ls cat echo"}
 export FIRNLIB="$ROOT/lib"
-FIRNC="$ROOT/vendor/firn/bin/firnc1"
+. "$ROOT/tools/lib/firnenv.sh"
+firnenv_need_firnc1
+FIRNC=$FIRNC1
 ULD=kernel/user/user.ld
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>"$TMPD/ascrt.err" \
     || bad "crt.s assembliert nicht"

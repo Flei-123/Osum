@@ -36,8 +36,8 @@ ip netns add "$NS" 2>/dev/null || { echo "SMBEXPLORER: skipped, no network names
 ip netns del "$NS" 2>/dev/null
 
 echo "== 1. build: smbctl, kernel, programs =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-if vendor/firn/bin/firnc -c --profile=app -o "$TMPD/smbctl.o" kernel/app/smbctl.fi > "$TMPD/cc.log" 2>&1 \
+. tools/lib/firnenv.sh
+if "$FIRNC" -c --profile=app -o "$TMPD/smbctl.o" kernel/app/smbctl.fi > "$TMPD/cc.log" 2>&1 \
    && ld -T kernel/user/user.ld -o "$TMPD/smbctl.elf" "$TMPD/smbctl.o" 2>"$TMPD/ld.err"; then
     strip --strip-all "$TMPD/smbctl.elf" 2>/dev/null
     ok "smbctl builds as a ring-3 app"

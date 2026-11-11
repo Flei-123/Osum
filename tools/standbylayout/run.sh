@@ -20,7 +20,7 @@ done
 OUT=$(mktemp -d "${TMPDIR:-/tmp}/standbylayout.XXXXXX")
 export OUT
 trap 'rm -rf "$OUT"' EXIT
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 
 sha() { sha256sum < "$1" | cut -d' ' -f1; }
 text() { tr -d '\000' < "$1" 2>/dev/null; }
@@ -115,7 +115,7 @@ echo "== 6. counter-proof: build before the change =="
 OLD="$OUT/old"
 mkdir -p "$OLD"
 git archive "$BASE_REF" | tar -x -C "$OLD"
-if (cd "$OLD" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1; bash tools/build-kernel.sh "$OUT/k_base.elf" > "$OUT/base_build.log" 2>&1); then
+if (cd "$OLD" && firnenv_prepare_old_tree . >/dev/null 2>&1; bash tools/build-kernel.sh "$OUT/k_base.elf" > "$OUT/base_build.log" 2>&1); then
     kernel_run k_base "$OUT/k_base.elf" "$OUT/kold.img"
     grep -a 'why=' "$OUT/k_base.txt" | head -2 | sed 's/^/        /'
     grep -aq 'why=old disk layout' "$OUT/k_base.txt" && bad "old build also refuses: gate cannot tell" || ok "old build does not refuse the old layout: gate sees the difference"

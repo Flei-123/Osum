@@ -21,8 +21,7 @@ num() { local name=$1 wert=$2 op=$3 want=$4
 same() { if [ "$2" = "$3" ]; then ok "$1: $2"; else bad "$1: '$3' statt '$2'"; fi }
 has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
-    echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
+. tools/lib/firnenv.sh
 #
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "THEMESTORE: UEBERSPRUNGEN (0 Zusagen geprueft)," \

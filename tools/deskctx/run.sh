@@ -14,6 +14,7 @@
 # right click equals the one before.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 TMPD=$(mktemp -d)
 BT=$TMPD/base
@@ -48,7 +49,7 @@ foto 03-settings
 EOF
 
 run_tree() { # <tree> <out>
-    ( cd "$1" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+    ( cd "$1" && firnenv_prepare_old_tree . >/dev/null 2>&1
       DESIGNBUILD="$2/build" bash tools/design/eh6.sh "$2/o" res=1280x800 accel=kvm progs="$PROGS" \
         drehbuch="$TMPD/dreh.txt" > "$2/o.log" 2>&1 )
 }

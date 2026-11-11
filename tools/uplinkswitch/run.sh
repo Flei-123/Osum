@@ -14,7 +14,7 @@ has() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 hasnot() { grep -qaF -- "$2" "$1" && bad "$3 -- '$2' present" || ok "$3"; }
 command -v qemu-system-x86_64 >/dev/null || { echo "UPLINKSWITCH: skipped, no qemu"; exit 0; }
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 HOSTIP=$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
 [ -n "$HOSTIP" ] || { echo "UPLINKSWITCH: no host address"; exit 1; }
 SUM=$(python3 -c 'print(sum(((i*7+3)&255) for i in range(65536)))')
@@ -145,7 +145,7 @@ has "$V" '==END==' "V: system keeps running"
 if [ "${UPLSW_OLD:-1}" = 1 ]; then
     echo "== control: ${UPLSW_BASE:-origin/main} kernel in case A =="
     mkdir -p "$T/old"; git archive "${UPLSW_BASE:-origin/main}" | tar -x -C "$T/old"
-    cp -a vendor/firn/bin vendor/firn/lib "$T/old/vendor/firn/" 2>/dev/null
+    firnenv_prepare_old_tree "$T/old"
     if (cd "$T/old" && FIRNLIB="$T/old/lib" ./tools/build-kernel.sh "$T/old.img" --stufe 0 > "$T/old.txt" 2>&1); then
         run_readdr ctl "$T/old.img"; C="$T/ctl.klar"
         if grep -aq 'uplswitch: conn2 bytes=65536' "$C" && grep -aq "uplswitch: conn2 sum=$SUM" "$C" \

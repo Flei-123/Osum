@@ -25,7 +25,7 @@ has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "SPALTEN: skipped, qemu-system-x86_64 is missing"; exit 0
 fi
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "firnc fehlt"; exit 1; }
+. tools/lib/firnenv.sh
 
 # ------------------------------------------------------------- 1. bauen
 echo "== 1. bauen =="
@@ -36,7 +36,7 @@ bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/k.log" 2>&1 \
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s assembliert nicht"
 PROGS="desktop taskbar launcher calc sh pluguhr plugregel plugpaar wmplug"
 for p in $PROGS; do
-    up_build vendor/firn/bin/firnc "$p" "$TMPD/$p.o" "$TMPD/$p.elf" \
+    up_build "$FIRNC" "$p" "$TMPD/$p.o" "$TMPD/$p.elf" \
         "$TMPD/crt.o" kernel/user/user.ld 0 "$TMPD/$p.err" || {
         bad "firnc uebersetzt $p.fi nicht"; head -6 "$TMPD/$p.err" | sed 's/^/        /'
         echo; echo "SPALTEN: $pass bestanden, $fail gescheitert"; exit 1; }

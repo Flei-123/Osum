@@ -7,7 +7,7 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 BLOCKS=4096
 
 TMPD=$(mktemp -d)
@@ -22,7 +22,6 @@ hat() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 nicht() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
 wert() { grep -a "^$2: " "$1" | tail -1 | sed "s/^$2: //"; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh fehlgeschlagen"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 fehlt: $FIRNC"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "TRESOR: uebersprungen, qemu-system-x86_64 fehlt"

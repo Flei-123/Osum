@@ -4,7 +4,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/tmpdir.sh
 export FIRNLIB="$(pwd)/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 TMPD=$(mktemp -d)
 osum_tmp_guard "${1:-}" "$TMPD"
 trap 'rm -rf "$TMPD"' EXIT

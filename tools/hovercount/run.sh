@@ -52,7 +52,7 @@ run_one() { # <name> <script> <extra>
 }
 field() { echo "$1" | grep -a -o " $2=[0-9]*" | head -1 | cut -d= -f2; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 run_one a "$TMPD/a.txt" "framesdump=300"
 run_one b "$TMPD/b.txt" "framesdump=300"
 run_one c "$TMPD/c.txt" ""

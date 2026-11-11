@@ -3,8 +3,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-export FIRNLIB="$ROOT/lib"
+. tools/lib/firnenv.sh
 D=$(mktemp -d); chmod 755 "$D"
 trap 'stop_smbd; rm -rf "$D"' EXIT
 pass=0; fail=0
@@ -14,7 +13,6 @@ for t in smbd smbpasswd openssl sha256sum; do
     command -v "$t" >/dev/null 2>&1 || command -v "/usr/sbin/$t" >/dev/null 2>&1 || { echo "SMB: skipped, $t is missing"; exit 0; }
 done
 export PATH="$PATH:/usr/sbin"
-[ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 
 $FIRNC tools/smb/cryptotest.fi -o "$D/ct" 2> "$D/ct.err" && ok "crypto vectors program builds" || { bad "cryptotest build"; head -5 "$D/ct.err"; }
 $FIRNC kernel/app/smbctl.fi -o "$D/smbctl" 2> "$D/cc.err" && ok "smbctl builds (host profile)" || { bad "smbctl build"; head -10 "$D/cc.err"; echo "SMB: $pass ok, $fail FAIL"; exit 1; }

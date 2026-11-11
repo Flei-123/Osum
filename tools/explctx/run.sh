@@ -16,6 +16,7 @@
 # and clicking where the probe row would be starts nothing.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 TMPD=$(mktemp -d)
 BT=$TMPD/base
@@ -65,7 +66,7 @@ foto 04-props
 EOT
 
 run_tree() { # <tree> <out> [nomanifest]
-    ( cd "$1" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+    ( cd "$1" && firnenv_prepare_old_tree . >/dev/null 2>&1
       if [ "${3:-}" = nomanifest ]; then unset EH_ETC_EXTRA; fi
       DESIGNBUILD="$2/build" bash tools/design/eh6.sh "$2/o" accel=kvm progs="$PROGS" \
         drehbuch="$TMPD/dreh.txt" > "$2/o.log" 2>&1 )

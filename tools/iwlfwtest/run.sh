@@ -24,7 +24,7 @@ has() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 hasnot() { grep -qaF -- "$2" "$1" && bad "$3 -- '$2' present" || ok "$3"; }
 command -v qemu-system-x86_64 >/dev/null || { echo "IWLFWTEST: skipped, no qemu"; exit 0; }
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 
 mkdir -p "$T/blobs" "$T/bin"
 python3 -I tools/wlan/iwlfw_ref.py gen "$T/blobs"

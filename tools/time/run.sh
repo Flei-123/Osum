@@ -98,9 +98,9 @@ done
 echo "== 1. the build: kernel, /bin/sntp, an image that carries it =="
 # =====================================================================
 if [ -z "${TIME_REUSE:-}" ] || [ ! -s "$OUT/ziel0.img" ]; then
-bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 \
-    && ok "the pinned compiler ($(cut -c1-8 vendor/firn/COMMIT))" \
-    || { bad "fetch-firnc.sh"; tail -5 "$OUT/firnc.log"; }
+[ -x "$FIRNC" ] \
+    && ok "the pinned compiler (firn $FIRN_VERSION_USED)" \
+    || { bad "pinned compiler missing"; }
 bash tools/install/build.sh "$OUT" > "$OUT/build.log" 2>&1 \
     && ok "image built ($(grep -a 'programme' "$OUT/build.log" | tr -s ' '))" \
     || { bad "tools/install/build.sh"; tail -20 "$OUT/build.log"; }

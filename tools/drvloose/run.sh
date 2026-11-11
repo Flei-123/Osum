@@ -13,7 +13,7 @@ D=$(mktemp -d); trap 'rm -rf "$D"' EXIT; osum_tmp_guard "${1:-}" "$D"
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
 fin() { echo "DRVLOOSE: $pass passed, $fail failed"; [ "$fail" -eq 0 ]; exit $?; }
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 
 PROGS="sh cat echo drvctl"
 mkdir -p "$D/bin" "$D/pk"

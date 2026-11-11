@@ -13,7 +13,7 @@ check() {
     if [ "$2" = 1 ]; then OK=$((OK + 1)); echo "ok   $1"; else FAIL=$((FAIL + 1)); echo "FAIL $1"; fi
 }
 has() { grep -q -- "$2" "$1" && echo 1 || echo 0; }
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 mkdir -p "$T/bin"
 bash tools/sync/build.sh "$T/bin" 0 sh cat echo > "$T/b.txt" 2>&1 || { tail -15 "$T/b.txt"; exit 1; }
 ./tools/build-kernel.sh "$T/k0.img" --stufe 0 > "$T/k.txt" 2>&1 || { tail -15 "$T/k.txt"; exit 1; }

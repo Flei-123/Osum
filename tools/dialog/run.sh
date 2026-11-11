@@ -19,7 +19,7 @@ osum_tmp_guard "${1:-}" "$TMPD"
 mkdir -p "$TMPD/bin"
 PROGS="sh echo sleep msgbox"
 echo "== 1. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1 && ok "programs build" \
     || { bad "programs do not build"; tail -8 "$TMPD/b.txt"; echo "DIALOG: $pass passed, $fail failed"; exit 1; }
 ./tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/k.txt" 2>&1 && ok "kernel builds" \

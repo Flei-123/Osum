@@ -5,8 +5,9 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 ULD=kernel/user/user.ld
 BLOCKS=8192
 PROGS="sh cat echo ls cp rm mkdir wc true false mount umount fremdfs"
@@ -50,8 +51,6 @@ shawert() { # datei pfad
 }
 
 echo "== 0. die Vorbedingungen =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 \
-    || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 command -v qemu-system-x86_64 >/dev/null 2>&1 || {
     echo "FREMDFS: uebersprungen, qemu-system-x86_64 fehlt"; exit 0; }
 for w in mkfs.ext4 debugfs e2fsck mkntfs sha256sum gcc python3; do

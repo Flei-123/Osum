@@ -4,8 +4,7 @@
 # (contexts, scan, peer, keys, TX/RX framing) over a loopback transport, auth/assoc/EAPOL frames against Python references.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-export FIRNLIB="$PWD/lib"
+. tools/lib/firnenv.sh
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }

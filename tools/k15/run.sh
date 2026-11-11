@@ -44,7 +44,8 @@ frgb() { python3 tools/k15/value.py "$1" "$2" "$3" rgb 2>/dev/null; }
 rgb() { python3 -c "v=int('${1:-0}');print((v>>16)&255,(v>>8)&255,v&255)"; }
 rect() { grep -aoE "^$2: rect id=$3 .*" "$1" | tail -1 | grep -oE "$4=[0-9]+" | sed 's/.*=//'; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     summary_note "skipped, qemu-system-x86_64 is not available"
     exit 0
@@ -117,7 +118,7 @@ as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
     || bad "crt.s does not assemble"
 baue() {
     local s=$1 cc p rc=0 opt="$OPTL"
-    if [ "$s" = 0 ]; then cc=vendor/firn/bin/firnc; else cc=vendor/firn/bin/firnc1; opt="$OPTL1"; fi
+    if [ "$s" = 0 ]; then cc="$FIRNC"; else cc="$FIRNC1"; opt="$OPTL1"; fi
     for p in $PROGS; do
         UPROF=""; UCRT="$TMPD/crt.o"
         grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }

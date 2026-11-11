@@ -14,7 +14,7 @@ has() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 hasnot() { grep -qaF -- "$2" "$1" && bad "$3 -- '$2' present" || ok "$3"; }
 command -v qemu-system-x86_64 >/dev/null || { echo "USBWLAN: skipped, no qemu"; exit 0; }
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 USB_SNAPS=${USBWLAN_USB_SNAPS:-4}
 WLAN_SNAPS=${USBWLAN_WLAN_SNAPS:-4}
 BACK_SNAPS=${USBWLAN_BACK_SNAPS:-3}

@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-export FIRNLIB="$PWD/lib"
+. tools/lib/firnenv.sh
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 echo "== regtrace: ring, formatter, parse/normalize/diff =="
 if ! $FIRNC tools/regtrace/selftest.fi -o "$D/self" 2> "$D/err"; then

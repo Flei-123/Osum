@@ -19,6 +19,7 @@
 # Env: GUI_BUILD=<dir> keeps the build cache (default: mktemp, removed at exit), GUI_RES (default 1280x800).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 . tools/lib/pidkill.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
@@ -173,7 +174,7 @@ wprobe() {
     local O="$D/wprobe"; mkdir -p "$O"
     echo "== stage wprobe: fvviewer -w 000000001 against the real relay =="
     HWNET_PROGS="sh ls cat echo dhcp" bash tools/hwnet/build.sh "$O/s0" 0 > "$O/b0.txt" 2>&1 || { bad "wprobe: kernel/userland build"; tail -5 "$O/b0.txt"; return; }
-    vendor/firn/bin/firnc -c --profile=app -o "$O/fvv.o" kernel/user/fvviewer.fi > "$O/fvv.err" 2>&1 \
+    "$FIRNC" -c --profile=app -o "$O/fvv.o" kernel/user/fvviewer.fi > "$O/fvv.err" 2>&1 \
         && ld -T kernel/user/user.ld -o "$O/fvv.elf" "$O/fvv.o" 2>>"$O/fvv.err" && strip --strip-all "$O/fvv.elf" \
         || { bad "wprobe: fvviewer build"; head -5 "$O/fvv.err"; return; }
     printf 'nameserver 10.0.2.3\n' > "$O/resolv.conf"

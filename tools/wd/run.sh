@@ -21,7 +21,7 @@ is()  { [ "$2" = "$3" ] && ok "$1 ($2)" || bad "$1: got '$2', want '$3'"; }
 old() { git show "$OLD:$1" 2>/dev/null; }
 val() { grep -a "^$2=" | head -1 | cut -d= -f2; }     # val <file> <key> via stdin
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 
 echo "== A. corner radius 8 (r1001) =="
 is "osum.shape radius_window" "$(val x radius_window < assets/shapes/osum.shape)" 8
@@ -34,7 +34,7 @@ if bash tools/tokens/run.sh > "$T/tok.txt" 2>&1; then ok "tokens gate (R_LARGE =
 is "COUNTER-PROOF old osum.shape radius_window was" "$(old assets/shapes/osum.shape | val x radius_window)" 12
 is "COUNTER-PROOF old preset radius was" "$(old assets/themes/tageslicht.preset | val x radius)" 12
 mkdir -p "$T/oldlib"; cp -r lib/. "$T/oldlib/"; old lib/fui/tokens.fi > "$T/oldlib/fui/tokens.fi"
-if FIRNLIB="$T/oldlib" vendor/firn/bin/firnc --profile=app tools/tokens/host.fi -o "$T/oldhost" > "$T/ob.log" 2>&1 \
+if FIRNLIB="$T/oldlib" "$FIRNC" --profile=app tools/tokens/host.fi -o "$T/oldhost" > "$T/ob.log" 2>&1 \
    && "$T/oldhost" > "$T/oldrows.txt" && ! python3 -I tools/tokens/check.py "$T/oldrows.txt" > "$T/oc.txt" 2>&1; then
     ok "COUNTER-PROOF old tokens.fi is red against the new check ($(grep -c FAIL "$T/oc.txt") fail)"
 else bad "COUNTER-PROOF old tokens.fi should be red"; fi
@@ -47,7 +47,7 @@ python3 -I tools/theme/model.py table assets/schemes/*.scheme > "$T/w_new.txt" 2
 is "contrast pairings still all fine (model.py table, rows with failures)" "$(awk -F'|' '$6+0>0' "$T/w_new.txt" | wc -l)" 0
 
 echo "== C. idle lock =="
-FIRNLIB="$PWD/lib" vendor/firn/bin/firnc --profile=app tools/lockidle/host.fi -o "$T/li" > "$T/li.log" 2>&1 && "$T/li" > "$T/li.txt" || { bad "lockidle host build/run"; tail -3 "$T/li.log"; }
+FIRNLIB="$PWD/lib" "$FIRNC" --profile=app tools/lockidle/host.fi -o "$T/li" > "$T/li.log" 2>&1 && "$T/li" > "$T/li.txt" || { bad "lockidle host build/run"; tail -3 "$T/li.log"; }
 r() { awk -v g="$1" -v a="$2" '$1==g && $2==a {print $3}' "$T/li.txt"; }
 is "choice seconds never/1/2/5/10/15/30" "$(for l in 0 1 2 3 4 5 6; do r 1 $l; done | tr '\n' ' ')" "0 60 120 300 600 900 1800 "
 is "out-of-range choice reads as never" "$(r 1 7)" 0

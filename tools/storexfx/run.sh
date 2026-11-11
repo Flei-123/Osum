@@ -31,7 +31,7 @@ OPK=$(python3 tools/lib/opkpfad.py)
 ULD=kernel/user/user.ld
 
 echo "== 1. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 mkdir -p "$TMPD/bin" "$TMPD/src"
 cp kernel/user/*.fi tools/xfx/xfxstub.fi "$TMPD/src/"
 if USRC="$TMPD/src" bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then
@@ -40,7 +40,7 @@ else
     bad "the programs do not build"; head -20 "$TMPD/b.txt" | sed 's/^/        /'
     echo "STOREXFX: $pass passed, $fail failed"; exit 1
 fi
-if vendor/firn/bin/firnc -c --profile=app -o "$TMPD/fetch.o" kernel/app/fetch.fi > "$TMPD/fe.txt" 2>&1 \
+if "$FIRNC" -c --profile=app -o "$TMPD/fetch.o" kernel/app/fetch.fi > "$TMPD/fe.txt" 2>&1 \
         && ld -T "$ULD" -o "$TMPD/bin/fetch.elf" "$TMPD/fetch.o" 2>>"$TMPD/fe.txt"; then
     strip --strip-all "$TMPD/bin/fetch.elf"; ok "/bin/fetch builds"
 else

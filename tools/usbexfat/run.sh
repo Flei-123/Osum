@@ -21,7 +21,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 PROGS="sh cat echo ls cp rm rmdir mkdir mv wc shasum mount umount eject head sleep"
 FUZZ_COUNT=${FUZZ_COUNT:-12}
@@ -49,7 +49,6 @@ for w in mkfs.exfat fsck.exfat mkfs.vfat mcopy mdir mtype sfdisk qemu-system-x86
     command -v "$w" >/dev/null 2>&1 || { echo "USBEXFAT: skipped, $w missing"; exit 0; }
 done
 qemu-system-x86_64 -device help 2>&1 | grep -q 'qemu-xhci' || { echo "USBEXFAT: skipped, no qemu-xhci"; exit 0; }
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { [ -x "$FIRNC" ] || { echo "USBEXFAT: no firnc"; exit 1; }; }
 
 echo "== 1. build: kernel, programs, root disk =="
 KERN="$ARB/k.mb"

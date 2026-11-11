@@ -28,7 +28,7 @@ LDREAL=$(readlink -f /lib/ld-musl-x86_64.so.1 2>/dev/null || true)
 PROGS="sh sleep echo cat ls wayd"
 
 echo "== 1. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 python3 tools/wayland/genkeys.py --keymaps "$TMPD/km" 2>"$TMPD/km.txt" && ok "keymaps compiled" || bad "keymap generation: $(cat "$TMPD/km.txt")"
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then ok "firnc0 builds $(echo $PROGS | wc -w) programs"
 else bad "the programs do not build"; tail -15 "$TMPD/b.txt" | sed 's/^/        /'; echo "GTK: $pass passed, $fail failed"; exit 1; fi

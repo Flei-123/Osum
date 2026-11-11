@@ -14,7 +14,7 @@ hasnot() { grep -qaF -- "$2" "$1" && bad "$3 -- '$2' is there and should not be"
 TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 PROGS="sh cat echo hwinv sysinfo"
 mkdir -p "$TMPD/bin"
 bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1 && ok "hwinv builds" || { bad "build"; head -20 "$TMPD/b.txt"; echo "HWINV-GUEST: $pass passed, $fail failed"; exit 1; }

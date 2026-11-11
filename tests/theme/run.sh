@@ -21,8 +21,7 @@ num() { local name=$1 wert=$2 op=$3 want=$4
 has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 feld() { grep -a "^$2 " "$1" | head -1 | awk "{print \$$3}"; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
-    echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
+. tools/lib/firnenv.sh
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "THEME: skipped, qemu-system-x86_64 is missing"
     exit 0

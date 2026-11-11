@@ -10,7 +10,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 mkdir -p "$TMPD/bin" "$TMPD/binold" "$TMPD/srcold" "$TMPD/bd"
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 PROGS="sh ls cat echo opk"
 
 echo "== 1. build =="

@@ -42,7 +42,7 @@ mkdir -p "$TMPD/bin" "$TMPD/barbin"
 PROGS="sh ls cat echo sleep orientbus act axd"
 
 echo "== 1. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1 \
    && (cd "$BARROOT" && FIRNLIB="$BARROOT/lib" bash tools/sync/build.sh "$TMPD/barbin" 0 taskbar) > "$TMPD/b2.txt" 2>&1; then
     ok "firnc0 builds $(echo $PROGS | wc -w) programs and the task bar (from $BARROOT)"

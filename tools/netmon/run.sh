@@ -33,8 +33,9 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 LDSCRIPT=kernel/kernel.ld
 ULD=kernel/user/user.ld
 PROGS="sh ls cat echo ping wget netstat sleep dhcp netmon widgetdemo"
@@ -88,7 +89,6 @@ monval() { grep -a "^netmon: on=" "$1" 2>/dev/null | tail -1 \
            | grep -aoE "(^|[ :])$2=[0-9]+" | tail -1 | cut -d= -f2; }
 
 # ------------------------------------------------------- the tools
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing"; exit 1; }
 for t in qemu-system-x86_64 ip gcc python3; do
     command -v "$t" >/dev/null 2>&1 || { echo "NETMON: skipped, $t is not available"; exit 0; }

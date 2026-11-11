@@ -14,8 +14,8 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT
 O="python3 tools/sdk/osdk.py"
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-[ -x vendor/firn/bin/firnc ] || { echo "SDK: firnc0 missing"; exit 1; }
+. tools/lib/firnenv.sh
+[ -x "$FIRNC" ] || { echo "SDK: firnc0 missing"; exit 1; }
 
 echo "== 1. manifest lint =="
 $O new org.example.hello --dir "$TMPD/hello" >/dev/null && $O check "$TMPD/hello" >/dev/null && ok "template passes" || bad "template refused"

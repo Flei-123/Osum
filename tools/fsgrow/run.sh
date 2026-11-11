@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 . tools/lib/pidkill.sh
 export FIRNLIB="$(pwd)/lib"
 OLDREF=${OLDREF:-6c1381392}
@@ -47,7 +48,7 @@ build_tree() {
     local p spec="/bin/ /tmp/ /dev/ /proc/"
     for p in $PROGS; do
         [ -f "$root/kernel/user/$p.fi" ] || continue
-        FIRNLIB="$root/lib" "$root/vendor/firn/bin/firnc" "$root/kernel/user/$p.fi" -o "$out/$p.o" >"$out/e$p" 2>&1 || { echo "compile $p failed"; head -5 "$out/e$p"; return 1; }
+        FIRNLIB="$root/lib" "$FIRNC" "$root/kernel/user/$p.fi" -o "$out/$p.o" >"$out/e$p" 2>&1 || { echo "compile $p failed"; head -5 "$out/e$p"; return 1; }
         ld -T "$root/kernel/user/user.ld" --defsym=USER_ENTRY="_F0.u_start" -o "$out/$p.elf" "$out/crt.o" "$out/$p.o" 2>/dev/null
         strip --strip-all "$out/$p.elf" 2>/dev/null
         spec="$spec /bin/$p=$out/$p.elf"
@@ -175,8 +176,7 @@ echo "== 5. old kernel on the grown image ($OLDREF) =="
 OLDD=$TMPD/oldsrc
 mkdir -p "$OLDD"
 git archive "$OLDREF" | tar -x -C "$OLDD"
-mkdir -p "$OLDD/vendor/firn"
-cp -rn vendor/firn/. "$OLDD/vendor/firn/"
+firnenv_prepare_old_tree "$OLDD"
 if build_tree "$OLDD" "$TMPD/old"; then
     ok "old kernel built"
     make_base "$TMPD/g0.img"

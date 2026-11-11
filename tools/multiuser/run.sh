@@ -11,7 +11,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 export FIRNLIB="$(pwd)/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 BLOCKS=4096
 
@@ -34,7 +34,6 @@ mlast() { grep -aoE "mut: $2=-?[0-9]+" "$1" | tail -1 | grep -oE '\-?[0-9]+$'; }
 muval() { grep -aoE "^mu: .*" "$1" | tail -1 \
     | grep -oE "(^| )$2=[0-9]+" | tail -1 | grep -oE '[0-9]+$'; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh fehlgeschlagen"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 fehlt: $FIRNC"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "MULTIUSER: uebersprungen, qemu-system-x86_64 fehlt"

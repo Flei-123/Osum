@@ -34,7 +34,7 @@ for t in qemu-system-x86_64 python3; do
 done
 
 echo "== 1. build =="
-bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1
+. tools/lib/firnenv.sh
 if [ -n "${AHCILOCK_BUILT:-}" ] && [ -s "$AHCILOCK_BUILT/quelle.img" ]; then
     cp -f "$AHCILOCK_BUILT/quelle.img" "$AHCILOCK_BUILT/k.mb" "$OUT/"
     ok "reused build $AHCILOCK_BUILT"

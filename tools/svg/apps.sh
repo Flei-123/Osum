@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"
-[ -x vendor/firn/bin/firnc ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-vendor/firn/bin/firnc --profile=app tools/svg/bake.fi -o "$T/bake" >/dev/null
+"$FIRNC" --profile=app tools/svg/bake.fi -o "$T/bake" >/dev/null
 python3 -I tools/svg/mkapps.py "$(pwd)" "$T/bake" "$@"

@@ -4,7 +4,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 export FIRNLIB="$(pwd)/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
@@ -21,7 +21,6 @@ expect_gt() {
     if [ -n "$2" ] && [ "$2" -gt "$3" ] 2>/dev/null; then ok "$1: $2"; else bad "$1: got '$2', want > $3"; fi
 }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc missing: $FIRNC"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "FSCK: skipped, qemu-system-x86_64 missing"

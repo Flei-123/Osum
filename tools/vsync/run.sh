@@ -14,8 +14,7 @@ ok() { echo "    ok  -- $1"; pass=$((pass + 1)); }
 bad() { echo "    NICHT -- $1"; fail=$((fail + 1)); }
 zahl() { grep -aoE "$2" "$1" 2>/dev/null | tail -1 | grep -oE '[0-9]+' | tail -1; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
-    echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
+. tools/lib/firnenv.sh
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "VSYNC: skipped, qemu-system-x86_64 is missing"
     exit 0

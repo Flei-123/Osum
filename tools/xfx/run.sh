@@ -4,7 +4,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 export FIRNLIB="$(pwd)/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 BIG_MIB=${BIG_MIB:-24}
 TMPD=$(mktemp -d)
@@ -19,7 +19,6 @@ seg() { awk -v n="@@$2" '/^@@/{on=($0==n);next} on' "$1" | tr -d '\r'; }
 has() { seg "$1" "$2" | grep -qaE -- "$3" && ok "$4" || bad "$4 -- '$3' missing in @@$2"; }
 hasnot() { seg "$1" "$2" | grep -qaE -- "$3" && bad "$4 -- '$3' present in @@$2" || ok "$4"; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc missing: $FIRNC"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "XFX: skipped, qemu-system-x86_64 missing"

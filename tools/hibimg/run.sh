@@ -3,13 +3,13 @@
 # tools/hibimg/run.sh -- host test of the S4 hibernate image format (lib/power/hibimg.fi) + kernel-profile compile check.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc.sh failed"; exit 1; }
+. tools/lib/firnenv.sh
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "  OK    $1"; }
 bad() { fail=$((fail+1)); echo "  FAIL  $1"; }
-FC="vendor/firn/bin/firnc"
+FC=$FIRNC
 echo "== 1. host test =="
 if FIRNLIB="$PWD/lib" $FC --profile=app tools/hibimg/host.fi -o "$T/host" > "$T/host.build" 2>&1; then
     "$T/host" > "$T/host.out"; hrc=$?

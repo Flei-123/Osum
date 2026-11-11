@@ -104,7 +104,7 @@ ip netns add "$NS" 2>/dev/null || { echo "ANBREAL: skipped, no network namespace
 ip netns del "$NS" 2>/dev/null
 
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 mkdir -p "$TMPD/w" "$TMPD/fid" "$TMPD/mint" "$TMPD/jw"
 
 # --- build: FirnChat (3 binaries from HEAD, in the temp folder) and the guest ---
@@ -131,7 +131,6 @@ else
     fi
 fi
 WEBDIR=$FC/web
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 if ! "$FIRNC" -c --profile=app -o "$TMPD/konto.o" kernel/app/account.fi > "$TMPD/cc.log" 2>&1; then
     bad "account.fi does not compile"; head -12 "$TMPD/cc.log" | sed 's/^/        /'
     echo "ANBREAL: $pass passed, $fail failed"; exit 1

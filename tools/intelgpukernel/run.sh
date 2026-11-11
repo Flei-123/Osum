@@ -8,7 +8,7 @@ ROOT=$(pwd)
 . tools/lib/pidkill.sh
 
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 BASE_REF=${INTELGPU_BASE_REF:-0f667ef51}
 BASE_WORDS="osum nokbd noproc nofs noring3"
 DONE_LINE='^smp: gs-basis'
@@ -57,7 +57,6 @@ boot() {
 has() { grep -aq "$2" "$TMPD/$1.txt"; }
 count() { grep -ac "$2" "$TMPD/$1.txt"; }
 
-[ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 mkdir -p "$TMPD/base"
 git archive "$BASE_REF" kernel lib | tar -x -C "$TMPD/base"
 ln -s "$ROOT/vendor" "$TMPD/base/vendor"

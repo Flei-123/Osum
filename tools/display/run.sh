@@ -8,8 +8,9 @@ marke_laden . || exit 1
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 ULD=kernel/user/user.ld
 BLOCKS=4096
 PROGS="sh echo cat ls dispctl"
@@ -43,7 +44,6 @@ lookno() { local name=$1; shift; local aus rc
     aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1); rc=$?
     if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- passed: $aus"; fi; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "DISPLAY: skipped, qemu-system-x86_64 is not there"; exit 0
 fi

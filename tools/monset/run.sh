@@ -50,7 +50,7 @@ run_one() { # name, drehbuch, etc extra
     rm -rf "$TMPD/$1/build"
 }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 run_one a "$TMPD/a.txt" "/etc/mouse.conf=$TMPD/mouse-on.conf@0644"
 run_one b "$TMPD/b.txt" ""
 run_one c "$TMPD/c.txt" ""

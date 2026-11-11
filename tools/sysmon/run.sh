@@ -35,7 +35,7 @@ run_one() {
 }
 field() { echo "$1" | grep -a -o " $2=[0-9]*" | head -1 | cut -d= -f2; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 run_one a "sysmondump=500" &
 run_one b "" &
 wait

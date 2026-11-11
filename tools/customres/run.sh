@@ -7,7 +7,7 @@ cd "$(dirname "$0")/../.."
 marke_laden . || exit 1
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 BLOCKS=4096
 PROGS="sh echo cat ls dispctl sleep"
@@ -52,7 +52,6 @@ behalte() { # ppm zielname
         || cp -f "$1" "$SHOTS/$2.ppm"
 }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "CUSTOMRES: skipped, qemu-system-x86_64 is not there"; exit 0
 fi

@@ -7,8 +7,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-FIRNC=vendor/firn/bin/firnc
+. tools/lib/firnenv.sh
 for t in mkntfs ntfsinfo ntfscat ntfscp ntfsresize ntfsfix; do
     command -v "$t" >/dev/null 2>&1 || { echo "NTFSSHRINK: $t missing"; exit 1; }
 done

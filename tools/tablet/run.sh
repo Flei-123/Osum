@@ -13,6 +13,7 @@
 # COUNTER-PROBE: the tree before this change (TABLET_BASE commit) shows the pointer NOT at those positions.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${1:-$(mktemp -d)}
@@ -29,7 +30,7 @@ PROGS="desktop taskbar launcher settings theme explorer sh echo ls cat"
 
 run_tree() { # tree out
     mkdir -p "$2"
-    ( cd "$1" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+    ( cd "$1" && firnenv_prepare_old_tree . >/dev/null 2>&1
       ALLTAGBUILD="$2.build" bash tools/alltag/build.sh "$2" kbd=no warten=3 \
         extra="modfs osum wmshell wmdauer usb hidgen" hold=no waitfor="eingabe: ber=" progs="$PROGS" \
         qemu="-device qemu-xhci -device usb-tablet -qmp unix:$2/qmp.sock,server,nowait" \

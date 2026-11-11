@@ -11,7 +11,7 @@ for t in sgdisk python3 qemu-system-x86_64; do
 done
 OUT=$(mktemp -d); export OUT
 trap 'rm -rf "$OUT"' EXIT
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 RUN_LIMIT=${RUN_LIMIT:-600}
 
 echo "== 1. build kernel and dualcli =="

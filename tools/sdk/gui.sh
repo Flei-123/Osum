@@ -18,7 +18,7 @@ part() { awk -v a="==$2==" -v b="==$3==" 'index($0,a){f=1;next} index($0,b){f=0}
 fin() { echo "SDK-GUI: $pass passed, $fail failed"; [ "$fail" = 0 ]; exit; }
 if [ -n "${1:-}" ]; then TMPD=$1; mkdir -p "$TMPD"; else TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT; fi
 O="python3 tools/sdk/osdk.py"
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 
 echo "== 1. new / check / build =="
 $O new org.example.counter --kind gui --dir "$TMPD/counter" > /dev/null && ok "osdk new --kind gui" || { bad "new gui"; fin; }

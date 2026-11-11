@@ -7,7 +7,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/summary.sh
 summary_begin FSSLOTS
 export FIRNLIB="$(pwd)/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 PROGS="sh cat echo ls shasum mount umount sleep rm wc mv"
 TMPD=$(mktemp -d)
@@ -20,7 +20,6 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 DROP='pcache.drop_node(state, nget(state, k, N_MNT) - 1, k)'
 
 echo "== 0. prerequisites =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc failed"; exit 1; }
 for w in mkfs.exfat mkfs.fat mcopy mkfs.ext4 debugfs mkntfs sha256sum gcc python3 sfdisk qemu-system-x86_64; do
     command -v "$w" >/dev/null 2>&1 || { summary_note "skipped, $w missing"; exit 0; }
 done

@@ -25,14 +25,14 @@ osum_tmp_guard "${1:-}" "$TMPD"
 mkdir -p "$TMPD/bin"
 PROGS="sh ls cat echo sleep orientbus act settingsd settings"
 echo "== 1. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1 && ok "programs build" \
     || { bad "programs do not build"; tail -8 "$TMPD/b.txt"; echo "TRUSTDLG: $pass passed, $fail failed"; exit 1; }
 KSRC=$ROOT
 if [ -n "${KERNEL_REF:-}" ]; then
     KSRC="$TMPD/kref"; mkdir -p "$KSRC"
     git archive "$KERNEL_REF" | tar -x -C "$KSRC"
-    mkdir -p "$KSRC/vendor/firn"; cp -a vendor/firn/. "$KSRC/vendor/firn/" 2>/dev/null
+    firnenv_prepare_old_tree "$KSRC"
     echo "        kernel from $KERNEL_REF"
 fi
 (cd "$KSRC" && ./tools/build-kernel.sh "$TMPD/k0.img" --stufe 0) > "$TMPD/k.txt" 2>&1 && ok "kernel builds" \

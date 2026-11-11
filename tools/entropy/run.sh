@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-export FIRNLIB="$(pwd)/lib"
+. tools/lib/firnenv.sh
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 rc=0
 printf 'import entropy.health\nimport entropy.pool\nimport entropy.drbg\nimport entropy.seedfile\nfn main() -> i32 {\n    return 0\n}\n' > "$T/k.fi"

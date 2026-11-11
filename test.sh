@@ -167,45 +167,28 @@ abschnitte_abarbeiten() {
     fi
 }
 
-echo "== 1. der festgenagelte Uebersetzer (vendor/firn/COMMIT) =="
-COMMIT=$(cat vendor/firn/COMMIT)
+echo "== 1. the pinned compiler (firn.toolchain) =="
 S1=""
-bash vendor/firn/fetch-firnc.sh > "$WORK/vendor.log" 2>&1 || \
-    S1="$S1 fetch-firnc.sh fehlgeschlagen (siehe .test-work/vendor.log);"
-[ -x vendor/firn/bin/firnc ]  || S1="$S1 vendor/firn/bin/firnc fehlt;"
-[ -x vendor/firn/bin/firnc1 ] || S1="$S1 vendor/firn/bin/firnc1 fehlt;"
-[ -d vendor/firn/lib/std ]    || S1="$S1 vendor/firn/lib/std fehlt;"
-#
-#     a751b3db...  b229d84c0efbe8b6
-#     ^ Commit     ^ sha256 der Flicken in vendor/firn/patches/
-#
-GEB_C=$(cut -d' ' -f1 vendor/firn/.gebaut 2>/dev/null)
-GEB_P=$(cut -d' ' -f2 vendor/firn/.gebaut 2>/dev/null)
-PSUM_SOLL=$( { cat vendor/firn/patches/*.patch 2>/dev/null || true; } \
-             | sha256sum | cut -c1-16)
-[ -f vendor/firn/.gebaut ] || S1="$S1 vendor/firn/.gebaut fehlt;"
-[ "$GEB_C" = "$COMMIT" ] || \
-    S1="$S1 vendor/firn/.gebaut: Commit $GEB_C statt $COMMIT;"
-[ "$GEB_P" = "$PSUM_SOLL" ] || \
-    S1="$S1 vendor/firn/.gebaut: Flicken $GEB_P statt $PSUM_SOLL;"
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+[ -x "$FIRNC" ]  || S1="$S1 $FIRNC missing;"
+[ -x "$FIRNC1" ] || S1="$S1 $FIRNC1 missing;"
+[ -d "$FIRN_STD" ] || S1="$S1 $FIRN_STD missing;"
 while read -r want name; do
     case "$want" in \#*|"") continue;; esac
-    roh="vendor/firn/lib/.roh/$name"
-    [ -f "$roh" ] || roh="vendor/firn/lib/$name"
-    got=$(git hash-object "$roh" 2>/dev/null)
-    [ "$got" = "$want" ] || S1="$S1 $roh: $got statt $want;"
+    got=$(git hash-object "$FIRN_TOOLCHAIN/lib/$name" 2>/dev/null)
+    [ "$got" = "$want" ] || S1="$S1 $name: $got instead of $want;"
 done < vendor/net/BLOBS
-[ -d lib/net ] && S1="$S1 im Repo liegt eine Kopie des Stacks unter lib/net;"
+[ -d lib/net ] && S1="$S1 the repo holds a copy of the net stack under lib/net;"
 { [ -e compiler ] || [ -e bin/firnc1.fi ]; } && \
-    S1="$S1 im Repo liegt ein Uebersetzer -- er gehoert nach vendor/;"
+    S1="$S1 the repo holds a compiler;"
 ZUSAGEN=$((ZUSAGEN + 9))
 if [ -z "$S1" ]; then
-    echo "   Firn ${COMMIT:0:8}, firnc0 + firnc1 gebaut, lib/std daneben,"
+    echo "   Firn $FIRN_VERSION_USED, firnc + firnc1 ready, lib/std next to them,"
     echo "   lib/net/ with the three blob hashes from vendor/net/BLOBS (9 commitments)"
     ok
 else
-    bad "der festgenagelte Uebersetzer:$S1"
-    tail -5 "$WORK/vendor.log" | sed 's/^/     /'
+    bad "the pinned compiler:$S1"
 fi
 
 lauf "2. freistehend uebersetzen: profile kernel, Inline-Assembler, MMIO, iretq (tools/freestanding/run.sh)" \

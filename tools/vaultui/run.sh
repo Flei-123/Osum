@@ -28,7 +28,7 @@ command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "VAULTD-TPM: qemu missin
 
 
 echo "== 1. build + static =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 PROGS="sh ls cat echo sleep mkdir grep su chmod vaultd vaultctl pinctl vaultui"
 mkdir -p "$TMPD/bin"
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then ok "programs build"; else bad "programs do not build"; tail -15 "$TMPD/b.txt"; echo "VAULTUI: $pass passed, $fail failed"; exit 1; fi

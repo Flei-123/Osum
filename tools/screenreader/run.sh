@@ -7,11 +7,11 @@
 # 3) /bin/screenreader builds
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc.sh failed"; exit 1; }
+. tools/lib/firnenv.sh
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 rc=0
-FC=vendor/firn/bin/firnc
+FC=$FIRNC
 if FIRNLIB="$PWD/lib" $FC --profile=kernel -c tools/screenreader/kcheck.fi -o "$T/k.o" > "$T/k.build" 2>&1; then
     echo "OK    speaktext + speech compile in profile kernel"
 else

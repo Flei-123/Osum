@@ -11,7 +11,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 has() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 hasnot() { grep -qaF -- "$2" "$1" && bad "$3 -- '$2' present" || ok "$3"; }
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 mkdir -p "$T/blobs" "$T/bin"
 python3 -I tools/iwlfh/ref.py gen "$T/blobs" || { bad "reference generator"; exit 1; }
 FWPATH=/lib/firmware/intel/iwlwifi/iwlwifi-8265-36.ucode

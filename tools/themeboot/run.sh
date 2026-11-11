@@ -10,6 +10,7 @@
 # Hook: image option flaky=K (/etc/themeflaky) makes the first K reads of /etc/theme.conf per program fail, deterministic.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 TMPD=$(mktemp -d)
 BASE=${THEMEBOOT_BASE:-$(git log --format=%H --grep='^wlibc: theme.conf is read once' -1 | xargs -r -I{} git rev-parse {}^)}
@@ -44,7 +45,7 @@ if [ -z "$BASE" ]; then bad "no base commit for the counter-probe"; else
         python3 tools/themeboot/oldhook.py "$ROOT/kernel/user/wlibc.fi" "$OLD/kernel/user/wlibc.fi" > "$TMPD/hook.log" 2>&1 \
             || bad "hook patch failed: $(tail -2 "$TMPD/hook.log")"
         cp tools/toolbench/build.sh "$OLD/tools/toolbench/build.sh"
-        ( cd "$OLD" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+        ( cd "$OLD" && firnenv_prepare_old_tree . >/dev/null 2>&1
           bash tools/toolbench/build.sh "$TMPD/oldout" desk=yes mode=$FILE_MODE wait=12 last=300 flaky=2 extra="wighalt=120" plan="$TMPD/plan.txt" ) > "$TMPD/old.log" 2>&1
         T2=$(tile "$TMPD/oldout")
         [ -n "$T2" ] && echo "$T2" | grep -qa "an=$OLD_AN" && ok "the old way starts dark (an=$OLD_AN, wrong for mode=$FILE_MODE) with the same failing read ($T2)" || bad "counter-probe did not show the bug: '$T2'"

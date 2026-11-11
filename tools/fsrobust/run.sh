@@ -5,7 +5,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 export FIRNLIB="$(pwd)/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 PROGS="sh ls cat echo rm df touch mkdir fsrlim fsrw fsrv fsck"
 #
@@ -27,7 +27,6 @@ num() { # name wert op erwartet
 }
 val() { tr -d '\000' < "$1" 2>/dev/null | grep -a "^$2: $3 = " | head -1 | sed 's/.* = //'; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh fehlgeschlagen"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 fehlt: $FIRNC"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "FSROBUST: uebersprungen, qemu-system-x86_64 fehlt"

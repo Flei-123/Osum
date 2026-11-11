@@ -7,7 +7,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 PROGS="contacts sh echo ls cat"
 bash tools/build-kernel.sh "$D/k0.mb" > "$D/k0.log" 2>&1 || { bad "kernel build"; echo "CONTACTS: $pass passed, $fail failed"; exit 1; }
 bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/bin.log" 2>&1 || { bad "programs build"; head -8 "$D/bin.log"; echo "CONTACTS: $pass passed, $fail failed"; exit 1; }

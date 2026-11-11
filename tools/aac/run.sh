@@ -10,9 +10,7 @@ for w in ffmpeg python3; do
     command -v "$w" >/dev/null 2>&1 || { summary_note "skipped, $w is missing"; exit 0; }
 done
 python3 -I -c 'import numpy' 2>/dev/null || { summary_note "skipped, numpy is missing"; exit 0; }
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-export FIRNLIB="$(pwd)/lib"
-[ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 pass=0; fail=0
 "$FIRNC" --profile=app -o "$D/aacdec" tools/aac/aacdec.fi > "$D/build.log" 2>&1 \
     || { grep -v RWX "$D/build.log" | head -5; summary_emit 0 1 0; exit 1; }

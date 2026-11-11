@@ -4,7 +4,7 @@ HERE="$(cd "$(dirname "$0")/../.." && pwd)"
 ALL="ax179 ax179-http ax179-ecmfirst ax179-multi ax179-late ax179-down ax179-hot ax179-unplug ax178a rtl8153 rtl-http rtl8153b rtl8152 rtl-multi rtl-late rtl-down rtl-hot rtl-unplug rtl-unknown-chip rtl-unknown-id ax-unknown-id none two hotadd-ecm hotadd-rndis"
 CASES="${*:-host $ALL}"
 source "$HERE/tools/usbredir/common.sh"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 printf 'echo ==START==\ndhcp\nping 192.168.42.129\nhost example.org\nsleep 2\ncat /proc/usbnet\necho ==END==\n' > "$T/s_nic.sh"
 HPORT=$((48000 + ($$ % 500)))
 printf 'echo ==START==\ndhcp\nwget -q http://192.168.42.129:%s/x.txt\nsleep 1\ncat /proc/usbnet\necho ==END==\n' "$HPORT" > "$T/s_http.sh"

@@ -14,7 +14,7 @@ trap 'rm -rf "$OUT"' EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 
 build() {
     mkdir -p "$2"
@@ -59,7 +59,7 @@ if [ ! -f "$NEW/osum.mb" ]; then build "$PWD" "$NEW" || { echo "HPNOKERNEL: buil
 if [ ! -f "$OLD/osum.mb" ]; then
     mkdir -p "$OUT/oldsrc"
     git archive "${HPNOKERNEL_OLD_REF:-b8ce8691e}" | tar -x -C "$OUT/oldsrc"
-    cp -r vendor/firn/bin vendor/firn/lib "$OUT/oldsrc/vendor/firn/" 2>/dev/null
+    firnenv_prepare_old_tree "$OUT/oldsrc"
     build "$OUT/oldsrc" "$OLD" || { echo "HPNOKERNEL: old build failed"; tail -n 5 "$OLD.log"; exit 1; }
 fi
 

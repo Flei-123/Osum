@@ -4,8 +4,8 @@
 osum_tree_key() {
     local root=${1:-.}
     {
-        (cd "$root" && bc_tree_hash kernel lib vendor/firn/lib tools/build-kernel.sh)
-        cat "$root/vendor/firn/.gebaut" 2>/dev/null
+        (cd "$root" && bc_tree_hash kernel lib tools/build-kernel.sh)
+        cat "${FIRN_TOOLCHAIN:-/nonexistent}/COMMIT" 2>/dev/null
     } | sha256sum | cut -c1-12
 }
 

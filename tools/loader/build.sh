@@ -4,7 +4,8 @@ cd "$(dirname "$0")/../.."
 . tools/sync/gc.sh   # r278: FIRN_FUNCTION_SECTIONS + ld --gc-sections (OSUM_NO_GC=1 = off)
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-CC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
+CC=$FIRNC
 OUT=${1:-/tmp/laden}
 . "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/lock.sh" && osum_sperre "$OUT"   # A-024
 JOBS=${JOBS:-$(nproc)}
@@ -14,8 +15,6 @@ GUI=${GUI:-"desktop taskbar launcher settings explorer widgetdemo themetest netm
 CLI=${CLI:-"sh ls cat echo edit cp mv rm mkdir rmdir touch head tail wc grep sort sleep ps kill uname date df install opk ota dhcp host reboot find du chmod id whoami top netview locate tar mount umount env which zip wlan"}
 APPS=${APPS:-"fetch"}
 
-bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || {
-    echo "== firnc cannot be built"; tail -20 "$OUT/firnc.log"; exit 1; }
 
 if [ ! -s "$OUT/k.mb" ] || [ -n "${LADEN_KERN_NEU:-}" ]; then
     bash tools/build-kernel.sh "$OUT/k.mb" > "$OUT/k.log" 2>&1 || {

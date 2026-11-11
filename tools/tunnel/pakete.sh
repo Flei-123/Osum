@@ -5,7 +5,8 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-CC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
+CC=$FIRNC
 OPK=${OPK:-$(python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/opkpfad.py")}   # A-025: der alte Ordner war ein Arbeitsbaum
 
 TMPD=$(mktemp -d)

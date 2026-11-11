@@ -3,13 +3,12 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 T=$(mktemp -d /tmp/usbvendor.XXXXXX)
 trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
 ok() { pass=$((pass + 1)); echo "  OK    $1"; }
 bad() { fail=$((fail + 1)); echo "  FAIL  $1"; }
-[ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh > /dev/null 2>&1
 
 printf 'import usbnet.ax88772\nfn main() -> i32 {\n    return 0\n}\n' > "$T/k.fi"
 FIRNLIB="$ROOT/lib" "$FIRNC" --profile=kernel -c "$T/k.fi" -o "$T/k.o" 2> "$T/k.err" \

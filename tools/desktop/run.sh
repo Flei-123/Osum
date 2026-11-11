@@ -84,8 +84,8 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "TASKBAR: skipped, qemu-system-x86_64 is not here"
     exit 0
 fi
-bash vendor/firn/fetch-firnc.sh >/dev/null || {
-    echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
 
 MONO=assets/osum-mono.ttf
 SANS=assets/osum-sans.ttf
@@ -115,7 +115,7 @@ as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
     || bad "crt.s does not assemble"
 build_progs() { # stage
     local s=$1 cc p rc=0
-    if [ "$s" = 0 ]; then cc=vendor/firn/bin/firnc; else cc=vendor/firn/bin/firnc1; fi
+    if [ "$s" = 0 ]; then cc="$FIRNC"; else cc="$FIRNC1"; fi
     for p in $PROGS; do
         UPROF=""; UCRT="$TMPD/crt.o"
         grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }

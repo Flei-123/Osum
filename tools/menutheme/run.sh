@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 TMPD=$(mktemp -d)
 BASE=${MENUTHEME_BASE:-$(git log --format=%H --grep='^fui: resync the toolkit theme' -1 | xargs -r -I{} git rev-parse {}^)}
@@ -37,7 +38,7 @@ if [ -z "$BASE" ]; then bad "no base commit for the counter-probe"; else
     OLD="$TMPD/old"
     git worktree add --detach "$OLD" "$BASE" > "$TMPD/wt.log" 2>&1 || bad "worktree failed: $(tail -n 2 "$TMPD/wt.log")"
     if [ -d "$OLD" ]; then
-        ( cd "$OLD" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 )
+        ( cd "$OLD" && firnenv_prepare_old_tree . >/dev/null 2>&1 )
         shoot "$OLD" "$TMPD/old-out"
         if [ -f "$TMPD/old-out/03-menu-after.ppm" ]; then
             luma "$TMPD/old-out/03-menu-after.ppm" > "$TMPD/l2.txt" && bad "old tree menu is dark too, the probe sees nothing: $(tr -s ' ' < "$TMPD/l2.txt")" || ok "old tree menu stays light: $(tr -s ' ' < "$TMPD/l2.txt")"

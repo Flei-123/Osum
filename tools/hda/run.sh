@@ -7,7 +7,7 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 BLOCKS=8192
 PROGS="sh echo cat ls play"
@@ -34,7 +34,6 @@ hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' sollte nicht da sein" || ok "$
 val()    { grep -oaE "aud: $2=[0-9]+" "$1" | tail -1 | grep -oE '[0-9]+$'; }
 
 echo "== 0. bauen =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/build.txt" 2>&1 \
     && ok "der Kern baut ($(stat -c%s "$TMPD/k.mb") Oktette)" \
     || { bad "the kernel does not build"; sed 's/^/        /' "$TMPD/build.txt"; \

@@ -4,7 +4,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 PROGS="sh cat echo ls cp rm mkdir wc true false mount umount fremdfs"
 

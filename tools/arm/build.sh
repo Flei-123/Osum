@@ -58,9 +58,7 @@ for f in "${FILES[@]}"; do
 done
 
 export FIRNLIB="$ROOT/lib"
-bash vendor/firn/fetch-firnc.sh >/dev/null || {
-    echo "vendor/firn/fetch-firnc.sh failed" >&2; exit 1; }
-FIRNC="$ROOT/vendor/firn/bin/firnc"
+. "$ROOT/tools/lib/firnenv.sh"
 [[ -x $FIRNC ]] || { echo "the compiler is missing: $FIRNC" >&2; exit 1; }
 
 # The counter-check switches of tools/arm/run.sh reach the Firn side as

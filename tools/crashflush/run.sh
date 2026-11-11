@@ -11,7 +11,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 pass=0; fail=0

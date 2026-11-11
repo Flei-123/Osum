@@ -7,7 +7,7 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 BLOCKS=6144
 PROGS="sh ls cat echo mkdir rm cp sync vault backup key bsect sleep"
 
@@ -29,7 +29,6 @@ nicht() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || o
 feld() { tr -cd '\11\12\15\40-\176' < "$1" | grep -a "^$2: " | tail -1 | sed "s/^$2: //"; }
 feld_n() { tr -cd '\11\12\15\40-\176' < "$1" | grep -a "^$2: " | sed -n "$3p" | sed "s/^$2: //"; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh fehlgeschlagen"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 fehlt: $FIRNC"; exit 1; }
 command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "SYNC: uebersprungen, qemu fehlt"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "SYNC: uebersprungen, python3 fehlt"; exit 0; }

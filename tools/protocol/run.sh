@@ -7,7 +7,7 @@ cd "$(dirname "$0")/../.."
 
 QEMU_X86=${QEMU_X86:-qemu-system-x86_64}
 export FIRNLIB="$(pwd)/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 PROGS="sh ls cat echo log crash krach"
 source_of() { case $1 in krach) echo noise ;; *) echo "$1" ;; esac; }
@@ -30,7 +30,6 @@ has() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' is missing"; }
 same() { [ "$2" = "$3" ] && ok "$1: $3" || bad "$1: '$3' instead of '$2'"; }
 value() { grep -oaE "$2" "$1" | head -1 | grep -oE '[0-9]+$'; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh failed"; exit 1; }
 command -v "$QEMU_X86" >/dev/null 2>&1 || {
     echo "LOG: skipped, $QEMU_X86 is missing"; exit 0; }
 

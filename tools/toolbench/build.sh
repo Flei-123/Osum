@@ -4,6 +4,7 @@
 #
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 export FIRNLIB="$(pwd)/lib"
 
 OUT=${1:?usage: build.sh <outdir> [key=value ...]}
@@ -84,7 +85,7 @@ for p in $progs; do
     fi
     UPROF=""; UCRT="$BUILDD/crt.o"
     grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
-    vendor/firn/bin/firnc $UPROF -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
+    "$FIRNC" $UPROF -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
         > "$BUILDD/e-$p" 2>&1 \
         || { echo "FEHLGESCHLAGEN beim Uebersetzen von $p"; head -25 "$BUILDD/e-$p"; exit 1; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \

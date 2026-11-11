@@ -12,7 +12,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 command -v qemu-system-x86_64 >/dev/null || { echo "NETHOT: skipped, no qemu"; exit 0; }
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 bash tools/sync/build.sh "$T/bin" 0 sh sleep echo dhcp ping cat > "$T/b.txt" 2>&1 || { tail "$T/b.txt"; exit 1; }
 KNEW="${NETHOT_KERNEL:-}"
 if [ -z "$KNEW" ]; then
@@ -78,7 +78,7 @@ common usbonly
 if [ "${NETHOT_OLD:-1}" = 1 ]; then
     echo "== control: origin/main =="
     mkdir -p "$T/old"; git archive "${NETHOT_BASE:-97b7e6b71}" | tar -x -C "$T/old"
-    cp -a vendor/firn/bin vendor/firn/lib "$T/old/vendor/firn/" 2>/dev/null
+    firnenv_prepare_old_tree "$T/old"
     if (cd "$T/old" && FIRNLIB="$T/old/lib" ./tools/build-kernel.sh "$T/old.img" --stufe 0 > "$T/old.txt" 2>&1); then
         run ctl "$T/old.img" s_usb.sh 1 "$T/p_attach"; H="$T/ctl.klar"
         grep -aq 'dhcp: ack ip=10.0.5.15' "$H" && bad "control: old kernel leased from USB" || ok "control: old kernel gets no USB lease"

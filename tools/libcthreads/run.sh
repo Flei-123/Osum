@@ -16,7 +16,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 PROGS="sh echo sleep thrprobe threxit thrwake thrcancel0"
 
 echo "== build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 mkdir -p "$TMPD/norwbin" "$TMPD/nobarbin" "$TMPD/bin" "$TMPD/badbin" "$TMPD/notlsbin" "$TMPD/nocvbin" "$TMPD/nosemlib_bin" "$TMPD/nocancelbin" "$TMPD/noexitbin" "$TMPD/nocmbin" "$TMPD/nonudgebin"
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then ok "programs build"; else sed 's/^/        /' "$TMPD/b.txt" | head -20; bad "programs do not build"; echo "LIBC-GUEST: $pass passed, $fail failed"; exit 1; fi
 cp -r lib "$TMPD/badlib"

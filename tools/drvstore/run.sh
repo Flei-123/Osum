@@ -12,7 +12,7 @@ hasnot() { grep -qaF -- "$2" "$1" && bad "$3 -- '$2' is there" || ok "$3"; }
 D=$(mktemp -d); [ -z "${DRVSTORE_KEEP:-}" ] && trap 'rm -rf "$D"' EXIT
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 bash tools/module/build.sh "$D/edudemo.omod" --quelle module/store/edudemo.fi > "$D/m.txt" 2>&1 && ok "edudemo module builds and is signed" || { bad "module"; tail -5 "$D/m.txt"; echo "DRVSTORE: $pass passed, $fail failed"; exit 1; }
 bash tools/module/build.sh "$D/fwdemo.omod" --quelle module/store/fwdemo.fi > "$D/mf.txt" 2>&1 && ok "fwdemo module builds and is signed" || { bad "fwdemo module"; tail -5 "$D/mf.txt"; }
 PROGS="sh cat echo drvctl"

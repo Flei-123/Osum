@@ -3,7 +3,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 TMPD=$(mktemp -d)
 trap 'git worktree remove --force "$TMPD/old" >/dev/null 2>&1; rm -rf "$TMPD"' EXIT
 pass=0; fail=0
@@ -21,8 +21,7 @@ fi
 KOLD=${FSZAP_OLD_KERNEL:-}
 if [ -z "$KOLD" ]; then
     git worktree add --detach "$TMPD/old" "${FSZAP_OLD_REF:-67190cba}" > /dev/null 2>&1 || bad "old worktree"
-    ln -s "$(pwd)/vendor/firn/bin" "$TMPD/old/vendor/firn/bin"
-    ln -s "$(pwd)/vendor/firn/lib" "$TMPD/old/vendor/firn/lib"
+    firnenv_prepare_old_tree "$TMPD/old"
     (cd "$TMPD/old" && bash tools/build-kernel.sh "$TMPD/kold.mb" > "$TMPD/buildold.log" 2>&1) || bad "old kernel build"
     KOLD="$TMPD/kold.mb"
 fi

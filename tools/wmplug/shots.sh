@@ -5,6 +5,7 @@
 # Gebrauch: bash tools/wmplug/shots.sh [zielordner]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 . tools/lib/qemu.sh
 . tools/lib/userprog.sh
 ROOT=$(pwd)
@@ -21,7 +22,7 @@ bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/k.log" 2>&1 \
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s || exit 1
 PROGS="desktop taskbar launcher calc sh pluguhr plugregel wmplug"
 for p in $PROGS; do
-    up_build vendor/firn/bin/firnc "$p" "$TMPD/$p.o" "$TMPD/$p.elf" \
+    up_build "$FIRNC" "$p" "$TMPD/$p.o" "$TMPD/$p.elf" \
         "$TMPD/crt.o" kernel/user/user.ld 0 "$TMPD/$p.err" \
         || { head -6 "$TMPD/$p.err"; echo "$p baut nicht"; exit 1; }
 done

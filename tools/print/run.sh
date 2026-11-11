@@ -71,12 +71,11 @@ aufraeumen() {
 }
 trap aufraeumen EXIT
 
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 
 # ======================================================================
 echo "== 1. das Programm baut =="
 # ======================================================================
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 if FIRNLIB="$ROOT/lib" "$FIRNC" -c --profile=app \
         -o "$TMPD/ipprint.o" kernel/app/ipprint.fi > "$TMPD/cc.log" 2>&1; then
     ok "firnc --profile=app: ipprint.fi mit font.ttf, font.raster, knetz"
@@ -308,7 +307,7 @@ echo "== 4. without address: /etc/printer.conf =="
 T0=$SECONDS
 lauf "ipprint /doc/kurz.txt" "$TMPD/o_c.txt"
 # ippeveprinter takes 5..15 s per job. ipprint asks every half second, one
-# connection per question; before vendor/firn/patches/0007 the ninth
+# connection per question; before Firn patch 0007 the ninth
 # connect failed until the first TIME_WAIT ran out, and every job took
 # 60 s. Boot, rendering and shutdown included, 40 s is generous.
 num "Sekunden fuer den ganzen Auftrag (Start bis fertig)" "$((SECONDS-T0))" le 40

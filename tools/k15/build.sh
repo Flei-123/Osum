@@ -3,7 +3,8 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/sync/gc.sh   # r278: FIRN_FUNCTION_SECTIONS + ld --gc-sections (OSUM_NO_GC=1 = off)
 export FIRNLIB="$(pwd)/lib"
-CC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
+CC=$FIRNC
 OUT=${1:-/tmp/k15}
 . "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/lock.sh" && osum_sperre "$OUT"   # A-024
 mkdir -p "$OUT"

@@ -19,10 +19,10 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 num() { if [ -z "${2:-}" ]; then bad "$1: no number"; return; fi
     if [ "$2" -"$3" "$4" ] 2>/dev/null; then ok "$1: $2"; else bad "$1: $2, expected $3 $4"; fi; }
 field() { printf '%s' "$1" | grep -oE "$2=[0-9]+" | head -1 | cut -d= -f2; }
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc failed"; exit 1; }
+. tools/lib/firnenv.sh
 BASE=${BASE:-HEAD}
 git worktree add --detach "$BT" "$BASE" >/dev/null 2>&1 || { echo "base worktree failed"; exit 1; }
-( cd "$BT" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+( cd "$BT" && firnenv_prepare_old_tree . >/dev/null 2>&1
   if [ -z "${PLATTE_KEEP_INK:-}" ]; then
       sed -i 's/^fn plate_ink(x: u64, y: u64, w: u64, h: u64) {$/&\n    plate(x, y, w, h)\n    if x < 100000000 { return }/' kernel/user/fuiapp.fi
       grep -q '^    plate(x, y, w, h)$' kernel/user/fuiapp.fi || { echo "base patch failed"; exit 1; }

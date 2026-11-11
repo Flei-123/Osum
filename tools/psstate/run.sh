@@ -9,7 +9,7 @@ QPID=""
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 
 echo "== host: state names match the scheduler constants =="
 python3 -I tools/psstate/names.py kernel/sched/sched.fi kernel/user/taskstate.fi > "$T/names.txt" 2>&1 && ok "every S_* constant has its own name, only S_NEW is called new" || { bad "state names"; cat "$T/names.txt"; }

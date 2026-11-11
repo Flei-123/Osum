@@ -4,8 +4,7 @@
 # independent struct.pack reference (tools/wlan/mvm_ref.py), plus 3 mutants that MUST differ.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-export FIRNLIB="$PWD/lib"
+. tools/lib/firnenv.sh
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }

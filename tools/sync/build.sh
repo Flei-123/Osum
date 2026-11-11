@@ -12,7 +12,9 @@ shift 2 || true
 PROGS=${*:-}
 mkdir -p "$OUT"
 
-if [ "$STUFE" = 0 ]; then CC="$ROOT/vendor/firn/bin/firnc"; else CC="$ROOT/vendor/firn/bin/firnc1"; fi
+. "$ROOT/tools/lib/firnenv.sh"
+firnenv_need_firnc1
+if [ "$STUFE" = 0 ]; then CC="$FIRNC"; else CC="$FIRNC1"; fi
 [ -x "$CC" ] || { echo "Uebersetzer fehlt: $CC" >&2; exit 1; }
 
 as --64 -o "$OUT/crt.o" kernel/user/crt.s || exit 1

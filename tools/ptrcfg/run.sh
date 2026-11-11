@@ -53,7 +53,7 @@ done
     && ok "four keys stored in /etc/mouse.conf (speed accel natural gestures)" || bad "store lines wrong"
 
 echo "== 3. kernel =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 KMB="${PTRCFG_KERNEL:-$TMPD/k.mb}"
 if [ ! -s "$KMB" ]; then
     bash tools/build-kernel.sh "$KMB" --stufe 0 > "$TMPD/b.log" 2>&1 \

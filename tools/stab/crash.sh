@@ -19,7 +19,7 @@ KTREE=${KTREE:-$ROOT}
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
 T=${CRASH_DIR:-$(mktemp -d)}; mkdir -p "$T/bin"
 [ -n "${CRASH_DIR:-}" ] || trap 'rm -rf "$T"' EXIT
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 bash tools/sync/build.sh "$T/bin" 0 sh echo stab > "$T/b.txt" 2>&1 || { tail "$T/b.txt"; exit 1; }
 (cd "$KTREE" && FIRNLIB="$KTREE/lib" ./tools/build-kernel.sh "$T/k0.img" --stufe 0) > "$T/k.txt" 2>&1 || { tail "$T/k.txt"; exit 1; }
 printf 'echo ==STAB==\nstab run %s %s %s\necho ==END==\n' "$ROUNDS" "$WORKERS" "$SUPS" > "$T/s.sh"

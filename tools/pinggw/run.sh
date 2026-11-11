@@ -13,6 +13,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$HERE"
+. tools/lib/firnenv.sh
 export FIRNLIB="$HERE/lib"
 T=${PINGGW_WORK:-$(mktemp -d)}
 mkdir -p "$T"
@@ -23,7 +24,6 @@ command -v qemu-system-x86_64 >/dev/null || { echo "PINGGW: skipped, no qemu"; e
 CASES="${*:-dhcp wrongmask nogw storm stormopen blocksend blocksendopen}"
 trap 'for f in "$T"/*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done; [ -n "${PINGGW_WORK:-}" ] || rm -rf "$T"' EXIT
 if [ ! -f "$T/k.img" ] || [ ! -f "$T/bin/ping.elf" ]; then
-    bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
     bash tools/sync/build.sh "$T/bin" 0 sh sleep echo dhcp ping cat > "$T/b.txt" 2>&1 || { tail "$T/b.txt"; exit 1; }
     ./tools/build-kernel.sh "$T/k.img" --stufe 0 > "$T/k.txt" 2>&1 || { tail "$T/k.txt"; exit 1; }
 fi

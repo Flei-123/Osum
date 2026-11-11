@@ -8,7 +8,7 @@ OUT=${2:-${LIVEDESIGN_DIR:-/tmp/livedesign}/$PROG.png}
 shift $(( $# >= 2 ? 2 : 1 ))
 BUILD=${LIVEDESIGN_DIR:-/tmp/livedesign}/build
 mkdir -p "$BUILD" "$(dirname "$OUT")"
-[ -x vendor/firn/bin/firnc ] || bash vendor/firn/fetch-firnc.sh > /dev/null 2>&1
+. tools/lib/firnenv.sh
 T0=$EPOCHREALTIME
 bash tools/sync/build.sh "$BUILD" 0 "$PROG"
 printf 'livedesign: build    %5.1f s\n' "$(awk -v a="$EPOCHREALTIME" -v b="$T0" 'BEGIN{print a-b}')"

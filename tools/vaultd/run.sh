@@ -4,7 +4,8 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="${FIRNLIB:-$ROOT/lib}"
-CC="$ROOT/vendor/firn/bin/firnc"
+. "$ROOT/tools/lib/firnenv.sh"
+CC=$FIRNC
 [ -x "$CC" ] || { echo "compiler missing: $CC" >&2; exit 1; }
 D=$(mktemp -d)
 SWPID=""

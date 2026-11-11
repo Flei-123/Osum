@@ -3,7 +3,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 
 TMPD=$(mktemp -d)
 . tools/lib/summary.sh; summary_begin XTSTAFEL

@@ -8,8 +8,9 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 
 export FIRNLIB="$(pwd)/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 LDSCRIPT=kernel/kernel.ld
 ULD=kernel/user/user.ld
 PROGS="sh ls cat echo aiot"
@@ -97,7 +98,6 @@ fi
 # =====================================================================
 echo "== 2. build: kernel and /bin/aiot, with both compilers =="
 # =====================================================================
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 for f in boot isr switch smp hv; do
     as --64 -o "$TMPD/$f.o" "kernel/arch/x86_64/$f.s" 2>"$TMPD/as.err" \
         || bad "$f.s cannot be assembled"

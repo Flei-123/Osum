@@ -13,7 +13,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 has() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 ACCELS="${SMPREAL_ACCELS:-$([ -e /dev/kvm ] && echo "kvm tcg" || echo tcg)}"
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 PROGS="sh cat echo burn"
 mkdir -p "$D/bin"
 bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/b.txt" 2>&1 && ok "programs build" || { bad "programs"; head -10 "$D/b.txt"; echo "SMPREAL: $pass passed, $fail failed"; exit 1; }

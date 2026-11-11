@@ -39,7 +39,7 @@ hasflat() { grep -qaE "$2" "$1.flat" && ok "$3" \
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "WMPLUG: skipped, qemu-system-x86_64 is missing"; exit 0
 fi
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "firnc fehlt"; exit 1; }
+. tools/lib/firnenv.sh
 
 # ====================================================== 1. bauen
 echo "== 1. bauen =="
@@ -54,7 +54,7 @@ PROGS="desktop taskbar launcher calc sh
        plugtempo plugspaet"
 gebaut=1
 for p in $PROGS; do
-    up_build vendor/firn/bin/firnc "$p" "$TMPD/$p.o" "$TMPD/$p.elf" \
+    up_build "$FIRNC" "$p" "$TMPD/$p.o" "$TMPD/$p.elf" \
         "$TMPD/crt.o" kernel/user/user.ld 0 "$TMPD/$p.err" || {
         bad "firnc uebersetzt $p.fi nicht"
         sed 's/^/        /' "$TMPD/$p.err" | head -6; gebaut=0; }

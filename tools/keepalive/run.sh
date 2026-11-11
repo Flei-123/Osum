@@ -27,7 +27,8 @@ for t in musl-gcc "$QEMU" python3 as ld; do command -v "$t" >/dev/null 2>&1 || {
 LDREAL=$(readlink -f "${LDSO:-/lib/ld-musl-x86_64.so.1}" 2>/dev/null || true)
 [ -r "$LDREAL" ] || LDREAL=/usr/lib/x86_64-linux-musl/libc.so
 [ -r "$LDREAL" ] || { echo "KEEPALIVE: no musl libc.so, skipped"; exit 0; }
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
 
 echo "== 1. build: kernel, the guest program, the image =="
 K=${KERNEL:-}
@@ -40,7 +41,7 @@ musl-gcc -O1 -Wall -o "$D/bin/t_keepalive" $HERE/t_keepalive.c 2> "$D/cc.err" &&
 as --64 -o "$D/crt.o" kernel/user/crt.s || exit 1
 SPEC="/lib/ /bin/ /tmp/ /etc/ /var/ /dev/ /proc/ /root/ /run/"
 for p in sh ls cat echo; do
-    vendor/firn/bin/firnc1 kernel/user/$p.fi -o "$D/p/$p.o" > "$D/p/$p.log" 2>&1 \
+    "$FIRNC1" kernel/user/$p.fi -o "$D/p/$p.o" > "$D/p/$p.log" 2>&1 \
       && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F1.u_start" -o "$D/p/$p.elf" "$D/crt.o" "$D/p/$p.o" 2>>"$D/p/$p.log" \
       || { bad "user program $p does not build"; exit 1; }
     strip --strip-all "$D/p/$p.elf" 2>/dev/null

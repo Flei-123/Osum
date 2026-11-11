@@ -62,7 +62,7 @@ num() { # name value op expected
 }
 has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' is missing"; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
+. tools/lib/firnenv.sh
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "MEM: skipped, qemu-system-x86_64 is not available"
     exit 0

@@ -10,6 +10,7 @@
 # COUNTER-PROBE: the same keys on the tree BEFORE the hotkeys (HOTKEYS_BASE commit) must show none of the actions.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${1:-$(mktemp -d)}
@@ -38,7 +39,7 @@ KEYS=(mon="warte 5" mon="sendkey shift" mon="warte 2" mon="sendkey meta_l-e" mon
 
 run_tree() { # tree out
     mkdir -p "$2"
-    ( cd "$1" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+    ( cd "$1" && firnenv_prepare_old_tree . >/dev/null 2>&1
       ALLTAGBUILD="$2.build" bash tools/alltag/build.sh "$2" kbd=no warten=6 \
         extra="modfs osum wmshell wmdauer usb hidgen" hold=no uitrace=yes waitfor="eingabe: ber=" progs="$PROGS" qemu="-device qemu-xhci -device usb-kbd" \
         "${KEYS[@]}" ) > "$2.log" 2>&1

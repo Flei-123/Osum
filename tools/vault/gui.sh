@@ -23,7 +23,7 @@ num() { local n=$1 w=$2 op=$3 e=$4
 feld() { python3 tools/k15/value.py "$1" "$2" "$3" 2>/dev/null; }
 rect() { grep -aoE "^explorer: rect id=$2 .*" "$1" | tail -1 | grep -oE "$3=[0-9]+" | sed 's/.*=//'; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh fehlgeschlagen"; exit 1; }
+. tools/lib/firnenv.sh
 command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "TRESOR-GUI: uebersprungen, qemu fehlt"; exit 0; }
 MONO=assets/osum-mono.ttf
 SANS=assets/osum-sans.ttf

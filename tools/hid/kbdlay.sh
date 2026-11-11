@@ -12,11 +12,11 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 python3 -I tools/hid/kbdgen.py --check && ok "generated data is up to date with the xkb data" || bad "generated data is stale (run tools/hid/kbdgen.py)"
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 mkdir -p "$T/lib"
 ln -s "$ROOT/kernel/drv" "$T/lib/drv"
 ln -s "$ROOT/lib/keymap" "$T/lib/keymap"
-FIRNLIB="$T/lib" vendor/firn/bin/firnc --profile=app tools/keymap/host.fi -o "$T/host" > "$T/host.build" 2>&1 && "$T/host" > "$T/dump.txt" \
+FIRNLIB="$T/lib" "$FIRNC" --profile=app tools/keymap/host.fi -o "$T/host" > "$T/host.build" 2>&1 && "$T/host" > "$T/dump.txt" \
     && ok "host build and dump" || { bad "host build"; grep -v '^warning' "$T/host.build" | head; }
 python3 -I - "$T/dump.txt" <<'PY' && ok "known keys of the layouts" || bad "known keys"
 import os, sys

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT
 ROOT=$PWD
 run_tree() {
@@ -22,7 +23,7 @@ if [ -n "$OLDREF" ]; then
     echo "== 2. counter-proof: the same keys on $OLDREF =="
     OLDWT="$TMPD/oldwt"
     git worktree add --detach "$OLDWT" "$OLDREF" > /dev/null 2>&1
-    for d in bin lib .gebaut; do [ -e "$OLDWT/vendor/firn/$d" ] || cp -a vendor/firn/$d "$OLDWT/vendor/firn/" 2>/dev/null; done
+    firnenv_prepare_old_tree "$OLDWT"
     run_tree "$OLDWT" old
     python3 tools/lineedit/check.py "$TMPD/old/serial.txt" | tee "$TMPD/old.txt"
     f2=$(grep -c '^  FAIL' "$TMPD/old.txt")

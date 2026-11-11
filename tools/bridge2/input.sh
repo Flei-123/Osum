@@ -46,10 +46,9 @@ grep -q 'IMAGE_PROFILE" = public \] && grep -Eq' tools/usbimg/build.sh && ok "bu
 grep -q '^input      = no' tools/usbimg/build.sh && ok "build.sh default permissions: input = no" || bad "build.sh default lacks input = no"
 
 echo "== 2. build =="
-bash vendor/firn/fetch-firnc.sh > "$W/fetch.log" 2>&1
+. tools/lib/firnenv.sh
 bash tools/bridge/build.sh "$W/b" 0 > "$W/bau.log" 2>&1 && ok "kernel + jarvisctl + jarvisd build" || { bad "bridge build"; tail -8 "$W/bau.log"; }
-export FIRNLIB="$ROOT/lib"
-vendor/firn/bin/firnc kernel/user/taskbar.fi -o "$W/tb.elf" > "$W/tb.log" 2>&1 && ok "taskbar (red JARVIS field) compiles" || { bad "taskbar does not compile"; head -8 "$W/tb.log"; }
+"$FIRNC" kernel/user/taskbar.fi -o "$W/tb.elf" > "$W/tb.log" 2>&1 && ok "taskbar (red JARVIS field) compiles" || { bad "taskbar does not compile"; head -8 "$W/tb.log"; }
 
 echo "== 3. emergency stop in the VM =="
 cat > "$W/g.sh" <<'G'

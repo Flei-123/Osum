@@ -3,6 +3,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$HERE"
+. tools/lib/firnenv.sh
 . "$HERE/tools/lib/pidkill.sh"
 export FIRNLIB="$HERE/lib"
 T=${USBTETHER_WORK:-$(mktemp -d)}
@@ -15,7 +16,6 @@ command -v qemu-system-x86_64 >/dev/null || { echo "USBTETHER: skipped, no qemu"
 cleanup_pids() { for f in "$T"/*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done; osum_kill_children $$; true; }
 trap 'cleanup_pids; [ -n "${USBTETHER_WORK:-}" ] || rm -rf "$T"' EXIT
 if [ ! -f "$T/k.img" ] || [ ! -f "$T/bin/dhcp.elf" ]; then
-    bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
     bash tools/sync/build.sh "$T/bin" 0 sh sleep echo dhcp ping host cat > "$T/b.txt" 2>&1 || { tail "$T/b.txt"; exit 1; }
     ./tools/build-kernel.sh "$T/k.img" --stufe 0 > "$T/k.txt" 2>&1 || { tail "$T/k.txt"; exit 1; }
 fi

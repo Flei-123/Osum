@@ -6,7 +6,8 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"
 OUT=${1:-/tmp/theme}
-CC=${2:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
+CC=${2:-"$FIRNC"}
 mkdir -p "$OUT"
 
 PROGS="themetest explorer launcher taskbar desktop settings sh echo ls cat"

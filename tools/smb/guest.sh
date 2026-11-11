@@ -38,8 +38,8 @@ ip netns add "$NS" 2>/dev/null || { echo "SMBGUEST: skipped, no network namespac
 ip netns del "$NS" 2>/dev/null
 
 echo "== 1. build: smbctl as a ring-3 app, kernel, image =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-if FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc -c --profile=app -o "$TMPD/smbctl.o" kernel/app/smbctl.fi > "$TMPD/cc.log" 2>&1; then
+. tools/lib/firnenv.sh
+if FIRNLIB="$ROOT/lib" "$FIRNC" -c --profile=app -o "$TMPD/smbctl.o" kernel/app/smbctl.fi > "$TMPD/cc.log" 2>&1; then
     ok "firnc --profile=app: smbctl.fi"
 else
     bad "smbctl.fi does not compile"; head -10 "$TMPD/cc.log"; echo "SMBGUEST: $pass passed, $fail failed"; exit 1

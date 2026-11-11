@@ -16,8 +16,7 @@ SW=3440
 SH=1440
 
 echo "== bauen =="
-bash vendor/firn/fetch-firnc.sh > "$BUILDD/fetch.log" 2>&1 || {
-    echo "FEHLGESCHLAGEN: fetch-firnc.sh"; tail -5 "$BUILDD/fetch.log"; exit 1; }
+. tools/lib/firnenv.sh
 ./tools/build-kernel.sh "$BUILDD/k0.mb" > "$BUILDD/k.log" 2>&1 \
     || { echo "FAIL: the kernel does not build"; tail -25 "$BUILDD/k.log"; exit 1; }
 echo "kernel $(stat -c%s "$BUILDD/k0.mb") Oktette"

@@ -19,7 +19,7 @@ run_one() {
         drehbuch="$TMPD/s.txt" > "$TMPD/$1/o.log" 2>&1
     rm -rf "$TMPD/$1/build"
 }
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 run_one a "/etc/drvstore.conf=$TMPD/on.conf@0644" &
 run_one b "/etc/drvstore.conf=$TMPD/off.conf@0644" &
 run_one c "" &

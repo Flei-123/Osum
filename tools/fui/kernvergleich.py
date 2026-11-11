@@ -99,7 +99,7 @@ def main():
     print("THE KERNEL NOW PAINTS WITH fui.core -- the shape comes from ONE file.")
     print()
     print("After the switch kernel/ui/wm.fi `cap_glyph` calls the routines from")
-    print("vendor/firn/lib/fui/core.fi. The first column is therefore by")
+    print("lib/fui/core.fi of the toolchain. The first column is therefore by")
     print("construction zero: it IS the same source. The second column shows")
     print("what the old, self-painted version would have done differently.")
     print()

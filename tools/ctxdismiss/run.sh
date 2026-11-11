@@ -14,6 +14,7 @@
 # COUNTER-PROOF: the tree before the fix (BASE, default HEAD~1): the menu survives the outside click, no second menu ever opens.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 TMPD=$(mktemp -d)
 BT=$TMPD/base
@@ -90,7 +91,7 @@ EOF
 } > "$TMPD/dreh.txt"
 
 run_tree() { # <tree> <out>
-    ( cd "$1" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+    ( cd "$1" && firnenv_prepare_old_tree . >/dev/null 2>&1
       DESIGNBUILD="$2/build" bash tools/design/eh6.sh "$2/o" res=1280x800 accel=kvm tafel=nein progs="$PROGS" \
         drehbuch="$TMPD/dreh.txt" > "$2/o.log" 2>&1 )
 }

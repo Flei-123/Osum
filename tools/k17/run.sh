@@ -6,8 +6,9 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 ULD=kernel/user/user.ld
 . tools/kpfad.sh
 K_SYS=$(kfi sys)       || exit 1
@@ -73,7 +74,6 @@ us() { grep -a "^usb: devices=" "$1" 2>/dev/null | tail -1 | tr -d '\000' \
 number_in() { grep -aE "^const $2: u64 = [0-9]+" "$1" | head -1 \
         | sed -E 's/^const [A-Za-z0-9_]+: u64 = ([0-9]+).*/\1/'; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "K17: uebersprungen, qemu-system-x86_64 fehlt"
     exit 0

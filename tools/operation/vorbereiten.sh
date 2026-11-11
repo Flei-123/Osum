@@ -14,8 +14,7 @@ PORT=${BETRIEB_PORT:-18443}
 NAME=${BETRIEB_NAME:-pkg.betrieb.test}
 
 echo "== 0. der Uebersetzer"
-bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || {
-    tail -5 "$OUT/firnc.log"; exit 1; }
+. tools/lib/firnenv.sh
 
 echo "== 1. packages (version 1, 2, 3) and certificates on $NAME"
 bash tools/install/pakete.sh "$OUT" > "$OUT/pak1.log" 2>&1 || {

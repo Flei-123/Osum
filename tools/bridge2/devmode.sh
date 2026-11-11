@@ -60,7 +60,7 @@ grep -q 'HP_DEV' tools/ota/republish-hp.sh && grep -q 'rechte-hp-dev.conf' tools
 [ -f docs/DEVMODE.md ] && ok "docs/DEVMODE.md exists" || bad "docs/DEVMODE.md missing"
 
 echo "== 2. build =="
-bash vendor/firn/fetch-firnc.sh > "$W/fetch.log" 2>&1
+. tools/lib/firnenv.sh
 BRIDGE_PROGS="sh ls cat echo chmod jsig jarvisctl sleep" bash tools/bridge/build.sh "$W/w0" 0 > "$W/b0.txt" 2>&1 && ok "kernel + jarvisd + jarvisctl + jsig build" || { bad "bridge build"; tail -8 "$W/b0.txt"; echo "DEVMODE: $pass passed, $fail failed"; exit 1; }
 K="$W/w0/k.mb"
 python3 tools/hwnet/mkcerts.py "$W/certs" jarvis.test > "$W/certs.txt" 2>&1 && ok "test certificates" || { bad "mkcerts"; cat "$W/certs.txt"; exit 1; }

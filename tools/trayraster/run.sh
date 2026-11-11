@@ -6,6 +6,7 @@
 #   TRAYRASTER_NOCP=1 skips the counter-proof, TRAYRASTER_ONLY=<n> runs only matrix line n (1-based).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 KEEP=${1:-}
 D=$(mktemp -d); trap 'cd "$ROOT"; [ -n "${OLDWT:-}" ] && git worktree remove --force "$OLDWT" >/dev/null 2>&1; rm -rf "$D"' EXIT
@@ -31,7 +32,7 @@ if [ -z "${TRAYRASTER_NOCP:-}" ] && [ -z "${TRAYRASTER_ONLY:-}" ]; then
     git worktree add --detach "$OLDWT" "$REF" >/dev/null 2>&1
     python3 -I tools/trayraster/demo_patch.py "$OLDWT"
     mkdir -p "$OLDWT/tools/trayraster"; cp tools/trayraster/* "$OLDWT/tools/trayraster/"
-    (cd "$OLDWT" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1; bash tools/trayraster/shot.sh "$D/old" 1280x800 1 101 0 > "$D/old.log" 2>&1)
+    (cd "$OLDWT" && firnenv_prepare_old_tree . >/dev/null 2>&1; bash tools/trayraster/shot.sh "$D/old" 1280x800 1 101 0 > "$D/old.log" 2>&1)
     python3 -I tools/trayraster/check.py "$D/old" 1 > "$D/old.res"; grep FAIL "$D/old.res" | sed 's/^/  (old) /'
     fo=$(grep -c '^  FAIL' "$D/old.res")
     [ "$fo" -ge 4 ] && { echo "  OK    counter-proof: $REF has $fo red checks"; pass=$((pass+1)); } || { echo "  FAIL  counter-proof stayed green ($fo red)"; fail=$((fail+1)); }

@@ -10,8 +10,7 @@ fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc.sh failed"; exit 1; }
-FIRNC=vendor/firn/bin/firnc
+. tools/lib/firnenv.sh
 as --64 -o "$TMPD/hostcrt.o" tools/k11/hostcrt.s || exit 1
 FIRNLIB="$ROOT/lib" "$FIRNC" -c -o "$TMPD/fas.o" kernel/user/fas.fi > "$TMPD/fas.err" 2>&1 || { bad "fas.fi compile"; head -3 "$TMPD/fas.err"; exit 1; }
 ld -T "$ULD" --defsym=USER_ENTRY=_F0.u_start -o "$TMPD/fas.host" "$TMPD/hostcrt.o" "$TMPD/fas.o" || exit 1

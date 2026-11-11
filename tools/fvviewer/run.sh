@@ -14,7 +14,8 @@ D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "  OK    $1"; }
 bad() { fail=$((fail+1)); echo "  FAIL  $1"; }
-vendor/firn/bin/firnc tools/fvviewer/wstest.fi -o "$D/wstest" > "$D/b.log" 2>&1 && ok "wstest builds" || { bad "wstest build"; head -5 "$D/b.log"; }
+. tools/lib/firnenv.sh
+"$FIRNC" tools/fvviewer/wstest.fi -o "$D/wstest" > "$D/b.log" 2>&1 && ok "wstest builds" || { bad "wstest build"; head -5 "$D/b.log"; }
 timeout 100 python3 tools/fvviewer/wstest.py "$D/wstest" | grep -q "WSTEST PASS" && ok "ws.fi vs websockets (7/16/64-bit, fragments, ping, close)" || bad "ws.fi vs websockets"
 timeout 150 python3 tools/fvviewer/wstest.py "$D/wstest" slow | grep -q "WSTEST PASS" && ok "ws.fi, one octet per read" || bad "ws.fi slow"
 # counter-check: server answers 101 with a WRONG accept value
@@ -28,10 +29,10 @@ out = p.communicate(timeout=20)[0].decode()
 sys.exit(0 if "bad upgrade answer" in out and "UPGRADED" not in out else 1)
 PY
 printf 'import fv.proto\nimport fv.session\nimport fv.crypto\nimport net.ws\nfn main() -> i32 {\n    var s: session.Sess = session.sess_new()\n    return 0\n}\n' > "$D/c.fi"
-vendor/firn/bin/firnc "$D/c.fi" -o "$D/c" > "$D/c.log" 2>&1 && ok "lib/fv/{proto,session,crypto} compile" || { bad "lib/fv compile"; head -5 "$D/c.log"; }
+"$FIRNC" "$D/c.fi" -o "$D/c" > "$D/c.log" 2>&1 && ok "lib/fv/{proto,session,crypto} compile" || { bad "lib/fv compile"; head -5 "$D/c.log"; }
 RUSTVEC=${FVV_RUST_VECTORS:-/root/projects/freeviewer/tests/orientos-vectors.json}
 if [ -f "$RUSTVEC" ]; then
-    vendor/firn/bin/firnc tools/fvviewer/vt.fi -o "$D/vt" > "$D/vt.log" 2>&1 && ok "vt builds" || { bad "vt build"; head -5 "$D/vt.log"; }
+    "$FIRNC" tools/fvviewer/vt.fi -o "$D/vt" > "$D/vt.log" 2>&1 && ok "vt builds" || { bad "vt build"; head -5 "$D/vt.log"; }
     python3 -I tools/fvviewer/vectors.py "$D/vt" "$RUSTVEC" > "$D/vec.txt" 2>&1
     if [ $? -eq 0 ]; then ok "proto+session equal the Rust vectors ($(tail -1 "$D/vec.txt"))"; else bad "vectors differ"; head -12 "$D/vec.txt"; fi
     # counter-check: a flipped byte in the contract file must make the comparison fail
@@ -49,7 +50,7 @@ else
 fi
 
 # ---- 4b: lib/fv/input.fi (key + pointer mapping) against an independent model of the wire format
-vendor/firn/bin/firnc tools/fvviewer/it.fi -o "$D/it" > "$D/it.log" 2>&1 && ok "it (input test driver) builds" || { bad "it build"; head -5 "$D/it.log"; }
+"$FIRNC" tools/fvviewer/it.fi -o "$D/it" > "$D/it.log" 2>&1 && ok "it (input test driver) builds" || { bad "it build"; head -5 "$D/it.log"; }
 if [ -x "$D/it" ]; then
     python3 -I tools/fvviewer/inputtest.py "$D/it" > "$D/in.txt" 2>&1 && ok "input.fi: $(tail -1 "$D/in.txt")" || { bad "input.fi mapping"; head -8 "$D/in.txt"; }
     printf '#!/bin/sh\necho x\n' > "$D/fakeit"; chmod +x "$D/fakeit"
@@ -77,7 +78,7 @@ start_th() { # sets PORT ID
     [ -n "$ID" ]
 }
 echo "  == app: kernel/user/fvviewer.fi =="
-if vendor/firn/bin/firnc kernel/user/fvviewer.fi -o "$D/fvv" > "$D/fvv.log" 2>&1; then
+if "$FIRNC" kernel/user/fvviewer.fi -o "$D/fvv" > "$D/fvv.log" 2>&1; then
     ok "fvviewer.fi builds (Linux host binary)"
 else
     bad "fvviewer.fi build"; head -8 "$D/fvv.log"
@@ -110,7 +111,7 @@ if [ -x "$FVBIN" ] && command -v qemu-system-x86_64 >/dev/null && command -v nod
     echo "  == app inside ${MARKE_PRODUKT} (QEMU, test host on 10.0.2.2) =="
     HWNET_PROGS="sh ls cat echo dhcp" bash tools/hwnet/build.sh "$D/s0" 0 > "$D/b0.txt" 2>&1 && ok "kernel + userland built" \
         || { bad "kernel/userland build"; tail -5 "$D/b0.txt"; }
-    if vendor/firn/bin/firnc -c --profile=app -o "$D/fvv.o" kernel/user/fvviewer.fi > "$D/fvv2.err" 2>&1 \
+    if "$FIRNC" -c --profile=app -o "$D/fvv.o" kernel/user/fvviewer.fi > "$D/fvv2.err" 2>&1 \
         && ld -T kernel/user/user.ld -o "$D/fvv.elf" "$D/fvv.o" 2>>"$D/fvv2.err" && strip --strip-all "$D/fvv.elf"; then
         ok "fvviewer built as a ring 3 app ($(stat -c%s "$D/fvv.elf") octets)"
     else

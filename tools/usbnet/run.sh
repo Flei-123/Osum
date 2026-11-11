@@ -16,8 +16,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-export FIRNLIB="$ROOT/lib"
+. tools/lib/firnenv.sh
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 pass=0
@@ -25,7 +24,6 @@ fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
-[ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 
 printf 'import usbnet.rndis\nfn main() -> i32 {\n    return 0\n}\n' > "$T/k.fi"
 "$FIRNC" --profile=kernel -c "$T/k.fi" -o "$T/k.o" 2> "$T/k.err" \

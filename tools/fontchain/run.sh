@@ -8,7 +8,7 @@
 set -uo pipefail
 ROOT=${1:-$(cd "$(dirname "$0")/../.." && pwd)}
 cd "$ROOT"
-[ -x vendor/firn/bin/firnc ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 PASS=0; FAIL=0
@@ -20,13 +20,13 @@ cp assets/osum-sans.ttf "$T/fonts/sans.ttf"; cp assets/osum-symbols.ttf "$T/font
 cp assets/osum-mono.ttf "$T/monofonts/sans.ttf"; cp assets/osum-symbols.ttf "$T/monofonts/symbols.ttf"; cp assets/osum-emoji.ttf "$T/monofonts/emoji.ttf"
 
 build_host() { # build_host <libdir> <out>
-    FIRNLIB="$1" vendor/firn/bin/firnc --profile=app tools/fontchain/host.fi -o "$2" > "$T/build.log" 2>&1
+    FIRNLIB="$1" "$FIRNC" --profile=app tools/fontchain/host.fi -o "$2" > "$T/build.log" 2>&1
 }
 run_host() { # run_host <bin> <fontdir> <out>
     (cd "$2" && "$1" > "$3" 2>&1)
 }
 
-if FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc --profile=app -c kernel/user/charmap.fi -o "$T/charmap.o" > "$T/fg.log" 2>&1; then ok "fuiglyph (via charmap) compiles in profile app"; else bad "fuiglyph compile"; grep -v '^warning' "$T/fg.log" | head; fi
+if FIRNLIB="$ROOT/lib" "$FIRNC" --profile=app -c kernel/user/charmap.fi -o "$T/charmap.o" > "$T/fg.log" 2>&1; then ok "fuiglyph (via charmap) compiles in profile app"; else bad "fuiglyph compile"; grep -v '^warning' "$T/fg.log" | head; fi
 
 if build_host "$ROOT/lib" "$T/host"; then
     run_host "$T/host" "$T/fonts" "$T/host.out"; rc=$?
@@ -45,7 +45,7 @@ if build_host "$T/lib-nofb" "$T/host-nofb"; then
     if [ "$rc" != 0 ] && [ "$nf" -ge 8 ]; then ok "counter-proof nofallback: chain disabled -> $nf checks red (missing box, no ink)"; else bad "counter-proof nofallback not caught (exit $rc, $nf red)"; fi
 else bad "nofallback build"; fi
 
-mkdir -p "$T/lib-two/font"; cp -r lib/. "$T/lib-two/"; cp vendor/firn/lib/font/ttf.fi "$T/lib-two/font/ttf.fi"
+mkdir -p "$T/lib-two/font"; cp -r lib/. "$T/lib-two/"; cp "$FIRN_TOOLCHAIN/lib/font/ttf.fi" "$T/lib-two/font/ttf.fi"
 sed -i 's/if k == 0 || k > (\*f).fb_n {/if k == 0 || k > 2 {/' "$T/lib-two/font/ttf.fi"
 if build_host "$T/lib-two" "$T/host-two"; then
     run_host "$T/host-two" "$T/fonts" "$T/two.out"; rc=$?

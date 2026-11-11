@@ -9,7 +9,8 @@ export FIRNLIB="$ROOT/lib"
 OUT=${1:-/tmp/usbimg}
 . "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/lock.sh" && osum_sperre "$OUT"   # A-024
 STUFE=${STUFE:-0}
-CC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
+CC=$FIRNC
 LIMINE=${LIMINE_DIR:-/root/jarvis/projects/u_DiS4in7esMF1/orientos/vendor/limine}
 ESP_MIB=${ESP_MIB:-96}
 [ "${HP_STICK:-0}" = 1 ] && : "${BOOT_KERNEL_COPY:=1}"
@@ -116,9 +117,7 @@ done
 
 # ============================================================ 1. Kern
 : > "$OUT/phases.log"; ph start
-bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 \
-    || fehler "der Uebersetzer cannot be built"
-ph fetch-firnc
+ph firnenv
 bash tools/build-kernel.sh "$OUT/osum.mb" --stufe "$STUFE" --product > "$OUT/k.log" 2>&1 \
     || { tail -20 "$OUT/k.log" >&2; fehler "the kernel cannot be built"; }
 sagen "kern        $(stat -c%s "$OUT/osum.mb") Oktette"
@@ -150,17 +149,10 @@ rc=0
 #
 . tools/kernel/buildcache.sh
 FIRNQ=""
-# Fallback: without FIRN_REPO, take the PINNED firn commit (vendor/firn/COMMIT) from a
-# local firn clone via git archive -- NOT the moving ../firn HEAD, which firnc0 may not compile.
-if [ -z "${FIRN_REPO:-}" ] && [ -f vendor/firn/COMMIT ]; then
-    PINC=$(head -n1 vendor/firn/COMMIT | tr -dc '0-9a-f')
-    for g in /root/firn "$ROOT/../firn" "$ROOT/../../firn"; do
-        if [ -n "$PINC" ] && [ -d "$g/.git" ] && git -C "$g" cat-file -e "$PINC^{commit}" 2>/dev/null; then
-            FIRN_REPO="$OUT/firnpin"; mkdir -p "$FIRN_REPO"
-            git -C "$g" archive "$PINC" | tar -x -C "$FIRN_REPO" && break
-            FIRN_REPO=""
-        fi
-    done
+if [ -z "${FIRN_REPO:-}" ]; then
+    FIRN_REPO="$OUT/firnpin"; mkdir -p "$FIRN_REPO"
+    ln -sfn "$FIRN_TOOLCHAIN/src" "$FIRN_REPO/bin"
+    ln -sfn "$FIRN_TOOLCHAIN/lib" "$FIRN_REPO/lib"
 fi
 for k in "${FIRN_REPO:-}" "$ROOT/../firn" "$ROOT/../../firn"; do
     [ -n "$k" ] && [ -f "$k/bin/firnc1.fi" ] && FIRNQ=$(cd "$k" && pwd) && break
@@ -169,7 +161,7 @@ firnc_osum_job() {
     local cc_abs="$ROOT/$CC" rootp
     rootp=$(cd "$FIRNQ" && pwd -P)
     rm -f "$OUT/firnc-osum.fail"
-    if ( cd "$rootp" && ROOT="$rootp" BC_GEBAUT="$ROOT/vendor/firn/.gebaut" BC_LIST_HASH="" FIRNLIB="$rootp/lib" \
+    if ( cd "$rootp" && ROOT="$rootp" BC_GEBAUT="$FIRN_TOOLCHAIN/COMMIT" BC_LIST_HASH="" FIRNLIB="$rootp/lib" \
             bc_cc "$OUT/firnc-osum.o" bin/firnc1.fi "$cc_abs" ) > "$OUT/firnc-osum.err" 2>&1 \
        && ld $GCS -T kernel/user/user.ld -o "$OUT/firnc.elf" "$OUT/firnc-osum.o" \
             2>> "$OUT/firnc-osum.err"; then
@@ -281,7 +273,6 @@ if [ -n "$gebaut_app" ]; then
     for a in $gebaut_app; do asz=$((asz + $(stat -c%s "$OUT/$a.elf"))); done
     sagen "apps        $(echo $gebaut_app | wc -w) Stueck ($asz Oktette, TLS 1.3)"
 fi
-export FIRNLIB="$ROOT/lib"
 
 if [ -n "$FIRNQ" ]; then
     wait "$FIRNC_PID"   # the background firnc compile (started with the programs) is done

@@ -36,7 +36,7 @@ SRC="$USRC/$PROG.fi"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 [ -n "$OUT" ] || OUT="$WORK/$PROG.png"
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 
 round() {
     local t0 t1 rc=0 sig

@@ -21,7 +21,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 RUSTVEC=${FVC_RUST_VECTORS:-/root/projects/freeviewer/tests/orientos-vectors.json}
 HOSTN=${FVC_HOST:-freeviewer.fleitec.com}
 TMPD=$(mktemp -d)

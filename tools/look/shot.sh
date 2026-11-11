@@ -51,6 +51,7 @@
 # `wm:` line the run reported.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 . tools/sync/gc.sh   # r278: FIRN_FUNCTION_SECTIONS + ld --gc-sections (OSUM_NO_GC=1 = off)
 export FIRN_REPO=${FIRN_REPO:-/root/jarvis/projects/u_DiS4in7esMF1/firn}
 export FIRNLIB="$(pwd)/lib"
@@ -197,7 +198,7 @@ for p in $progs; do
        && [ -n "$USERNEW" ] && [ "$BUILDD/$p.elf" -nt "$USERNEW" ]; then
         continue
     fi
-    vendor/firn/bin/firnc $OPTL -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
+    "$FIRNC" $OPTL -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
         > "$BUILDD/e-$p" 2>&1 \
         || { echo "FAILED to compile $p"; head -20 "$BUILDD/e-$p"; exit 1; }
     #

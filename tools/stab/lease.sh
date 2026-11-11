@@ -18,7 +18,7 @@ SECS=${1:-70}
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 cd "$TREE"
 export FIRNLIB="$TREE/lib"
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 bash tools/sync/build.sh "$T/bin" 0 sh sleep echo dhcp > "$T/b.txt" 2>&1 || { tail "$T/b.txt"; exit 1; }
 ./tools/build-kernel.sh "$T/k.img" --stufe 0 > "$T/k.txt" 2>&1 || { tail "$T/k.txt"; exit 1; }
 printf 'echo ==START==\ndhcp dauer t1=12 &\nsleep %s\necho ==END==\n' "$SECS" > "$T/s.sh"

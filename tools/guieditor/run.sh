@@ -76,7 +76,8 @@ lauf() {
 }
 
 echo "== 1. build: the library, the program and the bundle =="
-if vendor/firn/bin/firnc --profile=app -c kernel/user/nedit.fi \
+. tools/lib/firnenv.sh
+if "$FIRNC" --profile=app -c kernel/user/nedit.fi \
         -o "$OUT/nedit.o" > "$OUT/e-nedit" 2>&1; then
     ok "kernel/user/nedit.fi uebersetzt"
 else

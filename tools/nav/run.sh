@@ -8,7 +8,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc.sh failed"; exit 1; }
+. tools/lib/firnenv.sh
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
@@ -16,7 +16,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 ROUTES=kernel/user/settings.d/settings.routes
 
-build() { FIRNLIB="$1" vendor/firn/bin/firnc --profile=app tools/nav/drive.fi -o "$2" > "$2.build" 2>&1; }
+build() { FIRNLIB="$1" "$FIRNC" --profile=app tools/nav/drive.fi -o "$2" > "$2.build" 2>&1; }
 
 golden() { # binary -> number of failing checks
     local bin=$1 n=0 f
@@ -75,7 +75,7 @@ if a not in s: sys.exit(1)
 open(p,'w').write(s.replace(a,b,1))
 P
     then bad "mutation pattern not found: $4"; return; fi
-    if ! FIRNLIB="$d" vendor/firn/bin/firnc --profile=app tools/nav/drive.fi -o "$d/drive" > "$d/build" 2>&1; then bad "mutation does not build: $4"; return; fi
+    if ! FIRNLIB="$d" "$FIRNC" --profile=app tools/nav/drive.fi -o "$d/drive" > "$d/build" 2>&1; then bad "mutation does not build: $4"; return; fi
     local g; g=$(golden "$d/drive")
     if [ "$g" != 0 ]; then ok "mutation red ($g): $4"; else bad "mutation SURVIVED: $4"; fi
 }

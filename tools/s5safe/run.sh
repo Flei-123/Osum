@@ -6,7 +6,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
 
 export FIRNLIB="$(pwd)/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 MEM=${S5SAFE_MEM:-3072}
 PROGS="sh echo reboot shutdown"
 

@@ -7,10 +7,10 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 
 echo "== 1. encoder + fitter on the host =="
-if vendor/firn/bin/firnc -o "$D/unit" tools/pngfit/unit.fi > "$D/cc.log" 2>&1; then
+if "$FIRNC" -o "$D/unit" tools/pngfit/unit.fi > "$D/cc.log" 2>&1; then
     ok "lib/pngfit builds"
 else
     bad "lib/pngfit does not build"; head -20 "$D/cc.log" | sed 's/^/        /'
@@ -69,7 +69,7 @@ fi
 n=$(grep -c 'fit.encode_within(.*RESULT_CAP)' <(bash tools/structure/srcview.sh kernel/app/jarvisd.fi))
 [ "$n" = 2 ] && ok "both screenshot paths go through encode_within" || bad "encode_within used $n times, expected 2"
 grep -q 'aus.len > RESULT_CAP' <(bash tools/structure/srcview.sh kernel/app/jarvisd.fi) && ok "every result is guarded against the wire limit" || bad "no generic result guard"
-if vendor/firn/bin/firnc -c --profile=app -o "$D/jarvisd.o" kernel/app/jarvisd.fi > "$D/jd.log" 2>&1; then
+if "$FIRNC" -c --profile=app -o "$D/jarvisd.o" kernel/app/jarvisd.fi > "$D/jd.log" 2>&1; then
     ok "jarvisd builds"
 else
     bad "jarvisd does not build"; head -20 "$D/jd.log" | sed 's/^/        /'

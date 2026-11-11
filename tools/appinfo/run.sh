@@ -27,7 +27,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 TMPD=${1:-$(mktemp -d)}
 [ -z "${1:-}" ] && trap 'rm -rf "$TMPD"' EXIT
 mkdir -p "$TMPD/bin" "$TMPD/bd"
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 PROGS="sh ls cat echo sleep apprights opk settings"
 echo "== 1. build =="
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then ok "programs build"

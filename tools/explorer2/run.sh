@@ -4,6 +4,7 @@
 #
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${1:-$(mktemp -d)}
@@ -39,7 +40,7 @@ ok "Kern und Programme uebersetzen"
 for m in expmodell exporte expakt expdlg fileop; do
     stub="kernel/user/zz_chk_$m.fi"
     printf 'profile app\nimport %s\nfn main() -> i32 {\n    return 0\n}\n' "$m" > "$stub"
-    if vendor/firn/bin/firnc -c --profile=app "$stub" -o "$OUT/$m.o" \
+    if "$FIRNC" -c --profile=app "$stub" -o "$OUT/$m.o" \
             > "$OUT/e-$m" 2>&1; then
         ok "Baustein $m uebersetzt einzeln"
     else

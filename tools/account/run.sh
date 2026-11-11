@@ -51,7 +51,7 @@ ip netns add "$NS" 2>/dev/null || { echo "ACCOUNT: skipped, no network rooms"; e
 ip netns del "$NS" 2>/dev/null
 
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 
 # ======================================================================
 echo "== 0. the separation: provider knowledge stays in the back =="
@@ -84,7 +84,6 @@ fi
 # ======================================================================
 echo "== 1. the program builds and fits =="
 # ======================================================================
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 if FIRNLIB="$ROOT/lib" "$FIRNC" -c --profile=app \
         -o "$TMPD/konto.o" kernel/app/account.fi > "$TMPD/cc.log" 2>&1; then
     ok "firnc --profile=app: konto.fi with std.net, std.json, tls.tls, tls.x509"

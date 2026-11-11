@@ -117,7 +117,7 @@ first_line() { grep -a -m1 '^osum ' "$1" | tr -d '\r'; }
 fresh_disk() { cp --sparse=always "$OUT/basis.img" "$OUT/ziel.img"; }
 
 echo "== 1. build + install + feeds =="
-bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 && ok "pinned compiler" || bad "fetch-firnc.sh"
+[ -x "$FIRNC" ]  && ok "pinned compiler" || bad "pinned compiler missing"
 bash tools/install/pakete.sh "$OUT" > "$OUT/pak.log" 2>&1 && ok "base packages + test key (tools/install/pakete.sh)" || { tail -5 "$OUT/pak.log"; bad "install/pakete.sh"; }
 python3 tools/ota/mkcerts.py "$OUT/certs" ota.test 10.0.2.2 > "$OUT/certs.log" 2>&1 && ok "certificates" || { cat "$OUT/certs.log"; bad "mkcerts.py"; }
 cat > "$OUT/ota.conf" <<EOF

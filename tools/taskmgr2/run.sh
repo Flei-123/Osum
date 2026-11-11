@@ -24,7 +24,7 @@ num() { local name=$1 val=$2 op=$3 want=$4
 }
 cnt() { grep -ac "$2" "$1" 2>/dev/null || true; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc failed"; exit 1; }
+. tools/lib/firnenv.sh
 command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "TASKMGR2: skipped, no qemu"; exit 0; }
 
 drive() {
@@ -125,7 +125,7 @@ echo
 echo "== 4. counter-proof: the tree before S1 fails the same plans =="
 BWT="$TMPD/basewt"
 if git worktree add --detach "$BWT" "$BASE" >/dev/null 2>&1; then
-    cp -a vendor/firn/bin "$BWT/vendor/firn/bin" 2>/dev/null; cp -a vendor/firn/lib "$BWT/vendor/firn/lib" 2>/dev/null; cp -a vendor/firn/.gebaut "$BWT/vendor/firn/.gebaut" 2>/dev/null
+    firnenv_prepare_old_tree "$BWT"
     mkdir -p "$BWT/tools/taskmgr2"
     ( cd tools && tar cf - --exclude=build-kernel.sh --exclude=taskmgr2 . ) | ( cd "$BWT/tools" && tar xf - )
     printf '#!/usr/bin/env bash\nexec bash %s/tools/mkfsfi/mkfs.sh "$@"\n' "$ROOT" > "$BWT/tools/mkfsfi/mkfs.sh"

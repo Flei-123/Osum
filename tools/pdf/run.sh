@@ -16,9 +16,10 @@ for t in python3 pdftotext pdftoppm; do
 done
 
 echo "== 1. build =="
-vendor/firn/bin/firnc tools/pdf/pdfdump.fi -o "$OUT/pdfdump" > "$OUT/b1.log" 2>&1 && ok "pdfdump (host driver)" || { bad "pdfdump"; head -5 "$OUT/b1.log"; }
-vendor/firn/bin/firnc tools/pdf/pdfpng.fi -o "$OUT/pdfpng" > "$OUT/b2.log" 2>&1 && ok "pdfpng (host driver, the viewer's own render path)" || { bad "pdfpng"; head -5 "$OUT/b2.log"; }
-vendor/firn/bin/firnc tools/pdf/pdfsearch.fi -o "$OUT/pdfsearch" > "$OUT/b3.log" 2>&1 && ok "pdfsearch (host driver of the text search, lib/pdfread/pdftext.fi)" || { bad "pdfsearch"; head -5 "$OUT/b3.log"; }
+. tools/lib/firnenv.sh
+"$FIRNC" tools/pdf/pdfdump.fi -o "$OUT/pdfdump" > "$OUT/b1.log" 2>&1 && ok "pdfdump (host driver)" || { bad "pdfdump"; head -5 "$OUT/b1.log"; }
+"$FIRNC" tools/pdf/pdfpng.fi -o "$OUT/pdfpng" > "$OUT/b2.log" 2>&1 && ok "pdfpng (host driver, the viewer's own render path)" || { bad "pdfpng"; head -5 "$OUT/b2.log"; }
+"$FIRNC" tools/pdf/pdfsearch.fi -o "$OUT/pdfsearch" > "$OUT/b3.log" 2>&1 && ok "pdfsearch (host driver of the text search, lib/pdfread/pdftext.fi)" || { bad "pdfsearch"; head -5 "$OUT/b3.log"; }
 
 echo; echo "== 2. corpus =="
 python3 tools/pdf/corpus.py "$OUT/c" > "$OUT/corpus.log" 2>&1 && ok "$(ls "$OUT/c"/*.pdf | wc -l) PDFs written" || { bad "corpus.py"; tail -3 "$OUT/corpus.log"; }

@@ -15,6 +15,7 @@
 # Result: <outdir>/ser.txt (raw serial), <outdir>/ser.clean, <outdir>/summary.txt (ENOSYS numbers, failing mem calls, user faults, guest markers).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 export FIRNLIB="${FIRNLIB:-$ROOT/lib}"
 WD=${1:?workdir}; GS=${2:?guest script}; OUT=${3:-$WD/out-$(date +%H%M%S)}
@@ -25,7 +26,6 @@ KARGS=${KARGS:-osum vfs nokbd nosched noproc nofs fremdtrace}
 MEM=${MEM:-3072}; TMO=${TMO:-600}; BLOCKS=${BLOCKS:-900000}; DONE=${DONE:-FX-END}; DRIVE=${DRIVE:-ide}
 ACC=(); [ -w /dev/kvm ] && ACC=(-accel kvm -cpu host)
 if [ -z "${KERNEL:-}" ]; then
-    bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
     ./tools/build-kernel.sh "$OUT/k0.img" --stufe 0 > "$OUT/kernel.log" 2>&1 || { echo "LINUXAPPS: kernel build failed"; tail -5 "$OUT/kernel.log"; exit 1; }
     KERNEL=$OUT/k0.img
 fi

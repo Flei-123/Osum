@@ -34,9 +34,8 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 [ -x "$FIRNC" ] || { echo "firnc is missing: $FIRNC"; exit 1; }
-export FIRNLIB="$ROOT/lib"
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT

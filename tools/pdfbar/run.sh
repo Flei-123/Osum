@@ -2,12 +2,13 @@
 set -uo pipefail
 OLD_REF=7f9c4eae
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 if [ "${1:-}" = "--old" ]; then
     D=$(mktemp -d); trap 'git -C "$ROOT" worktree remove --force "$D/t" >/dev/null 2>&1; rm -rf "$D"' EXIT
     git -C "$ROOT" worktree add --detach "$D/t" "$OLD_REF" >/dev/null 2>&1 || { echo "PDFBAR --old: cannot check out $OLD_REF"; exit 2; }
     mkdir -p "$D/t/tools/pdfbar"; cp "$ROOT/tools/pdfbar/run.sh" "$D/t/tools/pdfbar/run.sh"
-    ( cd "$D/t" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1; OUT="$D/out" bash tools/pdfbar/run.sh ) > "$D/old.txt" 2>&1
+    ( cd "$D/t" && firnenv_prepare_old_tree . >/dev/null 2>&1; OUT="$D/out" bash tools/pdfbar/run.sh ) > "$D/old.txt" 2>&1
     f=$(grep -c '^  FAIL' "$D/old.txt"); o=$(grep -c '^  OK' "$D/old.txt")
     tail -n 4 "$D/old.txt"
     if [ "$f" -ge 4 ]; then echo "PDFBAR --old: the old viewer fails $f checks ($o ok) -- counter-proof holds"; exit 0; fi

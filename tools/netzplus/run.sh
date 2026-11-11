@@ -10,7 +10,7 @@ ROOT=$(pwd)
 . tools/lib/qemu.sh
 
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 LDSCRIPT=kernel/kernel.ld
 
 TMPD=${NZP_ARB:-$(mktemp -d)}
@@ -51,16 +51,15 @@ else
     exit 1
 fi
 
-if grep -q "RUNDE NETZPLUS" vendor/firn/lib/net/tcp.fi 2>/dev/null; then
-    ok "vendor/firn/lib/net/tcp.fi carries the change of this round"
+if grep -q "RUNDE NETZPLUS" "$FIRN_TOOLCHAIN/lib/net/tcp.fi" 2>/dev/null; then
+    ok "toolchain lib/net/tcp.fi carries the change of this round"
 else
-    bad "patch 0006 is NOT applied -- ./vendor/firn/fetch-firnc.sh"
+    bad "toolchain lib/net/tcp.fi lacks the change of this round"
 fi
 s1=""
 while read -r want name; do
     case "$want" in \#*|"") continue;; esac
-    roh="vendor/firn/lib/.roh/$name"
-    [ -f "$roh" ] || roh="vendor/firn/lib/$name"
+    roh="$FIRN_TOOLCHAIN/lib/$name"
     got=$(git hash-object "$roh" 2>/dev/null)
     [ "$got" = "$want" ] || s1="$s1 $name;"
 done < vendor/net/BLOBS

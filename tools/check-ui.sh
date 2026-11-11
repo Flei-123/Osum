@@ -163,7 +163,7 @@ if [[ $fehler -gt 0 ]]; then
     echo "    Farbreihenfolge bleiben Sache des Servers)."
     echo "  * If the element is missing in fUi, it belongs in lib/fui -- there"
     echo "    all three trees have it, because they share the same commit"
-    echo "    festnageln (vendor/firn/COMMIT)."
+    echo "    pin it (firn.toolchain)."
     echo
     echo "If a file or function is rightly raw (test bench, the"
     echo "background of a window, a diagram), its name belongs with"

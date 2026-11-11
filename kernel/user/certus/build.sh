@@ -6,13 +6,14 @@ ROOT=$(pwd)
 
 ZIEL=${1:-$ROOT/.certus-bau/certus.elf}
 CERTUS_REPO=${CERTUS_REPO:-/root/certus-ui}
+. tools/lib/firnenv.sh
 FIRNC=${CERTUS_FIRNC:-/root/firnc-gc/compiler/target/release/firnc}
 BAU=${CERTUS_BAU:-$ROOT/.certus-bau}
 
 [ -d "$CERTUS_REPO/lib/browser" ] || {
     echo "no Certus tree in $CERTUS_REPO (set CERTUS_REPO)" >&2; exit 2; }
 [ -x "$FIRNC" ] || {
-    echo "kein Uebersetzer: $FIRNC" >&2
+    echo "no compiler: $FIRNC" >&2
     echo "  (cd $CERTUS_REPO/compiler && cargo build --release)" >&2; exit 2; }
 if [ -f "$CERTUS_REPO/lib/osum/window/backend.fi" ]; then
     LAYOUT=new
@@ -137,7 +138,7 @@ python3 "$ROOT/kernel/user/certus/entkern.py" "$BAU" > "$BAU/entkern.log"
 
 cp "$CERTUS_REPO/lib/osum/certus_main.fi" "$BAU/certus_main.fi"
 (cd "$BAU" && python3 "$ROOT/kernel/user/certus/inlineconsts.py" "$BAU" wlib.fi wlibc.fi wlib/*.fi wlibc/*.fi) | tee "$BAU/inlineconsts.log"
-python3 "$ROOT/kernel/user/certus/splitstems.py" "$ROOT" "$BAU" "$ROOT/vendor/firn" | tee "$BAU/splitstems.log"
+python3 "$ROOT/kernel/user/certus/splitstems.py" "$ROOT" "$BAU" "$FIRN_TOOLCHAIN" | tee "$BAU/splitstems.log"
 (cd "$BAU" && python3 "$ROOT/kernel/user/certus/inlineconsts.py" "$BAU" osa/*.fi fui/*.fi) | tee -a "$BAU/inlineconsts.log"
 (cd "$BAU" && grep -l '__bits(\|__include_str(' osa/*.fi fui/*.fi 2>/dev/null | xargs -r python3 "$ROOT/kernel/user/certus/lowerintrinsics.py" "$BAU") | tee "$BAU/lowerintrinsics.log"
 if [ -f "$BAU/std/deflate.fi" ] && ! grep -q 'fn inflate_limited' "$BAU/std/deflate.fi"; then

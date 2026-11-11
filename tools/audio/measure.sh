@@ -4,7 +4,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 PROGS="sh echo cat ls play"
 
@@ -18,7 +18,6 @@ mkdir -p "$TMPD"
 [ "$KEEP" = 1 ] || trap 'rm -rf "$TMPD"' EXIT
 
 echo "== bauen =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/build.txt" 2>&1 \
     || { echo "the kernel does not build:"; tail -30 "$TMPD/build.txt"; exit 1; }
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null

@@ -25,7 +25,7 @@ LIMIT=2134016
 LIMIT3=8726286336
 KEEP=256
 OUT=$(mktemp -d); trap 'rm -rf "$OUT"' EXIT
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 PROGS="explorer taskbar settings installer pdfview nedit launcher"
 bash tools/sync/build.sh "$OUT" 0 $PROGS > "$OUT/b.txt" 2>&1 || { sed 's/^/    /' "$OUT/b.txt" | head; echo "PROGSIZE: build failed"; exit 1; }
 fail=0

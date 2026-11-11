@@ -4,12 +4,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CACHE="${MKFS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/osum/mkfs}"
 mkdir -p "$CACHE"
 
-if [ ! -x "$ROOT/vendor/firn/bin/firnc" ]; then
-    bash "$ROOT/vendor/firn/fetch-firnc.sh" >/dev/null 2>&1 || { echo "mkfs: firnc unavailable" >&2; exit 1; }
-fi
+. "$ROOT/tools/lib/firnenv.sh"
 
 tree_hash() {
-    (cd "$ROOT" && { sha256sum vendor/firn/bin/firnc tools/k11/hostcrt.s tools/k11/hostbuild.sh kernel/user/mkfs.fi kernel/user/user.ld
+    (cd "$ROOT" && { sha256sum "$FIRNC" tools/k11/hostcrt.s tools/k11/hostbuild.sh kernel/user/mkfs.fi kernel/user/user.ld
         find lib kernel/user/mkfs -type f -print0 | sort -z | xargs -0 cat | sha256sum; } | sha256sum | cut -c1-24)
 }
 

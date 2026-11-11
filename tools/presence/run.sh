@@ -25,8 +25,7 @@ PROGS="sh ls cat echo sleep presence freunde desktop taskbar"
 : "${OSUM_QEMU_ACCEL:=tcg}"
 
 echo "== 1. bauen =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-FIRNC=vendor/firn/bin/firnc
+. tools/lib/firnenv.sh
 [ -x "$FIRNC" ] || { echo "PRAESENZ: firnc0 fehlt"; exit 1; }
 
 mkdir -p "$TMPD/bin"

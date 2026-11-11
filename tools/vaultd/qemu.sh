@@ -35,8 +35,8 @@ H_ORI=$(hx "$ORIGIN"); H_USR=$(hx "$USER1"); H_LPW=$(hx "$LPW"); H_TTL=$(hx "Exa
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
 
 echo "== 1. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-[ -x vendor/firn/bin/firnc ] || { echo "VAULTD-QEMU: firnc missing"; exit 1; }
+. tools/lib/firnenv.sh
+[ -x "$FIRNC" ] || { echo "VAULTD-QEMU: firnc missing"; exit 1; }
 PROGS="sh ls cat echo sleep mkdir grep su chmod vaultd vaultctl"
 mkdir -p "$TMPD/bin"
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS init > "$TMPD/b.txt" 2>&1; then

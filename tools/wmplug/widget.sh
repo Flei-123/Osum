@@ -30,7 +30,7 @@ hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' sollte nicht da sein" || ok "$
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "WIDGET: skipped, qemu-system-x86_64 is missing"; exit 0
 fi
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "firnc fehlt"; exit 1; }
+. tools/lib/firnenv.sh
 
 echo "== 1. bauen =="
 bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/k.log" 2>&1 \
@@ -43,7 +43,7 @@ PROGS="desktop taskbar launcher pluguhr sh echo ls cat"
 [ -f kernel/user/wmplug.fi ] && PROGS="$PROGS wmplug"
 gebaut=1
 for p in $PROGS; do
-    up_build vendor/firn/bin/firnc "$p" "$TMPD/$p.o" "$TMPD/$p.elf" \
+    up_build "$FIRNC" "$p" "$TMPD/$p.o" "$TMPD/$p.elf" \
         "$TMPD/crt.o" kernel/user/user.ld 0 "$TMPD/$p.err" || {
         bad "firnc0 uebersetzt $p.fi nicht"
         sed 's/^/        /' "$TMPD/$p.err" | head -6; gebaut=0; }

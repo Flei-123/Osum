@@ -49,7 +49,7 @@ hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' should not be there" || ok "$3
 val() { grep -oaE "aud: $2=[0-9]+" "$1" | tail -1 | grep -oE '[0-9]+$'; }
 
 echo "== 0. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/build.txt" 2>&1 \
     && ok "kernel builds ($(stat -c%s "$TMPD/k.mb") octets)" \
     || { bad "kernel does not build"; sed 's/^/        /' "$TMPD/build.txt" | tail -20; \

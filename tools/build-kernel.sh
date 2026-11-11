@@ -66,13 +66,13 @@ OHNE_TUNNEL=0
 [[ $TUNNEL == off ]] && OHNE_TUNNEL=1
 
 export FIRNLIB="${KERNEL_FIRNLIB:-$ROOT/lib}"
-bash vendor/firn/fetch-firnc.sh >/dev/null || {
-    echo "vendor/firn/fetch-firnc.sh fehlgeschlagen" >&2; exit 1; }
+. "$ROOT/tools/lib/firnenv.sh"
+firnenv_need_firnc1
 
 if [[ $STUFE == 0 ]]; then
-    FIRNC="$ROOT/vendor/firn/bin/firnc"
+    FIRNC=$FIRN_TOOLCHAIN/bin/firnc
 else
-    FIRNC="$ROOT/vendor/firn/bin/firnc1"
+    FIRNC=$FIRNC1
 fi
 [[ -x $FIRNC ]] || { echo "Uebersetzer fehlt: $FIRNC" >&2; exit 1; }
 

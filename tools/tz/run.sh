@@ -8,10 +8,8 @@
 #      (tools/tz/check.py)
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-export FIRNLIB="$(pwd)/lib"
+. tools/lib/firnenv.sh
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-[ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 rc=0
 python3 tools/tz/gen.py 2>/dev/null | cmp -s - lib/tz/zonedata.fi \
     && echo "  OK   zonedata.fi equals gen.py output" || { echo "  FAIL zonedata.fi is stale (run gen.py)"; rc=1; }

@@ -10,8 +10,7 @@ for t in mkntfs ntfsinfo ntfscat ntfscp ntfsls ntfsresize ntfsfix sgdisk mkfs.vf
 done
 OUT=$(mktemp -d); export OUT
 trap 'rm -rf "$OUT"' EXIT
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-FIRNC=vendor/firn/bin/firnc
+. tools/lib/firnenv.sh
 
 ESP_START=2048
 ESP_SECT=69632

@@ -4,11 +4,11 @@
 #   needs glslangValidator (+ spirv-val for the cross-check); without them only the hand-assembled module is tested.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc.sh failed"; exit 1; }
+. tools/lib/firnenv.sh
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 rc=0
-FIRNLIB="$PWD/lib" vendor/firn/bin/firnc --profile=app tools/spirv/test.fi -o "$T/test" > "$T/build" 2>&1 \
+FIRNLIB="$PWD/lib" "$FIRNC" --profile=app tools/spirv/test.fi -o "$T/test" > "$T/build" 2>&1 \
     || { echo "FAIL  build test"; grep -v '^warning\|^ld:' "$T/build" | head -30; exit 1; }
 files=()
 if command -v glslangValidator >/dev/null 2>&1; then

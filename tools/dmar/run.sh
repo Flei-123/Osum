@@ -5,12 +5,11 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-[ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 python3 tools/dmar/gen.py tools/dmar/check.tpl "$T/check.fi" >/dev/null && ok "tables generated" || { bad "generator"; exit 1; }
 $FIRNC "$T/check.fi" -o "$T/c" 2> "$T/c.err" && ok "check builds" || { bad "build"; head -8 "$T/c.err"; echo "DMAR: $pass passed, $fail failed"; exit 1; }
 "$T/c" > "$T/c.txt" 2>&1

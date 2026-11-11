@@ -5,10 +5,10 @@ OUT=${1:?usage: build-bios.sh <outdir>}
 mkdir -p "$OUT"
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
-[ -x vendor/firn/bin/firnc ] || bash vendor/firn/fetch-firnc.sh >/dev/null
+. tools/lib/firnenv.sh
 mkdir "$W/src"
 cp boot/common/* boot/bios/* "$W/src/"
-FIRNLIB=$PWD/lib vendor/firn/bin/firnc -c "$W/src/main.fi" -o "$W/main.o" --profile=kernel
+FIRNLIB=$PWD/lib "$FIRNC" -c "$W/src/main.fi" -o "$W/main.o" --profile=kernel
 as --64 -I "$W/src" -o "$W/entry.o" "$W/src/entry.s"
 as --64 -o "$W/stage0.o" "$W/src/stage0.s"
 ld -m elf_x86_64 -Ttext 0x7C00 --oformat binary -e stage0_start -o "$W/stage0.bin" "$W/stage0.o"

@@ -6,13 +6,12 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 T=$(mktemp -d /tmp/ax88772drv.XXXXXX)
 trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
 ok() { pass=$((pass + 1)); echo "  OK    $1"; }
 bad() { fail=$((fail + 1)); echo "  FAIL  $1"; }
-[ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh > /dev/null 2>&1
 
 python3 -I tools/ax88772drv/ref.py > "$T/want.txt"
 

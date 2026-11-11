@@ -101,11 +101,12 @@ python3 -c 'import cryptography' 2>/dev/null || {
 # =====================================================================
 echo "== 1. the build: /bin/ota, /bin/fetch and an image in which both live =="
 # =====================================================================
-bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 \
-    && ok "der festgenagelte Uebersetzer ($(cat vendor/firn/COMMIT | cut -c1-8))" \
-    || { bad "fetch-firnc.sh"; tail -5 "$OUT/firnc.log"; }
+[ -x "$FIRNC" ] \
+    && ok "the pinned compiler (firn $FIRN_VERSION_USED)" \
+    || { bad "pinned compiler missing"; }
 
-vendor/firn/bin/firnc kernel/user/ota.fi -o "$OUT/ota-probe.o" \
+. tools/lib/firnenv.sh
+"$FIRNC" kernel/user/ota.fi -o "$OUT/ota-probe.o" \
     2> "$OUT/ota-cc.log" \
     && ok "kernel/user/ota.fi builds ($(bash tools/structure/srcview.sh kernel/user/ota.fi | grep -c .) lines, profile kernel, no heap)" \
     || { bad "ota.fi baut nicht"; head -20 "$OUT/ota-cc.log"; }
@@ -113,7 +114,7 @@ vendor/firn/bin/firnc kernel/user/ota.fi -o "$OUT/ota-probe.o" \
 #   error: cannot read 'kernel/app/libc/dns.fi': No such file or directory
 #      --> kernel/app/fetch.fi:88:1  |  import libc.dns
 #
-FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc -c --profile=app \
+FIRNLIB="$ROOT/lib" "$FIRNC" -c --profile=app \
     -o "$OUT/fetch-probe.o" kernel/app/fetch.fi 2> "$OUT/fetch-cc.log" \
     && ok "kernel/app/fetch.fi builds with range/resume ($(grep -c . kernel/app/fetch.fi) lines)" \
     || { bad "fetch.fi baut nicht"; head -20 "$OUT/fetch-cc.log"; }

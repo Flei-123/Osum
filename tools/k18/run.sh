@@ -10,8 +10,9 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 ULD=kernel/user/user.ld
 BLOCKS=4096
 PROGS="sh echo cat ls power"
@@ -65,7 +66,6 @@ number_in() { # datei name
 }
 punkt() { python3 tools/gfx/checkshot.py pixel "$@" 2>/dev/null; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "K18: uebersprungen, qemu-system-x86_64 fehlt"
     exit 0

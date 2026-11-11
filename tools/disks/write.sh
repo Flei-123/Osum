@@ -7,8 +7,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-FIRNC=vendor/firn/bin/firnc
+. tools/lib/firnenv.sh
 
 echo "== 1. host: gptw + ofsfmt against independent parsers =="
 python3 tools/disks/mkdisk.py "$D" >/dev/null

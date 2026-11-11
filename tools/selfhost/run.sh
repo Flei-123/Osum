@@ -5,8 +5,9 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 ULD=kernel/user/user.ld
-FIRNC=vendor/firn/bin/firnc
-FC1=vendor/firn/bin/firnc1
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 MODULES=${SELFHOST_MODULES:-echo fas firnc1}
 GUEST_LIMIT=${SELFHOST_TIMEOUT:-1500}
 
@@ -23,21 +24,13 @@ differ() { if [ "$2" != "$3" ]; then ok "$1"; else bad "$1 (hashes equal: $2)"; 
 sha() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
 field() { grep -a -m1 -oE "$2" "$1" 2>/dev/null | head -1; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] && [ -x "$FC1" ] || { echo "compiler binaries missing"; exit 1; }
 
 echo "== 1. toolchain for the guest =="
 
-PIN=$(cat vendor/firn/COMMIT)
-FIRN_SRC=""
-for k in "${FIRN_REPO:-}" "$ROOT/../firn" "$ROOT/../../firn" "$ROOT/../../../firn" "$ROOT/../../../../firn" "$HOME/firn"; do
-    if [ -n "$k" ] && [ -d "$k/.git" ] && git -C "$k" cat-file -e "$PIN^{commit}" 2>/dev/null; then FIRN_SRC=$k; break; fi
-done
-[ -n "$FIRN_SRC" ] || { bad "pinned Firn source not found (set FIRN_REPO)"; echo "SELFHOST: $pass passed, $fail failed"; exit 1; }
-
 mkdir -p "$TMPD/fz"
-git -C "$FIRN_SRC" archive "$PIN" bin | tar -x -C "$TMPD/fz"
-ln -s "$ROOT/vendor/firn/lib" "$TMPD/fz/lib"
+ln -s "$FIRN_TOOLCHAIN/src" "$TMPD/fz/bin"
+ln -s "$FIRN_TOOLCHAIN/lib" "$TMPD/fz/lib"
 
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s || { bad "crt.s"; exit 1; }
 as --64 -o "$TMPD/hostcrt.o" tools/k11/hostcrt.s || { bad "hostcrt.s"; exit 1; }
@@ -75,7 +68,7 @@ guest_specs() {
         esac
         case "$rel" in
             lib/*) printf '%s\n' "$dest/${rel#lib/}=$f" ;;
-            vendor/firn/lib/*) printf '%s\n' "$dest/${rel#vendor/firn/lib/}=$f" ;;
+            "$FIRN_TOOLCHAIN"/lib/*) printf '%s\n' "$dest/${f#"$FIRN_TOOLCHAIN"/lib/}=$f" ;;
         esac
     done < <(bash tools/selfhost/closure.sh "$entry")
 }

@@ -6,7 +6,7 @@
 # usage: bash tools/wlan/lw2.sh        exit 0 = all OK
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 ok=0; bad=0
 echo "== lw2: group rekey + capabilities =="

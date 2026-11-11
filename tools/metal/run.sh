@@ -8,7 +8,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
 
 export FIRNLIB="$(pwd)/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 
 pass=0
 fail=0
@@ -45,9 +45,7 @@ ALT=""
 if [ -n "$VOR" ]; then
     ALTD="$TMPD/alt"
     if git worktree add --detach "$ALTD" "$VOR" >"$TMPD/wt.txt" 2>&1; then
-        cp -a vendor/firn/bin "$ALTD/vendor/firn/bin" 2>/dev/null
-        cp -a vendor/firn/lib "$ALTD/vendor/firn/lib" 2>/dev/null
-        cp -a vendor/firn/.gebaut "$ALTD/vendor/firn/.gebaut" 2>/dev/null
+        firnenv_prepare_old_tree "$ALTD"
         if ( cd "$ALTD" && bash tools/build-kernel.sh "$TMPD/alt.mb" --stufe 0 ) \
                 >"$TMPD/b0.txt" 2>&1; then
             ALT="$TMPD/alt.mb"

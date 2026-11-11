@@ -59,8 +59,7 @@ BUILDD=${DESIGNBUILD:-/tmp/osum-eh5build-$(pwd | md5sum | cut -c1-12)}
 mkdir -p "$BUILDD"
 
 # ---------------------------------------------------------- 1. bauen
-bash vendor/firn/fetch-firnc.sh > "$BUILDD/fetch.log" 2>&1 || {
-    echo "FEHLGESCHLAGEN: fetch-firnc.sh"; tail -5 "$BUILDD/fetch.log"; exit 1; }
+. tools/lib/firnenv.sh
 newer=$(find kernel tools/build-kernel.sh -newer "$BUILDD/k0.mb" -print -quit 2>/dev/null || true)
 if [ ! -s "$BUILDD/k0.mb" ] || [ -n "$newer" ] || [ -n "${DESIGNREBUILD:-}" ]; then
     ./tools/build-kernel.sh "$BUILDD/k0.mb" > "$BUILDD/k.log" 2>&1 \
@@ -83,7 +82,7 @@ for p in $progs; do
     fi
     UPROF=""; UCRT="$BUILDD/crt.o"
     grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
-    vendor/firn/bin/firnc $UPROF -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
+    "$FIRNC" $UPROF -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
         > "$BUILDD/e-$p" 2>&1 \
         || { echo "FEHLGESCHLAGEN beim Uebersetzen von $p"; head -30 "$BUILDD/e-$p"; exit 1; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
@@ -97,7 +96,7 @@ echo "programme $(echo $GEBAUT | wc -w)"
 GEBAUT_APP=""
 for p in ${APPS:-fetch}; do
     [ -f "kernel/app/$p.fi" ] || continue
-    if FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc -c --profile=app \
+    if FIRNLIB="$ROOT/lib" "$FIRNC" -c --profile=app \
             -o "$BUILDD/app-$p.o" "kernel/app/$p.fi" \
             > "$BUILDD/app-$p.err" 2>&1 \
        && ld -T kernel/user/user.ld -o "$BUILDD/$p.elf" \

@@ -18,7 +18,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 PROGS="sh ls cat echo mv rm sleep ps"
 mkdir -p "$T/bin"
 bash tools/sync/build.sh "$T/bin" 0 $PROGS > "$T/b.txt" 2>&1 && ok "programs build" || { bad "programs build"; head -15 "$T/b.txt"; echo "LIVESWAP: $pass passed, $fail failed"; exit 1; }

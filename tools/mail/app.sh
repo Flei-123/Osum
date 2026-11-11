@@ -22,7 +22,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/pidkill.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 STAGES=${*:-model build}
 T=$(mktemp -d)
 STUBPID=""
@@ -31,7 +31,6 @@ trap cleanup EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
-[ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 
 run_stub() { # mode outdir [cert key]
     rm -f "$2/ports"; mkdir -p "$2"

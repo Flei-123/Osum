@@ -16,7 +16,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 PROGS="sh cat echo ls cp rm mkdir wc shasum mount umount cptempo"
 SIZE=${CPT_SIZE:-262144}
@@ -26,7 +26,6 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || exit 1
 K=${1:-}
 if [ -z "$K" ]; then
     bash tools/build-kernel.sh "$W/k0.mb" --stufe 0 > "$W/build.log" 2>&1 || { tail -15 "$W/build.log"; exit 1; }

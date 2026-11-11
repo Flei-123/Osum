@@ -5,7 +5,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 SCHNELL=${OSUM_AESNI_SCHNELL:-0}
 
 TMPD=$(mktemp -d)

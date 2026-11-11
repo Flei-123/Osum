@@ -19,7 +19,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 PROGS="sh ls cat echo id whoami sleep wc true false seq svc init ps kill reboot shutdown cp rm mkdir mount odbd bench"
 BLOCKS=16384
 ODBC="python3 -I $ROOT/tools/odbc/odbc.py"
@@ -39,7 +39,6 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 note(){ printf '        %s\n' "$1"; }
 finish() { echo "BENCH-INOS: $pass passed, $fail failed"; [ "$fail" = 0 ]; exit $?; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc missing"; exit 1; }
 command -v qemu-system-x86_64 >/dev/null || { echo "BENCH-INOS: skipped, no qemu"; exit 0; }
 if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then ACCEL="-accel kvm"; else ACCEL="-accel tcg"; fi

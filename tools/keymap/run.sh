@@ -18,8 +18,7 @@ trap 'cd "$ROOT"; [ -n "$OLDWT" ] && git worktree remove --force "$OLDWT" >/dev/
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "KEYMAP: fetch-firnc.sh failed"; exit 1; }
-FIRNC="$ROOT/vendor/firn/bin/firnc"
+. "$ROOT/tools/lib/firnenv.sh"
 
 host_build() {
     local lib=$1 out=$2
@@ -92,7 +91,7 @@ printf 'tray_language=1\n' > "$T/taskbar.conf"
 run_tree() {
     local tree=$1 out=$2
     mkdir -p "$out"
-    ( cd "$tree" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+    ( cd "$tree" && firnenv_prepare_old_tree . >/dev/null 2>&1
       ALLTAGBUILD="$out.build" bash tools/alltag/build.sh "$out" kbd=no warten=1 uitrace=yes lang=en \
         extra="modfs osum wmshell wmdauer usb hidgen lang=en" hold=no waitfor="eingabe: ber=" \
         progs="desktop taskbar sh echo ls cat" xfile=/etc/keyboard.conf="$T/keyboard.conf" tbconf="$T/taskbar.conf" \

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 . tools/lib/pidkill.sh
 ROOT=$PWD
 export FIRNLIB=$ROOT/lib
@@ -40,14 +41,14 @@ fi
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s
 SPEC="/bin/ /tmp/ /dev/ /proc/ /etc/ /etc/ssl/"
 for p in sh ls echo rm df shasum sleep; do
-    vendor/firn/bin/firnc kernel/user/$p.fi -o "$TMPD/$p.o" 2> "$TMPD/e$p" || { head "$TMPD/e$p"; echo "BIGFETCH: build failed"; exit 1; }
+    "$FIRNC" kernel/user/$p.fi -o "$TMPD/$p.o" 2> "$TMPD/e$p" || { head "$TMPD/e$p"; echo "BIGFETCH: build failed"; exit 1; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" -o "$TMPD/$p.elf" "$TMPD/crt.o" "$TMPD/$p.o"
     strip --strip-all "$TMPD/$p.elf" 2>/dev/null
     SPEC="$SPEC /bin/$p=$TMPD/$p.elf"
 done
 mkdir -p "$TMPD/src/kernel/app"
 cp "$FETCH_SRC" "$TMPD/src/kernel/app/fetch.fi"
-if vendor/firn/bin/firnc -c --profile=app -o "$TMPD/fetch.o" "$TMPD/src/kernel/app/fetch.fi" > "$TMPD/fc.txt" 2>&1 \
+if "$FIRNC" -c --profile=app -o "$TMPD/fetch.o" "$TMPD/src/kernel/app/fetch.fi" > "$TMPD/fc.txt" 2>&1 \
     && ld -T kernel/user/user.ld -o "$TMPD/fetch.elf" "$TMPD/fetch.o" 2>> "$TMPD/fc.txt"; then
     strip --strip-all "$TMPD/fetch.elf" 2>/dev/null
     ok "fetch ($LABEL) built, $(stat -c%s "$TMPD/fetch.elf") octets"

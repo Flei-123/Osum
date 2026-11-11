@@ -4,8 +4,7 @@
 # No QEMU device exists for this chip; the framing is unverified on hardware (see lib header).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-export FIRNLIB="$PWD/lib"
+. tools/lib/firnenv.sh
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 if ! $FIRNC tools/ch397/test.fi -o "$D/t" 2> "$D/err"; then echo "  FAIL  build"; head -20 "$D/err"; exit 1; fi
 "$D/t" | tee "$D/out"

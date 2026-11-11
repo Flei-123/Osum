@@ -4,7 +4,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 BLOCKS=${BSTORE_BLOCKS:-196608}
 BIG_BYTES=${BSTORE_BIG_BYTES:-6291456}
 
@@ -18,7 +18,6 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 is()  { if [ "$2" = "$3" ]; then ok "$1: $2"; else bad "$1: '$2', expected '$3'"; fi; }
 field() { sed -n "/^==$1==/,/^==/p" "$TMPD/run.txt" | grep -a "^$2: " | tail -1 | sed "s/^$2: //"; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "missing compiler: $FIRNC"; exit 1; }
 command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "bstorestream: skipped, qemu-system-x86_64 missing"; exit 0; }
 

@@ -11,7 +11,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 command -v qemu-system-x86_64 >/dev/null || { echo "DBGSRV-QEMU: skipped, no qemu"; exit 0; }
 command -v curl >/dev/null || { echo "DBGSRV-QEMU: skipped, no curl"; exit 0; }
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 
 TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
 WRONG=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')

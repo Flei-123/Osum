@@ -2,7 +2,8 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"
-CC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
+CC=$FIRNC
 OUT=${OUT:-/tmp/k11build}
 mkdir -p "$OUT"
 [ -f "$OUT/crt.o" ] || as --64 -o "$OUT/crt.o" kernel/user/crt.s || exit 1

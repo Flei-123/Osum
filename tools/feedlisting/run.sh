@@ -13,7 +13,8 @@ export FIRNLIB="$ROOT/lib"
 export BOOT_KERNEL_COPY=1
 export OSUM_CPU=${OSUM_CPU:-Haswell}
 OLD_CLIENT_REF=${OLD_CLIENT_REF:-a11a0b9e8}
-CC="$ROOT/vendor/firn/bin/firnc"
+. "$ROOT/tools/lib/firnenv.sh"
+CC=$FIRNC
 OUT=$(mktemp -d "${TMPDIR:-/tmp}/feedlisting.XXXXXX")
 export OUT
 PORT=${FEEDLISTING_PORT:-$((19000 + ($$ % 900)))}
@@ -70,7 +71,7 @@ make_feed() {
 }
 
 echo "== 1. publisher: both documents, same content, legacy bytes unchanged =="
-bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 && ok "pinned compiler" || bad "fetch-firnc.sh"
+[ -x "$FIRNC" ]  && ok "pinned compiler" || bad "pinned compiler missing"
 bash tools/install/pakete.sh "$OUT" > "$OUT/pak1.log" 2>&1 && ok "signed sources" || bad "install/pakete.sh"
 python3 tools/ota/mkcerts.py "$OUT/certs" ota.test 10.0.2.2 > "$OUT/certs.log" 2>&1 && ok "certificates" || bad "mkcerts.py"
 

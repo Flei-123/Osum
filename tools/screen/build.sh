@@ -16,7 +16,7 @@ MONO=assets/osum-mono.ttf
 SANS=assets/osum-sans.ttf
 PROGS="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "firnc fehlt"; exit 1; }
+. tools/lib/firnenv.sh
 
 echo ">> Kern"
 bash tools/build-kernel.sh "$TMPD/k0.mb" --stufe 0 > "$TMPD/kern.log" 2>&1 \
@@ -28,7 +28,7 @@ as --64 -o "$TMPD/crt.o" kernel/user/crt.s || exit 1
 for p in $PROGS; do
     UPROF=""; UCRT="$TMPD/crt.o"
     grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
-    vendor/firn/bin/firnc $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/e-$p" 2>&1 \
+    "$FIRNC" $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/e-$p" 2>&1 \
         || { echo "firnc $p:"; head -8 "$TMPD/e-$p"; exit 1; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
         -o "$TMPD/$p.elf" $UCRT "$TMPD/$p.o" || exit 1

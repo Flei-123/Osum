@@ -5,8 +5,11 @@ import subprocess
 import sys
 import os
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import firnenv
+
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-CC = os.path.join(ROOT, "vendor/firn/bin/firnc")
+CC = firnenv.firnc_path(ROOT)
 
 
 def einmal(file, profil_app=False):

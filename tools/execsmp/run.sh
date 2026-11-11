@@ -38,7 +38,7 @@ TMPD=${EXECSMP_DIR:-$(mktemp -d)}; mkdir -p "$TMPD"
 PROGS="sh echo execsmp"
 
 echo "== build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 mkdir -p "$TMPD/bin"
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then
     ok "programs build"

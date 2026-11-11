@@ -36,7 +36,7 @@ trap 'rm -rf "$T"' EXIT
 git diff --quiet HEAD -- . || { echo "feed-dev: working tree not clean (commit first, the stand names the commit)"; exit 1; }
 COUNT=$(git rev-list --count HEAD)
 
-bash vendor/firn/fetch-firnc.sh > /dev/null
+. tools/lib/firnenv.sh
 mkdir -p "$T/k" "$T/ovl"
 if [ -n "${FEED_KERNEL:-}" ]; then
     cp "$FEED_KERNEL" "$T/k/osum.mb"

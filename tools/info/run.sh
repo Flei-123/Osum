@@ -25,7 +25,7 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
 cd "$SRC"
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 
 # --- build tool: default image id is "dev", IMAGE_ID overrides, junk is refused
 if [ -z "${OLD:-}" ]; then

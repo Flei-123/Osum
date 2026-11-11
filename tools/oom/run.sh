@@ -36,8 +36,7 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     summary_note "skipped, qemu-system-x86_64 is not there"
     exit 0
 fi
-bash vendor/firn/fetch-firnc.sh >/dev/null || {
-    echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
+. tools/lib/firnenv.sh
 
 MONO=assets/osum-mono.ttf
 SANS=assets/osum-sans.ttf
@@ -177,7 +176,7 @@ BUILT=1
 for p in $PROGS; do
     UPROF=""; UCRT="$TMPD/crt.o"
     grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
-    vendor/firn/bin/firnc $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p.o" \
+    "$FIRNC" $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p.o" \
         > "$TMPD/e$p" 2>&1 || {
         bad "firnc uebersetzt $p.fi nicht"; sed 's/^/        /' "$TMPD/e$p" | head -5
         BUILT=0; continue; }

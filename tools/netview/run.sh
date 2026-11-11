@@ -39,8 +39,9 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 PROGS="sh ls cat echo ping wget netview nvcheck ps"
 BLOCKS=4096
 
@@ -105,7 +106,6 @@ ip netns list >/dev/null 2>&1 || { echo "NETVIEW: skipped, no network namespaces
 # =====================================================================
 echo "== 1. building: the kernel out of both compilers, and the programs =="
 # =====================================================================
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh failed"; exit 1; }
 
 for s in 0 1; do
     if bash tools/build-kernel.sh "$TMPD/k$s.mb" --stufe "$s" > "$TMPD/b$s.log" 2>&1; then

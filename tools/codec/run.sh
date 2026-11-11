@@ -6,8 +6,9 @@ cd "$(dirname "$0")/../.."
 . tools/lib/userprog.sh      # up_build
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 ULD=kernel/user/user.ld
 PROGS="sh cat echo h264t"
 
@@ -35,8 +36,6 @@ wert() { grep -a -m1 "^h264: $2 = " "$1" 2>/dev/null | sed 's/.* = //' \
          | tr -d '\r\000'; }
 
 echo "== 0. die Vorbedingungen =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 \
-    || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 command -v qemu-system-x86_64 >/dev/null 2>&1 || {
     summary_note "skipped, qemu-system-x86_64 is missing"; exit 0; }
 for w in ffmpeg python3 sha256sum; do

@@ -21,7 +21,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/brand-env.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 LDSCRIPT=kernel/kernel.ld
 ULD=kernel/user/user.ld
 PROGS="sh ls cat echo id whoami sleep wc true false seq svc init ps kill reboot shutdown cp rm mkdir mount odbd"
@@ -42,7 +42,6 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 note(){ printf '        %s\n' "$1"; }
 is() { if [ "$2" = "$3" ]; then ok "$1 ($2)"; else bad "$1: '$2', expected '$3'"; fi; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc missing"; exit 1; }
 command -v qemu-system-x86_64 >/dev/null || { echo "ODB: skipped, no qemu"; exit 0; }
 if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then ACCEL="-accel kvm"; else ACCEL="-accel tcg"; fi

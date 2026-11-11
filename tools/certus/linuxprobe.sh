@@ -20,14 +20,15 @@ QEMU=${QEMU_X86:-qemu-system-x86_64}
 KVM=(); [ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)
 [ -r "$BIN" ] || { echo "PROBE binary missing $BIN"; exit 0; }
 
-bash vendor/firn/fetch-firnc.sh > "$D/firnc.log" 2>&1
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
 bash tools/build-kernel.sh "$D/k.mb" --stufe 1 > "$D/kernel.log" 2>&1 || { echo "PROBE kernel-build FAIL"; tail -5 "$D/kernel.log"; exit 0; }
 
 mkdir -p "$D/p"
 as --64 -o "$D/crt.o" kernel/user/crt.s
 spec="/bin/ /tmp/ /etc/ /dev/ /proc/ /sys/ /root/ /lib/"
 for p in sh ls cat echo; do
-    vendor/firn/bin/firnc1 "kernel/user/$p.fi" -o "$D/p/$p.o" > "$D/p/$p.log" 2>&1 || { echo "PROBE prog-build FAIL $p"; exit 0; }
+    "$FIRNC1" "kernel/user/$p.fi" -o "$D/p/$p.o" > "$D/p/$p.log" 2>&1 || { echo "PROBE prog-build FAIL $p"; exit 0; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F1.u_start" -o "$D/p/$p.elf" "$D/crt.o" "$D/p/$p.o" 2>>"$D/p/$p.log" || exit 0
     strip --strip-all "$D/p/$p.elf" 2>/dev/null
     spec="$spec /bin/$p=$D/p/$p.elf"

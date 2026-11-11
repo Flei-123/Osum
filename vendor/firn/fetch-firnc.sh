@@ -142,4 +142,5 @@ FIRNLIB="$HERE/lib" "$HERE/bin/firnc" "$FIRNC1_SRC" -o "$HERE/bin/firnc1"
 link_aliases
 echo "$STAMP" > "$HERE/.gebaut"
 rm -rf "$BUILD"
-echo ">> done: vendor/firn/bin/firnc + bin/firnc1 + lib ($SHORT, patches $PATCHSUM)"
+. tools/lib/firnenv.sh
+echo ">> done: "$FIRNC" + bin/firnc1 + lib ($SHORT, patches $PATCHSUM)"

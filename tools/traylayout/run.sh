@@ -5,6 +5,7 @@
 #   TRAYLAYOUT_NOCP=1 skips the counter-proof run.  Pictures: <keep-dir>/new, <keep-dir>/old.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 KEEP=${1:-}
 D=$(mktemp -d); trap 'cd "$ROOT"; [ -n "${OLDWT:-}" ] && git worktree remove --force "$OLDWT" >/dev/null 2>&1; rm -rf "$D"' EXIT
@@ -22,7 +23,7 @@ if [ -z "${TRAYLAYOUT_NOCP:-}" ]; then
     OLDWT="$D/oldwt"
     git worktree add --detach "$OLDWT" "$REF" >/dev/null 2>&1
     mkdir -p "$OLDWT/tools/traylayout"; cp tools/traylayout/* "$OLDWT/tools/traylayout/"
-    (cd "$OLDWT" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1; bash tools/traylayout/shot.sh "$D/old" light > "$D/old.log" 2>&1)
+    (cd "$OLDWT" && firnenv_prepare_old_tree . >/dev/null 2>&1; bash tools/traylayout/shot.sh "$D/old" light > "$D/old.log" 2>&1)
     python3 -I tools/traylayout/check.py "$D/old" > "$D/old.res"; cat "$D/old.res" | grep FAIL | sed 's/^/  (old) /'
     fo=$(grep -c '^  FAIL' "$D/old.res")
     need=4; [ -n "${TRAYLAYOUT_OLD:-}" ] && need=1   # an explicit near ref differs by one change (Z9: volume field)

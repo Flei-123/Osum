@@ -8,6 +8,7 @@
 # COUNTER-PROBE: the tree before the dialog (Win+R opens the start menu): no "runbox:" line at all.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${1:-$(mktemp -d)}
@@ -25,7 +26,7 @@ command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "RUNBOX: skipped, no qem
 # event driven (W1d): tools/runbox/drive.py sends the keys through QMP and waits for `runbox: ready` / `exec` / `fail` lines
 run_tree() { # tree out progs ready-timeout
     mkdir -p "$2"
-    ( cd "$1" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+    ( cd "$1" && firnenv_prepare_old_tree . >/dev/null 2>&1
       ALLTAGBUILD="$2.build" bash tools/alltag/build.sh "$2" kbd=no warten=1 uitrace=yes \
         extra="modfs osum wmshell wmdauer usb hidgen" hold=no waitfor="eingabe: ber=" progs="$3" \
         qemu="-device qemu-xhci -device usb-kbd -qmp unix:$2/qmp.sock,server,nowait" \

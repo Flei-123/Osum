@@ -9,7 +9,7 @@
 set -uo pipefail
 ROOT=${1:-$(cd "$(dirname "$0")/../.." && pwd)}
 cd "$ROOT"
-[ -x vendor/firn/bin/firnc ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 PASS=0; FAIL=0
@@ -20,7 +20,7 @@ mkdir -p "$T/fonts"
 cp assets/osum-sans.ttf "$T/fonts/sans.ttf"; cp assets/osum-symbols.ttf "$T/fonts/symbols.ttf"
 
 build_host() {
-    FIRNLIB="$1" vendor/firn/bin/firnc --profile=app tools/fonthint/host.fi -o "$2" > "$T/build.log" 2>&1
+    FIRNLIB="$1" "$FIRNC" --profile=app tools/fonthint/host.fi -o "$2" > "$T/build.log" 2>&1
 }
 run_host() {
     (cd "$T/fonts" && "$1" > "$2" 2>&1)
@@ -51,7 +51,7 @@ if build_host "$T/lib-over" "$T/host-over"; then
     if [ "$rc" != 0 ] && [ "$nf" -ge 1 ]; then ok "counter-proof overhint: every top snapped -> $nf checks red"; else bad "counter-proof overhint not caught (exit $rc, $nf red)"; fi
 else bad "overhint build"; fi
 
-if FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc --profile=app -c kernel/user/charmap.fi -o "$T/charmap.o" > "$T/fg.log" 2>&1; then ok "fuiglyph (via charmap) compiles in profile app"; else bad "fuiglyph compile"; grep -v '^warning' "$T/fg.log" | head; fi
+if FIRNLIB="$ROOT/lib" "$FIRNC" --profile=app -c kernel/user/charmap.fi -o "$T/charmap.o" > "$T/fg.log" 2>&1; then ok "fuiglyph (via charmap) compiles in profile app"; else bad "fuiglyph compile"; grep -v '^warning' "$T/fg.log" | head; fi
 
 wire() {
 python3 -I - "$1" <<'PY'
@@ -78,7 +78,7 @@ wire "$T/old" > "$T/wire-old.out"
 if grep -q '^FAIL' "$T/wire-old.out"; then ok "counter-proof unwired: $(grep -c '^FAIL' "$T/wire-old.out") audit lines red"; else bad "counter-proof unwired not caught"; fi
 
 build_painter() {
-    FIRNLIB="$1" vendor/firn/bin/firnc --profile=app tools/fonthint/painter.fi -o "$2" > "$T/pbuild.log" 2>&1
+    FIRNLIB="$1" "$FIRNC" --profile=app tools/fonthint/painter.fi -o "$2" > "$T/pbuild.log" 2>&1
 }
 if build_painter "$ROOT/lib" "$T/painter"; then
     run_host "$T/painter" "$T/painter.out"; rc=$?
@@ -110,11 +110,11 @@ say("if role != ROLE_ICON {" in fs and fs.find("fonthint.painter_attach") > fs.f
 say("ttf.font_vhint(f, pxi as u32, by1)" in pat and "1.0, 0.0, m10, vy, 0.0, 0.0" in pat, "vendor painter scales glyphs by the hook factor (patch 0011)")
 PY
 }
-attach "$ROOT" "$ROOT/vendor/firn" > "$T/attach.out"; cat "$T/attach.out"
+attach "$ROOT" "$FIRN_TOOLCHAIN" > "$T/attach.out"; cat "$T/attach.out"
 PASS=$((PASS+$(grep -c '^OK' "$T/attach.out"))); FAIL=$((FAIL+$(grep -c '^FAIL' "$T/attach.out")))
 mkdir -p "$T/old2/kernel/user"
 sed 's/fonthint\.painter_attach/REMOVED_/g' kernel/user/fuiglyph.fi > "$T/old2/kernel/user/fuiglyph.fi"
-attach "$T/old2" "$ROOT/vendor/firn" > "$T/attach-old.out"
+attach "$T/old2" "$FIRN_TOOLCHAIN" > "$T/attach-old.out"
 if grep -q '^FAIL' "$T/attach-old.out"; then ok "counter-proof unattached: $(grep -c '^FAIL' "$T/attach-old.out") audit lines red"; else bad "counter-proof unattached not caught"; fi
 
 echo "FONTHINT: $PASS ok, $FAIL fail"

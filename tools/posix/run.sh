@@ -49,8 +49,9 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 
 export FIRNLIB="$(pwd)/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 LDSCRIPT=kernel/kernel.ld
 ULD=kernel/user/user.ld
 PROGS="sh ls cat echo rm hello posix"
@@ -74,7 +75,6 @@ num() { # name value op expected
 has() { grep -aqF "$2" "$1" && ok "$3" || bad "$3 -- '$2' is missing"; }
 hasnot() { grep -aqF "$2" "$1" && bad "$3 -- '$2' should not be there" || ok "$3"; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing: $FIRNC"; exit 1; }
 [ -x "$FC1" ]   || { echo "firnc1 is missing: $FC1"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then

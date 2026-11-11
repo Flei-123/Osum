@@ -3,13 +3,12 @@
 # tools/vulkan/run.sh -- libvulkan.so.1 (Firn, lib/vulkan) against lavapipe: same C client, byte-identical readbacks, mutation counter-proofs.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc.sh failed"; exit 1; }
+. tools/lib/firnenv.sh
 LVP=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 . tools/lib/tmpdir.sh; osum_tmp_guard "${1:-}" "$D"
 pass=0; fail=0
 ck() { if [ "$2" = ok ]; then pass=$((pass+1)); echo "  ok   $1"; else fail=$((fail+1)); echo "  FAIL $1"; fi; }
-FIRNC=vendor/firn/bin/firnc
 python3 -I tools/vulkan/genproc.py "$PWD" > /dev/null
 git diff --quiet -- lib/vulkan/vkproc.fi && ck "vkproc.fi is generated from the exports (no drift)" ok || ck "vkproc.fi is generated from the exports (no drift)" no
 gcc -O1 -Wall -o "$D/client" tools/vulkan/client.c -ldl && ck "client builds" ok || { ck "client builds" no; exit 1; }

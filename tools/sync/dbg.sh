@@ -4,7 +4,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 BLOCKS=6144
 PROGS="sh ls cat echo mkdir rm cp sync vault backup key bsect"
 PASS=eine-lange-passphrase

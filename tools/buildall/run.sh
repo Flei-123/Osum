@@ -3,7 +3,8 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="${FIRNLIB:-$ROOT/lib}"
-CC="${FIRNC:-$ROOT/vendor/firn/bin/firnc}"
+. "$ROOT/tools/lib/firnenv.sh"
+CC="${FIRNC:-"$FIRNC"}"
 BASELINE="$ROOT/tools/buildall/baseline.txt"
 JOBS="${BUILDALL_JOBS:-6}"
 MODE="${1:-check}"

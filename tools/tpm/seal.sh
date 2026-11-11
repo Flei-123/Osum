@@ -3,7 +3,8 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 export FIRNLIB="${FIRNLIB:-$(pwd)/lib}"
-CC="$(pwd)/vendor/firn/bin/firnc"
+. tools/lib/firnenv.sh
+CC=$FIRNC
 T=$(mktemp -d)
 SWPID=""
 cleanup() { [ -n "$SWPID" ] && kill "$SWPID" 2>/dev/null; rm -rf "$T"; rm -f tests/tpm/*.test; }

@@ -29,7 +29,7 @@ export FIRNLIB="$ROOT/lib"
 
 OUT=${1:-/tmp/wmplug-pakete}
 OPK=${OPK:-$(python3 tools/lib/opkpfad.py)}   # the old /root/orientos-install folder is gone
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 mkdir -p "$OUT"
 
 CRTDIR=$(mktemp -d)

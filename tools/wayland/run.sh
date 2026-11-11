@@ -59,8 +59,7 @@ else
     bad "wltest baut nicht"; grep -v 'GNU-stack\|deprecated' "$TMPD/cc.txt" | head -5 | sed 's/^/        /'
 fi
 
-FIRNC="$ROOT/vendor/firn/bin/firnc"
-export FIRNLIB="$ROOT/lib"
+. "$ROOT/tools/lib/firnenv.sh"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>"$TMPD/as.txt" \
     && ok "crt.s assembliert" || { bad "crt.s"; sed 's/^/        /' "$TMPD/as.txt" | head -3; }
 if "$FIRNC" kernel/user/sh.fi -o "$TMPD/sh.o" > "$TMPD/sh.txt" 2>&1 \

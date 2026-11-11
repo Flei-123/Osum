@@ -9,7 +9,7 @@ fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc.sh failed"; exit 1; }
+. tools/lib/firnenv.sh
 HOSTOUT="$TMPD/host" bash tools/k11/hostbuild.sh mkfs || { bad "mkfs.fi compile"; exit 1; }
 FI="$TMPD/host/mkfs"
 PY="python3 $ROOT/tools/osum/mkfs.py"

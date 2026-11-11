@@ -35,7 +35,7 @@ run_one() { # <name> <extra words> <script>
     ( DESIGNBUILD="$TMPD/$1/build" bash tools/design/eh6.sh "$TMPD/$1/o" res=1280x800 accel=kvm tafel=nein progs="$PROGS" \
         extra="$2" drehbuch="$TMPD/$3" > "$TMPD/$1/o.log" 2>&1 )
 }
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 run_one a "safeauto safewd" idle.txt &
 run_one b "safeauto safewd stallspin=100000" hang.txt &
 run_one c "safeauto stallspin=100000" hang.txt &

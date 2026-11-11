@@ -37,8 +37,7 @@ python3 -c "import PIL" 2>/dev/null || {
 
 # ------------------------------------------------------------ 1. bauen
 echo "== 1. bauen =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
-    echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
+. tools/lib/firnenv.sh
 if bash "$B" "$OUT/b0" script='echo bereit;exit' \
        progs="calc zip trashbin viewer snip lock sh echo ls cat" \
        > "$OUT/bauen.log" 2>&1; then

@@ -21,7 +21,7 @@ cp "$FSP" "$TMPD/fsp.orig"; cp "$SYS" "$TMPD/sys.orig"
 trap 'cp "$TMPD/fsp.orig" "$FSP"; cp "$TMPD/sys.orig" "$SYS"; rm -rf "$TMPD"' EXIT
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 mkdir -p "$TMPD/bin"
 PROGS="sh cat echo apprights"
 bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1 \

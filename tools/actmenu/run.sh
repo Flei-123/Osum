@@ -68,7 +68,7 @@ python3 $M check "$TMPD/etc/badmenu.actions" > "$TMPD/h5.txt" 2>&1 \
     && bad "host reader takes a broken menu kind" || ok "host reader refuses a broken menu kind"
 
 echo "== 2. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 mkdir -p "$TMPD/bin"
 PROGS="sh ls cat echo sleep mkdir orientbus notes act"
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS explorer > "$TMPD/b.txt" 2>&1; then

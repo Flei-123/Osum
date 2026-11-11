@@ -18,8 +18,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-export FIRNLIB="$ROOT/lib"
+. tools/lib/firnenv.sh
 T=$(mktemp -d)
 STUBPID=""
 cleanup() { [ -n "$STUBPID" ] && kill "$STUBPID" 2>/dev/null; rm -rf "$T"; }
@@ -28,7 +27,6 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
-[ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 
 # ---- 1. oracle
 "$FIRNC" tools/mail/oracle.fi -o "$T/oracle" 2> "$T/o.err" && ok "oracle builds" || { bad "oracle build"; head -8 "$T/o.err"; }

@@ -4,7 +4,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 
 AUS=${1:-docs/shots/hotplug2}
 mkdir -p "$AUS"
@@ -20,8 +20,6 @@ done
 python3 -c "import PIL" 2>/dev/null || { echo "KNOPF: uebersprungen, PIL fehlt"; exit 0; }
 
 echo "== bauen =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
-    [ -x "$FIRNC" ] || { echo "kein firnc"; exit 1; }; }
 ./tools/build-kernel.sh "$ARB/k.mb" > "$ARB/build.log" 2>&1 \
     || { echo "the kernel cannot be built"; tail -5 "$ARB/build.log"; exit 1; }
 echo "  Kern: $(stat -c%s "$ARB/k.mb") Oktette"

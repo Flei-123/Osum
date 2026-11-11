@@ -297,7 +297,7 @@ export function startePraesenzDienst(opt) {
       key: fs.readFileSync(key),
       minVersion: 'TLSv1.3',
       // DIESELBEN ZWEI VERFAHREN WIE DIE GERAETEBRUECKE, und aus
-      // demselben Grund: Osums TLS (vendor/firn/lib/tls/tls.fi) kann
+      // demselben Grund: Osums TLS (lib/tls/tls.fi of the toolchain) kann
       // genau diese zwei. Eine dritte Angabe hier waere eine Zeile, die
       // nie zutrifft, und beim naechsten Lesen eine falsche Auskunft.
       ciphers: 'TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384',

@@ -99,8 +99,7 @@ OUT=$(cd "$OUT" && pwd)
 BUILDD=$(cd "$BUILDD" && pwd)
 
 # ---------------------------------------------------------- 1. bauen
-bash vendor/firn/fetch-firnc.sh > "$BUILDD/fetch.log" 2>&1 || {
-    echo "FEHLGESCHLAGEN: fetch-firnc.sh"; tail -5 "$BUILDD/fetch.log"; exit 1; }
+. tools/lib/firnenv.sh
 newer=$(find kernel tools/build-kernel.sh -newer "$BUILDD/k0.mb" -print -quit 2>/dev/null || true)
 if [ ! -s "$BUILDD/k0.mb" ] || [ -n "$newer" ] || [ -n "${DESIGNREBUILD:-}" ]; then
     ./tools/build-kernel.sh "$BUILDD/k0.mb" > "$BUILDD/k.log" 2>&1 \
@@ -119,7 +118,7 @@ for p in $progs; do
        && [ -n "$USERNEW" ] && [ "$BUILDD/$p.elf" -nt "$USERNEW" ]; then
         continue
     fi
-    vendor/firn/bin/firnc -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
+    "$FIRNC" -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
         > "$BUILDD/e-$p" 2>&1 \
         || { echo "FEHLGESCHLAGEN beim Uebersetzen von $p"; head -30 "$BUILDD/e-$p"; exit 1; }
     CRT="$BUILDD/crt.o"

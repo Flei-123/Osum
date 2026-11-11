@@ -62,7 +62,7 @@ run_one() { # name, drehbuch
     rm -rf "$TMPD/$1/build"
 }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 run_one a "$TMPD/a.txt"
 run_one b "$TMPD/b.txt"
 SA="$TMPD/a/o/serial.txt"; SB="$TMPD/b/o/serial.txt"

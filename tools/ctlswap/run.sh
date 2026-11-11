@@ -10,7 +10,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 has()  { grep -aqF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 hasnt() { grep -aqF -- "$2" "$1" && bad "$3 -- '$2' present" || ok "$3"; }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 PROGS="sh ls cat echo jarvisctl"
 mkdir -p "$T/bin"
 bash tools/sync/build.sh "$T/bin" 0 $PROGS > "$T/b.txt" 2>&1 && ok "programs build" || { bad "programs build"; head -15 "$T/b.txt"; echo "CTLSWAP: $pass passed, $fail failed"; exit 1; }

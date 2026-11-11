@@ -6,8 +6,9 @@ W=${1:?arbeitsverzeichnis}
 S=${2:-0}
 mkdir -p "$W"
 
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 LDSCRIPT=kernel/kernel.ld
 ULD=kernel/user/user.ld
 PROGS=${BRIDGE_PROGS:-"sh ls cat echo chmod jsig jarvisctl"}
@@ -21,7 +22,6 @@ for f in boot isr switch smp hv; do
 done
 as --64 -o "$W/crt.o" kernel/user/crt.s || exit 1
 
-export FIRNLIB="$ROOT/lib"
 "$CC" kernel/kmain.fi -o "$W/k.o" > "$W/build.log" 2>&1 || {
     echo "kmain.fi uebersetzt nicht"; tail -20 "$W/build.log"; exit 1; }
 "$CC" kernel/uprog.fi -o "$W/u.o" >> "$W/build.log" 2>&1 || {

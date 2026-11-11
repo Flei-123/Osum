@@ -9,6 +9,7 @@ import sys
 import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import brand
+import firnenv
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -289,9 +290,9 @@ def cmd_build(args):
         print("osdk: build stopped, the manifest is refused")
         return 1
     short = short_of(f["id"])
-    firnc = os.path.join(ROOT, "vendor", "firn", "bin", "firnc")
+    firnc = firnenv.firnc_path(ROOT)
     if not os.access(firnc, os.X_OK):
-        print("osdk: %s missing (bash vendor/firn/fetch-firnc.sh)" % firnc)
+        print("osdk: %s missing (run: firn install)" % firnc)
         return 1
     main_src = os.path.join(proj, "src", "main.fi")
     if not os.path.isfile(main_src):

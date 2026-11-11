@@ -7,7 +7,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 
 dd if=/dev/zero of="$D/blank.img" bs=1M count=0 seek=16 2>/dev/null
 cat > "$D/plan.txt" <<PLAN

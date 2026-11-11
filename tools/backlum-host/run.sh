@@ -5,7 +5,7 @@
 #   bash tools/backlum-host/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc.sh failed"; exit 1; }
+. tools/lib/firnenv.sh
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
@@ -13,7 +13,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 build_run() { # libdir out -> exit code of the test, output in $2.txt
-    FIRNLIB="$1" vendor/firn/bin/firnc --profile=app tools/backlum-host/host.fi -o "$2" > "$2.build" 2>&1 || return 99
+    FIRNLIB="$1" "$FIRNC" --profile=app tools/backlum-host/host.fi -o "$2" > "$2.build" 2>&1 || return 99
     "$2" > "$2.txt"
 }
 
@@ -28,7 +28,7 @@ fn u_start(args: u64) -> u64 {
     return backlum.lum_q16(args) + backlum.tc_update(args, 0, 0)
 }
 KEOF
-if FIRNLIB="$PWD/lib" vendor/firn/bin/firnc --profile=kernel -c "$T/kcheck.fi" -o "$T/kcheck.o" > "$T/kcheck.build" 2>&1; then
+if FIRNLIB="$PWD/lib" "$FIRNC" --profile=kernel -c "$T/kcheck.fi" -o "$T/kcheck.o" > "$T/kcheck.build" 2>&1; then
     ok "fui.backlum compiles in profile kernel"
 else
     bad "fui.backlum does not compile in profile kernel"; grep -v '^warning' "$T/kcheck.build" | head

@@ -22,7 +22,8 @@ export FIRNLIB="$ROOT/lib"
 OUT=${OUT:-$(mktemp -d /tmp/entropy-kernel.XXXXXX)}
 [ "${KEEP:-0}" = 1 ] || trap 'rm -rf "$OUT"' EXIT
 mkdir -p "$OUT"
-CC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
+CC=$FIRNC
 PROGS="sh ls cat echo rndtest"
 QUIET="nokbd nosched noproc nofs noring3"
 SAMPLE=1048576
@@ -46,7 +47,7 @@ python3 -I tools/entropy/stats.py selfcheck >/dev/null 2>&1 && ok "the battery a
 
 echo
 echo "== 1. build: kernel, programs, disk =="
-bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 && ok "the pinned compiler" || bad "fetch-firnc.sh"
+[ -x "$FIRNC" ]  && ok "the pinned compiler" || bad "pinned compiler missing"
 bash tools/build-kernel.sh "$OUT/k.mb" > "$OUT/kernel.log" 2>&1 && ok "kernel built" || { bad "build-kernel.sh"; tail -15 "$OUT/kernel.log"; exit 1; }
 as --64 -o "$OUT/crt.o" kernel/user/crt.s
 SPEC="/bin/ /dev/ /proc/ /system/ /tmp/"

@@ -35,7 +35,7 @@ mkdir -p "$TMPD/bin"
 PROGS="sh ls cat echo sleep orientbus act axd scenedemo"
 
 echo "== 1. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then
     ok "firnc0 builds $(echo $PROGS | wc -w) programs"
 else

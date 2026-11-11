@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 . tools/lib/qemu.sh
 
 TMPD=$(mktemp -d)
@@ -13,7 +14,6 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 K=${AML_KERNEL:-}
 if [ -z "$K" ]; then
     K="$TMPD/osum.mb"
-    bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc failed"; exit 1; }
     bash tools/build-kernel.sh "$K" >/dev/null 2>&1 || { echo "kernel build failed"; exit 1; }
 fi
 

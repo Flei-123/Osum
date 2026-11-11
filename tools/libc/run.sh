@@ -5,7 +5,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/tmpdir.sh
 D=$(mktemp -d)
 osum_tmp_guard "${1:-}" "$D"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 pass=0
 fail=0
 ok() { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }

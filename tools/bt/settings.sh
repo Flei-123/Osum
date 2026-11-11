@@ -10,7 +10,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 cleanup() { for f in "$T"/*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done; rm -rf "$T"; }
 trap cleanup EXIT
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 export DESIGNBUILD="$T/build"
 export AUDIT_TIMEOUT=${AUDIT_TIMEOUT:-600}
 SCRIPT_COMMON=$'warte 12\nklick 24,780\nwarte 3\nklickauf start_Settings\nwarte 12\nklicksuche srecttab31 140,300\nwarte 4\nfoto bt-page\n'

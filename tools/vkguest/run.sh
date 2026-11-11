@@ -7,8 +7,7 @@ WD=${1:?workdir}
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 . tools/lib/tmpdir.sh; osum_tmp_guard "${1:-}" "$D"
 export FIRNLIB="$(pwd)/lib"
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-FIRNC=vendor/firn/bin/firnc
+. tools/lib/firnenv.sh
 pass=0; fail=0
 ck() { if [ "$2" = ok ]; then pass=$((pass+1)); echo "  ok   $1"; else fail=$((fail+1)); echo "  FAIL $1"; fi; }
 $FIRNC --shared -o "$D/libvulkan.so.1" lib/vulkan/libvulkan.fi > "$D/build.log" 2>&1 && ck "firnc --shared builds libvulkan.so.1" ok || { ck "firnc --shared builds libvulkan.so.1" no; exit 1; }

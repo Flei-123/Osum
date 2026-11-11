@@ -10,7 +10,7 @@ V1=kd1
 BPORT=15900
 QPORT=15901
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 
 aufraeumen() {
     [ -n "${SRVPID:-}" ] && kill "$SRVPID" 2>/dev/null

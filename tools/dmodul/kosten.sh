@@ -2,6 +2,7 @@
 set -uo pipefail
 WURZEL=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$WURZEL" || exit 1
+. tools/lib/firnenv.sh
 
 OUT=${1:?usage: kosten.sh <ausgabe> [accel=kvm|tcg]}
 accel=kvm
@@ -27,7 +28,7 @@ for p in $PROGS; do
     if [ -s "$BUILDD/$p.elf" ]; then
         continue
     fi
-    "$WURZEL/vendor/firn/bin/firnc" -c "$WURZEL/kernel/user/$p.fi" \
+    "$FIRNC" -c "$WURZEL/kernel/user/$p.fi" \
         -o "$BUILDD/$p.o" > "$BUILDD/e-$p" 2>&1 \
         || { head -20 "$BUILDD/e-$p"; echo "$p uebersetzt nicht"; exit 1; }
     CRT="$BUILDD/crt.o"

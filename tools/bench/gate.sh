@@ -13,6 +13,7 @@
 # produce are SKIPped (e.g. ui.* without --ui). Run the nightly through /root/jarvis/bin/heavy.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 LIB="python3 -I $ROOT/tools/bench/lib.py"
 BUD=$ROOT/tools/bench/budgets.json
@@ -51,7 +52,6 @@ case $MODE in
         if [ -z "$IMG" ]; then
             ABB=${ABB:-/root/abbilder}; TOKEN=${ODB_TOKEN_FILE:-$ABB/odb.token}
             [ -s "$TOKEN" ] || bash tools/vbox/run.sh odb-token >/dev/null 2>&1
-            bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
             ( export ODB=1 PARTTAB=mbr JARVIS_DEVICE_KEY=$ABB/vm-device.key JARVIS_CONF=$ABB/justin-permissions.conf \
                      IMAGE_ID="bench-$$" ODB_TOKEN_FILE=$TOKEN
               bash tools/usbimg/build.sh "$D/img" > "$D/build.log" 2>&1 ) || { tail -10 "$D/build.log"; bad "ODB=1 image build"; fin; }

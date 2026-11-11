@@ -34,7 +34,7 @@ run_one() { # <name> <extra words>
 }
 num() { echo "$1" | sed -nE "s/.* $2=([0-9]+).*/\1/p"; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 run_one a "vfs lang=en" &
 run_one b "vfs lang=en fbuc" &
 EH_SMP=4 run_one c "vfs lang=en fbmtrrsim" &

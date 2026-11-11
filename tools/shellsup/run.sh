@@ -85,7 +85,7 @@ field() { # <line> <key> -> number after key=
     echo "$1" | grep -a -o " $2=[0-9]*" | head -1 | cut -d= -f2
 }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 run_one a "$TMPD/dreh_a.txt" "tbkill=3000" &
 run_one b "$TMPD/dreh_b.txt" "tbkill=3000 nosup" &
 wait

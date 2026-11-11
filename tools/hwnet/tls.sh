@@ -3,8 +3,8 @@
 # tools/hwnet/tls.sh -- ROUND HWNET: HTTPS OUT OF RING 3, AND THE REFUSALS.
 #
 # Osum had no TLS. It also, all along, had the whole of Firn's round-B5
-# TLS work sitting in `vendor/firn/lib/tls/` and `lib/std/crypto/`,
-# pinned by `vendor/firn/COMMIT` and never used -- because every program
+# TLS work sitting in `lib/tls/` of the toolchain and `lib/std/crypto/`,
+# pinned by `firn.toolchain` and never used -- because every program
 # under `kernel/user/` is `profile kernel`, and a record layer needs a
 # heap.
 #
@@ -82,10 +82,10 @@ ip netns del "$NS" 2>/dev/null
 # =====================================================================
 echo "== 1. the program: the full Firn library in ring 3 =="
 # =====================================================================
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 # RUNDE MERGE-5: $FIRNLIB IS THE REPOSITORY'S OWN LIBRARY, NOT FIRN'S.
 #
-# This line used to read FIRNLIB="$ROOT/vendor/firn/lib", and the
+# This line used to read FIRNLIB="the toolchain lib", and the
 # acceptance run right after merging branch `betrieb` turned this whole
 # section from 24/0 into 0/1:
 #
@@ -98,8 +98,8 @@ bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 # (line 101 there) -- this probe and the one in `tools/ota/run.sh` were
 # both missed. Firn's own library is not lost by this: besides $FIRNLIB
 # the compiler always searches <compiler>/../lib, which IS
-# `vendor/firn/lib`.
-if FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc -c --profile=app \
+# the toolchain lib.
+if FIRNLIB="$ROOT/lib" "$FIRNC" -c --profile=app \
         -o "$TMPD/fetch.o" kernel/app/fetch.fi > "$TMPD/cc.log" 2>&1; then
     ok "firnc --profile=app: fetch.fi with std.rt, std.net, tls.tls and tls.x509"
 else

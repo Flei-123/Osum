@@ -21,12 +21,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || {
-    echo "vendor/firn/fetch-firnc.sh fehlgeschlagen" >&2; exit 1; }
+. "$ROOT/tools/lib/firnenv.sh"
+firnenv_need_firnc1
 if [[ $STUFE == 0 ]]; then
-    FIRNC="$ROOT/vendor/firn/bin/firnc"
+    FIRNC=$FIRN_TOOLCHAIN/bin/firnc
 else
-    FIRNC="$ROOT/vendor/firn/bin/firnc1"
+    FIRNC=$FIRNC1
 fi
 [[ -x $FIRNC ]] || { echo "Uebersetzer fehlt: $FIRNC" >&2; exit 1; }
 
@@ -58,7 +58,6 @@ cp -f "$(such fs-off.fi)" "$TMP/k/fs/fs.fi" || exit 1
 mkdir -p "$TMP/k/bus"
 cp -f "$(such drvnull.fi)" "$TMP/k/bus/drvnull.fi" || exit 1
 
-export FIRNLIB="$ROOT/lib"
 BASENAME=$(basename "$QUELLE")
 "$FIRNC" -o "$TMP/m.o" "$TMP/k/$BASENAME" || exit 1
 

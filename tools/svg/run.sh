@@ -3,15 +3,15 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"
-[ -x vendor/firn/bin/firnc ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
 ok() { echo "  OK    $*"; pass=$((pass+1)); }
 bad() { echo "  FAIL  $*"; fail=$((fail+1)); }
 python3 -I tools/svg/gen.py | cmp -s - lib/svg/svgnames.fi && ok "svgnames.fi equals generator output" || bad "svgnames.fi stale"
 printf 'profile kernel\nimport svg.svgdoc\nfn main() -> i32 {\n    return svgdoc.render(0, 0, 0, 1, 1) as i32\n}\n' > "$T/k.fi"
-vendor/firn/bin/firnc --profile=kernel -c "$T/k.fi" -o "$T/k.o" > "$T/k.log" 2>&1 && ok "lib/svg compiles for profile kernel" || { bad "kernel compile"; head -5 "$T/k.log"; }
-vendor/firn/bin/firnc --profile=app tools/svg/bake.fi -o "$T/bake" > "$T/b.log" 2>&1 || { bad "baker build"; head -5 "$T/b.log"; exit 1; }
+"$FIRNC" --profile=kernel -c "$T/k.fi" -o "$T/k.o" > "$T/k.log" 2>&1 && ok "lib/svg compiles for profile kernel" || { bad "kernel compile"; head -5 "$T/k.log"; }
+"$FIRNC" --profile=app tools/svg/bake.fi -o "$T/bake" > "$T/b.log" 2>&1 || { bad "baker build"; head -5 "$T/b.log"; exit 1; }
 for f in assets/icons/svg/*.svg; do
   for s in 24 32 48 64; do
     "$T/bake" "$f" "$T/o.osym" $s; rc=$?

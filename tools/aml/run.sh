@@ -58,8 +58,7 @@ sagt() { # datei name soll beschreibung
     else bad "$4 -- $2=$got, erwartet $3"; fi
 }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || {
-    echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
+. tools/lib/firnenv.sh
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "AML: uebersprungen, qemu-system-x86_64 fehlt"
     exit 0

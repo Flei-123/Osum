@@ -31,7 +31,7 @@ write_kopf "$OUT/kopf-old" salz anbieter "$OLD_PROVIDER" ziel "$OLD_TARGET"
     printf 'anbieter %s\nziel %s\ncheck x\n' "$OLD_PROVIDER" "$OLD_TARGET"
 } > "$OUT/kopf-both"
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 MUT="$OUT/mutant"
 mkdir -p "$MUT"
 cp -a kernel/user "$MUT/user"
@@ -39,7 +39,7 @@ sed -i -e 's/"provider\\0"/"pxovider\\0"/' -e 's/"target\\0"/"txrget\\0"/' "$MUT
 if cmp -s kernel/user/settings/setcore.fi "$MUT/user/settings/setcore.fi"; then
     bad "mutant source is identical to the real source"; echo "SETTINGSKOPF: $pass passed, $fail failed"; exit 1
 fi
-if vendor/firn/bin/firnc -c "$MUT/user/settings.fi" -o "$MUT/settings.o" > "$MUT/cc.log" 2>&1 \
+if "$FIRNC" -c "$MUT/user/settings.fi" -o "$MUT/settings.o" > "$MUT/cc.log" 2>&1 \
    && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" -o "$MUT/settings.elf" "$MUT/settings.o" 2>>"$MUT/cc.log"; then
     strip --strip-all "$MUT/settings.elf"
     ok "mutant settings (new KOPF keys ignored) builds"

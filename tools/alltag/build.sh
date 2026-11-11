@@ -29,6 +29,7 @@
 # code, and 0 differing pixels was reported as a success.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 . tools/lib/pidkill.sh
 . tools/sync/gc.sh   # r278: FIRN_FUNCTION_SECTIONS + ld --gc-sections (OSUM_NO_GC=1 = off)
 export FIRNLIB="$(pwd)/lib"
@@ -176,7 +177,7 @@ for p in $progs; do
     fi
     UPROF=""; UCRT="$BUILDD/crt.o"
     grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
-    vendor/firn/bin/firnc $UPROF $OPTL -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
+    "$FIRNC" $UPROF $OPTL -c "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
         > "$BUILDD/e-$p" 2>&1 \
         || { echo "FAILED to compile $p"; head -25 "$BUILDD/e-$p"; exit 1; }
     ld $GCS -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \

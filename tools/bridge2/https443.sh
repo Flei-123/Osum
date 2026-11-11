@@ -13,8 +13,7 @@ note(){ printf '        %s\n' "$1"; }
 command -v qemu-system-x86_64 >/dev/null || { echo "kein qemu"; exit 0; }
 
 echo "== 1. bauen =="
-bash vendor/firn/fetch-firnc.sh > "$W/fetch.log" 2>&1 || {
-    echo "fetch-firnc.sh gescheitert"; exit 1; }
+. tools/lib/firnenv.sh
 ./tools/build-kernel.sh "$W/k0.mb" > "$W/k.log" 2>&1 || {
     echo "the kernel does not build"; tail -20 "$W/k.log"; exit 1; }
 note "kernel $(stat -c%s "$W/k0.mb") Oktette"
@@ -22,14 +21,14 @@ note "kernel $(stat -c%s "$W/k0.mb") Oktette"
 as --64 -o "$W/crt.o" kernel/user/crt.s 2>"$W/as.err" || {
     echo "crt.s"; cat "$W/as.err"; exit 1; }
 for p in sh ls cat echo jsig jarvisctl dhcp host ping; do
-    vendor/firn/bin/firnc "kernel/user/$p.fi" -o "$W/$p.o" \
+    "$FIRNC" "kernel/user/$p.fi" -o "$W/$p.o" \
         > "$W/e-$p" 2>&1 || { echo "$p baut nicht"; head -20 "$W/e-$p"; exit 1; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
         -o "$W/$p.elf" "$W/crt.o" "$W/$p.o" 2>"$W/ld-$p" || {
         echo "$p bindet nicht"; cat "$W/ld-$p"; exit 1; }
     strip --strip-all "$W/$p.elf"
 done
-FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc -c --profile=app \
+FIRNLIB="$ROOT/lib" "$FIRNC" -c --profile=app \
     -o "$W/jarvisd.o" kernel/app/jarvisd.fi > "$W/e-jarvisd" 2>&1 || {
     echo "jarvisd baut nicht"; head -30 "$W/e-jarvisd"; exit 1; }
 ld -T kernel/user/user.ld -o "$W/jarvisd.elf" "$W/jarvisd.o" \

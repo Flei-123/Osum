@@ -5,7 +5,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/userprog.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 
 TMPD=$(mktemp -d)
@@ -24,7 +24,6 @@ same() {
 val() { grep -a -m1 "^vdec: $2 = " "$1" 2>/dev/null | sed 's/.* = //' | tr -d '\r\000'; }
 
 echo "== 0. preconditions =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc.sh failed"; exit 1; }
 for w in ffmpeg ffprobe python3 qemu-system-x86_64; do
     command -v "$w" >/dev/null 2>&1 || { summary_note "skipped, $w is missing"; exit 0; }
 done

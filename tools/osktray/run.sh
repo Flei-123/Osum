@@ -70,7 +70,7 @@ run_one() {
         progs="$PROGS" tbextra="tray_chevron=1" drehbuch="$2" > "$TMPD/$1/o.log" 2>&1 < /dev/null
     rm -rf "$TMPD/$1/build"
 }
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 run_one a "$TMPD/a.txt" "/etc/osk.conf=$TMPD/osk.conf@0644"
 if [ -z "${OSKTRAY_ONLY_A:-}" ]; then
     run_one b "$TMPD/b.txt" ""

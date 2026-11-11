@@ -11,6 +11,7 @@
 #    (no segment adoption, no lazy handover, no release of evicted segments)
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 if [ -n "${1:-}" ]; then
@@ -28,7 +29,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 PROGS="sh echo ls cat sleep xclip"
 
 boot_tree() { # tree out
-    ( cd "$1" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+    ( cd "$1" && firnenv_prepare_old_tree . >/dev/null 2>&1
       ALLTAGBUILD="$2.build" bash tools/alltag/build.sh "$2" mager=yes shot=no progs="$PROGS" \
         xfile="/xfer.sh=$ROOT/tools/xfer/guest.sh" script="sh /xfer.sh" ) > "$2.log" 2>&1
 }

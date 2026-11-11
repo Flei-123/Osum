@@ -16,13 +16,12 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 STAGES=${*:-host guest build}
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-[ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 
 stage_host() {
     echo "== stage host =="
@@ -47,7 +46,6 @@ stage_host() {
 
 stage_guest() {
     echo "== stage guest =="
-    bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
     mkdir -p "$T/bin"
     local PROGS="sh ls cat echo massren"
     bash tools/sync/build.sh "$T/bin" 0 $PROGS > "$T/b.txt" 2>&1 \

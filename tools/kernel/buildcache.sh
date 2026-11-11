@@ -7,8 +7,8 @@
 # there is no per-module object to cache.  So the key is the hash of EVERYTHING the compiler can
 # read for that root, and a hit skips the compile completely (typically 40 s of the 44-58 s build):
 #
-#   key = sha256( firnc binary, vendor/firn/.gebaut, the prepared kernel copy (after brand/version
-#                 substitution and stub swaps), lib/ (FIRNLIB), vendor/firn/lib, stage, root path,
+#   key = sha256( firnc binary, the toolchain COMMIT, the prepared kernel copy (after brand/version
+#                 substitution and stub swaps), lib/ (FIRNLIB), toolchain version, stage, root path,
 #                 FORMAT )
 #
 # The kernel copy contains the git short hash (kernel/version.fi), so across COMMITS the key changes
@@ -47,9 +47,9 @@ bc_common_key() {
     {
         echo "format=$BC_FORMAT stufe=$stufe"
         sha256sum "$firnc" | cut -d' ' -f1
-        cat "$ROOT/vendor/firn/.gebaut" 2>/dev/null
+        cat "${FIRN_TOOLCHAIN:-/nonexistent}/COMMIT" 2>/dev/null
         (cd "$work" && bc_tree_hash kernel)
-        (cd "$ROOT" && bc_tree_hash lib vendor/firn/lib)
+        (cd "$ROOT" && bc_tree_hash lib)
         if [[ -n ${FIRNLIB:-} && $FIRNLIB != "$ROOT/lib" && -d $FIRNLIB ]]; then
             (cd "$FIRNLIB" && bc_tree_hash .)
         fi
@@ -101,7 +101,7 @@ bc_prune() { # dir: drop oldest objects above the size limit
 # PROGRAM OBJECT CACHE (W-BUILD, 23.10.2026): one firnc -c step per program, keyed by what the
 # compile really READ.  Two levels, like ccache's direct mode:
 #   key1  = sha256(format, firnc, .gebaut, flags, source path, FIRNLIB, FIRN_* env, listing of all
-#           .fi names under lib/ kernel/ vendor/firn/lib  -- so a NEW file that shadows an import
+#           .fi names under lib/ kernel/ and the toolchain lib  -- so a NEW file that shadows an import
 #           changes the key)
 #   deps  = p/<key1>.<listhash>.deps : the source files firnc read (--deps-out), ROOT-relative
 #   obj   = p/<key1>.<listhash>.<contenthash>.o   (contenthash = sha256 of the content of all deps)
@@ -114,7 +114,7 @@ bc_prune() { # dir: drop oldest objects above the size limit
 
 bc_list_hash() { # once per process: names of all .fi files (no contents)
     [[ -n ${BC_LIST_HASH:-} ]] && return 0
-    BC_LIST_HASH=$( (cd "$ROOT" && find lib kernel vendor/firn/lib -type f -name '*.fi' 2>/dev/null | LC_ALL=C sort | sha256sum | cut -c1-64) )
+    BC_LIST_HASH=$( (cd "$ROOT" && find lib kernel "${FIRN_TOOLCHAIN:-/nonexistent}/lib" -type f -name '*.fi' 2>/dev/null | LC_ALL=C sort | sha256sum | cut -c1-64) )
     export BC_LIST_HASH
 }
 
@@ -164,7 +164,7 @@ bc_cc() {
     [[ -n ${BC_FIRNC_SUM:-} && ${BC_FIRNC_PATH:-} == "$firnc" ]] || { BC_FIRNC_SUM=$(sha256sum "$firnc" | cut -c1-64); BC_FIRNC_PATH=$firnc; }
     key1=$( {
         echo "pformat=1 $BC_FIRNC_SUM $BC_LIST_HASH $src $(bc_rel "${FIRNLIB:-}")"
-        cat "${BC_GEBAUT:-$ROOT/vendor/firn/.gebaut}" 2>/dev/null
+        cat "${BC_GEBAUT:-${FIRN_TOOLCHAIN:-/nonexistent}/COMMIT}" 2>/dev/null
         printf '%s\n' "$@"
         env | grep '^FIRN_' | LC_ALL=C sort
     } | sha256sum | cut -c1-64 )

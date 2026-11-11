@@ -23,16 +23,16 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 [ -w /dev/kvm ] && ACC=(-accel kvm -cpu host) || ACC=()
 
 echo "== 1. build =="
-bash vendor/firn/fetch-firnc.sh > "$W/fetch.log" 2>&1
+. tools/lib/firnenv.sh
 ./tools/build-kernel.sh "$W/k0.mb" > "$W/k.log" 2>&1 || { echo "kernel does not build"; tail -15 "$W/k.log"; exit 1; }
 as --64 -o "$W/crt.o" kernel/user/crt.s 2>"$W/as.err" || { cat "$W/as.err"; exit 1; }
 for p in sh ls cat echo sleep ps; do
-    vendor/firn/bin/firnc "kernel/user/$p.fi" -o "$W/$p.o" > "$W/e-$p" 2>&1 || { echo "$p does not build"; head -20 "$W/e-$p"; exit 1; }
+    "$FIRNC" "kernel/user/$p.fi" -o "$W/$p.o" > "$W/e-$p" 2>&1 || { echo "$p does not build"; head -20 "$W/e-$p"; exit 1; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" -o "$W/$p.elf" "$W/crt.o" "$W/$p.o" 2>"$W/ld-$p" || exit 1
     strip --strip-all "$W/$p.elf"
 done
 buildj() {
-    (cd "${BUILD_ROOT:-.}" && FIRNLIB="$ROOT/lib" "$ROOT/vendor/firn/bin/firnc" -c --profile=app -o "$W/j.o" "$1") > "$W/e-j" 2>&1 || { echo "jarvisd does not build"; head -20 "$W/e-j"; exit 1; }
+    (cd "${BUILD_ROOT:-.}" && FIRNLIB="$ROOT/lib" "$FIRNC" -c --profile=app -o "$W/j.o" "$1") > "$W/e-j" 2>&1 || { echo "jarvisd does not build"; head -20 "$W/e-j"; exit 1; }
     ld -T kernel/user/user.ld -o "$2" "$W/j.o" 2> "$W/ld-j" || exit 1
     strip --strip-all "$2"
 }

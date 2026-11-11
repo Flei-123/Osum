@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/gfx/fuiconv.sh <out-dir> [kind] -- builds the real fUi GPU shaders (vendor/firn/lib/fui/gpu_{vs,fs}.glsl) as Vulkan SPIR-V for the SWR lowering.
+# tools/gfx/fuiconv.sh <out-dir> [kind] -- builds the real fUi GPU shaders (toolchain lib/fui/gpu_{vs,fs}.glsl) as Vulkan SPIR-V for the SWR lowering.
 # With a kind the fragment shader is specialised (`int kind = N;`) and folded, so loop free kinds lower to straight VM code.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 OUT=$1; KIND=${2:-}
 mkdir -p "$OUT"
 conv() {
@@ -21,8 +22,8 @@ conv() {
         -e 's/^flat \(in\|out\) vec4 v_k;/layout(location = 6) flat \1 vec4 v_k;/' \
         -e 's/^out vec4 o;/layout(location = 0) out vec4 o;/' "$1"
 }
-conv vendor/firn/lib/fui/gpu_vs.glsl > "$OUT/gpu.vert"
-conv vendor/firn/lib/fui/gpu_fs.glsl > "$OUT/gpu.frag"
+conv "$FIRN_TOOLCHAIN/lib/fui/gpu_vs.glsl" > "$OUT/gpu.vert"
+conv "$FIRN_TOOLCHAIN/lib/fui/gpu_fs.glsl" > "$OUT/gpu.frag"
 if [ -n "$KIND" ]; then sed -i "s/int kind = int(v_k.x + 0.5);/int kind = $KIND;/" "$OUT/gpu.frag"; fi
 if [ "$KIND" = 6 ]; then
     perl -0pi -e 's/(for \(int k = 0; k < 4; k\+\+\) \{)\n\s*if \(k >= u_nspot\) break;(.*?\n            \}\n)(\s*\}\n)/[[unroll]] $1\n            if (k < u_nspot) {$2            }\n$3/s' "$OUT/gpu.frag"

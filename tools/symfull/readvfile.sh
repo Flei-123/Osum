@@ -6,7 +6,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/tmpdir.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC="$ROOT/vendor/firn/bin/firnc"
+. "$ROOT/tools/lib/firnenv.sh"
 SIZE=44900
 W=$(mktemp -d)
 osum_tmp_guard "${1:-}" "$W"

@@ -14,7 +14,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 ACCELS="${SMPLOAD_ACCELS:-$([ -e /dev/kvm ] && echo kvm || echo tcg)}"
 LOOPS="${SMPLOAD_LOOPS:-2400}"
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 PROGS="sh cat echo burn sleep"
 mkdir -p "$D/bin"
 bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/b.txt" 2>&1 && ok "programs build" || { bad "programs"; head -10 "$D/b.txt"; echo "SMPLOAD: $pass passed, $fail failed"; exit 1; }

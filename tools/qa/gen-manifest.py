@@ -10,18 +10,16 @@ AREAS = {
     "ui":     ["kernel/ui/*", "kernel/gfx/*", "lib/fui/*", "lib/font/*", "assets/schemes/*", "assets/shapes/*",
                "assets/themes/*", "etc/themes/*", "etc/shapes/*", "etc/schemas/*"],
     "apps":   ["kernel/user/*", "assets/apps/*", "assets/icons/*", "etc/orientbus/*"],
-    "net":    ["kernel/net/*", "lib/net/*", "lib/httpget/*", "lib/tls/*", "lib/wg/*", "lib/socks/*", "etc/ssl/*", "etc/netview/*",
-               "vendor/firn/patches/0001-*", "vendor/firn/patches/0006-*", "vendor/firn/patches/0007-*", "vendor/firn/patches/0008-*"],
+    "net":    ["kernel/net/*", "lib/net/*", "lib/httpget/*", "lib/tls/*", "lib/wg/*", "lib/socks/*", "etc/ssl/*", "etc/netview/*"],
     "fs":     ["kernel/fs/*", "kernel/block/*", "lib/disks/*"],
     "core":   ["kernel/arch/*", "kernel/sched/*", "kernel/mm/*", "kernel/sync/*", "kernel/ipc/*", "kernel/core.fi",
                "kernel/kmain.fi", "kernel/init/*", "kernel/kcore.fi", "kernel/tasks.fi", "kernel/klog.fi", "kernel/serial.fi", "kernel/lib/*",
-               "vendor/firn/COMMIT", "vendor/firn/fetch-firnc.sh"],
+               "firn.toolchain", "tools/lib/firnenv.sh"],
     "drv":    ["kernel/drv/*", "kernel/usb/*", "kernel/pwr/*", "kernel/acpi/*"],
-    "libc":   ["lib/libc/*", "kernel/sys/*", "kernel/ldr/*", "lib/std/*",
-               "vendor/firn/patches/0002-*", "vendor/firn/patches/0005-*"],
+    "libc":   ["lib/libc/*", "kernel/sys/*", "kernel/ldr/*", "lib/std/*"],
     "crypto": ["kernel/crypto/*", "lib/crypto/*", "lib/codec/*", "lib/ssh/*"],
     "bridge": ["etc/jarvis/*", "assets/jarvis/*", "kernel/bus/*", "kernel/app/*"],
-    "tools":  ["tools/build-kernel.sh", "tools/kernel/*", "vendor/firn/*", "tools/config"],
+    "tools":  ["tools/build-kernel.sh", "tools/kernel/*", "firn.toolchain", "tools/lib/firnenv.sh", "tools/config"],
 }
 GATE_AREAS = {
     "ui": "wm comp paint look design themestore tiling menualive menuhover startmenu tabstrip midline win11bar barscene barpop "

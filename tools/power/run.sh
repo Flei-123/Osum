@@ -13,13 +13,13 @@
 # NOT HERE: S3 on a lid close (tools/s3, s3dev gates cover the sleep itself).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc.sh failed"; exit 1; }
+. tools/lib/firnenv.sh
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "  OK    $1"; }
 bad() { fail=$((fail+1)); echo "  FAIL  $1"; }
-FC="vendor/firn/bin/firnc"
+FC=$FIRNC
 echo "== 1. host test =="
 if FIRNLIB="$PWD/lib" $FC --profile=app tools/power/host.fi -o "$T/host" > "$T/host.build" 2>&1; then
     "$T/host" > "$T/host.out"; hrc=$?
@@ -61,7 +61,6 @@ fi
 if [ -z "${POWER_HOST_ONLY:-}" ]; then
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -w /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
-export FIRNLIB="$PWD/lib"
 mkdir -p "$T/bin" "$T/asl"
 cp tools/acpiev/asl/laptop.asl "$T/asl/"
 ( cd "$T/asl" && iasl laptop.asl > iasl.txt 2>&1 ) && ok "laptop.asl compiles (fake lid, battery, mains)" || bad "laptop.asl does not compile"

@@ -25,7 +25,7 @@ mkdir -p "$TMPD/bin"
 PROGS="sh ls cat echo sleep a11ydemo screenreader"
 
 echo "== 1. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then
     ok "programs build ($PROGS)"
 else

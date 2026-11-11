@@ -5,7 +5,7 @@ cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 OUT=${1:-/dev/stdout}
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 mkdir -p "$T/bin"
 bash tools/sync/build.sh "$T/bin" 0 sh cat echo > "$T/b.txt" 2>&1 || { tail -15 "$T/b.txt"; exit 1; }
 ./tools/build-kernel.sh "$T/k0.img" --stufe 0 > "$T/k.txt" 2>&1 || { tail -15 "$T/k.txt"; exit 1; }

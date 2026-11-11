@@ -21,7 +21,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 STAGES=${*:-host hot bus}
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
@@ -33,7 +33,6 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 keep() { [ -z "${SW_KEEP:-}" ] || cp "$T"/*.txt "$T"/*.klar "$T"/*.lauf "$SW_KEEP"/ 2>/dev/null; }  # SW_KEEP=<dir>: copy logs out for debugging
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
-[ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 
 # ---------------------------------------------------------------- shared test data
 MAGIC='STICKWR-MAGIC-01!'

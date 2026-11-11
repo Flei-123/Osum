@@ -49,7 +49,7 @@ schau_nicht() { local name=$1; shift
 zahl() { grep -aoE "$2" "$1" | head -1 | grep -oE '[0-9]+' | tail -1; }
 zahl2() { grep -aoE "$2" "$1" | tail -1 | grep -oE '[0-9]+' | tail -1; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
+. tools/lib/firnenv.sh
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "WM: skipped, qemu-system-x86_64 is missing"
     exit 0
@@ -205,7 +205,7 @@ esac
 gebaut=1
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || gebaut=0
 for p in sh echo uname; do
-    vendor/firn/bin/firnc "kernel/user/$p.fi" -o "$TMPD/$p.o" >"$TMPD/$p.log" 2>&1 \
+    "$FIRNC" "kernel/user/$p.fi" -o "$TMPD/$p.o" >"$TMPD/$p.log" 2>&1 \
         && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
             -o "$TMPD/$p.elf" "$TMPD/crt.o" "$TMPD/$p.o" 2>>"$TMPD/$p.log" \
         || { gebaut=0; sed 's/^/        /' "$TMPD/$p.log" | head -4; }

@@ -80,7 +80,8 @@ done
 # =====================================================================
 echo "== 1. der Bau =="
 # =====================================================================
-CC=vendor/firn/bin/firnc
+. tools/lib/firnenv.sh
+CC=$FIRNC
 for f in lib/libc/dnswire.fi lib/libc/dns.fi; do
     $CC --check "$f" > /dev/null 2>&1 || true
 done

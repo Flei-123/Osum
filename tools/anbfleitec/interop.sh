@@ -94,12 +94,11 @@ ip netns add "$NS" 2>/dev/null || { echo "ANBINTEROP: skipped, no network namesp
 ip netns del "$NS" 2>/dev/null
 
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 mkdir -p "$TMPD/w" "$TMPD/fid" "$TMPD/ctl"
 
 # --- build (same as run.sh) ----------------------------------------------
 echo "== 0. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 if ! "$FIRNC" -c --profile=app -o "$TMPD/konto.o" kernel/app/account.fi > "$TMPD/cc.log" 2>&1; then
     bad "account.fi does not compile"; head -12 "$TMPD/cc.log" | sed 's/^/        /'
     echo "ANBINTEROP: $pass passed, $fail failed"; exit 1

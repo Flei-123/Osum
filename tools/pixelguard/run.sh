@@ -18,7 +18,7 @@ tally() {
     printf '  %s: %s\n' "$name" "$([ "$rc" -eq 0 ] && echo green || echo RED)"
 }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 BUILD="$TMPD/build"
 
 shoot() {

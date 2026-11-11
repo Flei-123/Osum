@@ -38,7 +38,7 @@ if ! qemu-system-x86_64 -device help 2>&1 | grep -q 'qemu-xhci'; then
 fi
 
 echo "== 1. bauen =="
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh faellt"; exit 1; }
+. tools/lib/firnenv.sh
 bash tools/build-kernel.sh "$TMPD/k0.mb" --stufe 0 > "$TMPD/b0.log" 2>&1 \
     && ok "der Kern baut ($(stat -c%s "$TMPD/k0.mb") Oktette)" \
     || { bad "the kernel does not build"; sed 's/^/        /' "$TMPD/b0.log" | head -12; exit 1; }
@@ -49,7 +49,7 @@ rc=0
 for p in $PROGS; do
     UPROF=""; UCRT="$TMPD/crt.o"
     grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
-    vendor/firn/bin/firnc $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/e$p" 2>&1 || {
+    "$FIRNC" $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/e$p" 2>&1 || {
         bad "firnc uebersetzt $p.fi nicht"; sed 's/^/        /' "$TMPD/e$p" | head -5; rc=1; continue; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
         -o "$TMPD/$p.elf" $UCRT "$TMPD/$p.o" 2>/dev/null || { bad "ld faellt bei $p"; rc=1; continue; }

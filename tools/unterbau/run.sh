@@ -14,6 +14,8 @@
 # were fixed in this round: on the kernel of $OLDREF they must NOT pass (the counter-proof that the check measures something).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
 ROOT=$(pwd)
 HERE=tools/unterbau
 OLDREF=${OLDREF:-553ef06c}
@@ -81,7 +83,7 @@ build_image() { # build_image <srcdir> <outdir>   (user programs of the system +
     as --64 -o "$O/crt.o" "$S/kernel/user/crt.s" || return 1
     local progs="sh ls cat echo"
     for p in $progs; do
-        "$S/vendor/firn/bin/firnc1" "$S/kernel/user/$p.fi" -o "$O/p/$p.o" > "$O/p/$p.log" 2>&1 || return 1
+        "$FIRNC1" "$S/kernel/user/$p.fi" -o "$O/p/$p.o" > "$O/p/$p.log" 2>&1 || return 1
         ld -T "$S/kernel/user/user.ld" --defsym=USER_ENTRY="_F1.u_start" -o "$O/p/$p.elf" "$O/crt.o" "$O/p/$p.o" 2>>"$O/p/$p.log" || return 1
         strip --strip-all "$O/p/$p.elf" 2>/dev/null
     done

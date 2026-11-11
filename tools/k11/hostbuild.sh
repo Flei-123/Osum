@@ -2,7 +2,8 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"
-CC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
+CC=$FIRNC
 OUT=${HOSTOUT:-/tmp/k11host}
 mkdir -p "$OUT"
 as --64 -o "$OUT/crt.o" tools/k11/hostcrt.s || exit 1

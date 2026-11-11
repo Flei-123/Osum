@@ -31,7 +31,7 @@ command -v qemu-system-x86_64 >/dev/null 2>&1 || {
     echo "IMAGE: skipped, no qemu"; exit 0; }
 python3 -c 'import PIL' 2>/dev/null || {
     echo "IMAGE: skipped, no Pillow on the host"; exit 0; }
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || true
+. tools/lib/firnenv.sh
 
 B=tools/alltag/build.sh
 

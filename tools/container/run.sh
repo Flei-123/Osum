@@ -11,7 +11,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 BLOCKS=8192
 PROGS="sh cat echo ls cp rm mkdir wc grep head true false ps ctr stress ctrkill"
@@ -39,8 +39,6 @@ zahl() { grep -oaE "$2[0-9]+" "$1" 2>/dev/null | tail -1 | grep -oE '[0-9]+$'; }
 command -v qemu-system-x86_64 >/dev/null 2>&1 || {
     echo "CONTAINER: uebersprungen, qemu fehlt"; exit 0; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
-    [ -x "$FIRNC" ] || { echo "CONTAINER: kein firnc"; exit 1; }; }
 
 # ============================================== 1. bauen
 

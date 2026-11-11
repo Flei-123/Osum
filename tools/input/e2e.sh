@@ -16,7 +16,7 @@ T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 PROGS="sh cat echo sleep touchdemo"
 mkdir -p "$T/bin"
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 if bash tools/sync/build.sh "$T/bin" 0 $PROGS > "$T/b.txt" 2>&1; then
     ok "the demo app and its shell build"
 else

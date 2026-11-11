@@ -50,8 +50,8 @@ for t in qemu-system-x86_64 python3; do
 done
 
 echo "== 1. build: kernel, /bin/wrace, an image that carries it, an empty data disk =="
-bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 \
-    && ok "the pinned compiler" || { bad "fetch-firnc.sh"; tail -5 "$OUT/firnc.log"; }
+[ -x "$FIRNC" ] \
+    && ok "the pinned compiler" || { bad "pinned compiler missing"; }
 bash tools/install/build.sh "$OUT" > "$OUT/build.log" 2>&1 \
     && ok "image built" || { bad "tools/install/build.sh"; tail -20 "$OUT/build.log"; }
 [ -s "$OUT/bin/wrace" ] && ok "/bin/wrace is in the image ($(stat -c%s "$OUT/bin/wrace") octets)" || bad "/bin/wrace missing"

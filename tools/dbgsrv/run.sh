@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-export FIRNLIB="$PWD/lib"
+. tools/lib/firnenv.sh
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 python3 tools/dbgsrv/genroutes.py tools/dbgsrv/routes.fi.in "$D/routes.fi"
 if cmp -s "$D/routes.fi" lib/dbgsrv/routes.fi; then echo "  OK    lib/dbgsrv/routes.fi matches generator"; else echo "  FAIL  lib/dbgsrv/routes.fi is stale"; exit 1; fi

@@ -30,8 +30,9 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 export FIRNLIB="$(pwd)/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 LDSCRIPT=kernel/kernel.ld
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
@@ -52,7 +53,6 @@ value() { # file pattern -> the number at the end of the first match
     grep -oE "$2" "$1" 2>/dev/null | head -1 | grep -oE '[0-9]+$'
 }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing: $FIRNC"; exit 1; }
 [ -x "$FC1" ]   || { echo "firnc1 is missing: $FC1"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then

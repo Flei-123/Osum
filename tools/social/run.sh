@@ -69,15 +69,15 @@ FCBIN=${FIRNCHAT_BIN:-/root/jarvis/projects/u_DiS4in7esMF1/firnchat/bin}
 FLEIKONTAKTE=${FLEIKONTAKTE:-$FCBIN/fleikontakte}
 
 echo "== 1. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-[ -x vendor/firn/bin/firnc ] || { echo "SOCIAL: firnc0 missing"; exit 1; }
+. tools/lib/firnenv.sh
+[ -x "$FIRNC" ] || { echo "SOCIAL: firnc0 missing"; exit 1; }
 mkdir -p "$TMPD/bin"
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then
     ok "firnc0 builds $(echo $PROGS | wc -w) programs"
 else
     bad "the programs do not build"; sed 's/^/        /' "$TMPD/b.txt" | head -20; fin
 fi
-if vendor/firn/bin/firnc -c --profile=app -o "$TMPD/socfleitec.o" \
+if "$FIRNC" -c --profile=app -o "$TMPD/socfleitec.o" \
         kernel/app/socfleitec.fi > "$TMPD/sf.txt" 2>&1 \
     && ld -T kernel/user/user.ld -o "$TMPD/bin/socfleitec.elf" "$TMPD/socfleitec.o" 2>> "$TMPD/sf.txt"; then
     strip --strip-all "$TMPD/bin/socfleitec.elf"

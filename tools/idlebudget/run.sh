@@ -51,10 +51,10 @@ share() { # <table-file> <kind-or-name>  -> sum of shares
 }
 
 mkdir -p "$TMPD/new" "$TMPD/old"
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 if [ -n "${BASE:-}" ]; then
     git worktree add --detach "$BT" "$BASE" >/dev/null 2>&1 || { echo "base worktree failed"; exit 1; }
-    ( cd "$BT" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 )
+    ( cd "$BT" && firnenv_prepare_old_tree . >/dev/null 2>&1 )
     OLDTREE=$BT; OLDX=""
 else
     OLDTREE=$ROOT; OLDX="noquiet"

@@ -50,13 +50,12 @@ ip netns del "$NS" 2>/dev/null
 ip netns add "$NS" 2>/dev/null || { echo "BRIDGE: uebersprungen, keine Netzraeume"; exit 0; }
 ip netns del "$NS" 2>/dev/null
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 
 # =====================================================================
 echo "== 1. build: two profiles, one image =="
 # =====================================================================
-export FIRNLIB="$ROOT/lib"
-if vendor/firn/bin/firnc -c --profile=app -o "$TMPD/jd.o" \
+if "$FIRNC" -c --profile=app -o "$TMPD/jd.o" \
         kernel/app/jarvisd.fi > "$TMPD/cc.log" 2>&1; then
     ok "firnc --profile=app: jarvisd.fi mit std.rt, std.net, std.deflate, tls.tls"
 else
@@ -67,9 +66,8 @@ undef=$(nm -u "$TMPD/jd.o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
 [ -z "$undef" ] && ok "no undefined name -- neither crt.s nor libc needed" \
                 || bad "undefiniert: $undef"
 
-export FIRNLIB="$ROOT/lib"
 for p in jsig jarvisctl; do
-    if vendor/firn/bin/firnc -c -o "$TMPD/$p.o" "kernel/user/$p.fi" \
+    if "$FIRNC" -c -o "$TMPD/$p.o" "kernel/user/$p.fi" \
             > "$TMPD/cc-$p.log" 2>&1; then
         ok "firnc profile kernel: $p.fi against lib/ (Ed25519 from round UPDATE)"
     else
@@ -83,7 +81,7 @@ import tls.tls
 import crypto.ed25519
 fn main(start: u64) -> i32 { return 0 }
 FIEND
-if FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc -c --profile=app \
+if FIRNLIB="$ROOT/lib" "$FIRNC" -c --profile=app \
         -o "$TMPD/beides.o" "$TMPD/beides.fi" > "$TMPD/beides.log" 2>&1; then
     ok "TLS and crypto.ed25519 link in ONE program now (the sha512 name collision is gone); the jsig/jarvisd split is a design choice"
 else

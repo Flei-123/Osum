@@ -6,8 +6,9 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 ULD=kernel/user/user.ld
 BLOCKS=4096
 PROGS="sh cat echo ls cp rm mkdir wc grep head true false ps mount umount k14"
@@ -58,7 +59,6 @@ number_in() { # datei name
         | sed -E 's/^const [A-Za-z0-9_]+: u64 = ([0-9]+).*/\1/'
 }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "K14: uebersprungen, qemu-system-x86_64 fehlt"
     exit 0

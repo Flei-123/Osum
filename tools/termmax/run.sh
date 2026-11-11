@@ -4,6 +4,7 @@
 #   [OLDREF=<ref>] bash /root/jarvis/bin/heavy bash tools/termmax/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"; [ -n "${OLDWT:-}" ] && git worktree remove --force "$OLDWT" 2>/dev/null' EXIT
@@ -20,8 +21,7 @@ if [ -n "$OLDREF" ]; then
     echo "== counter-proof: the same drehbuch on $OLDREF =="
     OLDWT="$TMPD/oldtree"
     git worktree add --detach "$OLDWT" "$OLDREF" > /dev/null 2>&1
-    cp -r "$ROOT/vendor/firn/bin" "$ROOT/vendor/firn/lib" "$OLDWT/vendor/firn/" 2>/dev/null
-    [ -e "$ROOT/vendor/firn/.gebaut" ] && cp -r "$ROOT/vendor/firn/.gebaut" "$OLDWT/vendor/firn/"
+    firnenv_prepare_old_tree "$OLDWT"
     run old "$OLDWT"
     python3 tools/termmax/check.py "$TMPD/old/serial.txt" | tee "$TMPD/old.txt"
     f2=$(grep -c '^  FAIL' "$TMPD/old.txt")

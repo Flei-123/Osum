@@ -29,7 +29,7 @@ run_one() { # <name> <etc extra>
 }
 share() { awk -v k="$2" '{ if ($0 ~ ("kind=" k " ") || $0 ~ ("name=" k " ")) { sub(/.*share=/, ""); s += $0 } } END { printf "%.1f", s }' "$1"; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 run_one on "/etc/mouse.conf=$TMPD/mouse-on.conf@0644" &
 run_one off "" &
 wait

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 export FIRNLIB=$PWD/lib
 OUT=${1:?output dir}
 MB=${MB:-48}
@@ -12,7 +13,7 @@ KERNEL=${KERNEL:-$OUT/k.mb}
 as --64 -o "$OUT/crt.o" kernel/user/crt.s
 SPEC="/bin/ /tmp/ /dev/ /proc/"
 for p in sh ls echo rm df wbench; do
-    vendor/firn/bin/firnc kernel/user/$p.fi -o "$OUT/$p.o" 2> "$OUT/e$p" || { head "$OUT/e$p"; exit 1; }
+    "$FIRNC" kernel/user/$p.fi -o "$OUT/$p.o" 2> "$OUT/e$p" || { head "$OUT/e$p"; exit 1; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" -o "$OUT/$p.elf" "$OUT/crt.o" "$OUT/$p.o"
     SPEC="$SPEC /bin/$p=$OUT/$p.elf"
 done

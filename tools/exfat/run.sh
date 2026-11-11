@@ -27,7 +27,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 PROGS="sh cat echo ls cp rm rmdir mkdir mv wc shasum mount umount sleep"
 PY="python3 -I tools/exfat/exfat.py"
@@ -41,7 +41,6 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 echo "== 0. prerequisites =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || { echo "fetch-firnc failed"; exit 1; }
 for w in mkfs.exfat fsck.exfat qemu-system-x86_64 sfdisk python3 mkfs.fat; do
     command -v "$w" >/dev/null 2>&1 || { echo "EXFAT: skipped, $w missing"; exit 0; }
 done

@@ -54,8 +54,8 @@ PROGS="sh ls cat echo sleep mkdir cp chmod rm orientbus notes act settingsd su d
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
 
 echo "== 1. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-[ -x vendor/firn/bin/firnc ] || { echo "ACTIONBUS: firnc0 missing"; exit 1; }
+. tools/lib/firnenv.sh
+[ -x "$FIRNC" ] || { echo "ACTIONBUS: firnc0 missing"; exit 1; }
 mkdir -p "$TMPD/bin"
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then
     ok "firnc0 builds $(echo $PROGS | wc -w) programs"

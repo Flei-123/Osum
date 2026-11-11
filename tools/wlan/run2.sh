@@ -5,7 +5,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 OUT=${OUT:-/tmp/wlan2-run}
 mkdir -p "$OUT" .probe
 QUICK=${1:-}

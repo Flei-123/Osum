@@ -5,7 +5,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/brand-env.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 PROGS="sh ls cat echo sleep svc init"
 BLOCKS=8192
@@ -19,7 +19,6 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 has() { if grep -q -- "$2" "$3"; then ok "$1"; else bad "$1 (missing '$2')"; head -5 "$3" | sed 's/^/        /'; fi; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh failed"; exit 1; }
 command -v qemu-system-x86_64 >/dev/null || { echo "kodb: skipped, no qemu"; exit 0; }
 if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then ACCEL="-accel kvm"; else ACCEL="-accel tcg"; fi
 

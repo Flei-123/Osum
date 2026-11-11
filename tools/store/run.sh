@@ -28,7 +28,7 @@ PROGS="sh ls cat echo sleep mkdir cp chmod rm orientbus act su stored opk ota"
 SRV_PORT=${STORE_PORT:-$(( 19000 + ($$ % 900) ))}
 
 echo "== 1. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 mkdir -p "$TMPD/bin"
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS store > "$TMPD/b.txt" 2>&1; then
     ok "firnc0 builds $(echo $PROGS store | wc -w) programs (stored $(stat -c%s "$TMPD/bin/stored.elf") B, store $(stat -c%s "$TMPD/bin/store.elf") B, opk $(stat -c%s "$TMPD/bin/opk.elf") B)"
@@ -37,7 +37,7 @@ else
     echo "STORE: $pass passed, $fail failed"; exit 1
 fi
 # /bin/fetch: the full library with TLS (profile app, no crt.o)
-if vendor/firn/bin/firnc -c --profile=app -o "$TMPD/fetch.o" kernel/app/fetch.fi > "$TMPD/fe.txt" 2>&1 \
+if "$FIRNC" -c --profile=app -o "$TMPD/fetch.o" kernel/app/fetch.fi > "$TMPD/fe.txt" 2>&1 \
         && ld -T kernel/user/user.ld -o "$TMPD/bin/fetch.elf" "$TMPD/fetch.o" 2>>"$TMPD/fe.txt"; then
     strip --strip-all "$TMPD/bin/fetch.elf"; ok "/bin/fetch builds ($(stat -c%s "$TMPD/bin/fetch.elf") B)"
 else

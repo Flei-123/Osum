@@ -4,7 +4,7 @@
 # usage: bash tools/wlan/link.sh        exit 0 = all OK
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 ok=0; bad=0
 echo "== link: EAPOL dispatch + capability summary =="

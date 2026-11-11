@@ -7,8 +7,8 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-if vendor/firn/bin/firnc -o "$D/unit" tools/fuicorner/unit.fi > "$D/cc.log" 2>&1; then
+. tools/lib/firnenv.sh
+if "$FIRNC" -o "$D/unit" tools/fuicorner/unit.fi > "$D/cc.log" 2>&1; then
     ok "fui.core + ecke build on the host"
 else
     bad "build failed"; head -20 "$D/cc.log" | sed 's/^/        /'

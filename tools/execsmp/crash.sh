@@ -15,7 +15,7 @@ BOOTS=${1:-20}; CORES=${2:-4}; EXTRA=${3:-}
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
 T=${CRASH_DIR:-$(mktemp -d)}; mkdir -p "$T/bin"
 [ -n "${CRASH_DIR:-}" ] || trap 'rm -rf "$T"' EXIT
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 bash tools/sync/build.sh "$T/bin" 0 sh echo execsmp > "$T/b.txt" 2>&1 || { tail "$T/b.txt"; exit 1; }
 ./tools/build-kernel.sh "$T/k0.img" --stufe 0 > "$T/k.txt" 2>&1 || { tail "$T/k.txt"; exit 1; }
 printf 'echo ==EXEC==\nexecsmp run spawn 1 2\nexecsmp run spawn 1 2\necho ==END==\n' > "$T/s.sh"

@@ -75,7 +75,7 @@ run_one() {
     fi
 }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 
 echo "== A: direct fallback (no bus), tile 7 on and off =="
 A="$TMPD/a/o"

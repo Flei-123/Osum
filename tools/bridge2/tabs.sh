@@ -18,7 +18,7 @@ cleanup() { [ -n "$QPID" ] && kill "$QPID" 2>/dev/null; rm -f "$SOCK"; }
 trap cleanup EXIT
 
 echo "== 1. das Abbild =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 if [ ! -f "$OUT/disk.img" ]; then
     bash tools/look/shot.sh "$OUT" keep=yes >"$OUT/bau.log" 2>&1 || {
         echo "the build failed"; tail -6 "$OUT/bau.log"; exit 1; }

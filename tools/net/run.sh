@@ -50,8 +50,9 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 LDSCRIPT=kernel/kernel.ld
 ULD=kernel/user/user.ld
 NETPROGS="sh ls cat echo ping wget"
@@ -102,7 +103,6 @@ val() { # file key
 
 # ------------------------------------------------------- the compiler
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing: $FIRNC"; exit 1; }
 [ -x "$FC1" ]   || { echo "firnc1 is missing: $FC1"; exit 1; }
 for t in qemu-system-x86_64 ip gcc nc curl python3 md5sum; do
@@ -164,7 +164,7 @@ build_stage 1 && ok "firnc1: the same, out of the compiler written in Firn" \
 
 # The driver is part of the freestanding kernel: no libc, no runtime, and
 # not one `syscall` instruction in ring 0. The TCP/IP stack of round K3
-# comes in with it -- and it comes in FROM `vendor/firn/lib/net/`, which
+# comes in with it -- and it comes in FROM `lib/net/` of the toolchain, which
 # is the pinned Firn commit and not a copy in this repository.
 for s in 0 1; do
     [ -f "$TMPD/k$s.o" ] || continue

@@ -9,6 +9,7 @@
 # wrong place at 90/180/270 (the tablet position is not turned back) and misses the button.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${1:-$(mktemp -d)}
@@ -27,7 +28,7 @@ run_tree() { # tree out rot mode(abs|rel)
     local word="" dev="usb-tablet"
     [ "${4:-abs}" = rel ] && dev="usb-mouse"
     [ "$3" != 0 ] && word="deskrot$3"
-    ( cd "$1" && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+    ( cd "$1" && firnenv_prepare_old_tree . >/dev/null 2>&1
       ALLTAGBUILD="$2.build" bash tools/alltag/build.sh "$2" kbd=no warten=1 \
         extra="modfs osum wmshell wmdauer usb hidgen $word" hold=no uitrace=yes waitfor="taskbar: start x=" progs="$PROGS" \
         qemu="-device qemu-xhci -device $dev -qmp unix:$2/qmp.sock,server,nowait" \

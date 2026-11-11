@@ -36,7 +36,7 @@ WLB=${WLBUILD:-/root/wl-build}
 PROGS="sh sleep echo cat ls wayd"
 
 echo "== 1. build =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 if python3 tools/wayland/gen.py 2>/dev/null | cmp -s - kernel/user/wlproto.fi; then
     ok "wlproto.fi is what gen.py generates"
 else

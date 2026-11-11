@@ -11,7 +11,7 @@ D=${KEEP:-$(mktemp -d)}; mkdir -p "$D"
 trap '[ -n "${KEEP:-}" ] || rm -rf "$D"' EXIT
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 finish() { echo "WBDEV: $pass passed, $fail failed"; [ "$fail" -eq 0 ]; exit $?; }
 BIG_BYTES=${BIG_BYTES:-524288}
 NVME_WRITE_RATIO=${NVME_WRITE_RATIO:-5}

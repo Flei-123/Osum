@@ -2,7 +2,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 
@@ -13,15 +13,11 @@ nok()  { fail=$((fail+1)); printf '  FEHL  %s\n' "$1"; }
 
 echo "HAERTUNG-2 Befund 1: buf_grow bei erschoepfter Arena"
 
-if [[ ! -x $FIRNC ]]; then
-    echo "  firnc fehlt -- ./vendor/firn/fetch-firnc.sh laufen lassen" >&2
-    exit 1
-fi
 
 cp tools/hardening/canary.fi "$TMPD/canary.fi"
 cp tools/hardening/proof.fi "$TMPD/nachweis.fi"
 
-export FIRNLIB="$(pwd)/vendor/firn/lib"
+export FIRNLIB="$FIRN_TOOLCHAIN/lib"
 if ! "$FIRNC" "$TMPD/nachweis.fi" -o "$TMPD/nachweis" 2>"$TMPD/bau.log"; then
     echo "  the proof could not be compiled:" >&2
     sed 's/^/    /' "$TMPD/bau.log" >&2

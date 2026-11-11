@@ -44,7 +44,7 @@ hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' duerfte nicht dastehen" || ok 
 val() { grep -aoE "^nic: $2=[0-9]+" "$1" 2>/dev/null | tail -1 | cut -d= -f2; }
 loss() { grep -oE '[0-9]+% packet loss' "$1" | grep -oE '^[0-9]+'; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 for t in qemu-system-x86_64 ip gcc nc python3 busybox; do
     command -v "$t" >/dev/null 2>&1 || { echo "RTL: uebersprungen, $t fehlt"; exit 0; }
 done

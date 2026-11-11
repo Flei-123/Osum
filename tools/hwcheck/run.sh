@@ -7,12 +7,11 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-[ -x "$FIRNC" ] || bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 $FIRNC tools/hwcheck/check.fi -o "$T/c" 2> "$T/c.err" && ok "check test builds" || { bad "build"; head -5 "$T/c.err"; echo "HWCHECK: $pass passed, $fail failed"; exit 1; }
 "$T/c" > "$T/c.txt" 2>&1
 n1=$(grep -c '^OK' "$T/c.txt"); n2=$(grep -c '^FAIL' "$T/c.txt")

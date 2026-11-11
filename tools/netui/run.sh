@@ -6,8 +6,7 @@
 # usage: bash tools/netui/run.sh        exit 0 = all OK
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 ok=0; bad=0
 echo "== netui: logic against the Python model =="

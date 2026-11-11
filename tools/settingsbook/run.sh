@@ -36,7 +36,7 @@ OUT=${1:-}
 if [ -z "$OUT" ]; then OUT=$(mktemp -d); trap 'rm -rf "$OUT" "$OUT-build" "$OUT-stub"' EXIT; fi
 shift || true
 export DESIGNBUILD="${DESIGNBUILD:-$OUT-build}"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 YRES=800
 pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "  OK    $1"; }
@@ -44,7 +44,6 @@ bad() { fail=$((fail+1)); echo "  FAIL  $1"; }
 msg() { grep -a "^$1 = " locale/en/messages | head -1 | sed 's/^[^=]*= //'; }
 
 mkdir -p "$OUT-stub"
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 if "$FIRNC" -c --profile=app -o "$OUT-stub/fk.o" tools/settingsbook/fakekonto.fi > "$OUT-stub/cc.log" 2>&1 \
    && ld -T kernel/user/user.ld -o "$OUT-stub/konto.elf" "$OUT-stub/fk.o" 2>>"$OUT-stub/cc.log"; then
     strip --strip-all "$OUT-stub/konto.elf" 2>/dev/null

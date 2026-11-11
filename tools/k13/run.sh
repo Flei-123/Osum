@@ -6,8 +6,9 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 
 export FIRNLIB="$(pwd)/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 ULD=kernel/user/user.ld
 # RUNDE MERGE-2: 16384 STATT 4096 BLOECKE (8 MiB statt 2 MiB).
 #
@@ -36,7 +37,6 @@ val() { grep -aoE "$2" "$1" | tail -1 | grep -oE '\-?[0-9]+$'; }
 k13val() { grep -aoE "^k13: .*" "$1" | tail -1 \
     | grep -oE "(^| )$2=[0-9]+" | tail -1 | grep -oE '[0-9]+$'; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 fehlt: $FIRNC"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "K13: uebersprungen, qemu-system-x86_64 fehlt"

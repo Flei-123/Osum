@@ -29,8 +29,7 @@ feld() { grep -aoE "(^|[^a-z])$3=[0-9]+" <(grep -aF "$2" "$1" | tail -1) \
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "STORAGE: skipped, qemu-system-x86_64 is not there"; exit 0
 fi
-bash vendor/firn/fetch-firnc.sh >/dev/null || {
-    echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
+. tools/lib/firnenv.sh
 
 echo "== build"
 bash tools/storage/build.sh "$TMPD" || exit 1

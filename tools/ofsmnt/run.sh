@@ -5,7 +5,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-FIRNC=vendor/firn/bin/firnc
+. tools/lib/firnenv.sh
 ULD=kernel/user/user.ld
 PROGS="sh cat echo ls cp rm mkdir wc true false mount umount"
 OLDREF=${OLDREF:-}
@@ -112,9 +112,7 @@ if [ -n "$OLDREF" ]; then
     echo "== 5. counter-proof: the same run on $OLDREF =="
     OLDWT="$W/oldtree"
     git worktree add --detach "$OLDWT" "$OLDREF" > /dev/null 2>&1
-    rm -rf "$OLDWT/vendor/firn/bin" "$OLDWT/vendor/firn/lib"
-    ln -s "$ROOT/vendor/firn/bin" "$OLDWT/vendor/firn/bin"
-    ln -s "$ROOT/vendor/firn/lib" "$OLDWT/vendor/firn/lib"
+    firnenv_prepare_old_tree "$OLDWT"
     if build_kernel "$OLDWT" "$W/k-old.mb"; then
         run old "$W/k-old.mb"
         dd if="$W/live-old.img" of=/dev/null bs=512 count=1 status=none

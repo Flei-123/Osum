@@ -20,8 +20,10 @@ while [[ $# -gt 0 ]]; do
 done
 mkdir -p "$OUT"
 
-if [[ $STUFE == 0 ]]; then CC=${FIRNC:-vendor/firn/bin/firnc}
-else CC=${FIRNC1:-vendor/firn/bin/firnc1}; OPTL="$OPTL1"; fi
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+if [[ $STUFE == 0 ]]; then CC=${FIRNC:-"$FIRNC"}
+else CC=${FIRNC1:-"$FIRNC1"}; OPTL="$OPTL1"; fi
 
 PROGS="desktop taskbar settings launcher explorer i18nt \
        sh echo ls cat"

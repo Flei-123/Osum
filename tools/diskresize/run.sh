@@ -6,8 +6,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-FIRNC=$(pwd)/vendor/firn/bin/firnc
+. tools/lib/firnenv.sh
 for t in sgdisk sfdisk python3; do command -v $t >/dev/null || { echo "DISKRESIZE: $t missing"; exit 1; }; done
 
 fuzz() {

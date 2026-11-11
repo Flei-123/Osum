@@ -9,6 +9,7 @@
 # COUNTER-PROOF: the same drehbuch on OLDREF must fail at least 3 checks.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/firnenv.sh
 ROOT=$(pwd)
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"; [ -n "${OLDWT:-}" ] && git worktree remove --force "$OLDWT" 2>/dev/null' EXIT
@@ -22,7 +23,7 @@ if [ -n "$OLDREF" ]; then
     echo "== counter-proof: the same drehbuch on $OLDREF =="
     OLDWT="$TMPD/oldtree"
     git worktree add --detach "$OLDWT" "$OLDREF" > /dev/null 2>&1
-    (cd "$OLDWT" && bash vendor/firn/fetch-firnc.sh > /dev/null 2>&1; DESIGNBUILD="$TMPD/oldbuild" bash tools/design/eh6.sh "$TMPD/old" accel=kvm moreprogs=term drehbuch="$ROOT/tools/hotkey/script.txt" > "$TMPD/run2.log" 2>&1)
+    (cd "$OLDWT" && firnenv_prepare_old_tree . > /dev/null 2>&1; DESIGNBUILD="$TMPD/oldbuild" bash tools/design/eh6.sh "$TMPD/old" accel=kvm moreprogs=term drehbuch="$ROOT/tools/hotkey/script.txt" > "$TMPD/run2.log" 2>&1)
     python3 tools/hotkey/check.py "$TMPD/old" | tee "$TMPD/old.txt"
     f2=$(grep -c '^  FAIL' "$TMPD/old.txt")
     [ "$f2" -ge 3 ] && echo "  OK    the old tree fails $f2 checks: they measure something" || echo "  FAIL  the old tree fails only $f2 checks"

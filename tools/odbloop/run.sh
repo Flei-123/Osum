@@ -24,7 +24,7 @@ fin() { echo; echo "ODBLOOP: $pass passed, $fail failed"; [ "$fail" -eq 0 ]; exi
 
 [ -s "$TOKEN" ] || bash tools/vbox/run.sh odb-token >/dev/null 2>&1
 [ -s "$TOKEN" ] || { echo "odbloop: no token file $TOKEN"; exit 2; }
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 
 IMG=${ODBLOOP_IMAGE:-}
 if [ -z "$IMG" ]; then

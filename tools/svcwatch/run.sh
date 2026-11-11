@@ -9,7 +9,7 @@ D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 ACC=$([ -e /dev/kvm ] && echo kvm || echo tcg)
 PROGS="sh cat echo sleep svcprobe"
 finish() { [ -n "${SVCWATCH_KEEP:-}" ] && { mkdir -p "$SVCWATCH_KEEP"; cp "$D"/*.klar "$SVCWATCH_KEEP/" 2>/dev/null; }; echo "SVCWATCH: $pass passed, $fail failed"; [ "$fail" = 0 ]; exit $?; }
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 mkdir -p "$D/bin"
 bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/b.txt" 2>&1 && ok "programs build" || { bad "programs"; head -10 "$D/b.txt"; finish; }
 K="${KERNEL:-}"

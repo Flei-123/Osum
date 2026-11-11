@@ -41,8 +41,9 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
-FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
+FC1=$FIRNC1
 
 NS=hwnet-$$
 V0=hw0-$$
@@ -80,7 +81,6 @@ has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' is missing"; }
 hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' should not be there" || ok "$3"; }
 val() { grep -aoE "^nic: $2=[0-9]+" "$1" 2>/dev/null | tail -1 | cut -d= -f2; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 for t in qemu-system-x86_64 ip gcc nc python3 busybox; do
     command -v "$t" >/dev/null 2>&1 || { echo "HWNET: skipped, $t is not available"; exit 0; }
 done

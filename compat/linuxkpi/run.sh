@@ -24,7 +24,7 @@ fin() { keep; echo "LINUXKPI-QEMU: $pass passed, $fail failed"; [ "$fail" -eq 0 
 SCREEN="python3 -I compat/linuxkpi/hosttest/screen.py"
 B="$D/b"
 bash compat/linuxkpi/build.sh "$B" > "$D/build.txt" 2>&1 && ok "shim and bochs driver build, closure ok, modules signed" || { bad "build"; tail -5 "$D/build.txt"; fin; }
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 PROGS="sh cat echo drvctl sleep"
 mkdir -p "$D/bin"
 bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/p.txt" 2>&1 && ok "programs build" || { bad "programs"; head -10 "$D/p.txt"; fin; }

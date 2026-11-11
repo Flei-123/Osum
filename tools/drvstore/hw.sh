@@ -12,7 +12,7 @@ hasnot() { grep -qaF -- "$2" "$1" && bad "$3 -- '$2' is there" || ok "$3"; }
 D=$(mktemp -d); [ -z "${DRVHW_KEEP:-}" ] && trap 'rm -rf "$D"' EXIT
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 fin() { echo "DRVHW: $pass passed, $fail failed"; [ "$fail" -eq 0 ]; exit $?; }
 bash tools/module/build.sh "$D/hwdemo.omod" --quelle module/store/hwdemo.fi > "$D/m.txt" 2>&1 && ok "hwdemo module builds and is signed" || { bad "hwdemo module"; tail -5 "$D/m.txt"; fin; }
 bash tools/module/build.sh "$D/hwleak.omod" --quelle module/store/hwleak.fi > "$D/ml.txt" 2>&1 && ok "hwleak module builds and is signed" || { bad "hwleak module"; tail -5 "$D/ml.txt"; fin; }

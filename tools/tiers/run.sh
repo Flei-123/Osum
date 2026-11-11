@@ -65,7 +65,7 @@ $MK build "$D/pk3" --name bt --module "$D/fake.omod" --tier bogus --match "pci 1
 sed -i 's/^tier=compat/tier=native/' "$D/pk/lkpi-fake/driver.inf"
 [[ "$($MK check "$D/pk/lkpi-fake")" == INVALID* ]] && ok "counter-proof: flipping tier breaks the signature" || bad "tier flip not detected"
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 bash tools/module/build.sh "$D/edudemo.omod" --source module/store/edudemo.fi > "$D/m.txt" 2>&1 && ok "edudemo module builds" || { bad "module"; tail -5 "$D/m.txt"; fin; }
 PROGS="sh cat echo drvctl"
 mkdir -p "$D/bin" "$D/kp"

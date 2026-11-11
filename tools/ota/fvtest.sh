@@ -67,7 +67,7 @@ lauf() { # name script [limit]
 
 if stage build; then
 echo "== 1. build the packages =="
-bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || { bad "fetch-firnc"; tail -3 "$OUT/firnc.log"; }
+. tools/lib/firnenv.sh
 bash pakete/bauen.sh "$OUT/pk" > "$OUT/bauen.log" 2>&1
 [ -f "$OUT/pk/fvviewer-1.0.0.opk" ] && ok "fvviewer-1.0.0.opk built ($(stat -c%s "$OUT/pk/fvviewer-1.0.0.opk") octets)" \
     || { bad "fvviewer-1.0.0.opk not built"; tail -5 "$OUT/bauen.log"; exit 1; }

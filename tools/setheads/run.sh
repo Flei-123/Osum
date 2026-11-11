@@ -18,7 +18,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 has() { grep -qaE -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 mkdir -p "$T/bin"
 PROGS="sh ls cat echo sleep orientbus act axd settings taskbar"
 HOOK=""

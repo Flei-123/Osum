@@ -18,7 +18,7 @@ D=$(mktemp -d)
 trap 'rm -rf "$D"' EXIT
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+. tools/lib/firnenv.sh
 finish() { echo "CLASSES-DEVICES: $pass passed, $fail failed"; [ "$fail" -eq 0 ]; exit $?; }
 calls() { grep -aoE "^# class-calls $2=[0-9]+" "$1" | tail -1 | cut -d= -f2; }
 found() { grep -aoE "^$2 [a-z]+ [^ ]+ found=[0-9?]+" "$1" | head -1 | sed 's/.*found=//'; }

@@ -30,8 +30,7 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "EINSPRUNG: uebersprungen, qemu-system-x86_64 fehlt"
     exit 0
 fi
-bash vendor/firn/fetch-firnc.sh >/dev/null || {
-    echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
+. tools/lib/firnenv.sh
 
 MONO=assets/osum-mono.ttf
 SANS=assets/osum-sans.ttf
@@ -58,7 +57,7 @@ rc=0
 for p in $PROGS; do
     UPROF=""; UCRT="$TMPD/crt.o"
     grep -qa '^profile app' "kernel/user/$p.fi" && { UPROF=--profile=app; UCRT=""; }
-    vendor/firn/bin/firnc $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/e$p" 2>&1 || {
+    "$FIRNC" $UPROF -c "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/e$p" 2>&1 || {
         bad "firnc uebersetzt $p.fi nicht"; sed 's/^/        /' "$TMPD/e$p" | head -6; rc=1; continue; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
         -o "$TMPD/$p.elf" $UCRT "$TMPD/$p.o" 2>"$TMPD/ld.err" \

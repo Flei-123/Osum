@@ -9,7 +9,7 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
@@ -67,8 +67,6 @@ BASIS="nokbd nosched noproc nofs noring3"
 # ------------------------------------------------------------ 1. bauen
 
 echo "== 1. the kernel with the vector unit =="
-bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 \
-    || { echo "AVX: vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 
 if bash tools/build-kernel.sh "$TMPD/k0.mb" --stufe 0 > "$TMPD/b0.log" 2>&1; then
     ok "the kernel is built ($(stat -c%s "$TMPD/k0.mb") Oktette)"
