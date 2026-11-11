@@ -3,22 +3,26 @@ profile kernel
 
 import lib.kstate
 import fs.cachelock
+import arch.arch
 
 export {
-    attach, REGION_FRAMES, read_hit, copy_out, begin_fill, attach_frame, finish_fill, abort_fill, buffer_of,
+    attach, sets_for, region_frames, MIN_SETS, read_hit, copy_out, begin_fill, attach_frame, finish_fill, abort_fill, buffer_of,
     drop_node, drop_ino, drop_mount, drop_all, take_frame,
     hits, misses, inserts, evictions, drops, resident, shrunk, bypassed,
-    note_bypass, MISS, PAGE_BYTES
+    note_bypass, MISS, PAGE_BYTES, pin, unpin, valid_of
 }
 
 const MISS: u64 = 0xFFFFFFFFFFFFFFFF
 const PAGE_BYTES: u64 = 4096
-const SLOTS: u64 = 256
 const WAYS: u64 = 8
-const SETS: u64 = 32
+const MIN_SETS: u64 = 32
+const MAX_SETS: u64 = 4096
+const FRAMES_PER_SLOT: u64 = 8
 const SLOT_BYTES: u64 = 64
-const SLOTS_AT: u64 = 4096
-const REGION_FRAMES: u64 = 5
+const FILTER_BUCKETS: u64 = 1024
+const FILTER_AT: u64 = 4096
+const SLOTS_AT: u64 = 12288
+const GOLDEN: u64 = 0x9E3779B97F4A7C15
 const H_EPOCH: u64 = 8
 const H_CLOCK: u64 = 16
 const H_HITS: u64 = 24
@@ -29,21 +33,32 @@ const H_DROPS: u64 = 56
 const H_PAGES: u64 = 64
 const H_SHRUNK: u64 = 72
 const H_BYPASS: u64 = 80
-const H_MNT_LIVE: u64 = 88
+const H_SETS: u64 = 88
+const H_MNT_LIVE: u64 = 96
 const S_NODE: u64 = 0
 const S_KEY: u64 = 8
 const S_VALID: u64 = 16
 const S_STAMP: u64 = 24
 const S_FRAME: u64 = 32
 const S_BUSY: u64 = 40
+const S_PIN: u64 = 48
 
-fn attach(state: u64, region: u64) {
-    var o: u64 = 0
-    while o < REGION_FRAMES * 4096 {
-        kstate.set(region, o, 0)
-        o = o + 8
+fn sets_for(total_frames: u64) -> u64 {
+    var sets: u64 = MIN_SETS
+    while sets < MAX_SETS && sets * WAYS * FRAMES_PER_SLOT < total_frames {
+        sets = sets * 2
     }
+    return sets
+}
+
+fn region_frames(sets: u64) -> u64 {
+    return (SLOTS_AT + sets * WAYS * SLOT_BYTES + PAGE_BYTES - 1) / PAGE_BYTES
+}
+
+fn attach(state: u64, region: u64, sets: u64) {
+    arch.fill_words(region, 0, region_frames(sets) * PAGE_BYTES / 8)
     kstate.set(region, H_CLOCK, 1)
+    kstate.set(region, H_SETS, sets)
     kstate.set(state, kstate.PCACHE_BASE, region)
 }
 
@@ -59,22 +74,36 @@ fn key_of(m: u64, idx: u64) -> u64 {
     return (idx << 8) | (m + 1)
 }
 
-fn set_hash(node: u64, m: u64, idx: u64) -> u64 {
-    var h: u64 = (node ^ (m << 56)) *% 0x9E3779B97F4A7C15
-    h = (h ^ (idx *% 0xC2B2AE3D27D4EB4F)) *% 0x9E3779B97F4A7C15
-    return (h >> 32) % SETS
+fn set_of(b: u64, node: u64, m: u64, idx: u64) -> u64 {
+    let h: u64 = ((node ^ (m << 56)) *% GOLDEN) >> 32
+    return (h + idx) & (kstate.get(b, H_SETS) - 1)
+}
+
+fn filter_at(node: u64) -> u64 {
+    return FILTER_AT + (((node *% GOLDEN) >> 40) % FILTER_BUCKETS) * 8
+}
+
+fn filter_count(b: u64, node: u64) -> u64 {
+    return kstate.get(b, filter_at(node))
+}
+
+fn filter_up(b: u64, node: u64) {
+    kstate.set(b, filter_at(node), kstate.get(b, filter_at(node)) + 1)
+}
+
+fn filter_down(b: u64, node: u64) {
+    let n: u64 = kstate.get(b, filter_at(node))
+    if n > 0 {
+        kstate.set(b, filter_at(node), n - 1)
+    }
+}
+
+fn slot_count(b: u64) -> u64 {
+    return kstate.get(b, H_SETS) * WAYS
 }
 
 fn copy_out(dst: u64, src: u64, n: u64) {
-    var i: u64 = 0
-    while i + 8 <= n {
-        kstate.set(dst, i, kstate.get(src, i))
-        i = i + 8
-    }
-    while i < n {
-        kstate.set8(dst + i, kstate.get8(src + i) as u8)
-        i = i + 1
-    }
+    arch.copy_octets(dst, src, n)
 }
 
 fn read_hit(state: u64, m: u64, node: u64, idx: u64, from: u64, n: u64, dst: u64) -> u64 {
@@ -86,7 +115,7 @@ fn read_hit(state: u64, m: u64, node: u64, idx: u64, from: u64, n: u64, dst: u64
         return MISS
     }
     let key: u64 = key_of(m, idx)
-    let set: u64 = set_hash(node, m, idx)
+    let set: u64 = set_of(b, node, m, idx)
     let flags: u64 = cachelock.take(b)
     var way: u64 = 0
     while way < WAYS {
@@ -116,6 +145,49 @@ fn read_hit(state: u64, m: u64, node: u64, idx: u64, from: u64, n: u64, dst: u64
     return MISS
 }
 
+fn pin(state: u64, m: u64, node: u64, idx: u64) -> u64 {
+    if !enabled(state) {
+        return 0
+    }
+    let b: u64 = kstate.get(state, kstate.PCACHE_BASE)
+    if b == 0 {
+        return 0
+    }
+    let key: u64 = key_of(m, idx)
+    let set: u64 = set_of(b, node, m, idx)
+    let flags: u64 = cachelock.take(b)
+    var way: u64 = 0
+    while way < WAYS {
+        let s: u64 = slot_of(b, set * WAYS + way)
+        if kstate.get(s, S_KEY) == key && kstate.get(s, S_NODE) == node {
+            let clock: u64 = kstate.get(b, H_CLOCK) + 1
+            kstate.set(b, H_CLOCK, clock)
+            kstate.set(s, S_STAMP, clock)
+            kstate.set(s, S_PIN, kstate.get(s, S_PIN) + 1)
+            kstate.set(b, H_HITS, kstate.get(b, H_HITS) + 1)
+            cachelock.give(b, flags)
+            return s
+        }
+        way = way + 1
+    }
+    cachelock.give(b, flags)
+    return 0
+}
+
+fn unpin(state: u64, slot: u64) {
+    let b: u64 = kstate.get(state, kstate.PCACHE_BASE)
+    let flags: u64 = cachelock.take(b)
+    let n: u64 = kstate.get(slot, S_PIN)
+    if n > 0 {
+        kstate.set(slot, S_PIN, n - 1)
+    }
+    cachelock.give(b, flags)
+}
+
+fn valid_of(slot: u64) -> u64 {
+    return kstate.get(slot, S_VALID)
+}
+
 fn begin_fill(state: u64, m: u64, node: u64, idx: u64) -> u64 {
     if !enabled(state) {
         return 0
@@ -124,7 +196,7 @@ fn begin_fill(state: u64, m: u64, node: u64, idx: u64) -> u64 {
     if b == 0 {
         return 0
     }
-    let set: u64 = set_hash(node, m, idx)
+    let set: u64 = set_of(b, node, m, idx)
     let flags: u64 = cachelock.take(b)
     kstate.set(b, H_MNT_LIVE, kstate.get(b, H_MNT_LIVE) | (1 << (m & 63)))
     var victim: u64 = 0
@@ -133,7 +205,7 @@ fn begin_fill(state: u64, m: u64, node: u64, idx: u64) -> u64 {
     var way: u64 = 0
     while way < WAYS {
         let s: u64 = slot_of(b, set * WAYS + way)
-        if kstate.get(s, S_BUSY) == 0 && !empty {
+        if kstate.get(s, S_BUSY) == 0 && kstate.get(s, S_PIN) == 0 && !empty {
             if kstate.get(s, S_KEY) == 0 {
                 victim = s
                 empty = true
@@ -150,6 +222,7 @@ fn begin_fill(state: u64, m: u64, node: u64, idx: u64) -> u64 {
     }
     if kstate.get(victim, S_KEY) != 0 {
         kstate.set(b, H_EVICTS, kstate.get(b, H_EVICTS) + 1)
+        filter_down(b, kstate.get(victim, S_NODE))
     }
     kstate.set(victim, S_KEY, 0)
     kstate.set(victim, S_BUSY, kstate.get(b, H_EPOCH) + 1)
@@ -177,6 +250,7 @@ fn finish_fill(state: u64, slot: u64, m: u64, node: u64, idx: u64, valid: u64) {
         kstate.set(slot, S_VALID, valid)
         kstate.set(slot, S_STAMP, clock)
         kstate.set(slot, S_KEY, key_of(m, idx))
+        filter_up(b, node)
         kstate.set(b, H_INSERTS, kstate.get(b, H_INSERTS) + 1)
     }
     kstate.set(slot, S_BUSY, 0)
@@ -201,8 +275,13 @@ fn drop_where(state: u64, mode: u64, m: u64, node: u64) {
     let flags: u64 = cachelock.take(b)
     kstate.set(b, H_EPOCH, kstate.get(b, H_EPOCH) + 1)
     var live: u64 = 0
+    if (mode == 1 || mode == 2) && filter_count(b, node) == 0 {
+        cachelock.give(b, flags)
+        return
+    }
+    let slots: u64 = slot_count(b)
     var i: u64 = 0
-    while i < SLOTS {
+    while i < slots {
         let s: u64 = slot_of(b, i)
         let key: u64 = kstate.get(s, S_KEY)
         if key != 0 {
@@ -216,6 +295,7 @@ fn drop_where(state: u64, mode: u64, m: u64, node: u64) {
             }
             if hit {
                 kstate.set(s, S_KEY, 0)
+                filter_down(b, kstate.get(s, S_NODE))
                 kstate.set(b, H_DROPS, kstate.get(b, H_DROPS) + 1)
             } else {
                 live = live | (1 << (((key & 255) - 1) & 63))
@@ -250,11 +330,15 @@ fn take_frame(state: u64) -> u64 {
     }
     var f: u64 = 0
     let flags: u64 = cachelock.take(b)
+    let slots: u64 = slot_count(b)
     var i: u64 = 0
-    while i < SLOTS && f == 0 {
+    while i < slots && f == 0 {
         let s: u64 = slot_of(b, i)
-        if kstate.get(s, S_BUSY) == 0 && kstate.get(s, S_FRAME) != 0 {
+        if kstate.get(s, S_BUSY) == 0 && kstate.get(s, S_PIN) == 0 && kstate.get(s, S_FRAME) != 0 {
             f = kstate.get(s, S_FRAME)
+            if kstate.get(s, S_KEY) != 0 {
+                filter_down(b, kstate.get(s, S_NODE))
+            }
             kstate.set(s, S_KEY, 0)
             kstate.set(s, S_FRAME, 0)
             kstate.set(b, H_PAGES, kstate.get(b, H_PAGES) - 1)

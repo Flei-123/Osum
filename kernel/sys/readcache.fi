@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import fs.file
+import fs.vfs
+import fs.pcache
+import sys.sysuser
+
+export { serve }
+
+fn serve(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    let m: u64 = file.open_mnt(state, of)
+    if !vfs.page_cached(state, m) {
+        return 0
+    }
+    let node: u64 = file.open_ino(state, of)
+    let off: u64 = file.open_off(state, of)
+    var done: u64 = 0
+    while done < len {
+        let pos: u64 = off + done
+        let from: u64 = pos & (pcache.PAGE_BYTES - 1)
+        var want: u64 = pcache.PAGE_BYTES - from
+        if want > len - done {
+            want = len - done
+        }
+        let slot: u64 = pcache.pin(state, m, node, pos >> 12)
+        if slot == 0 {
+            break
+        }
+        var copied: bool = false
+        if from + want <= pcache.valid_of(slot) {
+            copied = sysuser.copy_out(state, me, buf + done, pcache.buffer_of(slot) + from, want)
+        }
+        pcache.unpin(state, slot)
+        if !copied {
+            break
+        }
+        done = done + want
+    }
+    if done != 0 {
+        file.open_set_off(state, of, off + done)
+    }
+    return done
+}

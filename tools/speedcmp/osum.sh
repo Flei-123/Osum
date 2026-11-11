@@ -37,7 +37,7 @@ for i in $(seq 1 "$SPEED_RUNS"); do
     cp "$W/disk.img" "$W/live.img"
     drive_args "$OSUM_DRIVE" "$W/live.img" || exit 1
     timeout "$SPEED_BOOT_TIMEOUT" qemu-system-x86_64 "${SPEED_KVM[@]}" -smp "$SPEED_SMP" -m "$SPEED_MEM" -kernel "$W/k.mb" \
-        -append "osum vfs nokbd ${SPEED_OSUM_WORDS-nosched noproc nofs} script=/bin/speedbench;exit" -serial "file:$OUT/osum-$i.raw" -display none -no-reboot \
+        -append "osum vfs nokbd ${SPEED_OSUM_WORDS-nosched noproc nofs} script=${SPEED_SCRIPT:-/bin/speedbench;exit}" -serial "file:$OUT/osum-$i.raw" -display none -no-reboot \
         "${DRIVE_ARGS[@]}" -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
     echo "osum run $i rc=$?" >&2
     grep -a '^S ' "$OUT/osum-$i.raw" | tr -d '\r' > "$OUT/osum-$i.txt"

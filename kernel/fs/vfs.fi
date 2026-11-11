@@ -24,7 +24,7 @@ export {
     mount_for, node_for, node_for_nofollow, resolve, ops_of,
     v_readdir, v_attr, v_read, v_write, v_create, v_unlink, v_rename,
     v_trunc, can, rdonly, root_node, type_of, all_mode,
-    MAX_MNT, cache_words, cache_shrink, caches_up
+    MAX_MNT, cache_words, cache_shrink, caches_up, page_cached
 }
 
 const MAX_MNT: u64 = 8
@@ -110,10 +110,22 @@ fn caches_up(state: u64) {
         }
     }
     if kstate.get(state, kstate.PCACHE_BASE) == 0 {
-        let r: u64 = region_up(state, kstate.PCACHE_BASE, kstate.PCACHE_TRIED, pcache.REGION_FRAMES)
+        pcache_up(state)
+    }
+}
+
+fn pcache_up(state: u64) {
+    if kstate.get(state, kstate.BITMAP) == 0 || kstate.add(state, kstate.PCACHE_TRIED, 1) != 1 {
+        return
+    }
+    var sets: u64 = pcache.sets_for(mmframe.frames_total(state))
+    while sets >= pcache.MIN_SETS {
+        let r: u64 = mmframe.frame_run(state, pcache.region_frames(sets))
         if r != 0 {
-            pcache.attach(state, r)
+            pcache.attach(state, r, sets)
+            return
         }
+        sets = sets / 2
     }
 }
 
@@ -150,6 +162,14 @@ fn page_for_fill(state: u64, m: u64, node: u64, idx: u64) -> u64 {
         pcache.attach_frame(state, slot, f)
     }
     return slot
+}
+
+fn page_cached(state: u64, m: u64) -> bool {
+    if !can(state, m, vfsops.OP_READ) || !cacheable(mnt.fstype(state, m)) {
+        return false
+    }
+    caches_up(state)
+    return kstate.get(state, kstate.PCACHE_BASE) != 0
 }
 
 fn cacheable(t: u64) -> bool {

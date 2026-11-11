@@ -26,6 +26,8 @@
 
 typedef void (*bench_fn)(long n);
 
+static const char *only_filter;
+
 static char *io_buf;
 static int data_fd = -1;
 
@@ -61,7 +63,7 @@ static int selected(const char *name)
 
 static void measure(const char *name, bench_fn fn, long batch, long min_batches, long ops_per_item)
 {
-    if (!selected(name))
+    if (!selected(name) || (only_filter && !strstr(name, only_filter)))
         return;
     long total = 0;
     long long t0 = now_ns();
@@ -239,6 +241,8 @@ int main(int argc, char **argv)
 {
     if (argc > 1 && !strcmp(argv[1], "--noop"))
         return 0;
+    if (argc > 1)
+        only_filter = argv[1];
     io_buf = malloc(IO_CHUNK);
     memset(io_buf, 0x5A, IO_CHUNK);
     data_fd = open(DATA_PATH, O_RDWR | O_CREAT | O_TRUNC, 0600);
