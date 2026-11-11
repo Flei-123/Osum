@@ -79,7 +79,7 @@ mutant() {
 mutant nocopy kernel/user/services/svcosum.fi 's/xfer.is_error(xfer.set(xfer.SEL_CLIPBOARD, kinds, uris, n))/xfer.is_error(0)/' \
     script.txt "" clip paste_from_service copy_stays_on_clipboard
 mutant nocut kernel/user/services/svcosum.fi 's/kinds = kinds | cut_mask()/kinds = kinds/' \
-    script.txt "" clip cut_flag cut_clears_clipboard
+    script.txt "" clip cut_paste_consumes cut_clears_clipboard
 
 echo "EXPLORERCLIP: $pass passed, $fail failed"
 [ "$fail" = 0 ]
