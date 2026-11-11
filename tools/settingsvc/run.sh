@@ -16,9 +16,9 @@ guest() {
     local apps="$out.apps"
     rm -rf "$apps"; cp -a "$tree/assets/apps" "$apps"
     printf 'perm=notify\n' >> "$apps/charmap.osp/INFO"
-    ( cd "$tree" && export APPS_DIR="$apps" BUNDLE_USER_APPS=charmap.osp && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
+    ( cd "$tree" && export APPS_DIR="$apps" BUNDLE_USER_APPS=charmap.osp EH_MKFS_EXTRA=/proc/ && bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
       DESIGNREBUILD=1 DESIGNBUILD="$out.build" bash tools/design/eh6.sh "$out" res=1920x1080 accel=kvm \
-        mode="$MODE" uiscale="$SCALE" lang=en drehbuch="$ROOT/tools/settingsvc/script.txt" moreprogs="dialogd apprights charmap" ) > "$out.log" 2>&1
+        mode="$MODE" uiscale="$SCALE" "extra=vfs lang=en" drehbuch="$ROOT/tools/settingsvc/script.txt" moreprogs="dialogd apprights charmap" ) > "$out.log" 2>&1
     rm -rf "$out.build" "$apps"
     [ -s "$out/serial.txt" ] && grep -aq "settings: ready" "$out/serial.txt"
 }
@@ -37,8 +37,11 @@ expect() {
     esac
 }
 
+WANT=${SETTINGSVC_ONLY:-}
 echo "== 1. settings in the guest (scale $SCALE): last page, uninstall confirm =="
-if guest "$ROOT" "$OUT/main"; then
+if [ -n "$WANT" ]; then
+    :
+elif guest "$ROOT" "$OUT/main"; then
     ok "guest script ran"
     verdicts "$OUT/main"
     while read -r _ name state note; do
@@ -49,12 +52,13 @@ else
     bad "guest run failed"; tail -n 12 "$OUT/main.log"
 fi
 
-[ -n "${SETTINGSVC_NOMUT:-}" ] && { echo "SETTINGSVC: $pass passed, $fail failed"; [ "$fail" = 0 ]; exit; }
+[ -n "${SETTINGSVC_NOMUT:-}" ] && [ -z "$WANT" ] && { echo "SETTINGSVC: $pass passed, $fail failed"; [ "$fail" = 0 ]; exit; }
 echo
 echo "== 2. COUNTER-PROBES: mutated trees =="
 mutant() {
     local name=$1 file=$2 expr=$3
     shift 3
+    [ -n "$WANT" ] && [ "$WANT" != "$name" ] && return
     local T="$OUT/mut-$name"
     mkdir -p "$T"
     tar -C "$ROOT" --exclude=.git -cf - . | tar -C "$T" -xf -
