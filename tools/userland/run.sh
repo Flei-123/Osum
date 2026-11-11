@@ -568,7 +568,7 @@ has "$TMPD/after6.txt" "/keep.txt" "a file the shell wrote with '>' is in the im
 has "$TMPD/after6.txt" "/bin/sh" "and nothing else on the image was harmed"
 bash tools/mkfsfi/mkfs.sh list "$TMPD/after-t2.img" > "$TMPD/after2.txt" 2>&1
 has "$TMPD/after2.txt" "/out.txt" "the file of the redirection case is on the disk"
-has "$TMPD/after2.txt" "/tmp" "and so is the directory the shell makes for its pipes"
+hasnot "$TMPD/after2.txt" "/tmp" "and the shell leaves no scratch directory for its pipes (they live in the kernel)"
 size=$(awk '$1 == "/out.txt" {print $2}' "$TMPD/after2.txt")
 num "'echo -n short > /out.txt' wrote exactly five octets" "${size:-0}" eq 5
 
