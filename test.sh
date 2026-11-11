@@ -179,7 +179,9 @@ while read -r want name; do
     got=$(git hash-object "$FIRN_TOOLCHAIN/lib/$name" 2>/dev/null)
     [ "$got" = "$want" ] || S1="$S1 $name: $got instead of $want;"
 done < vendor/net/BLOBS
-[ -d lib/net ] && S1="$S1 the repo holds a copy of the net stack under lib/net;"
+for stack_file in wire tcp stack; do
+    [ -e "lib/net/$stack_file.fi" ] && S1="$S1 the repo holds a copy of the net stack under lib/net;"
+done
 { [ -e compiler ] || [ -e bin/firnc1.fi ]; } && \
     S1="$S1 the repo holds a compiler;"
 ZUSAGEN=$((ZUSAGEN + 9))
