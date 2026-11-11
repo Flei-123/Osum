@@ -40,7 +40,12 @@ open(sys.argv[1], "wb").write(bytes(out[:300000]))
 PYEOF
 SHA=$(sha256sum "$W/src.bin" | cut -d' ' -f1)
 dd if=/dev/null of="$W/fs.img" bs=1M seek=16 2>/dev/null
-mkfs.ext4 -q -F -b "$BS" -O "$FEATURES" -I 256 "$W/fs.img" >/dev/null 2>&1 || { echo "mkfs.ext4 failed"; exit 1; }
+mkfs.ext4 -q -F -b "$BS" -O "$FEATURES" -I 256 -N 4096 "$W/fs.img" >/dev/null 2>&1 || { echo "mkfs.ext4 failed"; exit 1; }
+head -c 8192 "$W/src.bin" > "$W/hole.bin"
+: > "$W/frag.cmd"
+for i in $(seq 0 1199); do echo "write $W/hole.bin f$i" >> "$W/frag.cmd"; done
+for i in $(seq 1 2 1199); do echo "rm f$i" >> "$W/frag.cmd"; done
+debugfs -w -f "$W/frag.cmd" "$W/fs.img" >/dev/null 2>&1
 e2fsck -fn "$W/fs.img" >/dev/null 2>&1 && ok "fresh image is clean" || bad "fresh image not clean"
 dd if=/dev/null of="$W/disk.img" bs=1M seek=18 2>/dev/null
 printf 'label: dos\nstart=2048, type=83\n' | sfdisk "$W/disk.img" >/dev/null 2>&1
@@ -87,6 +92,14 @@ for f in /d/a.bin /d/c.bin /h.txt; do
 done
 debugfs -R "stat /e" "$W/after.img" 2>&1 | grep -qa "not found" && ok "removed dir /e is gone" || bad "dir /e still there"
 debugfs -R "stat /b.bin" "$W/after.img" 2>&1 | grep -qa "not found" && ok "renamed source /b.bin is gone" || bad "/b.bin still there"
+for f in /d/a.bin /d/c.bin /h.txt; do
+    debugfs -R "ex $f" "$W/after.img" 2>/dev/null | grep -aq '^ *1/ *1 ' && ok "$f has a depth-1 extent tree" || bad "$f is not a depth-1 tree"
+done
+nex=$(debugfs -R "ex /d/a.bin" "$W/after.img" 2>/dev/null | grep -ac '^ *[01]/ *1 .* - ')
+[ "$nex" -gt 8 ] && ok "a.bin has $nex extent lines (more than 4)" || bad "a.bin extent lines: $nex"
+cp "$W/after.img" "$W/mut2.img"
+debugfs -w -R "sif /d/a.bin blocks 8" "$W/mut2.img" >/dev/null 2>&1
+e2fsck -fn "$W/mut2.img" >/dev/null 2>&1 && bad "MUTANT: wrong i_blocks not detected" || ok "MUTANT: wrong i_blocks of a deep tree turns e2fsck red"
 cp "$W/after.img" "$W/mut.img"
 debugfs -w -R "set_bg 0 free_blocks_count 1" "$W/mut.img" >/dev/null 2>&1
 e2fsck -fn "$W/mut.img" >/dev/null 2>&1 && bad "MUTANT: broken group counter not detected" || ok "MUTANT: broken group counter turns e2fsck red"

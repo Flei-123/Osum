@@ -1,0 +1,193 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import fs.ext4
+import fs.ext4alloc
+import fs.ext4ino
+import libc.octets
+
+export { map_add, free_blocks }
+
+const ROOT_DEPTH: u64 = 6
+const ROOT_MAX: u64 = 4
+const NODE_ENTRIES: u64 = 2
+const NODE_CAPACITY: u64 = 4
+const KEY_LEAF_LO: u64 = 4
+const KEY_LEAF_HI: u64 = 8
+const KEY_PAD: u64 = 10
+const WORD_MASK: u64 = 0xFFFFFFFF
+const HEIGHT_LEAF_ROOT: u64 = 1
+
+fn leaf_of(e: u64) -> u64 {
+    return octets.le32(e + KEY_LEAF_LO) | (octets.le16(e + KEY_LEAF_HI) << 32)
+}
+
+fn index_set(e: u64, first: u64, leaf: u64) {
+    octets.put32(e, first)
+    octets.put32(e + KEY_LEAF_LO, leaf & WORD_MASK)
+    octets.put16(e + KEY_LEAF_HI, leaf >> 32)
+    octets.put16(e + KEY_PAD, 0)
+}
+
+fn leaf_init(buf: u64, bs: u64, entries: u64) {
+    octets.zero(buf, bs)
+    octets.put16(buf, ext4ino.EXT_MAGIC)
+    octets.put16(buf + NODE_ENTRIES, entries)
+    octets.put16(buf + NODE_CAPACITY, (bs - ext4ino.EXT_HDR) / ext4ino.EXT_ENTRY)
+}
+
+fn leaf_alloc(state: u64, m: u64, p: u64, goal: u64) -> u64 {
+    let nb: u64 = ext4alloc.block_alloc(state, m, goal)
+    if nb != 0 {
+        ext4ino.blocks_add(state, m, p, 1, true)
+    }
+    return nb
+}
+
+fn leaf_drop(state: u64, m: u64, p: u64, nb: u64) {
+    ext4alloc.block_free_run(state, m, nb, 1)
+    ext4ino.blocks_add(state, m, p, 1, false)
+}
+
+fn promote(state: u64, m: u64, p: u64, lblock: u64, pblock: u64) -> bool {
+    let h: u64 = p + ext4ino.I_BLOCK
+    let n: u64 = octets.le16(h + NODE_ENTRIES)
+    if n == 0 || n < octets.le16(h + NODE_CAPACITY) {
+        return false
+    }
+    let bs: u64 = ext4.sget(state, m, ext4.S_BSIZE)
+    let nb: u64 = leaf_alloc(state, m, p, pblock + 1)
+    if nb == 0 {
+        return false
+    }
+    let leaf: u64 = ext4alloc.bm_buf(state)
+    leaf_init(leaf, bs, n)
+    octets.copy(leaf + ext4ino.EXT_HDR, h + ext4ino.EXT_HDR, n * ext4ino.EXT_ENTRY)
+    if !ext4ino.node_append(leaf, lblock, pblock)
+        || !ext4alloc.block_write(state, m, nb, leaf) {
+        leaf_drop(state, m, p, nb)
+        return false
+    }
+    let first: u64 = octets.le32(h + ext4ino.EXT_HDR)
+    octets.zero(h + ext4ino.EXT_HDR, ROOT_MAX * ext4ino.EXT_ENTRY)
+    index_set(h + ext4ino.EXT_HDR, first, nb)
+    octets.put16(h + NODE_ENTRIES, 1)
+    octets.put16(h + ROOT_DEPTH, HEIGHT_LEAF_ROOT)
+    return true
+}
+
+fn grow(state: u64, m: u64, p: u64, lblock: u64, pblock: u64) -> bool {
+    let h: u64 = p + ext4ino.I_BLOCK
+    let n: u64 = octets.le16(h + NODE_ENTRIES)
+    if n >= octets.le16(h + NODE_CAPACITY) {
+        return false
+    }
+    let bs: u64 = ext4.sget(state, m, ext4.S_BSIZE)
+    let nb: u64 = leaf_alloc(state, m, p, pblock + 1)
+    if nb == 0 {
+        return false
+    }
+    let leaf: u64 = ext4alloc.bm_buf(state)
+    leaf_init(leaf, bs, 0)
+    ext4ino.node_append(leaf, lblock, pblock)
+    if !ext4alloc.block_write(state, m, nb, leaf) {
+        leaf_drop(state, m, p, nb)
+        return false
+    }
+    index_set(h + ext4ino.EXT_HDR + n * ext4ino.EXT_ENTRY, lblock, nb)
+    octets.put16(h + NODE_ENTRIES, n + 1)
+    return true
+}
+
+fn append_leaf(state: u64, m: u64, p: u64, lblock: u64, pblock: u64) -> bool {
+    let h: u64 = p + ext4ino.I_BLOCK
+    let n: u64 = octets.le16(h + NODE_ENTRIES)
+    if n == 0 {
+        return false
+    }
+    let at: u64 = leaf_of(h + ext4ino.EXT_HDR + (n - 1) * ext4ino.EXT_ENTRY)
+    let leaf: u64 = ext4alloc.bm_buf(state)
+    if !ext4.block_read(state, m, at, leaf) || octets.le16(leaf + ROOT_DEPTH) != 0 {
+        return false
+    }
+    if ext4ino.node_append(leaf, lblock, pblock) {
+        return ext4alloc.block_write(state, m, at, leaf)
+    }
+    return grow(state, m, p, lblock, pblock)
+}
+
+fn map_add(state: u64, m: u64, p: u64, lblock: u64, pblock: u64) -> bool {
+    let h: u64 = p + ext4ino.I_BLOCK
+    if octets.le16(h) != ext4ino.EXT_MAGIC {
+        return false
+    }
+    let depth: u64 = octets.le16(h + ROOT_DEPTH)
+    if depth == 0 {
+        return ext4ino.node_append(h, lblock, pblock)
+            || promote(state, m, p, lblock, pblock)
+    }
+    if depth == HEIGHT_LEAF_ROOT {
+        return append_leaf(state, m, p, lblock, pblock)
+    }
+    return false
+}
+
+fn run_len(e: u64) -> u64 {
+    let len: u64 = octets.le16(e + NODE_CAPACITY)
+    if len > ext4ino.EXT_INIT_MAX_LEN {
+        return len - ext4ino.EXT_INIT_MAX_LEN
+    }
+    return len
+}
+
+fn free_run(state: u64, m: u64, e: u64) -> bool {
+    return ext4alloc.block_free_run(state, m, ext4ino.extent_start(e), run_len(e))
+}
+
+fn free_leaf(state: u64, m: u64, at: u64) -> bool {
+    let leaf: u64 = ext4alloc.bm_buf(state)
+    if !ext4.block_read(state, m, at, leaf) || octets.le16(leaf) != ext4ino.EXT_MAGIC {
+        return false
+    }
+    let n: u64 = octets.le16(leaf + NODE_ENTRIES)
+    var i: u64 = 0
+    while i < n {
+        if !ext4.block_read(state, m, at, leaf) {
+            return false
+        }
+        if !free_run(state, m, leaf + ext4ino.EXT_HDR + i * ext4ino.EXT_ENTRY) {
+            return false
+        }
+        i = i + 1
+    }
+    return ext4alloc.block_free_run(state, m, at, 1)
+}
+
+fn free_blocks(state: u64, m: u64, p: u64) -> bool {
+    let h: u64 = p + ext4ino.I_BLOCK
+    if (octets.le32(p + ext4ino.I_FLAGS) & ext4ino.EXTENTS_FL) == 0
+        || octets.le16(h) != ext4ino.EXT_MAGIC {
+        return false
+    }
+    let depth: u64 = octets.le16(h + ROOT_DEPTH)
+    if depth > HEIGHT_LEAF_ROOT {
+        return false
+    }
+    let n: u64 = octets.le16(h + NODE_ENTRIES)
+    var i: u64 = 0
+    while i < n {
+        let e: u64 = h + ext4ino.EXT_HDR + i * ext4ino.EXT_ENTRY
+        if depth == 0 && !free_run(state, m, e) {
+            return false
+        }
+        if depth != 0 && !free_leaf(state, m, leaf_of(e)) {
+            return false
+        }
+        i = i + 1
+    }
+    octets.put16(h + NODE_ENTRIES, 0)
+    octets.put16(h + ROOT_DEPTH, 0)
+    octets.put32(p + ext4ino.I_BLOCKS, 0)
+    ext4ino.cache_flush(state, m)
+    return true
+}

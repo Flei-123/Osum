@@ -9,7 +9,8 @@ import fs.ext4alloc
 import sched.time
 import libc.octets
 
-export { inode_save, inode_init, map_append, last_pblock, inode_free_blocks, cache_flush,
+export { inode_save, inode_init, map_append, node_append, extent_start, last_pblock, cache_flush,
+    EXT_MAGIC, EXT_HDR, EXT_ENTRY, EXT_INIT_MAX_LEN, I_BLOCK, I_BLOCKS,
     blocks_add, set_size, touch, set_links, EXTENTS_FL, MODE_DIR, MODE_FILE,
     I_LINKS, I_FLAGS }
 
@@ -106,9 +107,8 @@ fn extent_start(e: u64) -> u64 {
     return octets.le32(e + 8) | (octets.le16(e + 6) << 32)
 }
 
-fn map_append(p: u64, lblock: u64, pblock: u64) -> bool {
-    let h: u64 = p + I_BLOCK
-    if octets.le16(h) != EXT_MAGIC || octets.le16(h + 6) != 0 {
+fn node_append(h: u64, lblock: u64, pblock: u64) -> bool {
+    if octets.le16(h) != EXT_MAGIC {
         return false
     }
     let n: u64 = octets.le16(h + 2)
@@ -140,6 +140,13 @@ fn map_append(p: u64, lblock: u64, pblock: u64) -> bool {
     return true
 }
 
+fn map_append(p: u64, lblock: u64, pblock: u64) -> bool {
+    if octets.le16(p + I_BLOCK + 6) != 0 {
+        return false
+    }
+    return node_append(p + I_BLOCK, lblock, pblock)
+}
+
 fn last_pblock(p: u64) -> u64 {
     let h: u64 = p + I_BLOCK
     let n: u64 = octets.le16(h + 2)
@@ -148,33 +155,6 @@ fn last_pblock(p: u64) -> u64 {
     }
     let last: u64 = h + EXT_HDR + (n - 1) * EXT_ENTRY
     return extent_start(last) + octets.le16(last + 4) - 1
-}
-
-fn inode_free_blocks(state: u64, m: u64, p: u64) -> bool {
-    let h: u64 = p + I_BLOCK
-    if (octets.le32(p + I_FLAGS) & EXTENTS_FL) == 0 {
-        return false
-    }
-    if octets.le16(h) != EXT_MAGIC || octets.le16(h + 6) != 0 {
-        return false
-    }
-    let n: u64 = octets.le16(h + 2)
-    var i: u64 = 0
-    while i < n {
-        let e: u64 = h + EXT_HDR + i * EXT_ENTRY
-        var len: u64 = octets.le16(e + 4)
-        if len > EXT_INIT_MAX_LEN {
-            len = len - EXT_INIT_MAX_LEN
-        }
-        if !ext4alloc.block_free_run(state, m, extent_start(e), len) {
-            return false
-        }
-        i = i + 1
-    }
-    octets.put16(h + 2, 0)
-    octets.put32(p + I_BLOCKS, 0)
-    cache_flush(state, m)
-    return true
 }
 
 fn cache_flush(state: u64, m: u64) {
