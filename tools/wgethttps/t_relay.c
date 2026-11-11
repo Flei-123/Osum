@@ -26,13 +26,10 @@ static void relay_child(int net_fd)
     char buf[2048];
     int open_count = 2;
     while (open_count > 0) {
-        int pr = poll(pfd, 2, 20000);
-        dprintf(2, "CH poll=%d r0=%x r1=%x\n", pr, pfd[0].revents, pfd[1].revents);
-        if (pr <= 0) _exit(3);
+        if (poll(pfd, 2, 20000) <= 0) _exit(3);
         for (int i = 0; i < 2; i++) {
             if (!(pfd[i].revents & (POLLIN | POLLHUP))) continue;
             ssize_t n = read(pfd[i].fd, buf, sizeof buf);
-            dprintf(2, "CH read i=%d n=%zd errno=%d\n", i, n, errno);
             if (n < 0) _exit(4);
             if (n == 0) { pfd[i].fd = -1; open_count--; if (i == 1) _exit(0); continue; }
             if (write(i == 0 ? net_fd : 1, buf, n) != n) _exit(5);

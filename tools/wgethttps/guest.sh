@@ -7,4 +7,6 @@ echo "WT https-big $($B timeout 60 $B wget -q -O - https://10.0.2.2:TLSPORT/big.
 echo "WT https-twice $($B timeout 40 $B wget -q -O - https://10.0.2.2:TLSPORT/h.txt 2>&1 | $B tail -n 1)"
 echo "WT ssl-client-applet $($B ssl_client 2>&1 | $B head -n 1 | $B cut -c1-30)"
 echo "WT curl-https $(/bin/curl -sSk --max-time 30 https://10.0.2.2:TLSPORT/h.txt 2>&1 | $B tail -n 1)"
+/bin/t_eof HTTPPORT
+/bin/t_relay HTTPPORT
 echo "WT end"
