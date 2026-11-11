@@ -13,7 +13,7 @@
 ## Baseline images (HP_BASE)
 
 - Never delete `hp-*base*` or `hp-stick*` directories under `/root/abbilder`: they are the baselines `republish-hp.sh` and `publish.sh` compare against.
-- `hp-stick36-base` is the build output directory (`*.elf`, `osum.mb`, `buendel`) of `IMAGE_ID=hp-stick36 HP_STICK=1 bash tools/usbimg/build.sh <out>` at commit `89003cb4` (rebuild: detached worktree of that commit, `bash vendor/firn/fetch-firnc.sh` first).
+- `hp-stick36-base` is the build output directory (`*.elf`, `osum.mb`, `buendel`) of `IMAGE_ID=hp-stick36 HP_STICK=1 bash tools/usbimg/build.sh <out>` at commit `89003cb4` (rebuild: detached worktree of that commit, `firn install` of the pinned version first).
 
 ## Device key (WARNING)
 

@@ -44,7 +44,7 @@ Deviations from native Firn: `file_save` also queues `OP_FILE_ITEM` (name) + `OP
 
 1. `dialogd`: multiple selection, mime in the accept list, sandbox=files inheritance for the picker.
 2. Decide: `kernel/user/services/` stays the backend behind the Firn names, or a Firn `lib/@orientos/services/` platform dir calls it.
-3. Pin lift of `vendor/firn` once `lib/services` is in Firn main (then rename or wrap: `svcosum` gets the Firn `svcos` function names).
+3. Pin lift of `firn.toolchain` once `lib/services` is in Firn main (then rename or wrap: `svcosum` gets the Firn `svcos` function names).
 4. Async host events: `svc.host_event(kind,status,id,q,p,n)` fed from the bus loop of the app (native replies are queued at once today).
 5. Certus does not answer the `firn_web_*` service imports yet (Firn contract note), so web-side conformance needs Certus capability `services`.
 6. done: gate `dialogd` (tools/dialogd/run.sh): host test, guest run with `dialogdemo` at scale 1 and 2, 2 mutated trees must go red.
