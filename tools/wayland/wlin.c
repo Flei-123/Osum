@@ -360,7 +360,7 @@ static void p_axis_discrete(void *d, struct wl_pointer *p, uint32_t a, int32_t v
 static const struct wl_pointer_listener p_l = { p_enter, p_leave, p_motion, p_button, p_axis, p_frame, p_axis_source, p_axis_stop, p_axis_discrete };
 
 /* ------------------------------------------------------ second seat binding */
-static void kb2_keymap(void *d, struct wl_keyboard *k, uint32_t fmt, int32_t fd, uint32_t size) { say("kb2 keymap fmt=%u size=%u", fmt, size); close(fd); }
+static void kb2_keymap(void *d, struct wl_keyboard *k, uint32_t fmt, int32_t fd, uint32_t size) { say("kb2 map fmt=%u size=%u", fmt, size); close(fd); }
 static void kb2_enter(void *d, struct wl_keyboard *k, uint32_t s, struct wl_surface *sf, struct wl_array *keys)
 {
     say("kb2 enter serial=%u surface=%s", s, sf == surf ? "ours" : "other");
