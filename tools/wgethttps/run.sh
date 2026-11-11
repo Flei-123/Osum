@@ -29,6 +29,7 @@ LDREAL=$(readlink -f "${LDSO:-/lib/ld-musl-x86_64.so.1}" 2>/dev/null || true)
 free_port() { python3 -I -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])'; }
 HTTPPORT=$(free_port); TLSPORT=$(free_port)
 mkdir -p "$D/www" "$D/bin" "$D/lib"
+echo wgethttps > "$D/bin/wt-marker"
 echo hello-net > "$D/www/h.txt"
 head -c 300000 /dev/urandom > "$D/www/big.bin"
 BIGSHA=$(sha256sum "$D/www/big.bin" | cut -c1-16)
