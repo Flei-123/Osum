@@ -9,9 +9,14 @@ import libc.text
 import services.dlgproto
 import services.dlgreply
 import services.svcrules
+import libc.io
+import libc.errno
+import busy
+import msg
 import explorer.expbase
+import explorer.expwork
 
-export { parse, active, accepts, choose, finish }
+export { parse, active, saving, accepts, choose, finish, title_into, default_name, save_as }
 
 const ARGS_MIN: u64 = 6
 const ARG_ID: u64 = 2
@@ -21,7 +26,12 @@ const ARG_ACCEPT: u64 = 6
 const APP_CAP: u64 = 64
 const ACCEPT_CAP: u64 = 47
 const NAME_CAP: u64 = 63
-const CONTENT_CAP: u64 = 65536
+const CONTENT_CAP: u64 = 131072
+const TITLE_CAP: u64 = 62
+const ARG_TITLE: u64 = 5
+const PATH_CAP: u64 = 320
+const KEY_CAP: u64 = 48
+const DOT: u64 = 46
 const SLASH: u64 = 47
 
 static mut FLAG: [u8; 7] = "--pick\0"
@@ -31,7 +41,13 @@ static mut LEN_FIELD: [u8; 6] = " len=\0"
 static mut app_buf: [u8; 65] = [0 as u8; 65]
 static mut accept_buf: [u8; 48] = [0 as u8; 48]
 static mut name_buf: [u8; 64] = [0 as u8; 64]
-static mut content: [u8; 65536] = [0 as u8; 65536]
+static mut content: [u8; 131072] = [0 as u8; 131072]
+static mut title_buf: [u8; 63] = [0 as u8; 63]
+static mut hint_buf: [u8; 64] = [0 as u8; 64]
+static mut key_buf: [u8; 48] = [0 as u8; 48]
+static mut staged_buf: [u8; 160] = [0 as u8; 160]
+static mut K_REPLACE: [u8; 16] = "dialogd.replace\0"
+static mut pick_mode: u64 = 0
 static mut pick_id: u64 = 0
 static mut enabled: bool = false
 static mut answered: bool = false
@@ -61,16 +77,39 @@ fn parse(args: u64) -> bool {
         return false
     }
     let app: u64 = ulib.arg_at(args, ARG_APP)
-    if dlgproto.mode_of(ulib.arg_at(args, ARG_MODE)) != dlgproto.MODE_OPEN || !svcrules.valid_name(app, text.length(app)) {
+    let mode: u64 = dlgproto.mode_of(ulib.arg_at(args, ARG_MODE))
+    if (mode != dlgproto.MODE_OPEN && mode != dlgproto.MODE_SAVE) || !svcrules.valid_name(app, text.length(app)) {
         return false
     }
+    if mode == dlgproto.MODE_SAVE && (ulib.arg_count(args) <= ARG_ACCEPT || text.length(ulib.arg_at(args, ARG_ACCEPT)) == 0) {
+        return false
+    }
+    pick_mode = mode
+    ulib.strncpy((&title_buf[0 as usize]) as u64, ulib.arg_at(args, ARG_TITLE), TITLE_CAP)
     octets.copy(app_ptr(), app, text.length(app))
     pick_id = ulib.to_num(ulib.arg_at(args, ARG_ID))
-    if ulib.arg_count(args) > ARG_ACCEPT {
+    if ulib.arg_count(args) > ARG_ACCEPT && mode == dlgproto.MODE_OPEN {
         ulib.strncpy(accept_ptr(), ulib.arg_at(args, ARG_ACCEPT), ACCEPT_CAP)
+    }
+    if ulib.arg_count(args) > ARG_ACCEPT && mode == dlgproto.MODE_SAVE {
+        ulib.strncpy((&hint_buf[0 as usize]) as u64, ulib.arg_at(args, ARG_ACCEPT), NAME_CAP)
     }
     enabled = true
     return true
+}
+
+fn saving() -> bool {
+    return enabled && pick_mode == dlgproto.MODE_SAVE
+}
+
+fn default_name() -> u64 {
+    return (&hint_buf[0 as usize]) as u64
+}
+
+fn title_into(dst: u64) {
+    if enabled && text.length((&title_buf[0 as usize]) as u64) > 0 {
+        ulib.strncpy(dst, (&title_buf[0 as usize]) as u64, TITLE_CAP)
+    }
 }
 
 fn accepts(name: u64) -> bool {
@@ -130,4 +169,71 @@ fn finish() {
         octets.zero(name_at(), 64)
         store(dlgproto.ANSWER_CANCEL, 0)
     }
+}
+
+fn safe_name(name: u64) -> bool {
+    let n: u64 = text.length(name)
+    if n == 0 || n > NAME_CAP {
+        return false
+    }
+    if n <= 2 && octets.ld8(name, 0) == DOT && (n == 1 || octets.ld8(name, 1) == DOT) {
+        return false
+    }
+    var at: u64 = 0
+    while at < n {
+        if octets.ld8(name, at) == SLASH {
+            return false
+        }
+        at = at + 1
+    }
+    return true
+}
+
+fn staged_path() -> u64 {
+    let key: u64 = (&key_buf[0 as usize]) as u64
+    let key_len: u64 = dlgproto.input_key(pick_id, key, KEY_CAP)
+    let path: u64 = (&staged_buf[0 as usize]) as u64
+    if key_len == 0 || svcrules.store_path(app_ptr(), text.length(app_ptr()), key, key_len, path, 160) == 0 {
+        return 0
+    }
+    return path
+}
+
+fn write_target(path: u64, len: u64) -> bool {
+    let fd: u64 = io.create(path)
+    if errno.failed(fd) {
+        return false
+    }
+    let wrote: u64 = io.write_all(fd, data_at(), len)
+    io.close(fd)
+    return !errno.failed(wrote) && wrote == len
+}
+
+fn replace_allowed(path: u64) -> bool {
+    if errno.failed(io.size_of(path)) {
+        return true
+    }
+    return busy.confirm((&title_buf[0 as usize]) as u64, msg.get((&K_REPLACE[0 as usize]) as u64))
+}
+
+fn save_as(dir: u64, name: u64) {
+    if !saving() || !safe_name(name) {
+        return
+    }
+    let path: u64 = expwork.join(dir, name)
+    if !replace_allowed(path) {
+        return
+    }
+    let staged: u64 = staged_path()
+    var got: u64 = dlgreply.READ_FAILED
+    if staged != 0 {
+        got = dlgreply.read_file(staged, data_at(), CONTENT_CAP)
+    }
+    if got == dlgreply.READ_FAILED || !write_target(path, got) {
+        reply(dlgproto.ANSWER_FAILED, 0)
+        return
+    }
+    octets.zero(name_at(), 64)
+    octets.copy(name_at(), name, text.length(name))
+    reply(dlgproto.ANSWER_OK, 0)
 }

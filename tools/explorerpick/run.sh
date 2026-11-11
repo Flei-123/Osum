@@ -41,7 +41,7 @@ if guest "$ROOT" "$OUT/main"; then
     while read -r _ name state note; do
         if [ "$state" = ok ]; then ok "$name"; else bad "$name -- $note"; fi
     done < "$OUT/main.checks"
-    [ "$(wc -l < "$OUT/main.checks")" -ge 7 ] && ok "all check groups reported" || bad "check groups missing"
+    [ "$(wc -l < "$OUT/main.checks")" -ge 13 ] && ok "all check groups reported" || bad "check groups missing"
 else
     bad "pick guest run failed"; tail -n 12 "$OUT/main.log"
 fi
@@ -71,6 +71,12 @@ mutant nofilter kernel/user/explorer/exppick.fi 's/return dlgproto.ext_matches(a
     accept_filter_skips_bin
 mutant nocancel kernel/user/explorer/exppick.fi 's/store(dlgproto.ANSWER_CANCEL, 0)/store(dlgproto.ANSWER_OK, 0)/' \
     close_is_cancel
+mutant nosavewrite kernel/user/explorer/exppick.fi 's/let wrote: u64 = io.write_all(fd, data_at(), len)/let wrote: u64 = len/' \
+    save_writes_staged_content
+mutant notitle kernel/user/explorer/exppick.fi 's/if enabled \&\& text.length((&title_buf\[0 as usize\]) as u64) > 0 {/if false {/' \
+    save_window_title open_window_title
+mutant smallcap kernel/user/explorer/exppick.fi 's/const CONTENT_CAP: u64 = 131072/const CONTENT_CAP: u64 = 65536/' \
+    big_file_over_64k_picked
 
 echo "EXPLORERPICK: $pass passed, $fail failed"
 [ "$fail" = 0 ]
