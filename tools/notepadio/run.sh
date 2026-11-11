@@ -78,35 +78,5 @@ mutant emptyexport kernel/user/notepad/npactions.fi '/^fn pad_export/,/^}/ s/npd
 mutant noimportload kernel/user/notepad/npactions.fi '/^fn pad_import/,/^}/ s/npdoc.pad_load(npdoc.pad_text_ptr(), n)/npdoc.pad_blank()/' \
     imported_saved imported_state
 
-echo "NOTEPADIO: $pass passed, $fail failed"; [ "$fail" = 0 ]; exit; }
-echo
-echo "== 2. COUNTER-PROBES: mutated trees =="
-mutant() {
-    local name=$1 file=$2 expr=$3
-    shift 3
-    local T="$OUT/mut-$name"
-    mkdir -p "$T"
-    tar -C "$ROOT" --exclude=.git -cf - . | tar -C "$T" -xf -
-    sed -i "$expr" "$T/$file"
-    if cmp -s "$T/$file" "$ROOT/$file"; then bad "mutant $name: the sed expression changed nothing"; rm -rf "$T"; return; fi
-    if guest "$T" "$OUT/m-$name"; then
-        ok "mutant $name booted"
-        verdicts "$OUT/m-$name"
-        local c
-        for c in "$@"; do expect "$OUT/m-$name" "$c" fail; done
-    else
-        bad "mutant $name did not run"
-    fi
-    rm -rf "$T"
-}
-mutant noconfirm kernel/user/svcedit/sefiles.fi 's/if !sedoc.dirty() {/if true {/' \
-    confirm_cancel confirm_accept
-mutant nopicksave kernel/user/svcedit/sefiles.fi 's/svcosum.pick_save(/svcosum.file_save(/' \
-    picker_saved
-mutant nopickopen kernel/user/svcedit/sefiles.fi 's/svcosum.pick_open(/svcosum.file_open(/' \
-    picker_opened
-mutant stickydirty kernel/user/svcedit/sefiles.fi '/^fn apply_save/,/^}/ s/sedoc.mark_clean()//' \
-    saved_clean
-
 echo "NOTEPADIO: $pass passed, $fail failed"
 [ "$fail" = 0 ]

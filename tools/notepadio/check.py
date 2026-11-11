@@ -40,7 +40,7 @@ def main():
     cancelled = [e for e in evs if e.startswith("imported name=-")]
     verdict("import_cancel", bool(cancelled) and "status=0" not in cancelled[-1].split(), str(cancelled[-1:]))
     picks = re.findall(r"(?m)^explorer: pick answer=(\d+) name=(\S*) len=(\d+)", serial)
-    verdict("picker_exported", any(a == "1" and n == "note.txt" for a, n, l in picks), str(picks))
+    verdict("picker_exported", any(a == "1" and n == "note.txt" and l == "0" for a, n, l in picks), str(picks))
     verdict("picker_imported", any(a == "1" and n == "note.txt" and l == "5" for a, n, l in picks), str(picks))
     verdict("picker_cancelled", any(a == "0" for a, n, l in picks), str(picks))
     verdict("no_surface_absent", "no surface" not in evs)
