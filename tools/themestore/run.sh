@@ -1688,15 +1688,17 @@ num "und in keiner von ihnen eine leere, abgeschnittene oder ueberlappende Besch
 echo
 echo "== 12. addendum: the umlaut in the terminal and the measured bar =="
 
-TLOG="$TMPD/al100/serial.txt"
-TPPM="$TMPD/al100/desktop.ppm"
+bash tools/themestore/build.sh "$TMPD/term" terminal_only=yes keep=yes \
+    > "$TMPD/term.log" 2>&1
+TLOG="$TMPD/term/serial.txt"
+TPPM="$TMPD/term/desktop.ppm"
 has "$TLOG" "wm: termgitter win=" \
     "der Kern nennt das Zellenraster des Terminals (Lage, Zelle, Aufsteiger)"
 TG=$(grep -a 'wm: termgitter win=' "$TLOG" | tail -1)
 tgv() { printf '%s' "$TG" | grep -oE " $1=[0-9]+" | grep -oE '[0-9]+'; }
 TGX=$(tgv x); TGY=$(tgv y); TGW=$(tgv cellw); TGH=$(tgv cellh)
 TGP=$(tgv px); TGA=$(tgv asc)
-TLINE='NOT A SINGLE DEVICE!'
+TLINE='abcdefghijklm ABCDEFGHIJK +-*/'
 COLS=$(python3 - "$TPPM" "${TGX:-0}" "${TGY:-0}" "${TGW:-10}" "${TGH:-19}" \
     "${TGA:-14}" "${#TLINE}" <<'PYC'
 import sys
@@ -1704,8 +1706,8 @@ sys.path.insert(0, "tools/look")
 import umlaut
 ppm = sys.argv[1]
 x, y, cw, ch, asc, n = [int(v) for v in sys.argv[2:8]]
-ax, ay = x + cw, y + ch + asc
-fb = umlaut.grundfarben(ppm, ax, ay - asc, ax + n * cw, ay + 4)
+ay = y + ch + asc
+fb = umlaut.grundfarben(ppm, x, ay - asc, x + n * cw, ay + 4)
 if fb is None:
     print("0 0 0 0 0 0")
 else:
@@ -1714,21 +1716,24 @@ PYC
 )
 tgrid() {
     python3 tools/gfx/checkshot.py tgrid "$TPPM" assets/osum-mono.ttf \
-        "${TGP:-16}" "${TGX:-0}" "${TGY:-0}" "${TGW:-10}" "${TGH:-19}" 1 1 \
+        "${TGP:-16}" "${TGX:-0}" "${TGY:-0}" "${TGW:-10}" "${TGH:-19}" 1 0 \
         $COLS "$1" 0 2>&1
 }
 UM=$(tgrid "$TLINE" | head -1)
 UF=$(printf '%s' "$UM" | grep -oE '[0-9]+ wrong' | grep -oE '^[0-9]+')
 UT=$(printf '%s' "$UM" | grep -oE '[0-9]+ ink pixels' | grep -oE '^[0-9]+')
+UE=$(printf '%s' "$UM" | grep -c 'EMPTY')
 num "the terminal text is rasterised pixel-exact (wrong pixels)" \
     "${UF:-99}" eq 0
+num "and no cell of the line is empty (an empty terminal is not a pass)" \
+    "${UE:-1}" eq 0
 num "and ink was actually measured" "${UT:-0}" ge 500
-UC=$(tgrid 'NOT A SINGLE DEVCE!' | head -1 | grep -oE '[0-9]+ wrong' \
+UCD=$(tgrid 'abcdefghijkl ABCDEFGHIJK +-*/' | head -1 | grep -oE '[0-9]+ wrong' \
      | grep -oE '^[0-9]+')
 num "CONTROL: a line with a letter missing does NOT fit the raster" \
-    "${UC:-0}" gt 0
+    "${UCD:-0}" gt 0
 #
-BL=$(python3 tools/themestore/shotcheck.py "$TPPM" "$TLOG" --taskbar 2>&1 \
+BL=$(python3 tools/themestore/shotcheck.py "$TMPD/al100/desktop.ppm" "$TMPD/al100/serial.txt" --taskbar 2>&1 \
      | grep -a 'shotcheck: leiste')
 echo "        $BL"
 BN=$(printf '%s' "$BL" | grep -oE 'texts [0-9]+' | grep -oE '[0-9]+')
@@ -1740,7 +1745,7 @@ num "die Leiste meldet ihre Beschriftungen mit gemessener Breite" \
 num "und keine davon ist leer" "${BE:-9}" eq 0
 num "und keine ragt aus ihrem Bedienelement heraus" "${BC:-9}" eq 0
 num "und keine ueberlappt eine andere" "${BO:-9}" eq 0
-BT=$(grep -aE '^taskbar: btn i=0 ' "$TLOG" | tail -1 | sed -E 's/.* t=//')
+BT=$(grep -aE '^taskbar: btn i=0 ' "$TMPD/al100/serial.txt" | tail -1 | sed -E 's/.* t=//')
 if [ -n "$BT" ]; then
     ok "the window button of the bar carries the window title: $BT"
 else
