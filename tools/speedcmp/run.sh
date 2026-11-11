@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/speedcmp/run.sh -- same C bench (musl, dynamic) under Osum and Debian 13 in QEMU/KVM, median over RUNS boots, table -> docs/speed-osum-vs-linux.{md,tsv}
-#   /root/jarvis/bin/heavy bash tools/speedcmp/run.sh
-# Env: SPEED_RUNS (5), SPEED_SMP (2), SPEED_MEM (1024), OSUM_DRIVE/LINUX_DRIVE (ahci|ide|virtio|nvme), SPEED_KERNEL (prebuilt osum.mb),
-#      SPEED_OSUM_WORDS (default "nosched noproc nofs"), SPEEDCMP_CACHE (keeps the Debian download), SPEED_OUT (keeps raw serial logs)
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/speedcmp/common.sh

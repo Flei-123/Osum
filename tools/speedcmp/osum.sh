@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/speedcmp/osum.sh <outdir> <speedbench-binary> -- boots speedbench RUNS times under Osum (QEMU/KVM), writes <outdir>/osum-<n>.txt
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)

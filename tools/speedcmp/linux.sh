@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/speedcmp/linux.sh <outdir> <speedbench-binary> <debian-nocloud.qcow2> -- boots speedbench RUNS times under Debian 13 (QEMU/KVM, init= straight into the bench), writes <outdir>/linux-<n>.txt
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/speedcmp/common.sh
