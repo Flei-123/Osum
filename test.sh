@@ -191,7 +191,7 @@ else
     bad "the pinned compiler:$S1"
 fi
 
-lauf "1b. the Firn pin: lib shadows listed, no vendor/firn (tools/firnpin/check.sh)" \
+lauf "1b. the Firn pin: lib shadows listed, no vendored Firn (tools/firnpin/check.sh)" \
      tools/firnpin/check.sh firnpin '^FIRNPIN: '
 
 lauf "2. freistehend uebersetzen: profile kernel, Inline-Assembler, MMIO, iretq (tools/freestanding/run.sh)" \
