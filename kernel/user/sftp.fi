@@ -1,0 +1,419 @@
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.errno
+import libc.io
+import libc.octets
+import libc.text
+import ssh.wire
+import ssh.link
+import ssh.session
+import sshconn
+import sshio
+
+export { u_start }
+
+const T_INIT: u64 = 1
+const T_VERSION: u64 = 2
+const T_OPEN: u64 = 3
+const T_CLOSE: u64 = 4
+const T_READ: u64 = 5
+const T_WRITE: u64 = 6
+const T_OPENDIR: u64 = 11
+const T_READDIR: u64 = 12
+const T_REALPATH: u64 = 16
+const T_STATUS: u64 = 101
+const T_HANDLE: u64 = 102
+const T_DATA: u64 = 103
+const T_NAME: u64 = 104
+const FX_OK: u64 = 0
+const FX_EOF: u64 = 1
+const PFLAG_READ: u64 = 1
+const PFLAG_WRITE: u64 = 2
+const PFLAG_CREAT: u64 = 8
+const PFLAG_TRUNC: u64 = 16
+const ATTR_SIZE: u64 = 1
+const ATTR_UIDGID: u64 = 2
+const ATTR_PERMISSIONS: u64 = 4
+const ATTR_ACMODTIME: u64 = 8
+const ATTR_EXTENDED: u64 = 0x80000000
+const PROTOCOL_VERSION: u64 = 3
+const CHUNK: u64 = 16384
+const PACKET_CAP: u64 = 20000
+const HANDLE_CAP: u64 = 256
+const STATUS_FAILED: u64 = 1
+
+static mut txbuf: [u8; 20000] = [0 as u8; 20000]
+static mut rxbuf: [u8; 20000] = [0 as u8; 20000]
+static mut handlebuf: [u8; 256] = [0 as u8; 256]
+static mut handle_len: u64 = 0
+static mut next_id: u64 = 1
+
+static mut S_SFTP: [u8; 5] = "sftp\0"
+static mut M_USAGE: [u8; 130] = "usage: sftp [-P port] [-i key] [-l user] [-w password] [-o opt] [user@]host (pwd | ls path | get remote local | put local remote)\0"
+static mut M_CHANNEL: [u8; 38] = "sftp: cannot start the sftp subsystem\0"
+static mut M_PROTO: [u8; 21] = "sftp: protocol error\0"
+static mut M_FAILED: [u8; 35] = "sftp: server reported an error for\0"
+static mut M_OPENLOCAL: [u8; 29] = "sftp: cannot open local file\0"
+static mut C_PWD: [u8; 4] = "pwd\0"
+static mut C_LS: [u8; 3] = "ls\0"
+static mut C_GET: [u8; 4] = "get\0"
+static mut C_PUT: [u8; 4] = "put\0"
+static mut T_NL: [u8; 2] = "\n\0"
+
+fn tx_body() -> u64 {
+    return (&txbuf[0 as usize]) as u64 + 4
+}
+
+fn rx_ptr() -> u64 {
+    return (&rxbuf[0 as usize]) as u64
+}
+
+fn send_packet(len: u64) -> bool {
+    octets.st32_be((&txbuf[0 as usize]) as u64, 0, len)
+    return session.chan_send((&txbuf[0 as usize]) as u64, len + 4)
+}
+
+fn begin_request(b: *mut wire.Buf, kind: u64) -> u64 {
+    *b = wire.buf_write(tx_body(), (PACKET_CAP - 4) as usize)
+    wire.w8(b, kind)
+    let id: u64 = next_id
+    next_id = next_id + 1
+    wire.w32(b, id)
+    return id
+}
+
+fn finish_request(b: *mut wire.Buf) -> bool {
+    if (*b).bad {
+        return false
+    }
+    return send_packet((*b).len as u64)
+}
+
+fn recv_packet() -> u64 {
+    if !sshio.recv_exact(rx_ptr(), 4) {
+        return 0
+    }
+    let len: u64 = octets.ld32_be(rx_ptr(), 0)
+    if len == 0 || len > PACKET_CAP - 4 {
+        return 0
+    }
+    if !sshio.recv_exact(rx_ptr(), len) {
+        return 0
+    }
+    return len
+}
+
+fn handshake_sftp() -> bool {
+    var b: wire.Buf = wire.buf_write(tx_body(), 16)
+    wire.w8(&b, T_INIT)
+    wire.w32(&b, PROTOCOL_VERSION)
+    if !finish_request(&b) {
+        return false
+    }
+    let n: u64 = recv_packet()
+    return n != 0 && octets.ld8(rx_ptr(), 0) == T_VERSION
+}
+
+fn reply_status(b: *mut wire.Buf) -> u64 {
+    return wire.r32(b)
+}
+
+fn expect_status(want: u64) -> bool {
+    let n: u64 = recv_packet()
+    if n == 0 {
+        return false
+    }
+    var b: wire.Buf = wire.buf_read(rx_ptr(), n as usize)
+    if wire.r8(&b) != T_STATUS {
+        return false
+    }
+    wire.r32(&b)
+    return reply_status(&b) == want
+}
+
+fn store_handle(b: *mut wire.Buf) -> bool {
+    var hn: usize = 0
+    let hp: u64 = wire.rstring(b, &hn)
+    if (*b).bad || (hn as u64) > HANDLE_CAP {
+        return false
+    }
+    var i: u64 = 0
+    while i < (hn as u64) {
+        octets.st8((&handlebuf[0 as usize]) as u64, i, octets.ld8(hp, i))
+        i = i + 1
+    }
+    handle_len = hn as u64
+    return true
+}
+
+fn open_handle(kind: u64, path: u64, flags: u64) -> bool {
+    var b: wire.Buf = wire.buf_write(tx_body(), 1)
+    begin_request(&b, kind)
+    wire.wstring(&b, path, text.length(path) as usize)
+    if kind == T_OPEN {
+        wire.w32(&b, flags)
+        wire.w32(&b, 0)
+    }
+    if !finish_request(&b) {
+        return false
+    }
+    let n: u64 = recv_packet()
+    if n == 0 {
+        return false
+    }
+    var r: wire.Buf = wire.buf_read(rx_ptr(), n as usize)
+    if wire.r8(&r) != T_HANDLE {
+        return false
+    }
+    wire.r32(&r)
+    return store_handle(&r)
+}
+
+fn request_with_handle(kind: u64) -> wire.Buf {
+    var b: wire.Buf = wire.buf_write(tx_body(), 1)
+    begin_request(&b, kind)
+    wire.wstring(&b, (&handlebuf[0 as usize]) as u64, handle_len as usize)
+    return b
+}
+
+fn close_handle() -> bool {
+    var b: wire.Buf = request_with_handle(T_CLOSE)
+    return finish_request(&b) && expect_status(FX_OK)
+}
+
+fn skip_attrs(b: *mut wire.Buf) {
+    let flags: u64 = wire.r32(b)
+    if (flags & ATTR_SIZE) != 0 {
+        wire.r64(b)
+    }
+    if (flags & ATTR_UIDGID) != 0 {
+        wire.r32(b)
+        wire.r32(b)
+    }
+    if (flags & ATTR_PERMISSIONS) != 0 {
+        wire.r32(b)
+    }
+    if (flags & ATTR_ACMODTIME) != 0 {
+        wire.r32(b)
+        wire.r32(b)
+    }
+}
+
+fn print_names(b: *mut wire.Buf, long_form: bool) {
+    let count: u64 = wire.r32(b)
+    var i: u64 = 0
+    while i < count && !(*b).bad {
+        var fnn: usize = 0
+        var lnn: usize = 0
+        let fp: u64 = wire.rstring(b, &fnn)
+        let lp: u64 = wire.rstring(b, &lnn)
+        skip_attrs(b)
+        if long_form {
+            io.write_all(ulib.OUT, lp, lnn as u64)
+        } else {
+            io.write_all(ulib.OUT, fp, fnn as u64)
+        }
+        ulib.say((&T_NL[0 as usize]) as u64)
+        i = i + 1
+    }
+}
+
+fn cmd_pwd() -> u64 {
+    var b: wire.Buf = wire.buf_write(tx_body(), 1)
+    begin_request(&b, T_REALPATH)
+    var dot: [u8; 2] = ".\0"
+    wire.wstring(&b, (&dot[0 as usize]) as u64, 1)
+    if !finish_request(&b) {
+        return STATUS_FAILED
+    }
+    let n: u64 = recv_packet()
+    var r: wire.Buf = wire.buf_read(rx_ptr(), n as usize)
+    if n == 0 || wire.r8(&r) != T_NAME {
+        return STATUS_FAILED
+    }
+    wire.r32(&r)
+    print_names(&r, false)
+    return 0
+}
+
+fn cmd_ls(path: u64) -> u64 {
+    if !open_handle(T_OPENDIR, path, 0) {
+        ulib.esay_line((&M_FAILED[0 as usize]) as u64, path)
+        return STATUS_FAILED
+    }
+    var going: bool = true
+    while going {
+        var b: wire.Buf = request_with_handle(T_READDIR)
+        if !finish_request(&b) {
+            return STATUS_FAILED
+        }
+        let n: u64 = recv_packet()
+        var r: wire.Buf = wire.buf_read(rx_ptr(), n as usize)
+        let kind: u64 = wire.r8(&r)
+        if n == 0 || kind != T_NAME {
+            going = false
+        } else {
+            wire.r32(&r)
+            print_names(&r, true)
+        }
+    }
+    close_handle()
+    return 0
+}
+
+fn read_chunk(fd: u64, offset: u64) -> u64 {
+    var b: wire.Buf = request_with_handle(T_READ)
+    wire.w64(&b, offset)
+    wire.w32(&b, CHUNK)
+    if !finish_request(&b) {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    let n: u64 = recv_packet()
+    var r: wire.Buf = wire.buf_read(rx_ptr(), n as usize)
+    let kind: u64 = wire.r8(&r)
+    if n == 0 {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    if kind == T_STATUS {
+        wire.r32(&r)
+        if reply_status(&r) == FX_EOF {
+            return 0
+        }
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    if kind != T_DATA {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    wire.r32(&r)
+    var dn: usize = 0
+    let dp: u64 = wire.rstring(&r, &dn)
+    if r.bad || errno.failed(io.write_all(fd, dp, dn as u64)) {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    return dn as u64
+}
+
+fn cmd_get(remote: u64, local: u64) -> u64 {
+    if !open_handle(T_OPEN, remote, PFLAG_READ) {
+        ulib.esay_line((&M_FAILED[0 as usize]) as u64, remote)
+        return STATUS_FAILED
+    }
+    let fd: u64 = io.create(local)
+    if errno.failed(fd) {
+        ulib.esay_line((&M_OPENLOCAL[0 as usize]) as u64, local)
+        return STATUS_FAILED
+    }
+    var offset: u64 = 0
+    var going: bool = true
+    var status: u64 = 0
+    while going {
+        let n: u64 = read_chunk(fd, offset)
+        if n == 0xFFFFFFFFFFFFFFFF {
+            status = STATUS_FAILED
+            going = false
+        } else if n == 0 {
+            going = false
+        } else {
+            offset = offset + n
+        }
+    }
+    io.close(fd)
+    close_handle()
+    return status
+}
+
+fn write_chunk(fd: u64, offset: u64) -> u64 {
+    var b: wire.Buf = request_with_handle(T_WRITE)
+    wire.w64(&b, offset)
+    let slot: u64 = tx_body() + (b.len as u64) + 4
+    let got: u64 = io.read(fd, slot, CHUNK)
+    if errno.failed(got) {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    if got == 0 {
+        return 0
+    }
+    wire.w32(&b, got)
+    b.len = b.len + (got as usize)
+    if !finish_request(&b) || !expect_status(FX_OK) {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    return got
+}
+
+fn cmd_put(local: u64, remote: u64) -> u64 {
+    let fd: u64 = io.open(local, kcall.O_RDONLY)
+    if errno.failed(fd) {
+        ulib.esay_line((&M_OPENLOCAL[0 as usize]) as u64, local)
+        return STATUS_FAILED
+    }
+    if !open_handle(T_OPEN, remote, PFLAG_WRITE | PFLAG_CREAT | PFLAG_TRUNC) {
+        io.close(fd)
+        ulib.esay_line((&M_FAILED[0 as usize]) as u64, remote)
+        return STATUS_FAILED
+    }
+    var offset: u64 = 0
+    var going: bool = true
+    var status: u64 = 0
+    while going {
+        let n: u64 = write_chunk(fd, offset)
+        if n == 0xFFFFFFFFFFFFFFFF {
+            status = STATUS_FAILED
+            going = false
+        } else if n == 0 {
+            going = false
+        } else {
+            offset = offset + n
+        }
+    }
+    io.close(fd)
+    close_handle()
+    return status
+}
+
+fn dispatch(args: u64, at: u64, argc: u64) -> u64 {
+    let cmd: u64 = ulib.arg_at(args, at)
+    let rest: u64 = argc - at - 1
+    if ulib.streq(cmd, (&C_PWD[0 as usize]) as u64) && rest == 0 {
+        return cmd_pwd()
+    }
+    if ulib.streq(cmd, (&C_LS[0 as usize]) as u64) && rest == 1 {
+        return cmd_ls(ulib.arg_at(args, at + 1))
+    }
+    if ulib.streq(cmd, (&C_GET[0 as usize]) as u64) && rest == 2 {
+        return cmd_get(ulib.arg_at(args, at + 1), ulib.arg_at(args, at + 2))
+    }
+    if ulib.streq(cmd, (&C_PUT[0 as usize]) as u64) && rest == 2 {
+        return cmd_put(ulib.arg_at(args, at + 1), ulib.arg_at(args, at + 2))
+    }
+    ulib.esay_line((&M_USAGE[0 as usize]) as u64, 0)
+    return 2
+}
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    let at: u64 = sshconn.parse_options(args, 80)
+    if at == sshconn.BAD_INDEX || at + 1 >= argc {
+        ulib.esay_line((&M_USAGE[0 as usize]) as u64, 0)
+        return 2
+    }
+    let target: u64 = ulib.arg_at(args, at)
+    sshconn.set_target(target, text.length(target))
+    let rc: u64 = sshconn.connect_session()
+    if rc != 0 {
+        return rc
+    }
+    if !session.chan_open() || !session.chan_request_subsystem((&S_SFTP[0 as usize]) as u64)
+        || !handshake_sftp() {
+        ulib.esay_line((&M_CHANNEL[0 as usize]) as u64, 0)
+        link.shutdown_link()
+        return STATUS_FAILED
+    }
+    let status: u64 = dispatch(args, at + 1, argc)
+    session.chan_send_eof()
+    session.chan_finish()
+    link.shutdown_link()
+    return status
+}

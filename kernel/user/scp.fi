@@ -9,17 +9,16 @@ import libc.text
 import ssh.link
 import ssh.session
 import sshconn
+import sshio
 
 export { u_start }
 
 const CHUNK: u64 = 8192
-const RECV_MS: u64 = 30000
 const STATUS_FAILED: u64 = 1
 const NAME_MAX: u64 = 255
 const REMOTE_MAX: u64 = 700
 const LINE_MAX: u64 = 400
 const FILE_MODE: u64 = 0x1A4
-const TIMEOUTS_MAX: u64 = 4
 
 static mut iobuf: [u8; 8192] = [0 as u8; 8192]
 static mut linebuf: [u8; 416] = [0 as u8; 416]
@@ -42,38 +41,11 @@ static mut T_SPACE: [u8; 2] = " \0"
 static mut T_NL: [u8; 2] = "\n\0"
 static mut T_C0644: [u8; 6] = "C0644\0"
 
-fn recv_some(out: u64, cap: u64) -> u64 {
-    var idle: u64 = 0
-    while idle < TIMEOUTS_MAX {
-        let r: u64 = session.chan_recv(out, cap, RECV_MS, session.NO_FD)
-        if r != session.TIMEOUT {
-            if r == session.FAILED {
-                return 0
-            }
-            return r
-        }
-        idle = idle + 1
-    }
-    return 0
-}
-
-fn recv_exact(out: u64, n: u64) -> bool {
-    var got: u64 = 0
-    while got < n {
-        let r: u64 = recv_some(out + got, n - got)
-        if r == 0 {
-            return false
-        }
-        got = got + r
-    }
-    return true
-}
-
 fn recv_line() -> u64 {
     var n: u64 = 0
     var one: [u8; 1] = [0 as u8; 1]
     while n < LINE_MAX {
-        if !recv_exact((&one[0 as usize]) as u64, 1) {
+        if !sshio.recv_exact((&one[0 as usize]) as u64, 1) {
             return 0xFFFFFFFFFFFFFFFF
         }
         if one[0 as usize] == 10 {
@@ -88,7 +60,7 @@ fn recv_line() -> u64 {
 
 fn read_ack() -> bool {
     var b: [u8; 1] = [0 as u8; 1]
-    if !recv_exact((&b[0 as usize]) as u64, 1) {
+    if !sshio.recv_exact((&b[0 as usize]) as u64, 1) {
         ulib.esay_line((&M_SHORT[0 as usize]) as u64, 0)
         return false
     }
@@ -238,7 +210,7 @@ fn receive_body(fd: u64, size: u64) -> bool {
         if want > CHUNK {
             want = CHUNK
         }
-        let r: u64 = recv_some((&iobuf[0 as usize]) as u64, want)
+        let r: u64 = sshio.recv_some((&iobuf[0 as usize]) as u64, want)
         if r == 0 {
             return false
         }
@@ -254,7 +226,7 @@ fn skip_time_lines() -> bool {
     var going: bool = true
     while going {
         var b: [u8; 1] = [0 as u8; 1]
-        if !recv_exact((&b[0 as usize]) as u64, 1) {
+        if !sshio.recv_exact((&b[0 as usize]) as u64, 1) {
             return false
         }
         if b[0 as usize] == 84 {
@@ -276,13 +248,13 @@ fn read_header() -> bool {
     let l: u64 = (&linebuf[0 as usize]) as u64
     if octets.ld8(l, 0) == 1 || octets.ld8(l, 0) == 2 {
         recv_line()
-        ulib.esay_line((&M_NACK[0 as usize]) as u64, l + 1)
+        ulib.esay_line((&M_NACK[0 as usize]) as u64, l)
         return false
     }
     var rest: [u8; 1] = [0 as u8; 1]
     var n: u64 = 1
     while n < LINE_MAX {
-        if !recv_exact((&rest[0 as usize]) as u64, 1) {
+        if !sshio.recv_exact((&rest[0 as usize]) as u64, 1) {
             return false
         }
         if rest[0 as usize] == 10 {

@@ -8,7 +8,7 @@ export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 LDSCRIPT=kernel/kernel.ld
 ULD=kernel/user/user.ld
-PROGS="sh ls cat echo sleep true false init shasum ssh scp"
+PROGS="sh ls cat echo sleep true false init shasum ssh scp sftp"
 BLOCKS=4096
 OSUM_IP=10.0.2.15
 OSUM_GW=10.0.2.2
@@ -91,6 +91,7 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 UsePAM no
 StrictModes no
+Subsystem sftp /usr/lib/openssh/sftp-server
 LogLevel VERBOSE
 CFG
 "$SSHD_BIN" -D -e -f "$TMPD/sshd_config" 2>"$TMPD/sshd.log" &
@@ -133,6 +134,19 @@ cat > "$TMPD/t.sh" <<GUEST
 /bin/scp $SCPC -o UserKnownHostsFile=/etc/kh_new $TARGET:$UPDIR/up.bin /d/down.bin
 /bin/echo RC8:\$?
 /bin/shasum /d/down.bin
+/bin/echo T9
+/bin/sftp $SCPC -o UserKnownHostsFile=/etc/kh_new $TARGET pwd
+/bin/echo RC9:\$?
+/bin/echo T10
+/bin/sftp $SCPC -o UserKnownHostsFile=/etc/kh_new $TARGET put /d/blob.bin $UPDIR/sftp_up.bin
+/bin/echo RC10:\$?
+/bin/echo T11
+/bin/sftp $SCPC -o UserKnownHostsFile=/etc/kh_new $TARGET get $UPDIR/sftp_up.bin /d/sftp_down.bin
+/bin/echo RC11:\$?
+/bin/shasum /d/sftp_down.bin
+/bin/echo T12
+/bin/sftp $SCPC -o UserKnownHostsFile=/etc/kh_new $TARGET ls $UPDIR
+/bin/echo RC12:\$?
 /bin/echo $DONE_MARK
 GUEST
 
@@ -202,6 +216,15 @@ is "uploaded file: SHA-256 on the host equals the original" "$HOSTSUM" "$BLOBSUM
 is "scp download exit status" "$(field "$S" RC8:)" "0"
 GUESTSUM=$(tr -d '\000\r' < "$S" | grep -a ' /d/down.bin' | head -1 | cut -d' ' -f1)
 is "downloaded file: SHA-256 in the guest equals the original" "$GUESTSUM" "$BLOBSUM"
+is "sftp pwd exit status" "$(field "$S" RC9:)" "0"
+tr -d '\000\r' < "$S" | sed -n '/^T9$/,/^RC9:/p' | grep -aq '^/' && ok "sftp pwd prints an absolute path" || bad "sftp pwd printed no path"
+is "sftp put exit status" "$(field "$S" RC10:)" "0"
+is "sftp put: SHA-256 on the host equals the original" "$(sha256sum "$UPDIR/sftp_up.bin" 2>/dev/null | cut -d' ' -f1)" "$BLOBSUM"
+is "sftp get exit status" "$(field "$S" RC11:)" "0"
+is "sftp get: SHA-256 in the guest equals the original" "$(tr -d '\000\r' < "$S" | grep -a ' /d/sftp_down.bin' | head -1 | cut -d' ' -f1)" "$BLOBSUM"
+is "sftp ls exit status" "$(field "$S" RC12:)" "0"
+lsout=$(tr -d '\000\r' < "$S" | sed -n '/^T12$/,/^RC12:/p')
+echo "$lsout" | grep -aq 'sftp_up.bin' && echo "$lsout" | grep -aq 'up.bin' && ok "sftp ls lists both uploaded files" || bad "sftp ls misses the files"
 accepted=$(grep -c 'Accepted publickey' "$TMPD/sshd.log")
 [ "$accepted" -ge 5 ] && ok "OpenSSH booked $accepted publickey logins" || bad "only $accepted accepted logins in the host log"
 
