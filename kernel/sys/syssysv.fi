@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 import lib.errno
+import sched.sched
+import sched.signal
 import sys.sysuser
 
 export {
@@ -17,6 +19,7 @@ const SYS_MSGCTL: u64 = 71
 const SYS_SEMTIMEDOP: u64 = 220
 
 const E_NOMSG: u64 = 42
+const E_NOMSG_WAIT: u64 = 0xFFFF
 
 const IPC_CREAT: u64 = 512
 const IPC_EXCL: u64 = 1024
@@ -40,6 +43,8 @@ const SEMS_PER_SET: u64 = 16
 const SEMOPS_MAX: u64 = 16
 const SEM_VALUE_MAX: u64 = 32767
 const SEMBUF_BYTES: u64 = 6
+const SEMBUF_FLAG_OFFSET: u64 = 4
+const BLOCK_POLL_TICKS: u64 = 1
 
 const QUEUES_MAX: u64 = 8
 const QUEUE_DEPTH: u64 = 16
@@ -223,7 +228,7 @@ fn semop_apply(state: u64, me: u64, slot: u64, ops: u64, n: u64) -> u64 {
     return 0
 }
 
-fn semop(state: u64, me: u64, id: u64, ops: u64, n: u64) -> u64 {
+fn semop_once(state: u64, me: u64, id: u64, ops: u64, n: u64) -> u64 {
     let slot: u64 = sem_slot(id & 0xFFFFFFFF)
     if slot >= SETS_MAX {
         return fail(errno.E_INVAL)
@@ -394,7 +399,7 @@ fn msgctl(id: u64, cmd: u64) -> u64 {
     return 0
 }
 
-fn msgsnd(state: u64, me: u64, id: u64, msgp: u64, size: u64, flags: u64) -> u64 {
+fn msgsnd_once(state: u64, me: u64, id: u64, msgp: u64, size: u64, flags: u64) -> u64 {
     let slot: u64 = q_slot(id & 0xFFFFFFFF)
     if slot >= QUEUES_MAX {
         return fail(errno.E_INVAL)
@@ -462,7 +467,7 @@ fn msg_matches(t: u64, want: u64, flags: u64) -> bool {
     return t == want
 }
 
-fn msgrcv(state: u64, me: u64, id: u64, msgp: u64, size: u64, want: u64,
+fn msgrcv_once(state: u64, me: u64, id: u64, msgp: u64, size: u64, want: u64,
     flags: u64) -> u64 {
     let slot: u64 = q_slot(id & 0xFFFFFFFF)
     if slot >= QUEUES_MAX {
@@ -473,7 +478,7 @@ fn msgrcv(state: u64, me: u64, id: u64, msgp: u64, size: u64, want: u64,
         if (flags & IPC_NOWAIT) != 0 {
             return fail(E_NOMSG)
         }
-        return fail(errno.E_AGAIN)
+        return fail(E_NOMSG_WAIT)
     }
     let idx: u64 = slot * QUEUE_DEPTH + (q_head[slot as usize] + pick) % QUEUE_DEPTH
     var n: u64 = m_len[idx as usize]
@@ -513,4 +518,64 @@ fn msg_remove(slot: u64, pick: u64) {
         i = i + 1
     }
     q_count[slot as usize] = q_count[slot as usize] - 1
+}
+
+fn semop_nowait(state: u64, me: u64, ops: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n && i < SEMOPS_MAX {
+        let flags: u64 = sysuser.get16(state, me, ops + i * SEMBUF_BYTES + SEMBUF_FLAG_OFFSET)
+        if (flags & IPC_NOWAIT) != 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn wait_again(state: u64, me: u64) -> bool {
+    if signal.interrupted(state, me) {
+        return false
+    }
+    sched.sleep_ticks(state, BLOCK_POLL_TICKS)
+    return true
+}
+
+fn semop(state: u64, me: u64, id: u64, ops: u64, n: u64) -> u64 {
+    while true {
+        let r: u64 = semop_once(state, me, id, ops, n)
+        if r != fail(errno.E_AGAIN) || semop_nowait(state, me, ops, n) {
+            return r
+        }
+        if !wait_again(state, me) {
+            return fail(errno.E_INTR)
+        }
+    }
+    return 0
+}
+
+fn msgsnd(state: u64, me: u64, id: u64, msgp: u64, size: u64, flags: u64) -> u64 {
+    while true {
+        let r: u64 = msgsnd_once(state, me, id, msgp, size, flags)
+        if r != fail(errno.E_AGAIN) || (flags & IPC_NOWAIT) != 0 {
+            return r
+        }
+        if !wait_again(state, me) {
+            return fail(errno.E_INTR)
+        }
+    }
+    return 0
+}
+
+fn msgrcv(state: u64, me: u64, id: u64, msgp: u64, size: u64, want: u64,
+    flags: u64) -> u64 {
+    while true {
+        let r: u64 = msgrcv_once(state, me, id, msgp, size, want, flags)
+        if r != fail(E_NOMSG_WAIT) {
+            return r
+        }
+        if !wait_again(state, me) {
+            return fail(errno.E_INTR)
+        }
+    }
+    return 0
 }

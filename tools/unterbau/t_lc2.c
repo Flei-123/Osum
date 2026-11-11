@@ -4,6 +4,8 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <sys/ipc.h>
+#include <sys/msg.h>
+#include <sys/sem.h>
 #include <sys/shm.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -208,6 +210,68 @@ static void check_shm(void)
     CHECK("shm_stale_id", shmat(id, 0, 0) == (void *)-1 && errno == EINVAL, "errno=%d", errno);
 }
 
+struct lc2_msg {
+    long mtype;
+    char text[16];
+};
+
+union lc2_semun {
+    int val;
+};
+
+static void child_after(int ms, int action, int id, pid_t parent)
+{
+    if (fork() != 0)
+        return;
+    struct timespec nap = {0, ms * 1000000L};
+    nanosleep(&nap, 0);
+    if (action == 0) {
+        struct sembuf up = {0, 1, 0};
+        semop(id, &up, 1);
+    } else if (action == 1) {
+        struct lc2_msg m = {5, "wake"};
+        msgsnd(id, &m, 5, 0);
+    } else {
+        kill(parent, SIGUSR1);
+    }
+    _exit(0);
+}
+
+static void check_sysv_blocking(void)
+{
+    int sem = semget(IPC_PRIVATE, 1, IPC_CREAT | 0600);
+    int q = msgget(IPC_PRIVATE, IPC_CREAT | 0600);
+    CHECKC("block_ids", sem >= 0 && q >= 0);
+    if (sem < 0 || q < 0)
+        return;
+    struct sembuf down = {0, -1, 0};
+    errno = 0;
+    child_after(100, 0, sem, getpid());
+    CHECK("semop_blocks_until_post", semop(sem, &down, 1) == 0, "errno=%d", errno);
+    wait(0);
+    struct lc2_msg r = {0, ""};
+    child_after(100, 1, q, getpid());
+    long n = msgrcv(q, &r, sizeof r.text, 0, 0);
+    CHECK("msgrcv_blocks_until_send", n == 5 && r.mtype == 5, "n=%ld errno=%d", n, errno);
+    wait(0);
+    struct sigaction sa = {0};
+    sa.sa_handler = on_usr1;
+    sigaction(SIGUSR1, &sa, 0);
+    errno = 0;
+    child_after(60, 2, sem, getpid());
+    CHECK("semop_interrupted", semop(sem, &down, 1) == -1 && errno == EINTR, "errno=%d", errno);
+    wait(0);
+    child_after(60, 2, q, getpid());
+    errno = 0;
+    CHECK("msgrcv_interrupted", msgrcv(q, &r, sizeof r.text, 0, 0) == -1 && errno == EINTR, "errno=%d", errno);
+    wait(0);
+    struct sembuf nb = {0, -1, IPC_NOWAIT};
+    errno = 0;
+    CHECK("semop_nowait_again", semop(sem, &nb, 1) == -1 && errno == EAGAIN, "errno=%d", errno);
+    semctl(sem, 0, IPC_RMID);
+    msgctl(q, IPC_RMID, 0);
+}
+
 int main(void)
 {
     alarm(90);
@@ -215,5 +279,6 @@ int main(void)
     check_pidfd();
     check_timer_signal();
     check_timer_none_and_thread();
+    check_sysv_blocking();
     return 0;
 }
