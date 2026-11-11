@@ -4,6 +4,7 @@ profile kernel
 import ulib
 import libc.text
 import libc.io
+import libc.errno
 import lineedit.leread
 
 export { u_start }
@@ -26,6 +27,14 @@ const K_APP: u64 = 4
 const K_ERR: u64 = 5
 const K_AMP: u64 = 6
 const K_SEMI: u64 = 7
+const K_ERRDUP: u64 = 8
+const K_OUTDUP: u64 = 9
+const K_ERRAPP: u64 = 10
+const K_AND: u64 = 11
+const K_OR: u64 = 12
+const NO_FD: u64 = 0xFFFFFFFF
+const FD_MASK: u64 = 0xFFFFFFFF
+const FD_SHIFT: u64 = 32
 
 static mut line: [u8; 256] = [0 as u8; 256]
 static mut words: [u8; 768] = [0 as u8; 768]
@@ -47,8 +56,7 @@ static mut rctx: [u8; 528] = [0 as u8; 528]
 static mut interactive: u64 = 0
 static mut in_fd: u64 = 0
 static mut commands: u64 = 0
-static mut tmp_ready: u64 = 0
-static mut scratch: [u8; 128] = [0 as u8; 128]
+static mut stage_pid: [u64; 4] = [0 as u64; 4]
 static mut leaving: u64 = 0
 static mut did_run: u64 = 0
 static mut last_bg: u64 = 0
@@ -384,6 +392,36 @@ fn is_break(c: u64) -> bool {
     return c == 124 || c == 60 || c == 62 || c == 38 || c == 59
 }
 
+fn lex_out(at: u64) -> u64 {
+    var i: u64 = at
+    if ch(i) == 49 {
+        i = i + 1
+    }
+    if ch(i + 1) == 38 && ch(i + 2) == 50 {
+        push_tok(K_OUTDUP, 0)
+        return i + 3
+    }
+    if ch(i + 1) == 62 {
+        push_tok(K_APP, 0)
+        return i + 2
+    }
+    push_tok(K_OUT, 0)
+    return i + 1
+}
+
+fn lex_err(at: u64) -> u64 {
+    if ch(at + 2) == 38 && ch(at + 3) == 49 {
+        push_tok(K_ERRDUP, 0)
+        return at + 4
+    }
+    if ch(at + 2) == 62 {
+        push_tok(K_ERRAPP, 0)
+        return at + 3
+    }
+    push_tok(K_ERR, 0)
+    return at + 2
+}
+
 fn tokenize() -> bool {
     var s_quote: [u8; 26] = "sh: unterminated quote\0\0\0\0"
     ntok = 0
@@ -397,29 +435,28 @@ fn tokenize() -> bool {
         let c: u64 = ch(i)
         if c == 0 || c == 35 {
             going = false
+        } else if c == 124 && ch(i + 1) == 124 {
+            push_tok(K_OR, 0)
+            i = i + 2
         } else if c == 124 {
             push_tok(K_PIPE, 0)
             i = i + 1
         } else if c == 60 {
             push_tok(K_IN, 0)
             i = i + 1
+        } else if c == 38 && ch(i + 1) == 38 {
+            push_tok(K_AND, 0)
+            i = i + 2
         } else if c == 38 {
             push_tok(K_AMP, 0)
             i = i + 1
         } else if c == 59 {
             push_tok(K_SEMI, 0)
             i = i + 1
-        } else if c == 62 {
-            if ch(i + 1) == 62 {
-                push_tok(K_APP, 0)
-                i = i + 2
-            } else {
-                push_tok(K_OUT, 0)
-                i = i + 1
-            }
+        } else if c == 62 || (c == 49 && ch(i + 1) == 62) {
+            i = lex_out(i)
         } else if c == 50 && ch(i + 1) == 62 {
-            push_tok(K_ERR, 0)
-            i = i + 2
+            i = lex_err(i)
         } else {
             let start: u64 = wat
             var open: bool = true
@@ -488,52 +525,39 @@ fn word_at(t: u64) -> u64 {
     return (&words[(tok_at[t as usize]) as usize]) as u64
 }
 
+fn is_separator(kind: u64) -> bool {
+    return kind == K_SEMI || kind == K_AMP || kind == K_AND || kind == K_OR
+}
+
 fn run_line() -> bool {
     if !tokenize() {
         status = 2
         return true
     }
     var i: u64 = 0
+    var skip: bool = false
     while i < ntok {
         var j: u64 = i
-        var bg: bool = false
-        while j < ntok && tok_kind[j as usize] != K_SEMI
-        && tok_kind[j as usize] != K_AMP {
+        while j < ntok && !is_separator(tok_kind[j as usize]) {
             j = j + 1
         }
-        if j < ntok && tok_kind[j as usize] == K_AMP {
-            bg = true
+        var sep: u64 = K_SEMI
+        if j < ntok {
+            sep = tok_kind[j as usize]
         }
-        if j > i {
+        if j > i && !skip {
             commands = commands + 1
-            if !run_pipeline(i, j, bg) {
+            if !run_pipeline(i, j, sep == K_AMP) {
                 return false
             }
         }
+        skip = (sep == K_AND && status != 0) || (sep == K_OR && status == 0)
         i = j + 1
     }
     return true
 }
 
-fn tmp_path(k: u64) -> u64 {
-    var t0: [u8; 9] = "/tmp/sh0\0"
-    var t1: [u8; 9] = "/tmp/sh1\0"
-    var dir: [u8; 5] = "/tmp\0"
-    if tmp_ready == 0 {
-        ulib.sys(ulib.SYS_MKDIR, (&dir[0 as usize]) as u64, 0, 0)
-        tmp_ready = 1
-    }
-    if k % 2 == 0 {
-        ulib.strcpy((&scratch[0 as usize]) as u64, (&t0[0 as usize]) as u64)
-    } else {
-        ulib.strcpy((&scratch[0 as usize]) as u64, (&t1[0 as usize]) as u64)
-    }
-    return (&scratch[0 as usize]) as u64
-}
-
-fn run_pipeline(from: u64, to: u64, bg: bool) -> bool {
-    var stage_in: [u8; 128] = [0 as u8; 128]
-    var stage_out: [u8; 128] = [0 as u8; 128]
+fn count_stages(from: u64, to: u64) -> u64 {
     var stages: u64 = 1
     var t: u64 = from
     while t < to {
@@ -542,57 +566,128 @@ fn run_pipeline(from: u64, to: u64, bg: bool) -> bool {
         }
         t = t + 1
     }
+    return stages
+}
+
+fn close_fd(fd: u64) {
+    if fd != NO_FD {
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    }
+}
+
+fn announce_job(pid: u64) {
+    var s_job: [u8; 3] = "[\0\0"
+    var s_jend: [u8; 3] = "] \0"
+    ulib.say((&s_job[0 as usize]) as u64)
+    ulib.sayu(nbg)
+    ulib.say((&s_jend[0 as usize]) as u64)
+    ulib.sayu(pid)
+    ulib.nl()
+}
+
+fn keep_job(pid: u64) {
+    if nbg < NBG {
+        bg_pid[nbg as usize] = pid
+        nbg = nbg + 1
+    }
+    last_bg = pid
+}
+
+fn run_pipeline(from: u64, to: u64, bg: bool) -> bool {
+    var s_deep: [u8; 24] = "sh: too many stages\0\0\0\0\0"
+    var s_pipe: [u8; 24] = "sh: cannot make a pipe\0\0"
+    let stages: u64 = count_stages(from, to)
     if stages > MAX_STAGE {
-        var s_deep: [u8; 24] = "sh: too many stages\0\0\0\0\0"
         ulib.esay_line((&s_deep[0 as usize]) as u64, 0)
         status = 2
         return true
     }
+    var carry: u64 = NO_FD
     var start: u64 = from
     var k: u64 = 0
-    var alive: bool = true
     while k < stages {
         var end: u64 = start
         while end < to && tok_kind[end as usize] != K_PIPE {
             end = end + 1
         }
-        stage_in[0 as usize] = 0 as u8
-        stage_out[0 as usize] = 0 as u8
-        if k > 0 {
-            ulib.strcpy((&stage_in[0 as usize]) as u64, tmp_path(k - 1))
-        }
+        var out_r: u64 = NO_FD
+        var out_w: u64 = NO_FD
         if k + 1 < stages {
-            ulib.strcpy((&stage_out[0 as usize]) as u64, tmp_path(k))
+            var pfd: [u64; 1] = [0 as u64; 1]
+            if errno.failed(io.pipe((&pfd[0 as usize]) as u64)) {
+                ulib.esay_line((&s_pipe[0 as usize]) as u64, 0)
+                close_fd(carry)
+                reap_stages(k)
+                status = 2
+                return leaving == 0
+            }
+            out_r = pfd[0 as usize] & FD_MASK
+            out_w = (pfd[0 as usize] >> FD_SHIFT) & FD_MASK
         }
-        let last: bool = k + 1 == stages
-        if !run_stage(start, end, (&stage_in[0 as usize]) as u64,
-            (&stage_out[0 as usize]) as u64, bg && last) {
-            alive = false
-        }
+        stage_pid[k as usize] = run_stage(start, end, carry, out_w)
+        close_fd(carry)
+        close_fd(out_w)
+        carry = out_r
         start = end + 1
         k = k + 1
     }
-    if stages > 1 {
-        var d: u64 = 0
-        while d + 1 < stages {
-            ulib.sys(ulib.SYS_UNLINK, tmp_path(d), 0, 0)
-            d = d + 1
-        }
+    if bg {
+        detach_stages(stages)
+        return leaving == 0
     }
-    return alive
+    reap_stages(stages)
+    return leaving == 0
 }
 
-fn run_stage(from: u64, to: u64, pin: u64, pout: u64, bg: bool) -> bool {
-    var f_in: [u8; 96] = [0 as u8; 96]
-    var f_out: [u8; 96] = [0 as u8; 96]
-    var f_err: [u8; 96] = [0 as u8; 96]
+fn detach_stages(count: u64) {
+    var s: u64 = 0
+    while s < count {
+        if stage_pid[s as usize] != 0 {
+            keep_job(stage_pid[s as usize])
+        }
+        s = s + 1
+    }
+    let last: u64 = stage_pid[(count - 1) as usize]
+    if last != 0 {
+        announce_job(last)
+        status = 0
+    }
+}
+
+fn reap_stages(count: u64) {
+    var s_arrow: [u8; 5] = " -> \0"
+    var s: u64 = 0
+    var waited: bool = false
+    while s < count {
+        let pid: u64 = stage_pid[s as usize]
+        if pid != 0 {
+            let code: u64 = ulib.wait_code(pid)
+            if s + 1 == count {
+                status = code
+                waited = true
+            }
+        }
+        s = s + 1
+    }
+    if waited && interactive == 1 {
+        prompt()
+        ulib.say(argv[0 as usize])
+        ulib.say((&s_arrow[0 as usize]) as u64)
+        ulib.sayn(status)
+        ulib.nl()
+    }
+}
+
+fn run_stage(from: u64, to: u64, pin: u64, pout: u64) -> u64 {
     var s_what: [u8; 22] = "sh: missing file name\0"
     var s_many: [u8; 26] = "sh: too many arguments\0\0\0\0"
-    var append: bool = false
     argc = 0
-    ulib.strncpy((&f_in[0 as usize]) as u64, pin, 96)
-    ulib.strncpy((&f_out[0 as usize]) as u64, pout, 96)
-    f_err[0 as usize] = 0 as u8
+    if pin != NO_FD {
+        ulib.sys(ulib.SYS_DUP2, pin, 0, 0)
+    }
+    if pout != NO_FD {
+        ulib.sys(ulib.SYS_DUP2, pout, 1, 0)
+    }
     var t: u64 = from
     while t < to {
         let kind: u64 = tok_kind[t as usize]
@@ -600,58 +695,55 @@ fn run_stage(from: u64, to: u64, pin: u64, pout: u64, bg: bool) -> bool {
             if argc >= MAX_ARGS {
                 ulib.esay_line((&s_many[0 as usize]) as u64, 0)
                 status = 2
-                return true
+                undo()
+                return 0
             }
             argv[argc as usize] = word_at(t)
             argc = argc + 1
+            t = t + 1
+        } else if kind == K_ERRDUP {
+            ulib.sys(ulib.SYS_DUP2, 1, 2, 0)
+            t = t + 1
+        } else if kind == K_OUTDUP {
+            ulib.sys(ulib.SYS_DUP2, 2, 1, 0)
             t = t + 1
         } else {
             if t + 1 >= to || tok_kind[(t + 1) as usize] != K_WORD {
                 ulib.esay_line((&s_what[0 as usize]) as u64, 0)
                 status = 2
-                return true
+                undo()
+                return 0
             }
-            if kind == K_IN {
-                ulib.strncpy((&f_in[0 as usize]) as u64, word_at(t + 1), 96)
-            } else if kind == K_ERR {
-                ulib.strncpy((&f_err[0 as usize]) as u64, word_at(t + 1), 96)
-            } else {
-                ulib.strncpy((&f_out[0 as usize]) as u64, word_at(t + 1), 96)
-                append = kind == K_APP
+            if !apply_redirect(kind, word_at(t + 1)) {
+                undo()
+                return 0
             }
             t = t + 2
         }
     }
     if argc == 0 {
-        return true
+        undo()
+        return 0
     }
     if assignments() {
         status = 0
-        return true
-    }
-    if !redirect(0, (&f_in[0 as usize]) as u64, false) {
-        return true
-    }
-    if !redirect(1, (&f_out[0 as usize]) as u64, append) {
         undo()
-        return true
-    }
-    if !redirect(2, (&f_err[0 as usize]) as u64, false) {
-        undo()
-        return true
+        return 0
     }
     did_run = 0
-    let alive: bool = execute(bg)
+    let pid: u64 = launch()
     undo()
-    if interactive == 1 && did_run == 1 {
-        var s_arrow: [u8; 5] = " -> \0"
-        prompt()
-        ulib.say(argv[0 as usize])
-        ulib.say((&s_arrow[0 as usize]) as u64)
-        ulib.sayn(status)
-        ulib.nl()
+    return pid
+}
+
+fn apply_redirect(kind: u64, name: u64) -> bool {
+    if kind == K_IN {
+        return redirect(0, name, false)
     }
-    return alive
+    if kind == K_ERR || kind == K_ERRAPP {
+        return redirect(2, name, kind == K_ERRAPP)
+    }
+    return redirect(1, name, kind == K_APP)
 }
 
 fn eq_at(w: u64) -> u64 {
@@ -770,13 +862,11 @@ fn make_path(cmd: u64) {
     ulib.strncpy((&path[0 as usize]) as u64 + 5, cmd, 123)
 }
 
-fn execute(bg: bool) -> bool {
+fn launch() -> u64 {
     var s_no: [u8; 16] = "sh: cannot run \0"
     var s_arrow: [u8; 5] = " -> \0"
-    var s_job: [u8; 3] = "[\0\0"
-    var s_jend: [u8; 3] = "] \0"
     if builtin() {
-        return leaving == 0
+        return 0
     }
     make_path(argv[0 as usize])
     push_env()
@@ -788,25 +878,9 @@ fn execute(bg: bool) -> bool {
         ulib.eput((&s_arrow[0 as usize]) as u64)
         say_err(pid)
         status = 127
-        return true
+        return 0
     }
-    if bg {
-        if nbg < NBG {
-            bg_pid[nbg as usize] = pid
-            nbg = nbg + 1
-        }
-        last_bg = pid
-        ulib.say((&s_job[0 as usize]) as u64)
-        ulib.sayu(nbg)
-        ulib.say((&s_jend[0 as usize]) as u64)
-        ulib.sayu(pid)
-        ulib.nl()
-        status = 0
-        return true
-    }
-    status = ulib.wait_code(pid)
-    did_run = 1
-    return true
+    return pid
 }
 
 fn say_err(v: u64) {
