@@ -13,12 +13,13 @@ import services.svcdlg
 import services.dlgproto
 
 export {
-    set_app, caps, copy_text, paste_text, message, confirm, file_open, file_save,
+    set_app, caps, copy_text, paste_text, copy_files, paste_files, files_seq, clear_files, message, confirm, file_open, file_save,
     store_set, store_get, store_remove, store_has, store_keys,
     poll, pending,
 }
 
 const CLIP_MAX: u64 = 16384
+const CUT_MIME_LEN: u64 = 22
 const KIND_MAX: u64 = 3
 const BUTTONS_MAX: u64 = 3
 const DATA_ROOT_LEN: u64 = 6
@@ -35,6 +36,8 @@ static mut dlg_key: [u8; 48] = [0 as u8; 48]
 static mut clip_buf: [u8; 16384] = [0 as u8; 16384]
 static mut dent_buf: [u8; 1024] = [0 as u8; 1024]
 static mut TMP_SUFFIX: [u8; 6] = "/.tmp\0"
+static mut CUT_MIME: [u8; 23] = "application/x-osum-cut\0"
+static mut cut_mask_cache: u64 = 0
 
 fn app_ptr() -> u64 {
     return (&app_name[0 as usize]) as u64
@@ -103,6 +106,62 @@ fn paste_text(id_out: u64) -> u64 {
         return svcrules.FAILED
     }
     octets.st32(id_out, 0, id)
+    return svcrules.OK
+}
+
+fn cut_mask() -> u64 {
+    if cut_mask_cache == 0 {
+        cut_mask_cache = xfer.mime_of((&CUT_MIME[0 as usize]) as u64, CUT_MIME_LEN)
+    }
+    return cut_mask_cache
+}
+
+fn copy_files(uris: u64, n: u64, cut: u64) -> u64 {
+    if !svcrules.has(caps(), svcrules.CAP_CLIP_WRITE) {
+        return svcrules.NO_BACKEND
+    }
+    if n == 0 {
+        return svcrules.INVALID
+    }
+    var kinds: u64 = xfer.MIME_URIS
+    if cut != 0 {
+        kinds = kinds | cut_mask()
+    }
+    if xfer.is_error(xfer.set(xfer.SEL_CLIPBOARD, kinds, uris, n)) {
+        return svcrules.FAILED
+    }
+    return svcrules.OK
+}
+
+fn paste_files(out: u64, max: u64, len_out: u64, cut_out: u64) -> u64 {
+    octets.st32(len_out, 0, 0)
+    octets.st32(cut_out, 0, 0)
+    if !svcrules.has(caps(), svcrules.CAP_CLIP_READ) {
+        return svcrules.NO_BACKEND
+    }
+    let kinds: u64 = xfer.types(xfer.SEL_CLIPBOARD, 0)
+    if (kinds & (xfer.MIME_URIS | xfer.MIME_PATH)) == 0 {
+        return svcrules.NOT_FOUND
+    }
+    let n: u64 = xfer.get_files(xfer.SEL_CLIPBOARD, 0, out, max)
+    if xfer.is_error(n) || n > max {
+        return svcrules.FAILED
+    }
+    octets.st32(len_out, 0, n)
+    if (kinds & cut_mask()) != 0 {
+        octets.st32(cut_out, 0, 1)
+    }
+    return svcrules.OK
+}
+
+fn files_seq() -> u64 {
+    return xfer.seq(xfer.SEL_CLIPBOARD, 0)
+}
+
+fn clear_files() -> u64 {
+    if xfer.is_error(xfer.clear(xfer.SEL_CLIPBOARD)) {
+        return svcrules.FAILED
+    }
     return svcrules.OK
 }
 
