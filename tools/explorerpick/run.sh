@@ -71,7 +71,7 @@ mutant nofilter kernel/user/explorer/exppick.fi 's/return dlgproto.ext_matches(a
     accept_filter_skips_bin
 mutant nocancel kernel/user/explorer/exppick.fi 's/store(dlgproto.ANSWER_CANCEL, 0)/store(dlgproto.ANSWER_OK, 0)/' \
     close_is_cancel
-mutant nosavewrite kernel/user/explorer/exppick.fi 's/let wrote: u64 = io.write_all(fd, data_at(), len)/let wrote: u64 = len/' \
+mutant nosavewrite kernel/user/services/dlgreply.fi 's/let wrote: u64 = io.write_all(fd, data, len)/let wrote: u64 = len/' \
     save_writes_staged_content
 mutant notitle kernel/user/explorer/exppick.fi 's/if enabled \&\& text.length((&title_buf\[0 as usize\]) as u64) > 0 {/if false {/' \
     save_window_title open_window_title
