@@ -1,0 +1,666 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.kstate
+import sched.sched
+import sched.time
+import sched.taskconst
+import sched.taskslot
+import sched.proc.procfault
+import lib.errno
+import fs.file
+import fs.fs
+import ipc.perm
+import ipc.uio
+import sys.sysconst
+import sys.sysuser
+import sys.sysfd
+import sys.sysnet
+import sys.sysfile
+import sys.sysevent
+import sys.syslock
+
+export {
+    call, handles
+}
+
+const SYS_MINCORE: u64 = 27
+const SYS_TRUNCATE: u64 = 76
+const SYS_GETDENTS: u64 = 78
+const SYS_TIMES: u64 = 100
+const SYS_GETSID: u64 = 124
+const SYS_CAPGET: u64 = 125
+const SYS_CAPSET: u64 = 126
+const SYS_UTIME: u64 = 132
+const SYS_XATTR_FIRST: u64 = 188
+const SYS_XATTR_LAST: u64 = 197
+const SYS_UTIMES: u64 = 235
+const SYS_FUTIMESAT: u64 = 261
+const SYS_GET_ROBUST_LIST: u64 = 274
+const SYS_SPLICE: u64 = 275
+const SYS_TEE: u64 = 276
+const SYS_SYNC_FILE_RANGE: u64 = 277
+const SYS_VMSPLICE: u64 = 278
+const SYS_RECVMMSG: u64 = 299
+const SYS_SYNCFS: u64 = 306
+const SYS_SENDMMSG: u64 = 307
+const SYS_SCHED_SETATTR: u64 = 314
+const SYS_SCHED_GETATTR: u64 = 315
+const SYS_MLOCK2: u64 = 325
+const SYS_COPY_FILE_RANGE: u64 = 326
+const SYS_CLOSE_RANGE: u64 = 436
+const SYS_OPENAT2: u64 = 437
+const SYS_EPOLL_PWAIT2: u64 = 441
+const SYS_FCHMODAT2: u64 = 452
+
+const SYS_OPENAT: u64 = 257
+const SYS_EPOLL_PWAIT: u64 = 281
+const O_WRONLY: u64 = 1
+
+const MMSG_BYTES: u64 = 64
+const MMSG_VLEN_MAX: u64 = 1024
+const MSG_WAITFORONE: u64 = 0x10000
+const FD_TOP: u64 = 4095
+const F_SETFD: u64 = 2
+const FD_CLOEXEC: u64 = 1
+const CLOSE_RANGE_CLOEXEC: u64 = 4
+const CLOSE_RANGE_KNOWN: u64 = 6
+const NS_PER_TICK: u64 = 10000000
+const COPY_CHUNK: u64 = 4096
+const DIRENT64_HEAD: u64 = 19
+const DIRENT_NAME_OLD: u64 = 18
+const OPENAT2_HOW_BYTES: u64 = 24
+const SCHED_ATTR_V0: u64 = 48
+const SCHED_ATTR_MAX: u64 = 56
+const ROBUST_HEAD_BYTES: u64 = 24
+const CAP_V1: u64 = 0x19980330
+const CAP_V2: u64 = 0x20071026
+const CAP_V3: u64 = 0x20080522
+const CAP_WORD_BYTES: u64 = 12
+const CAP_HIGH_MASK: u64 = 0x1FF
+const CAP_ALL: u64 = 0xFFFFFFFF
+const MS_MAX: u64 = 0x7FFFFFFF
+const TIMEOUT_FOREVER: u64 = 0xFFFFFFFF
+
+fn fail(e: u64) -> u64 {
+    return sysuser.neg(e)
+}
+
+fn handles(number: u64) -> bool {
+    if number >= SYS_XATTR_FIRST && number <= SYS_XATTR_LAST {
+        return true
+    }
+    if number == SYS_MINCORE || number == SYS_TRUNCATE || number == SYS_GETDENTS
+        || number == SYS_TIMES || number == SYS_GETSID || number == SYS_CAPGET
+        || number == SYS_CAPSET || number == SYS_UTIME || number == SYS_UTIMES
+        || number == SYS_FUTIMESAT || number == SYS_GET_ROBUST_LIST {
+        return true
+    }
+    if number == SYS_SPLICE || number == SYS_TEE || number == SYS_SYNC_FILE_RANGE
+        || number == SYS_VMSPLICE || number == SYS_RECVMMSG || number == SYS_SYNCFS
+        || number == SYS_SENDMMSG || number == SYS_SCHED_SETATTR
+        || number == SYS_SCHED_GETATTR {
+        return true
+    }
+    return number == SYS_MLOCK2 || number == SYS_COPY_FILE_RANGE
+        || number == SYS_CLOSE_RANGE || number == SYS_OPENAT2
+        || number == SYS_EPOLL_PWAIT2 || number == SYS_FCHMODAT2
+}
+
+fn call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
+    a3: u64, a4: u64, a5: u64) -> u64 {
+    if number >= SYS_XATTR_FIRST && number <= SYS_XATTR_LAST {
+        return fail(errno.E_OPNOTSUPP)
+    }
+    if number == SYS_RECVMMSG {
+        return do_recvmmsg(state, me, a0, a1, a2, a3)
+    }
+    if number == SYS_SENDMMSG {
+        return do_sendmmsg(state, me, a0, a1, a2, a3)
+    }
+    if number == SYS_MINCORE {
+        return do_mincore(state, me, a0, a1, a2)
+    }
+    if number == SYS_CAPGET {
+        return do_capget(state, me, a0, a1)
+    }
+    if number == SYS_CAPSET {
+        return do_capset(state, me, a0, a1)
+    }
+    if number == SYS_TIMES {
+        return do_times(state, me, a0)
+    }
+    if number == SYS_TRUNCATE {
+        return do_truncate(state, me, a0, a1)
+    }
+    if number == SYS_GETDENTS {
+        return do_getdents_old(state, me, a0, a1, a2)
+    }
+    if number == SYS_GETSID {
+        return do_getsid(state, me, a0)
+    }
+    if number == SYS_CLOSE_RANGE {
+        return do_close_range(state, me, a0, a1, a2)
+    }
+    if number == SYS_UTIME || number == SYS_UTIMES {
+        return do_utime_path(state, me, number, a0, a1)
+    }
+    if number == SYS_FUTIMESAT {
+        return do_futimesat(state, me, a0, a1, a2)
+    }
+    return call_more(state, me, number, a0, a1, a2, a3, a4, a5)
+}
+
+fn call_more(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
+    a3: u64, a4: u64, a5: u64) -> u64 {
+    if number == SYS_COPY_FILE_RANGE {
+        if a5 != 0 {
+            return fail(errno.E_INVAL)
+        }
+        return do_copy_range(state, me, a0, a1, a2, a3, a4)
+    }
+    if number == SYS_SPLICE {
+        return do_copy_range(state, me, a0, a1, a2, a3, a4)
+    }
+    if number == SYS_TEE || number == SYS_VMSPLICE {
+        return fail(errno.E_INVAL)
+    }
+    if number == SYS_SYNCFS {
+        return do_sync_fd(state, me, a0)
+    }
+    if number == SYS_SYNC_FILE_RANGE {
+        if (a3 & 0xFFFFFFF8) != 0 {
+            return fail(errno.E_INVAL)
+        }
+        return do_sync_fd(state, me, a0)
+    }
+    if number == SYS_MLOCK2 {
+        if (a2 & 0xFFFFFFFE) != 0 {
+            return fail(errno.E_INVAL)
+        }
+        return 0
+    }
+    if number == SYS_FCHMODAT2 {
+        return do_fchmodat2(state, me, a0, a1, a2)
+    }
+    if number == SYS_OPENAT2 {
+        return do_openat2(state, me, a0, a1, a2, a3)
+    }
+    if number == SYS_EPOLL_PWAIT2 {
+        return do_epoll_pwait2(state, me, a0, a1, a2, a3, a4)
+    }
+    if number == SYS_SCHED_GETATTR {
+        return do_sched_getattr(state, me, a0, a1, a2, a3)
+    }
+    if number == SYS_SCHED_SETATTR {
+        return do_sched_setattr(state, me, a0, a1, a2)
+    }
+    if number == SYS_GET_ROBUST_LIST {
+        return do_get_robust_list(state, me, a1, a2)
+    }
+    return fail(errno.E_NOSYS)
+}
+
+fn do_recvmmsg(state: u64, me: u64, fd: u64, vec: u64, vlen_arg: u64, flags: u64) -> u64 {
+    var vlen: u64 = vlen_arg & 0xFFFFFFFF
+    if vlen > MMSG_VLEN_MAX {
+        vlen = MMSG_VLEN_MAX
+    }
+    var fl: u64 = flags
+    let waitone: bool = (flags & MSG_WAITFORONE) != 0
+    if waitone {
+        fl = flags - MSG_WAITFORONE
+    }
+    var done: u64 = 0
+    while done < vlen {
+        let mh: u64 = vec + done * MMSG_BYTES
+        let r: u64 = sysnet.do_recvmsg(state, me, fd, mh, fl)
+        if errno.is_error(r) {
+            if done > 0 {
+                return done
+            }
+            return r
+        }
+        if !sysuser.put32(state, me, mh + sysconst.MH_BYTES, r) {
+            return fail(errno.E_FAULT)
+        }
+        done = done + 1
+        if waitone {
+            fl = fl | sysconst.MSG_DONTWAIT
+        }
+    }
+    return done
+}
+
+fn do_sendmmsg(state: u64, me: u64, fd: u64, vec: u64, vlen_arg: u64, flags: u64) -> u64 {
+    var vlen: u64 = vlen_arg & 0xFFFFFFFF
+    if vlen > MMSG_VLEN_MAX {
+        vlen = MMSG_VLEN_MAX
+    }
+    var done: u64 = 0
+    while done < vlen {
+        let mh: u64 = vec + done * MMSG_BYTES
+        let r: u64 = sysnet.do_sendmsg(state, me, fd, mh, flags)
+        if errno.is_error(r) {
+            if done > 0 {
+                return done
+            }
+            return r
+        }
+        if !sysuser.put32(state, me, mh + sysconst.MH_BYTES, r) {
+            return fail(errno.E_FAULT)
+        }
+        done = done + 1
+    }
+    return done
+}
+
+fn do_mincore(state: u64, me: u64, addr: u64, len: u64, vec: u64) -> u64 {
+    if (addr & (sysconst.PAGE - 1)) != 0 {
+        return fail(errno.E_INVAL)
+    }
+    let pages: u64 = (len + sysconst.PAGE - 1) / sysconst.PAGE
+    if !procfault.user_ok(state, me, addr, pages * sysconst.PAGE) {
+        return fail(errno.E_NOMEM)
+    }
+    if pages == 0 {
+        return 0
+    }
+    if !procfault.user_ok(state, me, vec, pages) {
+        return fail(errno.E_FAULT)
+    }
+    var i: u64 = 0
+    while i < pages {
+        if !sysuser.poke(state, me, vec + i, 1) {
+            return fail(errno.E_FAULT)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn cap_words(version: u64) -> u64 {
+    if version == CAP_V1 {
+        return 1
+    }
+    if version == CAP_V2 || version == CAP_V3 {
+        return 2
+    }
+    return 0
+}
+
+fn do_capget(state: u64, me: u64, hdr: u64, data: u64) -> u64 {
+    if !procfault.user_ok(state, me, hdr, 8) {
+        return fail(errno.E_FAULT)
+    }
+    let words: u64 = cap_words(sysuser.get32(state, me, hdr))
+    if words == 0 {
+        sysuser.put32(state, me, hdr, CAP_V3)
+        return fail(errno.E_INVAL)
+    }
+    if data == 0 {
+        return 0
+    }
+    if !procfault.user_ok(state, me, data, words * CAP_WORD_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    var i: u64 = 0
+    while i < words {
+        var bits: u64 = 0
+        if perm.is_root(state, me) {
+            bits = CAP_ALL
+            if i == 1 {
+                bits = CAP_HIGH_MASK
+            }
+        }
+        let at: u64 = data + i * CAP_WORD_BYTES
+        if !sysuser.put32(state, me, at, bits) || !sysuser.put32(state, me, at + 4, bits)
+            || !sysuser.put32(state, me, at + 8, 0) {
+            return fail(errno.E_FAULT)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn do_capset(state: u64, me: u64, hdr: u64, data: u64) -> u64 {
+    if !procfault.user_ok(state, me, hdr, 8) {
+        return fail(errno.E_FAULT)
+    }
+    let words: u64 = cap_words(sysuser.get32(state, me, hdr))
+    if words == 0 {
+        sysuser.put32(state, me, hdr, CAP_V3)
+        return fail(errno.E_INVAL)
+    }
+    if perm.is_root(state, me) {
+        return 0
+    }
+    if !procfault.user_ok(state, me, data, words * CAP_WORD_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    var i: u64 = 0
+    while i < words {
+        let at: u64 = data + i * CAP_WORD_BYTES
+        if sysuser.get32(state, me, at) != 0 || sysuser.get32(state, me, at + 4) != 0 {
+            return fail(errno.E_PERM)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn do_times(state: u64, me: u64, buf: u64) -> u64 {
+    if buf != 0 {
+        if !procfault.user_ok(state, me, buf, 32) {
+            return fail(errno.E_FAULT)
+        }
+        var i: u64 = 0
+        while i < 4 {
+            if !sysuser.put64(state, me, buf + i * 8, 0) {
+                return fail(errno.E_FAULT)
+            }
+            i = i + 1
+        }
+    }
+    return time.mono_ns(state) / NS_PER_TICK
+}
+
+fn do_truncate(state: u64, me: u64, path: u64, size: u64) -> u64 {
+    let fd: u64 = sysfd.do_open_mode(state, me, path, O_WRONLY, 0)
+    if errno.is_error(fd) {
+        return fd
+    }
+    let r: u64 = sysfd.do_ftruncate(state, me, fd, size)
+    sysfd.do_close(state, me, fd)
+    return r
+}
+
+fn do_getdents_old(state: u64, me: u64, fd: u64, buf: u64, count: u64) -> u64 {
+    let n: u64 = sysfile.do_getdents(state, me, fd, buf, count)
+    if errno.is_error(n) {
+        return n
+    }
+    var pos: u64 = 0
+    while pos < n {
+        let rec: u64 = buf + pos
+        let reclen: u64 = sysuser.get16(state, me, rec + 16)
+        if reclen < DIRENT64_HEAD + 1 || pos + reclen > n {
+            return fail(errno.E_IO)
+        }
+        let kind: u64 = sysuser.peek(state, me, rec + 18)
+        var i: u64 = DIRENT_NAME_OLD
+        while i < reclen - 1 {
+            if !sysuser.poke(state, me, rec + i, sysuser.peek(state, me, rec + i + 1)) {
+                return fail(errno.E_FAULT)
+            }
+            i = i + 1
+        }
+        if !sysuser.poke(state, me, rec + reclen - 1, kind) {
+            return fail(errno.E_FAULT)
+        }
+        pos = pos + reclen
+    }
+    return n
+}
+
+fn do_getsid(state: u64, me: u64, pid: u64) -> u64 {
+    var task: u64 = me
+    if pid != 0 {
+        task = sched.find_pid(state, pid)
+        if task >= kstate.MAX_TASKS {
+            return fail(errno.E_SRCH)
+        }
+    }
+    return taskslot.tget(state, task, taskconst.T_SID)
+}
+
+fn do_close_range(state: u64, me: u64, first: u64, last: u64, flags: u64) -> u64 {
+    if first > last || (flags & 0xFFFFFFF9) != 0 {
+        return fail(errno.E_INVAL)
+    }
+    var top: u64 = last
+    if top > FD_TOP {
+        top = FD_TOP
+    }
+    var fd: u64 = first
+    while fd <= top {
+        if (flags & CLOSE_RANGE_CLOEXEC) != 0 {
+            syslock.do_fcntl(state, me, fd, F_SETFD, FD_CLOEXEC)
+        } else {
+            sysfd.do_close(state, me, fd)
+        }
+        fd = fd + 1
+    }
+    return 0
+}
+
+fn set_path_times(state: u64, me: u64, name: u64, use_now: bool, atime: u64, mtime: u64) -> u64 {
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = sysuser.fetch_path(state, me, name, buf, sysconst.MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if !perm.walk_w(state, me, buf) {
+        return fail(errno.E_ACCES)
+    }
+    let ino: u64 = fs.path(state, buf)
+    if ino == 0 {
+        return fail(errno.E_NOENT)
+    }
+    if !perm.may(state, me, ino, perm.R_WRITE) {
+        return fail(errno.E_ACCES)
+    }
+    var a: u64 = atime
+    var m: u64 = mtime
+    if use_now {
+        a = time.now_sec(state)
+        m = a
+    }
+    if !fs.set_times(state, ino, 0, m, a) {
+        return fail(errno.E_IO)
+    }
+    return 0
+}
+
+fn do_utime_path(state: u64, me: u64, number: u64, name: u64, times: u64) -> u64 {
+    if times == 0 {
+        return set_path_times(state, me, name, true, 0, 0)
+    }
+    if !procfault.user_ok(state, me, times, 32) {
+        return fail(errno.E_FAULT)
+    }
+    if number == SYS_UTIME {
+        return set_path_times(state, me, name, false, sysuser.get_user64(state, me, times),
+            sysuser.get_user64(state, me, times + 8))
+    }
+    return set_path_times(state, me, name, false, sysuser.get_user64(state, me, times),
+        sysuser.get_user64(state, me, times + 16))
+}
+
+fn do_futimesat(state: u64, me: u64, dirfd: u64, name: u64, times: u64) -> u64 {
+    let e: u64 = sysfile.at_enter1(state, me, dirfd, name)
+    if errno.is_error(e) {
+        return e
+    }
+    let r: u64 = do_utime_path(state, me, SYS_UTIMES, name, times)
+    uio.set_atbase(state, me, 0)
+    return r
+}
+
+fn do_copy_range(state: u64, me: u64, fd_in: u64, off_in: u64, fd_out: u64, off_out: u64,
+    len: u64) -> u64 {
+    let oi: u64 = sysuser.of_of(state, me, fd_in)
+    let oo: u64 = sysuser.of_of(state, me, fd_out)
+    if oi >= file.MAX_OPEN || oo >= file.MAX_OPEN {
+        return fail(errno.E_BADF)
+    }
+    if file.open_kind(state, oi) != file.K_FILE || file.open_kind(state, oo) != file.K_FILE {
+        return fail(errno.E_INVAL)
+    }
+    if (file.open_flags(state, oi) & 3) == O_WRONLY || (file.open_flags(state, oo) & 3) == 0 {
+        return fail(errno.E_BADF)
+    }
+    if (off_in != 0 && !procfault.user_ok(state, me, off_in, 8))
+        || (off_out != 0 && !procfault.user_ok(state, me, off_out, 8)) {
+        return fail(errno.E_FAULT)
+    }
+    var pos_in: u64 = file.open_off(state, oi)
+    if off_in != 0 {
+        pos_in = sysuser.get_user64(state, me, off_in)
+    }
+    var pos_out: u64 = file.open_off(state, oo)
+    if off_out != 0 {
+        pos_out = sysuser.get_user64(state, me, off_out)
+    }
+    let done: u64 = copy_loop(state, file.open_ino(state, oi), pos_in,
+        file.open_ino(state, oo), pos_out, len)
+    if errno.is_error(done) {
+        return done
+    }
+    store_pos(state, me, oi, off_in, pos_in + done)
+    store_pos(state, me, oo, off_out, pos_out + done)
+    return done
+}
+
+fn store_pos(state: u64, me: u64, of: u64, user_ptr: u64, pos: u64) {
+    if user_ptr != 0 {
+        sysuser.put64(state, me, user_ptr, pos)
+        return
+    }
+    file.open_set_off(state, of, pos)
+}
+
+fn copy_loop(state: u64, ino_in: u64, pos_in: u64, ino_out: u64, pos_out: u64, len: u64) -> u64 {
+    let bounce: u64 = sysuser.blockb(state)
+    var done: u64 = 0
+    while done < len {
+        var step: u64 = len - done
+        if step > COPY_CHUNK {
+            step = COPY_CHUNK
+        }
+        let n: u64 = fs.read_at(state, ino_in, pos_in + done, bounce, step)
+        if n == 0 {
+            return done
+        }
+        let w: u64 = fs.write_at(state, ino_out, pos_out + done, bounce, n)
+        if w == 0 {
+            if done == 0 {
+                return fail(errno.E_IO)
+            }
+            return done
+        }
+        done = done + w
+        if w < n {
+            return done
+        }
+    }
+    return done
+}
+
+fn do_sync_fd(state: u64, me: u64, fd: u64) -> u64 {
+    if sysuser.of_of(state, me, fd) >= file.MAX_OPEN {
+        return fail(errno.E_BADF)
+    }
+    return sysfd.do_fsync(state, me, fd)
+}
+
+fn do_fchmodat2(state: u64, me: u64, dirfd: u64, path: u64, mode: u64) -> u64 {
+    let e: u64 = sysfile.at_enter1(state, me, dirfd, path)
+    if errno.is_error(e) {
+        return e
+    }
+    let r: u64 = sysfile.do_chmod(state, me, path, mode)
+    uio.set_atbase(state, me, 0)
+    return r
+}
+
+fn do_openat2(state: u64, me: u64, dirfd: u64, path: u64, how: u64, size: u64) -> u64 {
+    if size < OPENAT2_HOW_BYTES {
+        return fail(errno.E_INVAL)
+    }
+    if !procfault.user_ok(state, me, how, OPENAT2_HOW_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    if sysuser.get_user64(state, me, how + 16) != 0 {
+        return fail(errno.E_OPNOTSUPP)
+    }
+    return sysfile.lc_at(state, me, SYS_OPENAT, dirfd, path, sysuser.get_user64(state, me, how),
+        sysuser.get_user64(state, me, how + 8), 0)
+}
+
+fn do_epoll_pwait2(state: u64, me: u64, epfd: u64, events: u64, maxev: u64, ts: u64,
+    sigmask: u64) -> u64 {
+    var ms: u64 = TIMEOUT_FOREVER
+    if ts != 0 {
+        if !procfault.user_ok(state, me, ts, 16) {
+            return fail(errno.E_FAULT)
+        }
+        let secs: u64 = sysuser.get_user64(state, me, ts)
+        let nsec: u64 = sysuser.get_user64(state, me, ts + 8)
+        if secs > MS_MAX / 1000 {
+            ms = MS_MAX
+        } else {
+            ms = secs * 1000 + (nsec + 999999) / 1000000
+            if ms > MS_MAX {
+                ms = MS_MAX
+            }
+        }
+    }
+    return sysevent.do_events(state, me, SYS_EPOLL_PWAIT, epfd, events, maxev, ms, sigmask)
+}
+
+fn do_sched_getattr(state: u64, me: u64, pid: u64, attr: u64, size: u64, flags: u64) -> u64 {
+    if flags != 0 || size < SCHED_ATTR_V0 {
+        return fail(errno.E_INVAL)
+    }
+    if pid != 0 && sched.find_pid(state, pid) >= kstate.MAX_TASKS {
+        return fail(errno.E_SRCH)
+    }
+    var out: u64 = size
+    if out > SCHED_ATTR_MAX {
+        out = SCHED_ATTR_MAX
+    }
+    if !procfault.user_ok(state, me, attr, out) {
+        return fail(errno.E_FAULT)
+    }
+    var at: u64 = 0
+    while at < out {
+        if !sysuser.put64(state, me, attr + at, 0) {
+            return fail(errno.E_FAULT)
+        }
+        at = at + 8
+    }
+    if !sysuser.put32(state, me, attr, out) {
+        return fail(errno.E_FAULT)
+    }
+    return 0
+}
+
+fn do_sched_setattr(state: u64, me: u64, pid: u64, attr: u64, flags: u64) -> u64 {
+    if flags != 0 {
+        return fail(errno.E_INVAL)
+    }
+    if pid != 0 && sched.find_pid(state, pid) >= kstate.MAX_TASKS {
+        return fail(errno.E_SRCH)
+    }
+    if !procfault.user_ok(state, me, attr, SCHED_ATTR_V0) {
+        return fail(errno.E_FAULT)
+    }
+    let policy: u64 = sysuser.get32(state, me, attr + 4)
+    if policy == 0 || policy == 3 || policy == 5 {
+        return 0
+    }
+    if policy == 1 || policy == 2 || policy == 6 {
+        return fail(errno.E_PERM)
+    }
+    return fail(errno.E_INVAL)
+}
+
+fn do_get_robust_list(state: u64, me: u64, head_out: u64, len_out: u64) -> u64 {
+    if !procfault.user_ok(state, me, head_out, 8) || !procfault.user_ok(state, me, len_out, 8) {
+        return fail(errno.E_FAULT)
+    }
+    if !sysuser.put64(state, me, head_out, 0) || !sysuser.put64(state, me, len_out, ROBUST_HEAD_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    return 0
+}
