@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/unterbau/image.sh -- shared by run.sh and tools/abimatrix: kernel build, disk image build, one QEMU boot. Sourced, expects D HERE LDREAL QEMU KVM SMP TMO.
 build_kernel() { # build_kernel <srcdir> <out.mb>
     ( cd "$1" && bash tools/build-kernel.sh "$2" --stufe 1 ) > "$2.log" 2>&1
 }
@@ -41,7 +40,7 @@ boot() { # boot <kernel> <disk> <script> <serial-out>
         ${NETARGS:-} -drive "file=$2.live,format=raw,if=ide,index=0${UB_DRIVEX:-}" -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
     local rc=$?; rm -f "$2.live"; return $rc
 }
-stones_spec() { # stones_spec <stonesdir>   (mkfs spec words that install python3 / curl / git from the proof-stone directory)
+stones_spec() { # stones_spec <stonesdir>
     local STONES=$1 so SX
     SX="/usr/bin/ /usr/lib/python3.12/ /usr/lib/python3.12/lib-dynload/ /w/"
     [ -r "$STONES/python3" ] && SX="$SX /usr/bin/python3=$STONES/python3 /usr/lib/python312.zip=$STONES/lib/python312.zip"

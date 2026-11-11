@@ -1,17 +1,5 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/abimatrix/run.sh -- Linux ABI matrix: real Linux programs (busybox, coreutils-like, python3, curl, git, a musl C program, Firefox stages) tested against Osum in QEMU.
-#
-#   /root/jarvis/bin/heavy bash tools/abimatrix/run.sh
-#   ABI_EXT=1 ABI_FXWD=/root/fxhp ...      also run the external stages (Firefox F3/F4 via tools/linuxapps/gate.sh; minutes each)
-#   WRITE_DOC=1 ...                        also write docs/linux-abi-matrix.md
-#   ABI_OUT=<dir> KEEP=1 ...               keep serial log, matrix.tsv, matrix.md
-#   KERNEL=<osum.mb> ...                   use a built kernel instead of building one
-#
-# One program = one line of registry.tsv (id, group, kind, expected, command); a new program needs no change to this script.
-# The commands run in ONE guest boot (busybox sh /etc/am.sh); counter.tsv rows must come out FAIL (the matrix notices a wrong expectation).
-# known-red.txt lists the rows that are FAIL today; a new FAIL or a listed row that passes turns the gate red.
-# Needs the proof stones of tools/unterbau/build-stones.sh in /root/stones (STONES=) and /root/bbdyn/busybox (BBDYN=).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
