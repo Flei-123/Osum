@@ -23,8 +23,8 @@ static void drain(const char *name, int fd, pid_t pid)
     size_t have = 0;
     ssize_t n;
     while ((n = read(fd, buf, sizeof buf)) > 0) have += n;
-    snprintf(m, sizeof m, n == 0 ? "eof after %zu bytes" : "errno %d after %zu bytes", n == 0 ? (int)have : errno, have);
-    if (n < 0) snprintf(m, sizeof m, "errno %d after %zu bytes", errno, have);
+    if (n == 0) snprintf(m, sizeof m, "eof after %zu bytes", have);
+    else snprintf(m, sizeof m, "errno %d after %zu bytes", errno, have);
     printf("WT %s %s\n", name, m);
     fflush(stdout);
     waitpid(pid, NULL, 0);
