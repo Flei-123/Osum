@@ -18,7 +18,7 @@ make_bundle() { # make_bundle <dir> <name> <info> <keys> <start>
 }
 
 mkdir -p "$TMPD/apps" "$TMPD/files"
-for keep in explorer edit settings taskmgr; do cp -a assets/apps/$keep.osp "$TMPD/apps/"; done
+for keep in explorer settings taskmgr; do cp -a assets/apps/$keep.osp "$TMPD/apps/"; done
 cp -a assets/apps/certus.osp "$TMPD/apps/"
 printf '/bin/echo\n' > "$TMPD/apps/certus.osp/start.txt"
 make_bundle aa-reader "Aa Reader" "Reads certus files" "reader" /bin/edit
