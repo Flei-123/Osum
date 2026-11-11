@@ -16,7 +16,7 @@ mon() { printf '%s\n' "$1" | socat - "UNIX-CONNECT:$SOCK" > /dev/null 2>&1; }
     sleep 5
     for k in pgdn pgdn pgdn end; do mon "sendkey $k"; sleep 3; done
     mon "mouse_move 60 40"; sleep 1; mon "mouse_button 1"; sleep 1; mon "mouse_button 0"; sleep 1
-    for n in 1 2 3; do mon "mouse_move 0 0 1"; sleep 1; done
+    for n in 1 2 3 4 5 6; do mon "mouse_move 0 0 -1"; sleep ${FX7_WHEELGAP:-3}; done
 ) &
 DP=$!
 trap 'kill $DP 2>/dev/null' EXIT

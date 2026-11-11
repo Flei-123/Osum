@@ -169,6 +169,7 @@ echo "BB uname $(/bin/busybox uname -s >/dev/null 2>&1 && echo ok || echo FAIL)"
 echo "BB hostname $(/bin/busybox hostname >/dev/null 2>&1 && echo ok || echo FAIL)"
 echo "BB pwd $(cd /tmp && /bin/busybox pwd)"
 /bin/busybox tar cf /tmp/t.tar /etc/pruef.txt 2>/dev/null; echo "BB tar $(/bin/busybox tar tf /tmp/t.tar 2>/dev/null)"
+/bin/busybox tar tf /tmp/t.tar > /tmp/t.lst 2>/dev/null; echo "BB tar-file $(/bin/busybox cat /tmp/t.lst)"
 echo "BB gzip $(/bin/busybox gzip -c /etc/pruef.txt | /bin/busybox gunzip | /bin/busybox wc -l)"
 echo "BB diff $(/bin/busybox diff /etc/pruef.txt /etc/pruef.txt >/dev/null && echo same)"
 echo "BB seq $(/bin/busybox seq 1 5 | /bin/busybox tail -n 1)"
@@ -233,7 +234,7 @@ if [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ONLY " | grep -q " busybox
     bbchk grep 1; bbchk sort two; bbchk mkdir-touch f; bbchk redirect hello; bbchk awk 3; bbchk sed aXc; bbchk sha256 "$SHA12"
     bbchk loadavg 0.00; bbchk uptime-cmd ok; bbchk df-cmd ok; bbchk free-cmd ok; bbchk ps-cmd ok; bbchk date-cmd ok
     bbchk head-n 2; bbchk tail three; bbchk tr ABC; bbchk find 2; bbchk xargs 3; bbchk cp-mv-rm ok; bbchk symlink 3; bbchk chmod-stat 600; bbchk id 0
-    bbchk uname ok; bbchk hostname ok; bbchk pwd /tmp; bbchk tar etc/pruef.txt; bbchk gzip 3; bbchk diff same; bbchk seq 5; bbchk dd 4096; bbchk sort-uniq 2
+    bbchk uname ok; bbchk hostname ok; bbchk pwd /tmp; bbchk tar etc/pruef.txt; bbchk tar-file etc/pruef.txt; bbchk gzip 3; bbchk diff same; bbchk seq 5; bbchk dd 4096; bbchk sort-uniq 2
     bbchk date-fmt 5; bbchk mktemp ok; bbchk realpath /etc/pruef.txt; bbchk ash-func 42; bbchk heredoc hd; bbchk sed-i y; bbchk sleep ok; bbchk bg-wait ok; bbchk kill done
     bbchk mounts ok; bbchk mount-cmd ok; bbchk ip-cmd ok; bbchk ip-addr 1; bbchk ip-link 1; bbchk ip-route 2; bbchk ifconfig-cmd ok; bbchk top-cmd ok; bbchk lsof-cmd ok
     grep -aq '^BB end' "$D/bb.res" && ok "busybox sh ran its script to the end" || bad "busybox sh did not reach the end of its script"
