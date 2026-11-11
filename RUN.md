@@ -19,7 +19,7 @@ bash tools/build-kernel.sh /tmp/k.mb      # der Kern, rund 15 s
 Die Ring-3-Programme baut der Laeufer selbst mit; einzeln geht
 
 ```bash
-vendor/firn/bin/firnc -c kernel/user/settings.fi -o /tmp/settings.o
+"$FIRNC" -c kernel/user/settings.fi -o /tmp/settings.o
 ```
 
 (Programme mit `profile app` in der ersten Zeile brauchen
@@ -257,7 +257,7 @@ Weichzeichner beruhigt den Grund und laesst darum mehr Durchsicht zu.
 * `python3` mit **Pillow** (Bilder auswerten), `as`, `ld`, `nm`,
   `objcopy`.
 * Der Firn-Uebersetzer wird bei Bedarf geholt:
-  `bash vendor/firn/fetch-firnc.sh`.
+  `firn install <version from firn.toolchain>`.
 
 ## 6. Wenn etwas rot ist
 

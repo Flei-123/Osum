@@ -1,33 +1,45 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-REPO=${FIRN_REPO:-$HOME/firn}
-REF=${1:-pin}
-PIN=$(cat "$ROOT/vendor/firn/COMMIT")
-if [[ $REF == pin ]]; then
-    TARGET=$PIN
-else
-    TARGET=$(git -C "$REPO" rev-parse "$REF")
-fi
+. "$ROOT/tools/lib/summary.sh"
+. "$ROOT/tools/lib/firnenv.sh"
+summary_begin FIRNPIN
+trap summary_guard EXIT
+SHADOWS="$ROOT/tools/firnpin/shadows.txt"
+pass=0
 fail=0
-ok() { echo "OK   $*"; }
-bad() { echo "FAIL $*"; fail=$((fail + 1)); }
-git -C "$REPO" cat-file -e "$PIN^{commit}" 2>/dev/null && ok "pin ${PIN:0:8} exists in $REPO" || bad "pin ${PIN:0:8} missing in $REPO"
-git -C "$REPO" cat-file -e "$TARGET^{commit}" 2>/dev/null || { bad "target $REF missing"; exit 1; }
-if git -C "$REPO" remote | grep -qx origin; then
-    git -C "$REPO" branch -r --contains "$PIN" 2>/dev/null | grep -q origin/ \
-        && ok "pin is reachable from an origin branch" || bad "pin is not on any origin branch"
-fi
-D=$(mktemp -d)
-trap 'rm -rf "$D"' EXIT
-cp -a "$ROOT/vendor/firn/." "$D/"
-rm -rf "$D/bin" "$D/lib" "$D/.gebaut"
-echo "$TARGET" > "$D/COMMIT"
-if OSUM_FIRN_TOOLCHAIN=0 FIRN_REPO=$REPO bash "$D/fetch-firnc.sh" --force > "$D/build.log" 2>&1; then
-    ok "fetch-firnc.sh --force builds ${TARGET:0:8} with $(find "$ROOT/vendor/firn/patches" -name "*.patch" 2>/dev/null | wc -l) patches"
-else
-    bad "fetch-firnc.sh --force failed on ${TARGET:0:8}"
-    tail -15 "$D/build.log"
-fi
-echo "$fail failed"
-exit $((fail > 0))
+ok() { echo "  OK    $*"; pass=$((pass + 1)); }
+bad() { echo "  FAIL  $*"; fail=$((fail + 1)); }
+
+[ -f "$ROOT/firn.toolchain" ] && ok "firn.toolchain present" || bad "firn.toolchain missing"
+[ -d "$FIRN_TOOLCHAIN/lib" ] && ok "toolchain $FIRN_VERSION_USED installed" || bad "toolchain $FIRN_VERSION_USED not installed"
+
+for path in vendor/firn/bin vendor/firn/lib vendor/firn/COMMIT vendor/firn/fetch-firnc.sh; do
+    [ -e "$ROOT/$path" ] && bad "forbidden path exists: $path" || ok "absent: $path"
+done
+
+refs=$(git -C "$ROOT" grep -lI 'vendor/firn' -- . ':!*.md' ':!reports' ':!belege' ':!.mess' ':!tools/lib/firnenv.sh' ':!tools/firnpin/check.sh' || true)
+[ -z "$refs" ] && ok "no script refers to vendor/firn" || bad "vendor/firn referenced in: $(echo $refs | tr '\n' ' ')"
+
+while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    [ -f "$ROOT/lib/$rel" ] || { bad "stale shadow entry: $rel"; continue; }
+    [ -f "$FIRN_TOOLCHAIN/lib/$rel" ] || { bad "shadow entry not in toolchain: $rel"; continue; }
+    if cmp -s "$ROOT/lib/$rel" "$FIRN_TOOLCHAIN/lib/$rel"; then
+        bad "duplicate (identical to toolchain), delete it: $rel"
+    else
+        ok "shadow $rel"
+    fi
+done < "$SHADOWS"
+
+while IFS= read -r rel; do
+    [ -f "$FIRN_TOOLCHAIN/lib/$rel" ] || continue
+    grep -qxF "$rel" "$SHADOWS" && continue
+    if cmp -s "$ROOT/lib/$rel" "$FIRN_TOOLCHAIN/lib/$rel"; then
+        bad "duplicate (identical to toolchain), delete it: $rel"
+    else
+        bad "unlisted shadow of toolchain lib: $rel"
+    fi
+done < <(git -C "$ROOT" ls-files lib | grep '\.fi$' | sed 's#^lib/##')
+
+summary_emit "$pass" "$fail" 10

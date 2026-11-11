@@ -193,7 +193,7 @@ That is exactly how the DejaVu fonts should have been handled.
 
 ### 5.4 Everything else
 
-* `vendor/firn/`, `vendor/net/` -- Justin's own code, pinned by commit and
+* `vendor/net/` and the pinned Firn toolchain (`firn.toolchain`) -- Justin's own code, pinned by version and
   blob hash. Firn's runtime is MIT, Firn's compiler is GPL-2.0-only. The
   three network files (`wire.fi`, `tcp.fi`, `stack.fi`, 2,646 lines) that
   the kernel compiles in are GPL-2.0-only on the Firn side and are linked

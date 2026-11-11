@@ -14,40 +14,9 @@ look at the answer of `buf_reserve`):
 
 `$FIRNLIB` points at this `lib/`, so `import tls.tls` and
 `import std.crypto.chacha` resolve here first; everything else under
-`std.*` still comes from the pinned Firn library (`vendor/firn/lib`).
+`std.*` still comes from the pinned Firn toolchain (`firn.toolchain`).
 
 Licence: MPL-2.0 (Firn), author Justin — unchanged, see the SPDX lines.
-Patch 0003 was dropped from `vendor/firn/patches/` because its target
-files are no longer in Firn; its change is contained in these copies.
+Its change (former patch 0003) is contained in these copies.
 
-## `lib/fui/navkit.fi` (the other way round: a MIRROR)
-
-`lib/fui/navkit.fi` + `lib/fui/navnum.fi` (size text, centre-line baseline, thin overlay scroll bar, heat plate, history
-graph, bar) is written in Firn (`lib/fui/navkit.fi`, test `tests/1930_fui_navkit.fi`, branch
-`fui-navkit`) and mirrored here because the pin (`vendor/firn/COMMIT`) does not contain it yet.
-`$FIRNLIB` is searched before the pinned library, so `import fui.navkit` finds this copy. The copy
-must stay byte-identical to Firn's (`tools/fui/navkit-sync.sh` checks it when the Firn repository is
-there); delete it when the pin has moved past the commit that holds the file.
-
-## `lib/fui/nav_{route,layout,rail,palette}.fi` (MIRROR, 21.10.2026)
-
-The navigation toolkit (route model, adaptive layout, app rail, command palette; Firn `5a2070df4`,
-`docs/fui-nav.md`) is mirrored here because the pin (`vendor/firn/COMMIT`) does not contain it yet.
-`$FIRNLIB` is searched before the pinned library. The four files must stay byte-identical to Firn's;
-the pin already has `fui.cmdbar`, `fui.action` and `text.fuzzy`, which the toolkit imports.
-Gate: `bash tools/navlibs/run.sh` (byte comparison when the Firn repository is there, plus Firn's tests
-1933-1936 in `tests/navlibs/` built against `lib/` and run). Delete the mirror when the pin has moved
-past that commit.
-
-## `lib/std/{cbor,cborread,cborcanon,utf8}.fi` (MIRROR, 31.10.2026)
-
-Deterministic CBOR (RFC 8949 section 4.2, CTAP2 canonical): encoder `std.cbor`, strict decoder and validator
-`std.cborread` (shortest forms, definite lengths, UTF-8, sorted unique map keys, depth and size limits),
-`std.cborcanon` (re-sorts lenient maps), `std.utf8`. They are written for Firn (`lib/std/`) and mirrored here
-because the pin does not contain them yet; `$FIRNLIB` is searched before the pinned library. Gate:
-`bash tools/vaultlib/run.sh` (RFC 8949 Appendix A vectors, negative cases, fuzz). Delete the mirror when the pin has
-moved past the Firn commit that holds the files (roadmap: lift to Firn).
-
-## `lib/vault/` + `lib/std/{cbor,cborread,cborcanon,utf8}.fi` (MIRROR, roadmap r2441)
-
-Container v2 (`vlayout`, `vslot`, `vbody`, `container`, `recovery`, `vrand`) is written here first and must move to Firn `lib/vault/` when the pin catches up; gate `tools/vaultlib/run.sh` (incl. the Python cross-check `against.py`).
+Shadow list and check: `tools/firnpin/shadows.txt`, `bash tools/firnpin/check.sh`.

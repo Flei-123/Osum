@@ -76,8 +76,7 @@ additionally needs `mtools`, `sgdisk` and a Limine checkout (`LIMINE_DIR`).
 ```sh
 git clone https://github.com/Flei-123/Osum.git osum
 cd osum
-./vendor/firn/fetch-firnc.sh           # once: builds the pinned Firn compiler
-export FIRNLIB="$PWD/lib"
+firn install "$(cut -d' ' -f2 firn.toolchain)"   # once: the pinned Firn toolchain
 bash tools/build-kernel.sh /tmp/k.mb   # kernel image
 LIMINE_DIR=/path/to/limine bash tools/usbimg/build.sh /tmp/build  # bootable image: /tmp/build/orientos-usb.img
 ```
@@ -102,7 +101,7 @@ off.
 | `lib/wlan/` | WLAN protocol stack |
 | `tools/` | one build or test runner per area |
 | `assets/` | fonts, icons, themes, application bundles |
-| `vendor/firn/` | the pinned Firn compiler (only the commit hash and a fetch script are in the repo) |
+| `firn.toolchain` | the pinned Firn version (installed with `firn install`, nothing is vendored) |
 | `docs/` | design and measurement documents |
 
 Source comments and the documents in `docs/` are partly written in German;

@@ -69,7 +69,7 @@ here or comes from Justin's own Firn repository.
 
 `rustc`/`cargo` appear once each in the shell scripts, and only indirectly:
 the Firn compiler stage 0 is a Rust program, and it is built out of the
-pinned Firn checkout by `vendor/firn/hole-firnc.sh`. Nothing in this
+installed Firn toolchain (`firn.toolchain`). Nothing in this
 repository is Rust. Licence of the Rust toolchain: Apache-2.0 OR MIT
 (upstream); no copy here. **Stage: BUILD.**
 
@@ -98,20 +98,16 @@ Kein fontTools, kein FreeType -- reines `struct`."
 Both entries under `vendor/` point at Justin's own Firn repository. They are
 listed here so that nobody mistakes a `vendor/` directory for foreign code.
 
-### 3.1 `vendor/firn/` -- the compiler and the Firn library
+### 3.1 `firn.toolchain` -- the compiler and the Firn library
 
-* **Tracked here:** exactly two files -- `vendor/firn/COMMIT` and
-  `vendor/firn/hole-firnc.sh`. The compiler binary is deliberately not
-  checked in ("2,8 MB Binaerdatei pro Version in der Historie",
-  `hole-firnc.sh` header).
-* **Pin:** `vendor/firn/COMMIT` =
-  `7b4c22b14c036828ac78adc42f7bfc16acfbfb08` (Stand 17.09.2026).
-* **What gets unpacked:** the whole Firn library of that commit into
-  `vendor/firn/lib/` -- 171 `.fi` files, 5.2 MB on disk.
+* **Tracked here:** one file, `firn.toolchain` (`firn X.Y.Z`). Nothing of
+  Firn is vendored; `firn install` fetches the toolchain into `~/.firn/versions/`.
 * **Origin and licence:** the Firn repository, **MPL-2.0**, same author.
-  **Not third party.** (Firn moved from MIT to MPL-2.0 on 16 September 2026;
-  its licence notice carries NO Exhibit B, so the code stays compatible with
-  this repository's GPL-2.0-only kernel -- MPL 2.0 section 3.3.)
+  **Not third party.** Its licence notice carries NO Exhibit B, so the code
+  stays compatible with this repository's GPL-2.0-only kernel -- MPL 2.0
+  section 3.3.
+* **Local shadows:** `tools/firnpin/shadows.txt` lists the `lib/` files that
+  deliberately differ from the toolchain (`tools/firnpin/check.sh`).
 * **Stage:** BUILD (the compiler), **RUNTIME** for the library modules the
   kernel imports -- but that is own code.
 
@@ -119,7 +115,7 @@ listed here so that nobody mistakes a `vendor/` directory for foreign code.
 
 * **Tracked here:** `vendor/net/HERKUNFT.md` and `vendor/net/BLOBS`
   (451 octets).
-* **What it pins:** three files that come out of `vendor/firn/COMMIT` and
+* **What it pins:** three files that come out of the pinned toolchain (`firn.toolchain`) and
   are compiled into the kernel:
 
   | file | blob | lines |

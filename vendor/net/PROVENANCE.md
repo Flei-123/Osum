@@ -2,15 +2,11 @@
 
 Osum schreibt den Stack aus Runde K3 **nicht ab**. Er benutzt ihn als
 Abhaengigkeit, und zwar ueber genau den Mechanismus, mit dem auch der
-Uebersetzer festgenagelt ist: `vendor/firn/COMMIT`.
+Uebersetzer festgenagelt ist: `firn.toolchain`.
 
 ## Der Weg, in einem Satz
 
-`vendor/firn/fetch-firnc.sh` packt den Firn-Commit aus `COMMIT` aus und
-kopiert **die ganze Firn-Bibliothek** dieses Commits nach
-`vendor/firn/lib/`. Darin liegt `lib/net/`. Beide Uebersetzerstufen
-suchen ein `import` zuletzt in `<Verzeichnis der Uebersetzerdatei>/../lib`
-— also in `vendor/firn/lib/`. Damit findet
+`firn install` legt die Toolchain nach `~/.firn/versions/<Version>/`; darin liegt `lib/net/`. Der Uebersetzer sucht ein `import` zuletzt in `<Verzeichnis der Uebersetzerdatei>/../lib` — also dort. Damit findet
 
 ```firn
 import net.wire
@@ -18,7 +14,7 @@ import net.tcp
 import net.stack
 ```
 
-im Kernel **den Stand aus `vendor/firn/COMMIT`** und sonst keinen. Es gibt
+im Kernel **den Stand aus `firn.toolchain`** und sonst keinen. Es gibt
 keine zweite Kopie im Repo, die auseinanderdriften koennte, und es gibt
 keinen Pfad, ueber den versehentlich ein *neuerer* Firn-Stand
 hereinkaeme: `$FIRNLIB` zeigt auf `<repo>/lib` (die libc dieses Repos),
@@ -28,7 +24,7 @@ und `<repo>/lib/net/` existiert absichtlich nicht.
 
 | | |
 |---|---|
-| Firn-Commit | `c66c6bcd5f30d632d74e20facb6a5757c6043379` (`vendor/firn/COMMIT`) |
+| Firn-Commit | `c66c6bcd5f30d632d74e20facb6a5757c6043379` (`firn.toolchain`) |
 | `lib/net/wire.fi` | blob `0dd4c71cfd88424f0d1149f41342458468cd53bd`, 492 Zeilen |
 | `lib/net/tcp.fi` | blob `201b5a3972d0e05bb5d6b74c4298e42f1732685d`, 1 555 Zeilen |
 | `lib/net/stack.fi` | blob `136851a057d18cad35aeba10c59f9e6b83ba9426`, 599 Zeilen |

@@ -4,7 +4,7 @@ One direction only: a layer imports itself and the layers BELOW it, never above.
 
 | rank | layer | what | where |
 |---|---|---|---|
-| 0 | ext | the pinned Firn library (`std.rt`, `std.io`, `fui.*`) | `vendor/firn/lib` (not in the tree) |
+| 0 | ext | the pinned Firn library (`std.rt`, `std.io`, `fui.*`) | `~/.firn/versions/<version>/lib` (not in the tree) |
 | 1 | std | what every program links: libc, byte/text/path helpers, the program runtime, transfer/message modules | `lib/libc`, `lib/std`, `lib/utf8.fi`, `lib/urilist.fi`, `kernel/user/{ulib,xfer,msg}.fi` |
 | 2 | syslib | protocol and device libraries without UI | rest of `lib/*` |
 | 3 | framework | UI toolkits: fUi, nav kit, wlib/wlibc, scene runtime | `lib/fui`, `lib/nav`, `kernel/user/{wlib,wlibc,fuiscene}` and their facade files |
