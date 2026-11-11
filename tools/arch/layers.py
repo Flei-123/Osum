@@ -66,7 +66,7 @@ TABLE = {
     'test': _s("""k13t k14 k16 k17 shat h264t i18nt icont themetest hallo1 hallo2 hallo3 hello posix hurt wrace wspam
         wchurn stress crash burn execsmp shmtest ptytest bench compbench compdiff a11ydemo scenedemo widgetdemo
         plugboese plugpaar plugprobe plugregel plugspaet plugtempo pluguhr pollbr pollt sockt soclocal stab fftempo
-        cptempo ctr ctrkill presentlog nvcheck noise ofs3 netmeter sysstub mut dialogdemo svcproof"""),
+        cptempo ctr ctrkill presentlog nvcheck noise ofs3 netmeter sysstub mut dialogdemo pickdemo svcproof"""),
 }
 ORDER = ['test', 'cmd', 'toolkit', 'services', 'shell', 'apps', 'base']
 

@@ -1,0 +1,120 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import lineout
+import libc.io
+import libc.errno
+import libc.text
+import libc.octets
+import libc.kcall
+import services.svcrules
+import services.svcqueue
+import services.svcosum
+
+export { u_start }
+
+const NAME_BUF: u64 = 128
+const VALUE_BUF: u64 = 4096
+const NOTE_LEN: u64 = 13
+
+static mut name_buf: [u8; 128] = [0 as u8; 128]
+static mut value_buf: [u8; 4096] = [0 as u8; 4096]
+static mut head_buf: [u8; 28] = [0 as u8; 28]
+static mut out_buf: [u8; 8] = [0 as u8; 8]
+static mut APP_NAME: [u8; 9] = "pickdemo\0"
+static mut SEED_KEY: [u8; 5] = "seed\0"
+static mut SEED_VALUE: [u8; 2] = "x\0"
+static mut NOTE_PATH: [u8; 18] = "/data/zzzpick.txt\0"
+static mut NOTE_BODY: [u8; 14] = "note-body-123\0"
+static mut SKIP_PATH: [u8; 17] = "/data/zzskip.bin\0"
+static mut SKIP_BODY: [u8; 5] = "skip\0"
+static mut t_title: [u8; 11] = "Demo title\0"
+static mut t_accept: [u8; 4] = "txt\0"
+static mut l_wait_ok: [u8; 18] = "pickdemo: ok-wait\0"
+static mut l_ok: [u8; 13] = "pickdemo: ok\0"
+static mut l_wait_cancel: [u8; 22] = "pickdemo: cancel-wait\0"
+static mut l_cancel: [u8; 17] = "pickdemo: cancel\0"
+static mut l_rec: [u8; 14] = "pickdemo: rec\0"
+static mut l_done: [u8; 15] = "pickdemo: done\0"
+static mut s_status: [u8; 9] = " status=\0"
+static mut s_op: [u8; 5] = " op=\0"
+static mut s_name: [u8; 7] = " name=\0"
+static mut s_len: [u8; 6] = " len=\0"
+static mut s_val: [u8; 6] = " val=\0"
+
+fn say(p: u64) {
+    let _n: u64 = lineout.add_text(p)
+}
+
+fn num(label: u64, v: u64) {
+    say(label)
+    lineout.add_num(v)
+}
+
+fn mark(p: u64) {
+    say(p)
+    lineout.end_line()
+}
+
+fn write_file(path: u64, body: u64, n: u64) {
+    let fd: u64 = io.create(path)
+    if errno.failed(fd) {
+        return
+    }
+    let _w: u64 = io.write_all(fd, body, n)
+    let _c: u64 = io.close(fd)
+}
+
+fn seed() {
+    let app: u64 = (&APP_NAME[0 as usize]) as u64
+    let _a: u64 = svcosum.set_app(app, text.length(app))
+    let _s: u64 = svcosum.store_set((&SEED_KEY[0 as usize]) as u64, 4, (&SEED_VALUE[0 as usize]) as u64, 1)
+    write_file((&NOTE_PATH[0 as usize]) as u64, (&NOTE_BODY[0 as usize]) as u64, NOTE_LEN)
+    write_file((&SKIP_PATH[0 as usize]) as u64, (&SKIP_BODY[0 as usize]) as u64, 4)
+}
+
+fn drain_queue() {
+    let head: u64 = (&head_buf[0 as usize]) as u64
+    let name: u64 = (&name_buf[0 as usize]) as u64
+    let value: u64 = (&value_buf[0 as usize]) as u64
+    while svcosum.pending() > 0 {
+        octets.zero(name, NAME_BUF)
+        octets.zero(value, VALUE_BUF)
+        if !svcosum.poll(head, name, NAME_BUF - 1, value, VALUE_BUF - 1) {
+            return
+        }
+        say((&l_rec[0 as usize]) as u64)
+        num((&s_op[0 as usize]) as u64, octets.le32(head + 8))
+        say((&s_status[0 as usize]) as u64)
+        say(svcrules.status_name(octets.le32(head + 12)))
+        say((&s_name[0 as usize]) as u64)
+        say(name)
+        num((&s_len[0 as usize]) as u64, octets.le32(head + 24))
+        say((&s_val[0 as usize]) as u64)
+        say(value)
+        lineout.end_line()
+    }
+}
+
+fn ask_pick(wait: u64, label: u64) {
+    mark(wait)
+    let st: u64 = svcosum.pick_open((&t_title[0 as usize]) as u64, (&t_accept[0 as usize]) as u64, (&out_buf[0 as usize]) as u64)
+    say(label)
+    say((&s_status[0 as usize]) as u64)
+    say(svcrules.status_name(st))
+    lineout.end_line()
+    drain_queue()
+}
+
+fn u_start(args: u64) -> u64 {
+    seed()
+    ask_pick((&l_wait_ok[0 as usize]) as u64, (&l_ok[0 as usize]) as u64)
+    ask_pick((&l_wait_cancel[0 as usize]) as u64, (&l_cancel[0 as usize]) as u64)
+    mark((&l_done[0 as usize]) as u64)
+    return 0
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}
