@@ -62,9 +62,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/firnenv.sh
 ROOT=$(pwd)
 
-FIRNC=${FIRNC_A64:-"$FIRNC"}
-if [[ ! -x $FIRNC ]]; then
-fi
+FIRNC=${FIRNC_A64:-$FIRNC}
 [[ -x $FIRNC ]] || { echo "the compiler is missing: $FIRNC" >&2; exit 2; }
 
 TMP=$(mktemp -d)
