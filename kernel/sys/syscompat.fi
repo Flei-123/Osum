@@ -9,6 +9,7 @@ import sched.proc.procfault
 import lib.errno
 import fs.file
 import fs.fs
+import fs.vfs
 import ipc.perm
 import ipc.uio
 import sys.sysconst
@@ -493,7 +494,7 @@ fn do_copy_range(state: u64, me: u64, fd_in: u64, off_in: u64, fd_out: u64, off_
     if oi >= file.MAX_OPEN || oo >= file.MAX_OPEN {
         return fail(errno.E_BADF)
     }
-    if file.open_kind(state, oi) != file.K_FILE || file.open_kind(state, oo) != file.K_FILE {
+    if !is_plain(file.open_kind(state, oi)) || !is_plain(file.open_kind(state, oo)) {
         return fail(errno.E_INVAL)
     }
     if (file.open_flags(state, oi) & 3) == O_WRONLY || (file.open_flags(state, oo) & 3) == 0 {
@@ -511,8 +512,7 @@ fn do_copy_range(state: u64, me: u64, fd_in: u64, off_in: u64, fd_out: u64, off_
     if off_out != 0 {
         pos_out = sysuser.get_user64(state, me, off_out)
     }
-    let done: u64 = copy_loop(state, file.open_ino(state, oi), pos_in,
-        file.open_ino(state, oo), pos_out, len)
+    let done: u64 = copy_loop(state, oi, pos_in, oo, pos_out, len)
     if errno.is_error(done) {
         return done
     }
@@ -529,7 +529,25 @@ fn store_pos(state: u64, me: u64, of: u64, user_ptr: u64, pos: u64) {
     file.open_set_off(state, of, pos)
 }
 
-fn copy_loop(state: u64, ino_in: u64, pos_in: u64, ino_out: u64, pos_out: u64, len: u64) -> u64 {
+fn is_plain(kind: u64) -> bool {
+    return kind == file.K_FILE || kind == file.K_VFILE
+}
+
+fn plain_read(state: u64, of: u64, pos: u64, dst: u64, len: u64) -> u64 {
+    if file.open_kind(state, of) == file.K_VFILE {
+        return vfs.v_read(state, file.open_mnt(state, of), file.open_ino(state, of), pos, dst, len)
+    }
+    return fs.read_at(state, file.open_ino(state, of), pos, dst, len)
+}
+
+fn plain_write(state: u64, of: u64, pos: u64, src: u64, len: u64) -> u64 {
+    if file.open_kind(state, of) == file.K_VFILE {
+        return vfs.v_write(state, file.open_mnt(state, of), file.open_ino(state, of), pos, src, len)
+    }
+    return fs.write_at(state, file.open_ino(state, of), pos, src, len)
+}
+
+fn copy_loop(state: u64, of_in: u64, pos_in: u64, of_out: u64, pos_out: u64, len: u64) -> u64 {
     let bounce: u64 = sysuser.blockb(state)
     var done: u64 = 0
     while done < len {
@@ -537,16 +555,16 @@ fn copy_loop(state: u64, ino_in: u64, pos_in: u64, ino_out: u64, pos_out: u64, l
         if step > COPY_CHUNK {
             step = COPY_CHUNK
         }
-        let n: u64 = fs.read_at(state, ino_in, pos_in + done, bounce, step)
+        let n: u64 = plain_read(state, of_in, pos_in + done, bounce, step)
+        if errno.is_error(n) {
+            return copy_result(done, n)
+        }
         if n == 0 {
             return done
         }
-        let w: u64 = fs.write_at(state, ino_out, pos_out + done, bounce, n)
-        if w == 0 {
-            if done == 0 {
-                return fail(errno.E_IO)
-            }
-            return done
+        let w: u64 = plain_write(state, of_out, pos_out + done, bounce, n)
+        if errno.is_error(w) || w == 0 {
+            return copy_result(done, fail(errno.E_IO))
         }
         done = done + w
         if w < n {
@@ -554,6 +572,13 @@ fn copy_loop(state: u64, ino_in: u64, pos_in: u64, ino_out: u64, pos_out: u64, l
         }
     }
     return done
+}
+
+fn copy_result(done: u64, err: u64) -> u64 {
+    if done > 0 {
+        return done
+    }
+    return err
 }
 
 fn do_sync_fd(state: u64, me: u64, fd: u64) -> u64 {
