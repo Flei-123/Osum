@@ -43,6 +43,12 @@ $B tar cf /tmp/t.tar -C /tmp tt
 for n in 1 2; do $B timeout 30 $B tar tf /tmp/t.tar > /tmp/e$n.out 2>/tmp/e$n.err; echo "WT dbg-tar-early$n rc=$? out=$($B wc -l < /tmp/e$n.out) err=$($B tr '\n' '|' < /tmp/e$n.err | $B cut -c1-120)"; done
 $B sync
 $B timeout 30 $B tar tf /tmp/t.tar > /tmp/e3.out 2>/tmp/e3.err; echo "WT dbg-tar-aftersync rc=$? out=$($B wc -l < /tmp/e3.out)"
+for n in 1 2 3; do
+echo "WT dbg-A$n $($B timeout 30 $B tar tf /tmp/t.tar 2>/tmp/a.err | $B wc -l) err=$($B wc -c < /tmp/a.err)"
+$B timeout 30 $B tar tf /tmp/t.tar >/dev/null 2>/tmp/b.err; echo "WT dbg-B$n rc=$? err=$($B tr '\n' '|' < /tmp/b.err | $B cut -c1-100)"
+echo "WT dbg-C$n $($B tar tf /tmp/t.tar 2>&1 | $B wc -l)"
+$B tar tf /tmp/t.tar >/tmp/d.out 2>&1; echo "WT dbg-D$n rc=$?"
+done
 echo "WT tar-list $($B timeout 30 $B tar tf /tmp/t.tar 2>&1 | $B wc -l)"
 echo "WT tar-list-exit $($B timeout 30 $B tar tf /tmp/t.tar >/dev/null 2>&1; echo $?)"
 echo "WT tar-extract $($B mkdir /tmp/ex && $B timeout 30 $B tar xf /tmp/t.tar -C /tmp/ex && $B sha256sum /tmp/ex/tt/a.bin | $B cut -c1-16)"

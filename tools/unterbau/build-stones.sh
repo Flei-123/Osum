@@ -93,6 +93,7 @@ want tcc && {
 echo "== tcc (tinycc, musl, dynamic) + musl headers and crt files =="
 mkdir -p "$W/x/tcc" "$OUT/lib/tcc/include" "$OUT/lib/musl"
 tar xzf /root/fremdquellen/tinycc-aade7ba.tar.gz -C "$W/x/tcc" --strip-components=1
+sed -i 's/#define ELF_START_ADDR 0x400000/#define ELF_START_ADDR 0x40100000/' "$W/x/tcc/x86_64-link.c"
 ( cd "$W/x/tcc" && TCCCFG="--cc=musl-gcc --prefix=/usr --config-musl --libpaths=/usr/lib --crtprefix=/usr/lib --tccdir=/usr/lib/tcc --elfinterp=/lib/ld-musl-x86_64.so.1"
   ./configure $TCCCFG --sysincludepaths=/usr/include/x86_64-linux-musl:$PWD/include >/dev/null 2>&1 && make -j"$J" >/dev/null 2>&1 \
   && cp libtcc1.a runmain.o bt-exe.o bcheck.o bcheck_run.o "$W/" && ./configure $TCCCFG --sysincludepaths=/usr/include:/usr/lib/tcc/include >/dev/null 2>&1 \
