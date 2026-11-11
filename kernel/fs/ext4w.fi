@@ -1,0 +1,562 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.errno
+import fs.vfsops
+import fs.ext4
+import fs.ext4alloc
+import fs.ext4ino
+import fs.ext4dir
+import libc.octets
+
+export { ops, unmount }
+
+const SB_SECTOR: u64 = 2
+const SB_REV_LEVEL: u64 = 0x4C
+const SB_STATE: u64 = 0x3A
+const SB_COMPAT: u64 = 0x5C
+const SB_INCOMPAT: u64 = 0x60
+const SB_RO_COMPAT: u64 = 0x64
+const COMPAT_OK: u64 = 0x3C
+const INCOMPAT_OK: u64 = 0x2C2
+const RO_COMPAT_OK: u64 = 0x6B
+const STATE_ERRORS: u64 = 0x2
+const WORD_MASK: u64 = 0xFFFFFFFF
+const NAME_BYTES: u64 = 256
+const TAG_EXT4: u64 = 875770213
+const MODE_TYPE: u64 = 0xF000
+const MODE_LNK: u64 = 0xA000
+const FT_LNK: u64 = 7
+const I_SIZE_LO: u64 = 0x04
+const I_BLOCKS: u64 = 0x1C
+const I_BLOCK: u64 = 0x28
+const SLASH: u64 = 47
+
+fn features_ok(state: u64, m: u64) -> bool {
+    let s: u64 = ext4.buf(state, ext4.SECBUF)
+    if !blk_read_sb(state, m, s) {
+        return false
+    }
+    if octets.le32(s + SB_REV_LEVEL) != 1 {
+        return false
+    }
+    if (octets.le32(s + SB_COMPAT) & (WORD_MASK - COMPAT_OK)) != 0 {
+        return false
+    }
+    if (octets.le32(s + SB_INCOMPAT) & (WORD_MASK - INCOMPAT_OK)) != 0 {
+        return false
+    }
+    if (octets.le32(s + SB_RO_COMPAT) & (WORD_MASK - RO_COMPAT_OK)) != 0 {
+        return false
+    }
+    return (octets.le16(s + SB_STATE) & STATE_ERRORS) == 0
+}
+
+fn blk_read_sb(state: u64, m: u64, dst: u64) -> bool {
+    return ext4alloc.sb_read(state, m, dst)
+}
+
+fn writable(state: u64, m: u64) -> bool {
+    if ext4.sget(state, m, ext4.S_VALID) == 0
+        || ext4.sget(state, m, ext4.S_UNSAUBER) != 0 {
+        return false
+    }
+    if !features_ok(state, m) {
+        return false
+    }
+    return ext4alloc.sb_flag_state(state, m, false)
+}
+
+fn unmount(state: u64, m: u64) {
+    let __f: u64 = ext4.enter(state)
+    if ext4.sget(state, m, ext4.S_VALID) != 0
+        && ext4.sget(state, m, ext4.S_UNSAUBER) == 0 {
+        ext4alloc.sb_flag_state(state, m, true)
+    }
+    ext4.leave(state, __f)
+}
+
+fn resolve(state: u64, m: u64, path: u64) -> u64 {
+    var seg: [u8; 256] = [0 as u8; 256]
+    var at: u64 = 0
+    var ino: u64 = 2
+    var going: bool = true
+    while going {
+        at = pathseg_segment(path, at, (&seg[0]) as u64)
+        if kstate.get8((&seg[0]) as u64) == 0 {
+            going = false
+        } else {
+            let next: u64 = ext4dir.dir_lookup(state, m, ino,
+                (&seg[0]) as u64)
+            if next == 0 {
+                return 0
+            }
+            ino = next
+        }
+    }
+    return ino
+}
+
+fn pathseg_segment(path: u64, at: u64, out: u64) -> u64 {
+    var i: u64 = at
+    while kstate.get8(path + i) == SLASH {
+        i = i + 1
+    }
+    var n: u64 = 0
+    while kstate.get8(path + i) != 0 && kstate.get8(path + i) != SLASH {
+        if n + 1 < NAME_BYTES {
+            kstate.set8(out + n, kstate.get8(path + i) as u8)
+            n = n + 1
+        }
+        i = i + 1
+    }
+    kstate.set8(out + n, 0 as u8)
+    return i
+}
+
+fn split_parent(state: u64, m: u64, path: u64, out_name: u64) -> u64 {
+    var parent: [u8; 256] = [0 as u8; 256]
+    var end: u64 = octets.cstr_len(path)
+    while end > 0 && kstate.get8(path + end - 1) == SLASH {
+        end = end - 1
+    }
+    var start: u64 = end
+    while start > 0 && kstate.get8(path + start - 1) != SLASH {
+        start = start - 1
+    }
+    if end == start || end - start >= NAME_BYTES || start >= NAME_BYTES {
+        return 0
+    }
+    octets.copy(out_name, path + start, end - start)
+    kstate.set8(out_name + end - start, 0 as u8)
+    octets.copy((&parent[0]) as u64, path, start)
+    kstate.set8((&parent[0]) as u64 + start, 0 as u8)
+    return resolve(state, m, (&parent[0]) as u64)
+}
+
+fn is_under(from: u64, to: u64) -> bool {
+    var a: u64 = 0
+    var b: u64 = 0
+    while kstate.get8(from + a) == SLASH {
+        a = a + 1
+    }
+    while kstate.get8(to + b) == SLASH {
+        b = b + 1
+    }
+    while kstate.get8(from + a) != 0 {
+        if kstate.get8(from + a) != kstate.get8(to + b) {
+            return false
+        }
+        a = a + 1
+        b = b + 1
+    }
+    return kstate.get8(to + b) == SLASH || kstate.get8(to + b) == 0
+}
+
+fn ftype_of(mode: u64) -> u64 {
+    let t: u64 = ext4.art_von(mode)
+    if t == vfsops.N_DIR {
+        return ext4dir.FT_DIR
+    }
+    if (mode & MODE_TYPE) == MODE_LNK {
+        return FT_LNK
+    }
+    return ext4dir.FT_REG
+}
+
+fn adjust_links(state: u64, m: u64, ino: u64, add: bool) -> bool {
+    let p: u64 = ext4.inode_load(state, m, ino)
+    if p == 0 {
+        return false
+    }
+    let links: u64 = octets.le16(p + ext4ino.I_LINKS)
+    if add {
+        ext4ino.set_links(p, links + 1)
+    } else if links > 0 {
+        ext4ino.set_links(p, links - 1)
+    }
+    ext4ino.touch(state, p)
+    return ext4ino.inode_save(state, m, ino)
+}
+
+fn freeable(p: u64) -> bool {
+    if octets.le32(p + I_BLOCKS) == 0 {
+        return true
+    }
+    return (octets.le32(p + ext4ino.I_FLAGS) & ext4ino.EXTENTS_FL) != 0
+        && octets.le16(p + I_BLOCK + 6) == 0
+}
+
+fn f_write(state: u64, m: u64, node: u64, off: u64, src: u64,
+    len: u64) -> u64 {
+    let __f: u64 = ext4.enter(state)
+    let __r: u64 = f_write_body(state, m, node, off, src, len)
+    ext4.leave(state, __f)
+    return __r
+}
+
+fn write_block(state: u64, m: u64, iptr: u64, ino: u64, lb: u64, inb: u64,
+    chunk: u64, src: u64) -> bool {
+    let bs: u64 = ext4.sget(state, m, ext4.S_BSIZE)
+    var pb: u64 = ext4.block_of(state, m, iptr, lb, ino)
+    var fresh: bool = false
+    if pb == 0 {
+        if (octets.le32(iptr + ext4ino.I_FLAGS) & ext4ino.EXTENTS_FL) == 0 {
+            return false
+        }
+        pb = ext4alloc.block_alloc(state, m, ext4ino.last_pblock(iptr) + 1)
+        if pb == 0 {
+            return false
+        }
+        if !ext4ino.map_append(iptr, lb, pb) {
+            ext4alloc.block_free_run(state, m, pb, 1)
+            return false
+        }
+        ext4ino.blocks_add(state, m, iptr, 1, true)
+        ext4ino.cache_flush(state, m)
+        fresh = true
+    }
+    let tmp: u64 = ext4alloc.bm_buf(state)
+    if fresh {
+        octets.zero(tmp, bs)
+    } else if chunk < bs && !ext4.block_read(state, m, pb, tmp) {
+        return false
+    }
+    octets.copy(tmp + inb, src, chunk)
+    return ext4alloc.block_write(state, m, pb, tmp)
+}
+
+fn f_write_body(state: u64, m: u64, node: u64, off: u64, src: u64,
+    len: u64) -> u64 {
+    ext4.tick(state)
+    if node == 0 || len == 0 || !writable(state, m) {
+        return 0
+    }
+    let ino: u64 = ext4.nget(state, node, ext4.N_INO)
+    let iptr: u64 = ext4.inode_load(state, m, ino)
+    if iptr == 0 || ext4.art_von(ext4.ino_mode(iptr)) != vfsops.N_FILE {
+        return 0
+    }
+    let bs: u64 = ext4.sget(state, m, ext4.S_BSIZE)
+    let size: u64 = ext4.ino_size(iptr)
+    var done: u64 = 0
+    var going: bool = true
+    while going && done < len {
+        let pos: u64 = off + done
+        let inb: u64 = pos % bs
+        var chunk: u64 = bs - inb
+        if chunk > len - done {
+            chunk = len - done
+        }
+        if write_block(state, m, iptr, ino, pos / bs, inb, chunk,
+            src + done) {
+            done = done + chunk
+        } else {
+            going = false
+        }
+    }
+    if done == 0 {
+        return 0
+    }
+    var new_size: u64 = size
+    if off + done > size {
+        new_size = off + done
+    }
+    ext4ino.set_size(iptr, new_size)
+    ext4ino.touch(state, iptr)
+    if !ext4ino.inode_save(state, m, ino) {
+        return 0
+    }
+    ext4.nset(state, node, ext4.N_SIZE, new_size)
+    return done
+}
+
+fn f_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
+    let __f: u64 = ext4.enter(state)
+    let __r: u64 = f_create_body(state, m, path, art)
+    ext4.leave(state, __f)
+    return __r
+}
+
+fn create_rollback(state: u64, m: u64, ino: u64, is_dir: bool,
+    block: u64) -> u64 {
+    if block != 0 {
+        ext4alloc.block_free_run(state, m, block, 1)
+    }
+    ext4alloc.inode_free(state, m, ino, is_dir)
+    return 0
+}
+
+fn f_create_body(state: u64, m: u64, path: u64, art: u64) -> u64 {
+    ext4.tick(state)
+    if !writable(state, m) {
+        return 0
+    }
+    if art != vfsops.N_FILE && art != vfsops.N_DIR {
+        return 0
+    }
+    var name: [u8; 256] = [0 as u8; 256]
+    let nm: u64 = (&name[0]) as u64
+    let parent: u64 = split_parent(state, m, path, nm)
+    if parent == 0 || ext4dir.dir_lookup(state, m, parent, nm) != 0 {
+        return 0
+    }
+    let is_dir: bool = art == vfsops.N_DIR
+    let ino: u64 = ext4alloc.inode_alloc(state, m, is_dir)
+    if ino == 0 {
+        return 0
+    }
+    let iptr: u64 = ext4.inode_load(state, m, ino)
+    if iptr == 0 {
+        return create_rollback(state, m, ino, is_dir, 0)
+    }
+    var mode: u64 = ext4ino.MODE_FILE
+    var links: u64 = 1
+    var ft: u64 = ext4dir.FT_REG
+    var size: u64 = 0
+    var block: u64 = 0
+    if is_dir {
+        mode = ext4ino.MODE_DIR
+        links = 2
+        ft = ext4dir.FT_DIR
+    }
+    ext4ino.inode_init(state, m, iptr, mode, links)
+    if is_dir {
+        let bs: u64 = ext4.sget(state, m, ext4.S_BSIZE)
+        block = ext4alloc.block_alloc(state, m, 0)
+        if block == 0 {
+            return create_rollback(state, m, ino, true, 0)
+        }
+        ext4ino.map_append(iptr, 0, block)
+        ext4ino.blocks_add(state, m, iptr, 1, true)
+        ext4ino.set_size(iptr, bs)
+        size = bs
+        let db: u64 = ext4alloc.bm_buf(state)
+        ext4dir.dir_init_block(state, m, db, ino, parent)
+        if !ext4alloc.block_write(state, m, block, db) {
+            return create_rollback(state, m, ino, true, block)
+        }
+    }
+    if !ext4ino.inode_save(state, m, ino) {
+        return create_rollback(state, m, ino, is_dir, block)
+    }
+    if ext4dir.dir_add(state, m, parent, nm, ino, ft) != 0 {
+        return create_rollback(state, m, ino, is_dir, block)
+    }
+    if is_dir {
+        adjust_links(state, m, parent, true)
+    }
+    ext4ino.cache_flush(state, m)
+    return ext4.node_get(state, m, ino, size, mode, ext4ino.EXTENTS_FL, links)
+}
+
+fn f_unlink(state: u64, m: u64, path: u64) -> u64 {
+    let __f: u64 = ext4.enter(state)
+    let __r: u64 = f_unlink_body(state, m, path)
+    ext4.leave(state, __f)
+    return __r
+}
+
+fn forget_node(state: u64, m: u64, ino: u64) {
+    let nd: u64 = ext4.node_find(state, m, ino)
+    if nd == 0 {
+        return
+    }
+    ext4.nset(state, nd, ext4.N_SIZE, 0)
+    ext4.nset(state, nd, ext4.N_NLINKS, 0)
+    if ext4.nget(state, nd, ext4.N_USE) == 0 {
+        ext4.nset(state, nd, ext4.N_MNT, 0)
+    }
+}
+
+fn destroy_inode(state: u64, m: u64, ino: u64, is_dir: bool) -> u64 {
+    let p: u64 = ext4.inode_load(state, m, ino)
+    if p == 0 {
+        return errno.E_IO
+    }
+    if octets.le32(p + I_BLOCKS) != 0 && !ext4ino.inode_free_blocks(state, m, p) {
+        return errno.E_IO
+    }
+    octets.zero(p, ext4.sget(state, m, ext4.S_INOSZ))
+    if !ext4ino.inode_save(state, m, ino)
+        || !ext4alloc.inode_free(state, m, ino, is_dir) {
+        return errno.E_IO
+    }
+    return 0
+}
+
+fn f_unlink_body(state: u64, m: u64, path: u64) -> u64 {
+    ext4.tick(state)
+    if !writable(state, m) {
+        return errno.E_ROFS
+    }
+    var name: [u8; 256] = [0 as u8; 256]
+    let nm: u64 = (&name[0]) as u64
+    let parent: u64 = split_parent(state, m, path, nm)
+    if parent == 0 {
+        return errno.E_NOENT
+    }
+    let ino: u64 = ext4dir.dir_lookup(state, m, parent, nm)
+    if ino == 0 {
+        return errno.E_NOENT
+    }
+    let p: u64 = ext4.inode_load(state, m, ino)
+    if p == 0 {
+        return errno.E_IO
+    }
+    let is_dir: bool = ext4.art_von(ext4.ino_mode(p)) == vfsops.N_DIR
+    let links: u64 = octets.le16(p + ext4ino.I_LINKS)
+    let last: bool = is_dir || links <= 1
+    if last && !freeable(p) {
+        return errno.E_OPNOTSUPP
+    }
+    if is_dir && !ext4dir.dir_is_empty(state, m, ino) {
+        return errno.E_NOTEMPTY
+    }
+    if ext4dir.dir_remove(state, m, parent, nm) == 0 {
+        return errno.E_IO
+    }
+    if last {
+        let r: u64 = destroy_inode(state, m, ino, is_dir)
+        if r != 0 {
+            return r
+        }
+        if is_dir {
+            adjust_links(state, m, parent, false)
+        }
+        forget_node(state, m, ino)
+    } else {
+        let q: u64 = ext4.inode_load(state, m, ino)
+        ext4ino.set_links(q, links - 1)
+        ext4ino.touch(state, q)
+        ext4ino.inode_save(state, m, ino)
+    }
+    ext4ino.cache_flush(state, m)
+    return 0
+}
+
+fn f_trunc(state: u64, m: u64, node: u64) -> u64 {
+    let __f: u64 = ext4.enter(state)
+    let __r: u64 = f_trunc_body(state, m, node)
+    ext4.leave(state, __f)
+    return __r
+}
+
+fn f_trunc_body(state: u64, m: u64, node: u64) -> u64 {
+    ext4.tick(state)
+    if node == 0 || !writable(state, m) {
+        return errno.E_ROFS
+    }
+    let ino: u64 = ext4.nget(state, node, ext4.N_INO)
+    let p: u64 = ext4.inode_load(state, m, ino)
+    if p == 0 {
+        return errno.E_IO
+    }
+    if ext4.art_von(ext4.ino_mode(p)) != vfsops.N_FILE {
+        return errno.E_ISDIR
+    }
+    if octets.le32(p + I_BLOCKS) != 0 && !ext4ino.inode_free_blocks(state, m, p) {
+        return errno.E_OPNOTSUPP
+    }
+    ext4ino.set_size(p, 0)
+    ext4ino.touch(state, p)
+    if !ext4ino.inode_save(state, m, ino) {
+        return errno.E_IO
+    }
+    ext4ino.cache_flush(state, m)
+    ext4.nset(state, node, ext4.N_SIZE, 0)
+    return 0
+}
+
+fn f_rename(state: u64, m: u64, from: u64, to: u64) -> u64 {
+    let __f: u64 = ext4.enter(state)
+    let __r: u64 = f_rename_body(state, m, from, to)
+    ext4.leave(state, __f)
+    return __r
+}
+
+fn replace_target(state: u64, m: u64, tgt: u64, to: u64,
+    src_is_dir: bool) -> u64 {
+    let tp: u64 = ext4.inode_load(state, m, tgt)
+    if tp == 0 {
+        return errno.E_IO
+    }
+    let tgt_is_dir: bool = ext4.art_von(ext4.ino_mode(tp)) == vfsops.N_DIR
+    if tgt_is_dir && !src_is_dir {
+        return errno.E_ISDIR
+    }
+    if !tgt_is_dir && src_is_dir {
+        return errno.E_NOTDIR
+    }
+    return f_unlink_body(state, m, to)
+}
+
+fn f_rename_body(state: u64, m: u64, from: u64, to: u64) -> u64 {
+    ext4.tick(state)
+    if !writable(state, m) {
+        return errno.E_ROFS
+    }
+    var an: [u8; 256] = [0 as u8; 256]
+    var bn: [u8; 256] = [0 as u8; 256]
+    let anp: u64 = (&an[0]) as u64
+    let bnp: u64 = (&bn[0]) as u64
+    let ap: u64 = split_parent(state, m, from, anp)
+    let bp: u64 = split_parent(state, m, to, bnp)
+    if ap == 0 || bp == 0 {
+        return errno.E_NOENT
+    }
+    let ino: u64 = ext4dir.dir_lookup(state, m, ap, anp)
+    if ino == 0 {
+        return errno.E_NOENT
+    }
+    let p: u64 = ext4.inode_load(state, m, ino)
+    if p == 0 {
+        return errno.E_IO
+    }
+    let mode: u64 = ext4.ino_mode(p)
+    let is_dir: bool = ext4.art_von(mode) == vfsops.N_DIR
+    if is_dir && is_under(from, to) {
+        return errno.E_INVAL
+    }
+    let tgt: u64 = ext4dir.dir_lookup(state, m, bp, bnp)
+    if tgt == ino {
+        return 0
+    }
+    if tgt != 0 {
+        let r: u64 = replace_target(state, m, tgt, to, is_dir)
+        if r != 0 {
+            return r
+        }
+    }
+    let err: u64 = ext4dir.dir_add(state, m, bp, bnp, ino, ftype_of(mode))
+    if err != 0 {
+        return err
+    }
+    if ext4dir.dir_remove(state, m, ap, anp) == 0 {
+        return errno.E_IO
+    }
+    if is_dir && ap != bp {
+        ext4dir.dir_set_dotdot(state, m, ino, bp)
+        adjust_links(state, m, ap, false)
+        adjust_links(state, m, bp, true)
+    }
+    ext4ino.cache_flush(state, m)
+    return 0
+}
+
+fn ops() -> vfsops.Ops {
+    return vfsops.Ops {
+        lookup: ext4.f_lookup,
+        readdir: ext4.f_readdir,
+        attr: ext4.f_attr,
+        read: ext4.f_read,
+        write: f_write,
+        create: f_create,
+        unlink: f_unlink,
+        rename: f_rename,
+        trunc: f_trunc,
+        mask: vfsops.OP_ALL,
+        tag: TAG_EXT4
+    }
+}

@@ -1,0 +1,182 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import block.blk
+import fs.mnt
+import fs.ext4
+import fs.ext4alloc
+import sched.time
+import libc.octets
+
+export { inode_save, inode_init, map_append, last_pblock, inode_free_blocks, cache_flush,
+    blocks_add, set_size, touch, set_links, EXTENTS_FL, MODE_DIR, MODE_FILE,
+    I_LINKS, I_FLAGS }
+
+const I_MODE: u64 = 0x00
+const I_SIZE_LO: u64 = 0x04
+const I_ATIME: u64 = 0x08
+const I_CTIME: u64 = 0x0C
+const I_MTIME: u64 = 0x10
+const I_LINKS: u64 = 0x1A
+const I_BLOCKS: u64 = 0x1C
+const I_FLAGS: u64 = 0x20
+const I_BLOCK: u64 = 0x28
+const I_SIZE_HI: u64 = 0x6C
+const I_EXTRA_ISIZE: u64 = 0x80
+const I_CRTIME: u64 = 0x90
+const I_EXTRA_WITH_CRTIME: u64 = 32
+const I_MIN_FOR_EXTRA: u64 = 160
+
+const EXTENTS_FL: u64 = 0x80000
+const MODE_DIR: u64 = 0x41ED
+const MODE_FILE: u64 = 0x81A4
+
+const EXT_MAGIC: u64 = 0xF30A
+const EXT_HDR: u64 = 12
+const EXT_ENTRY: u64 = 12
+const EXT_INLINE_MAX: u64 = 4
+const EXT_INIT_MAX_LEN: u64 = 32768
+const SECTOR: u64 = 512
+
+fn inode_save(state: u64, m: u64, ino: u64) -> bool {
+    let ipg: u64 = ext4.sget(state, m, ext4.S_IPG)
+    let inosz: u64 = ext4.sget(state, m, ext4.S_INOSZ)
+    let bs: u64 = ext4.sget(state, m, ext4.S_BSIZE)
+    if ino == 0 || ipg == 0 {
+        return false
+    }
+    let d: u64 = ext4alloc.gd_load(state, m, (ino - 1) / ipg)
+    if d == 0 {
+        return false
+    }
+    let byte_off: u64 = ext4alloc.gd_inode_table(state, m, d) * bs
+        + ((ino - 1) % ipg) * inosz
+    return blk.write_on(state, mnt.dev(state, m),
+        mnt.first(state, m) + byte_off / SECTOR,
+        ext4.buf(state, ext4.INOBUF))
+}
+
+fn inode_init(state: u64, m: u64, p: u64, mode: u64, links: u64) {
+    let inosz: u64 = ext4.sget(state, m, ext4.S_INOSZ)
+    let now: u64 = time.now_sec(state)
+    octets.zero(p, inosz)
+    octets.put16(p + I_MODE, mode)
+    octets.put16(p + I_LINKS, links)
+    octets.put32(p + I_ATIME, now)
+    octets.put32(p + I_CTIME, now)
+    octets.put32(p + I_MTIME, now)
+    octets.put32(p + I_FLAGS, EXTENTS_FL)
+    octets.put16(p + I_BLOCK, EXT_MAGIC)
+    octets.put16(p + I_BLOCK + 4, EXT_INLINE_MAX)
+    if inosz >= I_MIN_FOR_EXTRA {
+        octets.put16(p + I_EXTRA_ISIZE, I_EXTRA_WITH_CRTIME)
+        octets.put32(p + I_CRTIME, now)
+    }
+}
+
+fn touch(state: u64, p: u64) {
+    let now: u64 = time.now_sec(state)
+    octets.put32(p + I_CTIME, now)
+    octets.put32(p + I_MTIME, now)
+}
+
+fn set_size(p: u64, size: u64) {
+    octets.put32(p + I_SIZE_LO, size & 0xFFFFFFFF)
+    octets.put32(p + I_SIZE_HI, size >> 32)
+}
+
+fn set_links(p: u64, links: u64) {
+    octets.put16(p + I_LINKS, links)
+}
+
+fn blocks_add(state: u64, m: u64, p: u64, n: u64, add: bool) {
+    let unit: u64 = n * (ext4.sget(state, m, ext4.S_BSIZE) / SECTOR)
+    let cur: u64 = octets.le32(p + I_BLOCKS)
+    if add {
+        octets.put32(p + I_BLOCKS, cur + unit)
+    } else if cur >= unit {
+        octets.put32(p + I_BLOCKS, cur - unit)
+    } else {
+        octets.put32(p + I_BLOCKS, 0)
+    }
+}
+
+fn extent_start(e: u64) -> u64 {
+    return octets.le32(e + 8) | (octets.le16(e + 6) << 32)
+}
+
+fn map_append(p: u64, lblock: u64, pblock: u64) -> bool {
+    let h: u64 = p + I_BLOCK
+    if octets.le16(h) != EXT_MAGIC || octets.le16(h + 6) != 0 {
+        return false
+    }
+    let n: u64 = octets.le16(h + 2)
+    if n > 0 {
+        let last: u64 = h + EXT_HDR + (n - 1) * EXT_ENTRY
+        let len: u64 = octets.le16(last + 4)
+        if len > EXT_INIT_MAX_LEN {
+            return false
+        }
+        let end: u64 = octets.le32(last) + len
+        if lblock < end {
+            return false
+        }
+        if lblock == end && pblock == extent_start(last) + len
+            && len < EXT_INIT_MAX_LEN {
+            octets.put16(last + 4, len + 1)
+            return true
+        }
+    }
+    if n >= octets.le16(h + 4) {
+        return false
+    }
+    let e: u64 = h + EXT_HDR + n * EXT_ENTRY
+    octets.put32(e, lblock)
+    octets.put16(e + 4, 1)
+    octets.put16(e + 6, pblock >> 32)
+    octets.put32(e + 8, pblock & 0xFFFFFFFF)
+    octets.put16(h + 2, n + 1)
+    return true
+}
+
+fn last_pblock(p: u64) -> u64 {
+    let h: u64 = p + I_BLOCK
+    let n: u64 = octets.le16(h + 2)
+    if octets.le16(h) != EXT_MAGIC || n == 0 {
+        return 0
+    }
+    let last: u64 = h + EXT_HDR + (n - 1) * EXT_ENTRY
+    return extent_start(last) + octets.le16(last + 4) - 1
+}
+
+fn inode_free_blocks(state: u64, m: u64, p: u64) -> bool {
+    let h: u64 = p + I_BLOCK
+    if (octets.le32(p + I_FLAGS) & EXTENTS_FL) == 0 {
+        return false
+    }
+    if octets.le16(h) != EXT_MAGIC || octets.le16(h + 6) != 0 {
+        return false
+    }
+    let n: u64 = octets.le16(h + 2)
+    var i: u64 = 0
+    while i < n {
+        let e: u64 = h + EXT_HDR + i * EXT_ENTRY
+        var len: u64 = octets.le16(e + 4)
+        if len > EXT_INIT_MAX_LEN {
+            len = len - EXT_INIT_MAX_LEN
+        }
+        if !ext4alloc.block_free_run(state, m, extent_start(e), len) {
+            return false
+        }
+        i = i + 1
+    }
+    octets.put16(h + 2, 0)
+    octets.put32(p + I_BLOCKS, 0)
+    cache_flush(state, m)
+    return true
+}
+
+fn cache_flush(state: u64, m: u64) {
+    ext4.sset(state, m, ext4.S_CINO, 0)
+}

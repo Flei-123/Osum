@@ -150,8 +150,10 @@ weg wg-aus
 
 if [[ $OHNE_EXT4 == 1 ]]; then
     ersetze ext4-aus ext4 || exit 1
+    ersetze ext4w-aus ext4w || exit 1
 fi
 weg ext4-aus
+weg ext4w-aus
 if [[ $OHNE_NTFS == 1 ]]; then
     ersetze ntfs-aus ntfs || exit 1
 fi
