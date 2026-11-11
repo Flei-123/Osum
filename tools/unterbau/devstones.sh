@@ -10,6 +10,7 @@ devstones_spec() { # devstones_spec <stonesdir>: image spec words for make, tcc 
     fi
     if [ -r "$S/tcc" ] && [ -r "$S/lib/tcc/libtcc1.a" ] && [ -d "$S/include" ]; then
         out="$out /bin/tcc=$S/tcc /usr/ /usr/lib/ /usr/lib/tcc/ /usr/lib/libtcc1.a=$S/lib/tcc/libtcc1.a /usr/lib/tcc/include/ /usr/include/"
+        for f in runmain.o bt-exe.o bcheck.o bcheck_run.o; do [ -r "$S/lib/tcc/$f" ] && out="$out /usr/lib/tcc/$f=$S/lib/tcc/$f"; done
         for f in "$S"/lib/tcc/include/*.h; do out="$out /usr/lib/tcc/include/$(basename "$f")=$f"; done
         for f in crt1.o crti.o crtn.o; do out="$out /usr/lib/$f=$S/lib/musl/$f"; done
         for f in c m dl pthread rt; do out="$out /usr/lib/lib$f.so->/lib/ld-musl-x86_64.so.1"; done

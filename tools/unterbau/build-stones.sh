@@ -95,9 +95,9 @@ mkdir -p "$W/x/tcc" "$OUT/lib/tcc/include" "$OUT/lib/musl"
 tar xzf /root/fremdquellen/tinycc-aade7ba.tar.gz -C "$W/x/tcc" --strip-components=1
 ( cd "$W/x/tcc" && TCCCFG="--cc=musl-gcc --prefix=/usr --config-musl --libpaths=/usr/lib --crtprefix=/usr/lib --tccdir=/usr/lib/tcc --elfinterp=/lib/ld-musl-x86_64.so.1"
   ./configure $TCCCFG --sysincludepaths=/usr/include/x86_64-linux-musl:$PWD/include >/dev/null 2>&1 && make -j"$J" >/dev/null 2>&1 \
-  && cp libtcc1.a "$W/libtcc1.a" && ./configure $TCCCFG --sysincludepaths=/usr/include:/usr/lib/tcc/include >/dev/null 2>&1 \
+  && cp libtcc1.a runmain.o bt-exe.o bcheck.o bcheck_run.o "$W/" && ./configure $TCCCFG --sysincludepaths=/usr/include:/usr/lib/tcc/include >/dev/null 2>&1 \
   && rm -f tcc ./*.o && make tcc >/dev/null 2>&1 && strip -o "$OUT/tcc" tcc \
-  && cp "$W/libtcc1.a" "$OUT/lib/tcc/" && cp include/*.h "$OUT/lib/tcc/include/" )
+  && cp "$W/libtcc1.a" "$W/runmain.o" "$W/bt-exe.o" "$W/bcheck.o" "$W/bcheck_run.o" "$OUT/lib/tcc/" && cp include/*.h "$OUT/lib/tcc/include/" )
 rm -rf "$OUT/include" && mkdir -p "$OUT/include" && ( cd /usr/include/x86_64-linux-musl && find . -type f | cpio -pdm "$OUT/include" >/dev/null 2>&1 )
 cp /usr/lib/x86_64-linux-musl/crt1.o /usr/lib/x86_64-linux-musl/crti.o /usr/lib/x86_64-linux-musl/crtn.o "$OUT/lib/musl/"
 }
