@@ -11,8 +11,6 @@
 
 static int sbp_a = -1, sbp_b = -1;
 static pid_t sbp_child;
-static volatile int sbp_turn;
-static long sbp_rounds;
 static int sbp_epfd = -1;
 
 static void run_vfork(long n)
@@ -111,41 +109,6 @@ static void sbp_epoll(void)
     close(sbp_epfd);
 }
 
-static void sbp_futex_wait(volatile int *addr, int val)
-{
-    while (__atomic_load_n(addr, __ATOMIC_ACQUIRE) == val)
-        syscall(SYS_futex, addr, FUTEX_WAIT, val, 0, 0, 0);
-}
-
-static void sbp_futex_set(int val)
-{
-    __atomic_store_n(&sbp_turn, val, __ATOMIC_RELEASE);
-    syscall(SYS_futex, &sbp_turn, FUTEX_WAKE, 1, 0, 0, 0);
-}
-
-static void *sbp_futex_thread(void *arg)
-{
-    for (long i = 0; i < sbp_rounds; i++) {
-        sbp_futex_wait(&sbp_turn, 0);
-        sbp_futex_set(0);
-    }
-    return arg;
-}
-
-static void run_futex_pingpong(long n)
-{
-    pthread_t th;
-    sbp_rounds = n;
-    sbp_turn = 0;
-    if (pthread_create(&th, 0, sbp_futex_thread, 0))
-        exit(16);
-    for (long i = 0; i < n; i++) {
-        sbp_futex_set(1);
-        sbp_futex_wait(&sbp_turn, 1);
-    }
-    pthread_join(th, 0);
-}
-
 static int sbp_tcp_pair(int *client_fd, int *server_fd)
 {
     struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons(SBP_TCP_PORT)};
@@ -208,7 +171,6 @@ static void sbp_run_all(void)
     measure("nanosleep_1ms", run_nanosleep, 20, 1, 1);
     sbp_socketpair();
     sbp_epoll();
-    measure("futex_pingpong", run_futex_pingpong, 2000, 1, 1);
     sbp_tcp_run("tcp_loopback_roundtrip", run_sock_roundtrip, 2000, 1);
     sbp_tcp_run("tcp_loopback_write_64kib", run_tcp_stream, 256, 0);
 }

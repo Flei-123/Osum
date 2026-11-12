@@ -49,12 +49,6 @@ static void pb_cleanup(void)
     rmdir(PB_ROOT);
 }
 
-static void run_open_close(long n)
-{
-    for (long i = 0; i < n; i++)
-        close(open(PB_FLAT_FILE, O_RDONLY));
-}
-
 static void run_open_close_deep(long n)
 {
     for (long i = 0; i < n; i++)
@@ -73,13 +67,6 @@ static void run_stat_deep(long n)
     struct stat st;
     for (long i = 0; i < n; i++)
         stat(PB_DEEP_FILE, &st);
-}
-
-static void run_stat_missing(long n)
-{
-    struct stat st;
-    for (long i = 0; i < n; i++)
-        stat(PB_MISSING, &st);
 }
 
 static void run_access_flat(long n)
@@ -130,11 +117,9 @@ static void pb_measure(const char *name, bench_fn fn, long batch, long ops_per_i
 static void pb_run_all(void)
 {
     pb_prepare();
-    pb_measure("open_close", run_open_close, 2000, 1);
     pb_measure("open_close_deep", run_open_close_deep, 2000, 1);
     pb_measure("stat_flat", run_stat_flat, 2000, 1);
     pb_measure("stat_deep", run_stat_deep, 2000, 1);
-    pb_measure("stat_missing", run_stat_missing, 2000, 1);
     pb_measure("access_flat", run_access_flat, 2000, 1);
     pb_measure("readdir_1000_entry", run_readdir_big, 10, PB_BIG_COUNT);
     pb_measure("stat_big_dir_entry", run_stat_big_entry, 2000, 1);
