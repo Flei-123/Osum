@@ -1,42 +1,112 @@
 // SPDX-License-Identifier: GPL-2.0-only
 profile kernel
 
-import lib.kstate
 import fs.file
 import fs.vfs
 import fs.pcache
+import fs.pcacherun
+import sched.proc.procfault
+import sched.proc.procmap
+import arch.arch
+import arch.x86_64.guard
+import mm.mmlock
 import sys.sysuser
 
 export { serve }
 
+const PIECES_PER_LOCK: u64 = 4
+
+fn copy_run(state: u64, me: u64, dst: u64, pos: u64, end: u64, m: u64, node: u64, idx0: u64, packed: u64) -> u64 {
+    let count: u64 = packed >> pcacherun.COUNT_SHIFT
+    var copied: u64 = 0
+    var j: u64 = 0
+    var pieces: u64 = 0
+    var failed: bool = false
+    var fl: u64 = mmlock.mm_lock(state)
+    while j < count && !failed {
+        let page_at: u64 = (idx0 + j) << 12
+        var from: u64 = 0
+        if j == 0 {
+            from = pos - page_at
+        }
+        var want: u64 = pcache.PAGE_BYTES - from
+        if want > end - (page_at + from) {
+            want = end - (page_at + from)
+        }
+        let frame: u64 = pcacherun.run_frame(state, m, node, idx0, packed, j) + from
+        var inpage: u64 = 0
+        while inpage < want && !failed {
+            let to: u64 = dst + copied
+            var piece: u64 = 4096 - (to & 4095)
+            if piece > want - inpage {
+                piece = want - inpage
+            }
+            let phys: u64 = procmap.user_phys(state, me, to)
+            if phys != 0 {
+                guard.stac(state)
+                arch.copy_octets(phys, frame + inpage, piece)
+                guard.clac(state)
+            } else {
+                mmlock.mm_unlock(state, fl)
+                failed = !sysuser.copy_out(state, me, to, frame + inpage, piece)
+                fl = mmlock.mm_lock(state)
+            }
+            if !failed {
+                copied = copied + piece
+                inpage = inpage + piece
+                pieces = pieces + 1
+                if pieces % PIECES_PER_LOCK == 0 {
+                    mmlock.mm_unlock(state, fl)
+                    fl = mmlock.mm_lock(state)
+                }
+            }
+        }
+        j = j + 1
+    }
+    mmlock.mm_unlock(state, fl)
+    return copied
+}
+
 fn serve(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     let m: u64 = file.open_mnt(state, of)
-    if !vfs.page_cached(state, m) {
+    if !vfs.page_cached(state, m) || len == 0 {
+        return 0
+    }
+    if !procfault.user_range_ok(state, me, buf, len) {
         return 0
     }
     let node: u64 = file.open_ino(state, of)
     let off: u64 = file.open_off(state, of)
+    let end: u64 = off + len
+    let last_idx: u64 = (end - 1) >> 12
     var done: u64 = 0
-    while done < len {
+    var go: bool = true
+    while done < len && go {
         let pos: u64 = off + done
-        let from: u64 = pos & (pcache.PAGE_BYTES - 1)
-        var want: u64 = pcache.PAGE_BYTES - from
-        if want > len - done {
-            want = len - done
+        let idx0: u64 = pos >> 12
+        var n: u64 = last_idx - idx0 + 1
+        if n > pcacherun.MAX_RUN {
+            n = pcacherun.MAX_RUN
         }
-        let slot: u64 = pcache.pin(state, m, node, pos >> 12)
-        if slot == 0 {
-            break
+        var last_need: u64 = pcache.PAGE_BYTES
+        if idx0 + n - 1 == last_idx {
+            last_need = ((end - 1) & 4095) + 1
         }
-        var copied: bool = false
-        if from + want <= pcache.valid_of(slot) {
-            copied = sysuser.copy_out(state, me, buf + done, pcache.buffer_of(slot) + from, want)
+        let packed: u64 = pcacherun.pin_run(state, m, node, idx0, n, last_need)
+        if (packed >> pcacherun.COUNT_SHIFT) == 0 {
+            go = false
+        } else {
+            let got: u64 = copy_run(state, me, buf + done, pos, end, m, node, idx0, packed)
+            pcacherun.unpin_run(state, m, node, idx0, packed)
+            done = done + got
+            var span: u64 = (packed >> pcacherun.COUNT_SHIFT) * pcache.PAGE_BYTES - (pos & 4095)
+            if span > end - pos {
+                span = end - pos
+            }
+            if got < span {
+                go = false
+            }
         }
-        pcache.unpin(state, slot)
-        if !copied {
-            break
-        }
-        done = done + want
     }
     if done != 0 {
         file.open_set_off(state, of, off + done)
