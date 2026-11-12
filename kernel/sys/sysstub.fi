@@ -1,0 +1,247 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import klog
+import lib.errno
+import sched.proc.procfault
+import sys.sysuser
+
+export {
+    handles, call, SYS_PKEY_MPROTECT, pkey_ok
+}
+
+const SYS_SYSLOG: u64 = 103
+const SYS_MBIND: u64 = 237
+const SYS_SET_MEMPOLICY: u64 = 238
+const SYS_GET_MEMPOLICY: u64 = 239
+const SYS_PERF_EVENT_OPEN: u64 = 298
+const SYS_FANOTIFY_INIT: u64 = 300
+const SYS_NAME_TO_HANDLE_AT: u64 = 303
+const SYS_PKEY_MPROTECT: u64 = 329
+const SYS_PKEY_ALLOC: u64 = 330
+const SYS_PKEY_FREE: u64 = 331
+const SYS_PROCESS_MADVISE: u64 = 440
+
+const SYSLOG_CLOSE: u64 = 0
+const SYSLOG_OPEN: u64 = 1
+const SYSLOG_READ: u64 = 2
+const SYSLOG_READ_ALL: u64 = 3
+const SYSLOG_READ_CLEAR: u64 = 4
+const SYSLOG_CLEAR: u64 = 5
+const SYSLOG_CONSOLE_OFF: u64 = 6
+const SYSLOG_CONSOLE_ON: u64 = 7
+const SYSLOG_CONSOLE_LEVEL: u64 = 8
+const SYSLOG_SIZE_UNREAD: u64 = 9
+const SYSLOG_SIZE_BUFFER: u64 = 10
+const LOG_LINE_MAX: u64 = 256
+const LOG_BUFFER_BYTES: u64 = 130560
+const LEVEL_MIN: u64 = 1
+const LEVEL_MAX: u64 = 8
+const INT_MASK: u64 = 0xFFFFFFFF
+const INT_SIGN: u64 = 0x80000000
+
+const MPOL_LAST: u64 = 4
+const MPOL_MODE_MASK: u64 = 0xFFFF
+const MPOL_F_NODE: u64 = 1
+const MPOL_F_ADDR: u64 = 2
+const MPOL_F_MEMS_ALLOWED: u64 = 4
+const MPOL_F_ALL_BITS: u64 = 0xFFFFFFF8
+const MBIND_FLAGS_BITS: u64 = 0xFFFFFFF8
+const MASK_WORD_BITS: u64 = 64
+const MASK_MAX_BITS: u64 = 4096
+const PAGE_MASK: u64 = 4095
+const PKEY_NONE: u64 = 0xFFFFFFFF
+
+fn fail(e: u64) -> u64 {
+    return sysuser.neg(e)
+}
+
+fn handles(number: u64) -> bool {
+    return number == SYS_SYSLOG || number == SYS_MBIND || number == SYS_SET_MEMPOLICY
+        || number == SYS_GET_MEMPOLICY || number == SYS_PERF_EVENT_OPEN
+        || number == SYS_FANOTIFY_INIT || number == SYS_NAME_TO_HANDLE_AT
+        || number == SYS_PKEY_ALLOC || number == SYS_PKEY_FREE
+        || number == SYS_PROCESS_MADVISE
+}
+
+fn call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    if number == SYS_SYSLOG {
+        return do_syslog(state, me, a0, a1, a2)
+    }
+    if number == SYS_MBIND {
+        return do_mbind(a0, a2, a4)
+    }
+    if number == SYS_SET_MEMPOLICY {
+        return do_set_mempolicy(a0, a2)
+    }
+    if number == SYS_GET_MEMPOLICY {
+        return do_get_mempolicy(state, me, a0, a1, a2, a4)
+    }
+    if number == SYS_PERF_EVENT_OPEN {
+        return fail(errno.E_ACCES)
+    }
+    if number == SYS_FANOTIFY_INIT {
+        return fail(errno.E_PERM)
+    }
+    if number == SYS_NAME_TO_HANDLE_AT {
+        return fail(errno.E_OPNOTSUPP)
+    }
+    if number == SYS_PKEY_ALLOC {
+        return do_pkey_alloc(a0)
+    }
+    if number == SYS_PKEY_FREE {
+        return fail(errno.E_INVAL)
+    }
+    return do_process_madvise(a4)
+}
+
+fn pkey_ok(pkey: u64) -> bool {
+    return (pkey & INT_MASK) == PKEY_NONE || (pkey & INT_MASK) == 0
+}
+
+fn do_pkey_alloc(flags: u64) -> u64 {
+    if flags != 0 {
+        return fail(errno.E_INVAL)
+    }
+    return fail(errno.E_NOSPC)
+}
+
+fn do_process_madvise(flags: u64) -> u64 {
+    if flags != 0 {
+        return fail(errno.E_INVAL)
+    }
+    return fail(errno.E_PERM)
+}
+
+fn mode_ok(mode: u64) -> bool {
+    return (mode & MPOL_MODE_MASK) <= MPOL_LAST
+}
+
+fn do_mbind(start: u64, mode: u64, flags: u64) -> u64 {
+    if (start & PAGE_MASK) != 0 || (flags & MBIND_FLAGS_BITS) != 0 || !mode_ok(mode) {
+        return fail(errno.E_INVAL)
+    }
+    return 0
+}
+
+fn do_set_mempolicy(mode: u64, maxnode: u64) -> u64 {
+    if !mode_ok(mode) || (maxnode & INT_SIGN) != 0 {
+        return fail(errno.E_INVAL)
+    }
+    return 0
+}
+
+fn mask_words(maxnode: u64) -> u64 {
+    return (maxnode + MASK_WORD_BITS - 1) / MASK_WORD_BITS
+}
+
+fn put_mask(state: u64, me: u64, mask: u64, maxnode: u64, first: u64) -> u64 {
+    if maxnode == 0 || maxnode > MASK_MAX_BITS {
+        return fail(errno.E_INVAL)
+    }
+    var i: u64 = 0
+    while i < mask_words(maxnode) {
+        var word: u64 = 0
+        if i == 0 {
+            word = first
+        }
+        if !sysuser.put64(state, me, mask + i * 8, word) {
+            return fail(errno.E_FAULT)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn do_get_mempolicy(state: u64, me: u64, mode_ptr: u64, mask: u64, maxnode: u64, flags: u64) -> u64 {
+    if (flags & MPOL_F_ALL_BITS) != 0 {
+        return fail(errno.E_INVAL)
+    }
+    if (flags & MPOL_F_MEMS_ALLOWED) != 0 && (flags & (MPOL_F_NODE | MPOL_F_ADDR)) != 0 {
+        return fail(errno.E_INVAL)
+    }
+    if (flags & MPOL_F_MEMS_ALLOWED) != 0 {
+        if mask == 0 {
+            return fail(errno.E_INVAL)
+        }
+        return put_mask(state, me, mask, maxnode, 1)
+    }
+    if mode_ptr != 0 && !sysuser.put32(state, me, mode_ptr, 0) {
+        return fail(errno.E_FAULT)
+    }
+    if mask != 0 {
+        return put_mask(state, me, mask, maxnode, 0)
+    }
+    return 0
+}
+
+fn line_bytes(state: u64, seq: u64, tmp: u64) -> u64 {
+    return klog.line_at(state, seq, tmp, LOG_LINE_MAX)
+}
+
+fn log_start(state: u64, len: u64, tmp: u64) -> u64 {
+    let newest: u64 = klog.seq(state)
+    var first: u64 = newest + 1
+    var total: u64 = 0
+    var seq: u64 = newest
+    while seq >= klog.first_seq(state) && seq != 0 {
+        let n: u64 = line_bytes(state, seq, tmp)
+        if total + n > len {
+            return first
+        }
+        total = total + n
+        first = seq
+        seq = seq - 1
+    }
+    return first
+}
+
+fn read_log(state: u64, me: u64, buf: u64, len: u64) -> u64 {
+    var tmp: [u8; 256] = [0 as u8; 256]
+    let tmp_addr: u64 = (&tmp[0 as usize]) as u64
+    if klog.seq(state) == 0 {
+        return 0
+    }
+    var seq: u64 = log_start(state, len, tmp_addr)
+    var done: u64 = 0
+    while seq <= klog.seq(state) {
+        let n: u64 = line_bytes(state, seq, tmp_addr)
+        if n != 0 {
+            if !sysuser.copy_out(state, me, buf + done, tmp_addr, n) {
+                return fail(errno.E_FAULT)
+            }
+            done = done + n
+        }
+        seq = seq + 1
+    }
+    return done
+}
+
+fn do_syslog(state: u64, me: u64, kind: u64, buf: u64, len_arg: u64) -> u64 {
+    let len: u64 = len_arg & INT_MASK
+    if kind == SYSLOG_CLOSE || kind == SYSLOG_OPEN || kind == SYSLOG_CLEAR
+        || kind == SYSLOG_CONSOLE_OFF || kind == SYSLOG_CONSOLE_ON || kind == SYSLOG_SIZE_UNREAD {
+        return 0
+    }
+    if kind == SYSLOG_CONSOLE_LEVEL {
+        if len < LEVEL_MIN || len > LEVEL_MAX {
+            return fail(errno.E_INVAL)
+        }
+        return 0
+    }
+    if kind == SYSLOG_SIZE_BUFFER {
+        return LOG_BUFFER_BYTES
+    }
+    if kind != SYSLOG_READ && kind != SYSLOG_READ_ALL && kind != SYSLOG_READ_CLEAR {
+        return fail(errno.E_INVAL)
+    }
+    if buf == 0 || (len_arg & INT_SIGN) != 0 {
+        return fail(errno.E_INVAL)
+    }
+    if len == 0 {
+        return 0
+    }
+    if !procfault.user_ok(state, me, buf, len) {
+        return fail(errno.E_FAULT)
+    }
+    return read_log(state, me, buf, len)
+}
