@@ -5,6 +5,7 @@ import sync.atomic
 import tz.tz
 import tz.rules
 import sched.clockslew
+import sched.vdso
 
 export {
     init, calibrate, adopt_khz, mono_ns, real_ns, boot_sec, rtc_field, tsc, khz,
@@ -12,7 +13,7 @@ export {
     tz_min, set_tz, now_local,
     tz_base, tz_rule_get, set_tz_rule, eu_dst, set_utc, rtc_write,
     epoch_of, days_from_civil, now_sec, split, set_utc_ns, slew_by, slew_remaining,
-    suspend_mark, resume_fix, since, expired, rewind_tsc,
+    suspend_mark, resume_fix, since, expired, rewind_tsc, vdso_sync, vdso_frame, vdso_refresh,
     CLOCK_REALTIME, CLOCK_MONOTONIC, CLOCK_PROCESS, CLOCK_THREAD,
     CLOCK_MONOTONIC_RAW, CLOCK_REALTIME_COARSE, CLOCK_MONOTONIC_COARSE,
     CLOCK_BOOTTIME, CLOCK_MAX,
@@ -211,6 +212,7 @@ fn calibrate(state: u64) -> u64 {
         return 0
     }
     kstate.set(state, kstate.TIME_KHZ, k)
+    vdso_sync(state)
     return k
 }
 
@@ -220,6 +222,7 @@ fn adopt_khz(state: u64, k: u64) -> u64 {
         return 0
     }
     kstate.set(state, kstate.TIME_KHZ, k)
+    vdso_sync(state)
     return k
 }
 
@@ -269,6 +272,35 @@ fn mono_ns(state: u64) -> u64 {
 fn real_ns(state: u64) -> u64 {
     let mono: u64 = mono_ns(state)
     return (kstate.get(state, kstate.TIME_BOOT) *% NS_PER_SEC) +% mono +% clockslew.offset_ns(mono)
+}
+
+static mut vdso_real_ok: u64 = 1
+
+fn vdso_sync(state: u64) {
+    let mono: u64 = raw_ns(state)
+    clockslew.settle(mono)
+    var real_ok: u64 = 1
+    if clockslew.active(mono) {
+        real_ok = 0
+    }
+    vdso_real_ok = real_ok
+    let base: u64 = (kstate.get(state, kstate.TIME_BOOT) *% NS_PER_SEC) +% clockslew.base()
+    vdso.publish(kstate.get(state, kstate.TIME_KHZ), kstate.get(state, kstate.TIME_TSC0), base, real_ok)
+}
+
+fn vdso_frame(state: u64) -> u64 {
+    let had: u64 = vdso.peek()
+    let f: u64 = vdso.frame(state)
+    if had == 0 && f != 0 {
+        vdso_sync(state)
+    }
+    return f
+}
+
+fn vdso_refresh(state: u64) {
+    if vdso_real_ok == 0 && vdso.peek() != 0 {
+        vdso_sync(state)
+    }
 }
 
 fn now_sec(state: u64) -> u64 {
@@ -417,6 +449,7 @@ fn tz_anwenden(state: u64) {
     }
     rtc_frame = frame
     kstate.set(state, kstate.TIME_BOOT, utc)
+    vdso_sync(state)
     if tz_offset != 0 || tz_west != 0 || tz_rule != 0 || rtc_is_utc != 0 {
         tz_done = 1
     }
@@ -438,6 +471,7 @@ fn set_utc_ns(state: u64, utc: u64, nsec: u64) -> bool {
     let boot_ns: u64 = ((utc *% NS_PER_SEC) +% nsec) -% mono
     kstate.set(state, kstate.TIME_BOOT, boot_ns / NS_PER_SEC)
     clockslew.rebase(mono, boot_ns % NS_PER_SEC)
+    vdso_sync(state)
     note_sync(utc, utc -% before)
     return true
 }
@@ -456,6 +490,7 @@ fn slew_by(state: u64, delta_ns: u64) -> bool {
         return false
     }
     clockslew.begin(mono_ns(state), delta_ns)
+    vdso_sync(state)
     var secs: u64 = a / NS_PER_SEC
     if clockslew.negative(delta_ns) {
         secs = 0 -% secs
@@ -571,5 +606,6 @@ fn resume_fix(state: u64) -> u64 {
         kstate.set(state, kstate.TIME_TSC0, tsc() -% back)
     }
     kstate.set(state, kstate.TIME_BOOT, kstate.get(state, kstate.TIME_BOOT) +% dt)
+    vdso_sync(state)
     return dt
 }
