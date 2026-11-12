@@ -906,6 +906,27 @@ fn bm_byte(b: u64) -> u64 {
     return (b % BITS_PER_BLOCK) / 8
 }
 
+static mut data_overwrite: u64 = 0
+static mut leaf_alloc: u64 = 0
+
+fn leaf_overwrite_pending() -> bool {
+    return data_overwrite != 0 && leaf_alloc != 0
+}
+
+fn block_alloc_leaf(state: u64) -> u64 {
+    leaf_alloc = 1
+    let b: u64 = block_alloc(state)
+    leaf_alloc = 0
+    return b
+}
+
+fn walk_leaf(state: u64, block: u64, k: u64, grow: bool) -> u64 {
+    leaf_alloc = 1
+    let b: u64 = walk_level(state, block, k, grow)
+    leaf_alloc = 0
+    return b
+}
+
 fn block_alloc(state: u64) -> u64 {
     let last: u64 = total_blocks(state)
     var lim: u64 = max_blocks(state)
@@ -954,8 +975,10 @@ fn search_free(state: u64, von: u64, bis: u64) -> u64 {
                 return 0
             }
             kstate.set(state, kstate.FSG_OFF + G_HINT, fund)
-            octets.zero(buf_zz(state), BS)
-            ofsj.write(state, fund, buf_zz(state))
+            if !leaf_overwrite_pending() {
+                octets.zero(buf_zz(state), BS)
+                ofsj.write(state, fund, buf_zz(state))
+            }
             return fund
         }
     }
@@ -1090,7 +1113,7 @@ fn file_block(state: u64, ino: u64, index: u64, grow: bool) -> u64 {
         if b != 0 || !grow {
             return b
         }
-        let fresh: u64 = block_alloc(state)
+        let fresh: u64 = block_alloc_leaf(state)
         if fresh == 0 {
             return 0
         }
@@ -1143,7 +1166,7 @@ fn quad_block(state: u64, ino: u64, q: u64, grow: bool) -> u64 {
     if l4 == 0 {
         return 0
     }
-    return walk_level(state, l4, q % PER_BLOCK, grow)
+    return walk_leaf(state, l4, q % PER_BLOCK, grow)
 }
 
 fn ptr_at(state: u64, block: u64, k: u64) -> u64 {
@@ -1202,7 +1225,7 @@ fn single_block(state: u64, ino: u64, k: u64, grow: bool) -> u64 {
     if b != 0 || !grow {
         return b
     }
-    let fresh: u64 = block_alloc(state)
+    let fresh: u64 = block_alloc_leaf(state)
     if fresh == 0 {
         return 0
     }
@@ -1259,7 +1282,7 @@ fn double_block(state: u64, ino: u64, d: u64, grow: bool) -> u64 {
     if b != 0 || !grow {
         return b
     }
-    let fresh: u64 = block_alloc(state)
+    let fresh: u64 = block_alloc_leaf(state)
     if fresh == 0 {
         return 0
     }
@@ -1294,7 +1317,7 @@ fn triple_block(state: u64, ino: u64, t: u64, grow: bool) -> u64 {
     if l3 == 0 {
         return 0
     }
-    return walk_level(state, l3, t % PER_BLOCK, grow)
+    return walk_leaf(state, l3, t % PER_BLOCK, grow)
 }
 
 fn walk_level(state: u64, block: u64, k: u64, grow: bool) -> u64 {
@@ -1755,7 +1778,12 @@ fn write_at_blocks(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
             }
             ofsj.chunk(state)
         }
+        data_overwrite = 0
+        if chunk == BS {
+            data_overwrite = 1
+        }
         let b: u64 = file_block(state, ino, pos / BS, true)
+        data_overwrite = 0
         if b == 0 {
             stop = true
         } else {
