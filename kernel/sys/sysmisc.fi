@@ -1,0 +1,180 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.errno
+import lib.kstate
+import sched.sched
+import sched.time
+import sched.proc.procfault
+import ipc.perm
+import sys.sysuser
+import sys.utsinfo
+
+export {
+    handles, call, SYS_SETFSUID, SYS_SETFSGID, SYS_PERSONALITY, SYS_SCHED_RR_GET_INTERVAL, SYS_SETTIMEOFDAY,
+    SYS_SETHOSTNAME, SYS_SETDOMAINNAME, SYS_IOPRIO_SET, SYS_IOPRIO_GET
+}
+
+const SYS_SETFSUID: u64 = 122
+const SYS_SETFSGID: u64 = 123
+const SYS_PERSONALITY: u64 = 135
+const SYS_SCHED_RR_GET_INTERVAL: u64 = 148
+const SYS_SETTIMEOFDAY: u64 = 164
+const SYS_SETHOSTNAME: u64 = 170
+const SYS_SETDOMAINNAME: u64 = 171
+const SYS_IOPRIO_SET: u64 = 251
+const SYS_IOPRIO_GET: u64 = 252
+
+const PERSONALITY_QUERY: u64 = 0xFFFFFFFF
+const INT_MASK: u64 = 0xFFFFFFFF
+const IOPRIO_WHO_PROCESS: u64 = 1
+const IOPRIO_WHO_USER: u64 = 3
+const IOPRIO_CLASS_SHIFT: u64 = 13
+const IOPRIO_CLASS_MAX: u64 = 3
+const IOPRIO_CLASS_RT: u64 = 1
+const IOPRIO_CLASS_BE: u64 = 2
+const IOPRIO_DATA_MASK: u64 = 8191
+const IOPRIO_DATA_LEVELS: u64 = 8
+const IOPRIO_DEFAULT: u64 = 0
+const RR_TIMESLICE_NS: u64 = 100000000
+const TIMEVAL_BYTES: u64 = 16
+const TIMESPEC_BYTES: u64 = 16
+const NS_PER_USEC: u64 = 1000
+const USEC_PER_SEC: u64 = 1000000
+const TZ_BYTES: u64 = 8
+
+static mut persona: u64 = 0
+
+fn fail(e: u64) -> u64 {
+    return sysuser.neg(e)
+}
+
+fn handles(number: u64) -> bool {
+    if number == SYS_SETFSUID || number == SYS_SETFSGID || number == SYS_PERSONALITY
+        || number == SYS_SCHED_RR_GET_INTERVAL || number == SYS_SETTIMEOFDAY {
+        return true
+    }
+    return number == SYS_SETHOSTNAME || number == SYS_SETDOMAINNAME
+        || number == SYS_IOPRIO_SET || number == SYS_IOPRIO_GET
+}
+
+fn do_set_name(state: u64, me: u64, field: u64, text: u64, len_arg: u64) -> u64 {
+    var buf: [u8; 65] = [0 as u8; 65]
+    let len: u64 = len_arg & INT_MASK
+    if !perm.is_root(state, me) {
+        return fail(errno.E_PERM)
+    }
+    if len > utsinfo.NAME_MAX {
+        return fail(errno.E_INVAL)
+    }
+    if len != 0 && !sysuser.copy_in(state, me, (&buf[0]) as u64, text, len) {
+        return fail(errno.E_FAULT)
+    }
+    if !utsinfo.set_field(field, (&buf[0]) as u64, len) {
+        return fail(errno.E_INVAL)
+    }
+    return 0
+}
+
+fn do_personality(arg: u64) -> u64 {
+    let wanted: u64 = arg & INT_MASK
+    let previous: u64 = persona
+    if wanted != PERSONALITY_QUERY {
+        persona = wanted
+    }
+    return previous
+}
+
+fn do_rr_interval(state: u64, me: u64, pid_arg: u64, ts: u64) -> u64 {
+    let pid: u64 = pid_arg & INT_MASK
+    if (pid & 0x80000000) != 0 {
+        return fail(errno.E_INVAL)
+    }
+    if pid != 0 && sched.find_pid(state, pid) == kstate.MAX_TASKS {
+        return fail(errno.E_SRCH)
+    }
+    if !procfault.user_ok(state, me, ts, TIMESPEC_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    if !sysuser.put64(state, me, ts, 0) || !sysuser.put64(state, me, ts + 8, RR_TIMESLICE_NS) {
+        return fail(errno.E_FAULT)
+    }
+    return 0
+}
+
+fn do_settimeofday(state: u64, me: u64, tv: u64, tz: u64) -> u64 {
+    if !perm.is_root(state, me) {
+        return fail(errno.E_PERM)
+    }
+    if tz != 0 && !procfault.user_ok(state, me, tz, TZ_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    if tv == 0 {
+        return 0
+    }
+    if !procfault.user_ok(state, me, tv, TIMEVAL_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    let sec: u64 = sysuser.user_word(state, me, tv)
+    let usec: u64 = sysuser.user_word(state, me, tv + 8)
+    if usec >= USEC_PER_SEC {
+        return fail(errno.E_INVAL)
+    }
+    if !time.set_utc_ns(state, sec, usec * NS_PER_USEC) {
+        return fail(errno.E_INVAL)
+    }
+    let _w: bool = time.rtc_write(state)
+    return 0
+}
+
+fn do_ioprio(state: u64, me: u64, set: bool, which: u64, who: u64, prio: u64) -> u64 {
+    let kind: u64 = which & INT_MASK
+    if kind < IOPRIO_WHO_PROCESS || kind > IOPRIO_WHO_USER {
+        return fail(errno.E_INVAL)
+    }
+    if kind == IOPRIO_WHO_PROCESS && (who & INT_MASK) != 0 && sched.find_pid(state, who & INT_MASK) == kstate.MAX_TASKS {
+        return fail(errno.E_SRCH)
+    }
+    if !set {
+        return IOPRIO_DEFAULT
+    }
+    let class: u64 = (prio & INT_MASK) >> IOPRIO_CLASS_SHIFT
+    let data: u64 = prio & IOPRIO_DATA_MASK
+    if class > IOPRIO_CLASS_MAX {
+        return fail(errno.E_INVAL)
+    }
+    if (class == IOPRIO_CLASS_RT || class == IOPRIO_CLASS_BE) && data >= IOPRIO_DATA_LEVELS {
+        return fail(errno.E_INVAL)
+    }
+    if class == IOPRIO_CLASS_RT && !perm.is_root(state, me) {
+        return fail(errno.E_PERM)
+    }
+    return 0
+}
+
+fn call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64) -> u64 {
+    if number == SYS_SETFSUID {
+        return perm.euid(state, me)
+    }
+    if number == SYS_SETFSGID {
+        return perm.egid(state, me)
+    }
+    if number == SYS_PERSONALITY {
+        return do_personality(a0)
+    }
+    if number == SYS_SCHED_RR_GET_INTERVAL {
+        return do_rr_interval(state, me, a0, a1)
+    }
+    if number == SYS_SETTIMEOFDAY {
+        return do_settimeofday(state, me, a0, a1)
+    }
+    if number == SYS_SETHOSTNAME {
+        return do_set_name(state, me, utsinfo.F_NODENAME, a0, a1)
+    }
+    if number == SYS_SETDOMAINNAME {
+        return do_set_name(state, me, utsinfo.F_DOMAIN, a0, a1)
+    }
+    if number == SYS_IOPRIO_SET {
+        return do_ioprio(state, me, true, a0, a1, a2)
+    }
+    return do_ioprio(state, me, false, a0, a1, 0)
+}
