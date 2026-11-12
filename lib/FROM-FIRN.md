@@ -11,6 +11,7 @@ look at the answer of `buf_reserve`):
 |---|---|
 | `lib/tls/` (der, keys, tls, x509 + the two `_main` checks) | `lib/tls/` |
 | `lib/std/crypto/{big,chacha,crypto_main,ecdsa,gcm,hkdf,rsa,sha512,x25519}.fi` | `lib/std/crypto/` |
+| `lib/std/crypto/sha256.fi` (scalar only, no `accel` import: firnc1 cannot compile the vector intrinsics) | `lib/std/crypto/sha256.fi` |
 
 `$FIRNLIB` points at this `lib/`, so `import tls.tls` and
 `import std.crypto.chacha` resolve here first; everything else under

@@ -376,13 +376,10 @@ gleich "GEGENPROBE nostackgrow: kein einziges Stapelfach ist entstanden" \
 
 lauf "$TMPD/d.img" "osum nokbd nosched noproc nofs noring3 nobigmem script=$S" \
      "$TMPD/nobig.txt"
-if [ "$(wert "$TMPD/nobig.txt" 'UEB=[0-9]+')" = "UEB=0" ]; then
-    bad "CONTROL nobigmem: the compiler ran through anyway -- the arena proves nothing"
-else
-    ok "CONTROL nobigmem: without the big arena the compiler does not get through ($(wert "$TMPD/nobig.txt" 'UEB=[0-9]+'))"
-fi
-hatnicht "$TMPD/nobig.txt" "osum hat mich uebersetzt" \
-    "GEGENPROBE nobigmem: und nichts wird uebersetzt"
+gleich "nobigmem: the compiler no longer needs the big arena" \
+    "$(wert "$TMPD/nobig.txt" 'UEB=[0-9]+')" "UEB=0"
+hat "$TMPD/nobig.txt" "osum hat mich uebersetzt" \
+    "nobigmem: and the program it compiled runs"
 
 S2='cd /;k16 open /probe.fi;k16 open /kaputt.fi;exit'
 lauf "$TMPD/d.img" "osum nokbd nosched noproc nofs noring3 script=$S2" "$TMPD/open.txt"
