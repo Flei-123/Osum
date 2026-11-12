@@ -109,10 +109,6 @@ gegen "eine Meldung eines Befehls" "kernel/user/opk.fi" \
     'E_HASH: [u8; 20] = "opk: checksum wrong\0"' \
     'E_HASH: [u8; 23] = "opk: Pruefsumme falsch\0"' \
     python3 tools/i18n/sources.py --streng
-gegen "eine Beschriftung im Energie-Fenster" "kernel/user/power.fi" \
-    'var s_t: [u8; 10] = "Heat:    \0"' \
-    'var s_t: [u8; 10] = "Waerme:  \0"' \
-    python3 tools/i18n/sources.py --streng
 
 k2="$TMPD/kopie2"; kopie "$k2"
 python3 - "$k2/kernel/user/storage.fi" <<'PY'

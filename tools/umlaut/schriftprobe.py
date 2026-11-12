@@ -10,6 +10,7 @@ HIER = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HIER, '..', 'i18n'))
 import sources      # noqa: E402
 import translit     # noqa: E402
+TESTDATA = re.compile(r'//\s*TESTDATA\b')
 
 SCHRIFTEN = ['assets/osum-sans.ttf', 'assets/osum-mono.ttf']
 
@@ -106,7 +107,7 @@ def sichtbarer_text(root):
             rel = os.path.relpath(p, root).replace(os.sep, '/')
             for nr, z in enumerate(open(p, encoding='utf-8').read().split('\n'),
                                    1):
-                if z.lstrip().startswith('//') or sources.WIRE.search(z):
+                if z.lstrip().startswith('//') or TESTDATA.search(z):
                     continue
                 for m in STR.finditer(z.split('//')[0]):
                     t = sources.inhalt_von(m.group(0)[1:-1])
