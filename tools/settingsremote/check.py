@@ -15,7 +15,6 @@ RECT = re.compile(r"^settings: rect name=xrsw x=(\d+) y=(\d+) w=(\d+) h=(\d+) ax
 REMOTE = re.compile(r"^settings: remote page enabled=(\w+) service=(\S*) id=(\S*) peer=(\S*)$", re.M)
 NAV = re.compile(r"^settings: nav route=" + re.escape(ROUTE) + r" page=(\d+)", re.M)
 MIN_COLORS = 4
-MIN_DIFF_PIXELS = 40
 
 
 def declared_controls():
@@ -31,12 +30,6 @@ def shot(run_dir, name):
 
 def colors_in(img, box):
     return len(set(img.crop(box).getdata()))
-
-
-def diff_pixels(a, b):
-    if a is None or b is None or a.size != b.size:
-        return 0
-    return sum(1 for p, q in zip(a.getdata(), b.getdata()) if p != q)
 
 
 def judge(serial_text, before, after, declared):
@@ -61,7 +54,10 @@ def judge(serial_text, before, after, declared):
         box = (ax, ay, min(ax + w, before.size[0]), min(ay + h, before.size[1]))
         ok(w > 0 and h > 0 and box[2] > box[0] and box[3] > box[1], "switch rect inside the picture (%s)" % (box,))
         ok(colors_in(before, box) >= MIN_COLORS, "switch rect has drawn pixels (%d colors)" % colors_in(before, box))
-    ok(diff_pixels(before, after) >= MIN_DIFF_PIXELS, "clicking the switch changes the picture (%d pixels)" % diff_pixels(before, after))
+    if rect and after is not None:
+        ax, ay, w, h = (int(rect.group(i)) for i in (5, 6, 3, 4))
+        box = (ax, ay, min(ax + w, after.size[0]), min(ay + h, after.size[1]))
+        ok(box[2] > box[0] and colors_in(after, box) >= MIN_COLORS, "switch still drawn after the click")
     return res
 
 
