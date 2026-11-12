@@ -54,10 +54,11 @@ if [ -f "$S" ]; then
     [ "$COUNT" -eq 1 ] && ok "started exactly once" || bad "started $COUNT times"
 fi
 
-echo "== counter-proof: origin/main glogin does not start it =="
+BASE_REF=${XRAUTOSTART_BASE:-04b121db7^}
+echo "== counter-proof: glogin before the autostart change ($BASE_REF) does not start it =="
 BASE_TREE=$(mktemp -d)
 rmdir "$BASE_TREE"
-git worktree add -q --detach "$BASE_TREE" origin/main || { bad "worktree for origin/main"; BASE_TREE=""; }
+git worktree add -q --detach "$BASE_TREE" "$BASE_REF" || { bad "worktree for $BASE_REF"; BASE_TREE=""; }
 if [ -n "$BASE_TREE" ]; then
     sign_in "$BASE_TREE" old
     S=$OUT/old/serial.txt
