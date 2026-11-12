@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.errno
+import sched.futex
+import sys.sysuser
+
+export {
+    handles, call
+}
+
+const SYS_FUTEX_WAKE: u64 = 454
+const SYS_FUTEX_WAIT: u64 = 455
+
+const FUTEX2_SIZE_MASK: u64 = 3
+const FUTEX2_SIZE_U32: u64 = 2
+const FUTEX2_NUMA: u64 = 4
+const FUTEX2_PRIVATE: u64 = 128
+const FUTEX2_KNOWN: u64 = 135
+const CLOCK_REALTIME: u64 = 0
+const CLOCK_MONOTONIC: u64 = 1
+const OP_WAIT_BITSET: u64 = 9
+const OP_WAKE_BITSET: u64 = 10
+const OP_PRIVATE: u64 = 128
+const OP_CLOCK_REALTIME: u64 = 256
+const INT_MASK: u64 = 0xFFFFFFFF
+
+fn fail(e: u64) -> u64 {
+    return sysuser.neg(e)
+}
+
+fn handles(number: u64) -> bool {
+    return number == SYS_FUTEX_WAKE || number == SYS_FUTEX_WAIT
+}
+
+fn flags_ok(flags: u64) -> bool {
+    return (flags & ~FUTEX2_KNOWN) == 0 && (flags & FUTEX2_NUMA) == 0
+        && (flags & FUTEX2_SIZE_MASK) == FUTEX2_SIZE_U32
+}
+
+fn op_of(base: u64, flags: u64) -> u64 {
+    if (flags & FUTEX2_PRIVATE) != 0 {
+        return base | OP_PRIVATE
+    }
+    return base
+}
+
+fn call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
+    if number == SYS_FUTEX_WAKE {
+        return do_wake(state, me, a0, a1, a2, a3)
+    }
+    return do_wait(state, me, a0, a1, a2, a3, a4, a5)
+}
+
+fn do_wake(state: u64, me: u64, uaddr: u64, mask: u64, nr: u64, flags: u64) -> u64 {
+    if !flags_ok(flags & INT_MASK) || (mask & INT_MASK) == 0 || (nr & INT_MASK) > 0x7FFFFFFF {
+        return fail(errno.E_INVAL)
+    }
+    return futex.call(state, me, uaddr, op_of(OP_WAKE_BITSET, flags), nr & INT_MASK, 0, 0, mask & INT_MASK)
+}
+
+fn do_wait(state: u64, me: u64, uaddr: u64, val: u64, mask: u64, flags: u64, timeout: u64, clockid: u64) -> u64 {
+    if !flags_ok(flags & INT_MASK) || (mask & INT_MASK) == 0 {
+        return fail(errno.E_INVAL)
+    }
+    var op: u64 = op_of(OP_WAIT_BITSET, flags)
+    if timeout != 0 {
+        if (clockid & INT_MASK) == CLOCK_REALTIME {
+            op = op | OP_CLOCK_REALTIME
+        } else if (clockid & INT_MASK) != CLOCK_MONOTONIC {
+            return fail(errno.E_INVAL)
+        }
+    }
+    return futex.call(state, me, uaddr, op, val & INT_MASK, timeout, 0, mask & INT_MASK)
+}
