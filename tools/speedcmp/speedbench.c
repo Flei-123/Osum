@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -237,6 +238,8 @@ static void run_thread(long n)
     }
 }
 
+#include "wbench.h"
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && !strcmp(argv[1], "--noop"))
@@ -264,6 +267,7 @@ int main(int argc, char **argv)
     measure("fork_exec_exit_wait", run_exec, 20, 1, 1);
     measure("pipe_roundtrip", run_pipe, PIPE_ROUNDS, 1, 1);
     measure("thread_create_join", run_thread, 100, 1, 1);
+    wb_run_all();
     close(data_fd);
     unlink(DATA_PATH);
     (void)!write(1, "\nS END 0 0\n", 11);

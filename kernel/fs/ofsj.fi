@@ -6,10 +6,13 @@ import block.blk
 import mm.mmframe
 import libc.regio
 import libc.octets
+import diag.cmdopt
 
 export {
     setup, disable, enabled, begin, commit, abort, write, read, read_stream, read_stream_span,
     replay, needed, room, slots, counter, chunk, clear,
+    commit_lazy, flush_pending, pending, age, group_on, group_counter,
+    GROUP_IDLE_TICKS, GC_GROUPS, GC_DEFERRED,
     J_TX, J_REPLAY, J_RBLOCKS, J_CHUNKS, J_WRITES, J_HITS, J_STGRUNS,
     HEAD_MAGIC, COMMIT_MAGIC, MAX_SLOTS, BLOCKS_NEEDED
 }
@@ -46,6 +49,20 @@ const J_HITS: u64 = 104
 const J_STG: u64 = 112
 const J_STGCAP: u64 = 120
 const J_STGRUNS: u64 = 128
+
+const GROUP_SOFT_SLOTS: u64 = 160
+const GROUP_MAX_TICKS: u64 = 30
+const GROUP_IDLE_TICKS: u64 = 2
+const GC_GROUPS: u64 = 0
+const GC_DEFERRED: u64 = 1
+const MODE_UNSET: u64 = 0
+const MODE_ON: u64 = 1
+const MODE_OFF: u64 = 2
+
+static mut g_pending: [u64; 1] = [0 as u64; 1]
+static mut g_since: [u64; 1] = [0 as u64; 1]
+static mut g_mode: [u64; 1] = [0 as u64; 1]
+static mut g_stats: [u64; 2] = [0 as u64; 2]
 
 const TGT_OFF: u64 = 0x1000
 const HSH_OFF: u64 = 0x2000
@@ -193,6 +210,8 @@ fn room(state: u64) -> u64 {
 }
 
 fn disable(state: u64) {
+    let _flushed: bool = flush_pending(state)
+    g_pending[0] = 0
     s(state, J_ON, 0)
     s(state, J_DEPTH, 0)
     s(state, J_COUNT, 0)
@@ -216,7 +235,45 @@ fn setup(state: u64, jstart: u64, jblocks: u64) -> bool {
     s(state, J_BLOCKS, jblocks)
     s(state, J_ON, 1)
     stage_init(state)
+    g_pending[0] = 0
+    g_mode[0] = group_mode(state)
     return true
+}
+
+fn group_mode(state: u64) -> u64 {
+    var w: [u8; 8] = "nogroup\0"
+    if cmdopt.has(state, (&w[0]) as u64) {
+        return MODE_OFF
+    }
+    return MODE_ON
+}
+
+fn group_on(state: u64) -> bool {
+    return g_mode[0] == MODE_ON && g(state, J_STG) != 0
+}
+
+fn group_counter(which: u64) -> u64 {
+    return g_stats[which as usize]
+}
+
+fn pending() -> bool {
+    return g_pending[0] != 0
+}
+
+fn age(state: u64) -> u64 {
+    return kstate.get(state, kstate.TICKS) -% g_since[0]
+}
+
+fn settle(state: u64) {
+    if g_pending[0] != 0 {
+        if g(state, J_COUNT) > GROUP_SOFT_SLOTS || age(state) >= GROUP_MAX_TICKS {
+            let _ok: bool = persist(state)
+        }
+    }
+    if g_pending[0] == 0 {
+        s(state, J_COUNT, 0)
+        s(state, J_FULL, 0)
+    }
 }
 
 fn begin(state: u64) {
@@ -225,8 +282,7 @@ fn begin(state: u64) {
     }
     let d: u64 = g(state, J_DEPTH)
     if d == 0 {
-        s(state, J_COUNT, 0)
-        s(state, J_FULL, 0)
+        settle(state)
     }
     s(state, J_DEPTH, d + 1)
 }
@@ -326,6 +382,55 @@ fn commit(state: u64) -> bool {
         return true
     }
     s(state, J_DEPTH, 0)
+    return persist(state)
+}
+
+fn commit_lazy(state: u64) -> bool {
+    if !enabled(state) {
+        return true
+    }
+    let d: u64 = g(state, J_DEPTH)
+    if d > 1 {
+        s(state, J_DEPTH, d - 1)
+        return true
+    }
+    s(state, J_DEPTH, 0)
+    if !group_on(state) || g(state, J_FULL) == 1 {
+        return persist(state)
+    }
+    if g(state, J_COUNT) == 0 {
+        return true
+    }
+    if g_pending[0] == 0 {
+        g_since[0] = kstate.get(state, kstate.TICKS)
+        g_pending[0] = 1
+    }
+    g_stats[GC_DEFERRED as usize] = g_stats[GC_DEFERRED as usize] + 1
+    return true
+}
+
+fn flush_pending(state: u64) -> bool {
+    if g_pending[0] == 0 || g(state, J_DEPTH) != 0 {
+        return true
+    }
+    return persist(state)
+}
+
+fn persist(state: u64) -> bool {
+    let was_pending: bool = g_pending[0] != 0
+    let ok: bool = persist_run(state)
+    g_pending[0] = 0
+    if was_pending {
+        g_stats[GC_GROUPS as usize] = g_stats[GC_GROUPS as usize] + 1
+    }
+    if !ok {
+        s(state, J_COUNT, 0)
+        s(state, J_FULL, 0)
+    }
+    return ok
+}
+
+fn persist_run(state: u64) -> bool {
     let n: u64 = g(state, J_COUNT)
     if n == 0 {
         return true

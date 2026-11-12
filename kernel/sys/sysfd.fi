@@ -30,6 +30,7 @@ import fs.mnt
 import fs.vfsops
 import fs.devfs
 import block.blk
+import fs.jsync
 import fs.ext4
 import fs.ntfs
 import fs.exfat
@@ -76,14 +77,16 @@ fn do_write(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
     if len > MAX_FWRITE {
         len = MAX_FWRITE
     }
-    if !procfault.user_ok(state, me, buf, len) {
-        return sysuser.neg(errno.E_FAULT)
-    }
     let of: u64 = file.fd_check(state, me, fd, handle.R_WRITE)
     if of >= file.MAX_OPEN {
         return sysuser.neg(errno.E_BADF)
     }
-    if len <= sysconst.MAX_IO || !file_like(file.open_kind(state, of)) {
+    let kind: u64 = file.open_kind(state, of)
+    let validated_by_copy: bool = len <= sysconst.MAX_IO && file_like(kind)
+    if !validated_by_copy && !procfault.user_ok(state, me, buf, len) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    if len <= sysconst.MAX_IO || !file_like(kind) {
         if len > sysconst.MAX_IO {
             len = sysconst.MAX_IO
         }
@@ -1413,7 +1416,8 @@ fn fsync_of(state: u64, of: u64) -> u64 {
     if kind == file.K_SOCK {
         return sysuser.neg(errno.E_INVAL)
     }
-    if !blk.flush(state) {
+    let journal_ok: bool = jsync.sync(state)
+    if !blk.flush(state) || !journal_ok {
         return sysuser.neg(errno.E_IO)
     }
     return 0
