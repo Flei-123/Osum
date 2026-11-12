@@ -41,6 +41,7 @@ import fs.procfs.pfbase
 import fs.procfs.pfproc
 import fs.procfs.pfreg
 import fs.procfs.pfsys
+import fs.procfs.pfsyscpu
 import fs.procfs.pfsysreg
 
 const K_GLOBAL: u64 = 2
@@ -192,7 +193,7 @@ const G_INTELGPU: u64 = 52
 const G_S3: u64 = 53
 const G_LAST: u64 = 53
 
-const G_END: u64 = 60
+const G_END: u64 = 61
 
 const F_STATUS: u64 = 1
 
@@ -216,13 +217,16 @@ const F_MMAPLOG: u64 = 10
 
 const F_LAST: u64 = 10
 
-const F_END: u64 = 20
+const F_END: u64 = 26
 
 fn build(state: u64, n: u64) -> u64 {
     let art: u64 = pfproc.n_art(n)
     let slot: u64 = pfproc.n_slot(n)
     let sub: u64 = pfproc.n_sub(n)
     if art == pfbase.K_SFS {
+        if pfsyscpu.owns(sub) {
+            return pfsyscpu.render(state, slot, sub)
+        }
         return sfs_build(state, sub)
     }
     if art == K_GLOBAL {
@@ -1187,7 +1191,7 @@ fn sfs_cache_type(state: u64) -> u64 {
 }
 
 fn sfs_is_dir(sub: u64) -> bool {
-    return sub == pfbase.SF_ROOT || sub == SF_DEVICES || sub == SF_SYSTEM || sub == SF_CPU || sub == SF_CPUN || sub == SF_CACHE || sub == SF_IDX0
+    return sub == pfbase.SF_ROOT || sub == SF_DEVICES || sub == SF_SYSTEM || sub == SF_CPU || sub == SF_CPUN || sub == SF_CACHE || sub == SF_IDX0 || pfsyscpu.is_dir(sub)
 }
 
 fn sfs_count(state: u64, sub: u64) -> u64 {
@@ -1195,10 +1199,13 @@ fn sfs_count(state: u64, sub: u64) -> u64 {
         return 1
     }
     if sub == SF_CPU {
-        return 3 + sfs_ncpu(state)
+        return 4 + sfs_ncpu(state)
     }
     if sub == SF_CPUN {
-        return 1
+        return pfsyscpu.CPUN_COUNT
+    }
+    if sub == pfsyscpu.SC_TOPOLOGY {
+        return pfsyscpu.TOPOLOGY_COUNT
     }
     if sub == SF_CACHE {
         if sfs_cache_type(state) == 0 {
@@ -1229,10 +1236,19 @@ fn sfs_child(state: u64, sub: u64, slot: u64, i: u64) -> u64 {
         if i < 3 {
             return pfproc.node(pfbase.K_SFS, 0, SF_ONLINE + i)
         }
-        return pfproc.node(pfbase.K_SFS, i - 3, SF_CPUN)
+        if i == 3 {
+            return pfproc.node(pfbase.K_SFS, 0, pfsyscpu.SC_KERNEL_MAX)
+        }
+        return pfproc.node(pfbase.K_SFS, i - 4, SF_CPUN)
     }
     if sub == SF_CPUN {
-        return pfproc.node(pfbase.K_SFS, slot, SF_CACHE)
+        if i == 0 {
+            return pfproc.node(pfbase.K_SFS, slot, SF_CACHE)
+        }
+        return pfsyscpu.cpun_child(slot, i)
+    }
+    if sub == pfsyscpu.SC_TOPOLOGY {
+        return pfsyscpu.topology_child(slot, i)
     }
     if sub == SF_CACHE {
         return pfproc.node(pfbase.K_SFS, slot, SF_IDX0)
@@ -1292,6 +1308,8 @@ fn sfs_name(state: u64, n: u64, out: u64) {
         pfsys.copy_z(out, (&a13[0]) as u64)
     } else if sub == SF_C_WAYS {
         pfsys.copy_z(out, (&a14[0]) as u64)
+    } else if pfsyscpu.owns(sub) {
+        pfsyscpu.entry_name(sub, out)
     } else {
         kstate.set8(out, 0 as u8)
     }

@@ -1,0 +1,122 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import sched.prstate
+import sched.taskconst
+import sched.taskslot
+import fs.procfs.pfproc
+import fs.procfs.pfpidview
+import fs.procfs.pfwrite
+
+export { make_wchan, make_cpuset, make_loginuid, make_timerslack, make_syscall, make_sched }
+
+const LOGINUID_UNSET: u64 = 4294967295
+const SCHED_LABEL_WIDTH: u64 = 45
+const SCHED_VALUE_WIDTH: u64 = 18
+const SCHED_RULE_LEN: u64 = 67
+const MS_PER_TICK: u64 = 10
+const FRACTION_DIGITS: u64 = 6
+const DASH: u64 = 45
+const COLON: u64 = 58
+
+fn make_wchan(state: u64, t: u64) -> u64 {
+    return pfproc.w_num(state, 0, 0)
+}
+
+fn make_cpuset(state: u64, t: u64) -> u64 {
+    return pfproc.w_nl(state, pfproc.w_ch(state, 0, 47))
+}
+
+fn make_loginuid(state: u64, t: u64) -> u64 {
+    return pfproc.w_nl(state, pfproc.w_num(state, 0, LOGINUID_UNSET))
+}
+
+fn make_timerslack(state: u64, t: u64) -> u64 {
+    var ns: u64 = taskslot.tget(state, t, taskconst.T_SLACK)
+    if ns == 0 {
+        ns = prstate.SLACK_DEFAULT
+    }
+    return pfproc.w_nl(state, pfproc.w_num(state, 0, ns))
+}
+
+fn make_syscall(state: u64, t: u64) -> u64 {
+    let st: u64 = taskslot.tget(state, t, taskconst.T_STATE)
+    if st == taskconst.S_RUN || st == taskconst.S_READY {
+        var word: [u8; 8] = "running\0"
+        return pfproc.w_nl(state, pfproc.w_str(state, 0, (&word[0]) as u64))
+    }
+    var p: u64 = pfproc.w_ch(state, 0, DASH)
+    p = pfproc.w_num(state, p, 1)
+    return pfproc.w_nl(state, p)
+}
+
+fn group_threads(state: u64, t: u64) -> u64 {
+    var group: u64 = taskslot.tget(state, t, taskconst.T_TGID)
+    if group == 0 {
+        group = taskslot.tget(state, t, taskconst.T_PID)
+    }
+    var count: u64 = 0
+    var i: u64 = 0
+    while i < kstate.MAX_TASKS {
+        let st: u64 = taskslot.tget(state, i, taskconst.T_STATE)
+        if st != taskconst.S_FREE && st != taskconst.S_ZOMBIE {
+            var other: u64 = taskslot.tget(state, i, taskconst.T_TGID)
+            if other == 0 {
+                other = taskslot.tget(state, i, taskconst.T_PID)
+            }
+            if other == group {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    return count
+}
+
+fn sched_label(state: u64, at: u64, label: u64) -> u64 {
+    var p: u64 = pfproc.w_str(state, at, label)
+    p = pfwrite.w_spaces(state, p, at + SCHED_LABEL_WIDTH - p)
+    return pfproc.w_ch(state, p, COLON)
+}
+
+fn sched_count(state: u64, at: u64, label: u64, v: u64) -> u64 {
+    var p: u64 = sched_label(state, at, label)
+    p = pfwrite.w_pad_num(state, p, v, SCHED_VALUE_WIDTH)
+    return pfproc.w_nl(state, p)
+}
+
+fn sched_millis(state: u64, at: u64, label: u64, ms: u64) -> u64 {
+    var p: u64 = sched_label(state, at, label)
+    p = pfwrite.w_pad_num(state, p, ms, SCHED_VALUE_WIDTH - FRACTION_DIGITS - 1)
+    p = pfproc.w_ch(state, p, 46)
+    var i: u64 = 0
+    while i < FRACTION_DIGITS {
+        p = pfproc.w_ch(state, p, 48)
+        i = i + 1
+    }
+    return pfproc.w_nl(state, p)
+}
+
+fn make_sched(state: u64, t: u64) -> u64 {
+    var runtime: [u8; 20] = "se.sum_exec_runtime\0"
+    var switches: [u8; 12] = "nr_switches\0"
+    var lead: [u8; 3] = " (\0"
+    var threads: [u8; 12] = ", #threads:\0"
+    var p: u64 = pfpidview.make_comm(state, t) - 1
+    p = pfproc.w_str(state, p, (&lead[0]) as u64)
+    p = pfproc.w_num(state, p, taskslot.tget(state, t, taskconst.T_PID))
+    p = pfproc.w_str(state, p, (&threads[0]) as u64)
+    p = pfproc.w_ch(state, p, 32)
+    p = pfproc.w_num(state, p, group_threads(state, t))
+    p = pfproc.w_ch(state, p, 41)
+    p = pfproc.w_nl(state, p)
+    var i: u64 = 0
+    while i < SCHED_RULE_LEN {
+        p = pfproc.w_ch(state, p, DASH)
+        i = i + 1
+    }
+    p = pfproc.w_nl(state, p)
+    p = sched_millis(state, p, (&runtime[0]) as u64, taskslot.tget(state, t, taskconst.T_TICKS) * MS_PER_TICK)
+    return sched_count(state, p, (&switches[0]) as u64, taskslot.tget(state, t, taskconst.T_RUNS))
+}

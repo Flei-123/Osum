@@ -1,0 +1,196 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import arch.cpu
+import arch.x86_64.fpu
+import lib.kstate
+import fs.procfs.pfbase
+import fs.procfs.pfproc
+import fs.procfs.pfsys
+
+export { SC_KERNEL_MAX, SC_TOPOLOGY, CPUN_COUNT, TOPOLOGY_COUNT, owns, is_dir, cpun_child, topology_child, entry_name, render }
+
+const SC_KERNEL_MAX: u64 = 17
+const SC_ONLINE: u64 = 18
+const SC_TOPOLOGY: u64 = 19
+const SC_PACKAGE_ID: u64 = 20
+const SC_CORE_ID: u64 = 21
+const SC_THREAD_SIBLINGS: u64 = 22
+const SC_CORE_SIBLINGS: u64 = 23
+
+const CPUN_COUNT: u64 = 3
+const TOPOLOGY_COUNT: u64 = 4
+
+const LEAF_TOPOLOGY: u64 = 0xB
+const LEVEL_SMT: u64 = 1
+const LEVEL_CORE: u64 = 2
+const SHIFT_MASK: u64 = 31
+const LEVEL_TYPE_SHIFT: u64 = 8
+const LEVEL_TYPE_MASK: u64 = 255
+const NO_PACKAGE_SHIFT: u64 = 32
+const COMMA: u64 = 44
+const DASH: u64 = 45
+
+fn owns(sub: u64) -> bool {
+    return sub >= SC_KERNEL_MAX && sub <= SC_CORE_SIBLINGS
+}
+
+fn is_dir(sub: u64) -> bool {
+    return sub == SC_TOPOLOGY
+}
+
+fn cpun_child(slot: u64, i: u64) -> u64 {
+    if i == 1 {
+        return pfproc.node(pfbase.K_SFS, slot, SC_TOPOLOGY)
+    }
+    return pfproc.node(pfbase.K_SFS, slot, SC_ONLINE)
+}
+
+fn topology_child(slot: u64, i: u64) -> u64 {
+    return pfproc.node(pfbase.K_SFS, slot, SC_PACKAGE_ID + i)
+}
+
+fn entry_name(sub: u64, out: u64) {
+    var kernel_max: [u8; 11] = "kernel_max\0"
+    var online: [u8; 7] = "online\0"
+    var topology: [u8; 9] = "topology\0"
+    var package_id: [u8; 20] = "physical_package_id\0"
+    var core_id: [u8; 8] = "core_id\0"
+    var smt_siblings: [u8; 21] = "thread_siblings_list\0"
+    var core_siblings: [u8; 19] = "core_siblings_list\0"
+    if sub == SC_KERNEL_MAX {
+        pfsys.copy_z(out, (&kernel_max[0]) as u64)
+    } else if sub == SC_ONLINE {
+        pfsys.copy_z(out, (&online[0]) as u64)
+    } else if sub == SC_TOPOLOGY {
+        pfsys.copy_z(out, (&topology[0]) as u64)
+    } else if sub == SC_PACKAGE_ID {
+        pfsys.copy_z(out, (&package_id[0]) as u64)
+    } else if sub == SC_CORE_ID {
+        pfsys.copy_z(out, (&core_id[0]) as u64)
+    } else if sub == SC_THREAD_SIBLINGS {
+        pfsys.copy_z(out, (&smt_siblings[0]) as u64)
+    } else if sub == SC_CORE_SIBLINGS {
+        pfsys.copy_z(out, (&core_siblings[0]) as u64)
+    } else {
+        kstate.set8(out, 0 as u8)
+    }
+}
+
+fn level_type(level: u64) -> u64 {
+    return (fpu.cpuid_c(LEAF_TOPOLOGY, level) >> LEVEL_TYPE_SHIFT) & LEVEL_TYPE_MASK
+}
+
+fn has_topology_leaf() -> bool {
+    return fpu.cpuid_a(0, 0) >= LEAF_TOPOLOGY
+}
+
+fn smt_shift() -> u64 {
+    if has_topology_leaf() && level_type(0) == LEVEL_SMT {
+        return fpu.cpuid_a(LEAF_TOPOLOGY, 0) & SHIFT_MASK
+    }
+    return 0
+}
+
+fn package_shift() -> u64 {
+    if !has_topology_leaf() {
+        return NO_PACKAGE_SHIFT
+    }
+    if level_type(1) == LEVEL_CORE {
+        return fpu.cpuid_a(LEAF_TOPOLOGY, 1) & SHIFT_MASK
+    }
+    return smt_shift()
+}
+
+fn apic_of(state: u64, i: u64) -> u64 {
+    return cpu.get(state, i, cpu.C_APICID)
+}
+
+fn cpu_total(state: u64) -> u64 {
+    var n: u64 = cpu.count(state)
+    if n == 0 {
+        n = 1
+    }
+    if n > kstate.MAX_CPUS {
+        n = kstate.MAX_CPUS
+    }
+    return n
+}
+
+fn core_id_of(apic: u64) -> u64 {
+    let shift: u64 = smt_shift()
+    let bits: u64 = package_shift() - shift
+    return (apic >> shift) & ((1 << bits) - 1)
+}
+
+fn sibling_mask(state: u64, slot: u64, shift: u64) -> u64 {
+    let key: u64 = apic_of(state, slot) >> shift
+    var mask: u64 = 0
+    var i: u64 = 0
+    while i < cpu_total(state) {
+        if (apic_of(state, i) >> shift) == key {
+            mask = mask | (1 << i)
+        }
+        i = i + 1
+    }
+    return mask
+}
+
+fn run_end(mask: u64, total: u64, from: u64) -> u64 {
+    var last: u64 = from
+    while last + 1 < total && ((mask >> (last + 1)) & 1) != 0 {
+        last = last + 1
+    }
+    return last
+}
+
+fn w_cpu_list(state: u64, mask: u64, total: u64) -> u64 {
+    var p: u64 = 0
+    var first: bool = true
+    var i: u64 = 0
+    while i < total {
+        if ((mask >> i) & 1) == 0 {
+            i = i + 1
+        } else {
+            let last: u64 = run_end(mask, total, i)
+            if !first {
+                p = pfproc.w_ch(state, p, COMMA)
+            }
+            p = pfproc.w_num(state, p, i)
+            if last > i {
+                p = pfproc.w_ch(state, p, DASH)
+                p = pfproc.w_num(state, p, last)
+            }
+            first = false
+            i = last + 1
+        }
+    }
+    return pfproc.w_nl(state, p)
+}
+
+fn online_flag(state: u64, slot: u64) -> u64 {
+    if slot == cpu.here(state) || cpu.online(state, slot) {
+        return 1
+    }
+    return 0
+}
+
+fn render(state: u64, slot: u64, sub: u64) -> u64 {
+    if sub == SC_KERNEL_MAX {
+        return pfproc.w_nl(state, pfproc.w_num(state, 0, kstate.MAX_CPUS - 1))
+    }
+    if sub == SC_ONLINE {
+        return pfproc.w_nl(state, pfproc.w_num(state, 0, online_flag(state, slot)))
+    }
+    let apic: u64 = apic_of(state, slot)
+    if sub == SC_PACKAGE_ID {
+        return pfproc.w_nl(state, pfproc.w_num(state, 0, apic >> package_shift()))
+    }
+    if sub == SC_CORE_ID {
+        return pfproc.w_nl(state, pfproc.w_num(state, 0, core_id_of(apic)))
+    }
+    if sub == SC_THREAD_SIBLINGS {
+        return w_cpu_list(state, sibling_mask(state, slot, smt_shift()), cpu_total(state))
+    }
+    return w_cpu_list(state, sibling_mask(state, slot, package_shift()), cpu_total(state))
+}
