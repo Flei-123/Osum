@@ -8,7 +8,7 @@ SOCK="$OUT/mon.sock"
 wait_marker() {
     local pattern=$1 waited=0
     until grep -qa "$pattern" "$OUT/ser.txt" 2>/dev/null || [ "$waited" -ge "${FX7_MARKERCAP:-420}" ]; do sleep 5; waited=$((waited + 5)); done
-    sleep "${FX7_PAINTWAIT:-25}"
+    sleep "${FX7_PAINTWAIT:-60}"
 }
 mon() { printf '%s\n' "$1" | socat - "UNIX-CONNECT:$SOCK" > /dev/null 2>&1; }
 (
