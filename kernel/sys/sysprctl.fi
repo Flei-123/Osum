@@ -1,0 +1,213 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.errno
+import lib.kstate
+import libc.regio
+import sched.prstate
+import sched.sched
+import sched.signal
+import sched.taskconst
+import sched.taskslot
+import sys.sysuser
+
+export {
+    handles, do_prctl, parent_exited
+}
+
+const PR_SET_PDEATHSIG: u64 = 1
+const PR_GET_PDEATHSIG: u64 = 2
+const PR_GET_KEEPCAPS: u64 = 7
+const PR_SET_KEEPCAPS: u64 = 8
+const PR_CAPBSET_READ: u64 = 23
+const PR_CAPBSET_DROP: u64 = 24
+const PR_GET_SECUREBITS: u64 = 27
+const PR_SET_SECUREBITS: u64 = 28
+const PR_SET_TIMERSLACK: u64 = 29
+const PR_GET_TIMERSLACK: u64 = 30
+const PR_SET_CHILD_SUBREAPER: u64 = 36
+const PR_GET_CHILD_SUBREAPER: u64 = 37
+const PR_GET_TID_ADDRESS: u64 = 40
+const PR_SET_THP_DISABLE: u64 = 41
+const PR_GET_THP_DISABLE: u64 = 42
+const PR_SET_PTRACER: u64 = 0x59616d61
+
+const PTRACER_ANY: u64 = 0xFFFFFFFFFFFFFFFF
+const SIGNAL_MAX: u64 = 64
+const CAP_LAST: u64 = 40
+const SECBITS_VALID: u64 = 0xFF
+const SECBITS_LOCK_MASK: u64 = 0xAA
+const INT_BYTES: u64 = 4
+const WORD_BYTES: u64 = 8
+const SIGNED_BIT: u64 = 0x8000000000000000
+
+fn handles(option: u64) -> bool {
+    return option == PR_SET_PDEATHSIG || option == PR_GET_PDEATHSIG || option == PR_GET_KEEPCAPS
+        || option == PR_SET_KEEPCAPS || option == PR_CAPBSET_READ || option == PR_CAPBSET_DROP
+        || option == PR_GET_SECUREBITS || option == PR_SET_SECUREBITS || option == PR_SET_TIMERSLACK
+        || option == PR_GET_TIMERSLACK || option == PR_SET_CHILD_SUBREAPER || option == PR_GET_CHILD_SUBREAPER
+        || option == PR_GET_TID_ADDRESS || option == PR_SET_THP_DISABLE || option == PR_GET_THP_DISABLE
+        || option == PR_SET_PTRACER
+}
+
+fn put_user(state: u64, me: u64, dst: u64, value: u64, len: u64) -> u64 {
+    var buf: [u8; 8] = [0 as u8; 8]
+    let src: u64 = (&buf[0]) as u64
+    regio.write64(src, value)
+    if !sysuser.copy_out(state, me, dst, src, len) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return 0
+}
+
+fn set_pdeathsig(state: u64, me: u64, sig: u64) -> u64 {
+    if sig > SIGNAL_MAX {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    taskslot.tset(state, me, taskconst.T_PDEATH, sig)
+    return 0
+}
+
+fn set_flag_checked(state: u64, me: u64, flag: u64, value: u64) -> u64 {
+    if value > 1 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    prstate.flag_set(state, me, flag, value == 1)
+    return 0
+}
+
+fn cap_dropped(state: u64, me: u64, cap: u64) -> bool {
+    return (taskslot.tget(state, me, taskconst.T_CAPDROP) & (1 << cap)) != 0
+}
+
+fn capbset(state: u64, me: u64, option: u64, cap: u64) -> u64 {
+    if cap > CAP_LAST {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if option == PR_CAPBSET_READ {
+        if cap_dropped(state, me, cap) {
+            return 0
+        }
+        return 1
+    }
+    taskslot.tset(state, me, taskconst.T_CAPDROP, taskslot.tget(state, me, taskconst.T_CAPDROP) | (1 << cap))
+    return 0
+}
+
+fn set_securebits(state: u64, me: u64, bits: u64) -> u64 {
+    if (bits & (0xFFFFFFFFFFFFFFFF -% SECBITS_VALID)) != 0 {
+        return sysuser.neg(errno.E_PERM)
+    }
+    let old: u64 = taskslot.tget(state, me, taskconst.T_SECBITS)
+    let locked: u64 = ((old & SECBITS_LOCK_MASK) >> 1) | (old & SECBITS_LOCK_MASK)
+    if ((old ^ bits) & locked) != 0 {
+        return sysuser.neg(errno.E_PERM)
+    }
+    taskslot.tset(state, me, taskconst.T_SECBITS, bits)
+    return 0
+}
+
+fn set_timerslack(state: u64, me: u64, ns: u64) -> u64 {
+    if ns == 0 || (ns & SIGNED_BIT) != 0 {
+        taskslot.tset(state, me, taskconst.T_SLACK, 0)
+    } else {
+        taskslot.tset(state, me, taskconst.T_SLACK, ns)
+    }
+    return 0
+}
+
+fn get_timerslack(state: u64, me: u64) -> u64 {
+    let ns: u64 = taskslot.tget(state, me, taskconst.T_SLACK)
+    if ns == 0 {
+        return prstate.SLACK_DEFAULT
+    }
+    return ns
+}
+
+fn set_ptracer(state: u64, me: u64, who: u64) -> u64 {
+    if who != 0 && who != PTRACER_ANY && sched.find_pid(state, who) >= kstate.MAX_TASKS {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    taskslot.tset(state, me, taskconst.T_PTRACER, who)
+    return 0
+}
+
+fn thp_disable(state: u64, me: u64, option: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
+    if option == PR_GET_THP_DISABLE {
+        if a2 != 0 || a3 != 0 || a4 != 0 {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        if prstate.flag_get(state, me, prstate.FLAG_THP_DISABLE) {
+            return 1
+        }
+        return 0
+    }
+    if a3 != 0 || a4 != 0 || a5 != 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    prstate.flag_set(state, me, prstate.FLAG_THP_DISABLE, a2 != 0)
+    return 0
+}
+
+fn flag_value(state: u64, me: u64, flag: u64) -> u64 {
+    if prstate.flag_get(state, me, flag) {
+        return 1
+    }
+    return 0
+}
+
+fn do_prctl(state: u64, me: u64, option: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
+    if option == PR_SET_PDEATHSIG {
+        return set_pdeathsig(state, me, a2)
+    }
+    if option == PR_GET_PDEATHSIG {
+        return put_user(state, me, a2, taskslot.tget(state, me, taskconst.T_PDEATH), INT_BYTES)
+    }
+    if option == PR_GET_KEEPCAPS {
+        return flag_value(state, me, prstate.FLAG_KEEPCAPS)
+    }
+    if option == PR_SET_KEEPCAPS {
+        return set_flag_checked(state, me, prstate.FLAG_KEEPCAPS, a2)
+    }
+    if option == PR_CAPBSET_READ || option == PR_CAPBSET_DROP {
+        return capbset(state, me, option, a2)
+    }
+    if option == PR_GET_SECUREBITS {
+        return taskslot.tget(state, me, taskconst.T_SECBITS)
+    }
+    if option == PR_SET_SECUREBITS {
+        return set_securebits(state, me, a2)
+    }
+    if option == PR_SET_TIMERSLACK {
+        return set_timerslack(state, me, a2)
+    }
+    if option == PR_GET_TIMERSLACK {
+        return get_timerslack(state, me)
+    }
+    if option == PR_SET_CHILD_SUBREAPER {
+        prstate.flag_set(state, me, prstate.FLAG_SUBREAPER, a2 != 0)
+        return 0
+    }
+    if option == PR_GET_CHILD_SUBREAPER {
+        return put_user(state, me, a2, flag_value(state, me, prstate.FLAG_SUBREAPER), INT_BYTES)
+    }
+    if option == PR_GET_TID_ADDRESS {
+        return put_user(state, me, a2, taskslot.tget(state, me, taskconst.T_FUTEX), WORD_BYTES)
+    }
+    if option == PR_SET_THP_DISABLE || option == PR_GET_THP_DISABLE {
+        return thp_disable(state, me, option, a2, a3, a4, a5)
+    }
+    return set_ptracer(state, me, a2)
+}
+
+fn parent_exited(state: u64, me: u64) {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 0
+    while i < n {
+        let sig: u64 = taskslot.tget(state, i, taskconst.T_PDEATH)
+        if sig != 0 && i != me && taskslot.tget(state, i, taskconst.T_PARENT) == me
+            && taskslot.tget(state, i, taskconst.T_STATE) != taskconst.S_FREE {
+            let _r: bool = signal.send_task(state, i, sig)
+        }
+        i = i + 1
+    }
+}

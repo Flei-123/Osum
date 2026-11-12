@@ -1,0 +1,58 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.kstate
+import sched.taskconst
+import sched.taskslot
+
+export {
+    FLAG_KEEPCAPS, FLAG_THP_DISABLE, FLAG_SUBREAPER, SLACK_DEFAULT, SECBIT_KEEP_CAPS,
+    flag_get, flag_set, inherit_fork, reset_exec, subreaper_for
+}
+
+const FLAG_KEEPCAPS: u64 = 1
+const FLAG_THP_DISABLE: u64 = 2
+const FLAG_SUBREAPER: u64 = 4
+const FLAGS_INHERITED: u64 = 3
+const SLACK_DEFAULT: u64 = 50000
+const SECBIT_KEEP_CAPS: u64 = 16
+const ANCESTOR_LIMIT: u64 = 64
+
+fn flag_get(state: u64, t: u64, flag: u64) -> bool {
+    return (taskslot.tget(state, t, taskconst.T_PRFLAGS) & flag) != 0
+}
+
+fn flag_set(state: u64, t: u64, flag: u64, on: bool) {
+    let old: u64 = taskslot.tget(state, t, taskconst.T_PRFLAGS)
+    if on {
+        taskslot.tset(state, t, taskconst.T_PRFLAGS, old | flag)
+    } else {
+        taskslot.tset(state, t, taskconst.T_PRFLAGS, old & (0xFFFFFFFFFFFFFFFF -% flag))
+    }
+}
+
+fn inherit_fork(state: u64, child: u64, parent: u64) {
+    taskslot.tset(state, child, taskconst.T_PRFLAGS, taskslot.tget(state, parent, taskconst.T_PRFLAGS) & FLAGS_INHERITED)
+    taskslot.tset(state, child, taskconst.T_SLACK, taskslot.tget(state, parent, taskconst.T_SLACK))
+    taskslot.tset(state, child, taskconst.T_SECBITS, taskslot.tget(state, parent, taskconst.T_SECBITS))
+    taskslot.tset(state, child, taskconst.T_CAPDROP, taskslot.tget(state, parent, taskconst.T_CAPDROP))
+}
+
+fn reset_exec(state: u64, t: u64) {
+    flag_set(state, t, FLAG_KEEPCAPS, false)
+    let bits: u64 = taskslot.tget(state, t, taskconst.T_SECBITS)
+    taskslot.tset(state, t, taskconst.T_SECBITS, bits & (0xFFFFFFFFFFFFFFFF -% SECBIT_KEEP_CAPS))
+}
+
+fn subreaper_for(state: u64, dying: u64, fallback: u64) -> u64 {
+    var cur: u64 = taskslot.tget(state, dying, taskconst.T_PARENT)
+    var depth: u64 = 0
+    while depth < ANCESTOR_LIMIT && cur < kstate.MAX_TASKS && cur != dying {
+        let st: u64 = taskslot.tget(state, cur, taskconst.T_STATE)
+        if st != taskconst.S_FREE && st != taskconst.S_ZOMBIE && flag_get(state, cur, FLAG_SUBREAPER) {
+            return cur
+        }
+        cur = taskslot.tget(state, cur, taskconst.T_PARENT)
+        depth = depth + 1
+    }
+    return fallback
+}

@@ -15,6 +15,7 @@ import sched.time
 import sched.taskslot
 import sched.taskconst
 import sched.ptstate
+import sched.prstate
 
 export {
     init, create, start, schedule, on_tick, fast_tick, yield_now, sleep_ticks, sleep_fine, poll_sleep_fine, idle_wait,
@@ -672,6 +673,7 @@ fn create(state: u64, kind: u64, prio: u64, arg: u64, entry: u64) -> u64 {
     taskslot.tset(state, slot, taskconst.T_SUID, taskslot.tget(state, par, taskconst.T_SUID))
     taskslot.tset(state, slot, taskconst.T_SGID, taskslot.tget(state, par, taskconst.T_SGID))
     taskslot.tset(state, slot, taskconst.T_UMASK, taskslot.tget(state, par, taskconst.T_UMASK))
+    prstate.inherit_fork(state, slot, par)
     groups_inherit(state, slot, par)
     if taskslot.tget(state, par, taskconst.T_EXAS) != 0 {
         session_identity(state, slot)
@@ -1801,11 +1803,15 @@ fn kill_group(state: u64, i: u64, code: u64) {
 
 fn reparent(state: u64, dying: u64) {
     let slot: u64 = kstate.get(state, kstate.K13_OFF + kstate.U_INITSLOT)
-    if slot == 0 {
+    var init: u64 = kstate.MAX_TASKS
+    if slot != 0 {
+        init = slot - 1
+    }
+    if init == dying {
         return
     }
-    let init: u64 = slot - 1
-    if init == dying {
+    let heir: u64 = prstate.subreaper_for(state, dying, init)
+    if heir >= kstate.MAX_TASKS {
         return
     }
     let n: u64 = kstate.get(state, kstate.TASKS)
@@ -1813,7 +1819,7 @@ fn reparent(state: u64, dying: u64) {
     while i < n {
         if taskslot.tget(state, i, taskconst.T_STATE) != taskconst.S_FREE {
             if taskslot.tget(state, i, taskconst.T_PARENT) == dying && i != dying {
-                taskslot.tset(state, i, taskconst.T_PARENT, init)
+                taskslot.tset(state, i, taskconst.T_PARENT, heir)
                 kstate.add(state, kstate.K13_OFF + kstate.U_ORPHANS, 1)
             }
         }
