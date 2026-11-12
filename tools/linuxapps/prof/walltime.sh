@@ -10,6 +10,6 @@ export "KARGS=osum vfs nokbd nosched noproc nofs gfx nic nip=10.0.2.15/24 ngw=10
 export KERNEL
 python3 tools/linuxapps/prof/hmpsample.py "$OUT/mon.sock" "$OUT/samples.txt" "$TMO" > /dev/null 2>&1 &
 SAMPLER=$!
-bash tools/linuxapps/run.sh "${FXWD:-/root/abbilder/fxscudo/wd}" tools/linuxapps/guest-fx12-wall.sh "$OUT"
+bash tools/linuxapps/run.sh "${FXWD:-/root/abbilder/fxscudo/wd}" "${FXGUEST:-tools/linuxapps/guest-fx12-wall.sh}" "$OUT"
 kill "$SAMPLER" 2>/dev/null
 grep -a "FX11 run .* rc=" "$OUT/ser.txt"

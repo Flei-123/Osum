@@ -28,12 +28,14 @@ python3 -I tools/iwlfh/ref.py gen "$TMPD/blobs" > "$TMPD/blobs.log" 2>&1 || { ba
     echo "warteauf 'qsnet: state=[0-9]+ kind=[0-9]+ rows=[1-9]' || 150"
     echo "warte 4"
     echo "foto list"
-    for r in 0 1 2; do
-        echo "klickauf qsnetkey$((50 + r))"; echo "warte 3"; echo "foto pick$r"
-        echo "klickauf qsnetkey41"; echo "tippe abc"; echo "klickauf qsnetkey42"; echo "warte 2"; echo "foto short$r"
-        echo "klickauf qsnetkey41"; echo "tippe defgh123"; echo "klickauf qsnetkey42"; echo "warte 3"
-    done
-    echo "warte 3"
+    echo "klickauf qsnetkey50"; echo "warte 3"; echo "foto pick0"
+    echo "klickauf qsnetkey41"; echo "tippe abc"; echo "klickauf qsnetkey42"; echo "warte 2"; echo "foto short0"
+    echo "klickauf qsnetkey45"; echo "warte 2"; echo "foto cancel0"
+    echo "klickauf qsnetkey51"; echo "warte 3"; echo "foto pick1"
+    echo "klickauf qsnetkey52"; echo "warte 3"; echo "foto pick2"
+    echo "klickauf qsnetkey41"; echo "tippe abc"; echo "klickauf qsnetkey42"; echo "warte 2"; echo "foto short2"
+    echo "klickauf qsnetkey41"; echo "tippe defgh123"; echo "klickauf qsnetkey42"; echo "warte 3"
+    echo "warteauf 'qsnet: link failed' || 90"; echo "warte 3"; echo "foto badpw"
 } > "$TMPD/script.txt"
 
 D="$TMPD/out"
@@ -60,6 +62,8 @@ else ok "scale $SCALE: counter-proof -- no network name while the page is closed
 grep -aq 'qsnet: box k=41 ' "$S" && ok "scale $SCALE: a secured network opens the password row" || bad "scale $SCALE: no password row appeared"
 grep -aq 'qsnet: password short' "$S" && ok "scale $SCALE: a 3 character password is rejected" || bad "scale $SCALE: short password not rejected"
 grep -aq 'qsnet: connect rc=0' "$S" && ok "scale $SCALE: a valid password saves the network" || bad "scale $SCALE: no connect after a valid password"
+grep -aq 'qsnet: link failed' "$S" && ok "scale $SCALE: no link after the timeout -> the password view returns with an error" || bad "scale $SCALE: no failure report for a wrong password"
+if [ -s "$D/badpw.ppm" ] && ocr "$D/badpw.ppm" | grep -qi "failed"; then ok "scale $SCALE: the picture shows the failure message"; else bad "scale $SCALE: no failure message in the picture"; fi
 if grep -aqE 'CRASH|EXCEPTION' "$S"; then bad "scale $SCALE: crash lines in serial"; else ok "scale $SCALE: no crash lines"; fi
 echo "QSNETWIFI: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

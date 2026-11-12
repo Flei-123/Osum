@@ -1,0 +1,85 @@
+import std.rt
+import jarvisd.jdbase
+import jarvisd.jdcmd
+
+const NG_IP: i64 = 1
+const NG_GW: i64 = 3
+
+static mut fail_count: u64 = 0
+static mut fail_since_ms: u64 = 0
+static mut net_sig: u64 = 0
+
+fn net_signature() -> u64 {
+    let ip: u64 = syscall(jdbase.S_NETGET, NG_IP, 0, 0, 0, 0, 0) as u64
+    let gw: u64 = syscall(jdbase.S_NETGET, NG_GW, 0, 0, 0, 0, 0) as u64
+    return (ip << 32) ^ gw
+}
+
+fn fail_name(kind: u64) -> str {
+    if kind == jdbase.FAIL_CONNECT {
+        return "connect"
+    }
+    if kind == jdbase.FAIL_TLS {
+        return "tls"
+    }
+    if kind == jdbase.FAIL_SEND {
+        return "send"
+    }
+    if kind == jdbase.FAIL_RECV {
+        return "recv"
+    }
+    if kind == jdbase.FAIL_STATUS {
+        return "status"
+    }
+    if kind == jdbase.FAIL_ROOTS {
+        return "roots"
+    }
+    return "unknown"
+}
+
+fn log_event(event: str, kind: str, count: u64, secs: u64) {
+    var detail: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&detail, count)
+    rt.buf_push(&detail, 32 as u8)
+    rt.buf_push_dec_u64(&detail, secs)
+    rt.buf_push(&detail, 115 as u8)
+    jdcmd.notiere(event.p as u64, event.n, kind, detail.ptr, detail.len)
+    rt.buf_free(&detail)
+}
+
+fn note_failure() {
+    let now: u64 = jdcmd.now_ms()
+    if fail_count == 0 {
+        fail_since_ms = now
+    }
+    fail_count = fail_count + 1
+    if (fail_count & (fail_count - 1)) == 0 {
+        log_event("net", fail_name(jdbase.k_fail_kind), fail_count, (now - fail_since_ms) / 1000)
+    }
+}
+
+fn note_success() {
+    let now: u64 = jdcmd.now_ms()
+    if fail_count > 0 {
+        log_event("net", "recovered", fail_count, (now - fail_since_ms) / 1000)
+        fail_count = 0
+    }
+    net_sig = net_signature()
+}
+
+fn net_changed() -> bool {
+    if jdbase.k_legacy {
+        return false
+    }
+    let sig: u64 = net_signature()
+    if net_sig == 0 {
+        net_sig = sig
+        return false
+    }
+    if sig == net_sig {
+        return false
+    }
+    net_sig = sig
+    log_event("net", "changed", fail_count, 0)
+    return true
+}

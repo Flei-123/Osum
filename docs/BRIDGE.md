@@ -641,3 +641,11 @@ Nebenbei behoben: `jarvisctl input revoke` hieß durch die Umbenennung „transp
 
 **Abnahme.** `tools/bridge2/input.sh` (Config-Schlüssel, Public-Wächter, Bau, Not-Aus in der VM mit
 Gegenprobe). Die volle Kette Auftrag → Gerät → Ergebnis: `tools/bridge2/chain.sh`.
+
+## Reconnect behaviour (12.11.2026)
+
+- Every https request has a hard 15 s send/receive timeout (`jdbase.NET_TIMEOUT_MS`); `jarvisd -o` restores the old 60 s for counter-proofs.
+- The worker watchdog is capped at 120 s (`jdbase.WATCHDOG_CAP_S`), also when `permissions.conf` says more or 0.
+- A change of the device IP or gateway ends the session and starts a fresh round (new DNS lookup, new sign-in).
+- `/var/log/jarvisd.log` gets `net <kind> <count> <secs>` on failures 1, 2, 4, 8, ..., and `net recovered <count> <secs>` when a sign-in works again. Kinds: connect, tls, send, recv, status, roots. The log rotates to `jarvisd.log.1` at 64 KiB.
+- Gate: `tools/bridgerecon/run.sh` (fake https bridge with DNS, stalled requests, link black hole, `-o` counter-proof).

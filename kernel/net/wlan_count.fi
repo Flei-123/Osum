@@ -1,0 +1,103 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import libc.octets
+
+export { note_rx, note_tx, note_conv_fail, note_send_fail, get, C_RX_ARP_REQ, C_RX_ARP_REP, C_RX_ICMP_REPLY, C_RX_ICMP_OTHER,
+    C_RX_TCP, C_RX_UDP, C_RX_OTHER, C_TX_ARP_REQ, C_TX_ARP_REP, C_TX_ICMP_REQ, C_TX_ICMP_OTHER, C_TX_TCP, C_TX_UDP,
+    C_TX_OTHER, C_CONV_FAIL, C_SEND_FAIL, C_LAST_ERR }
+
+const C_RX_ARP_REQ: u64 = 0
+const C_RX_ARP_REP: u64 = 1
+const C_RX_ICMP_REPLY: u64 = 2
+const C_RX_ICMP_OTHER: u64 = 3
+const C_RX_TCP: u64 = 4
+const C_RX_UDP: u64 = 5
+const C_RX_OTHER: u64 = 6
+const C_TX_ARP_REQ: u64 = 7
+const C_TX_ARP_REP: u64 = 8
+const C_TX_ICMP_REQ: u64 = 9
+const C_TX_ICMP_OTHER: u64 = 10
+const C_TX_TCP: u64 = 11
+const C_TX_UDP: u64 = 12
+const C_TX_OTHER: u64 = 13
+const C_CONV_FAIL: u64 = 14
+const C_SEND_FAIL: u64 = 15
+const C_LAST_ERR: u64 = 16
+const C_COUNT: u64 = 17
+
+const ETH_HDR: u64 = 14
+const OFF_ETYPE: u64 = 12
+const OFF_ARP_OP: u64 = 20
+const OFF_IP_PROTO: u64 = 23
+const OFF_IP_VER_IHL: u64 = 14
+const ETYPE_ARP: u64 = 0x0806
+const ETYPE_IP4: u64 = 0x0800
+const ARP_OP_REQUEST: u64 = 1
+const ARP_MIN_LEN: u64 = 42
+const IP_MIN_LEN: u64 = 34
+const PROTO_ICMP: u64 = 1
+const PROTO_TCP: u64 = 6
+const PROTO_UDP: u64 = 17
+const ICMP_ECHO_REPLY: u64 = 0
+const ICMP_ECHO_REQUEST: u64 = 8
+const IHL_MASK: u64 = 0xF
+const IHL_WORD: u64 = 4
+
+static mut wc_count: [u64; 17] = [0 as u64; 17]
+
+fn bump(i: u64) { wc_count[i as usize] = wc_count[i as usize] + 1 }
+
+fn get(i: u64) -> u64 {
+    if i >= C_COUNT { return 0 }
+    return wc_count[i as usize]
+}
+
+fn etype(f: u64) -> u64 { return (octets.ld8(f, OFF_ETYPE) << 8) | octets.ld8(f, OFF_ETYPE + 1) }
+
+fn icmp_type(f: u64, n: u64) -> u64 {
+    let at: u64 = ETH_HDR + (octets.ld8(f, OFF_IP_VER_IHL) & IHL_MASK) * IHL_WORD
+    if at >= n { return 255 }
+    return octets.ld8(f, at)
+}
+
+fn note_rx(f: u64, n: u64) {
+    if n < ETH_HDR { return }
+    let t: u64 = etype(f)
+    if t == ETYPE_ARP && n >= ARP_MIN_LEN {
+        if octets.ld8(f, OFF_ARP_OP + 1) == ARP_OP_REQUEST { bump(C_RX_ARP_REQ) } else { bump(C_RX_ARP_REP) }
+        return
+    }
+    if t != ETYPE_IP4 || n < IP_MIN_LEN {
+        bump(C_RX_OTHER)
+        return
+    }
+    let p: u64 = octets.ld8(f, OFF_IP_PROTO)
+    if p == PROTO_TCP { bump(C_RX_TCP) } else if p == PROTO_UDP { bump(C_RX_UDP) } else if p == PROTO_ICMP {
+        if icmp_type(f, n) == ICMP_ECHO_REPLY { bump(C_RX_ICMP_REPLY) } else { bump(C_RX_ICMP_OTHER) }
+    } else { bump(C_RX_OTHER) }
+}
+
+fn note_tx(f: u64, n: u64) {
+    if n < ETH_HDR { return }
+    let t: u64 = etype(f)
+    if t == ETYPE_ARP && n >= ARP_MIN_LEN {
+        if octets.ld8(f, OFF_ARP_OP + 1) == ARP_OP_REQUEST { bump(C_TX_ARP_REQ) } else { bump(C_TX_ARP_REP) }
+        return
+    }
+    if t != ETYPE_IP4 || n < IP_MIN_LEN {
+        bump(C_TX_OTHER)
+        return
+    }
+    let p: u64 = octets.ld8(f, OFF_IP_PROTO)
+    if p == PROTO_TCP { bump(C_TX_TCP) } else if p == PROTO_UDP { bump(C_TX_UDP) } else if p == PROTO_ICMP {
+        if icmp_type(f, n) == ICMP_ECHO_REQUEST { bump(C_TX_ICMP_REQ) } else { bump(C_TX_ICMP_OTHER) }
+    } else { bump(C_TX_OTHER) }
+}
+
+fn note_conv_fail() { bump(C_CONV_FAIL) }
+
+fn note_send_fail(err: u64) {
+    bump(C_SEND_FAIL)
+    wc_count[C_LAST_ERR as usize] = err
+}
