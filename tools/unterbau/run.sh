@@ -16,6 +16,8 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/firnenv.sh
 firnenv_need_firnc1
+. tools/lib/kernelbase.sh
+export OSUM_KERNEL_BASE=${OSUM_KERNEL_BASE-$OSUM_PRODUCT_KERNEL_BASE}
 ROOT=$(pwd)
 HERE=tools/unterbau
 OLDREF=${OLDREF:-553ef06c}
@@ -29,6 +31,7 @@ QEMU=${QEMU_X86:-qemu-system-x86_64}
 KVM=(); [ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)
 [ -z "${NOKVM:-}" ] || KVM=()
 SMP=${SMP:-1}
+SMP_t_nopie_stress=${SMP_t_nopie_stress:-4}
 TMO=${TMO:-150}
 export FIRNLIB="$ROOT/lib"
 
@@ -60,10 +63,13 @@ for src in $HERE/t_*.c; do
     n=$(basename "$src" .c)
     if [ -n "${ONLY:-}" ] && ! echo " $ONLY " | grep -q " $n "; then continue; fi
     cflags="-O1 -g0 -pthread"
-    if [ "$n" = t_static_nopie ]; then
-        if [ -z "${OSUM_KERNEL_BASE:-}" ]; then echo "  SKIP  $n: needs OSUM_KERNEL_BASE=0x1600000 (low-window alias)"; continue; fi
-        cflags="-O1 -g0 -static -no-pie"
-    fi
+    case "$n" in
+        t_mirrorcost)
+            if [ -z "${OSUM_KERNEL_BASE:-}" ]; then echo "  SKIP  $n: needs OSUM_KERNEL_BASE=0x1600000 (low-window alias)"; continue; fi ;;
+        t_static_nopie|t_nopie_stress|t_dyn_nopie)
+            if [ -z "${OSUM_KERNEL_BASE:-}" ]; then echo "  SKIP  $n: needs OSUM_KERNEL_BASE=0x1600000 (low-window alias)"; continue; fi
+            if [ "$n" = t_dyn_nopie ]; then cflags="-O1 -g0 -pthread -no-pie"; else cflags="-O1 -g0 -static -no-pie"; fi ;;
+    esac
     if musl-gcc $cflags -Wno-unused-result -o "$D/bin/$n" "$src" -I$HERE -ldl -lrt 2> "$D/cc-$n.err"; then TESTS="$TESTS $n"; else bad "$n does not build"; head -5 "$D/cc-$n.err" | sed 's/^/        /'; fi
 done
 for l in libub1 libub2 libub3; do
@@ -71,7 +77,8 @@ for l in libub1 libub2 libub3; do
     musl-gcc -O1 -shared -fPIC -o "$D/lib/$l.so" $HERE/$l.c $extra 2> "$D/cc-$l.err" || { bad "$l does not build"; cat "$D/cc-$l.err" | head -3; }
 done
 # the child programs the tests start
-for c in $HERE/c_*.c; do [ -e "$c" ] || continue; musl-gcc -O1 -pthread -o "$D/bin/$(basename $c .c)" "$c" 2>> "$D/cc-child.err" || bad "$(basename $c) does not build"; done
+for c in $HERE/c_*.c; do [ -e "$c" ] || continue; [ "$(basename $c)" = c_lowhold.c ] && continue; musl-gcc -O1 -pthread -o "$D/bin/$(basename $c .c)" "$c" 2>> "$D/cc-child.err" || bad "$(basename $c) does not build"; done
+[ -z "${OSUM_KERNEL_BASE:-}" ] || musl-gcc -O1 -static -no-pie -o "$D/bin/c_lowhold" $HERE/c_lowhold.c 2>> "$D/cc-child.err" || bad "c_lowhold does not build"
 # the STATIC programs of the earlier rounds (tools/foreign: the way a musl binary ran on Osum before there was a dynamic loader) -- a regression gate
 FOREIGN=""
 for f in hello threads forktest locktest; do
@@ -126,8 +133,8 @@ run_all() { # run_all <kernel> <disk> <tag>
     for t in $TESTS; do
         local ka="" na=""
         case "$t" in t_events|t_udpnet|t_netlink) ka="nic nip=10.0.2.15/24 ngw=10.0.2.2"; na="-netdev user,id=n0 -device virtio-net-pci,netdev=n0";; t_wakelat|t_pollmulti|t_nbsock|t_procnet|t_ioctl) ka="nic nip=10.0.2.15/24 ngw=10.0.2.2"; na="-netdev user,id=n0,guestfwd=tcp:10.0.2.100:7777-cmd:cat -device virtio-net-pci,netdev=n0";; esac
-        local t0=$SECONDS tv="TMO_$t"
-        TMO=${!tv:-$TMO} KARGS="$ka ${KARGS_EXTRA:-}" NETARGS="$na" boot "$1" "$2" "/bin/$t" "$D/$3-$t.ser"; rc=$?
+        local t0=$SECONDS tv="TMO_$t" sv="SMP_$t"
+        SMP=${!sv:-$SMP} TMO=${!tv:-$TMO} KARGS="$ka ${KARGS_EXTRA:-}" NETARGS="$na" boot "$1" "$2" "/bin/$t" "$D/$3-$t.ser"; rc=$?
         local el=$((SECONDS-t0))
         grep -a '^T ' "$D/$3-$t.ser" 2>/dev/null | awk '!seen[$2]++' > "$D/$3-$t.res" || : > "$D/$3-$t.res"
         printf '        %-12s %3d checks   (qemu rc=%s, %ss)\n' "$t" "$(wc -l < "$D/$3-$t.res")" "$rc" "$el"

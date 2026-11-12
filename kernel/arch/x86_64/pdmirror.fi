@@ -3,9 +3,13 @@ import sched.taskconst
 import sched.taskslot
 import sync.atomic
 
-export { mirror, owner_added, owner_removed }
+export { mirror, owner_added, owner_removed, drain, stress }
+
+const ADDR_MASK: u64 = 0x000FFFFFFFFFF000
+const STRESS_SLOT: u64 = 511
 
 static mut owners: [u64; 1] = [0]
+static mut active: [u64; 1] = [0]
 
 fn owner_added() {
     atomic.fetch_add((&owners[0]) as u64, 1)
@@ -19,6 +23,7 @@ fn mirror(state: u64, idx: u64, entry: u64) {
     if atomic.load((&owners[0]) as u64) == 0 {
         return
     }
+    atomic.fetch_add((&active[0]) as u64, 1)
     var t: u64 = 1
     while t < kstate.MAX_TASKS {
         let low: u64 = taskslot.tget(state, t, taskconst.T_LOWPD)
@@ -27,4 +32,36 @@ fn mirror(state: u64, idx: u64, entry: u64) {
         }
         t = t + 1
     }
+    atomic.fetch_sub((&active[0]) as u64, 1)
+}
+
+fn drain() {
+    while atomic.load((&active[0]) as u64) != 0 {
+        atomic.pause()
+    }
+}
+
+fn kernel_pd(state: u64) -> u64 {
+    let pml4: u64 = kstate.get(state, kstate.KPML4)
+    if pml4 == 0 {
+        return 0
+    }
+    let pdpt: u64 = __mmio_read64(pml4 as *mut u64) & ADDR_MASK
+    if pdpt == 0 {
+        return 0
+    }
+    return __mmio_read64(pdpt as *mut u64) & ADDR_MASK
+}
+
+fn stress(state: u64, rounds: u64) -> u64 {
+    let pd: u64 = kernel_pd(state)
+    if pd == 0 {
+        return 0
+    }
+    var k: u64 = 0
+    while k < rounds {
+        mirror(state, STRESS_SLOT, __mmio_read64((pd + STRESS_SLOT * 8) as *mut u64))
+        k = k + 1
+    }
+    return rounds
 }
