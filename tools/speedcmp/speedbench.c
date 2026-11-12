@@ -277,6 +277,7 @@ static void run_thread(long n)
 }
 
 #include "wbench.h"
+#include "membench.h"
 
 int main(int argc, char **argv)
 {
@@ -318,6 +319,7 @@ int main(int argc, char **argv)
     measure("pipe_roundtrip", run_pipe, PIPE_ROUNDS, 1, 1);
     measure("thread_create_join", run_thread, 100, 1, 1);
     wb_run_all();
+    mb_run_all();
     close(data_fd);
     unlink(DATA_PATH);
     (void)!write(1, "\nS END 0 0\n", 11);

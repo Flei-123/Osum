@@ -23,12 +23,14 @@ echo 1 > /proc/sys/kernel/sysrq
 /usr/bin/speedbench
 echo o > /proc/sysrq-trigger
 INIT
+if [ -n "${SPEED_ONLY:-}" ]; then printf '%s\n%s\n' "$SPEED_ONLY" "${SPEED_MIN_MS:-0}" > "$W/speedonly"; SPEEDONLY_CMD="write $W/speedonly /etc/speedonly"; else SPEEDONLY_CMD="rm /etc/speedonly"; fi
 KERNEL_FILE=$(debugfs -R "ls -p /boot" "$W/root.ext4" 2>/dev/null | awk -F/ '$6 ~ /^vmlinuz-/ {print $6; exit}')
 INITRD_FILE=$(debugfs -R "ls -p /boot" "$W/root.ext4" 2>/dev/null | awk -F/ '$6 ~ /^initrd.img-/ {print $6; exit}')
 [ -n "$KERNEL_FILE" ] && [ -n "$INITRD_FILE" ] || { echo "linux: kernel/initrd not found in /boot" >&2; exit 1; }
 debugfs -R "dump /boot/$KERNEL_FILE $W/vmlinuz" "$W/root.ext4" >/dev/null 2>&1
 debugfs -R "dump /boot/$INITRD_FILE $W/initrd" "$W/root.ext4" >/dev/null 2>&1
 debugfs -w -f - "$W/root.ext4" >/dev/null 2>&1 <<DEBUGFS
+$SPEEDONLY_CMD
 rm /usr/bin/speedbench
 write $BENCH /usr/bin/speedbench
 set_inode_field /usr/bin/speedbench mode 0100755
