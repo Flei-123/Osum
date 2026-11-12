@@ -62,6 +62,8 @@ for src in $HERE/t_*.c; do
     if [ -n "${ONLY:-}" ] && ! echo " $ONLY " | grep -q " $n "; then continue; fi
     cflags="-O1 -g0 -pthread"
     case "$n" in
+        t_mirrorcost)
+            if [ -z "${OSUM_KERNEL_BASE:-}" ]; then echo "  SKIP  $n: needs OSUM_KERNEL_BASE=0x1600000 (low-window alias)"; continue; fi ;;
         t_static_nopie|t_nopie_stress|t_dyn_nopie)
             if [ -z "${OSUM_KERNEL_BASE:-}" ]; then echo "  SKIP  $n: needs OSUM_KERNEL_BASE=0x1600000 (low-window alias)"; continue; fi
             if [ "$n" = t_dyn_nopie ]; then cflags="-O1 -g0 -pthread -no-pie"; else cflags="-O1 -g0 -static -no-pie"; fi ;;
@@ -73,7 +75,8 @@ for l in libub1 libub2 libub3; do
     musl-gcc -O1 -shared -fPIC -o "$D/lib/$l.so" $HERE/$l.c $extra 2> "$D/cc-$l.err" || { bad "$l does not build"; cat "$D/cc-$l.err" | head -3; }
 done
 # the child programs the tests start
-for c in $HERE/c_*.c; do [ -e "$c" ] || continue; musl-gcc -O1 -pthread -o "$D/bin/$(basename $c .c)" "$c" 2>> "$D/cc-child.err" || bad "$(basename $c) does not build"; done
+for c in $HERE/c_*.c; do [ -e "$c" ] || continue; [ "$(basename $c)" = c_lowhold.c ] && continue; musl-gcc -O1 -pthread -o "$D/bin/$(basename $c .c)" "$c" 2>> "$D/cc-child.err" || bad "$(basename $c) does not build"; done
+[ -z "${OSUM_KERNEL_BASE:-}" ] || musl-gcc -O1 -static -no-pie -o "$D/bin/c_lowhold" $HERE/c_lowhold.c 2>> "$D/cc-child.err" || bad "c_lowhold does not build"
 # the STATIC programs of the earlier rounds (tools/foreign: the way a musl binary ran on Osum before there was a dynamic loader) -- a regression gate
 FOREIGN=""
 for f in hello threads forktest locktest; do
