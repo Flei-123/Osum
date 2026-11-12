@@ -109,10 +109,6 @@ gegen "eine Meldung eines Befehls" "kernel/user/opk.fi" \
     'E_HASH: [u8; 20] = "opk: checksum wrong\0"' \
     'E_HASH: [u8; 23] = "opk: Pruefsumme falsch\0"' \
     python3 tools/i18n/sources.py --streng
-gegen "eine Beschriftung im Energie-Fenster" "kernel/user/power.fi" \
-    'var s_t: [u8; 11] = "Wärme:   \0"' \
-    'var s_t: [u8; 11] = "Waerme:  \0"' \
-    python3 tools/i18n/sources.py --streng
 
 k2="$TMPD/kopie2"; kopie "$k2"
 python3 - "$k2/kernel/user/storage.fi" <<'PY'
@@ -153,8 +149,8 @@ OSUM_ROOT=. python3 tools/i18n/sources.py --marken > "$TMPD/m.txt" 2>&1
 MRC=$?
 sed 's/^/     /' "$TMPD/m.txt"
 is "marken rc" "$MRC" "0"
-MN=$(sed -n 's/^marken: \([0-9]*\) getippte.*/\1/p' "$TMPD/m.txt")
-mind "Marken mit Umschrift, alle mit Umlautform daneben" "${MN:-0}" 6
+MN=$(sed -n 's/^marks: \([0-9]*\) typed.*/\1/p' "$TMPD/m.txt")
+mind "Marken mit Umschrift, alle mit Umlautform daneben" "${MN:-0}" 5
 gegen "die zweite Schreibung eines Unterbefehls" "kernel/user/trashbin.fi" \
     'var c_zur_x: [u8; 8] = "zurück\0"' \
     'var c_zur_x: [u8; 8] = "zurxck\0"' \
@@ -167,12 +163,12 @@ SRC=$?
 sed 's/^/     /' "$TMPD/s.txt"
 is "spalten rc" "$SRC" "0"
 SB=$(sed -n 's/^spalten: \([0-9]*\) Beschriftungen.*/\1/p' "$TMPD/s.txt")
-SP=$(sed -n 's/^puffer:  \([0-9]*\) Zeichenketten.*/\1/p' "$TMPD/s.txt")
+SP=$(sed -n 's/^buffer:  \([0-9]*\) strings.*/\1/p' "$TMPD/s.txt")
 mind "Beschriftungen in sechs Spalten nachgezaehlt" "${SB:-0}" 40
 mind "Zeichenketten passen genau in ihren Puffer" "${SP:-0}" 4000
 gegen "eine Spalte um EIN ZEICHEN verkuerzt" "kernel/user/power.fi" \
-    'var s_t: [u8; 11] = "Wärme:   \0"' \
-    'var s_t: [u8; 10] = "Wärme:  \0"' \
+    'var s_t: [u8; 10] = "Heat:    \0"' \
+    'var s_t: [u8; 10] = "Heat:   \0"' \
     python3 tools/i18n/columns.py
 gegen "ein Literal, das nicht mehr in seinen Puffer passt" \
     "kernel/user/vpn.fi" \
@@ -186,7 +182,7 @@ OSUM_ROOT=. python3 tools/umlaut/schriftprobe.py > "$TMPD/f.txt" 2>&1
 FRC=$?
 sed 's/^/     /' "$TMPD/f.txt"
 is "schriftprobe rc" "$FRC" "0"
-ZN=$(sed -n 's/^schriftprobe: [0-9]* Textstellen, \([0-9]*\) verschiedene.*/\1/p' "$TMPD/f.txt")
+ZN=$(sed -n 's/^font probe: [0-9]* text spots, \([0-9]*\) different.*/\1/p' "$TMPD/f.txt")
 mind "verschiedene Zeichen ueber ASCII im sichtbaren Text" "${ZN:-0}" 7
 
 echo

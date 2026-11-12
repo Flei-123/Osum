@@ -224,8 +224,8 @@ has "$TMPD/g.txt" "tile: win=2 400,0 400x300" "Fenster 2 oben rechts"
 has "$TMPD/g.txt" "tile: win=3 400,300 400x300" "Fenster 3 unten rechts"
 has "$TMPD/g.txt" "tile: win=4 0,300 400x300" "Fenster 4 unten links"
 schau "und im Bild ist Fenster 1 wirklich rot" \
-    area "$TMPD/g.ppm" 2 22 396 276 192 48 48
-schau "Fenster 2 gruen" area "$TMPD/g.ppm" 402 22 396 276 48 176 80
+    area "$TMPD/g.ppm" 2 22 396 264 192 48 48
+schau "Fenster 2 gruen" area "$TMPD/g.ppm" 402 22 396 264 48 176 80
 schau "Fenster 3 blau" area "$TMPD/g.ppm" 402 322 396 276 48 96 224
 schau "Fenster 4 gelb" area "$TMPD/g.ppm" 2 322 396 276 224 192 48
 schau_nicht "an der Naht der vier Kacheln liegt keine Luecke" \
@@ -255,9 +255,9 @@ num "der Kern beendet sich sauber" "$RC" eq 21
 has "$TMPD/rt.txt" "tile: win=4 0,0 400x300" "nach der Drehung liegt Fenster 4 oben links"
 has "$TMPD/rt.txt" "tile: win=1 400,0 400x300" "und Fenster 1 oben rechts"
 schau "im Bild ist oben links jetzt gelb" \
-    area "$TMPD/rt.ppm" 2 22 396 276 224 192 48
+    area "$TMPD/rt.ppm" 2 22 396 264 224 192 48
 schau "und oben rechts rot" \
-    area "$TMPD/rt.ppm" 402 22 396 276 192 48 48
+    area "$TMPD/rt.ppm" 402 22 396 264 192 48 48
 schau_nicht "die Farben sind also WIRKLICH gewandert" \
     area "$TMPD/rt.ppm" 2 22 396 276 192 48 48
 

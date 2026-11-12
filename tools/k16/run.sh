@@ -115,7 +115,7 @@ printf '.intel_syntax noprefix\n.text\n.globl _start\n_start:\n    mov rax, rbx\
 if "$FAS" "$TMPD/kaputt.s" -o "$TMPD/kaputt.bin" --wirt > "$TMPD/kaputt.err" 2>&1; then
     bad "CONTROL: fas let an unknown instruction through"
 else
-    if grep -q "Zeile 6" "$TMPD/kaputt.err" && grep -q "quatschbefehl" "$TMPD/kaputt.err"; then
+    if grep -q "line 6" "$TMPD/kaputt.err" && grep -q "quatschbefehl" "$TMPD/kaputt.err"; then
         ok "CONTROL: an unknown instruction aborts -- with line number and word"
     else
         bad "CONTROL: the abort does not name line 6 and the word: $(head -1 "$TMPD/kaputt.err")"
@@ -145,7 +145,7 @@ fi
 echo "== 2. the numbers from which the kernel changes follow =="
 mkdir -p "$TMPD/mess"
 printf 'fn main(start: u64) -> i32 {\n    return 0\n}\n' > "$TMPD/mess/klein.fi"
-python3 - "$ROOT/$FC1" "$TMPD/mess/klein.fi" > "$TMPD/mess.txt" 2>&1 <<'PY'
+python3 - "$FC1" "$TMPD/mess/klein.fi" > "$TMPD/mess.txt" 2>&1 <<'PY'
 import resource, subprocess, sys
 fc1, quelle = sys.argv[1], sys.argv[2]
 def geht(art, wert):
@@ -190,12 +190,13 @@ FIRNLIB="$PWD/lib" "$FIRNC" -c -o "$LEER/x0.o" "$LEER/apphost.fi" \
     > "$LEER/c0.out" 2> "$LEER/c0.err"
 RC0=$?
 gleich "firnc1 geht bei fehlendem Import mit 2" "$RC1" "2"
-gleich "und schreibt dabei KEIN Oktett (das ist der Mangel)" \
-    "$(cat "$LEER/c1.out" "$LEER/c1.err" | wc -c)" "0"
+grep -q "hostaxtree.fi" "$LEER/c1.err" \
+    && ok "firnc1 NAMES the missing file (D-019 fixed)" \
+    || bad "firnc1 aborts without naming the missing file"
 [ "$RC0" -ne 0 ] \
     && ok "firnc0 scheitert an derselben Stelle (rc=$RC0)" \
     || bad "firnc0 haette auch scheitern muessen"
-grep -q "ulib.fi" "$LEER/c0.err" \
+grep -q "hostaxtree.fi" "$LEER/c0.err" \
     && ok "firnc0 NAMES the missing file -- that is how to get at the cause" \
     || bad "firnc0 no longer names the missing file"
 #
@@ -263,7 +264,7 @@ done
 if [ -z "$FIRNQ" ]; then
     bad "the source of the compiler (bin/firnc1.fi) was not found"
 else
-    if ( cd "$FIRNQ" && FIRNLIB="$FIRNQ/lib" "$ROOT/$FIRNC" -c -o "$TMPD/o/firnc.o" bin/firnc1.fi ) > "$TMPD/firnc.err" 2>&1 \
+    if ( cd "$FIRNQ" && FIRNLIB="$FIRNQ/lib" "$FIRNC" -c -o "$TMPD/o/firnc.o" bin/firnc1.fi ) > "$TMPD/firnc.err" 2>&1 \
        && ld -T "$ULD" -o "$TMPD/o/firnc" "$TMPD/o/firnc.o" 2>/dev/null; then
         strip --strip-all "$TMPD/o/firnc"
         ok "firnc is linked for Osum ($(stat -c%s "$TMPD/o/firnc") Oktette, Abbild ab 0x40100000)"
@@ -331,7 +332,7 @@ gleich "und es geht mit genau dem Code, den seine Quelle nennt" \
 
 bash tools/mkfsfi/mkfs.sh cat "$TMPD/nach-ueb.img" /probe.s > "$TMPD/osum.s" 2>/dev/null
 bash tools/mkfsfi/mkfs.sh cat "$TMPD/nach-ueb.img" /probe > "$TMPD/osum.bin" 2>/dev/null
-( cd "$TMPD/q" && "$ROOT/$FC1" probe.fi > "$TMPD/wirt.s" 2>/dev/null )
+( cd "$TMPD/q" && "$FC1" probe.fi > "$TMPD/wirt.s" 2>/dev/null )
 "$FAS" "$TMPD/wirt.s" -o "$TMPD/wirt.bin" > "$TMPD/wirt.fas" 2>&1 \
     || { bad "fas did not get through on the host: $(head -1 "$TMPD/wirt.fas")"; }
 num "die .s von Osum ist nicht leer (Oktette)" "$(stat -c%s "$TMPD/osum.s" 2>/dev/null || echo 0)" gt 1000
@@ -349,7 +350,7 @@ else
     head -c 120 "$TMPD/wirt.bin" | od -An -tx1 | head -2 | sed 's/^/        wirt /'
     head -2 "$TMPD/wirt.fas" | sed 's/^/        /' 
 fi
-( cd "$TMPD/q" && "$ROOT/$FC1" andere.fi > "$TMPD/andere.s" 2>/dev/null )
+( cd "$TMPD/q" && "$FC1" andere.fi > "$TMPD/andere.s" 2>/dev/null )
 if cmp -s "$TMPD/osum.s" "$TMPD/andere.s"; then
     bad "CONTROL: a different source came out character-identical -- the comparison measures nothing"
 else
