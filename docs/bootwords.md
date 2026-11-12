@@ -445,7 +445,7 @@ Total: 654
 | `notidemo` | bootargs.fi |  |  |
 | `notiledirty` | bootargs.fi |  |  |
 | `notimer` | bootargs.fi |  |  |
-| `nouphealth` | bootwords_store.fi | uphealth | two NICs: default route stays on the LAN with internet; LAN without internet + second NIC with internet -> uplink switches, /proc/net/connectivity lists online/ |
+| `nouphealth` | bootwords_store.fi | uphealth | LAN + USB NIC: healthy uplink stays; USB uplink without internet -> default route goes back to the LAN, /proc/net/connectivity lists online/local-only/offline;  |
 | `noupprefer` | bootwords_store.fi |  |  |
 | `nousb` | bootargs.fi | usbdesk, usbhid |  |
 | `nousbevr` | bootwords_store.fi | usbevents |  |
