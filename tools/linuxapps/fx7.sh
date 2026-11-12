@@ -12,6 +12,7 @@ mon() { printf '%s\n' "$1" | socat - "UNIX-CONNECT:$SOCK" > /dev/null 2>&1; }
     j=0
     until grep -qa 'FXLOAD' "$OUT/ser.txt" 2>/dev/null || [ "$j" -ge "${FX7_LOADWAIT:-150}" ]; do sleep 2; j=$((j + 2)); done
     sleep 15
+    [ -n "${FX7_NOINPUT:-}" ] && exit 0
     for k in a b c; do mon "sendkey $k"; sleep 2; done
     sleep 5
     for k in pgdn pgdn pgdn end; do mon "sendkey $k"; sleep 3; done

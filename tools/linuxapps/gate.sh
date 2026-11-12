@@ -14,7 +14,7 @@ fail=0
 KERNEL_ARG=()
 [ -n "${KERNEL:-}" ] && KERNEL_ARG=(env "KERNEL=$KERNEL")
 HTTPS_ARGS=("KARGS=osum vfs nokbd nosched noproc nofs fremdtrace gfx nic nip=10.0.2.15/24 ngw=10.0.2.2" "QEMU_EXTRA=-netdev user,id=n0 -device e1000,netdev=n0")
-for stage in ${STAGES:-F3 F4 F5 F6 F7}; do
+for stage in ${STAGES:-F3 F4 F5 F6 F7 F7N}; do
     want=$(awk -v s="$stage" '$1==s{print $2}' "$EXPECT")
     got=red
     first="no run: window stage needs a Wayland-capable run (F5 not implemented)"
@@ -36,6 +36,11 @@ for stage in ${STAGES:-F3 F4 F5 F6 F7}; do
         BLOCKS=${BLOCKS:-1000000} TMO=${TMO:-1500} FX7_WAIT=${FX7_WAIT:-240} "${KERNEL_ARG[@]}" bash tools/linuxapps/fx7.sh "$WD" "$OUT/F7" > "$OUT/F7.log" 2>&1
         verdict=$(python3 -I tools/linuxapps/f7check.py "$OUT/F7/ser.clean" 2>&1)
         if [ "${verdict%% *}" = green ]; then got=green; first=""; else first="$verdict"; fi
+    fi
+    if [ "$stage" = F7N ]; then
+        BLOCKS=${BLOCKS:-1000000} TMO=${TMO:-1500} FX7_WAIT=${FX7_WAIT:-240} FX7_NOINPUT=1 "${KERNEL_ARG[@]}" bash tools/linuxapps/fx7.sh "$WD" "$OUT/F7N" > "$OUT/F7N.log" 2>&1
+        verdict=$(python3 -I tools/linuxapps/f7check.py "$OUT/F7N/ser.clean" 2>&1)
+        if [ "${verdict%% *}" = red ] && [[ "$verdict" == *"typed text, key press, wheel, scroll, click" && "$verdict" != *"load"* ]]; then got=green; first=""; else first="counter-proof: $verdict"; fi
     fi
     if [ "$got" = "${want:-red}" ]; then pass=$((pass+1)); printf '  OK    %s is %s (expected %s)%s\n' "$stage" "$got" "${want:-red}" "${first:+; first failure: $first}"
     else fail=$((fail+1)); printf '  FAIL  %s is %s, expected %s%s\n' "$stage" "$got" "${want:-red}" "${first:+; first failure: $first}"; fi
