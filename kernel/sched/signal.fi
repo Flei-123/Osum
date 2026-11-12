@@ -13,6 +13,7 @@ import arch.x86_64.guard
 import libc.regio
 import sched.ptrace
 import sched.ptstate
+import sched.sigrestart
 
 export {
     init_task, clear_task, exec_reset, inherit,
@@ -591,8 +592,16 @@ fn greg_off(i: u64) -> u64 {
     return 152
 }
 
-fn deliver(state: u64, task: u64, sig: u64, ctx: u64) -> bool {
+fn rewind_for_restart(ctx: u64, number: u64) {
+    __mmio_write64((ctx + C_RIP) as *mut u64, sigrestart.rewind_target(__mmio_read64((ctx + C_RIP) as *mut u64)))
+    __mmio_write64((ctx + C_RAX) as *mut u64, number)
+}
+
+fn deliver(state: u64, task: u64, sig: u64, ctx: u64, restart_nr: u64) -> bool {
     let h: u64 = handler_of(state, task, sig)
+    if restart_nr != sigrestart.NO_RESTART && (regio.read64(act(state, task, sig) + A_FLAGS) & SA_RESTART) != 0 {
+        rewind_for_restart(ctx, restart_nr)
+    }
     let old_rsp: u64 = __mmio_read64((ctx + C_RSP) as *mut u64)
     var base: u64 = ((old_rsp -% REDZONE) -% SF_BYTES) & 0xFFFFFFFFFFFFFFF0
     let altsz: u64 = taskslot.tget(state, task, taskconst.T_ALTSZ)
@@ -756,7 +765,7 @@ fn next_signal(state: u64, task: u64) -> u64 {
     return 0
 }
 
-fn dispatch_signal(state: u64, task: u64, sig: u64, ctx: u64) -> bool {
+fn dispatch_signal(state: u64, task: u64, sig: u64, ctx: u64, restart_nr: u64) -> bool {
     taskslot.tset(state, task, taskconst.T_SIGLAST, sig)
     let h: u64 = handler_of(state, task, sig)
     if uncatchable(sig) {
@@ -771,14 +780,14 @@ fn dispatch_signal(state: u64, task: u64, sig: u64, ctx: u64) -> bool {
         do_default(state, task, sig)
         return false
     }
-    if deliver(state, task, sig, ctx) {
+    if deliver(state, task, sig, ctx, restart_nr) {
         return true
     }
     do_default(state, task, SIGSEGV)
     return false
 }
 
-fn run_pending(state: u64, task: u64, ctx: u64) -> bool {
+fn run_pending(state: u64, task: u64, ctx: u64, restart_nr: u64) -> bool {
     if kstate.mode_on(state, kstate.M_NOSIG) {
         return false
     }
@@ -794,7 +803,7 @@ fn run_pending(state: u64, task: u64, ctx: u64) -> bool {
         notify_tracer(state, task, raw)
         let sig: u64 = ptrace.signal_stop(state, task, raw)
         reload_ctx(task, ctx)
-        if sig != 0 && dispatch_signal(state, task, sig, ctx) {
+        if sig != 0 && dispatch_signal(state, task, sig, ctx, restart_nr) {
             return true
         }
         rounds = rounds + 1
@@ -846,7 +855,19 @@ fn load_ctx(frame: u64, c: u64) {
     __mmio_write64((c + C_SS) as *mut u64, USER_SS)
 }
 
-fn check_sys(state: u64, task: u64, frame: u64) {
+fn restart_number(number: u64, frame: u64) -> u64 {
+    if sigrestart.interrupted_result(__mmio_read64((frame + F_RAX) as *mut u64)) && sigrestart.restartable(number, __mmio_read64((frame + F_RSI) as *mut u64)) {
+        return number
+    }
+    return sigrestart.NO_RESTART
+}
+
+fn restart_in_frame(frame: u64, number: u64) {
+    __mmio_write64((frame + F_RIP) as *mut u64, sigrestart.rewind_target(__mmio_read64((frame + F_RIP) as *mut u64)))
+    __mmio_write64((frame + F_RAX) as *mut u64, number)
+}
+
+fn check_sys(state: u64, task: u64, frame: u64, number: u64) {
     if taskslot.tget(state, task, taskconst.T_KIND) != taskconst.K_USER {
         return
     }
@@ -857,7 +878,11 @@ fn check_sys(state: u64, task: u64, frame: u64) {
     let c: u64 = ctx_of(state, task)
     load_ctx(frame, c)
     ptrace.note_frame(task, frame, ptrace.LAYOUT_SYSCALL)
-    if !run_pending(state, task, c) {
+    let restart_nr: u64 = restart_number(number, frame)
+    if !run_pending(state, task, c, restart_nr) {
+        if restart_nr != sigrestart.NO_RESTART {
+            restart_in_frame(frame, restart_nr)
+        }
         suspend_done(state, task)
         return
     }
@@ -880,7 +905,7 @@ fn check_trap(state: u64, task: u64, frame: u64) {
         return
     }
     ptrace.note_frame(task, frame, ptrace.LAYOUT_TRAP)
-    run_pending(state, task, frame)
+    run_pending(state, task, frame, sigrestart.NO_RESTART)
 }
 
 
@@ -994,7 +1019,7 @@ fn do_sigreturn(state: u64, task: u64, frame: u64) -> u64 {
         & (0xFFFFFFFFFFFFFFFF -% (bit(SIGKILL) | bit(SIGSTOP))))
     taskslot.tset(state, task, taskconst.T_SIGRET, 0)
     ptrace.note_frame(task, c, ptrace.LAYOUT_TRAP)
-    run_pending(state, task, c)
+    run_pending(state, task, c, sigrestart.NO_RESTART)
     asm("call rax", in("rax") vector(state, V_IRET), in("rdi") c,
         clobber("memory"))
     return 0
