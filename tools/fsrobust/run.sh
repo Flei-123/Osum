@@ -142,6 +142,19 @@ num "BESCHAEDIGTE FAELLE (fsck)" "$n_f" eq 0
 num "BESCHAEDIGTE FAELLE (Wirt)" "$n_w" eq 0
 
 echo
+echo "== 3b. the plain image (no journal): $LAEUFE kills =="
+mkdir -p "$TMPD/plainruns"
+seq 201 $((200 + LAEUFE)) | xargs -P "$PAR" -I{} sh -c \
+    "bash tools/fsrobust/crash.sh $TMPD/nj.img $TMPD/plainruns {} '' 2>&1" \
+    > "$TMPD/plain.log" 2>&1
+p_l=$(grep -c '^lauf=' "$TMPD/plain.log")
+p_b=$(grep '^lauf=' "$TMPD/plain.log" | grep -vc 'rc2=21')
+p_s=$(grep '^lauf=' "$TMPD/plain.log" | grep -c 'schaeden=[1-9]')
+p_f=$(grep '^lauf=' "$TMPD/plain.log" | grep -c 'fsck=[1-9]')
+num "plain image: runs done" "$p_l" eq "$LAEUFE"
+num "plain image: runs that did not come up again" "$p_b" eq 0
+echo "        plain image damage (informational, no journal): guest=$p_s fsck=$p_f of $LAEUFE"
+
 echo "== 4. the control run: the same kills with 'nojournal' =="
 echo "        (hier MUESSEN Schaeden auftreten -- sonst misst"
 echo "         Abschnitt 3 nichts)"

@@ -1,9 +1,6 @@
 profile kernel
 
-import lib.kstate
-import sync.atomic
-import arch.cpu
-import sched.sched
+import sync.fslock
 import fs.ofsj
 
 export { sync, idle }
@@ -12,17 +9,9 @@ fn sync(state: u64) -> bool {
     if !ofsj.pending() {
         return true
     }
-    let flags: u64 = sched.irq_save()
-    let me: u64 = cpu.here(state)
-    let nested: bool = atomic.lock_owner(state, atomic.L_FS) == me + 1
-    if !nested {
-        atomic.lock_take(state, atomic.L_FS, me)
-    }
+    let flags: u64 = fslock.enter(state)
     let ok: bool = ofsj.flush_pending(state)
-    if !nested {
-        atomic.lock_give(state, atomic.L_FS)
-    }
-    sched.irq_restore(flags)
+    fslock.leave(state, flags)
     return ok
 }
 
@@ -30,11 +19,10 @@ fn idle(state: u64) {
     if !ofsj.pending() || ofsj.age(state) < ofsj.GROUP_IDLE_TICKS {
         return
     }
-    let flags: u64 = sched.irq_save()
-    let me: u64 = cpu.here(state)
-    if atomic.lock_try(state, atomic.L_FS, me) {
+    let flags: u64 = fslock.save_irq()
+    if fslock.try_take(state) {
         let _ok: bool = ofsj.flush_pending(state)
-        atomic.lock_give(state, atomic.L_FS)
+        fslock.give(state)
     }
-    sched.irq_restore(flags)
+    fslock.restore_irq(flags)
 }

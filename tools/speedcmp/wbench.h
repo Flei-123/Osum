@@ -11,11 +11,13 @@ static int wb_fd = -1;
 static char wb_names[WB_BATCH][WB_NAME_LEN];
 static char wb_alt_name[WB_NAME_LEN];
 
-#define PROF_N 8
+#define PROF_N 14
 
 static const char *prof_keys[PROF_N] = {
     "blk.run_cmds", "blk.run_sectors", "blk.ahci_cmds", "blk.ahci_wait_cy",
-    "blk.ahci_polls", "blk.ahci_irqs", "blk.ahci_sleeps", "tsc.khz"
+    "blk.ahci_polls", "blk.ahci_irqs", "blk.ahci_sleeps", "tsc.khz",
+    "blk.ahci_read_cmds", "blk.ahci_write_cmds", "blk.ahci_flush_cmds",
+    "blk.ahci_read_cy", "blk.ahci_write_cy", "blk.ahci_flush_cy"
 };
 
 static void prof_read(long long out[PROF_N])
@@ -37,9 +39,13 @@ static void prof_emit(const char *name, const long long a[PROF_N], const long lo
     char line[256];
     double per = (double)ops;
     int n = snprintf(line, sizeof line,
-        "\nP %s cmds=%.2f sectors=%.2f wait_kcy=%.1f polls=%.1f irqs=%.2f sleeps=%.2f\n", name,
+        "\nP %s cmds=%.2f sectors=%.2f wait_kcy=%.1f polls=%.1f irqs=%.2f sleeps=%.2f"
+        " rd=%.2f wr=%.2f fl=%.2f rd_kcy=%.1f wr_kcy=%.1f fl_kcy=%.1f\n", name,
         (double)(b[2] - a[2]) / per, (double)(b[1] - a[1]) / per, (double)(b[3] - a[3]) / per / 1000.0,
-        (double)(b[4] - a[4]) / per, (double)(b[5] - a[5]) / per, (double)(b[6] - a[6]) / per);
+        (double)(b[4] - a[4]) / per, (double)(b[5] - a[5]) / per, (double)(b[6] - a[6]) / per,
+        (double)(b[8] - a[8]) / per, (double)(b[9] - a[9]) / per, (double)(b[10] - a[10]) / per,
+        (double)(b[11] - a[11]) / per / 1000.0, (double)(b[12] - a[12]) / per / 1000.0,
+        (double)(b[13] - a[13]) / per / 1000.0);
     (void)!write(1, line, n);
 }
 
