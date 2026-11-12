@@ -26,11 +26,15 @@ static void test_environ(void)
 {
     char buf[4096];
     int n = slurp("/proc/self/environ", buf, sizeof buf);
-    int found = 0;
-    for (int i = 0; i < n; i += strlen(buf + i) + 1)
-        if (!strcmp(buf + i, environ[0]))
-            found = 1;
-    CHECK("environ_has_first", n > 0 && environ[0] && found, "n=%d", n);
+    int entries = 0, expected = 0, match = 1;
+    for (int i = 0; i < n; i += strlen(buf + i) + 1) {
+        if (!environ[entries] || strcmp(buf + i, environ[entries]))
+            match = 0;
+        entries++;
+    }
+    while (environ[expected])
+        expected++;
+    CHECK("environ_matches", n >= 0 && match && entries == expected, "n=%d entries=%d expected=%d", n, entries, expected);
 }
 
 static void test_comm_statm(void)
