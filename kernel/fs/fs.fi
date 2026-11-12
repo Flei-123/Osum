@@ -1775,10 +1775,116 @@ fn write_at(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
     return n
 }
 
+static mut lp_ino: u64 = 0
+static mut lp_group: u64 = 0
+static mut lp_lba: u64 = 0
+static mut lp_dirty: u64 = 0
+
+fn lp_flush(state: u64) -> bool {
+    if lp_dirty == 0 {
+        return true
+    }
+    lp_dirty = 0
+    return ofsj.write(state, lp_lba, buf_i2(state))
+}
+
+fn lp_drop(state: u64) -> bool {
+    let ok: bool = lp_flush(state)
+    lp_lba = 0
+    return ok
+}
+
+fn leaf_ptr_block(state: u64, ino: u64, k: u64, grow: bool) -> u64 {
+    if k < PER_BLOCK {
+        var ib: u64 = inode_get(state, ino, I_INDIRECT)
+        if ib == 0 && grow {
+            ib = block_alloc(state)
+            if ib != 0 {
+                inode_set(state, ino, I_INDIRECT, ib)
+            }
+        }
+        return ib
+    }
+    let d: u64 = k - PER_BLOCK
+    if d < PER_BLOCK * PER_BLOCK {
+        var l1: u64 = inode_get(state, ino, I_DINDIRECT)
+        if l1 == 0 && grow {
+            l1 = block_alloc(state)
+            if l1 != 0 {
+                inode_set(state, ino, I_DINDIRECT, l1)
+            }
+        }
+        if l1 == 0 {
+            return 0
+        }
+        return walk_level(state, l1, d / PER_BLOCK, grow)
+    }
+    if version(state) < OFS_V3 {
+        return 0
+    }
+    let t: u64 = d - PER_BLOCK * PER_BLOCK
+    var t1: u64 = inode_get(state, ino, I_TINDIRECT)
+    if t1 == 0 && grow {
+        t1 = block_alloc(state)
+        if t1 != 0 {
+            inode_set(state, ino, I_TINDIRECT, t1)
+        }
+    }
+    if t1 == 0 {
+        return 0
+    }
+    let t2: u64 = walk_level(state, t1, t / (PER_BLOCK * PER_BLOCK), grow)
+    if t2 == 0 {
+        return 0
+    }
+    return walk_level(state, t2, (t / PER_BLOCK) % PER_BLOCK, grow)
+}
+
+fn file_block_cached(state: u64, ino: u64, index: u64) -> u64 {
+    let dn: u64 = directs(state)
+    if index < dn {
+        return file_block(state, ino, index, true)
+    }
+    let k: u64 = index - dn
+    if k >= PER_BLOCK + PER_BLOCK * PER_BLOCK + PER_BLOCK * PER_BLOCK * PER_BLOCK {
+        return file_block(state, ino, index, true)
+    }
+    let group: u64 = k / PER_BLOCK
+    if lp_lba == 0 || lp_ino != ino || lp_group != group {
+        if !lp_drop(state) {
+            return 0
+        }
+        let lba: u64 = leaf_ptr_block(state, ino, k, true)
+        if lba == 0 || !ofsj.read(state, lba, buf_i2(state)) {
+            return 0
+        }
+        lp_ino = ino
+        lp_group = group
+        lp_lba = lba
+    }
+    let at: u64 = (k % PER_BLOCK) * 8
+    let b: u64 = regio.read64(buf_i2(state) + at)
+    if b != 0 {
+        return b
+    }
+    let fresh: u64 = block_alloc_leaf(state)
+    if fresh == 0 {
+        return 0
+    }
+    regio.write64(buf_i2(state) + at, fresh)
+    lp_dirty = 1
+    return fresh
+}
+
 fn write_at_scoped(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
     let flags: u64 = enter(state)
     free_batch_begin()
-    let n: u64 = write_at_blocks(state, ino, off, src, len)
+    lp_lba = 0
+    lp_dirty = 0
+    var n: u64 = write_at_blocks(state, ino, off, src, len)
+    if !lp_drop(state) {
+        n = 0
+    }
     free_batch_end(state)
     leave(state, flags)
     return n
@@ -1799,7 +1905,7 @@ fn write_at_blocks(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
         }
         // ------------------------------------------- RUNDE FSROBUST
         if ofsj.enabled(state) && ofsj.room(state) < 8 {
-            if !free_flush(state) {
+            if !free_flush(state) || !lp_drop(state) {
                 return n
             }
             if n > 0 {
@@ -1812,7 +1918,7 @@ fn write_at_blocks(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
         if chunk == BS {
             data_overwrite = 1
         }
-        let b: u64 = file_block(state, ino, pos / BS, true)
+        let b: u64 = file_block_cached(state, ino, pos / BS)
         data_overwrite = 0
         if b == 0 {
             stop = true
