@@ -15,7 +15,7 @@ export {
     euid, egid, uid_of, gid_of, is_root, may_signal,
     R_READ, R_WRITE, R_EXEC,
     checks, denied, report,
-    may_attr,
+    may_attr, may_fetched,
     walk, walk_stat, mu_report
 }
 
@@ -125,8 +125,24 @@ fn may_ids(state: u64, t: u64, ino: u64, want: u64, id: u64,
     return false
 }
 
+fn may_fetched(state: u64, t: u64, ino: u64, want: u64, attrs: u64) -> bool {
+    let okay: bool = may_attr(state, t, kstate.get(attrs, 8), kstate.get(attrs, 16), kstate.get(attrs, 24),
+        want, euid(state, t), egid(state, t), kstate.get(attrs, 0) == fs.T_DIR)
+    if okay {
+        return true
+    }
+    kstate.set(state, kstate.K13_OFF + kstate.U_LASTDENY, (ino << 8) | want)
+    return false
+}
+
 fn may(state: u64, t: u64, ino: u64, want: u64) -> bool {
-    return may_ids(state, t, ino, want, euid(state, t), egid(state, t))
+    if ino == 0 {
+        return may_ids(state, t, ino, want, euid(state, t), egid(state, t))
+    }
+    var attrs: [u64; 4] = [0 as u64; 4]
+    let at: u64 = (&attrs[0 as usize]) as u64
+    fs.inode_perm(state, ino, at)
+    return may_fetched(state, t, ino, want, at)
 }
 
 fn may_real(state: u64, t: u64, ino: u64, want: u64) -> bool {
@@ -189,6 +205,8 @@ fn walk(state: u64, t: u64, path: u64) -> bool {
         return false
     }
     kstate.add(state, kstate.MU_OFF + kstate.MU_WALKS, 1)
+    var attrs: [u64; 4] = [0 as u64; 4]
+    let at: u64 = (&attrs[0 as usize]) as u64
     let flags: u64 = fs.enter(state)
     var cur: u64 = fs.root(state)
     var fast: bool = true
@@ -234,11 +252,12 @@ fn walk(state: u64, t: u64, path: u64) -> bool {
                     if ino == 0 {
                         more = false
                     } else {
-                        if fs.inode_type(state, ino) != fs.T_DIR {
+                        fs.inode_perm(state, ino, at)
+                        if kstate.get(at, 0) != fs.T_DIR {
                             more = false
                         } else {
                             cur = ino
-                            if !may(state, t, ino, R_EXEC) {
+                            if !may_fetched(state, t, ino, R_EXEC, at) {
                                 erlaubt = false
                                 more = false
                             }

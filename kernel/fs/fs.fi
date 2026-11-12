@@ -72,7 +72,7 @@ export {
     block_of, buf_sb, buf_zz, geom_ext, geom_total, base_cover,
     base_inodes, ext_inodes, inodes_per_block, bm_blocks,
     set_size, format, mount, path, create_path, unlink_path, entry_at, ENTRY_MAX, dir_entries, step_dir,
-    inode_type, inode_size, read_at, read_at_wide, read_at_cached, write_at, file_truncate, root,
+    inode_type, inode_size, inode_perm, read_at, read_at_wide, read_at_cached, write_at, file_truncate, root,
     free_blocks, used_inodes, MAGIC, T_FILE, T_DIR, DIRENT,
     NAME_LEN, INODE_COUNT, version, directs, inode_mode, inode_uid,
     inode_gid, set_mode, set_owner, set_meta, parent_ino, OFS_V1,
@@ -699,6 +699,30 @@ fn inode_get(state: u64, ino: u64, field: u64) -> u64 {
     }
     leave(state, flags)
     return v
+}
+
+fn inode_perm_slow(state: u64, ino: u64, out: u64) {
+    __mmio_write64(out as *mut u64, inode_type(state, ino))
+    __mmio_write64((out + 8) as *mut u64, inode_mode(state, ino))
+    __mmio_write64((out + 16) as *mut u64, inode_uid(state, ino))
+    __mmio_write64((out + 24) as *mut u64, inode_gid(state, ino))
+}
+
+fn inode_perm(state: u64, ino: u64, out: u64) {
+    if ino == 0 || ino > inode_count(state) || version(state) < OFS_V2 {
+        inode_perm_slow(state, ino, out)
+        return
+    }
+    let flags: u64 = enter(state)
+    let lba: u64 = inode_block_of(state, ino)
+    let idx: u64 = inode_slot(state, ino) % inodes_per_block(state)
+    let hit: bool = iattr.perm_get(state, lba, idx, out)
+    leave(state, flags)
+    if !hit {
+        inode_perm_slow(state, ino, out)
+        return
+    }
+    __mmio_write64((out + 8) as *mut u64, kstate.get(out, 8) & 4095)
 }
 
 fn inode_set(state: u64, ino: u64, field: u64, v: u64) -> bool {
