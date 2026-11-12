@@ -1,21 +1,38 @@
 profile kernel
 
 import sync.fslock
+import block.blk
 import fs.ofsj
 
 export { sync, idle }
 
 fn sync(state: u64) -> bool {
-    if !ofsj.pending() {
-        return true
-    }
     let flags: u64 = fslock.enter(state)
-    let ok: bool = ofsj.flush_pending(state)
+    let table_ok: bool = blk.wb_flush(state)
+    blk.wb_release(state)
+    var ok: bool = true
+    if ofsj.pending() {
+        ok = ofsj.flush_pending(state)
+    }
     fslock.leave(state, flags)
-    return ok
+    return ok && table_ok
+}
+
+fn idle_table(state: u64) {
+    if !blk.wb_due(state) {
+        return
+    }
+    let flags: u64 = fslock.save_irq()
+    if fslock.try_take(state) {
+        let _flushed: bool = blk.flush(state)
+        blk.wb_release(state)
+        fslock.give(state)
+    }
+    fslock.restore_irq(flags)
 }
 
 fn idle(state: u64) {
+    idle_table(state)
     if !ofsj.pending() || ofsj.age(state) < ofsj.GROUP_IDLE_TICKS {
         return
     }

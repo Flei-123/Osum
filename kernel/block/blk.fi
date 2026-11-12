@@ -53,7 +53,7 @@ import bus.drvreg
 export {
     dev_flushes,
     ram_init, use_ata, use_nvme, read, write, blocks, present,
-    read_raw, read_stream, read_stream_span, S_SECTORS, S_SECTORS_WIDE, write_raw, write_run, wb_begin, wb_end, wb_flush,
+    read_raw, read_stream, read_stream_span, S_SECTORS, S_SECTORS_WIDE, write_raw, write_run, wb_begin, wb_begin_data, wb_struct, wb_due, wb_release, wb_end, wb_flush,
     BLOCK_SIZE, DEV_RAM, DEV_ATA, DEV_NVME, DEV_ATA1, DEV_USB,
     removable,
     // ---- Runde K14 ----
@@ -1205,7 +1205,15 @@ fn cache_put(state: u64, dev: u64, lba: u64, src: u64) {
 const W_BASE: u64 = 0x240 // address of the region, 0 = none
 const W_DEPTH: u64 = 0x248 // open scopes
 const W_DIRTY: u64 = 0x250 // valid slots
-const WB_SLOTS: u64 = 256
+const W_SINCE: u64 = 0x298 // tick of the oldest dirty slot
+const W_MODE: u64 = 0x2A0 // 0 eager, 1 data-only scope, 2 structural
+const WB_SLOTS: u64 = 2048
+const WB_KEY_BYTES: u64 = 16384
+const WB_IDLE_TICKS: u64 = 25
+const WB_MAX_TICKS: u64 = 100
+const WM_EAGER: u64 = 0
+const WM_DATA: u64 = 1
+const WM_STRUCT: u64 = 2
 const WB_VALID: u64 = 0x8000000000000000
 const WB_LBA_MASK: u64 = 0x0000FFFFFFFFFFFF
 
@@ -1218,7 +1226,7 @@ fn wb_meta_set(state: u64, slot: u64, v: u64) {
 }
 
 fn wb_data(state: u64, slot: u64) -> u64 {
-    return cg(state, W_BASE) + 4096 + slot * BLOCK_SIZE
+    return cg(state, W_BASE) + WB_KEY_BYTES + slot * BLOCK_SIZE
 }
 
 fn wb_key(dev: u64, lba: u64) -> u64 {
@@ -1294,7 +1302,7 @@ fn wb_active(state: u64) -> bool {
     return cg(state, W_BASE) != 0 && cg(state, W_DEPTH) != 0
 }
 
-const WB_FRAMES: u64 = 33
+const WB_FRAMES: u64 = 260
 
 static mut wb_last: [u64; 1] = [0 as u64; 1]
 
@@ -1310,7 +1318,7 @@ fn wb_grab(state: u64) -> u64 {
 
 fn wb_begin(state: u64) {
     if cg(state, W_BASE) == 0 && kstate.get(state, kstate.BITMAP) != 0 {
-        // 1 frame of slot keys + 32 frames of sector data
+        // 4 frames of slot keys + 256 frames of sector data
         let b: u64 = wb_grab(state)
         if b != 0 {
             var i: u64 = 0
@@ -1323,6 +1331,49 @@ fn wb_begin(state: u64) {
         }
     }
     cs(state, W_DEPTH, cg(state, W_DEPTH) + 1)
+}
+
+fn wb_begin_data(state: u64) {
+    wb_begin(state)
+    if cg(state, W_DEPTH) == 1 {
+        cs(state, W_MODE, WM_DATA)
+    }
+}
+
+fn wb_struct(state: u64) {
+    if cg(state, W_DEPTH) != 0 {
+        cs(state, W_MODE, WM_STRUCT)
+    }
+}
+
+fn wb_age(state: u64) -> u64 {
+    return kstate.get(state, kstate.TICKS) -% cg(state, W_SINCE)
+}
+
+fn wb_keep(state: u64) -> bool {
+    if cg(state, W_MODE) != WM_DATA || cg(state, W_DIRTY) == 0 {
+        return false
+    }
+    if kstate.mode_on(state, kstate.M_NOWBLAZY) {
+        return false
+    }
+    return wb_age(state) < WB_MAX_TICKS
+}
+
+fn wb_due(state: u64) -> bool {
+    if cg(state, W_BASE) == 0 || cg(state, W_DEPTH) != 0 {
+        return false
+    }
+    return cg(state, W_DIRTY) == 0 || wb_age(state) >= WB_IDLE_TICKS
+}
+
+fn wb_release(state: u64) {
+    let b: u64 = cg(state, W_BASE)
+    if b == 0 || cg(state, W_DEPTH) != 0 || cg(state, W_DIRTY) != 0 {
+        return
+    }
+    cs(state, W_BASE, 0)
+    mmframe.frame_free_run(state, b, WB_FRAMES)
 }
 
 fn wb_flush(state: u64) -> bool {
@@ -1365,15 +1416,16 @@ fn wb_end(state: u64) -> bool {
     if d == 0 {
         return true
     }
+    if d == 1 && wb_keep(state) {
+        cs(state, W_MODE, WM_EAGER)
+        cs(state, W_DEPTH, 0)
+        return true
+    }
     cs(state, W_DEPTH, d - 1)
     if d == 1 {
+        cs(state, W_MODE, WM_EAGER)
         let ok: bool = wb_flush(state)
-        // give the 33 frames back: a table kept forever shows up as a frame leak
-        let b: u64 = cg(state, W_BASE)
-        if b != 0 {
-            cs(state, W_BASE, 0)
-            mmframe.frame_free_run(state, b, WB_FRAMES)
-        }
+        wb_release(state)
         return ok
     }
     return true
@@ -1421,6 +1473,9 @@ fn wb_put(state: u64, dev: u64, lba: u64, src: u64) -> bool {
         cs(state, W_DIRTY, cg(state, W_DIRTY) - 1)
     }
     if wb_meta(state, sl) == 0 {
+        if cg(state, W_DIRTY) == 0 {
+            cs(state, W_SINCE, kstate.get(state, kstate.TICKS))
+        }
         cs(state, W_DIRTY, cg(state, W_DIRTY) + 1)
     }
     let d: u64 = wb_data(state, sl)
@@ -1885,6 +1940,9 @@ fn write_run_held(state: u64, lba: u64, src: u64, n: u64) -> bool {
         return true
     }
     let dv: u64 = kstate.get(state, kstate.DISK_DEV)
+    if wb_dev(dv, state) && cg(state, W_DEPTH) == 0 {
+        wb_flush(state)
+    }
     if cryptstate.active(state) || !run_dev(state, dv) {
         var k: u64 = 0
         while k < n {
