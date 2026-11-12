@@ -59,7 +59,12 @@ TESTS=""
 for src in $HERE/t_*.c; do
     n=$(basename "$src" .c)
     if [ -n "${ONLY:-}" ] && ! echo " $ONLY " | grep -q " $n "; then continue; fi
-    if musl-gcc -O1 -g0 -pthread -Wno-unused-result -o "$D/bin/$n" "$src" -I$HERE -ldl -lrt 2> "$D/cc-$n.err"; then TESTS="$TESTS $n"; else bad "$n does not build"; head -5 "$D/cc-$n.err" | sed 's/^/        /'; fi
+    cflags="-O1 -g0 -pthread"
+    if [ "$n" = t_static_nopie ]; then
+        if [ -z "${OSUM_KERNEL_BASE:-}" ]; then echo "  SKIP  $n: needs OSUM_KERNEL_BASE=0x1600000 (low-window alias)"; continue; fi
+        cflags="-O1 -g0 -static -no-pie"
+    fi
+    if musl-gcc $cflags -Wno-unused-result -o "$D/bin/$n" "$src" -I$HERE -ldl -lrt 2> "$D/cc-$n.err"; then TESTS="$TESTS $n"; else bad "$n does not build"; head -5 "$D/cc-$n.err" | sed 's/^/        /'; fi
 done
 for l in libub1 libub2 libub3; do
     extra=""; [ $l = libub2 ] && extra="-L$D/lib -lub1"
