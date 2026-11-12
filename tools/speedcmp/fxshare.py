@@ -1,6 +1,7 @@
 import argparse
 import collections
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -8,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from smcore import HEADER, TARGET, read_tsv
 from stacks import load_symbols, resolver
 
-ENTRY_FRAMES = ("sys__dispatch", "sys__entry")
+ENTRY_FRAMES = ("sys__dispatch", "sys__entry", "sys__entry_quick")
 TOP = 10
 
 
@@ -17,7 +18,8 @@ def load_map(path):
 
 
 def handler_histogram(samples_path, elf, t0):
-    resolve = resolver(load_symbols(elf))
+    raw_resolve = resolver(load_symbols(elf))
+    resolve = lambda addr: re.sub(r"^_F\d+\.", "", raw_resolve(addr))
     hist, total = collections.Counter(), 0
     for line in open(samples_path):
         parts = line.split()
