@@ -20,7 +20,7 @@ static const struct probe probes[] = {
     {"waitid", 247}, {"mq_open", 240}, {"mq_unlink", 241}, {"mq_timedsend", 242},
     {"mq_timedreceive", 243}, {"mq_notify", 244}, {"mq_getsetattr", 245}, {"add_key", 248},
     {"request_key", 249}, {"keyctl", 250}, {"ioprio_set", 251}, {"ioprio_get", 252},
-    {"migrate_pages", 256}, {"pselect6", 270}, {"ppoll", 271}, {"unshare", 272},
+    {"migrate_pages", 256}, {"pselect6", 270}, {"unshare", 272},
     {"move_pages", 279}, {"fanotify_mark", 301}, {"setns", 308}, {"io_pgetevents", 333},
     {"io_setup", 206}, {"io_destroy", 207}, {"io_getevents", 208}, {"io_submit", 209},
     {"io_cancel", 210}, {"ioperm", 173}, {"iopl", 172}, {"adjtimex", 159}, {"clock_adjtime", 305},
