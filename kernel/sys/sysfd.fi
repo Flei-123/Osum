@@ -773,6 +773,12 @@ fn vfs_commit(state: u64, me: u64, of: u64, want: u64) -> u64 {
 
 fn vfs_may(state: u64, me: u64, m: u64, node: u64, want: u64) -> bool {
     kstate.add(state, kstate.MU_OFF + kstate.MU_NODECHK, 1)
+    if vfs.type_of(state, m) == vfsops.FS_OFS && vfs.can(state, m, vfsops.OP_ATTR) {
+        var attrs: [u64; 4] = [0 as u64; 4]
+        let at: u64 = (&attrs[0 as usize]) as u64
+        fs.inode_perm(state, node, at)
+        return perm.may_fetched(state, me, node, want, at)
+    }
     let mode: u64 = vfs.v_attr(state, m, node, vfsops.A_MODE)
     let owner: u64 = vfs.v_attr(state, m, node, vfsops.A_UID)
     let group: u64 = vfs.v_attr(state, m, node, vfsops.A_GID)
@@ -812,11 +818,14 @@ fn open_devshm(state: u64, me: u64, i: u64, flags: u64) -> u64 {
     return fd
 }
 
-fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64, mode: u64) -> u64 {
+fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64, mode: u64, known: u64) -> u64 {
     if mnt_gone(state, m) {
         return sysuser.neg(errno.E_NODEV)
     }
-    var node: u64 = vfs.node_for(state, m, path)
+    var node: u64 = known
+    if node == 0 {
+        node = vfs.node_for(state, m, path)
+    }
     if node == 0 {
         if (flags & O_CREAT) == 0 {
             return sysuser.neg(errno.E_NOENT)
@@ -980,8 +989,15 @@ fn open_named(state: u64, me: u64, buf: u64, len: u64, flags: u64, mode: u64) ->
     if vfs.ready(state) {
         let m: u64 = vfs.mount_for(state, buf)
         if m < vfs.MAX_MNT {
+            var known: u64 = 0
             if m == 0 && vfs.all_mode(state) {
-                let fifo: u64 = fs.path(state, buf)
+                var fifo: u64 = 0
+                if vfs.type_of(state, 0) == vfsops.FS_OFS {
+                    fifo = vfs.node_for(state, 0, buf)
+                    known = fifo
+                } else {
+                    fifo = fs.path(state, buf)
+                }
                 if fifo != 0 && fs.inode_is_fifo(state, fifo) {
                     if !perm.may(state, me, fifo, want_of(flags)) {
                         return sysuser.neg(errno.E_ACCES)
@@ -990,7 +1006,7 @@ fn open_named(state: u64, me: u64, buf: u64, len: u64, flags: u64, mode: u64) ->
                 }
             }
             if m != 0 || vfs.all_mode(state) {
-                return open_vfs(state, me, m, buf, flags, mode)
+                return open_vfs(state, me, m, buf, flags, mode, known)
             }
         }
     }
