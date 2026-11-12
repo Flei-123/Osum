@@ -61,7 +61,7 @@ print("PROC-TASK-OK", len(tids))
 PY
 check proc-task-threads PROC-TASK-OK python3 /tmp/pt.py
 check proc-task-ls "^$$\$" ls /proc/$$/task
-check proc-task-stat-nlwp "." cat /proc/self/task/$$/stat
+check proc-task-stat "^$$ " cat /proc/$$/task/$$/stat
 check sys-class-net-lo "^lo$" ls /sys/class/net
 check sys-lo-mtu 65536 cat /sys/class/net/lo/mtu
 check sys-node-online "^0$" cat /sys/devices/system/node/online
@@ -73,8 +73,8 @@ check sys-root-ls "kernel" ls /sys
 check sys-devices-system "node" ls /sys/devices/system
 timeout 8 htop -d 5 < /dev/null > /tmp/h.out 2>&1
 echo "PROC htop rc=$?"
-echo "PROC htop-tasks: $(tr -d '\033' < /tmp/h.out | sed 's/\[[0-9;]*[a-zA-Z]//g' | grep -o 'Tasks:[^,]*,[^,]*,' | head -1)"
-check htop-tasks-nonzero "Tasks: *[1-9]" sh -c "tr -d '\033' < /tmp/h.out | sed 's/\[[0-9;]*[a-zA-Z]//g'"
+echo "PROC htop-tasks: $(tr -d '\033' < /tmp/h.out | sed 's/\[[0-9;?]*[a-zA-Z]//g; s/(B//g' | grep -o 'Tasks:[^,]*,[^,]*,' | head -1)"
+check htop-tasks-nonzero "Tasks: *[1-9]" sh -c "tr -d '\033' < /tmp/h.out | sed 's/\[[0-9;?]*[a-zA-Z]//g; s/(B//g'"
 echo "PROC htop-cpu: $(tr -d '\033' < /tmp/h.out | grep -c 'offline')"
 echo APPS-END
 echo FX-END
