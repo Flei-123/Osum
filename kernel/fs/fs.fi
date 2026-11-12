@@ -833,6 +833,7 @@ fn inode_scan_free(state: u64, from: u64, to: u64) -> u64 {
 }
 
 fn inode_alloc(state: u64, kind: u64) -> u64 {
+    wbscope.before_alloc(state)
     let last: u64 = inode_count(state)
     var start: u64 = kstate.get(state, kstate.FSG_OFF + G_IHINT)
     if start < 1 || start > last {
@@ -853,6 +854,7 @@ fn inode_alloc(state: u64, kind: u64) -> u64 {
 }
 
 fn inode_release(state: u64, ino: u64) -> bool {
+    wbscope.mark_freed(state)
     let hint: u64 = kstate.get(state, kstate.FSG_OFF + G_IHINT)
     if hint != 0 && ino < hint {
         kstate.set(state, kstate.FSG_OFF + G_IHINT, ino)
@@ -928,6 +930,7 @@ fn walk_leaf(state: u64, block: u64, k: u64, grow: bool) -> u64 {
 }
 
 fn block_alloc(state: u64) -> u64 {
+    wbscope.before_alloc(state)
     let last: u64 = total_blocks(state)
     var lim: u64 = max_blocks(state)
     if last < lim {
@@ -970,7 +973,7 @@ fn search_free(state: u64, von: u64, bis: u64) -> u64 {
             }
         }
         if fund != 0 {
-            blk.wb_struct(state)
+            wbscope.mark_struct(state)
             if !bm_store(state, kb) {
                 return 0
             }
@@ -1037,6 +1040,7 @@ fn block_free(state: u64, b: u64) {
     if b >= max_blocks(state) {
         return
     }
+    wbscope.mark_freed(state)
     let kb: u64 = bm_block_of(state, b)
     if !bm_load(state, kb) {
         return
@@ -1625,7 +1629,7 @@ fn size_write(state: u64, ino: u64, new_size: u64, only_grow: bool) -> bool {
         return true
     }
     let kind: u64 = regio.read64(at + I_TYPE)
-    blk.wb_struct(state)
+    wbscope.mark_struct(state)
     regio.write64(at + I_SIZE, new_size)
     if !ofsj.write(state, inode_block_of(state, ino), buf_in(state)) {
         return false
@@ -2023,6 +2027,29 @@ fn entry_at(state: u64, dir: u64, index: u64, out: u64, cap: u64) -> u64 {
     return got
 }
 
+static mut added_slot: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn entry_block(state: u64, slot: u64) -> u64 {
+    let de: u64 = dirent_size(state)
+    let first: u64 = slot * de / BS
+    if (slot + 1) * de - 1 >= (first + 1) * BS {
+        return NO_SLOT
+    }
+    return first
+}
+
+fn rename_needs_barrier(state: u64, odir: u64, ndir: u64, oldname: u64) -> bool {
+    if odir != ndir {
+        return true
+    }
+    let old_slot: u64 = dir_slot_of(state, odir, oldname)
+    if old_slot == NO_SLOT || added_slot == NO_SLOT {
+        return true
+    }
+    let a: u64 = entry_block(state, old_slot)
+    return a == NO_SLOT || a != entry_block(state, added_slot)
+}
+
 fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
     let de: u64 = dirent_size(state)
     let nl: u64 = name_len(state)
@@ -2066,6 +2093,7 @@ fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
         dirindex.touch(state, dir)
         return false
     }
+    added_slot = slot
     dirindex.note_add(state, dir, dirindex.name_hash(name, nl), slot)
     if inode_type(state, ino) == T_FILE {
         dcache.forget_name(state, name)
@@ -2421,7 +2449,7 @@ fn create_path_run(state: u64, p: u64, kind: u64) -> u64 {
             return 0
         }
     }
-    wbscope.barrier(state)
+    wbscope.order_create(state, inode_block_of(state, ino), data_start(state), kind == T_DIR)
     if !dir_add(state, dir, name, ino) {
         inode_release(state, ino)
         leave(state, flags)
@@ -2613,7 +2641,9 @@ fn rename_path_run(state: u64, from: u64, to: u64) -> u64 {
         leave(state, flags)
         return 28 // ENOSPC
     }
-    wbscope.barrier(state)
+    if rename_needs_barrier(state, odir, ndir, oldname) {
+        wbscope.barrier(state)
+    }
     if dir_remove(state, odir, oldname) == 0 {
         dir_remove(state, ndir, newname)
         leave(state, flags)
