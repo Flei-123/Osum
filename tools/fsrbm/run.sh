@@ -69,7 +69,6 @@ p = sys.argv[1]
 s = open(p).read()
 block = """        if ofsj.enabled(state) && ofsj.room(state) < 8 {
             if !free_flush(state) {
-                leave(state, flags)
                 return n
             }
 """
