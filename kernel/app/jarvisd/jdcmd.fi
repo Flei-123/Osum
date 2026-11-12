@@ -8,6 +8,7 @@ import std.rt
 import tls.tls
 import tls.x509
 import jarvisd.jdbase
+import jarvisd.jdlogcap
 import jarvisd.jdargs
 import jarvisd.jddev
 
@@ -608,6 +609,9 @@ fn conf_clear() {
     k_max_file = 262144
     k_command_ms = COMMAND_MS
     k_watchdog_ms = 600000
+    if !jdbase.k_legacy {
+        k_watchdog_ms = jdbase.WATCHDOG_CAP_S * 1000
+    }
     var p1: [u8; 22] = "/var/log/jarvisd.log\0\0"
     hinein((&k_protokoll[0]) as u64, jdbase.MAXPFAD, (&p1[0]) as u64, 20)
     var p2: [u8; 23] = "/var/jarvis/output.txt\0"
@@ -748,6 +752,9 @@ fn conf_read() -> bool {
                     let wsec: u64 = num_from(wp, wl)
                     if wsec == 0 || (wsec >= 20 && wsec <= 86400) {
                         k_watchdog_ms = wsec * 1000
+                        if !jdbase.k_legacy && (wsec == 0 || wsec > jdbase.WATCHDOG_CAP_S) {
+                            k_watchdog_ms = jdbase.WATCHDOG_CAP_S * 1000
+                        }
                     }
                 } else if ist(sp, sl, (&s_read[0]) as u64) {
                     list_add((&l_read[0]) as u64, &jdbase.n_read, wp, wl)
@@ -899,6 +906,7 @@ fn notiere(art: u64, artn: usize, erg: str, det: u64, detn: usize) {
         rt.buf_push_bytes(&b, det, detn)
     }
     rt.buf_push(&b, 10 as u8)
+    jdlogcap.rotate_if_big((&k_protokoll[0]) as u64)
     let fd: i64 = sys_open((&k_protokoll[0]) as u64,
         jdbase.O_WRONLY | jdbase.O_CREAT | O_APPEND, 384)
     if fd >= 0 {
@@ -975,15 +983,23 @@ fn http_body_from(p: u64, n: usize) -> usize {
     return n
 }
 
+fn net_timeout_ms() -> u64 {
+    if jdbase.k_legacy {
+        return jdbase.LEGACY_NET_TIMEOUT_MS
+    }
+    return jdbase.NET_TIMEOUT_MS
+}
+
 fn https_wechsel(d: *mut jdbase.Wire, body: u64, rumpfn: usize) -> bool {
     var schief: bool = false
     var c: net.Conn = net.connect_tcp(jdbase.k_ip, jdbase.k_port as u16)
     catch | e | fail_conn(&schief)
     if schief {
         say_if_loud("jarvisd: no connection\n")
+        jdbase.k_fail_kind = jdbase.FAIL_CONNECT
         return false
     }
-    let okt: bool = net.set_timeout(&c, 60000 as u64) catch false
+    let okt: bool = net.set_timeout(&c, net_timeout_ms()) catch false
 
     if !(*d).store_ok {
         var storebuf: rt.Buf = rt.buf_new()
@@ -995,6 +1011,7 @@ fn https_wechsel(d: *mut jdbase.Wire, body: u64, rumpfn: usize) -> bool {
         if wurzeln == 0 {
             say("jarvisd: no root store -- nothing is trusted\n")
             net.close(&c)
+            jdbase.k_fail_kind = jdbase.FAIL_ROOTS
             return false
         }
         (*d).store_ok = true
@@ -1010,6 +1027,7 @@ fn https_wechsel(d: *mut jdbase.Wire, body: u64, rumpfn: usize) -> bool {
         say("\n")
         tls.tls_free(&t)
         net.close(&c)
+        jdbase.k_fail_kind = jdbase.FAIL_TLS
         return false
     }
 
@@ -1026,6 +1044,7 @@ fn https_wechsel(d: *mut jdbase.Wire, body: u64, rumpfn: usize) -> bool {
         tls.tls_close(&t)
         tls.tls_free(&t)
         net.close(&c)
+        jdbase.k_fail_kind = jdbase.FAIL_SEND
         return false
     }
 
@@ -1049,6 +1068,10 @@ fn https_wechsel(d: *mut jdbase.Wire, body: u64, rumpfn: usize) -> bool {
         say("jarvisd: server answered ")
         say_num(code)
         say("\n")
+        jdbase.k_fail_kind = jdbase.FAIL_STATUS
+        if code == 0 {
+            jdbase.k_fail_kind = jdbase.FAIL_RECV
+        }
         rt.buf_free(&roh)
         return false
     }
@@ -1057,6 +1080,7 @@ fn https_wechsel(d: *mut jdbase.Wire, body: u64, rumpfn: usize) -> bool {
         rt.buf_push_bytes(&(*d).puf, roh.ptr + ab as u64, roh.len - ab)
     }
     rt.buf_free(&roh)
+    jdbase.k_fail_kind = jdbase.FAIL_NONE
     gut_gemeldet()
     return true
 }
