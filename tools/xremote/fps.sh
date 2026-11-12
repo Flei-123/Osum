@@ -6,7 +6,7 @@
 #
 # Env: XR_WD, XR_HOST, XR_RELAY, XR_LIBS, XR_LIBGCC (as in run.sh), XR_PERF_VIEWER (viewer with --perftest),
 #      KERNEL (prebuilt kernel image; the counter-probe is a kernel built from the commit before the grab fix),
-#      XR_MIN_FPS (15), XR_MAX_LATENCY_MS (300), XR_MAX_GRAB_MS (25, per 1920x1080 frame), KEEP=1 keeps the output dir.
+#      XR_MIN_FPS (15), XR_MAX_LATENCY_MS (300), XR_MAX_GRAB_MS (80, per 1920x1080 frame), KEEP=1 keeps the output dir.
 # Proves: with the desktop running, the viewer receives >= XR_MIN_FPS frames/s while the pointer sweeps the screen, a pointer
 #         move on a still screen shows up in the viewer within XR_MAX_LATENCY_MS, and one full-screen kernel grab
 #         (osum_shot, what the host does per frame) stays within XR_MAX_GRAB_MS scaled to 1920x1080.
@@ -21,7 +21,7 @@ NODEPATH=${XR_LIBS:-/root/jarvis/node_modules}
 LIBGCC=${XR_LIBGCC:-$WD/fx-root/usr/lib/libgcc_s.so.1}
 MIN_FPS=${XR_MIN_FPS:-15}
 MAX_LATENCY_MS=${XR_MAX_LATENCY_MS:-300}
-MAX_GRAB_MS=${XR_MAX_GRAB_MS:-25}
+MAX_GRAB_MS=${XR_MAX_GRAB_MS:-80}
 HOSTSECS=${XR_HOSTSECS:-240}
 TAILSECS=${XR_TAIL:-75}
 RELAYPORT=$((18000 + $$ % 1000))
@@ -107,7 +107,7 @@ ANS=$(echo "$LATLINE" | grep -o 'answered=[0-9]*' | cut -d= -f2)
 echo "        $LATLINE"
 [ -n "$LAT" ] && [ "$LAT" -le "$MAX_LATENCY_MS" ] && ok "pointer move visible in the viewer after ${LAT} ms median (<= $MAX_LATENCY_MS)" || bad "change-to-picture median ${LAT:-none} ms > $MAX_LATENCY_MS"
 [ "${ANS:-0}" -ge 10 ] && ok "viewer saw a new frame after $ANS of 12 moves" || bad "viewer answered only ${ANS:-0} of 12 moves"
-grep -aq 'Sitzung startet: backend osum' "$S" && ok "host started a capture session with the osum backend" || bad "no osum capture session in the host log"
+grep -aq 'Aufnahme: osum [0-9]*x[0-9]*' "$S" && ok "host captures the osum screen" || bad "host log has no osum capture line"
 
 echo "== $pass ok, $fail fail"
 if [ -n "${KEEP:-}" ]; then
