@@ -14,7 +14,7 @@ trap '[ -n "${KEEP:-}" ] || rm -rf "$D"' EXIT
 . tools/lib/firnenv.sh
 finish() { echo "WBDEV: $pass passed, $fail failed"; [ "$fail" -eq 0 ]; exit $?; }
 BIG_BYTES=${BIG_BYTES:-524288}
-NVME_WRITE_RATIO=${NVME_WRITE_RATIO:-5}
+NVME_WRITE_RATIO=${NVME_WRITE_RATIO:-4}
 NVME_FLUSH_RATIO=${NVME_FLUSH_RATIO:-10}
 AHCI_RATIO=${AHCI_RATIO:-3}
 APPENDS=${APPENDS:-40}
