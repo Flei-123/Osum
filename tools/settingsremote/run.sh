@@ -26,6 +26,7 @@ YRES=800
   echo "warteauf settings: nav route=settings://personalization page=0 || 90"
   echo "taste ctrl-f"; echo "tippe remote desktop"; echo "warte 3"
   echo "taste ret"; echo "warte 4"
+  echo "taste ctrl-f"; echo "warte 3"
   echo "foto 01-remote"
   echo "klickauf srectxrsw"; echo "warte 3"
   echo "foto 02-remote-clicked"
