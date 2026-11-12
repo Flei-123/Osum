@@ -9,6 +9,8 @@ import sched.proc.procbase
 import sched.proc.procfault
 import arch.cpu
 import fs.fs
+import fs.ofsattr
+import arch.arch
 import fs.statsane
 import fs.statxconv
 import ldr.elf
@@ -72,6 +74,7 @@ const DT_LNK: u64 = 10
 // `struct stat` of x86-64 Linux is 144 octets; `struct linux_dirent64`
 // has 19 octets in front of the name.
 const STAT_BYTES: u64 = 144
+const STAT_ATTR_AT: u64 = 256
 const DIRENT_HEAD: u64 = 19
 
 const ST_DEV: u64 = 0
@@ -309,14 +312,12 @@ fn stat_out(state: u64, me: u64, out: u64) -> u64 {
 
 fn fill_vstat(state: u64, m: u64, node: u64) -> bool {
     let s: u64 = sysuser.blockb(state) + 2048
-    var i: u64 = 0
-    while i < STAT_BYTES {
-        kstate.set8(s + i, 0 as u8)
-        i = i + 1
-    }
-    let art: u64 = vfs.v_attr(state, m, node, vfsops.A_TYPE)
-    let size: u64 = vfs.v_attr(state, m, node, vfsops.A_SIZE)
-    var mode: u64 = vfs.v_attr(state, m, node, vfsops.A_MODE)
+    let at: u64 = s + STAT_ATTR_AT
+    arch.fill_words(s, 0, STAT_BYTES / 8)
+    ofsattr.load(state, m, node, at)
+    let art: u64 = kstate.get(at, ofsattr.AT_TYPE)
+    let size: u64 = kstate.get(at, ofsattr.AT_SIZE)
+    var mode: u64 = kstate.get(at, ofsattr.AT_MODE)
     if art == vfsops.N_DIR {
         mode = mode | S_IFDIR
     } else if art == vfsops.N_CHR {
@@ -325,34 +326,27 @@ fn fill_vstat(state: u64, m: u64, node: u64) -> bool {
         mode = mode | S_IFBLK
     } else if art == vfsops.N_LNK {
         mode = mode | S_IFLNK
-    } else if m == 0 && fs.inode_is_fifo(state, node) {
+    } else if m == 0 && kstate.get(at, ofsattr.AT_FIFO) != 0 {
         mode = mode | S_IFIFO
     } else {
         mode = mode | S_IFREG
     }
-    let bs: u64 = vfs.v_attr(state, m, node, vfsops.A_BLKSIZE)
+    let bs: u64 = kstate.get(at, ofsattr.AT_BLKSIZE)
     __mmio_write64((s + ST_DEV) as *mut u64, m + 1)
     __mmio_write64((s + ST_INO) as *mut u64, node)
-    __mmio_write64((s + ST_NLINK) as *mut u64,
-        vfs.v_attr(state, m, node, vfsops.A_NLINK))
+    __mmio_write64((s + ST_NLINK) as *mut u64, kstate.get(at, ofsattr.AT_NLINK))
     __mmio_write32((s + ST_MODE) as *mut u32, mode as u32)
-    let vuid: u64 = vfs.v_attr(state, m, node, vfsops.A_UID)
-    let vgid: u64 = vfs.v_attr(state, m, node, vfsops.A_GID)
-    __mmio_write32((s + ST_UID) as *mut u32, statsane.id32(state, vuid) as u32)
-    __mmio_write32((s + ST_GID) as *mut u32, statsane.id32(state, vgid) as u32)
-    __mmio_write64((s + ST_RDEV) as *mut u64,
-        vfs.v_attr(state, m, node, vfsops.A_RDEV))
+    __mmio_write32((s + ST_UID) as *mut u32, statsane.id32(state, kstate.get(at, ofsattr.AT_UID)) as u32)
+    __mmio_write32((s + ST_GID) as *mut u32, statsane.id32(state, kstate.get(at, ofsattr.AT_GID)) as u32)
+    __mmio_write64((s + ST_RDEV) as *mut u64, kstate.get(at, ofsattr.AT_RDEV))
     __mmio_write64((s + ST_SIZE) as *mut u64, size)
     __mmio_write64((s + ST_BLKSIZE) as *mut u64, bs)
     if bs != 0 {
         __mmio_write64((s + ST_BLOCKS) as *mut u64, statsane.blocks512(state, size))
     }
-    __mmio_write64((s + ST_MTIME) as *mut u64,
-        vfs.v_attr(state, m, node, vfsops.A_MTIME))
-    __mmio_write64((s + ST_CTIME) as *mut u64,
-        vfs.v_attr(state, m, node, vfsops.A_CTIME))
-    __mmio_write64((s + ST_ATIME) as *mut u64,
-        vfs.v_attr(state, m, node, vfsops.A_ATIME))
+    __mmio_write64((s + ST_MTIME) as *mut u64, kstate.get(at, ofsattr.AT_MTIME))
+    __mmio_write64((s + ST_CTIME) as *mut u64, kstate.get(at, ofsattr.AT_CTIME))
+    __mmio_write64((s + ST_ATIME) as *mut u64, kstate.get(at, ofsattr.AT_ATIME))
     return true
 }
 
