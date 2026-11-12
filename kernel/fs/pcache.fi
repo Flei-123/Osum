@@ -9,7 +9,8 @@ export {
     attach, sets_for, region_frames, MIN_SETS, read_hit, copy_out, begin_fill, attach_frame, finish_fill, abort_fill, buffer_of,
     drop_node, drop_ino, drop_mount, drop_all, take_frame,
     hits, misses, inserts, evictions, drops, resident, shrunk, bypassed,
-    note_bypass, MISS, PAGE_BYTES, pin, unpin, valid_of
+    note_bypass, MISS, PAGE_BYTES, pin, unpin, valid_of,
+    base_of, find_way, slot_at, pin_slot, unpin_slot
 }
 
 const MISS: u64 = 0xFFFFFFFFFFFFFFFF
@@ -145,42 +146,67 @@ fn read_hit(state: u64, m: u64, node: u64, idx: u64, from: u64, n: u64, dst: u64
     return MISS
 }
 
-fn pin(state: u64, m: u64, node: u64, idx: u64) -> u64 {
+fn base_of(state: u64) -> u64 {
     if !enabled(state) {
         return 0
     }
-    let b: u64 = kstate.get(state, kstate.PCACHE_BASE)
-    if b == 0 {
-        return 0
-    }
+    return kstate.get(state, kstate.PCACHE_BASE)
+}
+
+fn find_way(b: u64, node: u64, m: u64, idx: u64) -> u64 {
     let key: u64 = key_of(m, idx)
-    let set: u64 = set_of(b, node, m, idx)
-    let flags: u64 = cachelock.take(b)
+    let first: u64 = set_of(b, node, m, idx) * WAYS
     var way: u64 = 0
     while way < WAYS {
-        let s: u64 = slot_of(b, set * WAYS + way)
+        let s: u64 = slot_of(b, first + way)
         if kstate.get(s, S_KEY) == key && kstate.get(s, S_NODE) == node {
-            let clock: u64 = kstate.get(b, H_CLOCK) + 1
-            kstate.set(b, H_CLOCK, clock)
-            kstate.set(s, S_STAMP, clock)
-            kstate.set(s, S_PIN, kstate.get(s, S_PIN) + 1)
-            kstate.set(b, H_HITS, kstate.get(b, H_HITS) + 1)
-            cachelock.give(b, flags)
-            return s
+            return way + 1
         }
         way = way + 1
     }
-    cachelock.give(b, flags)
     return 0
+}
+
+fn slot_at(b: u64, node: u64, m: u64, idx: u64, way: u64) -> u64 {
+    return slot_of(b, set_of(b, node, m, idx) * WAYS + way)
+}
+
+fn pin_slot(b: u64, s: u64) {
+    let clock: u64 = kstate.get(b, H_CLOCK) + 1
+    kstate.set(b, H_CLOCK, clock)
+    kstate.set(s, S_STAMP, clock)
+    kstate.set(s, S_PIN, kstate.get(s, S_PIN) + 1)
+    kstate.set(b, H_HITS, kstate.get(b, H_HITS) + 1)
+}
+
+fn unpin_slot(s: u64) {
+    let n: u64 = kstate.get(s, S_PIN)
+    if n > 0 {
+        kstate.set(s, S_PIN, n - 1)
+    }
+}
+
+fn pin(state: u64, m: u64, node: u64, idx: u64) -> u64 {
+    let b: u64 = base_of(state)
+    if b == 0 {
+        return 0
+    }
+    let flags: u64 = cachelock.take(b)
+    let way: u64 = find_way(b, node, m, idx)
+    if way == 0 {
+        cachelock.give(b, flags)
+        return 0
+    }
+    let s: u64 = slot_at(b, node, m, idx, way - 1)
+    pin_slot(b, s)
+    cachelock.give(b, flags)
+    return s
 }
 
 fn unpin(state: u64, slot: u64) {
     let b: u64 = kstate.get(state, kstate.PCACHE_BASE)
     let flags: u64 = cachelock.take(b)
-    let n: u64 = kstate.get(slot, S_PIN)
-    if n > 0 {
-        kstate.set(slot, S_PIN, n - 1)
-    }
+    unpin_slot(slot)
     cachelock.give(b, flags)
 }
 

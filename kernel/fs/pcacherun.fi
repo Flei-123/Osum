@@ -1,0 +1,64 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import fs.cachelock
+import fs.pcache
+
+export { MAX_RUN, COUNT_SHIFT, pin_run, run_frame, unpin_run }
+
+const MAX_RUN: u64 = 16
+const WAY_BITS: u64 = 3
+const WAY_MASK: u64 = 7
+const COUNT_SHIFT: u64 = 48
+
+fn way_of(packed: u64, j: u64) -> u64 {
+    return (packed >> (j * WAY_BITS)) & WAY_MASK
+}
+
+fn pin_run(state: u64, m: u64, node: u64, idx0: u64, n: u64, last_need: u64) -> u64 {
+    let b: u64 = pcache.base_of(state)
+    if b == 0 {
+        return 0
+    }
+    let flags: u64 = cachelock.take(b)
+    var packed: u64 = 0
+    var j: u64 = 0
+    var go: bool = true
+    while j < n && go {
+        let way: u64 = pcache.find_way(b, node, m, idx0 + j)
+        go = false
+        if way != 0 {
+            let s: u64 = pcache.slot_at(b, node, m, idx0 + j, way - 1)
+            var need: u64 = pcache.PAGE_BYTES
+            if j + 1 == n {
+                need = last_need
+            }
+            if pcache.valid_of(s) >= need {
+                pcache.pin_slot(b, s)
+                packed = packed | ((way - 1) << (j * WAY_BITS))
+                j = j + 1
+                go = true
+            }
+        }
+    }
+    cachelock.give(b, flags)
+    return packed | (j << COUNT_SHIFT)
+}
+
+fn run_frame(state: u64, m: u64, node: u64, idx0: u64, packed: u64, j: u64) -> u64 {
+    let b: u64 = kstate.get(state, kstate.PCACHE_BASE)
+    return pcache.buffer_of(pcache.slot_at(b, node, m, idx0 + j, way_of(packed, j)))
+}
+
+fn unpin_run(state: u64, m: u64, node: u64, idx0: u64, packed: u64) {
+    let b: u64 = kstate.get(state, kstate.PCACHE_BASE)
+    let count: u64 = packed >> COUNT_SHIFT
+    let flags: u64 = cachelock.take(b)
+    var j: u64 = 0
+    while j < count {
+        pcache.unpin_slot(pcache.slot_at(b, node, m, idx0 + j, way_of(packed, j)))
+        j = j + 1
+    }
+    cachelock.give(b, flags)
+}
