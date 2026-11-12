@@ -28,6 +28,7 @@ import ipc.uio
 import usb.usb
 import fs.vfsops
 import fs.procfs.pfbase
+import fs.procfs.pfgroup
 import lib.version
 
 const ART: u64 = 0x1000000
@@ -515,6 +516,28 @@ fn make_mounts(state: u64) -> u64 {
     return p
 }
 
+fn w_ids(state: u64, at: u64, user: u64, real: u64, effective: u64) -> u64 {
+    var uid_label: [u8; 5] = "Uid:\0"
+    var gid_label: [u8; 5] = "Gid:\0"
+    var p: u64 = at
+    if user != 0 {
+        p = w_str(state, p, (&uid_label[0]) as u64)
+    } else {
+        p = w_str(state, p, (&gid_label[0]) as u64)
+    }
+    var k: u64 = 0
+    while k < 4 {
+        p = w_ch(state, p, 9)
+        if k % 2 == 0 {
+            p = w_num(state, p, real)
+        } else {
+            p = w_num(state, p, effective)
+        }
+        k = k + 1
+    }
+    return w_nl(state, p)
+}
+
 fn make_stat(state: u64) -> u64 {
     var s1: [u8; 12] = "ticks     \0\0"
     var s2: [u8; 12] = "ctxt      \0\0"
@@ -559,9 +582,18 @@ fn make_stat(state: u64) -> u64 {
         sn = kstate.MAX_CPUS
     }
     var sci: u64 = 0
-    while sn > 1 && sci < sn {
-        let ct: u64 = cpu.get(state, sci, cpu.C_TICKS)
+    var bsp_only: bool = false
+    if sn == 0 {
+        sn = 1
+        bsp_only = true
+    }
+    while sci < sn {
+        var ct: u64 = cpu.get(state, sci, cpu.C_TICKS)
         var ci: u64 = cpu.get(state, sci, cpu.C_IDLETICKS)
+        if bsp_only {
+            ct = total
+            ci = idle_ticks
+        }
         if ci > ct {
             ci = ct
         }
@@ -885,29 +917,15 @@ fn make_status(state: u64, t: u64) -> u64 {
     }
     p = w_nl(state, p)
     var l12: [u8; 10] = "Threads:\0\0"
+    var l16: [u8; 10] = "Tgid:   \0\0"
     var l13: [u8; 10] = "VmRSS:  \0\0"
     var l14: [u8; 10] = "VmSize: \0\0"
     var l15: [u8; 5] = " kB\0\0"
-    var grp: u64 = taskslot.tget(state, t, taskconst.T_TGID)
-    if grp == 0 {
-        grp = taskslot.tget(state, t, taskconst.T_PID)
-    }
-    var nth: u64 = 0
-    var ti: u64 = 0
-    while ti < kstate.MAX_TASKS {
-        if taskslot.tget(state, ti, taskconst.T_STATE) != taskconst.S_FREE && taskslot.tget(state, ti, taskconst.T_STATE) != taskconst.S_ZOMBIE {
-            var tg: u64 = taskslot.tget(state, ti, taskconst.T_TGID)
-            if tg == 0 {
-                tg = taskslot.tget(state, ti, taskconst.T_PID)
-            }
-            if tg == grp {
-                nth = nth + 1
-            }
-        }
-        ti = ti + 1
-    }
+    p = w_str(state, p, (&l16[0]) as u64)
+    p = w_num(state, p, pfgroup.group_of(state, t))
+    p = w_nl(state, p)
     p = w_str(state, p, (&l12[0]) as u64)
-    p = w_num(state, p, nth)
+    p = w_num(state, p, pfgroup.count(state, t))
     p = w_nl(state, p)
     p = w_str(state, p, (&l13[0]) as u64)
     p = w_num(state, p, taskslot.tget(state, t, taskconst.T_UPAGES) * 4)
@@ -917,6 +935,8 @@ fn make_status(state: u64, t: u64) -> u64 {
     p = w_num(state, p, taskslot.tget(state, t, taskconst.T_UPAGES) * 4)
     p = w_str(state, p, (&l15[0]) as u64)
     p = w_nl(state, p)
+    p = w_ids(state, p, 1, taskslot.tget(state, t, taskconst.T_UID), taskslot.tget(state, t, taskconst.T_EUID))
+    p = w_ids(state, p, 0, taskslot.tget(state, t, taskconst.T_GID), taskslot.tget(state, t, taskconst.T_EGID))
     var l11: [u8; 10] = "Origin: \0\0"
     p = w_str(state, p, (&l11[0]) as u64)
     if origin.is_empty(state, t) {
@@ -986,7 +1006,7 @@ fn make_pstat(state: u64, t: u64) -> u64 {
     p = st_num(state, p, 0)
     p = st_num(state, p, taskslot.tget(state, t, taskconst.T_PRIO))
     p = st_num(state, p, 0)
-    p = st_num(state, p, 1)
+    p = st_num(state, p, pfgroup.count(state, t))
     p = st_num(state, p, 0)
     p = st_num(state, p, 0)
     p = st_num(state, p, taskslot.tget(state, t, taskconst.T_UPAGES) * 4096)
@@ -1089,7 +1109,7 @@ fn unshadow(state: u64, t: u64, addr: u64) -> u64 {
     if taskslot.tget(state, t, taskconst.T_LOWPD) == 0 {
         return addr
     }
-    if addr >= proclow.LOW_BASE + proclow.SHADOW_DELTA && addr <= proclow.LOW_END + proclow.SHADOW_DELTA {
+    if addr >= proclow.LOW_BASE + proclow.SHADOW_DELTA && addr <= proclow.low_end() + proclow.SHADOW_DELTA {
         return addr - proclow.SHADOW_DELTA
     }
     return addr

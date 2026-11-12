@@ -82,6 +82,13 @@ int main(void)
     errno = 0; n = slurp("/sys/devices/system/cpu/online", b, sizeof b); CHECKC("sys_cpu_online", n > 0);
     errno = 0; n = slurp("/sys/devices/system/cpu/possible", b, sizeof b); CHECKC("sys_cpu_possible", n > 0);
     errno = 0; n = slurp("/sys/devices/system/cpu/cpu0/cache/index0/size", b, sizeof b); CHECKC("sys_cpu_cache", n > 0);
+    errno = 0; n = slurp("/sys/class/net/lo/mtu", b, sizeof b); CHECKC("sys_class_net_lo_mtu", n > 0 && atoi(b) == 65536);
+    errno = 0; n = slurp("/sys/devices/system/node/online", b, sizeof b); CHECKC("sys_node_online", n > 0 && b[0] == '0');
+    errno = 0; n = slurp("/sys/kernel/mm/transparent_hugepage/enabled", b, sizeof b); CHECKC("sys_thp_enabled", n > 0 && strstr(b, "[never]"));
+    errno = 0; n = slurp("/sys/kernel/random/boot_id", b, sizeof b); CHECKC("sys_boot_id", n >= 36);
+    { struct stat cg; errno = 0; CHECKC("sys_fs_cgroup_dir", stat("/sys/fs/cgroup", &cg) == 0 && S_ISDIR(cg.st_mode)); }
+    { char tp[64]; snprintf(tp, sizeof tp, "/proc/self/task/%d/stat", (int)getpid()); errno = 0; n = slurp(tp, b, sizeof b); CHECKC("proc_task_self_stat", n > 0 && atoi(b) == (int)getpid()); }
+    { DIR *d = opendir("/proc/self/task"); int found = 0; struct dirent *e; while (d && (e = readdir(d))) if (atoi(e->d_name) == (int)getpid()) found = 1; if (d) closedir(d); errno = 0; CHECKC("proc_task_lists_self", found); }
     {
         /* /sys cache view must say what the CPU says: leaf 4 (Intel) or 0x8000001D (AMD, TOPOEXT); no cache info = no index0 (nothing invented) */
         unsigned ma = 0, ea = 0, eb = 0, ec = 0, ed = 0, xa = 0, xc = 0, lf = 0;

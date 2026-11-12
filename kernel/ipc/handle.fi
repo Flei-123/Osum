@@ -218,13 +218,17 @@ fn obj_live(state: u64, i: u64) -> bool {
     return obj_kind(state, i) != OK_NONE
 }
 
+static mut object_end: u64 = 0
+
 fn objects_used(state: u64) -> u64 {
     var n: u64 = 0
     var i: u64 = 0
-    while i < MAX_OBJ {
-        if kstate.get(state, oslot(i) + OB_KIND) != OK_NONE {
+    var p: u64 = state + kstate.HOBJ_OFF
+    while i < object_end {
+        if __mmio_read64(p as *mut u64) != OK_NONE {
             n = n + 1
         }
+        p = p + OB_BYTES
         i = i + 1
     }
     return n
@@ -234,39 +238,70 @@ fn obj_get(state: u64, kind: u64, num: u64) -> u64 {
     if kind == OK_NONE || kind > OK_MAX {
         return MAX_OBJ
     }
+    var p: u64 = state + kstate.HOBJ_OFF
+    var free: u64 = MAX_OBJ
     var i: u64 = 0
-    while i < MAX_OBJ {
-        let a: u64 = oslot(i)
-        if kstate.get(state, a + OB_KIND) == kind {
-            if kstate.get(state, a + OB_NUM) == num {
-                if kstate.get(state, a + OB_REFS) > 0 {
-                    kstate.set(state, a + OB_REFS,
-                        kstate.get(state, a + OB_REFS) + 1)
+    let end: u64 = object_end
+    while i < end {
+        let k: u64 = __mmio_read64(p as *mut u64)
+        if k == kind {
+            if __mmio_read64((p + OB_NUM) as *mut u64) == num {
+                let r: u64 = __mmio_read64((p + OB_REFS) as *mut u64)
+                if r > 0 {
+                    __mmio_write64((p + OB_REFS) as *mut u64, r + 1)
                     return i
                 }
             }
-        }
-        i = i + 1
-    }
-    i = 0
-    while i < MAX_OBJ {
-        let a: u64 = oslot(i)
-        if kstate.get(state, a + OB_KIND) == OK_NONE {
-            var g: u64 = (kstate.get(state, a + OB_GEN) +% 1) & 0xFFFFFFFF
-            if g == 0 {
-                g = 1
+        } else {
+            if k == OK_NONE && free == MAX_OBJ {
+                free = i
             }
-            kstate.set(state, a + OB_GEN, g)
-            kstate.set(state, a + OB_KIND, kind)
-            kstate.set(state, a + OB_NUM, num)
-            kstate.set(state, a + OB_REFS, 1)
-            kstate.set(state, a + OB_FLIGHT, 0)
-            kstate.add(state, kstate.H_OPENED, 1)
-            return i
         }
+        p = p + OB_BYTES
         i = i + 1
     }
-    return MAX_OBJ
+    if free == MAX_OBJ {
+        free = end
+    }
+    if free >= MAX_OBJ {
+        return MAX_OBJ
+    }
+    obj_create(state, free, kind, num)
+    return free
+}
+
+fn obj_create(state: u64, i: u64, kind: u64, num: u64) {
+    let a: u64 = oslot(i)
+    var g: u64 = (kstate.get(state, a + OB_GEN) +% 1) & 0xFFFFFFFF
+    if g == 0 {
+        g = 1
+    }
+    kstate.set(state, a + OB_GEN, g)
+    kstate.set(state, a + OB_KIND, kind)
+    kstate.set(state, a + OB_NUM, num)
+    kstate.set(state, a + OB_REFS, 1)
+    kstate.set(state, a + OB_FLIGHT, 0)
+    kstate.add(state, kstate.H_OPENED, 1)
+    if i + 1 > object_end {
+        object_end = i + 1
+    }
+}
+
+fn object_end_shrink(state: u64, freed: u64) {
+    if freed + 1 != object_end {
+        return
+    }
+    var e: u64 = freed
+    var p: u64 = state + kstate.HOBJ_OFF + freed * OB_BYTES
+    while e > 0 {
+        p = p - OB_BYTES
+        if __mmio_read64(p as *mut u64) != OK_NONE {
+            object_end = e
+            return
+        }
+        e = e - 1
+    }
+    object_end = 0
 }
 
 fn obj_ref(state: u64, i: u64) {
@@ -283,6 +318,7 @@ fn obj_free(state: u64, i: u64) {
     kstate.set(state, a + OB_REFS, 0)
     kstate.set(state, a + OB_FLIGHT, 0)
     kstate.add(state, kstate.H_CLOSED, 1)
+    object_end_shrink(state, i)
 }
 
 fn obj_unref(state: u64, i: u64) -> bool {
@@ -310,13 +346,14 @@ fn obj_unref(state: u64, i: u64) -> bool {
 fn inflight_on(state: u64, kind: u64, num: u64) -> u64 {
     var n: u64 = 0
     var i: u64 = 0
-    while i < MAX_OBJ {
-        let a: u64 = oslot(i)
-        if kstate.get(state, a + OB_KIND) == kind {
-            if kstate.get(state, a + OB_NUM) == num {
-                n = n + kstate.get(state, a + OB_FLIGHT)
+    var p: u64 = state + kstate.HOBJ_OFF
+    while i < object_end {
+        if __mmio_read64(p as *mut u64) == kind {
+            if __mmio_read64((p + OB_NUM) as *mut u64) == num {
+                n = n + __mmio_read64((p + OB_FLIGHT) as *mut u64)
             }
         }
+        p = p + OB_BYTES
         i = i + 1
     }
     return n

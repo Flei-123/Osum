@@ -47,7 +47,7 @@ def main(argv):
 
     def add(p, depth=0):
         p = os.path.normpath(p)
-        if p == '/' or p in want or p in skips or depth > 12:
+        if p == '/' or p in want or p in skips or depth > 12 or '=' in p:
             return
         h = host(p)
         if not os.path.lexists(h):

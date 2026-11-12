@@ -1,0 +1,99 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.errno
+import lib.kstate
+import fs.file
+import ipc.perm
+import sched.sched
+import sched.taskconst
+import sched.taskslot
+import sys.sysuser
+
+export {
+    handles, call
+}
+
+const SYS_KCMP: u64 = 312
+
+const KCMP_FILE: u64 = 0
+const KCMP_VM: u64 = 1
+const KCMP_FILES: u64 = 2
+const KCMP_FS: u64 = 3
+const KCMP_SIGHAND: u64 = 4
+const KCMP_IO: u64 = 5
+const KCMP_SYSVSEM: u64 = 6
+const KCMP_EPOLL_TFD: u64 = 7
+const ORDER_EQUAL: u64 = 0
+const ORDER_LESS: u64 = 1
+const ORDER_GREATER: u64 = 2
+const INT_MASK: u64 = 0xFFFFFFFF
+
+fn fail(e: u64) -> u64 {
+    return sysuser.neg(e)
+}
+
+fn handles(number: u64) -> bool {
+    return number == SYS_KCMP
+}
+
+fn order(a: u64, b: u64) -> u64 {
+    if a == b {
+        return ORDER_EQUAL
+    }
+    if a < b {
+        return ORDER_LESS
+    }
+    return ORDER_GREATER
+}
+
+fn task_of(state: u64, me: u64, pid: u64) -> u64 {
+    let slot: u64 = sched.find_pid(state, pid & INT_MASK)
+    if slot >= kstate.MAX_TASKS {
+        return kstate.MAX_TASKS
+    }
+    if slot != me && !perm.is_root(state, me) && perm.euid(state, slot) != perm.euid(state, me) {
+        return kstate.MAX_TASKS + 1
+    }
+    return slot
+}
+
+fn call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    let kind: u64 = a2 & INT_MASK
+    if kind > KCMP_EPOLL_TFD {
+        return fail(errno.E_INVAL)
+    }
+    let t1: u64 = task_of(state, me, a0)
+    let t2: u64 = task_of(state, me, a1)
+    if t1 == kstate.MAX_TASKS || t2 == kstate.MAX_TASKS {
+        return fail(errno.E_SRCH)
+    }
+    if t1 > kstate.MAX_TASKS || t2 > kstate.MAX_TASKS {
+        return fail(errno.E_PERM)
+    }
+    if kind == KCMP_FILE {
+        return compare_files(state, t1, t2, a3, a4)
+    }
+    if kind == KCMP_VM {
+        return order(taskslot.tget(state, t1, taskconst.T_CR3), taskslot.tget(state, t2, taskconst.T_CR3))
+    }
+    if kind == KCMP_FILES || kind == KCMP_FS || kind == KCMP_SIGHAND || kind == KCMP_IO || kind == KCMP_SYSVSEM {
+        return compare_same_task(t1, t2)
+    }
+    return fail(errno.E_OPNOTSUPP)
+}
+
+fn compare_files(state: u64, t1: u64, t2: u64, fd1: u64, fd2: u64) -> u64 {
+    let of1: u64 = file.fd_of(state, t1, fd1 & INT_MASK)
+    let of2: u64 = file.fd_of(state, t2, fd2 & INT_MASK)
+    if of1 >= file.MAX_OPEN || of2 >= file.MAX_OPEN {
+        return fail(errno.E_BADF)
+    }
+    return order(of1, of2)
+}
+
+fn compare_same_task(t1: u64, t2: u64) -> u64 {
+    if t1 == t2 {
+        return ORDER_EQUAL
+    }
+    return fail(errno.E_OPNOTSUPP)
+}
