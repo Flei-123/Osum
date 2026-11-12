@@ -1,6 +1,7 @@
 #define TNAME "procsys"
 #include "t.h"
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -74,9 +75,41 @@ static void test_dirs(void)
     CHECK("missing_is_enoent", read_text("/proc/sys/kernel/nope", buf, sizeof buf) < 0 && errno == ENOENT, "errno=%d", errno);
 }
 
+static void test_ipc_and_net_limits(void)
+{
+    char buf[128];
+    CHECK("sem_limits", read_text("/proc/sys/kernel/sem", buf, sizeof buf) > 0 && strcmp(buf, "16\t128\t16\t8\n") == 0, "buf=%s", buf);
+    CHECK("msgmax", read_text("/proc/sys/kernel/msgmax", buf, sizeof buf) > 0 && strcmp(buf, "256\n") == 0, "buf=%s", buf);
+    CHECK("panic_zero", read_text("/proc/sys/kernel/panic", buf, sizeof buf) > 0 && strcmp(buf, "0\n") == 0, "buf=%s", buf);
+    CHECK("ip_forward_off", read_text("/proc/sys/net/ipv4/ip_forward", buf, sizeof buf) > 0 && strcmp(buf, "0\n") == 0, "buf=%s", buf);
+    CHECK("ipv6_disabled", read_text("/proc/sys/net/ipv6/conf/all/disable_ipv6", buf, sizeof buf) > 0 && strcmp(buf, "1\n") == 0, "buf=%s", buf);
+    CHECK("keepalive_time", read_text("/proc/sys/net/ipv4/tcp_keepalive_time", buf, sizeof buf) > 0 && strcmp(buf, "7200\n") == 0, "buf=%s", buf);
+    CHECK("protected_symlinks_off", read_text("/proc/sys/fs/protected_symlinks", buf, sizeof buf) > 0 && strcmp(buf, "0\n") == 0, "buf=%s", buf);
+}
+
+static void test_dev_full(void)
+{
+    char buf[16];
+    memset(buf, 1, sizeof buf);
+    int fd = open("/dev/full", O_RDWR);
+    CHECK("full_opens", fd >= 0, "errno=%d", errno);
+    if (fd < 0)
+        return;
+    CHECK("full_reads_zero", read(fd, buf, sizeof buf) == (ssize_t)sizeof buf && buf[0] == 0 && buf[15] == 0, "buf0=%d", buf[0]);
+    errno = 0;
+    CHECK("full_write_enospc", write(fd, "x", 1) == -1 && errno == ENOSPC, "errno=%d", errno);
+    close(fd);
+    fd = open("/dev/kmsg", O_WRONLY);
+    CHECK("kmsg_write", fd >= 0 && write(fd, "procsys test\n", 13) == 13, "errno=%d", errno);
+    if (fd >= 0)
+        close(fd);
+}
+
 int main(void)
 {
     alarm(60);
+    test_ipc_and_net_limits();
+    test_dev_full();
     test_uname_match();
     test_limits();
     test_boot_id();

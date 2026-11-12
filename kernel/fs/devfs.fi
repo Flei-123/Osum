@@ -45,7 +45,9 @@ const D_WLOCK: u64 = 25
 const D_DRVCTL: u64 = 26
 const D_BTCTL: u64 = 27
 const D_TPM0: u64 = 28
-const D_LAST: u64 = 28
+const D_FULL: u64 = 29
+const D_KMSG: u64 = 30
+const D_LAST: u64 = 30
 const SHM_BASE: u64 = 300
 const PTS_BASE: u64 = 200
 const D_ROOT: u64 = 100
@@ -174,6 +176,8 @@ fn name_at(node: u64, out: u64) -> bool {
     var n_drvctl: [u8; 7] = "drvctl\0"
     var n_btctl: [u8; 6] = "btctl\0"
     var n_tpm0: [u8; 5] = "tpm0\0"
+    var n_full: [u8; 5] = "full\0"
+    var n_kmsg: [u8; 5] = "kmsg\0"
     var src: u64 = 0
     if node >= D_TTY1 && node <= D_TTY6 {
         kstate.set8(out, 116 as u8)
@@ -227,6 +231,10 @@ fn name_at(node: u64, out: u64) -> bool {
         src = (&n_btctl[0]) as u64
     } else if node == D_TPM0 {
         src = (&n_tpm0[0]) as u64
+    } else if node == D_FULL {
+        src = (&n_full[0]) as u64
+    } else if node == D_KMSG {
+        src = (&n_kmsg[0]) as u64
     } else {
         return false
     }
@@ -437,9 +445,12 @@ fn d_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
         kstate.set8(out + 2, 0 as u8)
         return D_ROOT
     }
-    let node: u64 = index - 1
+    var node: u64 = index - 1
     if node >= D_WLOCK {
-        return 0
+        node = D_FULL + node - D_WLOCK
+        if node > D_KMSG {
+            return 0
+        }
     }
     if !da(state, node) {
         return 0
@@ -495,7 +506,7 @@ fn d_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
         if shm_slot(node) < unixsock.USHM_PAGED {
             return 438
         }
-        if node == D_NULL || node == D_ZERO || node == D_TTY
+        if node == D_NULL || node == D_ZERO || node == D_FULL || node == D_TTY
             || node == D_CONSOLE || node == D_PTMX || pts_slot(node) < tty.MAX_TTY {
             return 438
         }
@@ -536,7 +547,7 @@ fn d_read(state: u64, m: u64, node: u64, off: u64, dst: u64,
     if node == D_NULL {
         return 0
     }
-    if node == D_ZERO {
+    if node == D_ZERO || node == D_FULL {
         var i: u64 = 0
         while i < len {
             kstate.set8(dst + i, 0 as u8)
@@ -548,7 +559,7 @@ fn d_read(state: u64, m: u64, node: u64, off: u64, dst: u64,
         let _w: bool = randwait.wait_ready(state, false)
         return rand.bytes(state, dst, len)
     }
-    if node == D_KLOG {
+    if node == D_KLOG || node == D_KMSG {
         return klog_read(state, off, dst, len)
     }
     if node == D_ODB {
@@ -735,7 +746,7 @@ fn klog_write(state: u64, src: u64, len: u64) -> u64 {
 fn d_write(state: u64, m: u64, node: u64, off: u64, src: u64,
     len: u64) -> u64 {
     tick(state)
-    if node == D_KLOG {
+    if node == D_KLOG || node == D_KMSG {
         return klog_write(state, src, len)
     }
     if node == D_ODB {
@@ -743,6 +754,9 @@ fn d_write(state: u64, m: u64, node: u64, off: u64, src: u64,
     }
     if node == D_NULL || node == D_ZERO {
         return len
+    }
+    if node == D_FULL {
+        return 0
     }
     if node == D_RANDOM || node == D_URANDOM {
         rand.mix(state, src, len)
