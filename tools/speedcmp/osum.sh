@@ -30,7 +30,7 @@ done
 printf 'root:x:0:0:root:/root:/bin/sh\n' > "$W/passwd"
 if [ -n "${SPEED_ONLY:-}" ]; then printf '%s\n%s\n' "$SPEED_ONLY" "${SPEED_MIN_MS:-0}" > "$W/speedonly"; SPEC="$SPEC /etc/speedonly=$W/speedonly"; fi
 SPEC="$SPEC /lib/ld-musl-x86_64.so.1=$LIBC /bin/speedbench=$BENCH /etc/passwd=$W/passwd"
-bash tools/mkfsfi/mkfs.sh build "$W/disk.img" 98304 --v3 --inodes=1024 ${SPEED_MKFS_OPTS-} $SPEC > "$W/mkfs.txt" 2>&1 || { tail -5 "$W/mkfs.txt" >&2; exit 1; }
+bash tools/mkfsfi/mkfs.sh build "$W/disk.img" ${SPEED_DISK_BLOCKS:-393216} --v3 --inodes=1024 ${SPEED_MKFS_OPTS-} $SPEC > "$W/mkfs.txt" 2>&1 || { tail -5 "$W/mkfs.txt" >&2; exit 1; }
 
 OSUM_DRIVE=${OSUM_DRIVE:-ahci}
 for i in $(seq 1 "$SPEED_RUNS"); do

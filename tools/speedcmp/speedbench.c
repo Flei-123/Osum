@@ -278,6 +278,9 @@ static void run_thread(long n)
 
 #include "wbench.h"
 #include "membench.h"
+#include "sbio.h"
+#include "sbmeta.h"
+#include "sbproc.h"
 
 int main(int argc, char **argv)
 {
@@ -320,6 +323,9 @@ int main(int argc, char **argv)
     measure("thread_create_join", run_thread, 100, 1, 1);
     wb_run_all();
     mb_run_all();
+    sbio_run_all();
+    sbm_run_all();
+    sbp_run_all();
     close(data_fd);
     unlink(DATA_PATH);
     (void)!write(1, "\nS END 0 0\n", 11);

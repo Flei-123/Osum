@@ -10,7 +10,7 @@ export FIRNLIB="$ROOT/lib"
 firnenv_need_firnc1
 FC1=$FIRNC1
 ULD=kernel/user/user.ld
-BLOCKS=4096
+BLOCKS=8192
 
 K11="edit find sed diff patch tar gzip gunzip xargs du top mount umount
      basename dirname tee cut tr seq env which"
@@ -207,7 +207,7 @@ cat > "$TMPD/t_werk.sh" <<'SCRIPT'
 echo ==BEGIN==
 du /b
 du -s /b
-echo eins zwei drei | xargs echo VOR
+echo one two three | xargs echo BEFORE
 seq 4 | xargs -n 2 echo P
 echo tee-test | tee /w/tee1.txt
 cat /w/tee1.txt
@@ -828,7 +828,7 @@ grep -qa 'K11' tools/kernel/memmap.py \
 
 n=$(grep -aoE '^const SYS_OSUM_(SETENV|MOUNT): u64 = 14[0-9][0-9]' kernel/sys/sys.fi | wc -l)
 num "eigene Aufrufnummern im Block 1400..1499" "$n" eq 2
-grep -qa '1400..1499   RUNDE K11' kernel/sys/sys.fi \
+grep -qa 'SYS_OSUM_SETENV: u64 = 1400' kernel/sys/sys.fi \
     && ok "the block is entered in the map of sys.fi" \
     || bad "the block 1400..1499 is missing from the map of sys.fi"
 doppelt=$(grep -aoE '^const SYS_[A-Z0-9_]+: u64 = [0-9]+' kernel/sys/sys.fi \
