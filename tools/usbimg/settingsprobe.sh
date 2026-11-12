@@ -8,7 +8,7 @@
 # from the start menu, clicks the sidebar entry of the package page "Activity"
 # (/apps/social.prog/SETTINGS, rect `ptaba`), then clicks the first control of the page (the switch
 # "Share my activity") TWICE: the first click must ask for confirmation (the action is critical),
-# the second one confirms. Every step is read from the serial line (`settings: stand ... status=[..]`)
+# the second one confirms. Every step is read from the serial line (`settings: state ... status=[..]`)
 # and photographed. The work directory is removed at the end when it was not given.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -46,7 +46,7 @@ done
 grep -qaE '^wm: hold' "$S" && ok "desktop is up (wm: hold)" || { bad "desktop never came up"; kill "$QPID" 2>/dev/null; echo "SETTINGSPROBE: $pass passed, $fail failed"; exit 1; }
 
 drive() { python3 -u tools/design/drive.py "$SOCK" "$S" "$OUT" "$1" >> "$OUT/drive.log" 2>&1; }
-status_of() { grep -a 'settings: stand' "$S" | tail -1 | sed -n 's/.* pkg=\[\(.*\)\].*/\1/p'; }
+status_of() { grep -a 'settings: state' "$S" | tail -1 | sed -n 's/.* pkg=\[\(.*\)\].*/\1/p'; }
 
 # 1. open Settings, click the package tab
 cat > "$OUT/d1" <<'E'
@@ -76,7 +76,7 @@ done
 grep -aq 'settings: rect name=ptabd ' "$S" && bad "a fourth package tab appeared (ptabd)" || ok "exactly three package tabs on this image"
 PF=$(grep -a 'settings: rect name=pf' "$S" | tail -n 20 | sed -n 's/.*name=\(pf[a-z][a-z]\) .*/\1/p' | awk '!s[$0]++' | head -1)
 [ -n "$PF" ] && ok "page controls are reported (first: $PF)" || bad "no control of the page reported (pf..)"
-n0=$(grep -ac 'settings: stand' "$S")
+n0=$(grep -ac 'settings: state' "$S")
 
 dlg_n() { grep -ac 'wm: trusted dialog up no=' "$S"; }
 ans_n() { grep -ac 'wm: trusted dialog answer=1 ' "$S"; }

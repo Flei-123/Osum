@@ -95,7 +95,7 @@ def sichtbarer_text(root):
             if z.startswith(('name=', 'info=')):
                 aus.append(('%s:%d' % (rel, nr), z.split('=', 1)[1]))
     for r in sources.funde(root):
-        aus.append(('%s:%d' % (r['datei'], r['zeile']), r['inhalt']))
+        aus.append(('%s:%d' % (r['file'], r['line']), r['inhalt']))
     STR = re.compile(r'"(?:\\.|[^"\\])*"')
     for dp, dns, fns in os.walk(os.path.join(root, 'kernel')):
         dns[:] = [x for x in dns if not x.startswith('.')]
@@ -106,7 +106,7 @@ def sichtbarer_text(root):
             rel = os.path.relpath(p, root).replace(os.sep, '/')
             for nr, z in enumerate(open(p, encoding='utf-8').read().split('\n'),
                                    1):
-                if z.lstrip().startswith('//'):
+                if z.lstrip().startswith('//') or sources.WIRE.search(z):
                     continue
                 for m in STR.finditer(z.split('//')[0]):
                     t = sources.inhalt_von(m.group(0)[1:-1])

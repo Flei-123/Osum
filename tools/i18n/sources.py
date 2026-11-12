@@ -163,7 +163,7 @@ def marken(root):
     klagen = []
     n = 0
     for r in funde(root):
-        if r['klasse'] != 'MARKE' or r['name'] == '-' or r.get('draht'):
+        if r['klasse'] != 'MARKE' or r['name'] == '-' or r.get('wire'):
             continue
         path_2 = os.path.join(root, r['file'])
         txt = open(path_2, encoding='utf-8').read()

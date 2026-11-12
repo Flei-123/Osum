@@ -246,9 +246,9 @@ mk_ssdt() { # name arguments...
 # Three batteries that differ in the ONE number this round is about: the
 # present rate of draw. Plus one that is worn out and one on mains.
 mk_ssdt low   --rest 3300 --voll 4400 --design 4400 --rate 1200 --volt 11400 --state 1 --network 0
-mk_ssdt high  --rest 3300 --voll 4400 --design 4400 --rate 7700 --volt 11400 --zustand 1 --netz 0
-mk_ssdt worn  --rest 2200 --voll 3000 --design 6000 --rate 2500 --volt 11400 --zustand 1 --netz 0
-mk_ssdt mains --rest 3300 --voll 4400 --design 4400 --rate 900  --volt 11400 --zustand 2 --netz 1
+mk_ssdt high  --rest 3300 --voll 4400 --design 4400 --rate 7700 --volt 11400 --state 1 --network 0
+mk_ssdt worn  --rest 2200 --voll 3000 --design 6000 --rate 2500 --volt 11400 --state 1 --network 0
+mk_ssdt mains --rest 3300 --voll 4400 --design 4400 --rate 900  --volt 11400 --state 2 --network 1
 mk_ssdt none  --kein-akku
 
 run() { # name commandline [ssdt] [timeout]
