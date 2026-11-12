@@ -10,10 +10,14 @@ import welcome_net
 import wlanconf
 import netui.netui
 import libc.text
+import uitheme
+import uikit.uiscale
+import uikit.uitext
+import uikit.uiglyph
 
 export {
-    is_page, open_page, back, build, act, owns_key, poll, title, status_text, glyph, is_online, trace_boxes,
-    K_BACK, K_SETTINGS, MAX_ROWS
+    is_page, open_page, back, build, act, owns_key, poll, title, status_text, glyph, is_online, short_status, trace_boxes,
+    K_BACK, K_SETTINGS, MAX_ROWS, has_wifi
 }
 
 const SYS_NETGET: u64 = 1300
@@ -41,8 +45,25 @@ const K_BACK: u64 = 40
 const K_PW: u64 = 41
 const K_CONNECT: u64 = 42
 const K_SETTINGS: u64 = 43
+const K_SHOW: u64 = 44
+const K_CANCEL: u64 = 45
+const K_ETH: u64 = 46
+const ETH_UD: u64 = 0xFF
 const K_NET0: u64 = 50
-const MAX_ROWS: u64 = 5
+const MAX_ROWS: u64 = 4
+const ROW_H0: u64 = 30
+const ROW_PAD0: u64 = 10
+const BAR_W0: u64 = 3
+const BAR_GAP0: u64 = 2
+const BAR_STEP0: u64 = 3
+const BAR_MIN_H0: u64 = 4
+const BAR_COUNT: u64 = 4
+const BAR_AREA0: u64 = 22
+const LOCK_SIZE0: u64 = 14
+const CONNECT_WAIT_NS: u64 = 30000000000
+const CONN_ARMED: u64 = 1
+const NAME_GAP0: u64 = 8
+const TEXT_NUDGE0: u64 = 2
 const NONE_PICK: u64 = 0xFFFFFFFF
 const ROW_CAP: u64 = 72
 const POLL_NS: u64 = 1000000000
@@ -53,12 +74,19 @@ const MSG_NONE: u64 = 0
 const MSG_GOING: u64 = 1
 const MSG_SHORT: u64 = 2
 const MSG_FAIL: u64 = 3
+const MSG_BAD_PW: u64 = 4
+const MSG_NO_LINK: u64 = 5
 
 static mut page: u64 = 0
 static mut picked: u64 = NONE_PICK
 static mut msg_kind: u64 = 0
 static mut sig_last: u64 = 0
 static mut poll_next: u64 = 0
+static mut conn_deadline: u64 = 0
+static mut conn_secured: bool = false
+static mut show_pw: bool = false
+static mut conn_ssid: [u8; 40] = [0 as u8; 40]
+static mut pw_title: [u8; 96] = [0 as u8; 96]
 static mut ssid_now: [u8; 40] = [0 as u8; 40]
 static mut title_buf: [u8; 72] = [0 as u8; 72]
 static mut rows_buf: [u8; 360] = [0 as u8; 360]
@@ -76,6 +104,16 @@ static mut k_empty: [u8; 13] = "qs.net.empty\0"
 static mut k_nowifi: [u8; 14] = "qs.net.nowifi\0"
 static mut k_connect: [u8; 15] = "qs.net.connect\0"
 static mut k_pw: [u8; 10] = "qs.net.pw\0"
+static mut k_sh_on: [u8; 16] = "qs.net.short.on\0"
+static mut k_sh_off: [u8; 17] = "qs.net.short.off\0"
+static mut k_sh_cable: [u8; 19] = "qs.net.short.cable\0"
+static mut k_sh_limited: [u8; 21] = "qs.net.short.limited\0"
+static mut k_pw_for: [u8; 13] = "qs.net.pwfor\0"
+static mut k_cancel: [u8; 14] = "qs.net.cancel\0"
+static mut k_show: [u8; 12] = "qs.net.show\0"
+static mut k_offline: [u8; 15] = "qs.net.offline\0"
+static mut k_m_badpw: [u8; 15] = "qs.net.m.badpw\0"
+static mut k_m_nolink: [u8; 16] = "qs.net.m.nolink\0"
 static mut k_settings: [u8; 16] = "qs.net.settings\0"
 static mut k_back: [u8; 12] = "qs.net.back\0"
 static mut k_st_off: [u8; 14] = "qs.net.st.off\0"
@@ -107,6 +145,7 @@ static mut s_box_w: [u8; 4] = " w=\0"
 static mut s_box_h: [u8; 4] = " h=\0"
 static mut s_line_short: [u8; 22] = "qsnet: password short\0"
 static mut s_line_rc: [u8; 5] = " rc=\0"
+static mut s_line_badpw: [u8; 19] = "qsnet: link failed\0"
 
 fn text_of(key: u64) -> u64 {
     return msg.get(key)
@@ -210,6 +249,20 @@ fn status_text() -> u64 {
     return text_of((&k_st_ok[0 as usize]) as u64)
 }
 
+fn short_status() -> u64 {
+    let st: u64 = state_code()
+    if st == ST_OK {
+        return text_of((&k_sh_on[0 as usize]) as u64)
+    }
+    if st == ST_OFF {
+        if !is_wifi_up() && up_kind() != 0 && up_kind() != KIND_WLAN && sys_net(NG_READY) == 0 {
+            return text_of((&k_sh_cable[0 as usize]) as u64)
+        }
+        return text_of((&k_sh_off[0 as usize]) as u64)
+    }
+    return text_of((&k_sh_limited[0 as usize]) as u64)
+}
+
 fn glyph() -> u64 {
     let st: u64 = state_code()
     if st == ST_OFF {
@@ -232,6 +285,8 @@ fn signature() -> u64 {
     h = (h ^ welcome_net.link_state()) *% 1099511628211
     h = (h ^ netui.list_count()) *% 1099511628211
     h = (h ^ page) *% 1099511628211
+    h = (h ^ msg_kind) *% 1099511628211
+    h = (h ^ picked) *% 1099511628211
     return h
 }
 
@@ -248,6 +303,7 @@ fn poll(now: u64) -> bool {
     if page != 0 {
         refresh_list()
     }
+    watch_connect(now)
     let s: u64 = signature()
     if s == sig_last {
         return false
@@ -255,6 +311,50 @@ fn poll(now: u64) -> bool {
     sig_last = s
     report_state()
     return true
+}
+
+fn linked_to_target() -> bool {
+    if !is_wifi_up() || state_code() == ST_OFF {
+        return false
+    }
+    return ulib.streq(current_ssid(), (&conn_ssid[0 as usize]) as u64)
+}
+
+fn rank_of_target() -> u64 {
+    var r: u64 = 0
+    while r < netui.list_count() {
+        if ulib.streq(welcome_net.ssid_at(r), (&conn_ssid[0 as usize]) as u64) {
+            return r
+        }
+        r = r + 1
+    }
+    return NONE_PICK
+}
+
+fn watch_connect(now: u64) {
+    if conn_deadline == 0 {
+        return
+    }
+    if conn_deadline == CONN_ARMED {
+        conn_deadline = now + CONNECT_WAIT_NS
+        return
+    }
+    if linked_to_target() {
+        conn_deadline = 0
+        msg_kind = MSG_NONE
+        return
+    }
+    if now < conn_deadline {
+        return
+    }
+    conn_deadline = 0
+    if conn_secured {
+        msg_kind = MSG_BAD_PW
+        picked = rank_of_target()
+        report_line((&s_line_badpw[0 as usize]) as u64)
+        return
+    }
+    msg_kind = MSG_NO_LINK
 }
 
 fn report_state() {
@@ -280,6 +380,7 @@ fn open_page() {
     page = 1
     picked = NONE_PICK
     msg_kind = MSG_NONE
+    show_pw = false
     refresh_list()
     sig_last = signature()
     report_line((&s_line_page[0 as usize]) as u64)
@@ -313,10 +414,7 @@ fn word_of(rank: u64) -> u64 {
     if netui.list_known(rank) {
         return text_of((&k_w_saved[0 as usize]) as u64)
     }
-    if welcome_net.needs_password(rank) {
-        return text_of((&k_w_secured[0 as usize]) as u64)
-    }
-    return text_of((&k_w_open[0 as usize]) as u64)
+    return (&empty[0 as usize]) as u64
 }
 
 fn row_text(rank: u64) -> u64 {
@@ -357,6 +455,12 @@ fn message_text() -> u64 {
     if msg_kind == MSG_FAIL {
         return text_of((&k_m_fail[0 as usize]) as u64)
     }
+    if msg_kind == MSG_BAD_PW {
+        return text_of((&k_m_badpw[0 as usize]) as u64)
+    }
+    if msg_kind == MSG_NO_LINK {
+        return text_of((&k_m_nolink[0 as usize]) as u64)
+    }
     return 0
 }
 
@@ -368,13 +472,123 @@ fn build_header(card: usize, inner_w: u64) {
     let _s: usize = fuiscene.separator(card)
 }
 
-fn build_state(card: usize) {
-    if !ulib.streq(title(), text_of((&k_title[0 as usize]) as u64)) {
-        let _t: usize = fuiscene.label(card, title())
+fn has_wired() -> bool {
+    return up_kind() != 0 && up_kind() != KIND_WLAN
+}
+
+fn eth_status() -> u64 {
+    if is_wifi_up() {
+        return text_of((&k_st_off[0 as usize]) as u64)
     }
-    let _s: usize = fuiscene.label_muted(card, status_text())
-    if sys_net(NG_IP) != 0 && sys_net(NG_READY) != 0 {
-        let _i: usize = fuiscene.label_muted(card, ip_text())
+    if state_code() != ST_OFF && sys_net(NG_IP) != 0 && sys_net(NG_READY) != 0 {
+        return ip_text()
+    }
+    return status_text()
+}
+
+fn ROW_H() -> u64 {
+    return ROW_H0 * uiscale.ui_scale()
+}
+
+fn paint_text(x: u64, y: u64, w: u64, p: u64, rgb: u64) {
+    let px: u64 = uiscale.px_ui()
+    let base: u64 = y + (ROW_H() - uitext.text_h(px)) / 2 + uitext.ascent_of(uitext.F_UI, px) + TEXT_NUDGE0 * uiscale.ui_scale()
+    fuiscene.cv_text_rgb(x, base, w, p, px, false, rgb)
+}
+
+fn text_fit(p: u64, avail: u64) -> u64 {
+    let px: u64 = uiscale.px_ui()
+    let n: u64 = text.length(p)
+    if uitext.text_w(uitext.F_UI, px, p, n) <= avail {
+        return n
+    }
+    return uiglyph.fit(uitext.F_UI, px, p, n, avail)
+}
+
+fn paint_bars(x: u64, y: u64, h: u64, lit: u64, fg: u64, dim: u64) {
+    let sc: u64 = uiscale.ui_scale()
+    var i: u64 = 0
+    while i < BAR_COUNT {
+        let bh: u64 = (BAR_MIN_H0 + i * BAR_STEP0) * sc
+        var rgb: u64 = dim
+        if i < lit {
+            rgb = fg
+        }
+        fuiscene.cv_round_rgb(x + i * (BAR_W0 + BAR_GAP0) * sc, y + h - bh, BAR_W0 * sc, bh, 1, rgb)
+        i = i + 1
+    }
+}
+
+fn row_paint(ud: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
+    let sc: u64 = uiscale.ui_scale()
+    let on: bool = (st & fuiscene.TS_ON) != 0
+    var plate: u64 = uitheme.theme(uitheme.T_BTN)
+    var fg: u64 = uitheme.theme(uitheme.T_FG)
+    var dim: u64 = uitheme.theme(uitheme.T_DIM)
+    if on {
+        plate = uitheme.theme(uitheme.T_ACCENT)
+        fg = uitheme.theme(uitheme.T_SELFG)
+        dim = fg
+    } else if (st & fuiscene.TS_DOWN) != 0 {
+        plate = uitheme.theme(uitheme.T_BTNDN)
+    } else if (st & fuiscene.TS_HOT) != 0 {
+        plate = uitheme.theme(uitheme.T_BTNHI)
+    }
+    fuiscene.cv_round_rgb(x, y, w, h, fuiscene.rb_px(), plate)
+    if (st & fuiscene.TS_FOCUS) != 0 {
+        fuiscene.cv_ring_rgb(x, y, w, h, fuiscene.rb_px(), 2, uitheme.theme(uitheme.T_FOCUS))
+    }
+    let pad: u64 = ROW_PAD0 * sc
+    var name: u64 = 0
+    var word: u64 = 0
+    var lock: bool = false
+    var left: u64 = x + pad
+    if ud == ETH_UD {
+        fuiscene.cv_glyph(icons.NETWORK_WIRED, left, y + (h - 16 * sc) / 2, 16 * sc, fg)
+        name = text_of((&k_eth[0 as usize]) as u64)
+        word = eth_status()
+    } else {
+        let bh: u64 = (BAR_MIN_H0 + (BAR_COUNT - 1) * BAR_STEP0) * sc
+        paint_bars(left, y + (h - bh) / 2, bh, netui.list_bars(ud), fg, dim)
+        name = welcome_net.ssid_at(ud)
+        word = word_of(ud)
+        lock = welcome_net.needs_password(ud)
+    }
+    left = x + pad + BAR_AREA0 * sc
+    var right: u64 = x + w - pad
+    let px: u64 = uiscale.px_ui()
+    let ww: u64 = uitext.text_w(uitext.F_UI, px, word, text.length(word))
+    if ww > 0 {
+        let wmax: u64 = (w - 2 * pad) / 2
+        let wn: u64 = text_fit(word, wmax)
+        let wd: u64 = uitext.text_w(uitext.F_UI, px, word, wn)
+        paint_text(right - wd, y, wd + 2, word, dim)
+        right = right - wd - NAME_GAP0 * sc
+    }
+    if lock {
+        let ls: u64 = LOCK_SIZE0 * sc
+        right = right - ls
+        fuiscene.cv_glyph(icons.NET_LOCK, right, y + (h - ls) / 2, ls, dim)
+        right = right - NAME_GAP0 * sc
+    }
+    if right > left {
+        let nn: u64 = text_fit(name, right - left)
+        let nw: u64 = uitext.text_w(uitext.F_UI, px, name, nn)
+        paint_text(left, y, nw + 2, name, fg)
+    }
+}
+
+fn add_row(card: usize, key: u64, label: u64, ud: u64, on: bool, inner_w: u64) {
+    let r: usize = fuiscene.row(card)
+    let _t: usize = fuiscene.flat_tile(r, key, label, inner_w, ROW_H() / uiscale.ui_scale(), on, ud, row_paint)
+}
+
+fn build_state(card: usize, inner_w: u64) {
+    if state_code() != ST_OK {
+        let _o: usize = fuiscene.label_muted(card, text_of((&k_offline[0 as usize]) as u64))
+    }
+    if has_wired() {
+        add_row(card, K_ETH, text_of((&k_eth[0 as usize]) as u64), ETH_UD, !is_wifi_up() && state_code() != ST_OFF, inner_w)
     }
 }
 
@@ -395,35 +609,65 @@ fn build_list(card: usize, inner_w: u64) {
     }
     var r: u64 = 0
     while r < shown {
-        let b: usize = fuiscene.button(card, row_text(r), K_NET0 + r)
-        fuiscene.set_size(b, inner_w, 32 * fuiscene.scale())
+        add_row(card, K_NET0 + r, row_text(r), r, is_current(r), inner_w)
         r = r + 1
     }
 }
 
+fn pw_title_text() -> u64 {
+    let dst: u64 = (&pw_title[0 as usize]) as u64
+    var at: u64 = ulib.strcpy(dst, text_of((&k_pw_for[0 as usize]) as u64))
+    at = at + ulib.strcpy(dst + at, (&sp[0 as usize]) as u64)
+    let _s: u64 = ulib.strncpy(dst + at, (&conn_ssid[0 as usize]) as u64, 40)
+    return dst
+}
+
 fn build_password(card: usize, inner_w: u64) {
-    if picked == NONE_PICK {
-        return
-    }
+    let _t: usize = fuiscene.label(card, pw_title_text())
     let pr: usize = fuiscene.row(card)
     fuiscene.set_gap(pr, 8)
-    let _e: usize = fuiscene.entry(pr, K_PW, inner_w - 96 * fuiscene.scale(), (&empty[0 as usize]) as u64)
-    fuiscene.entry_secret(K_PW, true)
+    let _e: usize = fuiscene.entry(pr, K_PW, inner_w - 56 * fuiscene.scale(), (&empty[0 as usize]) as u64)
+    fuiscene.entry_secret(K_PW, !show_pw)
     fuiscene.entry_hint(K_PW, text_of((&k_pw[0 as usize]) as u64))
-    let _c: usize = fuiscene.button_main(pr, text_of((&k_connect[0 as usize]) as u64), K_CONNECT)
+    var eye: u64 = icons.EYE
+    if show_pw {
+        eye = icons.EYE_OFF
+    }
+    let _v: usize = fuiscene.icon_button(pr, eye, text_of((&k_show[0 as usize]) as u64), K_SHOW)
+    let m: u64 = message_text()
+    if m != 0 {
+        let _m: usize = fuiscene.label_muted(card, m)
+    }
+    let br: usize = fuiscene.row(card)
+    fuiscene.set_gap(br, 8)
+    let _c: usize = fuiscene.button(br, text_of((&k_cancel[0 as usize]) as u64), K_CANCEL)
+    let _k: usize = fuiscene.button_main(br, text_of((&k_connect[0 as usize]) as u64), K_CONNECT)
 }
 
 fn build(card: usize, inner_w: u64) {
     build_header(card, inner_w)
-    build_state(card)
+    if picked != NONE_PICK {
+        build_password(card, inner_w)
+        return
+    }
+    build_state(card, inner_w)
     build_list(card, inner_w)
-    build_password(card, inner_w)
     let m: u64 = message_text()
     if m != 0 {
         let _m: usize = fuiscene.label_muted(card, m)
     }
     let _sep: usize = fuiscene.separator(card)
     let _s: usize = fuiscene.button(card, text_of((&k_settings[0 as usize]) as u64), K_SETTINGS)
+}
+
+fn remember(rank: u64) {
+    let _c: u64 = ulib.strncpy((&conn_ssid[0 as usize]) as u64, welcome_net.ssid_at(rank), 33)
+}
+
+fn arm_watch(rank: u64) {
+    remember(rank)
+    conn_secured = welcome_net.needs_password(rank)
+    conn_deadline = CONN_ARMED
 }
 
 fn save_and_go(rank: u64, psk: u64) -> bool {
@@ -433,6 +677,7 @@ fn save_and_go(rank: u64, psk: u64) -> bool {
     if ok {
         lineout.add_num(0)
         msg_kind = MSG_GOING
+        arm_watch(rank)
     } else {
         lineout.add_num(1)
         msg_kind = MSG_FAIL
@@ -451,6 +696,7 @@ fn pick_row(rank: u64) -> u64 {
     msg_kind = MSG_NONE
     if welcome_net.needs_password(rank) && !netui.list_known(rank) {
         picked = rank
+        remember(rank)
         return 1
     }
     picked = NONE_PICK
@@ -463,6 +709,7 @@ fn submit_password() -> u64 {
         return 0
     }
     let psk: u64 = fuiscene.entry_text(K_PW)
+    msg_kind = MSG_NONE
     var n: u64 = 0
     if psk != 0 {
         n = text.length(psk)
@@ -472,7 +719,11 @@ fn submit_password() -> u64 {
         report_line((&s_line_short[0 as usize]) as u64)
         return 1
     }
-    let ok: bool = save_and_go(picked, psk)
+    var target: u64 = rank_of_target()
+    if target == NONE_PICK {
+        target = picked
+    }
+    let ok: bool = save_and_go(target, psk)
     fuiscene.entry_set(K_PW, (&empty[0 as usize]) as u64)
     if ok {
         picked = NONE_PICK
@@ -487,6 +738,19 @@ fn act(key: u64) -> u64 {
     }
     if key == K_CONNECT {
         return submit_password()
+    }
+    if key == K_SHOW {
+        show_pw = !show_pw
+        return 1
+    }
+    if key == K_CANCEL {
+        picked = NONE_PICK
+        msg_kind = MSG_NONE
+        fuiscene.entry_set(K_PW, (&empty[0 as usize]) as u64)
+        return 1
+    }
+    if key == K_ETH {
+        return 1
     }
     if key >= K_NET0 && key < K_NET0 + MAX_ROWS {
         return pick_row(key - K_NET0)
@@ -513,6 +777,9 @@ fn trace_box(key: u64) {
 }
 
 fn trace_boxes() {
+    trace_box(K_ETH)
+    trace_box(K_SHOW)
+    trace_box(K_CANCEL)
     var r: u64 = 0
     while r < MAX_ROWS {
         trace_box(K_NET0 + r)
