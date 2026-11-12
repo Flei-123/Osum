@@ -10,8 +10,6 @@ EXTRA=${4:-}
 K=${FSR_KERNEL:-/tmp/fsr-k.mb}
 MINMS=${FSR_MINMS:-120}
 SPANMS=${FSR_SPANMS:-2600}
-WRITER=${FSR_WRITER:-fsrw endlos}
-MARKER=${FSR_MARKER:-fsrw: los}
 
 if [ "${FSR_DRIVE:-ide}" = ahci ]; then
     DRIVE_ARGS=(-device ich9-ahci,id=ahci0 -drive "file=$ARB/live-$NR.img,format=raw,if=none,id=hd0,cache=directsync" -device ide-hd,drive=hd0,bus=ahci0.0)
@@ -28,7 +26,7 @@ rm -f "$LIVE" "$S1" "$S2"
 cp --sparse=always "$ABBILD" "$LIVE"
 
 qemu-system-x86_64 -accel tcg -kernel "$K" -m 512 \
-    -append "osum vfs nokbd $EXTRA script=$WRITER" \
+    -append "osum vfs nokbd $EXTRA script=fsrw endlos" \
     -serial "file:$S1" -display none -no-reboot \
     "${DRIVE_ARGS[@]}" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
@@ -36,7 +34,7 @@ QPID=$!
 
 LOS=0
 for _ in $(seq 1 1200); do
-    if [ -f "$S1" ] && tr -d '\000' < "$S1" 2>/dev/null | grep -qaF "$MARKER"; then
+    if [ -f "$S1" ] && tr -d '\000' < "$S1" 2>/dev/null | grep -qa 'fsrw: los'; then
         LOS=1
         break
     fi
