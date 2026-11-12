@@ -89,6 +89,9 @@ serve fresh "$PORT" && serve upgrade $((PORT+1)) && ok "two HTTPS sources up" ||
 printf 'root:x:0:0:root:/:/bin/sh\njustin:x:1000:1000:Justin:/:/bin/sh\n' > "$TMPD/passwd"
 printf 'root:x:0:\njustin:x:1000:\n' > "$TMPD/group"
 printf 'installieren=admin\nentfernen=admin\nadmins=1000\n' > "$TMPD/conf.admin"
+printf 'installieren=benutzer\nentfernen=benutzer\n' > "$TMPD/conf.benutzer"
+printf 'installieren=aus\nentfernen=aus\n' > "$TMPD/conf.aus"
+printf 'installieren=admin\nentfernen=admin\nadmins=1001\n' > "$TMPD/conf.admins"
 printf 'dryfirst jarvis\n' > "$TMPD/policy"
 
 image() {
@@ -103,7 +106,8 @@ image() {
         "/etc/passwd=$TMPD/passwd" "/etc/group=$TMPD/group"
         "/etc/actions.d/store.actions=etc/actions.d/store.actions"
         "/etc/orientbus/policy=$TMPD/policy"
-        "/etc/store.conf=$TMPD/conf.admin" "/etc/store.admin=$TMPD/conf.admin"
+        "/etc/store.conf=$TMPD/conf.admin" "/etc/store.admin=$TMPD/conf.admin" "/etc/store.benutzer=$TMPD/conf.benutzer"
+        "/etc/store.aus=$TMPD/conf.aus" "/etc/store.admins=$TMPD/conf.admins"
         "/etc/ota.conf=$TMPD/ota.conf" "/etc/ssl/roots.pem=$TMPD/certs/ca.pem"
         "/system/schluessel.pub=$PUB" "/t/s.sh=$script")
     if [ "$preinstall" = 1 ]; then
@@ -210,5 +214,8 @@ has "$UAFTER" "|aktuell" "after the update the store says up to date"
 has "$UAFTER" "net" "net right survives the upgrade"
 hasnot "$UAFTER" "|update" "no pending update after upgrading"
 
+if [ "$fail" -ne 0 ]; then
+    for n in fresh upgrade; do echo "== tail $n"; tail -n 40 "$TMPD/$n.klar" | cut -c1-200; done
+fi
 echo "XRSTORE: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
