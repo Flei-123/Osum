@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import sync.atomic
+import arch.cpu
+
+export { enter, leave, mine, take, try_take, give, nested, save_irq, restore_irq }
+
+const NESTED: u64 = 0x8000000000000000
+const IF_BIT: u64 = 0x200
+
+fn task_id(state: u64) -> u64 {
+    return cpu.get(state, cpu.here(state), cpu.C_CUR)
+}
+
+fn save_irq() -> u64 {
+    return asm("pushfq\npop rax\ncli", out("rax"))
+}
+
+fn restore_irq(flags: u64) {
+    if (flags & IF_BIT) != 0 {
+        asm("sti")
+    }
+}
+
+fn mine(state: u64) -> bool {
+    return atomic.lock_owner(state, atomic.L_FS) == task_id(state) + 1
+}
+
+fn take(state: u64) {
+    atomic.lock_take(state, atomic.L_FS, task_id(state))
+}
+
+fn try_take(state: u64) -> bool {
+    return atomic.lock_try(state, atomic.L_FS, task_id(state))
+}
+
+fn give(state: u64) {
+    atomic.lock_give(state, atomic.L_FS)
+}
+
+fn nested(flags: u64) -> bool {
+    return (flags & NESTED) != 0
+}
+
+fn enter(state: u64) -> u64 {
+    let flags: u64 = save_irq()
+    if mine(state) {
+        return flags | NESTED
+    }
+    take(state)
+    return flags
+}
+
+fn leave(state: u64, flags: u64) {
+    if !nested(flags) {
+        give(state)
+    }
+    restore_irq(flags)
+}

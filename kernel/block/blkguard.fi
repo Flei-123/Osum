@@ -4,6 +4,7 @@ profile kernel
 import serial
 import lib.kstate
 import sync.atomic
+import sync.fslock
 import arch.cpu
 
 export { enter, leave, refused, unlocked, took, G_REFUSE }
@@ -49,14 +50,14 @@ fn enter(state: u64) -> u64 {
         return G_HELD
     }
     let me: u64 = cpu.here(state)
-    if atomic.lock_owner(state, atomic.L_FS) == me + 1 || me >= NCPU {
+    if fslock.mine(state) || me >= NCPU {
         return G_HELD
     }
     let flags: u64 = asm("pushfq\npop rax\ncli", out("rax"))
     atomic.fetch_add((&g_unlocked) as u64, 1)
     var spin: u64 = 0
     while spin < TRY_SPINS {
-        if atomic.lock_try(state, atomic.L_FS, me) {
+        if fslock.try_take(state) {
             g_flags[me as usize] = flags
             atomic.fetch_add((&g_took) as u64, 1)
             if g_took == 1 {
@@ -81,7 +82,7 @@ fn leave(state: u64, tok: u64) {
     }
     let me: u64 = cpu.here(state)
     let flags: u64 = g_flags[me as usize]
-    atomic.lock_give(state, atomic.L_FS)
+    fslock.give(state)
     if (flags & 0x200) != 0 {
         asm("sti")
     }

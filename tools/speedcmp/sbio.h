@@ -142,7 +142,11 @@ static void sbio_write_sized(const char *name, long bytes)
         emit_fail(name);
         return;
     }
+    long long pa[PROF_N], pb[PROF_N];
+    prof_read(pa);
     measure(name, run_sbio_write, sbio_batch(bytes), 1, 1);
+    prof_read(pb);
+    prof_emit(name, pa, pb, 1);
     sbio_close();
 }
 
