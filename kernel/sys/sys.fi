@@ -85,6 +85,8 @@ import sys.sysprctl
 import sched.ptrace
 import sched.ptstate
 import sys.syssvc
+import sys.sysfast
+import sys.sysquick
 import libc.regio
 
 export {
@@ -917,7 +919,37 @@ fn trace_after(number: u64, frame: u64, state: u64, r: u64) {
     }
 }
 
+fn entry_quick(number: u64, frame: u64, state: u64, me: u64) -> u64 {
+    var r: u64 = 0
+    if number == SYS_GETPID {
+        __atomic_add((state + kstate.SYSCALLS) as *mut u64, 1)
+        r = sysfast.pid_of(state, me)
+    } else if number == SYS_GETTID {
+        __atomic_add((state + kstate.SYSCALLS) as *mut u64, 1)
+        r = sysfast.tid_of(state, me)
+    } else if number == SYS_WRITE || number == SYS_READ {
+        r = sysquick.io(state, me, regio.read64_at(frame, sysconst.F_RDI), regio.read64_at(frame, F_RSI),
+            regio.read64_at(frame, F_RDX), number == SYS_WRITE)
+        if r == sysquick.MISS {
+            r = dispatch(number, frame, state, me)
+        } else {
+            __atomic_add((state + kstate.SYSCALLS) as *mut u64, 1)
+        }
+    } else {
+        r = dispatch(number, frame, state, me)
+    }
+    *((frame + sysconst.F_RAX) as *mut u64) = r
+    if !sysfast.quiet(state, me) {
+        signal.check_sys(state, me, frame)
+    }
+    return r
+}
+
 fn entry(number: u64, frame: u64, state: u64) -> u64 {
+    let quick: u64 = sysfast.begin(state)
+    if quick != sysfast.SLOW {
+        return entry_quick(number, frame, state, quick)
+    }
     let traced: bool = kstate.mode_on(state, kstate.M_FREMDTRACE)
     if traced {
         trace_before(number, frame, state)

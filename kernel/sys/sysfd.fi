@@ -184,6 +184,9 @@ fn shm_io(state: u64, me: u64, of: u64, buf: u64, len: u64, wr: bool) -> u64 {
 
 fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_VFILE {
+        return vfs_write(state, me, of, buf, len)
+    }
     if kind == file.K_SHM {
         return shm_io(state, me, of, buf, len, true)
     }
@@ -212,9 +215,6 @@ fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     }
     if kind == file.K_NETLINK {
         return nl_send_of(state, me, of, buf, len)
-    }
-    if kind == file.K_VFILE {
-        return vfs_write(state, me, of, buf, len)
     }
     if kind == file.K_VDIR {
         return sysuser.neg(errno.E_ISDIR)
@@ -321,6 +321,9 @@ fn do_read_one(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
 
 fn read_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_VFILE {
+        return vfs_read(state, me, of, buf, len)
+    }
     if kind == file.K_SHM {
         return shm_io(state, me, of, buf, len, false)
     }
@@ -350,10 +353,6 @@ fn read_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     }
     if kind == file.K_DIR || kind == file.K_VDIR {
         return sysuser.neg(errno.E_ISDIR)
-    }
-    // ROUNDE K14.
-    if kind == file.K_VFILE {
-        return vfs_read(state, me, of, buf, len)
     }
     if kind != file.K_FILE {
         return sysuser.neg(errno.E_BADF)
@@ -680,7 +679,7 @@ fn vfs_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
         return sysuser.neg(errno.E_BADF)
     }
     let m: u64 = file.open_mnt(state, of)
-    if mnt_gone(state, m) {
+    if vfs.type_of(state, m) != vfsops.FS_DEV && mnt_gone(state, m) {
         return sysuser.neg(errno.E_NODEV)
     }
     let node: u64 = file.open_ino(state, of)
@@ -704,14 +703,15 @@ fn vfs_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
         return sysuser.neg(errno.E_BADF)
     }
     let m: u64 = file.open_mnt(state, of)
-    if mnt_gone(state, m) {
+    let on_dev: bool = vfs.type_of(state, m) == vfsops.FS_DEV
+    if !on_dev && mnt_gone(state, m) {
         return sysuser.neg(errno.E_NODEV)
     }
     var want: u64 = len
     if want > kstate.BLOCK_MAX {
         want = kstate.BLOCK_MAX
     }
-    if vfs.type_of(state, m) == vfsops.FS_DEV && devfs.is_sink(file.open_ino(state, of)) {
+    if on_dev && devfs.is_sink(file.open_ino(state, of)) {
         return want
     }
     if !sysuser.copy_in(state, me, sysuser.blockb(state), buf, want) {

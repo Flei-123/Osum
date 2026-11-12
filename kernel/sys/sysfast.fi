@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import arch.cpu
+import sched.taskconst
+
+export { begin, quiet, pid_of, tid_of, raise, lower, slow_count, SLOW }
+
+const SLOW: u64 = 0xFFFFFFFFFFFFFFFF
+const FREMDTRACE_WORD: u64 = kstate.MODE_OFF + (kstate.M_FREMDTRACE / 64) * 8
+const FREMDTRACE_MASK: u64 = 1 << (kstate.M_FREMDTRACE % 64)
+
+static mut slow_users: u64 = 0
+
+fn raise() {
+    __atomic_add((&slow_users) as *mut u64, 1)
+}
+
+fn lower() {
+    slow_users = slow_users -% 1
+}
+
+fn slow_count() -> u64 {
+    return slow_users
+}
+
+fn current_cpu(state: u64) -> u64 {
+    let n: u64 = *((state + kstate.SMP_OFF + kstate.SMP_COUNT) as *mut u64)
+    if n <= 1 {
+        return 0
+    }
+    if *((state + kstate.SMP_OFF + cpu.GSFAST_AT) as *mut u64) == 0 {
+        return kstate.MAX_CPUS
+    }
+    let gi: u64 = asm("mov rax, qword ptr gs:[224]", out("rax"))
+    if gi >= n {
+        return kstate.MAX_CPUS
+    }
+    return gi
+}
+
+fn begin(state: u64) -> u64 {
+    if slow_users != 0 {
+        return SLOW
+    }
+    if (*((state + FREMDTRACE_WORD) as *mut u64) & FREMDTRACE_MASK) != 0 {
+        return SLOW
+    }
+    if *((state + kstate.EXCURSION) as *mut u64) != 0 {
+        return SLOW
+    }
+    let ci: u64 = current_cpu(state)
+    if ci >= kstate.MAX_CPUS {
+        return SLOW
+    }
+    return *((state + kstate.CPU_OFF + ci * kstate.CPU_BYTES + cpu.C_CUR) as *mut u64)
+}
+
+fn quiet(state: u64, me: u64) -> bool {
+    let t: u64 = state + kstate.TASK_OFF + me * kstate.TASK_BYTES
+    if (*((t + taskconst.T_SIGPEND) as *mut u64)
+        & (0xFFFFFFFFFFFFFFFF -% *((t + taskconst.T_SIGMASK) as *mut u64))) != 0 {
+        return false
+    }
+    if (*((t + taskconst.T_KILLCODE) as *mut u64) & taskconst.KILL_SET) != 0 {
+        return false
+    }
+    return *((t + taskconst.T_SUSP) as *mut u64) == 0
+}
+
+fn pid_of(state: u64, me: u64) -> u64 {
+    let t: u64 = state + kstate.TASK_OFF + me * kstate.TASK_BYTES
+    let g: u64 = *((t + taskconst.T_TGID) as *mut u64)
+    if g != 0 {
+        return g
+    }
+    return *((t + taskconst.T_PID) as *mut u64)
+}
+
+fn tid_of(state: u64, me: u64) -> u64 {
+    return *((state + kstate.TASK_OFF + me * kstate.TASK_BYTES + taskconst.T_PID) as *mut u64)
+}
