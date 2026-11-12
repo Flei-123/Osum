@@ -1,0 +1,423 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.errno
+import lib.kstate
+import sched.sched
+import sched.signal
+import sched.ptrace
+import sched.ptstate
+import sched.taskconst
+import sched.taskslot
+import sys.sysuser
+import sys.sysnet
+import libc.regio
+
+export {
+    handles, call
+}
+
+const SYS_PTRACE: u64 = 101
+
+const PT_TRACEME: u64 = 0
+const PT_PEEKTEXT: u64 = 1
+const PT_PEEKDATA: u64 = 2
+const PT_PEEKUSER: u64 = 3
+const PT_POKETEXT: u64 = 4
+const PT_POKEDATA: u64 = 5
+const PT_POKEUSER: u64 = 6
+const PT_CONT: u64 = 7
+const PT_KILL: u64 = 8
+const PT_SINGLESTEP: u64 = 9
+const PT_GETREGS: u64 = 12
+const PT_SETREGS: u64 = 13
+const PT_ATTACH: u64 = 16
+const PT_DETACH: u64 = 17
+const PT_SYSCALL: u64 = 24
+const PT_SETOPTIONS: u64 = 0x4200
+const PT_GETEVENTMSG: u64 = 0x4201
+const PT_GETSIGINFO: u64 = 0x4202
+const PT_SEIZE: u64 = 0x4206
+
+const SIGKILL_NUM: u64 = 9
+const SIGSTOP_NUM: u64 = 19
+const SIG_LIMIT: u64 = 65
+
+const WORD_BYTES: u64 = 8
+const REG_COUNT: u64 = 27
+const REGS_BYTES: u64 = 216
+const SIGINFO_BYTES: u64 = 128
+const SIGINFO_WORDS: u64 = 16
+const USER_SPACE_TOP: u64 = 0x0000800000000000
+const DEBUG_REGS_OFFSET: u64 = 848
+const DEBUG_REGS_END: u64 = 912
+const FLAGS_USER_MASK: u64 = 0x00000CD5
+const FLAGS_FIXED: u64 = 0x202
+const FLAG_TRAP: u64 = 0x100
+const SI_KERNEL: u64 = 0x80
+const USER_CS_VALUE: u64 = 0x33
+const USER_SS_VALUE: u64 = 0x2B
+const NO_OFFSET: u64 = 0xFFFF
+
+const R_ORIG_RAX: u64 = 15
+const R_CS: u64 = 17
+const R_SS: u64 = 20
+const R_FS_BASE: u64 = 21
+const R_GS_BASE: u64 = 22
+const R_RAX: u64 = 10
+const R_RIP: u64 = 16
+const R_EFLAGS: u64 = 18
+const R_RSP: u64 = 19
+
+fn fail(e: u64) -> u64 {
+    return errno.neg(e)
+}
+
+fn handles(number: u64) -> bool {
+    return number == SYS_PTRACE
+}
+
+fn greg_of(reg: u64) -> u64 {
+    if reg == 0 { return 7 }
+    if reg == 1 { return 6 }
+    if reg == 2 { return 5 }
+    if reg == 3 { return 4 }
+    if reg == 4 { return 10 }
+    if reg == 5 { return 11 }
+    if reg == 6 { return 3 }
+    if reg == 7 { return 2 }
+    if reg == 8 { return 1 }
+    if reg == 9 { return 0 }
+    if reg == 10 { return 13 }
+    if reg == 11 { return 14 }
+    if reg == 12 { return 12 }
+    if reg == 13 { return 9 }
+    if reg == 14 { return 8 }
+    if reg == 16 { return 16 }
+    if reg == 18 { return 17 }
+    if reg == 19 { return 15 }
+    return NO_OFFSET
+}
+
+fn syscall_offset(greg: u64) -> u64 {
+    if greg == 0 { return 56 }
+    if greg == 1 { return 48 }
+    if greg == 2 { return 64 }
+    if greg == 4 { return 24 }
+    if greg == 5 { return 16 }
+    if greg == 6 { return 8 }
+    if greg == 7 { return 0 }
+    if greg == 8 { return 88 }
+    if greg == 9 { return 80 }
+    if greg == 10 { return 32 }
+    if greg == 11 { return 40 }
+    if greg == 12 { return 72 }
+    if greg == 13 { return 96 }
+    if greg == 15 { return 120 }
+    if greg == 16 { return 104 }
+    if greg == 17 { return 112 }
+    return NO_OFFSET
+}
+
+fn frame_offset(task: u64, greg: u64) -> u64 {
+    if ptstate.get(task, ptstate.F_LAYOUT) == ptrace.LAYOUT_TRAP {
+        return signal.greg_off(greg)
+    }
+    return syscall_offset(greg)
+}
+
+fn virtual_register(task: u64, greg: u64, frame: u64) -> u64 {
+    if ptstate.get(task, ptstate.F_LAYOUT) == ptrace.LAYOUT_TRAP {
+        return 0
+    }
+    if greg == 3 {
+        return regio.read64_at(frame, 112)
+    }
+    if greg == 14 {
+        return regio.read64_at(frame, 104)
+    }
+    return 0
+}
+
+fn read_register(state: u64, task: u64, reg: u64) -> u64 {
+    let frame: u64 = ptstate.get(task, ptstate.F_FRAME)
+    if reg == R_ORIG_RAX {
+        return ptstate.get(task, ptstate.F_ORIG)
+    }
+    if reg == R_CS {
+        return USER_CS_VALUE
+    }
+    if reg == R_SS {
+        return USER_SS_VALUE
+    }
+    if reg == R_FS_BASE {
+        return taskslot.tget(state, task, taskconst.T_FSBASE)
+    }
+    if reg == R_GS_BASE {
+        return taskslot.tget(state, task, taskconst.T_GSBASE)
+    }
+    let greg: u64 = greg_of(reg)
+    if frame == 0 || greg == NO_OFFSET {
+        return 0
+    }
+    if reg == R_RAX && ptstate.get(task, ptstate.F_KIND) == ptstate.KIND_ENTER {
+        return ptrace.ENOSYS_RESULT
+    }
+    let off: u64 = frame_offset(task, greg)
+    if off == NO_OFFSET {
+        return virtual_register(task, greg, frame)
+    }
+    return regio.read64_at(frame, off)
+}
+
+fn sanitize(reg: u64, value: u64) -> u64 {
+    if reg == R_EFLAGS {
+        return (value & FLAGS_USER_MASK) | FLAGS_FIXED
+    }
+    return value
+}
+
+fn register_writable(reg: u64, value: u64) -> bool {
+    if reg == R_RIP || reg == R_RSP {
+        return value < USER_SPACE_TOP
+    }
+    return true
+}
+
+fn write_register(task: u64, reg: u64, value: u64) -> bool {
+    let frame: u64 = ptstate.get(task, ptstate.F_FRAME)
+    if reg == R_ORIG_RAX {
+        ptstate.set(task, ptstate.F_ORIG, value)
+        return true
+    }
+    let greg: u64 = greg_of(reg)
+    if frame == 0 || greg == NO_OFFSET {
+        return true
+    }
+    if !register_writable(reg, value) {
+        return false
+    }
+    let off: u64 = frame_offset(task, greg)
+    if off == NO_OFFSET {
+        return true
+    }
+    regio.write64_at(frame, off, sanitize(reg, value))
+    return true
+}
+
+fn get_regs(state: u64, me: u64, tracee: u64, data: u64) -> u64 {
+    var words: [u64; 27] = [0 as u64; 27]
+    var reg: u64 = 0
+    while reg < REG_COUNT {
+        words[reg as usize] = read_register(state, tracee, reg)
+        reg = reg + 1
+    }
+    if !sysuser.copy_out(state, me, data, (&words[0]) as u64, REGS_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    return 0
+}
+
+fn set_regs(state: u64, me: u64, tracee: u64, data: u64) -> u64 {
+    var words: [u64; 27] = [0 as u64; 27]
+    if !sysuser.copy_in(state, me, (&words[0]) as u64, data, REGS_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    var reg: u64 = 0
+    while reg < REG_COUNT {
+        if reg != R_CS && reg != R_SS && !write_register(tracee, reg, words[reg as usize]) {
+            return fail(errno.E_IO)
+        }
+        reg = reg + 1
+    }
+    return 0
+}
+
+fn peek_word(state: u64, me: u64, tracee: u64, addr: u64, data: u64) -> u64 {
+    var word: u64 = 0
+    if !sysuser.copy_in(state, tracee, (&word) as u64, addr, WORD_BYTES) {
+        return fail(errno.E_IO)
+    }
+    if !sysuser.copy_out(state, me, data, (&word) as u64, WORD_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    return 0
+}
+
+fn poke_word(state: u64, tracee: u64, addr: u64, data: u64) -> u64 {
+    var word: u64 = data
+    if !sysuser.copy_out(state, tracee, addr, (&word) as u64, WORD_BYTES) {
+        return fail(errno.E_IO)
+    }
+    return 0
+}
+
+fn peek_user(state: u64, me: u64, tracee: u64, addr: u64, data: u64) -> u64 {
+    var word: u64 = 0
+    if addr < REGS_BYTES && (addr & 7) == 0 {
+        word = read_register(state, tracee, addr >> 3)
+    } else {
+        if addr < DEBUG_REGS_OFFSET || addr >= DEBUG_REGS_END {
+            return fail(errno.E_IO)
+        }
+    }
+    if !sysuser.copy_out(state, me, data, (&word) as u64, WORD_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    return 0
+}
+
+fn poke_user(tracee: u64, addr: u64, data: u64) -> u64 {
+    if addr >= REGS_BYTES || (addr & 7) != 0 {
+        return fail(errno.E_IO)
+    }
+    if !write_register(tracee, addr >> 3, data) {
+        return fail(errno.E_IO)
+    }
+    return 0
+}
+
+fn get_siginfo(state: u64, me: u64, tracee: u64, data: u64) -> u64 {
+    var words: [u64; 16] = [0 as u64; 16]
+    let signo: u64 = ptstate.get(tracee, ptstate.F_CODE) & 255
+    words[0] = signo
+    if signo == ptrace.SIGTRAP_NUM {
+        words[1] = SI_KERNEL
+    }
+    if !sysuser.copy_out(state, me, data, (&words[0]) as u64, SIGINFO_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    return 0
+}
+
+fn resume(state: u64, tracee: u64, mode: u64, sig: u64) -> u64 {
+    if sig >= SIG_LIMIT {
+        return fail(errno.E_INVAL)
+    }
+    ptstate.set(tracee, ptstate.F_INJECT, sig)
+    ptstate.set(tracee, ptstate.F_MODE, mode)
+    ptstate.set(tracee, ptstate.F_FRESH, 0)
+    ptrace.apply_step_flag(tracee, mode == ptstate.MODE_STEP)
+    sched.ptrace_release(state, tracee)
+    return 0
+}
+
+fn detach(state: u64, tracee: u64, sig: u64) -> u64 {
+    if sig >= SIG_LIMIT {
+        return fail(errno.E_INVAL)
+    }
+    ptstate.set(tracee, ptstate.F_INJECT, sig)
+    ptstate.set(tracee, ptstate.F_MODE, 0)
+    ptstate.set(tracee, ptstate.F_FRESH, 0)
+    ptstate.set(tracee, ptstate.F_TRACER, 0)
+    ptrace.apply_step_flag(tracee, false)
+    sched.ptrace_release(state, tracee)
+    return 0
+}
+
+fn trace_me(state: u64, me: u64) -> u64 {
+    if ptstate.traced(me) {
+        return fail(errno.E_PERM)
+    }
+    let parent: u64 = taskslot.tget(state, me, taskconst.T_PARENT)
+    if parent >= kstate.MAX_TASKS || parent == me {
+        return fail(errno.E_PERM)
+    }
+    ptstate.set(me, ptstate.F_TRACER, parent + 1)
+    ptstate.set(me, ptstate.F_MODE, 0)
+    return 0
+}
+
+fn attach(state: u64, me: u64, pid: u64, seize: bool, options: u64) -> u64 {
+    let tracee: u64 = sched.find_pid(state, pid)
+    if tracee >= kstate.MAX_TASKS || pid == 0 {
+        return fail(errno.E_SRCH)
+    }
+    if tracee == me || ptstate.traced(tracee) || taskslot.tget(state, tracee, taskconst.T_KIND) != taskconst.K_USER {
+        return fail(errno.E_PERM)
+    }
+    if !sysnet.kill_allowed(state, me, pid) {
+        return fail(errno.E_PERM)
+    }
+    ptstate.set(tracee, ptstate.F_MODE, 0)
+    ptstate.set(tracee, ptstate.F_FRESH, 0)
+    ptstate.set(tracee, ptstate.F_OPTS, 0)
+    ptstate.set(tracee, ptstate.F_SEIZED, 0)
+    if seize {
+        ptstate.set(tracee, ptstate.F_OPTS, options)
+        ptstate.set(tracee, ptstate.F_SEIZED, 1)
+    }
+    ptstate.set(tracee, ptstate.F_TRACER, me + 1)
+    if !seize {
+        signal.send(state, tracee, SIGSTOP_NUM)
+    }
+    return 0
+}
+
+fn stopped_request(state: u64, me: u64, tracee: u64, req: u64, addr: u64, data: u64) -> u64 {
+    if req == PT_PEEKTEXT || req == PT_PEEKDATA {
+        return peek_word(state, me, tracee, addr, data)
+    }
+    if req == PT_POKETEXT || req == PT_POKEDATA {
+        return poke_word(state, tracee, addr, data)
+    }
+    if req == PT_PEEKUSER {
+        return peek_user(state, me, tracee, addr, data)
+    }
+    if req == PT_POKEUSER {
+        return poke_user(tracee, addr, data)
+    }
+    if req == PT_GETREGS {
+        return get_regs(state, me, tracee, data)
+    }
+    if req == PT_SETREGS {
+        return set_regs(state, me, tracee, data)
+    }
+    if req == PT_GETSIGINFO {
+        return get_siginfo(state, me, tracee, data)
+    }
+    if req == PT_GETEVENTMSG {
+        var zero: u64 = 0
+        if !sysuser.copy_out(state, me, data, (&zero) as u64, WORD_BYTES) {
+            return fail(errno.E_FAULT)
+        }
+        return 0
+    }
+    if req == PT_CONT {
+        return resume(state, tracee, ptstate.MODE_CONT, data)
+    }
+    if req == PT_SYSCALL {
+        return resume(state, tracee, ptstate.MODE_SYSCALL, data)
+    }
+    if req == PT_SINGLESTEP {
+        return resume(state, tracee, ptstate.MODE_STEP, data)
+    }
+    if req == PT_DETACH {
+        return detach(state, tracee, data)
+    }
+    return fail(errno.E_IO)
+}
+
+fn call(state: u64, me: u64, req: u64, pid: u64, addr: u64, data: u64) -> u64 {
+    if req == PT_TRACEME {
+        return trace_me(state, me)
+    }
+    if req == PT_ATTACH || req == PT_SEIZE {
+        return attach(state, me, pid, req == PT_SEIZE, data)
+    }
+    let tracee: u64 = sched.find_pid(state, pid)
+    if tracee >= kstate.MAX_TASKS || ptstate.tracer_slot(tracee) != me {
+        return fail(errno.E_SRCH)
+    }
+    if req == PT_KILL {
+        signal.send(state, tracee, SIGKILL_NUM)
+        return 0
+    }
+    if req == PT_SETOPTIONS {
+        ptstate.set(tracee, ptstate.F_OPTS, data)
+        return 0
+    }
+    if ptstate.get(tracee, ptstate.F_HOLD) == 0 {
+        return fail(errno.E_SRCH)
+    }
+    return stopped_request(state, me, tracee, req, addr, data)
+}

@@ -7,6 +7,7 @@ import mm.mmheap
 import sched.sched
 import sched.taskconst
 import sched.taskslot
+import sched.ptstate
 import sched.proc.procbase
 import sched.proc.proccopy
 import sched.proc.procfault
@@ -1062,16 +1063,21 @@ fn do_wait4(state: u64, me: u64, pid: u64, status: u64, options: u64) -> u64 {
                 zi = find_zombie_child(state, me, 0)
             }
         }
+        let traced_stop: u64 = report_trace_stop(state, me, want, status)
+        if traced_stop != 0 {
+            return traced_stop
+        }
         var child: u64 = kstate.MAX_TASKS
+        let has_tracees: bool = ptstate.tracee_count(state, me, want) != 0
         if kstate.mode_on(state, kstate.M_WAITOLD) {
             child = find_child(state, me, want)
-            if child >= kstate.MAX_TASKS {
+            if child >= kstate.MAX_TASKS && !has_tracees {
                 return sysuser.neg(errno.E_CHILD)
             }
         } else {
             child = find_zombie_child(state, me, want)
             if child >= kstate.MAX_TASKS {
-                if find_child(state, me, want) >= kstate.MAX_TASKS {
+                if find_child(state, me, want) >= kstate.MAX_TASKS && !has_tracees {
                     return sysuser.neg(errno.E_CHILD)
                 }
             }
@@ -1122,6 +1128,23 @@ fn do_wait4(state: u64, me: u64, pid: u64, status: u64, options: u64) -> u64 {
         rounds = rounds + 1
     }
     return sysuser.neg(errno.E_CHILD)
+}
+
+const TRACE_STOP_MARK: u64 = 0x7F
+
+fn report_trace_stop(state: u64, me: u64, want: u64, status: u64) -> u64 {
+    let tracee: u64 = ptstate.find_fresh(state, me, want)
+    if tracee >= kstate.MAX_TASKS {
+        return 0
+    }
+    let code: u64 = ptstate.claim_fresh(tracee)
+    if code == 0 {
+        return 0
+    }
+    if status != 0 {
+        sysuser.put32(state, me, status, (code << 8) | TRACE_STOP_MARK)
+    }
+    return taskslot.tget(state, tracee, taskconst.T_PID)
 }
 
 fn find_zombie_child(state: u64, me: u64, pid: u64) -> u64 {

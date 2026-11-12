@@ -14,6 +14,7 @@ import sched.hrt
 import sched.time
 import sched.taskslot
 import sched.taskconst
+import sched.ptstate
 
 export {
     init, create, start, schedule, on_tick, fast_tick, yield_now, sleep_ticks, sleep_fine, poll_sleep_fine, idle_wait,
@@ -26,7 +27,8 @@ export {
     ring3_report, syscalls_of, syscalls_sum, core_count, ring3_procs, poll_seq, poll_kick, poll_kick_one,
     sleep_ticks_unless, wake_sleeper, poll_sleep, groups_count, groups_at, groups_has, groups_set, groups_clear,
     groups_inherit, session_identity, fpu_area, fpu_set_area, fpu_inherit, fpu_reset, fsbase_apply, state_cas,
-    schedule_locked, kill_requested, stop_sleep, kill_other, group_of, group_live, kill_group
+    schedule_locked, kill_requested, stop_sleep, kill_other, group_of, group_live, kill_group,
+    ptrace_park, ptrace_release
 }
 
 const GUARD_PAINT: u64 = 0xC0DEFACEC0DEFACE
@@ -724,6 +726,7 @@ fn clear_signals(state: u64, i: u64) {
     taskslot.tset(state, i, taskconst.T_SUSP, 0)
     taskslot.tset(state, i, taskconst.T_STOPSIG, 0)
     taskslot.tset(state, i, taskconst.T_SIGLAST, 0)
+    ptstate.clear(i)
     let pid: u64 = taskslot.tget(state, i, taskconst.T_PID)
     taskslot.tset(state, i, taskconst.T_PGID, pid)
     taskslot.tset(state, i, taskconst.T_SID, pid)
@@ -1476,6 +1479,12 @@ fn wait_sleep(state: u64, want: u64, untraced: u64) {
             irq_restore(flags)
             return
         }
+        if ptstate.get(i, ptstate.F_TRACER) == cur + 1 && ptstate.get(i, ptstate.F_HOLD) != 0 && ptstate.get(i, ptstate.F_FRESH) != 0
+            && (want == 0 || taskslot.tget(state, i, taskconst.T_PID) == want) {
+            atomic.lock_give(state, atomic.L_SCHED)
+            irq_restore(flags)
+            return
+        }
         if untraced != 0 && taskslot.tget(state, i, taskconst.T_PARENT) == cur && (want == 0 || taskslot.tget(state, i, taskconst.T_PID) == want)
             && stop_unreported(taskslot.tget(state, i, taskconst.T_STOPSIG)) {
             atomic.lock_give(state, atomic.L_SCHED)
@@ -1536,6 +1545,56 @@ fn stop_sleep(state: u64, contbit: u64) {
     taskslot.tset(state, cur, taskconst.T_STATE, taskconst.S_STOP)
     schedule_locked(state)
     irq_restore(flags)
+}
+
+fn ptrace_park(state: u64) {
+    var first: bool = true
+    while true {
+        let flags: u64 = irq_save()
+        atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
+        let cur: u64 = current(state)
+        if first {
+            ptstate.set(cur, ptstate.F_HOLD, 1)
+            ptstate.set(cur, ptstate.F_FRESH, 1)
+            wake_pid(state, taskslot.tget(state, cur, taskconst.T_PID))
+            first = false
+        }
+        let killed: bool = (taskslot.tget(state, cur, taskconst.T_SIGPEND) & ptstate.KILL_BIT) != 0
+        if ptstate.get(cur, ptstate.F_HOLD) == 0 || killed {
+            ptstate.set(cur, ptstate.F_HOLD, 0)
+            atomic.lock_give(state, atomic.L_SCHED)
+            irq_restore(flags)
+            return
+        }
+        taskslot.tset(state, cur, taskconst.T_STATE, taskconst.S_STOP)
+        schedule_locked(state)
+        irq_restore(flags)
+    }
+}
+
+fn ptrace_release(state: u64, task: u64) {
+    let flags: u64 = irq_save()
+    atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
+    ptstate.set(task, ptstate.F_HOLD, 0)
+    atomic.lock_give(state, atomic.L_SCHED)
+    irq_restore(flags)
+    state_cas(state, task, taskconst.S_STOP, taskconst.S_READY)
+}
+
+fn ptrace_gone(state: u64, task: u64) {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 0
+    while i < n {
+        if ptstate.get(i, ptstate.F_TRACER) == task + 1 {
+            ptstate.set(i, ptstate.F_TRACER, 0)
+            ptstate.set(i, ptstate.F_HOLD, 0)
+            ptstate.set(i, ptstate.F_MODE, 0)
+            state_cas(state, i, taskconst.S_STOP, taskconst.S_READY)
+        }
+        i = i + 1
+    }
+    ptstate.set(task, ptstate.F_TRACER, 0)
+    ptstate.set(task, ptstate.F_HOLD, 0)
 }
 
 fn wake_pid(state: u64, pid: u64) {
@@ -1643,6 +1702,7 @@ fn exit_task(state: u64, code: u64) {
     taskslot.tset(state, cur, taskconst.T_EXIT, code)
     taskslot.tset(state, cur, taskconst.T_END, kstate.get(state, kstate.TICKS))
     lock_gone(state, cur)
+    ptrace_gone(state, cur)
     taskslot.tset(state, cur, taskconst.T_STATE, taskconst.S_ZOMBIE)
     reparent(state, cur)
     wake_pid(state, taskslot.tget(state, cur, taskconst.T_PID))
@@ -1683,6 +1743,7 @@ fn kill_other(state: u64, i: u64, pid: u64, code: u64) -> u64 {
     }
     taskslot.tset(state, i, taskconst.T_END, kstate.get(state, kstate.TICKS))
     lock_gone(state, i)
+    ptrace_gone(state, i)
     taskslot.tset(state, i, taskconst.T_STATE, taskconst.S_ZOMBIE)
     reparent(state, i)
     wake_pid(state, pid)
