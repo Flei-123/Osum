@@ -6,6 +6,7 @@ import sched.sched
 import sched.taskconst
 import sched.taskslot
 import fs.fs
+import fs.dcache
 import serial
 import ipc.appfs
 
@@ -155,11 +156,42 @@ fn walk_w(state: u64, t: u64, path: u64) -> bool {
     return walk(state, t, path)
 }
 
+fn component_start(path: u64, slash: u64) -> u64 {
+    var e: u64 = slash
+    while e > 0 && kstate.get8(path + e - 1) == 47 {
+        e = e - 1
+    }
+    var b: u64 = e
+    while b > 0 && kstate.get8(path + b - 1) != 47 {
+        b = b - 1
+    }
+    return b
+}
+
+fn component_end(path: u64, slash: u64) -> u64 {
+    var e: u64 = slash
+    while e > 0 && kstate.get8(path + e - 1) == 47 {
+        e = e - 1
+    }
+    return e
+}
+
+fn prefix_node(state: u64, path: u64, slash: u64) -> u64 {
+    let saved: u64 = kstate.get8(path + slash)
+    kstate.set8(path + slash, 0 as u8)
+    let ino: u64 = fs.path(state, path)
+    kstate.set8(path + slash, saved as u8)
+    return ino
+}
+
 fn walk(state: u64, t: u64, path: u64) -> bool {
     if !appfs.read_ok(state, t, path) {
         return false
     }
     kstate.add(state, kstate.MU_OFF + kstate.MU_WALKS, 1)
+    let flags: u64 = fs.enter(state)
+    var cur: u64 = fs.root(state)
+    var fast: bool = true
     var i: u64 = 0
     var erlaubt: bool = true
     var more: bool = true
@@ -171,15 +203,41 @@ fn walk(state: u64, t: u64, path: u64) -> bool {
             if c == 47 {
                 let before: u64 = kstate.get8(path + i + 1)
                 if i == 0 || (before != 47 && before != 0) {
-                    kstate.set8(path + i, 0 as u8)
-                    let ino: u64 = fs.path(state, path)
-                    kstate.set8(path + i, 47 as u8)
+                    var ino: u64 = 0
+                    if i == 0 {
+                        ino = cur
+                    } else {
+                        let stamp: u64 = dcache.stamp(state)
+                        let saved: u64 = kstate.get8(path + i)
+                        kstate.set8(path + i, 0 as u8)
+                        let hit: u64 = dcache.probe(state, 0, path)
+                        kstate.set8(path + i, saved as u8)
+                        if hit != dcache.MISS && hit != dcache.NEG {
+                            ino = hit
+                        } else {
+                            if fast {
+                                ino = fs.step_dir(state, cur, path, component_start(path, i), component_end(path, i))
+                                if ino != 0 && fs.inode_type(state, ino) == fs.T_LINK {
+                                    ino = prefix_node(state, path, i)
+                                    fast = false
+                                }
+                            } else {
+                                ino = prefix_node(state, path, i)
+                            }
+                            if ino != 0 {
+                                kstate.set8(path + i, 0 as u8)
+                                dcache.insert(state, 0, path, ino, stamp)
+                                kstate.set8(path + i, saved as u8)
+                            }
+                        }
+                    }
                     if ino == 0 {
                         more = false
                     } else {
                         if fs.inode_type(state, ino) != fs.T_DIR {
                             more = false
                         } else {
+                            cur = ino
                             if !may(state, t, ino, R_EXEC) {
                                 erlaubt = false
                                 more = false
@@ -191,6 +249,7 @@ fn walk(state: u64, t: u64, path: u64) -> bool {
             i = i + 1
         }
     }
+    fs.leave(state, flags)
     if erlaubt {
         return true
     }

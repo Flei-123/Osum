@@ -277,6 +277,7 @@ static void run_thread(long n)
 }
 
 #include "wbench.h"
+#include "pbench.h"
 
 int main(int argc, char **argv)
 {
@@ -317,6 +318,7 @@ int main(int argc, char **argv)
     measure("fork_exec_exit_wait", run_exec, 20, 1, 1);
     measure("pipe_roundtrip", run_pipe, PIPE_ROUNDS, 1, 1);
     measure("thread_create_join", run_thread, 100, 1, 1);
+    pb_run_all();
     wb_run_all();
     close(data_fd);
     unlink(DATA_PATH);
