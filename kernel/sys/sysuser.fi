@@ -139,26 +139,52 @@ fn copy_in(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
     return true
 }
 
+fn copy_name_span(state: u64, me: u64, va: u64, dst: u64, span: u64) -> u64 {
+    let mmfl: u64 = mmlock.mm_lock(state)
+    let phys: u64 = procmap.translate(state, me, va)
+    if phys == 0 {
+        mmlock.mm_unlock(state, mmfl)
+        __mmio_write8(dst as *mut u8, 0)
+        return 0
+    }
+    guard.stac(state)
+    var i: u64 = 0
+    var found: bool = false
+    while i < span && !found {
+        let c: u8 = __mmio_read8((phys + i) as *mut u8)
+        __mmio_write8((dst + i) as *mut u8, c)
+        if c == 0 {
+            found = true
+        } else {
+            i = i + 1
+        }
+    }
+    guard.clac(state)
+    mmlock.mm_unlock(state, mmfl)
+    return i
+}
+
 // A name out of ring 3 into the kernel's own buffer. Returns the length,
 // or an error. Nothing is read that the process does not own.
 fn fetch_name(state: u64, me: u64, addr: u64, dst: u64, max: u64) -> u64 {
     if addr == 0 {
         return neg(errno.E_FAULT)
     }
-    if !procfault.user_ok(state, me, addr, 1) {
-        return neg(errno.E_FAULT)
-    }
     var n: u64 = 0
     while n < max {
-        if !procfault.user_ok(state, me, addr + n, 1) {
+        let va: u64 = addr + n
+        if !procfault.user_ok(state, me, va, 1) {
             return neg(errno.E_FAULT)
         }
-        let c: u64 = peek(state, me, addr + n)
-        kstate.set8(dst + n, c as u8)
-        if c == 0 {
-            return n
+        var span: u64 = PAGE_BYTES - (va & (PAGE_BYTES - 1))
+        if span > max - n {
+            span = max - n
         }
-        n = n + 1
+        let got: u64 = copy_name_span(state, me, va, dst + n, span)
+        if got < span {
+            return n + got
+        }
+        n = n + span
     }
     return neg(errno.E_NAMETOOLONG)
 }
