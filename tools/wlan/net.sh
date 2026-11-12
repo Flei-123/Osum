@@ -98,12 +98,13 @@ awk '/==WAITED==/{f=1} /==PING1==/{f=0} f' "$C" > "$T/p1.txt"
 grep -aqE 'octets from 192\.168\.77\.1' "$T/p1.txt" && ok "ping gateway answered" || { bad "ping gateway not answered"; head -12 "$T/p1.txt"; }
 has "$C" 'stack wired=1 uplink=0' "/proc/wlan stack line: wired, uplink card 0"
 awk '/==PING1==/{f=1} f' "$C" | grep -aqE 'stack wired=1 .* gwmac=[0-9a-f]{2}:' && ok "/proc/wlan stack line: gateway MAC learned" || bad "/proc/wlan stack line: no gateway MAC"
-grep -aqE 'stack wired=1 .* drop=[0-9]+ echo=[0-9]+ dns=' "$C" && ok "/proc/wlan stack line: drop/echo/dns fields" || bad "/proc/wlan stack line: drop/echo/dns fields missing"
+grep -aqE 'stack wired=1 .* drop=[0-9]+ echo=[0-9]+ .*dns=' "$C" && ok "/proc/wlan stack line: drop/echo/dns fields" || bad "/proc/wlan stack line: drop/echo/dns fields missing"
+awk '/==PING1==/{f=1} f' "$C" | grep -aqE 'wire arp tx=[0-9]+ rxrq=[0-9]+ rxrp=[0-9]+ .* icmp tx=3 rxrep=3 rxoth=[0-9]+ stk icmp=3 echo=3 .* err conv=0 send=0 last=0' && ok "/proc/wlan wire line: ARP answered, 3 echo requests, 3 echo replies, no send errors" || { bad "/proc/wlan wire line wrong"; awk '/==PING1==/{f=1} f' "$C" | grep -a 'wire arp' | head -2; }
 has "$C" '==END==' "system keeps running"
 
 ETH="-netdev user,id=n0,net=10.0.2.0/24 -device e1000,netdev=n0"
 echo "-- E: e1000 + wlan0: the WLAN link becomes the uplink, ping goes over WLAN"
-run e "iwlfhtest iwlfhbind nic" "$ETH"
+run e "iwlfhtest iwlfhbind nic wlanfirst" "$ETH"
 E="$T/e.klar"
 has "$E" 'auto=up rc=0' "two cards: autostart up"
 has "$E" 'stack wired=1 uplink=1' "two cards: uplink is the WLAN card"

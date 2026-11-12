@@ -53,6 +53,7 @@ import drv.net.netclass
 import drv.net.ethreg
 import drv.net.usbnet
 import net.wlan_net
+import net.upstat
 
 export {
     resume_cards, kill_cards, probe, late_usb, kind_on, print_kind, MAX_CARDS,
@@ -126,6 +127,7 @@ static mut nd_admin_down: bool = false
 static mut nd_uplink_card: u64 = 0
 static mut nd_uplink_gen: u64 = 0
 static mut nd_usb_slot: u64 = 0
+static mut nd_was_alive: [u8; 8] = [0 as u8; 8]
 
 const SYNC_NONE: u64 = 0
 const SYNC_ADDED: u64 = 1
@@ -165,11 +167,30 @@ fn alive(state: u64, c: u64) -> bool {
     return ready_on(state, c) && link_up_on(state, c)
 }
 
+fn health_on(state: u64) -> bool {
+    return !kstate.mode_on(state, kstate.M_NOUPHEALTH)
+}
+
+fn good(state: u64, c: u64, strict: bool) -> bool {
+    if !alive(state, c) { return false }
+    return !strict || upstat.usable(state, c)
+}
+
+fn watch_edges(state: u64) {
+    var c: u64 = 0
+    while c < MAX_CARDS {
+        let up: bool = alive(state, c)
+        if up && nd_was_alive[c as usize] == 0 { upstat.forget(c) }
+        if up { nd_was_alive[c as usize] = 1 } else { nd_was_alive[c as usize] = 0 }
+        c = c + 1
+    }
+}
+
 fn is_pci_kind(k: u64) -> bool {
     return k == KIND_VIRTIO || k == KIND_E1000 || k == KIND_I219 || k == KIND_R8169
 }
 
-fn first_alive(state: u64, tier: u64) -> u64 {
+fn first_alive(state: u64, tier: u64, strict: bool) -> u64 {
     var c: u64 = 0
     while c < MAX_CARDS {
         let k: u64 = kind_on(state, c)
@@ -177,26 +198,37 @@ fn first_alive(state: u64, tier: u64) -> u64 {
         if tier == 0 { hit = is_pci_kind(k) }
         if tier == 1 { hit = k == KIND_USBNET }
         if tier == 2 { hit = k == KIND_WLAN }
-        if hit && alive(state, c) { return c }
+        if hit && good(state, c, strict) { return c }
         c = c + 1
     }
     return MAX_CARDS
 }
 
 fn alt_alive(state: u64) -> bool {
-    return first_alive(state, 0) < MAX_CARDS || first_alive(state, 1) < MAX_CARDS
+    return first_alive(state, 0, false) < MAX_CARDS || first_alive(state, 1, false) < MAX_CARDS
+}
+
+fn pick_alive(state: u64, strict: bool) -> u64 {
+    var tier: u64 = 0
+    while tier < 3 {
+        let c: u64 = first_alive(state, tier, strict)
+        if c < MAX_CARDS { return c }
+        tier = tier + 1
+    }
+    return MAX_CARDS
 }
 
 fn choose_uplink(state: u64) -> u64 {
+    let strict: bool = health_on(state)
     if nd_uplink_kind != KIND_NONE {
         let p: u64 = card_of_kind(state, nd_uplink_kind)
-        if p < MAX_CARDS && alive(state, p) { return p }
+        if p < MAX_CARDS && good(state, p, strict) { return p }
     }
-    var tier: u64 = 0
-    while tier < 3 {
-        let c: u64 = first_alive(state, tier)
-        if c < MAX_CARDS { return c }
-        tier = tier + 1
+    let best: u64 = pick_alive(state, strict)
+    if best < MAX_CARDS { return best }
+    if strict {
+        let any: u64 = pick_alive(state, false)
+        if any < MAX_CARDS { return any }
     }
     if kind_on(state, nd_uplink_card) != KIND_NONE { return nd_uplink_card }
     var c: u64 = 0
@@ -208,6 +240,7 @@ fn choose_uplink(state: u64) -> u64 {
 }
 
 fn uplink_refresh(state: u64) -> bool {
+    watch_edges(state)
     let c: u64 = choose_uplink(state)
     if c == nd_uplink_card { return false }
     nd_uplink_card = c
