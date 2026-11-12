@@ -180,27 +180,7 @@ def dims():
 
 
 
-HEADER = """// SPDX-License-Identifier: GPL-2.0-only
-// kernel/net/netmark.fi -- ERZEUGT AUS assets/netview/mark-*.txt.
-//
-// NICHT VON HAND AENDERN. `tools/netview/icons.py kern` schreibt diese
-// Datei, und `tools/netview/run.sh` baut sie im Abnahmelauf noch einmal
-// und vergleicht sie Oktett fuer Oktett mit der, die im Baum liegt.
-// Weicht sie ab, faellt der Lauf durch.
-//
-// WARUM ES SIE UEBERHAUPT GIBT. Dasselbe Zeichen steht an zwei Stellen
-// auf dem Schirm: am Fensterknopf in der Taskleiste (Ring 3, liest die
-// OSYM-Datei von der Platte) und in der TITELLEISTE (der Fensterserver,
-// mitten im Zeichnen eines Fensters, ohne Dateisystem). Zwei Stellen
-// duerfen nicht zwei Zeichnungen bedeuten -- also ist die Zeichnung die
-// Quelle und diese Datei ihr Abdruck.
-//
-// EINE REIHE JE BILDZEILE: `maske` traegt je Bildpunkt ein Bit,
-// hoechstwertiges Bit links; `rollen` traegt je Bildpunkt vier Bit mit
-// der Farbrolle (1 ink, 2 dim, 3 accent, 4 warn, 5 panel), niedrigstes
-// Nibble ganz links.
-
-profile kernel
+HEADER = """profile kernel
 
 export { W, H, COUNT, M_FILTERED, M_FAKED, M_NONE, mask_at, role_at }
 
@@ -208,8 +188,6 @@ const W: u64 = %(w)d
 const H: u64 = %(h)d
 const COUNT: u64 = %(count)d
 
-// Die Reihenfolge ist die der Sichten in `kernel/netview.fi`, ohne
-// `real` -- der Normalfall bekommt kein Zeichen.
 const M_FILTERED: u64 = 0
 const M_FAKED: u64 = 1
 const M_NONE: u64 = 2

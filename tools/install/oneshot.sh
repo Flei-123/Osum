@@ -13,6 +13,22 @@ SKRIPT=${3:-}
 LIMIT=${4:-240}
 MEM=${MEM:-512}
 
+run_limited() {
+    timeout "$LIMIT" "$@" > /dev/null 2>&1 &
+    local pid=$!
+    if [ -n "${STOP_ON:-}" ]; then
+        while kill -0 "$pid" 2> /dev/null; do
+            if grep -qa -- "$STOP_ON" "$OUT/$NAME.txt"; then
+                sleep 1
+                kill "$pid" 2> /dev/null
+                break
+            fi
+            sleep 1
+        done
+    fi
+    wait "$pid"
+}
+
 CRC=$(cat "$OUT/quelle.crc")
 BASIS="osum vfs nokbd nosched noproc nofs noring3"
 
@@ -54,23 +70,23 @@ if [ "$WIE" = roh ]; then
     [ -n "${OSUM_EXTRA:-}" ] && ZEILE="$ZEILE $OSUM_EXTRA"
     [ -n "$NETZ" ] && ZEILE="$ZEILE $NETZ"
     [ -n "$SKRIPT" ] && ZEILE="$ZEILE script=$SKRIPT"
-    timeout "$LIMIT" $QEMU_X86 -machine pc -cpu "$CPU" -m "$MEM" -smp "${OSUM_SMP:-1}" \
+    run_limited $QEMU_X86 -machine pc -cpu "$CPU" -m "$MEM" -smp "${OSUM_SMP:-1}" \
         -kernel "$OUT/k.mb" -append "$ZEILE" \
         -serial "file:$OUT/$NAME.txt" -display none -no-reboot "${RTCARGS[@]}" \
         "${ROHDISK[@]}" \
-        -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04
     rc=$?
 elif [ "$WIE" = iso ]; then
     ZEILE="$BASIS modfs modcrc=$CRC"
     [ -n "${OSUM_EXTRA:-}" ] && ZEILE="$ZEILE $OSUM_EXTRA"
     [ -n "$NETZ" ] && ZEILE="$ZEILE $NETZ"
     [ -n "$SKRIPT" ] && ZEILE="$ZEILE script=$SKRIPT"
-    timeout "$LIMIT" $QEMU_X86 -machine pc -cpu "$CPU" -m "$MEM" -smp "${OSUM_SMP:-1}" \
+    run_limited $QEMU_X86 -machine pc -cpu "$CPU" -m "$MEM" -smp "${OSUM_SMP:-1}" \
         -kernel "$OUT/k.mb" -initrd "$OUT/quelle.img" -append "$ZEILE" \
         -serial "file:$OUT/$NAME.txt" -display none -no-reboot "${RTCARGS[@]}" \
         -drive "file=$OUT/ziel.img,format=raw,if=ide,index=0" \
         "${ZWEITE[@]}" "${NETARGS[@]}" \
-        -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04
     rc=$?
 else
     {
@@ -116,7 +132,7 @@ else
           "${ZWEITE[@]}" "${NETARGS[@]}"
           -device isa-debug-exit,iobase=0xf4,iosize=0x04)
     [ -f "$VARS" ] && ARGS+=(-drive "if=pflash,format=raw,unit=1,file=$VARS")
-    timeout "$LIMIT" $QEMU_X86 "${ARGS[@]}" > /dev/null 2>&1
+    run_limited $QEMU_X86 "${ARGS[@]}"
     rc=$?
 fi
 echo "$rc" > "$OUT/$NAME.rc"

@@ -289,6 +289,55 @@ fn swap_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -> boo
     return ok
 }
 
+const ANON_AROUND_PAGES: u64 = 8
+
+const ANON_AROUND_MIN_FREE: u64 = 4096
+
+fn anon_around(state: u64, cur: u64, pt: u64, s: u64, e: u64) {
+    if mmframe.frames_free(state) < ANON_AROUND_MIN_FREE {
+        return
+    }
+    let first: u64 = s - s % ANON_AROUND_PAGES
+    var want: u64 = 0
+    var k: u64 = first
+    while k < first + ANON_AROUND_PAGES {
+        if k != s && procpt.read_entry(pt, k) == e {
+            want = want + 1
+        }
+        k = k + 1
+    }
+    let counter: u64 = ctr.ctr_of(state, cur)
+    if want == 0 || !ctr.mem_charge(state, counter, want) {
+        return
+    }
+    var bits: u64 = procbase.PAGE_PRESENT | procbase.PAGE_USER | (e & procbase.PAGE_WRITE)
+    if (e & procbase.PAGE_LAZYX) == 0 {
+        bits = bits | procpt.nx(state)
+    }
+    var mapped: u64 = 0
+    let flags: u64 = mmframe.lock(state)
+    k = first
+    while k < first + ANON_AROUND_PAGES && mapped < want {
+        if k != s && procpt.read_entry(pt, k) == e {
+            let frame: u64 = mmframe.frame_alloc_user_locked(state)
+            if frame == 0 {
+                break
+            }
+            procpt.zero_frame(frame)
+            procpt.write_entry(pt, k, frame | bits)
+            mapped = mapped + 1
+        }
+        k = k + 1
+    }
+    mmframe.unlock(state, flags)
+    if mapped < want {
+        ctr.mem_uncharge(state, counter, want - mapped)
+    }
+    if mapped != 0 {
+        taskslot.tset(state, cur, taskconst.T_UPAGES, taskslot.tget(state, cur, taskconst.T_UPAGES) + mapped)
+    }
+}
+
 fn lazy_fault(state: u64, cur: u64, addr: u64, err: u64) -> bool {
     if !procmap.lazy_zone(addr) || (err & 1) != 0 {
         return false
@@ -324,6 +373,7 @@ fn lazy_fault(state: u64, cur: u64, addr: u64, err: u64) -> bool {
             procpt.write_entry(pt, s, 0)
             if procmap.map_page_zero(state, cur, page, (e & procbase.PAGE_WRITE) != 0, (e & procbase.PAGE_LAZYX) != 0) != 0 {
                 ok = true
+                anon_around(state, cur, pt, s, e)
             } else {
                 procpt.write_entry(pt, s, e)
             }
@@ -365,7 +415,7 @@ fn low_user_range(state: u64, i: u64, addr: u64, len: u64) -> bool {
     return len <= proclow.LOW_END - addr
 }
 
-fn user_ok(state: u64, i: u64, addr: u64, len: u64) -> bool {
+fn user_range_ok(state: u64, i: u64, addr: u64, len: u64) -> bool {
     if len == 0 {
         return true
     }
@@ -375,8 +425,15 @@ fn user_ok(state: u64, i: u64, addr: u64, len: u64) -> bool {
     if addr +% len < addr {
         return false
     }
-    if addr +% len > procbase.USER_DATA + procbase.USER_SPAN * procbase.PRIV_SLOTS {
+    return addr +% len <= procbase.USER_DATA + procbase.USER_SPAN * procbase.PRIV_SLOTS
+}
+
+fn user_ok(state: u64, i: u64, addr: u64, len: u64) -> bool {
+    if !user_range_ok(state, i, addr, len) {
         return false
+    }
+    if len == 0 {
+        return true
     }
     var p: u64 = addr
     let last: u64 = addr +% len -% 1

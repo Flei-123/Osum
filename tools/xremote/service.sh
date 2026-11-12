@@ -35,8 +35,9 @@ for t in qemu-system-x86_64 node python3; do
     command -v "$t" >/dev/null 2>&1 || { echo "XRSERVICE: skipped, $t missing"; exit 0; }
 done
 T=$(mktemp -d)
-RP=""; VP=""
+RP=""; VP=""; DP=""
 cleanup() {
+    [ -n "$DP" ] && kill "$DP" 2>/dev/null
     [ -n "$RP" ] && kill "$RP" 2>/dev/null
     [ -n "$VP" ] && kill "$VP" 2>/dev/null
     rm -rf "$T"
@@ -60,12 +61,15 @@ python3 tools/k15/icon.py pakete/xremote/symbol.txt "$PKGSRC/bau/symbol" > /dev/
 python3 "$OPKPY" installieren --wurzel "$PKGROOT" "$T/xremote.opk" > "$T/opkinstall.log" 2>&1 || { echo "XRSERVICE: opk install failed"; cat "$T/opkinstall.log"; exit 1; }
 APPDIR="$PKGROOT/apps/xremote.osp"
 cp "$APPDIR/INFO" "$T/xr.info"
-printf 'xremote net\n' > "$T/xr.rights"
+printf '1\n' > "$T/xr.current"
+printf 'xremote\t%s\n' "$(printf 'a%.0s' $(seq 1 32))" > "$T/xr.plan"
+[ "${XR_NO_PLAN:-0}" = 1 ] && : > "$T/xr.plan"
 {
     echo "/apps/@755"; echo "/apps/xremote.osp/@755"
     (cd "$APPDIR" && find . -mindepth 1 -type d | sort) | while read -r d; do echo "/apps/xremote.osp/${d#./}/@755"; done
     (cd "$APPDIR" && find . -type f | sort) | while read -r f; do echo "/apps/xremote.osp/${f#./}=$APPDIR/${f#./}@644"; done
-    echo "/etc/apprights.conf=$T/xr.rights@644"
+    echo "/system/@755"; echo "/system/generations/@755"; echo "/system/generations/1/@755"
+    echo "/system/CURRENT=$T/xr.current@644"; echo "/system/generations/1/PLAN=$T/xr.plan@644"
     [ "${XR_REAL_RELAY:-0}" = 1 ] && echo "/etc/resolv.conf=$WD/fx-root/etc/resolv.conf@644"
     [ "${XR_DBG:-0}" = 1 ] && { echo "/opt/@755"; echo "/opt/xr/@755"; echo "/opt/xr/freeviewer-old=$XRTOOLS/freeviewer-host@755"; echo "/usr/@755"; echo "/usr/lib/@755"; echo "/usr/lib/libgcc_s.so.1=$LIBGCC@755"; }
     echo "/run/@755"; echo "/var/@755"; echo "/var/log/@755"; echo "/etc/@755"
@@ -107,19 +111,44 @@ viewer() {
     viewer "$T/v_ok2.txt" 45 "$ID2" "$PW2" 5
 ) &
 VP=$!
+MONSOCK="$T/mon.sock"
+(
+    answered=0
+    while true; do
+        dialogs=$(grep -ac 'wm: trusted dialog up no=' "$S" 2>/dev/null)
+        if [ "${dialogs:-0}" -gt "$answered" ]; then
+            sleep 2
+            printf 'sendkey j\n' > "$T/dialog-key.txt"
+            python3 tools/wm/monitor.py "$MONSOCK" "$T/dialog-key.txt" 0.15 > /dev/null 2>&1
+            answered=$((answered + 1))
+        fi
+        sleep 1
+    done
+) &
+DP=$!
 ACC=(); [ -w /dev/kvm ] && ACC=(-accel kvm -cpu host)
 BOOTARGS="gfx disp wm wmdauer wmshell osum vfs bus fremdtrace nic nip=10.0.2.15/24 ngw=10.0.2.2 script=sh /etc/fx.sh;exit"
-KERNEL=${KERNEL:-} DONE=SV-END TMO=${XR_TMO:-900} MEM=1024 GUI=1 GUI_EXTRA="xremoted settingsd apprights" \
-    EXTRA="/etc/svc.sh=$T/svc.sh@755 /etc/settings.schema=etc/settings.schema@644" KARGS="$BOOTARGS" \
-    QEMU_EXTRA="-vga std -netdev user,id=n0 -device virtio-net-pci,netdev=n0,mac=52:54:00:5b:1d:02" \
+KERNEL=${KERNEL:-} DONE=SV-END TMO=${XR_TMO:-900} MEM=1024 GUI=1 GUI_EXTRA="xremoted settingsd apprights orientbus act" \
+    EXTRA="/etc/svc.sh=$T/svc.sh@755 /etc/settings.schema=etc/settings.schema@644 /etc/actions.d/@755 /etc/actions.d/settings.actions=etc/actions.d/settings.actions@644" KARGS="$BOOTARGS" \
+    QEMU_EXTRA="-monitor unix:$MONSOCK,server,nowait -vga std -netdev user,id=n0 -device virtio-net-pci,netdev=n0,mac=52:54:00:5b:1d:02" \
     SPEC="$T/wd/fxrun/spec.txt" bash tools/linuxapps/run.sh "$WD" "$T/fx.sh" "$OUT" > "$T/linuxapps.log" 2>&1
 wait "$VP" 2>/dev/null; VP=""
+kill "$DP" 2>/dev/null; DP=""
 C="$OUT/ser.clean"
 tail -n 3 "$T/linuxapps.log" | sed 's/^/        /'
 line() { grep -a "^$1" "$C" | head -1; }
 has() { echo "$1" | grep -q -- "$2" && echo 1 || echo 0; }
 L=$(line 'SV-PKG');    chk "$(has "$L" 'host=1 ld=1 gcc=1')" "package files are in the guest ($L)"
 L=$(line 'SV-BEFORE'); chk "$(has "$L" 'conf=0 pw=0')" "control: no config, password, info or log before the service ran ($L)"
+L=$(line 'SV-RIGHTS')
+if [ "${XR_NO_PLAN:-0}" = 1 ]; then
+    chk "$(has "$L" 'mask=0 ')" "counter-proof: no signed plan, no automatic grant, mask stays 0 ($L)"
+else
+    chk "$(has "$L" 'mask=[0-9]* net')" "perm=net of the installed INFO is granted at load, no /etc/apprights.conf written by hand ($L)"
+fi
+L=$(line 'SV-BUS-GET0'); chk "$(has "$L" 'enabled=.*value=false')" "bus: remote.enabled reads false before the first switch-on ($L)"
+L=$(line 'SV-BUS-SET true'); chk "$(has "$L" 'confirm [0-9]* settings.remote.enabled')" "bus: settings.set remote.enabled is critical and asks for a confirmation ($L)"
+L=$(line 'SV-BUS-CONFIRM true'); chk "$(has "$L" 'use_dialog')" "bus: the window's own confirm is refused, only the system dialog says yes ($L)"
 NK=$(grep -c '^setting ' etc/settings.schema)
 grep -aq "settingsd: schema ok keys=$NK" "$C" && ok "settingsd loads the shipped schema with the remote.* keys (keys=$NK)" || bad "settingsd schema check: $(grep -a 'settingsd:' "$C" | head -1)"
 grep -aq 'xremoted: started' "$C" && ok "xremoted started in the guest" || bad "xremoted did not start"
@@ -129,6 +158,10 @@ L=$(line 'SV-B ')
 chk "$(has "$L" 'service=running pwlen=8 samepw=1')" "phase B: enabled -> running, 8-char password, info equals password file ($L)"
 ID=$(grep -a '^SV-ID ' "$C" | head -1 | cut -d' ' -f2)
 PW=$(grep -a '^SV-PW ' "$C" | head -1 | cut -d' ' -f2)
+L=$(line 'SV-BUS-GET1'); chk "$(has "$L" "value=$ID")" "bus: settings.get remote.id returns the ID of the state file ($L)"
+L=$(line 'SV-BUS-GET2'); chk "$(has "$L" "value=$PW")" "bus: settings.get remote.password returns the password ($L)"
+L=$(line 'SV-BUS-GET3'); chk "$(has "$L" 'value=')" "bus: settings.get remote.status answers ($L)"
+L=$(line 'SV-BUS-GET4'); chk "$(has "$L" 'value=true.*enabled=true')" "bus: remote.enabled reads true and /etc/xremote.conf says enabled=true ($L)"
 echo "$ID" | grep -qE '^[0-9]+$' && ok "host registered at the relay, ID $ID, state file readable by the guest" || bad "no host ID in the state file: '$ID'"
 echo "$PW" | grep -qE '^[A-Z2-9]{8}$' && ok "password has 8 characters from the unambiguous alphabet" || bad "password format: '$PW'"
 FB=$(grep -ac '^frame ' "$T/v_bad.txt" 2>/dev/null)
@@ -138,6 +171,8 @@ FO=$(grep -ac '^frame ' "$T/v_ok.txt" 2>/dev/null)
 [ "${FO:-0}" -ge 2 ] && ok "right password: viewer received $FO frames" || bad "right password: viewer received ${FO:-0} frames ($(tail -n 2 "$T/v_ok.txt" 2>/dev/null | tr '\n' ';'))"
 L=$(line 'SV-C ')
 chk "$(has "$L" 'service=disabled password= pw=0 state=0')" "phase C: disable -> status disabled, password and host state removed ($L)"
+L=$(line 'SV-BUS-SET false'); chk "$(has "$L" 'confirm [0-9]* settings.remote.enabled')" "bus: switching off asks as well ($L)"
+L=$(line 'SV-BUS-GET5'); chk "$(has "$L" 'value=false.*enabled=false')" "bus: after the confirmed switch-off remote.enabled reads false and the conf says enabled=false ($L)"
 FA=$(grep -ac '^frame ' "$T/v_after.txt" 2>/dev/null)
 [ "${FA:-0}" = 0 ] && [ -e "$T/v_after.txt" ] && ok "after disable the old ID and password give no frame (host is gone)" || bad "after disable a viewer still got $FA frames"
 N=$(grep -ac 'xremoted: host stopped' "$C")

@@ -14,6 +14,7 @@ read -r START SIZE < <(sfdisk -d "$W/d.raw" | awk '/type=4F68BCE3/ {gsub(",","",
 [ -n "${START:-}" ] || { echo "linux: root partition not found" >&2; exit 1; }
 dd if="$W/d.raw" of="$W/root.ext4" bs=512 skip="$START" count="$SIZE" status=none
 rm -f "$W/d.raw"
+if [ -n "${SPEED_ONLY:-}" ]; then printf '%s\n%s\n' "$SPEED_ONLY" "${SPEED_MIN_MS:-0}" > "$W/speedonly"; fi
 
 cat > "$W/speedinit" <<'INIT'
 #!/bin/sh
@@ -23,12 +24,14 @@ echo 1 > /proc/sys/kernel/sysrq
 /usr/bin/speedbench
 echo o > /proc/sysrq-trigger
 INIT
+if [ -n "${SPEED_ONLY:-}" ]; then printf '%s\n%s\n' "$SPEED_ONLY" "${SPEED_MIN_MS:-0}" > "$W/speedonly"; SPEEDONLY_CMD="write $W/speedonly /etc/speedonly"; else SPEEDONLY_CMD="rm /etc/speedonly"; fi
 KERNEL_FILE=$(debugfs -R "ls -p /boot" "$W/root.ext4" 2>/dev/null | awk -F/ '$6 ~ /^vmlinuz-/ {print $6; exit}')
 INITRD_FILE=$(debugfs -R "ls -p /boot" "$W/root.ext4" 2>/dev/null | awk -F/ '$6 ~ /^initrd.img-/ {print $6; exit}')
 [ -n "$KERNEL_FILE" ] && [ -n "$INITRD_FILE" ] || { echo "linux: kernel/initrd not found in /boot" >&2; exit 1; }
 debugfs -R "dump /boot/$KERNEL_FILE $W/vmlinuz" "$W/root.ext4" >/dev/null 2>&1
 debugfs -R "dump /boot/$INITRD_FILE $W/initrd" "$W/root.ext4" >/dev/null 2>&1
 debugfs -w -f - "$W/root.ext4" >/dev/null 2>&1 <<DEBUGFS
+$SPEEDONLY_CMD
 rm /usr/bin/speedbench
 write $BENCH /usr/bin/speedbench
 set_inode_field /usr/bin/speedbench mode 0100755
@@ -39,6 +42,9 @@ rm /usr/bin/speedinit
 write $W/speedinit /usr/bin/speedinit
 set_inode_field /usr/bin/speedinit mode 0100755
 DEBUGFS
+if [ -s "$W/speedonly" ]; then
+    printf 'rm /etc/speedonly\nwrite %s /etc/speedonly\n' "$W/speedonly" | debugfs -w -f - "$W/root.ext4" > /dev/null 2>&1
+fi
 [ -s "$W/vmlinuz" ] && [ -s "$W/initrd" ] || { echo "linux: kernel/initrd dump failed" >&2; exit 1; }
 echo "linux kernel: $KERNEL_FILE" > "$OUT/linux-kernel.txt"
 

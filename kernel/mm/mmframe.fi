@@ -17,6 +17,7 @@ export {
     frame_alloc,
     frame_alloc_inner,
     frame_alloc_user,
+    frame_alloc_user_locked,
     frame_alloc_user_low,
     kva,
     DM_BASE,
@@ -207,18 +208,22 @@ fn frame_alloc(state: u64) -> u64 {
 
 fn frame_alloc_user(state: u64) -> u64 {
     let flags: u64 = lock(state)
+    let r: u64 = frame_alloc_user_locked(state)
+    unlock(state, flags)
+    return r
+}
+
+fn frame_alloc_user_locked(state: u64) -> u64 {
     let res: u64 = kstate.get(state, kstate.RESERVE_FRAMES)
     if frames_free(state) <= res {
         kstate.set(state, kstate.RESERVE_HITS,
             kstate.get(state, kstate.RESERVE_HITS) + 1)
-        unlock(state, flags)
         return 0
     }
     var r: u64 = frame_alloc_high(state)
     if r == 0 {
         r = frame_alloc_inner(state)
     }
-    unlock(state, flags)
     return r
 }
 
@@ -312,17 +317,20 @@ fn frame_alloc_inner(state: u64) -> u64 {
 }
 
 fn scan_range(state: u64, from: u64, to: u64) -> u64 {
-    let bitmap: u64 = kstate.get(state, kstate.BITMAP)
-    let frames: u64 = to
+    let bitmap: u64 = __mmio_read64((state + kstate.BITMAP) as *mut u64)
     var f: u64 = from
-    while f < frames {
-        if kstate.get8(bitmap + f / 8) == 0xFF {
+    while f < to {
+        let at: u64 = bitmap + f / 8
+        let byte: u64 = __mmio_read8(at as *mut u8) as u64
+        if byte == 0xFF {
             f = f + 8 - (f % 8)
         } else {
-            if !bit_get(bitmap, f) {
-                bit_set(bitmap, f)
-                kstate.set(state, kstate.FRAMES_FREE, frames_free(state) - 1)
-                kstate.set(state, kstate.FRAME_HINT, f)
+            let mask: u64 = (1 as u64) << (f % 8)
+            if (byte & mask) == 0 {
+                __mmio_write8(at as *mut u8, (byte | mask) as u8)
+                let free_at: u64 = state + kstate.FRAMES_FREE
+                __mmio_write64(free_at as *mut u64, __mmio_read64(free_at as *mut u64) - 1)
+                __mmio_write64((state + kstate.FRAME_HINT) as *mut u64, f)
                 return f * FRAME_SIZE
             }
             f = f + 1
@@ -338,21 +346,26 @@ fn frame_free(state: u64, addr: u64) {
 }
 
 fn frame_free_inner(state: u64, addr: u64) {
-    let bitmap: u64 = kstate.get(state, kstate.BITMAP)
     let f: u64 = addr / FRAME_SIZE
-    if f >= kstate.get(state, kstate.BITMAP_FRAMES) {
+    if f >= __mmio_read64((state + kstate.BITMAP_FRAMES) as *mut u64) {
         return
     }
-    if bit_get(bitmap, f) {
-        bit_clear(bitmap, f)
-        kstate.set(state, kstate.FRAMES_FREE, frames_free(state) + 1)
-        if f < REACH_FRAMES {
-            if f < kstate.get(state, kstate.FRAME_HINT) {
-                kstate.set(state, kstate.FRAME_HINT, f)
-            }
-        } else if f < high_hint {
-            high_hint = f
+    let at: u64 = __mmio_read64((state + kstate.BITMAP) as *mut u64) + f / 8
+    let byte: u64 = __mmio_read8(at as *mut u8) as u64
+    let mask: u64 = (1 as u64) << (f % 8)
+    if (byte & mask) == 0 {
+        return
+    }
+    __mmio_write8(at as *mut u8, (byte ^ mask) as u8)
+    let free_at: u64 = state + kstate.FRAMES_FREE
+    __mmio_write64(free_at as *mut u64, __mmio_read64(free_at as *mut u64) + 1)
+    if f < REACH_FRAMES {
+        let hint_at: u64 = state + kstate.FRAME_HINT
+        if f < __mmio_read64(hint_at as *mut u64) {
+            __mmio_write64(hint_at as *mut u64, f)
         }
+    } else if f < high_hint {
+        high_hint = f
     }
 }
 

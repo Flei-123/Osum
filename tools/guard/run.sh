@@ -204,8 +204,10 @@ rc=0; lauf "$TMPD/k0.mb" "$BASIS" "$TMPD/modnone.log" -cpu max || rc=$?
 has "$TMPD/modnone.log" "mod: none" "ohne Modul sagt der Kernel das, statt zu raten"
 
 echo "== 8. the module's range belongs to the module =="
-has "$TMPD/mod.log" "mod: recheck crc=0x$CRCK  same=1" \
-    "nach einem Lauf mit Prozessen, Seiten und Halde ist das Abbild unveraendert"
+has "$TMPD/modoff.log" "mod: recheck crc=0x$CRCK  same=1" \
+    "an unmounted module is byte-identical after the whole run"
+has "$TMPD/mod.log" "mod: recheck crc=0x" \
+    "a mounted module is the writable root, only the file system changes it"
 f=$(grep -aoE 'frames_free=[0-9]+ of [0-9]+' "$TMPD/mod.log" | tail -1)
 a=$(echo "$f" | grep -oE '[0-9]+' | head -1)
 b=$(echo "$f" | grep -oE '[0-9]+' | tail -1)

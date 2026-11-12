@@ -11,6 +11,7 @@ import sched.proc.procbase
 import sched.proc.proccopy
 import sched.proc.procfault
 import sched.proc.procmap
+import sched.proc.procrange
 import sched.proc.procspace
 import sched.proc.procswap
 import sched.futex
@@ -167,15 +168,12 @@ fn lazy_run_f(state: u64, me: u64, base: u64, pages: u64, prot: u64, fk: u64, fp
     let rd: bool = (prot & PROT_READ) != 0
     let wr: bool = (prot & PROT_WRITE) != 0
     let ex: bool = (prot & PROT_EXEC) != 0
+    if fk == 0 {
+        return procrange.mark_run(state, me, base, pages, procmap.lazy_bits(rd, wr, ex))
+    }
     var k: u64 = 0
     while k < pages {
-        var ok: bool = false
-        if fk != 0 {
-            ok = procmap.lazy_mark_file(state, me, base + k * sysconst.PAGE, rd, wr, ex, fk - 1, fpg + k)
-        } else {
-            ok = procmap.lazy_mark(state, me, base + k * sysconst.PAGE, rd, wr, ex)
-        }
-        if !ok {
+        if !procmap.lazy_mark_file(state, me, base + k * sysconst.PAGE, rd, wr, ex, fk - 1, fpg + k) {
             lazy_undo(state, me, base, k)
             return false
         }
@@ -326,17 +324,9 @@ fn map_anon(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64) -> 
 
 // The rights of a range of mapped pages; 0 = done. One flush at the end.
 fn set_range_prot(state: u64, me: u64, base: u64, pages: u64, prot: u64) -> u64 {
-    var k: u64 = 0
-    while k < pages {
-        let r: u64 = procspace.page_protect(state, me, base + k * sysconst.PAGE, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0)
-        if r != 0 {
-            procspace.tlb_flush_if_current(state, me)
-            return r
-        }
-        k = k + 1
-    }
+    let r: u64 = procrange.protect_run(state, me, base, pages, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0)
     procspace.tlb_flush_if_current(state, me)
-    return 0
+    return r
 }
 
 // MAP_FIXED: the pages go exactly to `addr`, whatever was mapped there is replaced (and zero). Only inside the two windows that
@@ -365,6 +355,14 @@ fn map_fixed_f(state: u64, me: u64, addr: u64, pages: u64, prot: u64, fk: u64, f
     }
     file_shm_flush_maps(state, me, addr, pages * sysconst.PAGE, true)
     let _released: bool = unixsock.map_release(state, me, addr, pages * sysconst.PAGE)
+    if in_lazy && fk == 0 {
+        procrange.release(state, me, addr, end)
+        if !procrange.mark_run(state, me, addr, pages, procmap.lazy_bits((prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0)) {
+            return sysuser.neg(errno.E_NOMEM)
+        }
+        kstate.add(state, kstate.MAPS, pages)
+        return addr
+    }
     var p: u64 = addr
     while p < end {
         let _d: bool = procspace.page_drop(state, me, p)
@@ -1028,7 +1026,7 @@ fn do_unmap(state: u64, me: u64, addr: u64, len: u64) -> u64 {
     }
     if addr >= RES_BASE {
         let rl: u64 = sysfd.page_up(len)
-        procspace.range_drop(state, me, addr, addr + rl)
+        procrange.release(state, me, addr, addr + rl)
         let owner: u64 = mem_owner(state, me)
         let rr: u64 = res_remove(state, owner, addr, rl)
         if addr + rl == taskslot.tget(state, owner, taskconst.T_RESNEXT) {
@@ -1046,14 +1044,8 @@ fn do_unmap(state: u64, me: u64, addr: u64, len: u64) -> u64 {
     // COMPOSITOR S3: a mapping of a shared object gives its reference back (LCSH: a file mapping writes back first)
     file_shm_flush_maps(state, me, addr, sysfd.page_up(len), true)
     let _released: bool = unixsock.map_release(state, me, addr, sysfd.page_up(len))
-    var p: u64 = addr
     let end: u64 = addr + sysfd.page_up(len)
-    while p < end {
-        if p < MMAP_TOP || p < procbase.BIG_TOP || (p >= procfault.SHM_ARENA_BASE && p < procfault.SHM_ARENA_TOP) || (p >= procbase.LAZY_BASE && p < procbase.LAZY_TOP) {
-            procspace.page_drop(state, me, p)
-        }
-        p = p + sysconst.PAGE
-    }
+    procrange.release(state, me, addr, end)
     if in_lazy && addr == lazy_bottom(state, me) {
         var nb: u64 = end
         if nb >= procmap.LAZY_ATOP {
@@ -1132,12 +1124,8 @@ fn do_mprotect(state: u64, me: u64, addr: u64, len: u64, prot: u64) -> u64 {
         return sysuser.neg(errno.E_NOMEM)
     }
     let pages: u64 = sysfd.page_up(len) / sysconst.PAGE
-    var k: u64 = 0
-    while k < pages {
-        if !procspace.page_mapped(state, me, addr + k * sysconst.PAGE) {
-            return sysuser.neg(errno.E_NOMEM)
-        }
-        k = k + 1
+    if !procrange.all_mapped(state, me, addr, pages) {
+        return sysuser.neg(errno.E_NOMEM)
     }
     let r: u64 = set_range_prot(state, me, addr, pages, prot)
     if r == 2 {

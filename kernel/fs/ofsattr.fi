@@ -1,0 +1,106 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import libc.regio
+import fs.fs
+import fs.ofsj
+import fs.vfs
+import fs.vfsops
+
+export {
+    AT_TYPE, AT_SIZE, AT_MODE, AT_NLINK, AT_RDEV, AT_BLKSIZE, AT_UID, AT_GID,
+    AT_MTIME, AT_CTIME, AT_ATIME, AT_FIFO, AT_BYTES, load
+}
+
+const AT_TYPE: u64 = 0
+const AT_SIZE: u64 = 8
+const AT_MODE: u64 = 16
+const AT_NLINK: u64 = 24
+const AT_RDEV: u64 = 32
+const AT_BLKSIZE: u64 = 40
+const AT_UID: u64 = 48
+const AT_GID: u64 = 56
+const AT_MTIME: u64 = 64
+const AT_CTIME: u64 = 72
+const AT_ATIME: u64 = 80
+const AT_FIFO: u64 = 88
+const AT_BYTES: u64 = 96
+const ROOT_MOUNT: u64 = 0
+
+fn node_type(art: u64) -> u64 {
+    if art == fs.T_DIR {
+        return vfsops.N_DIR
+    }
+    if art == fs.T_FILE {
+        return vfsops.N_FILE
+    }
+    if art == fs.T_LINK {
+        return vfsops.N_LNK
+    }
+    return vfsops.N_NONE
+}
+
+fn put(out: u64, at: u64, v: u64) {
+    kstate.set(out, at, v)
+}
+
+fn load_generic(state: u64, m: u64, node: u64, out: u64) {
+    put(out, AT_TYPE, vfs.v_attr(state, m, node, vfsops.A_TYPE))
+    put(out, AT_SIZE, vfs.v_attr(state, m, node, vfsops.A_SIZE))
+    put(out, AT_MODE, vfs.v_attr(state, m, node, vfsops.A_MODE))
+    put(out, AT_NLINK, vfs.v_attr(state, m, node, vfsops.A_NLINK))
+    put(out, AT_RDEV, vfs.v_attr(state, m, node, vfsops.A_RDEV))
+    put(out, AT_BLKSIZE, vfs.v_attr(state, m, node, vfsops.A_BLKSIZE))
+    put(out, AT_UID, vfs.v_attr(state, m, node, vfsops.A_UID))
+    put(out, AT_GID, vfs.v_attr(state, m, node, vfsops.A_GID))
+    put(out, AT_MTIME, vfs.v_attr(state, m, node, vfsops.A_MTIME))
+    put(out, AT_CTIME, vfs.v_attr(state, m, node, vfsops.A_CTIME))
+    put(out, AT_ATIME, vfs.v_attr(state, m, node, vfsops.A_ATIME))
+    put(out, AT_FIFO, 0)
+}
+
+fn load_root(state: u64, node: u64, out: u64) -> bool {
+    if node == 0 || node > fs.inode_count(state) {
+        return false
+    }
+    let ver: u64 = fs.version(state)
+    let flags: u64 = fs.enter(state)
+    let ok: bool = ofsj.read(state, fs.inode_block_of(state, node), fs.buf_in(state))
+    if ok {
+        let at: u64 = fs.buf_in(state) + fs.inode_off(state, node)
+        let raw_mode: u64 = regio.read64(at + fs.I_MODE)
+        put(out, AT_TYPE, node_type(regio.read64(at + fs.I_TYPE)))
+        put(out, AT_SIZE, regio.read64(at + fs.I_SIZE))
+        put(out, AT_NLINK, 1)
+        put(out, AT_RDEV, 0)
+        put(out, AT_BLKSIZE, 512)
+        put(out, AT_MODE, 493)
+        put(out, AT_UID, 0)
+        put(out, AT_GID, 0)
+        put(out, AT_MTIME, 0)
+        put(out, AT_CTIME, 0)
+        put(out, AT_ATIME, 0)
+        put(out, AT_FIFO, 0)
+        if ver >= fs.OFS_V2 {
+            put(out, AT_MODE, raw_mode & 4095)
+            put(out, AT_UID, regio.read64(at + fs.I_UID))
+            put(out, AT_GID, regio.read64(at + fs.I_GID))
+            put(out, AT_FIFO, raw_mode & fs.FIFO_BIT)
+        }
+        if ver >= fs.OFS_V3 {
+            put(out, AT_MTIME, regio.read64(at + fs.I_MTIME))
+            put(out, AT_CTIME, regio.read64(at + fs.I_CTIME))
+            put(out, AT_ATIME, regio.read64(at + fs.I_ATIME))
+        }
+    }
+    fs.leave(state, flags)
+    return ok
+}
+
+fn load(state: u64, m: u64, node: u64, out: u64) {
+    if m == ROOT_MOUNT && vfs.type_of(state, m) == vfsops.FS_OFS && load_root(state, node, out) {
+        return
+    }
+    load_generic(state, m, node, out)
+}

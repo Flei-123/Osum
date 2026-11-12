@@ -66,7 +66,7 @@ trap aufraeumen EXIT
 
 lauf() { # name skript [limit]
     : > "$OUT/srv.log"
-    OTA_NETZ="$NETZ" OUT="$OUT" bash tools/install/oneshot.sh \
+    OTA_NETZ="$NETZ" OUT="$OUT" STOP_ON="${STOP_ON:-}" bash tools/install/oneshot.sh \
         "$1" platte "$2" "${3:-600}" > /dev/null 2>&1
     sed -i -e 's/\x1b\[[0-9;=]*[a-zA-Z]//g' "$OUT/$1.txt" 2>/dev/null
     cat "$OUT/$1.rc" 2>/dev/null
@@ -438,7 +438,7 @@ hat "$OUT/ein1.txt" "ota: set interval is now 900" "und sie laesst sich umstelle
 hat "$OUT/ein1.txt" "interval 900" "die neue Zahl steht danach wirklich da"
 hat "$OUT/ein1.txt" "auto     ja" "und der Schalter fuer die automatische Suche auch"
 # ota service never returns (rounds == 0), the VM is killed by the limit; boot under load needs headroom
-rc=$(lauf ein2 "ota set unsinn 5;ota service;exit" 420)
+rc=$(STOP_ON="ota: service, interval" lauf ein2 "ota set unsinn 5;ota service;exit" 420)
 hat "$OUT/ein2.txt" "ota: not a key" "ein unbekannter Schluessel wird abgelehnt"
 hat "$OUT/ein2.txt" "ota: service, interval 900" "und der Dienst nimmt den eingestellten Abstand"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
