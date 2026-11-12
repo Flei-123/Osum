@@ -5,17 +5,19 @@ import arch.x86_64.apic
 
 export {
     FINE_MAX_NS, deadline_after, set_wake, wake_of, expired, due, pending_any, clear_pending, arm_here, partial,
-    mark_full, rate_here, relax_here, fine_enabled, ticks_for
+    mark_full, rate_here, relax_here, fine_enabled, ticks_for, set_next, retune_here
 }
 
 const FINE_MAX_NS: u64 = 60000000
 const FAST_DIVIDER: u64 = 10
 const PARTIAL_PERCENT: u64 = 80
+const MIN_PERIOD_NS: u64 = 40000
 const MAX_CPUS: u64 = 8
 const MAX_SLOTS: u64 = 256
 
 static mut wake_ns: [u64; 256] = [0 as u64; 256]
 static mut pending: u64 = 0
+static mut next_ns: u64 = 0
 static mut fast_cpu: [u64; 8] = [0 as u64; 8]
 static mut last_full: [u64; 8] = [0 as u64; 8]
 
@@ -41,7 +43,29 @@ fn set_wake(me: u64, ns: u64) {
     wake_ns[me as usize] = ns
     if ns != 0 {
         pending = 1
+        if next_ns == 0 || ns < next_ns {
+            next_ns = ns
+        }
     }
+}
+
+fn set_next(ns: u64) {
+    next_ns = ns
+}
+
+fn period_ns(state: u64) -> u64 {
+    let cap: u64 = time.TICK_NS / FAST_DIVIDER
+    if next_ns == 0 {
+        return cap
+    }
+    let now: u64 = time.mono_ns(state)
+    if next_ns <= now + MIN_PERIOD_NS {
+        return MIN_PERIOD_NS
+    }
+    if next_ns - now > cap {
+        return cap
+    }
+    return next_ns - now
 }
 
 fn wake_of(i: u64) -> u64 {
@@ -72,15 +96,28 @@ fn pending_any() -> bool {
 
 fn clear_pending() {
     pending = 0
+    next_ns = 0
 }
 
 fn arm_here(state: u64) {
     let me: u64 = cpu.here(state)
-    if me >= MAX_CPUS || fast_cpu[me as usize] != 0 {
+    if me >= MAX_CPUS {
+        return
+    }
+    if fast_cpu[me as usize] != 0 {
+        apic.timer_ns_sooner(state, period_ns(state), time.TICK_NS)
         return
     }
     fast_cpu[me as usize] = 1
-    apic.timer_fast(state, FAST_DIVIDER)
+    apic.timer_ns(state, period_ns(state), time.TICK_NS)
+}
+
+fn retune_here(state: u64) {
+    let me: u64 = cpu.here(state)
+    if me >= MAX_CPUS || fast_cpu[me as usize] == 0 {
+        return
+    }
+    apic.timer_ns(state, period_ns(state), time.TICK_NS)
 }
 
 fn relax_here(state: u64) {
@@ -95,7 +132,7 @@ fn relax_here(state: u64) {
 fn rate_here(state: u64, mult: u64) {
     let me: u64 = cpu.here(state)
     if me < MAX_CPUS && fast_cpu[me as usize] != 0 {
-        apic.timer_fast(state, FAST_DIVIDER)
+        apic.timer_ns(state, period_ns(state), time.TICK_NS)
         return
     }
     apic.timer_rate(state, mult)
