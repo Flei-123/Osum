@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import mm.fileshare
+import sched.ctr
+import sched.taskconst
+import sched.taskslot
+import sched.proc.procbase
+import sched.proc.proclow
+import sched.proc.procmap
+import sched.proc.procpt
+
+const PT_SLOTS: u64 = 512
+
+const PAGE_BYTES: u64 = 4096
+
+fn run_bits(state: u64, runnable: bool) -> u64 {
+    var bits: u64 = procbase.PAGE_PRESENT | procbase.PAGE_USER | procbase.PAGE_SHARED | procbase.PAGE_PCACHE
+    if !runnable {
+        bits = bits | procpt.nx(state)
+    }
+    return bits
+}
+
+fn run_limit(page: u64, count: u64) -> u64 {
+    let slot: u64 = procpt.pt_slot(page)
+    if slot >= PT_SLOTS || proclow.aliased(page) || page < procmap.IMAGE_BASE {
+        return 0
+    }
+    var n: u64 = count
+    if n > PT_SLOTS - slot {
+        n = PT_SLOTS - slot
+    }
+    if page + n * PAGE_BYTES > procmap.IMAGE_END {
+        return 0
+    }
+    return n
+}
+
+fn file_run(state: u64, t: u64, page: u64, count: u64, runnable: bool, ino: u64, pg: u64) -> u64 {
+    let n: u64 = run_limit(page, count)
+    if n == 0 || ino >= procmap.LAZYF_MAX || pg + n >= procmap.LAZYF_MAX {
+        return 0
+    }
+    let pt: u64 = procpt.pt_for(state, t, page, true)
+    if pt == 0 {
+        return 0
+    }
+    let owner: u64 = ctr.ctr_of(state, t)
+    if !ctr.mem_charge(state, owner, n) {
+        return 0
+    }
+    let bits: u64 = run_bits(state, runnable)
+    let slot: u64 = procpt.pt_slot(page)
+    var done: u64 = 0
+    while done < n && procpt.read_entry(pt, slot + done) == 0 {
+        let frame: u64 = fileshare.lookup(state, ino, pg + done)
+        if frame == 0 {
+            break
+        }
+        procpt.write_entry(pt, slot + done, frame | bits)
+        done = done + 1
+    }
+    if done < n {
+        ctr.mem_uncharge(state, owner, n - done)
+    }
+    if done > 0 {
+        taskslot.tset(state, t, taskconst.T_UPAGES, taskslot.tget(state, t, taskconst.T_UPAGES) + done)
+    }
+    return done
+}
