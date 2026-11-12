@@ -73,7 +73,7 @@ for sc in $SCALES; do
     else bad "scale $sc: counter-proof broken ($n0)"; fi
     if grep -aq 'qs: closed by escape' "$S"; then ok "scale $sc: Escape still closes the panel"
     else bad "scale $sc: Escape did not close the panel"; fi
-    tiles=$(grep -ac '^qs: kachel n=' "$S")
+    tiles=$(grep -a '^qs: kachel n=' "$S" | grep -ao 'kachel n=[0-9]*' | sort -u | wc -l)
     if [ "$tiles" -ge 3 ] && [ "$tiles" -le 8 ]; then ok "scale $sc, $mode: $tiles tiles, only working ones (3 to 8)"
     else bad "scale $sc, $mode: $tiles tiles reported"; fi
 done
