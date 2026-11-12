@@ -1,0 +1,80 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.errno
+import fs.file
+import fs.vfsops
+import fs.mnt
+import fs.devfs
+import ipc.handle
+import sched.taskconst
+import sched.taskslot
+import sys.sysconst
+import sys.sysuser
+
+export { io, MISS }
+
+const MISS: u64 = 0xFFFFFFFFFFFF0001
+const ACCESS_MASK: u64 = 3
+const ACCESS_WRONLY: u64 = 1
+
+fn count_read(state: u64, me: u64, n: u64) {
+    if n != 0 {
+        taskslot.tset(state, me, taskconst.T_DISKR, taskslot.tget(state, me, taskconst.T_DISKR) + n)
+    }
+}
+
+fn zero_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    kstate.add(state, kstate.VFS_INDIRECT, 1)
+    let bounce: u64 = sysuser.blockb(state)
+    devfs.zero_fill(bounce, len)
+    if !sysuser.copy_out(state, me, buf, bounce, len) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    count_read(state, me, len)
+    file.open_set_off(state, of, file.open_off(state, of) + len)
+    return len
+}
+
+fn io(state: u64, me: u64, fd: u64, buf: u64, len: u64, writing: bool) -> u64 {
+    if len > sysconst.MAX_IO {
+        return MISS
+    }
+    var need: u64 = handle.R_READ
+    if writing {
+        need = handle.R_WRITE
+    }
+    let of: u64 = file.fd_check(state, me, fd, need)
+    if of >= file.MAX_OPEN {
+        return MISS
+    }
+    let rec: u64 = state + kstate.OFILE_OFF + of * file.OF_BYTES
+    if *((rec + file.OF_KIND) as *mut u64) != file.K_VFILE {
+        return MISS
+    }
+    let m: u64 = *((rec + file.OF_MNT) as *mut u64)
+    if m >= mnt.MAX_MNT
+        || *((state + kstate.K14_OFF + mnt.MNT_OFF + m * mnt.MNT_BYTES + mnt.M_TYPE) as *mut u64) != vfsops.FS_DEV {
+        return MISS
+    }
+    let node: u64 = *((rec + file.OF_INO) as *mut u64)
+    let access: u64 = *((rec + file.OF_FLAGS) as *mut u64) & ACCESS_MASK
+    if writing {
+        if (access == sysconst.O_RDWR || access == ACCESS_WRONLY)
+            && (node == devfs.D_NULL || node == devfs.D_ZERO) {
+            return len
+        }
+        return MISS
+    }
+    if access == ACCESS_WRONLY {
+        return MISS
+    }
+    if node == devfs.D_NULL {
+        return 0
+    }
+    if node == devfs.D_ZERO {
+        return zero_read(state, me, of, buf, len)
+    }
+    return MISS
+}
