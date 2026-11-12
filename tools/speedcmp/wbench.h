@@ -11,18 +11,54 @@ static int wb_fd = -1;
 static char wb_names[WB_BATCH][WB_NAME_LEN];
 static char wb_alt_name[WB_NAME_LEN];
 
+#define PROF_N 8
+
+static const char *prof_keys[PROF_N] = {
+    "blk.run_cmds", "blk.run_sectors", "blk.ahci_cmds", "blk.ahci_wait_cy",
+    "blk.ahci_polls", "blk.ahci_irqs", "blk.ahci_sleeps", "tsc.khz"
+};
+
+static void prof_read(long long out[PROF_N])
+{
+    static char buf[8192];
+    int fd = open("/proc/bench", O_RDONLY);
+    ssize_t n = fd >= 0 ? read(fd, buf, sizeof buf - 1) : 0;
+    if (fd >= 0)
+        close(fd);
+    buf[n > 0 ? n : 0] = 0;
+    for (int i = 0; i < PROF_N; i++) {
+        char *p = strstr(buf, prof_keys[i]);
+        out[i] = p ? atoll(p + strlen(prof_keys[i]) + 1) : -1;
+    }
+}
+
+static void prof_emit(const char *name, const long long a[PROF_N], const long long b[PROF_N], long ops)
+{
+    char line[256];
+    double per = (double)ops;
+    int n = snprintf(line, sizeof line,
+        "\nP %s cmds=%.2f sectors=%.2f wait_kcy=%.1f polls=%.1f irqs=%.2f sleeps=%.2f\n", name,
+        (double)(b[2] - a[2]) / per, (double)(b[1] - a[1]) / per, (double)(b[3] - a[3]) / per / 1000.0,
+        (double)(b[4] - a[4]) / per, (double)(b[5] - a[5]) / per, (double)(b[6] - a[6]) / per);
+    (void)!write(1, line, n);
+}
+
 static void measure_timed(const char *name, timed_fn fn, long batch)
 {
     if (!selected(name) || (only_filter && !strstr(name, only_filter)))
         return;
     long total = 0;
     long long spent = 0;
+    long long pa[PROF_N], pb[PROF_N];
+    prof_read(pa);
     long long t0 = now_ns();
     do {
         spent += fn(batch);
         total += batch;
     } while (now_ns() - t0 < MIN_NS);
+    prof_read(pb);
     emit(name, (double)spent / (double)total, total);
+    prof_emit(name, pa, pb, total);
 }
 
 static void wb_prepare(void)
