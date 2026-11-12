@@ -1,0 +1,101 @@
+profile kernel
+
+import lib.kstate
+
+export { MISS, which_of, get, put, drop, flush }
+
+const MISS: u64 = 0xFFFFFFFFFFFFFFFF
+const LINES: u64 = 128
+const LINE_WORDS: u64 = 42
+const SLOTS: u64 = 8
+const SLOT_WORDS: u64 = 5
+const SLOT_AT: u64 = 2
+const TAG_VALID: u64 = 0x8000000000000000
+const TAG_LBA_MASK: u64 = 0xFFFFFFFFFF
+const TAG_VOL_MASK: u64 = 0xFFFFFF
+const TAG_VOL_SHIFT: u64 = 40
+const LINE_MUL: u64 = 0x9E3779B97F4A7C15
+const LINE_SHIFT: u64 = 57
+const VOLUME_MUL: u64 = 1000003
+const F_TYPE: u64 = 0
+const F_SIZE: u64 = 8
+const F_MODE: u64 = 88
+const F_UID: u64 = 96
+const F_GID: u64 = 104
+
+static mut cells: [u64; 5376] = [0 as u64; 5376]
+
+fn which_of(field: u64) -> u64 {
+    if field == F_TYPE {
+        return 0
+    }
+    if field == F_SIZE {
+        return 1
+    }
+    if field == F_MODE {
+        return 2
+    }
+    if field == F_UID {
+        return 3
+    }
+    if field == F_GID {
+        return 4
+    }
+    return MISS
+}
+
+fn tag_of(state: u64, lba: u64) -> u64 {
+    let vol: u64 = kstate.get(state, kstate.DISK_DEV) * VOLUME_MUL + kstate.get(state, kstate.DISK_FIRST) + 1
+    return TAG_VALID | ((vol & TAG_VOL_MASK) << TAG_VOL_SHIFT) | (lba & TAG_LBA_MASK)
+}
+
+fn line_of(lba: u64) -> u64 {
+    return (((lba + 1) *% LINE_MUL) >> LINE_SHIFT) % LINES
+}
+
+fn get(state: u64, lba: u64, idx: u64, which: u64) -> u64 {
+    if idx >= SLOTS {
+        return MISS
+    }
+    let base: u64 = line_of(lba) * LINE_WORDS
+    if cells[base as usize] != tag_of(state, lba) || (cells[(base + 1) as usize] & (1 << idx)) == 0 {
+        return MISS
+    }
+    return cells[(base + SLOT_AT + idx * SLOT_WORDS + which) as usize]
+}
+
+fn put(state: u64, lba: u64, idx: u64, kind: u64, size: u64, mode: u64, uid: u64, gid: u64) {
+    if idx >= SLOTS {
+        return
+    }
+    let base: u64 = line_of(lba) * LINE_WORDS
+    let tag: u64 = tag_of(state, lba)
+    if cells[base as usize] != tag {
+        cells[base as usize] = tag
+        cells[(base + 1) as usize] = 0
+    }
+    let at: u64 = base + SLOT_AT + idx * SLOT_WORDS
+    cells[at as usize] = kind
+    cells[(at + 1) as usize] = size
+    cells[(at + 2) as usize] = mode
+    cells[(at + 3) as usize] = uid
+    cells[(at + 4) as usize] = gid
+    cells[(base + 1) as usize] = cells[(base + 1) as usize] | (1 << idx)
+}
+
+fn drop(state: u64, lba: u64) {
+    let base: u64 = line_of(lba) * LINE_WORDS
+    if cells[base as usize] == tag_of(state, lba) {
+        cells[base as usize] = 0
+        cells[(base + 1) as usize] = 0
+    }
+}
+
+fn flush() {
+    var i: u64 = 0
+    while i < LINES {
+        cells[(i * LINE_WORDS) as usize] = 0
+        cells[(i * LINE_WORDS + 1) as usize] = 0
+        i = i + 1
+    }
+}

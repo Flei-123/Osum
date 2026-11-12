@@ -58,6 +58,7 @@ import fs.nidx
 import fs.dcache
 import fs.dirscan
 import fs.dirindex
+import fs.iattr
 import fs.pcache
 import mm.fileshare
 import fs.ofsj
@@ -696,8 +697,24 @@ fn inode_get(state: u64, ino: u64, field: u64) -> u64 {
     }
     let flags: u64 = enter(state)
     var v: u64 = 0
-    if ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
-        v = regio.read64(buf_in(state) + inode_off(state, ino) + field)
+    let which: u64 = iattr.which_of(field)
+    let lba: u64 = inode_block_of(state, ino)
+    let off: u64 = inode_off(state, ino)
+    if which != iattr.MISS {
+        v = iattr.get(state, lba, off / inode_bytes(state), which)
+        if v != iattr.MISS {
+            leave(state, flags)
+            return v
+        }
+        v = 0
+    }
+    if ofsj.read(state, lba, buf_in(state)) {
+        let at: u64 = buf_in(state) + off
+        v = regio.read64(at + field)
+        if which != iattr.MISS {
+            iattr.put(state, lba, off / inode_bytes(state), regio.read64(at + I_TYPE), regio.read64(at + I_SIZE),
+                regio.read64(at + I_MODE), regio.read64(at + I_UID), regio.read64(at + I_GID))
+        }
     }
     leave(state, flags)
     return v
@@ -1889,6 +1906,21 @@ fn dir_find(state: u64, dir: u64, name: u64) -> u64 {
     return regio.read64(buf_nm(state))
 }
 
+fn step_dir(state: u64, dir: u64, w: u64, from: u64, to: u64) -> u64 {
+    let nl: u64 = name_len(state)
+    var n: u64 = 0
+    var i: u64 = from
+    while i < to {
+        if n + 1 < nl {
+            kstate.set8(p_name(state) + n, kstate.get8(w + i) as u8)
+            n = n + 1
+        }
+        i = i + 1
+    }
+    kstate.set8(p_name(state) + n, 0 as u8)
+    return dir_find(state, dir, p_name(state))
+}
+
 // The `index`-th LIVE entry. `out` gets the 32 octets of the entry:
 // inode number and name. 0 = there is no such entry.
 // ------------------------------------------- ROUND K15, ZWEITER NACHTRAG
@@ -1923,6 +1955,11 @@ fn entry_at(state: u64, dir: u64, index: u64, out: u64, cap: u64) -> u64 {
     var i: u64 = 0
     var seen: u64 = 0
     var got: u64 = 0
+    let resume: u64 = dirindex.cursor_slot(state, dir, index)
+    if resume != dirindex.NO_CURSOR && resume <= n {
+        i = resume
+        seen = index
+    }
     while i < n && got == 0 {
         let count: u64 = dir_chunk(state, dir, i, n)
         if count == 0 {
@@ -1936,6 +1973,7 @@ fn entry_at(state: u64, dir: u64, index: u64, out: u64, cap: u64) -> u64 {
                 if seen == index {
                     copy(e, out, de)
                     got = ino
+                    dirindex.cursor_save(state, dir, index + 1, i + k + 1)
                 }
                 seen = seen + 1
             }
@@ -2559,6 +2597,7 @@ fn format_as(state: u64, v: u64, inodes: u64) -> bool {
     ofsj.disable(state)
     let flags: u64 = enter(state)
     dirindex.reset()
+    iattr.flush()
     kstate.set(state, kstate.K13_OFF + kstate.U_FSVER, v)
     let total: u64 = blk.blocks(state)
     var isz: u64 = INODE_SIZE
@@ -2703,6 +2742,7 @@ fn mount(state: u64) -> bool {
     ofsj.disable(state)
     let flags: u64 = enter(state)
     dirindex.reset()
+    iattr.flush()
     kstate.set(state, kstate.FS_READY, 0)
     geom_j(state, 0, 0)
     if !blk.read(state, 0, buf_sb(state)) {
