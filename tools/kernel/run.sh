@@ -168,7 +168,7 @@ for f in k0 k1 uprog0 uprog1; do
     undef=$(nm -u "$o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vE "$erlaubt")
     [ -z "$undef" ] && ok "$f.o: no undefined symbol other than $(echo "$erlaubt" | tr -d '^$()' | tr '|' '/') (no libc, no runtime)" \
                     || { bad "$f.o: undefined symbols"; echo "$undef" | sed 's/^/        /'; }
-    foreign=$(nm --defined-only "$o" | awk '{print $3}' | grep -vE "^_F[01]\." || true)
+    foreign=$(nm --defined-only "$o" | awk '{print $3}' | grep -vE "^(_F[01]\.|\.L)" || true)
     [ -z "$foreign" ] && ok "$f.o: every defined symbol is its own" \
                       || { bad "$f.o: foreign symbols"; echo "$foreign" | sed 's/^/        /'; }
     if nm "$o" | grep -qiE '(malloc|printf|memcpy|__gc_|gc_alloc|mmap)'; then
