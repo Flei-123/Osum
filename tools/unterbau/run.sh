@@ -16,6 +16,8 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/firnenv.sh
 firnenv_need_firnc1
+. tools/lib/kernelbase.sh
+export OSUM_KERNEL_BASE=${OSUM_KERNEL_BASE-$OSUM_PRODUCT_KERNEL_BASE}
 ROOT=$(pwd)
 HERE=tools/unterbau
 OLDREF=${OLDREF:-553ef06c}
