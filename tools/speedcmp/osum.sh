@@ -15,7 +15,7 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 if [ -n "${SPEED_KERNEL:-}" ]; then
     cp "$SPEED_KERNEL" "$W/k.mb"
 else
-    bash tools/build-kernel.sh "$W/k.mb" --stufe 1 > "$W/kernel.log" 2>&1 || { tail -8 "$W/kernel.log" >&2; exit 1; }
+    bash tools/build-kernel.sh "$W/k.mb" --stufe "${SPEED_STUFE:-0}" > "$W/kernel.log" 2>&1 || { tail -8 "$W/kernel.log" >&2; exit 1; }
     [ -n "${SPEED_KERNEL_OUT:-}" ] && cp "$W/k.mb" "$SPEED_KERNEL_OUT"
 fi
 
