@@ -1,0 +1,286 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import actcli
+import fuiscene
+import msg
+import ulib
+import settings.setbase
+import settings.setcore
+import settings.setsystem
+
+export { load, tick, page, rects, toggle, confirm, owns, enabled }
+
+const TEXT_CAP: u64 = 72
+const LINE_CAP: u64 = 120
+const RELOAD_TICKS: u64 = 200
+const REPLY_WAIT_TICKS: u64 = 300
+const PENDING_NONE: u64 = 0
+
+static mut call_get: [u8; 18] = "call settings.get\0"
+static mut call_set: [u8; 18] = "call settings.set\0"
+static mut arg_key: [u8; 4] = "key\0"
+static mut arg_value: [u8; 6] = "value\0"
+static mut key_enabled: [u8; 15] = "remote.enabled\0"
+static mut key_id: [u8; 10] = "remote.id\0"
+static mut key_password: [u8; 16] = "remote.password\0"
+static mut key_status: [u8; 14] = "remote.status\0"
+static mut key_peer: [u8; 12] = "remote.peer\0"
+static mut key_service: [u8; 15] = "remote.service\0"
+static mut word_true: [u8; 5] = "true\0"
+static mut word_false: [u8; 6] = "false\0"
+static mut word_running: [u8; 8] = "running\0"
+static mut m_note: [u8; 21] = "settings.remote.note\0"
+static mut m_switch: [u8; 23] = "settings.remote.switch\0"
+static mut m_id: [u8; 19] = "settings.remote.id\0"
+static mut m_password: [u8; 25] = "settings.remote.password\0"
+static mut m_status: [u8; 23] = "settings.remote.status\0"
+static mut m_peer: [u8; 21] = "settings.remote.peer\0"
+static mut m_confirm: [u8; 24] = "settings.remote.confirm\0"
+static mut m_ask: [u8; 20] = "settings.remote.ask\0"
+static mut m_denied: [u8; 23] = "settings.remote.denied\0"
+static mut m_nobus: [u8; 22] = "settings.remote.nobus\0"
+static mut m_stop: [u8; 21] = "settings.remote.stop\0"
+static mut m_svc: [u8; 21] = "settings.remote.svc.\0"
+static mut s_dialog: [u8; 11] = "use_dialog\0"
+static mut m_dash: [u8; 2] = "-\0"
+static mut t_sep: [u8; 3] = ": \0"
+static mut r_switch: [u8; 5] = "xrsw\0"
+static mut r_confirm: [u8; 5] = "xrcf\0"
+static mut s_page: [u8; 31] = "settings: remote page enabled=\0"
+static mut s_svc: [u8; 10] = " service=\0"
+static mut s_id: [u8; 5] = " id=\0"
+static mut s_peer: [u8; 7] = " peer=\0"
+static mut s_end: [u8; 2] = "\n\0"
+
+static mut id_text: [u8; 72] = [0 as u8; 72]
+static mut password_text: [u8; 72] = [0 as u8; 72]
+static mut status_text: [u8; 72] = [0 as u8; 72]
+static mut peer_text: [u8; 72] = [0 as u8; 72]
+static mut service_text: [u8; 72] = [0 as u8; 72]
+static mut line_text: [u8; 120] = [0 as u8; 120]
+static mut svc_key: [u8; 48] = [0 as u8; 48]
+static mut notice_key: u64 = 0
+static mut enabled_on: bool = false
+static mut bus_up: bool = false
+static mut last_reload: u64 = 0
+static mut pending_no: u64 = 0
+
+fn owns(id: u64) -> bool {
+    return id == setbase.K_XR_SWITCH || id == setbase.K_XR_CONFIRM
+}
+
+fn enabled() -> bool {
+    return enabled_on
+}
+
+fn fetch(key: u64, out: u64) -> bool {
+    __mmio_write8(out as *mut u8, 0 as u8)
+    actcli.req((&call_get[0 as usize]) as u64)
+    actcli.arg((&arg_key[0 as usize]) as u64, key)
+    if actcli.send(REPLY_WAIT_TICKS) != actcli.R_OK {
+        return false
+    }
+    return actcli.field((&arg_value[0 as usize]) as u64, out, TEXT_CAP)
+}
+
+fn is_true(p: u64) -> bool {
+    return __mmio_read8(p as *mut u8) == 116 as u8 || __mmio_read8(p as *mut u8) == 49 as u8
+}
+
+fn reload_values() {
+    var flag: [u8; 72] = [0 as u8; 72]
+    let flag_p: u64 = (&flag[0 as usize]) as u64
+    let _e: bool = fetch((&key_enabled[0 as usize]) as u64, flag_p)
+    enabled_on = is_true(flag_p)
+    let _i: bool = fetch((&key_id[0 as usize]) as u64, (&id_text[0 as usize]) as u64)
+    let _p: bool = fetch((&key_password[0 as usize]) as u64, (&password_text[0 as usize]) as u64)
+    let _s: bool = fetch((&key_status[0 as usize]) as u64, (&status_text[0 as usize]) as u64)
+    let _r: bool = fetch((&key_peer[0 as usize]) as u64, (&peer_text[0 as usize]) as u64)
+    let _v: bool = fetch((&key_service[0 as usize]) as u64, (&service_text[0 as usize]) as u64)
+}
+
+fn clear_values() {
+    enabled_on = false
+    __mmio_write8((&id_text[0 as usize]) as u64 as *mut u8, 0 as u8)
+    __mmio_write8((&password_text[0 as usize]) as u64 as *mut u8, 0 as u8)
+    __mmio_write8((&status_text[0 as usize]) as u64 as *mut u8, 0 as u8)
+    __mmio_write8((&peer_text[0 as usize]) as u64 as *mut u8, 0 as u8)
+    __mmio_write8((&service_text[0 as usize]) as u64 as *mut u8, 0 as u8)
+}
+
+fn hash_text(p: u64) -> u64 {
+    var h: u64 = 5381
+    var i: u64 = 0
+    while __mmio_read8((p + i) as *mut u8) != 0 as u8 {
+        h = (h * 33 + (__mmio_read8((p + i) as *mut u8) as u64)) % 1000000007
+        i = i + 1
+    }
+    return h
+}
+
+fn signature() -> u64 {
+    var sig: u64 = 7
+    if enabled_on {
+        sig = 11
+    }
+    sig = sig * 31 + hash_text((&id_text[0 as usize]) as u64)
+    sig = sig * 31 + hash_text((&password_text[0 as usize]) as u64)
+    sig = sig * 31 + hash_text((&status_text[0 as usize]) as u64)
+    sig = sig * 31 + hash_text((&peer_text[0 as usize]) as u64)
+    return sig * 31 + hash_text((&service_text[0 as usize]) as u64)
+}
+
+fn trace() {
+    setcore.say((&s_page[0 as usize]) as u64)
+    if enabled_on {
+        setcore.say((&word_true[0 as usize]) as u64)
+    } else {
+        setcore.say((&word_false[0 as usize]) as u64)
+    }
+    setcore.say((&s_svc[0 as usize]) as u64)
+    setcore.say((&service_text[0 as usize]) as u64)
+    setcore.say((&s_id[0 as usize]) as u64)
+    setcore.say((&id_text[0 as usize]) as u64)
+    setcore.say((&s_peer[0 as usize]) as u64)
+    setcore.say((&peer_text[0 as usize]) as u64)
+    setcore.say((&s_end[0 as usize]) as u64)
+}
+
+fn load() -> bool {
+    let before: u64 = signature()
+    bus_up = actcli.open()
+    if bus_up {
+        reload_values()
+    } else {
+        clear_values()
+        notice_key = (&m_nobus[0 as usize]) as u64
+    }
+    trace()
+    return signature() != before
+}
+
+fn tick(now: u64) -> bool {
+    if now < last_reload + RELOAD_TICKS {
+        return false
+    }
+    last_reload = now
+    return load()
+}
+
+fn dash_if_empty(p: u64) -> u64 {
+    if __mmio_read8(p as *mut u8) == 0 as u8 {
+        return (&m_dash[0 as usize]) as u64
+    }
+    return p
+}
+
+fn service_label() -> u64 {
+    let word: u64 = (&service_text[0 as usize]) as u64
+    if __mmio_read8(word as *mut u8) == 0 as u8 {
+        return (&m_dash[0 as usize]) as u64
+    }
+    let key: u64 = (&svc_key[0 as usize]) as u64
+    let at: u64 = setcore.text_an(key, 0, (&m_svc[0 as usize]) as u64)
+    let _z: u64 = setcore.text_an(key, at, word)
+    return msg.get(key)
+}
+
+fn status_label() -> u64 {
+    let host: u64 = (&status_text[0 as usize]) as u64
+    if ulib.streq((&service_text[0 as usize]) as u64, (&word_running[0 as usize]) as u64) && __mmio_read8(host as *mut u8) != 0 as u8 {
+        return host
+    }
+    return service_label()
+}
+
+fn labeled(label_key: u64, value: u64) -> u64 {
+    let at: u64 = setcore.text_an((&line_text[0 as usize]) as u64, 0, msg.get(label_key))
+    let at2: u64 = setcore.text_an((&line_text[0 as usize]) as u64, at, (&t_sep[0 as usize]) as u64)
+    let _z: u64 = setcore.text_an((&line_text[0 as usize]) as u64, at2, value)
+    return (&line_text[0 as usize]) as u64
+}
+
+fn info_row(parent: usize, label_key: u64, value: u64) {
+    let _n: usize = fuiscene.label(parent, labeled(label_key, value))
+}
+
+fn page(left: usize, right: usize) {
+    let _note: usize = fuiscene.label_wrap(left, msg.get((&m_note[0 as usize]) as u64), 3)
+    let _sw: usize = fuiscene.toggle(left, msg.get((&m_switch[0 as usize]) as u64), setbase.K_XR_SWITCH, enabled_on)
+    info_row(left, (&m_status[0 as usize]) as u64, status_label())
+    if enabled_on {
+        info_row(left, (&m_id[0 as usize]) as u64, dash_if_empty((&id_text[0 as usize]) as u64))
+        info_row(left, (&m_password[0 as usize]) as u64, dash_if_empty((&password_text[0 as usize]) as u64))
+        info_row(left, (&m_peer[0 as usize]) as u64, dash_if_empty((&peer_text[0 as usize]) as u64))
+    }
+    if pending_no != PENDING_NONE {
+        let _cf: usize = fuiscene.button(left, msg.get((&m_confirm[0 as usize]) as u64), setbase.K_XR_CONFIRM)
+    }
+    if notice_key != 0 {
+        let _nt: usize = fuiscene.label_muted(left, msg.get(notice_key))
+    }
+    let _st: usize = fuiscene.label_muted(left, msg.get((&m_stop[0 as usize]) as u64))
+}
+
+fn rects() {
+    setcore.rect_say((&r_switch[0 as usize]) as u64, setbase.K_XR_SWITCH)
+    setcore.rect_say((&r_confirm[0 as usize]) as u64, setbase.K_XR_CONFIRM)
+}
+
+fn answer(rc: u64) {
+    notice_key = 0
+    pending_no = PENDING_NONE
+    if rc == actcli.R_CONFIRM {
+        var ln: [u8; 160] = [0 as u8; 160]
+        let lp: u64 = (&ln[0 as usize]) as u64
+        let _l: bool = actcli.line(0, lp, 160)
+        pending_no = setcore.num_from(lp + 8)
+        notice_key = (&m_ask[0 as usize]) as u64
+    } else if rc == actcli.R_NOBUS {
+        notice_key = (&m_nobus[0 as usize]) as u64
+    } else if rc != actcli.R_OK {
+        var ln: [u8; 160] = [0 as u8; 160]
+        let lp: u64 = (&ln[0 as usize]) as u64
+        let _l: bool = actcli.line(0, lp, 160)
+        if ulib.find(lp, (&s_dialog[0 as usize]) as u64) != 0xFFFFFFFFFFFFFFFF {
+            notice_key = (&m_ask[0 as usize]) as u64
+        } else {
+            notice_key = (&m_denied[0 as usize]) as u64
+        }
+    }
+}
+
+fn toggle() {
+    if !actcli.open() {
+        answer(actcli.R_NOBUS)
+        fuiscene.refresh()
+        return
+    }
+    var wanted: u64 = (&word_false[0 as usize]) as u64
+    if (fuiscene.value_of(setbase.K_XR_SWITCH) as u64) != 0 {
+        wanted = (&word_true[0 as usize]) as u64
+    }
+    actcli.req((&call_set[0 as usize]) as u64)
+    actcli.arg((&arg_key[0 as usize]) as u64, (&key_enabled[0 as usize]) as u64)
+    actcli.arg((&arg_value[0 as usize]) as u64, wanted)
+    answer(actcli.send(REPLY_WAIT_TICKS))
+    let _c: bool = load()
+    fuiscene.refresh()
+}
+
+fn confirm() {
+    if pending_no == PENDING_NONE {
+        return
+    }
+    var cf: [u8; 32] = [0 as u8; 32]
+    let cp: u64 = (&cf[0 as usize]) as u64
+    var s_c: [u8; 9] = "confirm \0"
+    let at: u64 = setcore.text_an(cp, 0, (&s_c[0 as usize]) as u64)
+    let _n: u64 = setcore.num_at(cp, at, pending_no)
+    actcli.req(cp)
+    pending_no = PENDING_NONE
+    answer(actcli.send(REPLY_WAIT_TICKS))
+    let _c: bool = load()
+    fuiscene.refresh()
+}

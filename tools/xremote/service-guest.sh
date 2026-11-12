@@ -10,6 +10,11 @@ kv() { while IFS== read -r k v; do [ "$k" = "$2" ] && { echo "$v"; return; }; do
 nap() { n=$1; while [ $n -gt 50 ]; do $B sleep 50; n=$((n - 50)); done; [ $n -gt 0 ] && $B sleep $n; }
 ex() { [ -e "$1" ] && echo 1 || echo 0; }
 enable() { echo "enabled=1" > $CONF; echo "relay=ws://10.0.2.2:@RELAYPORT@/fv/ws" >> $CONF; }
+act_q() { /bin/act "$@" 2>&1 | $B tr '\n' ' '; }
+bus_set() {
+    echo "SV-BUS-SET $1 $(act_q call settings.set key=remote.enabled value=$1)"
+    echo "SV-BUS-CONFIRM $1 $(act_q confirm last)"
+}
 wait_id() {
     i=0
     while [ $i -lt @HOSTSECS@ ]; do
@@ -35,8 +40,11 @@ echo "SV-A service=$(kv $INFO service) password=$(kv $INFO password) pw=$(ex /ru
 #DBG $B cat /tmp/dbg.log
 #DBG kill $DP
 #DBG echo "SV-DBG-END"
+echo "SV-RIGHTS $(/bin/apprights get xremote 2>&1 | $B tr '\n' ' ')"
+echo "SV-BUS-GET0 enabled=$(act_q call settings.get key=remote.enabled) service=$(act_q call settings.get key=remote.service)"
 echo "SV-PHASE B"
-enable
+echo "relay=ws://10.0.2.2:@RELAYPORT@/fv/ws" > $CONF
+bus_set true
 $B sleep 3
 echo "SV-B0 service=$(kv $INFO service)"
 wait_id
@@ -46,13 +54,18 @@ PWF=$($B cat /run/xremote.pw 2>/dev/null)
 echo "SV-ID $ID"
 echo "SV-PW $PW"
 echo "SV-B service=$(kv $INFO service) pwlen=${#PW} samepw=$([ "$PW" = "$PWF" ] && echo 1 || echo 0) status=$(kv $STATE status)"
+echo "SV-BUS-GET1 id=$(act_q call settings.get key=remote.id)"
+echo "SV-BUS-GET2 password=$(act_q call settings.get key=remote.password)"
+echo "SV-BUS-GET3 status=$(act_q call settings.get key=remote.status)"
+echo "SV-BUS-GET4 enabled=$(act_q call settings.get key=remote.enabled) conf=$($B tr '\n' ' ' < $CONF)"
 echo "SV-WINDOW1"
 nap @WINDOW@
 echo "SV-LOG1-BEGIN"
 $B cat $LOG
 echo "SV-LOG1-END"
 echo "SV-PHASE C"
-echo "enabled=0" > $CONF
+bus_set false
+echo "SV-BUS-GET5 enabled=$(act_q call settings.get key=remote.enabled) conf=$($B tr '\n' ' ' < $CONF)"
 $B sleep 8
 echo "SV-C service=$(kv $INFO service) password=$(kv $INFO password) pw=$(ex /run/xremote.pw) state=$(ex $STATE)"
 echo "SV-DISABLED-DONE"
