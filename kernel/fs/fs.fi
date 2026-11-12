@@ -908,6 +908,27 @@ fn bm_byte(b: u64) -> u64 {
     return (b % BITS_PER_BLOCK) / 8
 }
 
+static mut data_overwrite: u64 = 0
+static mut leaf_alloc: u64 = 0
+
+fn leaf_overwrite_pending() -> bool {
+    return data_overwrite != 0 && leaf_alloc != 0
+}
+
+fn block_alloc_leaf(state: u64) -> u64 {
+    leaf_alloc = 1
+    let b: u64 = block_alloc(state)
+    leaf_alloc = 0
+    return b
+}
+
+fn walk_leaf(state: u64, block: u64, k: u64, grow: bool) -> u64 {
+    leaf_alloc = 1
+    let b: u64 = walk_level(state, block, k, grow)
+    leaf_alloc = 0
+    return b
+}
+
 fn block_alloc(state: u64) -> u64 {
     wbscope.before_alloc(state)
     let last: u64 = total_blocks(state)
@@ -934,7 +955,7 @@ fn search_free(state: u64, von: u64, bis: u64) -> u64 {
     var b: u64 = von
     while b < bis {
         let kb: u64 = bm_block_of(state, b)
-        if !ofsj.read(state, kb, buf_bm(state)) {
+        if !bm_load(state, kb) {
             return 0
         }
         var ende: u64 = (b / BITS_PER_BLOCK + 1) * BITS_PER_BLOCK
@@ -953,12 +974,14 @@ fn search_free(state: u64, von: u64, bis: u64) -> u64 {
         }
         if fund != 0 {
             wbscope.mark_struct(state)
-            if !ofsj.write(state, kb, buf_bm(state)) {
+            if !bm_store(state, kb) {
                 return 0
             }
             kstate.set(state, kstate.FSG_OFF + G_HINT, fund)
-            octets.zero(buf_zz(state), BS)
-            ofsj.write(state, fund, buf_zz(state))
+            if !leaf_overwrite_pending() {
+                octets.zero(buf_zz(state), BS)
+                ofsj.write(state, fund, buf_zz(state))
+            }
             return fund
         }
     }
@@ -989,6 +1012,27 @@ fn free_batch_end(state: u64) {
     fb_on = 0
 }
 
+fn bm_load(state: u64, kb: u64) -> bool {
+    if fb_on == 0 {
+        return ofsj.read(state, kb, buf_bm(state))
+    }
+    if fb_kb == kb {
+        return true
+    }
+    if !free_flush(state) || !ofsj.read(state, kb, buf_bm(state)) {
+        return false
+    }
+    fb_kb = kb
+    return true
+}
+
+fn bm_store(state: u64, kb: u64) -> bool {
+    if fb_on != 0 {
+        return true
+    }
+    return ofsj.write(state, kb, buf_bm(state))
+}
+
 fn block_free(state: u64, b: u64) {
     if b < data_start(state) || b >= total_blocks(state) {
         return
@@ -998,21 +1042,12 @@ fn block_free(state: u64, b: u64) {
     }
     wbscope.mark_freed(state)
     let kb: u64 = bm_block_of(state, b)
-    if fb_on != 0 {
-        if fb_kb != kb {
-            if !free_flush(state) || !ofsj.read(state, kb, buf_bm(state)) {
-                return
-            }
-            fb_kb = kb
-        }
-    } else if !ofsj.read(state, kb, buf_bm(state)) {
+    if !bm_load(state, kb) {
         return
     }
     let p: u64 = buf_bm(state) + bm_byte(b)
     kstate.set8(p, (kstate.get8(p) & (255 ^ (1 << (b % 8)))) as u8)
-    if fb_on == 0 {
-        ofsj.write(state, kb, buf_bm(state))
-    }
+    let _stored: bool = bm_store(state, kb)
     if b < kstate.get(state, kstate.FSG_OFF + G_HINT) {
         kstate.set(state, kstate.FSG_OFF + G_HINT, b)
     }
@@ -1082,7 +1117,7 @@ fn file_block(state: u64, ino: u64, index: u64, grow: bool) -> u64 {
         if b != 0 || !grow {
             return b
         }
-        let fresh: u64 = block_alloc(state)
+        let fresh: u64 = block_alloc_leaf(state)
         if fresh == 0 {
             return 0
         }
@@ -1135,7 +1170,7 @@ fn quad_block(state: u64, ino: u64, q: u64, grow: bool) -> u64 {
     if l4 == 0 {
         return 0
     }
-    return walk_level(state, l4, q % PER_BLOCK, grow)
+    return walk_leaf(state, l4, q % PER_BLOCK, grow)
 }
 
 fn ptr_at(state: u64, block: u64, k: u64) -> u64 {
@@ -1194,7 +1229,7 @@ fn single_block(state: u64, ino: u64, k: u64, grow: bool) -> u64 {
     if b != 0 || !grow {
         return b
     }
-    let fresh: u64 = block_alloc(state)
+    let fresh: u64 = block_alloc_leaf(state)
     if fresh == 0 {
         return 0
     }
@@ -1251,7 +1286,7 @@ fn double_block(state: u64, ino: u64, d: u64, grow: bool) -> u64 {
     if b != 0 || !grow {
         return b
     }
-    let fresh: u64 = block_alloc(state)
+    let fresh: u64 = block_alloc_leaf(state)
     if fresh == 0 {
         return 0
     }
@@ -1286,7 +1321,7 @@ fn triple_block(state: u64, ino: u64, t: u64, grow: bool) -> u64 {
     if l3 == 0 {
         return 0
     }
-    return walk_level(state, l3, t % PER_BLOCK, grow)
+    return walk_leaf(state, l3, t % PER_BLOCK, grow)
 }
 
 fn walk_level(state: u64, block: u64, k: u64, grow: bool) -> u64 {
@@ -1718,6 +1753,15 @@ fn write_at(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
 
 fn write_at_scoped(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
     let flags: u64 = enter(state)
+    free_batch_begin()
+    let n: u64 = write_at_blocks(state, ino, off, src, len)
+    free_batch_end(state)
+    leave(state, flags)
+    return n
+}
+
+fn write_at_blocks(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
+    let flags: u64 = enter(state)
     var n: u64 = 0
     // A full disk stops the writing and is REPORTED as the number of
     // octets that really went in -- a file system that answered with the
@@ -1732,13 +1776,22 @@ fn write_at_scoped(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
         }
         // ------------------------------------------- RUNDE FSROBUST
         if ofsj.enabled(state) && ofsj.room(state) < 8 {
+            if !free_flush(state) {
+                leave(state, flags)
+                return n
+            }
             if n > 0 {
                 size_write(state, ino, off + n, true)
                 touch_mtime(state, ino)
             }
             ofsj.chunk(state)
         }
+        data_overwrite = 0
+        if chunk == BS {
+            data_overwrite = 1
+        }
         let b: u64 = file_block(state, ino, pos / BS, true)
+        data_overwrite = 0
         if b == 0 {
             stop = true
         } else {
