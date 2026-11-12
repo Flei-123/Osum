@@ -1,0 +1,242 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.errno
+import lib.kstate
+import sched.sched
+import sched.taskconst
+import sched.taskslot
+import sched.proc.procfault
+import sys.sysfd
+import sys.sysuser
+
+export { handles, call, SYS_IO_SETUP, SYS_IO_DESTROY, SYS_IO_GETEVENTS, SYS_IO_SUBMIT, SYS_IO_CANCEL }
+
+const SYS_IO_SETUP: u64 = 206
+const SYS_IO_DESTROY: u64 = 207
+const SYS_IO_GETEVENTS: u64 = 208
+const SYS_IO_SUBMIT: u64 = 209
+const SYS_IO_CANCEL: u64 = 210
+
+const CTX_MAX: u64 = 8
+const QUEUE_DEPTH: u64 = 256
+const EVENT_WORDS: u64 = 4
+const EVENT_BYTES: u64 = 32
+const NR_EVENTS_LIMIT: u64 = 65536
+const INT_MASK: u64 = 0xFFFFFFFF
+const IOCB_BYTES: u64 = 64
+const IOCB_DATA: u64 = 0
+const IOCB_OPCODE: u64 = 16
+const IOCB_FILDES: u64 = 20
+const IOCB_BUF: u64 = 24
+const IOCB_NBYTES: u64 = 32
+const IOCB_OFFSET: u64 = 40
+const OP_PREAD: u64 = 0
+const OP_PWRITE: u64 = 1
+const OP_FSYNC: u64 = 2
+const OP_FDSYNC: u64 = 3
+const OP_NOOP: u64 = 6
+const OP_PREADV: u64 = 7
+const OP_PWRITEV: u64 = 8
+
+static mut ctx_owner: [u64; 8] = [0 as u64; 8]
+static mut ctx_used: [u64; 8] = [0 as u64; 8]
+static mut ctx_head: [u64; 8] = [0 as u64; 8]
+static mut ctx_count: [u64; 8] = [0 as u64; 8]
+static mut events: [u64; 8192] = [0 as u64; 8192]
+
+fn fail(e: u64) -> u64 {
+    return sysuser.neg(e)
+}
+
+fn handles(number: u64) -> bool {
+    return number >= SYS_IO_SETUP && number <= SYS_IO_CANCEL
+}
+
+fn reclaim(state: u64) {
+    var i: u64 = 0
+    while i < CTX_MAX {
+        if ctx_used[(i) as usize] != 0 && sched.find_pid(state, ctx_owner[(i) as usize]) == kstate.MAX_TASKS {
+            ctx_used[(i) as usize] = 0
+        }
+        i = i + 1
+    }
+}
+
+fn free_slot() -> u64 {
+    var i: u64 = 0
+    while i < CTX_MAX {
+        if ctx_used[(i) as usize] == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return CTX_MAX
+}
+
+fn slot_of(ctx: u64) -> u64 {
+    if ctx == 0 || ctx > CTX_MAX || ctx_used[(ctx - 1) as usize] == 0 {
+        return CTX_MAX
+    }
+    return ctx - 1
+}
+
+fn do_setup(state: u64, me: u64, nr_events: u64, ctxp: u64) -> u64 {
+    let wanted: u64 = nr_events & INT_MASK
+    if wanted == 0 || wanted > NR_EVENTS_LIMIT {
+        return fail(errno.E_INVAL)
+    }
+    if !procfault.user_ok(state, me, ctxp, 8) {
+        return fail(errno.E_FAULT)
+    }
+    if sysuser.get64u(state, me, ctxp) != 0 {
+        return fail(errno.E_INVAL)
+    }
+    var slot: u64 = free_slot()
+    if slot == CTX_MAX {
+        reclaim(state)
+        slot = free_slot()
+    }
+    if slot == CTX_MAX {
+        return fail(errno.E_AGAIN)
+    }
+    if !sysuser.put64(state, me, ctxp, slot + 1) {
+        return fail(errno.E_FAULT)
+    }
+    ctx_used[(slot) as usize] = 1
+    ctx_owner[(slot) as usize] = taskslot.tget(state, me, taskconst.T_PID)
+    ctx_head[(slot) as usize] = 0
+    ctx_count[(slot) as usize] = 0
+    return 0
+}
+
+fn do_destroy(ctx: u64) -> u64 {
+    let slot: u64 = slot_of(ctx)
+    if slot == CTX_MAX {
+        return fail(errno.E_INVAL)
+    }
+    ctx_used[(slot) as usize] = 0
+    return 0
+}
+
+fn push_event(slot: u64, data: u64, obj: u64, result: u64) {
+    let tail: u64 = (ctx_head[(slot) as usize] + ctx_count[(slot) as usize]) % QUEUE_DEPTH
+    let at: u64 = (slot * QUEUE_DEPTH + tail) * EVENT_WORDS
+    events[(at) as usize] = data
+    events[(at + 1) as usize] = obj
+    events[(at + 2) as usize] = result
+    events[(at + 3) as usize] = 0
+    ctx_count[(slot) as usize] = ctx_count[(slot) as usize] + 1
+}
+
+fn run_iocb(state: u64, me: u64, iocb: u64) -> u64 {
+    let opcode: u64 = sysuser.get16(state, me, iocb + IOCB_OPCODE)
+    let fd: u64 = sysuser.get32(state, me, iocb + IOCB_FILDES)
+    let buf: u64 = sysuser.get64u(state, me, iocb + IOCB_BUF)
+    let nbytes: u64 = sysuser.get64u(state, me, iocb + IOCB_NBYTES)
+    let offset: u64 = sysuser.get64u(state, me, iocb + IOCB_OFFSET)
+    if opcode == OP_PREAD {
+        return sysfd.do_pio(state, me, fd, buf, nbytes, offset, false)
+    }
+    if opcode == OP_PWRITE {
+        return sysfd.do_pio(state, me, fd, buf, nbytes, offset, true)
+    }
+    if opcode == OP_PREADV {
+        return sysfd.do_pvec(state, me, fd, buf, nbytes, offset, false)
+    }
+    if opcode == OP_PWRITEV {
+        return sysfd.do_pvec(state, me, fd, buf, nbytes, offset, true)
+    }
+    if opcode == OP_FSYNC || opcode == OP_FDSYNC {
+        return sysfd.do_fsync(state, me, fd)
+    }
+    if opcode == OP_NOOP {
+        return 0
+    }
+    return fail(errno.E_INVAL)
+}
+
+fn do_submit(state: u64, me: u64, ctx: u64, nr_arg: u64, iocbpp: u64) -> u64 {
+    let slot: u64 = slot_of(ctx)
+    if slot == CTX_MAX {
+        return fail(errno.E_INVAL)
+    }
+    let nr: u64 = nr_arg
+    if (nr >> 63) != 0 {
+        return fail(errno.E_INVAL)
+    }
+    var done: u64 = 0
+    while done < nr {
+        if ctx_count[(slot) as usize] >= QUEUE_DEPTH {
+            break
+        }
+        if !procfault.user_ok(state, me, iocbpp + done * 8, 8) {
+            return submit_stop(done, errno.E_FAULT)
+        }
+        let iocb: u64 = sysuser.get64u(state, me, iocbpp + done * 8)
+        if !procfault.user_ok(state, me, iocb, IOCB_BYTES) {
+            return submit_stop(done, errno.E_FAULT)
+        }
+        let result: u64 = run_iocb(state, me, iocb)
+        push_event(slot, sysuser.get64u(state, me, iocb + IOCB_DATA), iocb, result)
+        done = done + 1
+    }
+    if done == 0 && nr != 0 {
+        return fail(errno.E_AGAIN)
+    }
+    return done
+}
+
+fn submit_stop(done: u64, e: u64) -> u64 {
+    if done != 0 {
+        return done
+    }
+    return fail(e)
+}
+
+fn pop_events(state: u64, me: u64, slot: u64, max: u64, out: u64) -> u64 {
+    var got: u64 = 0
+    while got < max && ctx_count[(slot) as usize] != 0 {
+        let at: u64 = (slot * QUEUE_DEPTH + ctx_head[(slot) as usize]) * EVENT_WORDS
+        var w: u64 = 0
+        while w < EVENT_WORDS {
+            if !sysuser.put64(state, me, out + got * EVENT_BYTES + w * 8, events[(at + w) as usize]) {
+                return got
+            }
+            w = w + 1
+        }
+        ctx_head[(slot) as usize] = (ctx_head[(slot) as usize] + 1) % QUEUE_DEPTH
+        ctx_count[(slot) as usize] = ctx_count[(slot) as usize] - 1
+        got = got + 1
+    }
+    return got
+}
+
+fn do_getevents(state: u64, me: u64, ctx: u64, min_nr: u64, nr: u64, out: u64) -> u64 {
+    let slot: u64 = slot_of(ctx)
+    if slot == CTX_MAX {
+        return fail(errno.E_INVAL)
+    }
+    if (nr >> 63) != 0 || (min_nr >> 63) != 0 || min_nr > nr {
+        return fail(errno.E_INVAL)
+    }
+    if nr != 0 && !procfault.user_ok(state, me, out, nr * EVENT_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    return pop_events(state, me, slot, nr, out)
+}
+
+fn call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
+    if number == SYS_IO_SETUP {
+        return do_setup(state, me, a0, a1)
+    }
+    if number == SYS_IO_DESTROY {
+        return do_destroy(a0)
+    }
+    if number == SYS_IO_SUBMIT {
+        return do_submit(state, me, a0, a1, a2)
+    }
+    if number == SYS_IO_GETEVENTS {
+        return do_getevents(state, me, a0, a1, a2, a3)
+    }
+    return fail(errno.E_INVAL)
+}

@@ -42,7 +42,7 @@ import sys.sysfifo
 import sys.sysfdalias
 
 export {
-    cx_bit, cx_close_marked, cx_copy, cx_pair, cx_put, cx_result, dir_allowed, do_close, do_dup, do_dup2, do_dup_min, do_fsync, do_ftruncate, do_lseek, do_open_mode, do_pio, do_pipe, do_pipe_flags, do_pvec, do_read, do_recvfrom, do_sendto, do_writev, ev_kind, file_io_loop, fsync_of, nl_name_out, nl_recv_of, nl_run, nl_wait, open_named, page_up, read_of, readable, sa_in, sa_out, sa_un, net_wait, sock_deadline, sock_gave_up, sock_of, vfs_on_create, wl_recv, wl_send, writable, write_of
+    cx_bit, cx_close_marked, cx_copy, cx_pair, cx_put, cx_result, dir_allowed, do_close, do_dup, do_dup2, do_dup_min, do_fsync, do_ftruncate, do_lseek, do_open_mode, do_pio, do_pipe, do_pipe_flags, do_pvec, do_read, do_recvfrom, do_sendto, do_writev, ev_kind, file_io_loop, fsync_of, nl_name_out, nl_recv_of, nl_run, nl_wait, open_named, page_up, read_of, readable, sa_in, sa_out, sa_un, net_wait, sock_deadline, sock_wait_error, sock_of, vfs_on_create, wl_recv, wl_send, writable, write_of
 }
 
 const SA_BYTES: u64 = 16
@@ -86,6 +86,9 @@ fn do_write(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
     if !validated_by_copy && !procfault.user_ok(state, me, buf, len) {
         return sysuser.neg(errno.E_FAULT)
     }
+    if len > sysconst.MAX_IO && stream_like(kind) {
+        return write_stream_steps(state, me, of, buf, len)
+    }
     if len <= sysconst.MAX_IO || !file_like(kind) {
         if len > sysconst.MAX_IO {
             len = sysconst.MAX_IO
@@ -98,6 +101,32 @@ fn do_write(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
         return sysuser.neg(errno.E_IO)
     }
     return done
+}
+
+fn stream_like(kind: u64) -> bool {
+    return kind == file.K_PIPEW || kind == file.K_PIPER || kind == file.K_SOCK || kind == file.K_USOCK || kind == file.K_CONOUT || kind == file.K_TTY
+}
+
+fn write_stream_steps(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    var put: u64 = 0
+    while put < len {
+        var step: u64 = len - put
+        if step > sysconst.MAX_IO {
+            step = sysconst.MAX_IO
+        }
+        let r: u64 = write_of(state, me, of, buf + put, step)
+        if r >= 0xFFFFFFFFFFFFF000 {
+            if put == 0 {
+                return r
+            }
+            return put
+        }
+        if r == 0 {
+            return put
+        }
+        put = put + r
+    }
+    return put
 }
 
 fn write_steps(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
@@ -1643,7 +1672,7 @@ fn do_sendto(state: u64, me: u64, fd: u64, buf: u64, want: u64,
     if !sysuser.copy_in(state, me, bounce, buf, len) {
         return sysuser.neg(errno.E_FAULT)
     }
-    return sock_io(state, si, bounce, len, a, port, true, flags)
+    return sock_io(state, me, si, bounce, len, a, port, true, flags)
 }
 
 fn do_recvfrom(state: u64, me: u64, fd: u64, buf: u64, want: u64,
@@ -1693,7 +1722,6 @@ fn do_recvfrom(state: u64, me: u64, fd: u64, buf: u64, want: u64,
     let bounce: u64 = inet.bounce(state)
     var a: u64 = 0
     var port: u64 = 0
-    var waited: u64 = 0
     let nb: bool = inet.sock_nonblock(state, si) || (flags & sysconst.MSG_DONTWAIT) != 0
     let rdl: u64 = sock_deadline(state, si, false)
     var n: u64 = 0
@@ -1705,10 +1733,14 @@ fn do_recvfrom(state: u64, me: u64, fd: u64, buf: u64, want: u64,
             going = false
         } else if n != sysuser.neg(errno.E_AGAIN) {
             return n
-        } else if nb || sock_gave_up(state, rdl, waited) {
+        } else if nb {
             return sysuser.neg(errno.E_AGAIN)
         } else {
-            waited = waited + net_wait(state, seen)
+            let stop: u64 = sock_wait_error(state, me, rdl)
+            if stop != 0 {
+                return stop
+            }
+            let _slept: u64 = net_wait(state, seen)
         }
     }
     if n > 0 {
@@ -1729,12 +1761,12 @@ fn do_recvfrom(state: u64, me: u64, fd: u64, buf: u64, want: u64,
 // whose send window is full is not an error; it is a reason to come back
 // in a moment -- and a `write` that returns a SHORT count is what the
 // interface has always allowed.
-fn sock_io(state: u64, si: u64, bounce: u64, len: u64, a: u64, port: u64,
+fn sock_io(state: u64, me: u64, si: u64, bounce: u64, len: u64, a: u64, port: u64,
     to: bool, flags: u64) -> u64 {
     var waited: u64 = 0
     let nb: bool = inet.sock_nonblock(state, si) || (flags & sysconst.MSG_DONTWAIT) != 0
     let sdl: u64 = sock_deadline(state, si, true)
-    while !sock_gave_up(state, sdl, waited) {
+    while true {
         let seen: u64 = sched.poll_seq(state)
         if to && sdl == 0 && waited >= SENDTO_ROUNDS {
             return sysuser.neg(errno.E_HOSTUNREACH)
@@ -1753,6 +1785,10 @@ fn sock_io(state: u64, si: u64, bounce: u64, len: u64, a: u64, port: u64,
         }
         if nb {
             return sysuser.neg(errno.E_AGAIN)
+        }
+        let stop: u64 = sock_wait_error(state, me, sdl)
+        if stop != 0 {
+            return stop
         }
         waited = waited + net_wait(state, seen)
     }
@@ -1803,13 +1839,15 @@ fn net_wait(state: u64, seen: u64) -> u64 {
     return kstate.get(state, kstate.TICKS) - t0
 }
 
-// True when a waiting loop has to stop: the user timeout passed, or --
-// without one -- the old NET_ROUNDS bound.
-fn sock_gave_up(state: u64, deadline: u64, waited: u64) -> bool {
-    if deadline != 0 {
-        return kstate.get(state, kstate.TICKS) >= deadline
+// Nonzero errno when a socket wait has to stop: the user timeout passed or a signal arrived; without a timeout the wait has no bound.
+fn sock_wait_error(state: u64, me: u64, deadline: u64) -> u64 {
+    if deadline != 0 && kstate.get(state, kstate.TICKS) >= deadline {
+        return sysuser.neg(errno.E_AGAIN)
     }
-    return waited >= sysconst.NET_ROUNDS
+    if signal.interrupted(state, me) {
+        return sysuser.neg(errno.E_INTR)
+    }
+    return 0
 }
 const F_SEAL_SHRINK: u64 = 2
 const F_SEAL_GROW: u64 = 4
@@ -2128,7 +2166,6 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool,
         if unixsock.peer_gone(state, si) {
             return sysuser.neg(errno.E_PIPE)
         }
-        var waitw: u64 = 0
         var free: u64 = unixsock.room(state, unixsock.sock_peer(state, si))
         if dg {
             // a datagram goes in whole: wait until the frame (4 length bytes + payload) fits, never cut it
@@ -2141,10 +2178,12 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool,
             if nonblock {
                 return sysuser.neg(errno.E_AGAIN)
             }
-            if waitw >= sysconst.NET_ROUNDS || unixsock.peer_gone(state, si) {
-                return sysuser.neg(errno.E_AGAIN)
+            if unixsock.peer_gone(state, si) {
+                return sysuser.neg(errno.E_PIPE)
             }
-            waitw = waitw + 1
+            if signal.interrupted(state, me) {
+                return sysuser.neg(errno.E_INTR)
+            }
             sched.poll_sleep(state, sched.poll_seq(state), kstate.get(state, kstate.TICKS) + 1)
             free = unixsock.room(state, unixsock.sock_peer(state, si))
             if dg {
@@ -2164,7 +2203,6 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool,
         sched.poll_kick(state)
         return w
     }
-    let read_deadline: u64 = kstate.get(state, kstate.TICKS) + sysconst.NET_ROUNDS
     while true {
         let seen: u64 = sched.poll_seq(state)
         if unixsock.waiting(state, si) != 0 {
@@ -2173,11 +2211,13 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool,
         if unixsock.peer_gone(state, si) {
             return 0
         }
-        let now: u64 = kstate.get(state, kstate.TICKS)
-        if nonblock || now >= read_deadline {
+        if nonblock {
             return sysuser.neg(errno.E_AGAIN)
         }
-        sched.poll_sleep(state, seen, now + 1)
+        if signal.interrupted(state, me) {
+            return sysuser.neg(errno.E_INTR)
+        }
+        sched.poll_sleep(state, seen, kstate.get(state, kstate.TICKS) + 1)
     }
     let r: u64 = wl_recv(state, me, si, buf, n, dg)
     if r == sysuser.neg(errno.E_FAULT) {
