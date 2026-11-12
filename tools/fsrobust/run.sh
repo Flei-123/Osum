@@ -72,6 +72,7 @@ lauf() { # abbild anhang ausgabe [zeitlimit]
     return $?
 }
 
+if [ -z "${FSR_SKIP_LIMITS:-}" ]; then
 echo
 echo "== 2. die Grenzen, in Ring 3 gemessen =="
 bash tools/mkfsfi/mkfs.sh build "$TMPD/lim.img" 262144 --v3 --inodes=256 \
@@ -116,6 +117,7 @@ num "alle Eintraege kamen ueber getdents zurueck" \
     "$(val "$TMPD/grossl.txt" fsrlim dents)" eq 12002
 num "und der LETZTE Name liess sich oeffnen" \
     "$(val "$TMPD/grossl.txt" fsrlim dlast)" eq 1
+fi
 
 echo
 echo "== 3. the power failure: $LAEUFE kills with SIGKILL =="

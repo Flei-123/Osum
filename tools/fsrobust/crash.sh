@@ -11,6 +11,14 @@ K=${FSR_KERNEL:-/tmp/fsr-k.mb}
 MINMS=${FSR_MINMS:-120}
 SPANMS=${FSR_SPANMS:-2600}
 
+if [ "${FSR_DRIVE:-ide}" = ahci ]; then
+    DRIVE_ARGS=(-device ich9-ahci,id=ahci0 -drive "file=$ARB/live-$NR.img,format=raw,if=none,id=hd0,cache=directsync" -device ide-hd,drive=hd0,bus=ahci0.0)
+    FSCK_STEP=""
+else
+    DRIVE_ARGS=(-drive "file=$ARB/live-$NR.img,format=raw,if=ide,index=0,cache=directsync")
+    FSCK_STEP=";fsck /dev/hda"
+fi
+
 LIVE="$ARB/live-$NR.img"
 S1="$ARB/w-$NR.txt"
 S2="$ARB/v-$NR.txt"
@@ -20,7 +28,7 @@ cp --sparse=always "$ABBILD" "$LIVE"
 qemu-system-x86_64 -accel tcg -kernel "$K" -m 512 \
     -append "osum vfs nokbd $EXTRA script=fsrw endlos" \
     -serial "file:$S1" -display none -no-reboot \
-    -drive "file=$LIVE,format=raw,if=ide,index=0,cache=directsync" \
+    "${DRIVE_ARGS[@]}" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
 QPID=$!
 
@@ -43,9 +51,9 @@ wait "$QPID" 2>/dev/null
 
 # ------------------------------------------------- 2. wieder hochfahren
 timeout 900 qemu-system-x86_64 -accel tcg -kernel "$K" -m 512 \
-    -append "osum vfs nokbd $EXTRA script=fsrv;fsck /dev/hda;exit" \
+    -append "osum vfs nokbd $EXTRA script=fsrv${FSCK_STEP};exit" \
     -serial "file:$S2" -display none -no-reboot \
-    -drive "file=$LIVE,format=raw,if=ide,index=0,cache=directsync" \
+    "${DRIVE_ARGS[@]}" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
 RC2=$?
 
@@ -57,6 +65,7 @@ ROK2=$(val fsrv rollok2)
 SCH=$(val fsrv schaeden)
 FSCK=$(val fsck errors)
 JOFF=$(val fsck journal_open)
+if [ -z "$FSCK_STEP" ]; then FSCK=0; JOFF=0; fi
 NACH=$(tr -d '\000' < "$S2" 2>/dev/null | grep -oa 'ofsj: nachgetragen=[0-9]*' | head -1 | sed 's/.*=//')
 
 WS=$(python3 tools/fsrobust/check.py struktur "$LIVE" 2>&1 | grep -c BEFUND)

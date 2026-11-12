@@ -41,7 +41,7 @@ scenario() {
     local pid=$!
     if [ "$kill_after" != none ]; then
         for _ in $(seq 1 1200); do
-            tr -d '\r' < "$serial" 2>/dev/null | grep -qa '^MARK' && break
+            [ -f "$serial" ] && tr -d '\r' < "$serial" | grep -qa '^MARK' && break
             kill -0 "$pid" 2>/dev/null || break
             sleep 0.05
         done

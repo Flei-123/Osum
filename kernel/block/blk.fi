@@ -1858,9 +1858,9 @@ fn write_raw_store(state: u64, wdv: u64, abs: u64, src: u64) -> bool {
     return true
 }
 
-// r728: write n consecutive sectors (volume-relative lba). Plain ATA gets
-// multi-sector commands (the read-ahead cache is dropped for the range);
-// every other path (encryption, AHCI, NVMe, USB, RAM) stays sector by
+// r728: write n consecutive sectors (volume-relative lba). Plain ATA and AHCI
+// get multi-sector commands (the read-ahead cache is dropped for the range);
+// every other path (encryption, NVMe, USB, RAM) stays sector by
 // sector through `write`, so their behaviour does not change at all.
 fn write_run(state: u64, lba: u64, src: u64, n: u64) -> bool {
     let g: u64 = blkguard.enter(state)
@@ -1872,13 +1872,20 @@ fn write_run(state: u64, lba: u64, src: u64, n: u64) -> bool {
     return ok
 }
 
+fn run_dev(state: u64, dv: u64) -> bool {
+    if dv == DEV_ATA || dv == DEV_ATA1 {
+        return true
+    }
+    return dv == DEV_AHCI && !kstate.mode_on(state, kstate.M_NOWBDEV)
+}
+
 fn write_run_held(state: u64, lba: u64, src: u64, n: u64) -> bool {
     dma_up(state)
     if n == 0 {
         return true
     }
     let dv: u64 = kstate.get(state, kstate.DISK_DEV)
-    if cryptstate.active(state) || (dv != DEV_ATA && dv != DEV_ATA1) {
+    if cryptstate.active(state) || !run_dev(state, dv) {
         var k: u64 = 0
         while k < n {
             if !write(state, lba + k, src + k * BLOCK_SIZE) {
@@ -1898,7 +1905,7 @@ fn write_run_held(state: u64, lba: u64, src: u64, n: u64) -> bool {
         if c > 128 {
             c = 128
         }
-        let wrote: bool = ata_write_run_twice(abs + done, src + done * BLOCK_SIZE, c, dv == DEV_ATA1)
+        let wrote: bool = wb_dev_run(state, dv, abs + done, src + done * BLOCK_SIZE, c)
         if wrote {
             blkstat.note_write(dv, c)
         }

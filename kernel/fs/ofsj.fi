@@ -7,6 +7,7 @@ import mm.mmframe
 import libc.regio
 import libc.octets
 import diag.cmdopt
+import arch.arch
 
 export {
     setup, disable, enabled, begin, commit, abort, write, read, read_stream, read_stream_span,
@@ -64,6 +65,15 @@ static mut g_since: [u64; 1] = [0 as u64; 1]
 static mut g_mode: [u64; 1] = [0 as u64; 1]
 static mut g_stats: [u64; 2] = [0 as u64; 2]
 
+const MAP_ENTRIES: u64 = 1024
+const MAP_MASK: u64 = 1023
+const MAP_SHIFT: u64 = 54
+const MAP_MUL: u64 = 0x9E3779B97F4A7C15
+const SLOT_SHIFT: u64 = 48
+const LBA_MASK: u64 = 0xFFFFFFFFFFFF
+
+static mut g_map: [u64; 1024] = [0 as u64; 1024]
+
 const TGT_OFF: u64 = 0x1000
 const HSH_OFF: u64 = 0x2000
 
@@ -104,11 +114,7 @@ fn stg(state: u64, i: u64) -> u64 {
 }
 
 fn copy_block(from: u64, to: u64) {
-    var i: u64 = 0
-    while i < BS / 8 {
-        regio.write64(to + i * 8, regio.read64(from + i * 8))
-        i = i + 1
-    }
+    arch.copy_words(to, from, BS / 8)
 }
 
 fn stage_init(state: u64) {
@@ -179,14 +185,6 @@ fn scratch(state: u64) -> u64 {
 
 fn scratch2(state: u64) -> u64 {
     return state + kstate.JR_OFF + 0xA00
-}
-
-fn copy(from: u64, to: u64, n: u64) {
-    var i: u64 = 0
-    while i < n {
-        kstate.set8(to + i, kstate.get8(from + i) as u8)
-        i = i + 1
-    }
 }
 
 fn needed() -> u64 {
@@ -289,16 +287,50 @@ fn begin(state: u64) {
 
 const KEIN: u64 = 0xFFFFFFFFFFFFFFFF
 
+fn map_start(lba: u64) -> u64 {
+    return ((lba *% MAP_MUL) >> MAP_SHIFT) & MAP_MASK
+}
+
+fn map_live_slot(state: u64, e: u64) -> u64 {
+    if e == 0 {
+        return KEIN
+    }
+    let slot: u64 = (e >> SLOT_SHIFT) - 1
+    if slot >= g(state, J_COUNT) || tgt(state, slot) != (e & LBA_MASK) {
+        return KEIN
+    }
+    return slot
+}
+
 fn find(state: u64, lba: u64) -> u64 {
-    let n: u64 = g(state, J_COUNT)
-    var i: u64 = 0
-    while i < n {
-        if tgt(state, i) == lba {
-            return i
+    var p: u64 = map_start(lba)
+    var probes: u64 = 0
+    while probes < MAP_ENTRIES {
+        let e: u64 = g_map[p as usize]
+        let slot: u64 = map_live_slot(state, e)
+        if slot == KEIN {
+            return KEIN
         }
-        i = i + 1
+        if (e & LBA_MASK) == lba {
+            return slot
+        }
+        p = (p + 1) & MAP_MASK
+        probes = probes + 1
     }
     return KEIN
+}
+
+fn map_insert(state: u64, lba: u64, slot: u64) {
+    var p: u64 = map_start(lba)
+    var probes: u64 = 0
+    while probes < MAP_ENTRIES {
+        if map_live_slot(state, g_map[p as usize]) == KEIN {
+            g_map[p as usize] = ((slot + 1) << SLOT_SHIFT) | lba
+            return
+        }
+        p = (p + 1) & MAP_MASK
+        probes = probes + 1
+    }
 }
 
 fn write(state: u64, lba: u64, src: u64) -> bool {
@@ -316,12 +348,15 @@ fn write(state: u64, lba: u64, src: u64) -> bool {
         i = n
         tgt_set(state, i, lba)
         s(state, J_COUNT, n + 1)
+        map_insert(state, lba, i)
     } else {
         s(state, J_HITS, g(state, J_HITS) + 1)
     }
     if g(state, J_STG) != 0 && i < stg_cap(state) {
         copy_block(src, stg(state, i))
-    } else if !blk.write(state, pay_blk(state, i), src) {
+        return true
+    }
+    if !blk.write(state, pay_blk(state, i), src) {
         s(state, J_FULL, 1)
         return false
     }
@@ -498,6 +533,11 @@ fn persist_run(state: u64) -> bool {
     sum = mix(sum, seq)
     sum = mix(sum, n)
     var i: u64 = 0
+    while i < m {
+        hsh_set(state, i, block_hash(stg(state, i)))
+        i = i + 1
+    }
+    i = 0
     while i < n {
         sum = mix(sum, tgt(state, i))
         sum = mix(sum, hsh(state, i))
