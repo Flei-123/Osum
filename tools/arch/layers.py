@@ -56,7 +56,7 @@ TABLE = {
         firun basename lspci pcicfg regdump prphread wlanctl"""),
     'toolkit': _s("""appdir fuib fuiglyph fuiapp fuiscene fuied winopts winfloat backdrop template"""),
     'services': _s("""orientbus odbd settingsd stored social sshd wayd powerd hotkeyd wmplug dhcp sntp svc rpc rpcc
-        rpcd init ota opk presence proxy dnswt fsrv fsrw fsrlim fremdfs stickwr standby power
+        rpcd init ota opk presence proxy dnswt fsrv fsrw fsrbig fsrlim fremdfs stickwr standby power
         melder autorun diskctl drvctl dispctl ebpfctl axd bsect modeapply"""),
     'shell': _s("""desktop taskbar launcher glogin login signin lock lockclaim idlelock floatlock welcome barpop traypop
         calpop calev taskview notifc qs qsmodes runbox wmd freunde tiling backlum cliphist mbg modul elevate msgbox"""),
