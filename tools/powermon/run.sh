@@ -246,9 +246,9 @@ mk_ssdt() { # name arguments...
 # Three batteries that differ in the ONE number this round is about: the
 # present rate of draw. Plus one that is worn out and one on mains.
 mk_ssdt low   --rest 3300 --voll 4400 --design 4400 --rate 1200 --volt 11400 --state 1 --network 0
-mk_ssdt high  --rest 3300 --voll 4400 --design 4400 --rate 7700 --volt 11400 --zustand 1 --netz 0
-mk_ssdt worn  --rest 2200 --voll 3000 --design 6000 --rate 2500 --volt 11400 --zustand 1 --netz 0
-mk_ssdt mains --rest 3300 --voll 4400 --design 4400 --rate 900  --volt 11400 --zustand 2 --netz 1
+mk_ssdt high  --rest 3300 --voll 4400 --design 4400 --rate 7700 --volt 11400 --state 1 --network 0
+mk_ssdt worn  --rest 2200 --voll 3000 --design 6000 --rate 2500 --volt 11400 --state 1 --network 0
+mk_ssdt mains --rest 3300 --voll 4400 --design 4400 --rate 900  --volt 11400 --state 2 --network 1
 mk_ssdt none  --kein-akku
 
 run() { # name commandline [ssdt] [timeout]
@@ -581,7 +581,7 @@ echo "== 11. the window: it is really opened, and it is really drawn =="
 # back; nothing crashed and nothing was right.
 MONO="$ROOT/assets/osum-mono.ttf"
 SANS="$ROOT/assets/osum-sans.ttf"
-GARGS=(build "$TMPD/gui.img" "$BLOCKS" /lib/ "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/ /etc/)
+GARGS=(build "$TMPD/gui.img" "$((BLOCKS*2))" /lib/ "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/ /etc/)
 for p in $PROGS; do GARGS+=("/bin/$p=$TMPD/$p.elf"); done
 bash tools/mkfsfi/mkfs.sh "${GARGS[@]}" > "$TMPD/gui.log" 2>&1 \
     && ok "a disk with the fonts and the programs on it: $(tail -1 "$TMPD/gui.log")" \

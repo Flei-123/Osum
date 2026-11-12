@@ -12,8 +12,8 @@ FN = re.compile(r'^(?:pub\s+)?fn\s+([A-Za-z_0-9]+)')
 
 COLUMNS = [
     ("kernel/user/power.fi",
-     [("zeig_profil", "s_p"), ("zeig_akku", "s_a"), ("zeig_akku", "s_net"),
-      ("zeig_akku", "s_mod"), ("zeig_waerme", "s_t")], 9,
+     [("show_profile", "s_p"), ("show_battery", "s_a"), ("show_battery", "s_net"),
+      ("show_battery", "s_mod"), ("show_heat", "s_t")], 9,
      "/bin/power setzt Profil/Akku/Netz/Modell/Wärme untereinander"),
     ("kernel/user/vpn.fi",
      [("show", "s_peer"), ("show", "s_hs"), ("show", "s_port"),
@@ -21,8 +21,8 @@ COLUMNS = [
      "/bin/vpn setzt Gegenstellen/Handschläge/Port/Notaus/verworfen "
      "untereinander"),
     ("kernel/user/tiling.fi",
-     [("zeig", "s_bl"), ("zeig", "s_kn"), ("zeig", "s_lay"),
-      ("zeig", "s_rec"), ("zeig", "s_bi")], 11,
+     [("show", "s_bl"), ("show", "s_kn"), ("show", "s_lay"),
+      ("show", "s_rec"), ("show", "s_bi")], 11,
      "/bin/tiling setzt Fenster/Knoten/Aufbau/Rechteck/Tasten "
      "untereinander"),
     ("kernel/user/powermon.fi",

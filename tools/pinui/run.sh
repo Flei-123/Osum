@@ -6,7 +6,7 @@
 #
 # Boots the design-audit machine (tools/design/audit.sh), opens Settings, clicks the Users tab (tabe), and types into the real
 # entries (rect names weg = new PIN, wej = current PIN, weh = Set PIN, wei = Remove PIN; name = 'w' + two letters of the key id).
-# Sequence and expected status line (read from the serial `settings: stand ... status=[...]` lines):
+# Sequence and expected status line (read from the serial `settings: state ... status=[...]` lines):
 #   1. no PIN yet, new PIN only          -> PIN set
 #   2. new PIN, WRONG current PIN        -> Current PIN is wrong   (counter-proof: the check really happens)
 #   3. new PIN, right current PIN        -> PIN set
