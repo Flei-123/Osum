@@ -75,7 +75,8 @@ python3 "$OPK" quelle "$TMPD/quelle1" --schluessel "$KEY" > "$TMPD/q1.log" 2>&1
 python3 tools/update/signpak.py "$KEY" "$TMPD/quelle1"/*.opk >> "$TMPD/q1.log" 2>&1
 python3 tools/ota/mkcerts.py "$TMPD/certs" ota.test 10.0.2.2 > "$TMPD/certs.log" 2>&1 && ok "certificates" || bad "certificates"
 PUB="$TMPD/schluessel.pub"
-[ -s "$PUB" ] || PUB=$(ls "$TMPD"/*.pub 2>/dev/null | head -1)
+cp "$TMPD/oeffentlich.key" "$PUB"
+[ -s "$PUB" ] && ok "trusted public key staged" || bad "no public key"
 serve() {
     python3 tools/ota/server.py --wurzel "$TMPD/srv/$1" --port "$2" --cert "$TMPD/certs/srv.pem" --key "$TMPD/certs/srv.key" \
         --log "$TMPD/srv-$1.log" > "$TMPD/srv-$1.out" 2>&1 &
@@ -194,7 +195,7 @@ has "$F" "|neu" "xremote is new on this device before the install"
 AFTER=$TMPD/fresh-after.txt
 awk '/==F-AFTER==/{f=1;next} /==F-END==/{f=0} f' "$F" > "$AFTER"
 has "$AFTER" "xremote -> " "opk list shows xremote after the install"
-has "$AFTER" "net" "apprights grants net (perm=net from the package INFO)"
+has "$AFTER" "apprights: xremote mask=4 net" "apprights grants net (perm=net from the package INFO)"
 has "$AFTER" "symbol" "the package ships its Store icon (symbol)"
 has "$AFTER" "freeviewer-host" "the host binary is under /apps/xremote.osp/bin"
 has "$AFTER" "|aktuell" "the store lists xremote as up to date"
@@ -204,18 +205,21 @@ U=$TMPD/upgrade.klar
 has "$U" "==U-END==" "the upgrade script ran to its end"
 BEFORE=$TMPD/up-before.txt
 awk '/==U-BEFORE==/{f=1;next} /==U-LIST==/{f=0} f' "$U" > "$BEFORE"
-has "$BEFORE" "xremote -> " "0.1.0 installed from the local signed source"
-has "$BEFORE" "net" "apprights has net after the plain opk install"
+has "$BEFORE" "xremote -> " "fallback: plain opk install of the signed 0.1.0 file works"
+has "$BEFORE" "apprights: xremote mask=4 net" "apprights has net after the plain opk install"
 has "$U" "item=xremote|0.1.1|" "the catalog offers 0.1.1"
 has "$U" "|update" "the store marks xremote as update"
 UAFTER=$TMPD/up-after.txt
 awk '/==U-AFTER==/{f=1;next} /==U-END==/{f=0} f' "$U" > "$UAFTER"
 has "$UAFTER" "|aktuell" "after the update the store says up to date"
-has "$UAFTER" "net" "net right survives the upgrade"
+has "$UAFTER" "apprights: xremote mask=4 net" "net right survives the upgrade"
+has "$UAFTER" "item=xremote|0.1.1|" "the store lists the new version 0.1.1 after the update"
+has "$UAFTER" "generation 1" "the update made a new package generation"
 hasnot "$UAFTER" "|update" "no pending update after upgrading"
 
 if [ "$fail" -ne 0 ]; then
     for n in fresh upgrade; do echo "== tail $n"; tail -n 40 "$TMPD/$n.klar" | cut -c1-200; done
 fi
+[ -z "${XRSTORE_SAVE:-}" ] || cp "$TMPD"/*.klar "$XRSTORE_SAVE"/
 echo "XRSTORE: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
