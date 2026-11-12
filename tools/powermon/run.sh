@@ -581,7 +581,7 @@ echo "== 11. the window: it is really opened, and it is really drawn =="
 # back; nothing crashed and nothing was right.
 MONO="$ROOT/assets/osum-mono.ttf"
 SANS="$ROOT/assets/osum-sans.ttf"
-GARGS=(build "$TMPD/gui.img" "$BLOCKS" /lib/ "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/ /etc/)
+GARGS=(build "$TMPD/gui.img" "$((BLOCKS*2))" /lib/ "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/ /etc/)
 for p in $PROGS; do GARGS+=("/bin/$p=$TMPD/$p.elf"); done
 bash tools/mkfsfi/mkfs.sh "${GARGS[@]}" > "$TMPD/gui.log" 2>&1 \
     && ok "a disk with the fonts and the programs on it: $(tail -1 "$TMPD/gui.log")" \
