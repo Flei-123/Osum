@@ -381,8 +381,7 @@ fn pipe_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     let p: u64 = file.open_ino(state, of)
     // r1215: wait on the poll wake sequence instead of "one tick": a writer (pipe_write) and the closing of a pipe end both
     // call sched.poll_kick, so the reader runs right after the data arrives, not at the next 10 ms tick. The sequence is read
-    // BEFORE the look (no lost wake-up, see sched.poll_sleep). Same bound as before: BLOCK_ROUNDS ticks in total.
-    let deadline: u64 = kstate.get(state, kstate.TICKS) + sysconst.BLOCK_ROUNDS
+    // BEFORE the look (no lost wake-up, see sched.poll_sleep).
     while true {
         let seen: u64 = sched.poll_seq(state)
         if file.pipe_bytes(state, p) != 0 {
@@ -395,10 +394,10 @@ fn pipe_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
         if (file.open_flags(state, of) & sysconst.UB_O_NONBLOCK) != 0 {
             return sysuser.neg(errno.E_AGAIN)
         }
-        if kstate.get(state, kstate.TICKS) >= deadline {
-            return sysuser.neg(errno.E_AGAIN)
+        if signal.interrupted(state, me) {
+            return sysuser.neg(errno.E_INTR)
         }
-        sched.poll_sleep(state, seen, deadline)
+        sched.poll_sleep(state, seen, taskconst.POLL_FOREVER)
     }
     var n: u64 = 0
     var going: bool = true
@@ -429,7 +428,7 @@ fn pipe_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
 fn pipe_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     let p: u64 = file.open_ino(state, of)
     var n: u64 = 0
-    var waited: u64 = 0
+    var stop_error: u64 = sysuser.neg(errno.E_AGAIN)
     var going: bool = true
     while going {
         let seen: u64 = sched.poll_seq(state)
@@ -443,10 +442,13 @@ fn pipe_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
                 return sysuser.neg(errno.E_PIPE)
             }
             if file.pipe_room(state, p) == 0 {
-                if waited >= sysconst.BLOCK_ROUNDS || (file.open_flags(state, of) & sysconst.UB_O_NONBLOCK) != 0 {
+                if (file.open_flags(state, of) & sysconst.UB_O_NONBLOCK) != 0 {
+                    going = false
+                } else if signal.interrupted(state, me) {
+                    stop_error = sysuser.neg(errno.E_INTR)
                     going = false
                 } else {
-                    waited = waited + net_wait(state, seen)
+                    let _slept: u64 = net_wait(state, seen)
                 }
             } else {
                 if !file.pipe_put(state, p, sysuser.peek(state, me, buf + n)) {
@@ -462,7 +464,7 @@ fn pipe_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     }
     if n == 0 {
         if len != 0 {
-            return sysuser.neg(errno.E_AGAIN)
+            return stop_error
         }
     }
     return n
