@@ -84,5 +84,21 @@ int main(int argc, char **argv)
     char *const follow_run[] = {"/bin/strace", "-f", "/bin/forker", NULL};
     const char *const follow_need[] = {"[pid", "execve(\"/bin/true\"", "+++ exited with 0 +++", NULL};
     check_case("strace_follow_fork", follow_run, follow_need, verbose);
+    char *const static_run[] = {"/bin/strace", "/bin/true_static", NULL};
+    const char *const static_need[] = {"execve(", "exit_group(0)", "+++ exited with 0 +++", NULL};
+    check_case("strace_static", static_run, static_need, verbose);
+    char *const spie_run[] = {"/bin/strace", "/bin/true_spie", NULL};
+    check_case("strace_static_pie", spie_run, static_need, verbose);
+    char *const filter_run[] = {"/bin/strace", "-f", "-e", "trace=execve", "/bin/forker", NULL};
+    const char *const filter_need[] = {"execve(\"/bin/true\"", "+++ exited with 0 +++", NULL};
+    check_case("strace_filter", filter_run, filter_need, verbose);
+    char *const count_run[] = {"/bin/strace", "-c", "/bin/true", NULL};
+    const char *const count_need[] = {"% time", "total", NULL};
+    check_case("strace_count", count_run, count_need, verbose);
+    char *const direct_static[] = {"/bin/true_static", NULL};
+    char *const direct_spie[] = {"/bin/true_spie", NULL};
+    const char *const none[] = {NULL};
+    check_case("exec_static_direct", direct_static, none, verbose);
+    check_case("exec_static_pie_direct", direct_spie, none, verbose);
     return 0;
 }

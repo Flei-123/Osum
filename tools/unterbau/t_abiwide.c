@@ -120,12 +120,11 @@ struct prctl_probe {
 
 static const struct prctl_probe prctls[] = {
     {"get_pdeathsig", 2, 0}, {"get_dumpable", 3, 0}, {"get_keepcaps", 7, 0}, {"set_keepcaps", 8, 0},
-    {"get_endian", 19, 0}, {"get_seccomp", 21, 0}, {"capbset_read", 23, 0}, {"get_timerslack", 30, 0},
+    {"get_seccomp", 21, 0}, {"capbset_read", 23, 0}, {"get_timerslack", 30, 0},
     {"set_timerslack", 29, 50000}, {"set_child_subreaper", 36, 1}, {"get_child_subreaper", 37, 0},
     {"get_tid_address", 40, 0}, {"get_thp_disable", 42, 0}, {"set_thp_disable", 41, 0},
     {"get_no_new_privs", 39, 0}, {"get_speculation", 52, 0}, {"get_tsc", 25, 0},
-    {"set_ptracer", 0x59616d61, -1}, {"get_securebits", 27, 0}, {"get_fpexc", 11, 0},
-    {"get_unalign", 5, 0}, {"get_timing", 13, 0}, {"mce_kill_get", 34, 0},
+    {"set_ptracer", 0x59616d61, -1}, {"get_securebits", 27, 0}, {"get_timing", 13, 0}, {"mce_kill_get", 34, 0},
     {"get_io_flusher", 58, 0}, {"get_auxv_trailer", 0, 0},
 };
 

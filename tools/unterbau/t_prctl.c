@@ -23,6 +23,11 @@
 #define OPT_SET_THP_DISABLE 41
 #define OPT_GET_THP_DISABLE 42
 #define OPT_SET_PTRACER 0x59616d61
+#define OPT_GET_TIMING 13
+#define OPT_GET_TSC 25
+#define OPT_MCE_KILL_GET 34
+#define OPT_GET_SPECULATION_CTRL 52
+#define OPT_GET_IO_FLUSHER 58
 #define ANY_PTRACER (-1L)
 #define DEFAULT_SLACK 50000L
 #define WAIT_TICKS 300
@@ -286,9 +291,20 @@ static void test_securebits(void)
     CHECK("securebits_not_shared", pr(OPT_GET_SECUREBITS, 0) == 0, "errno=%d", errno);
 }
 
+static void test_constant_getters(void)
+{
+    int tsc = 0;
+    CHECK("get_tsc", pr(OPT_GET_TSC, (long)&tsc) == 0 && tsc == 1, "tsc=%d errno=%d", tsc, errno);
+    CHECK("get_timing", pr(OPT_GET_TIMING, 0) == 0, "errno=%d", errno);
+    CHECK("mce_kill_get", pr(OPT_MCE_KILL_GET, 0) == 2, "errno=%d", errno);
+    CHECK("get_speculation_ctrl", pr(OPT_GET_SPECULATION_CTRL, 0) == 0, "errno=%d", errno);
+    CHECK("get_io_flusher", pr(OPT_GET_IO_FLUSHER, 0) == 0, "errno=%d", errno);
+}
+
 int main(void)
 {
     alarm(60);
+    test_constant_getters();
     test_pdeathsig_state();
     test_pdeathsig_effect();
     test_keepcaps();

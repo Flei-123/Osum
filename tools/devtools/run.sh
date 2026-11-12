@@ -5,6 +5,8 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 HERE=tools/devtools
 UB=tools/unterbau
+. tools/lib/firnenv.sh
+firnenv_need_firnc1
 . tools/lib/tmpdir.sh
 D=${DT_OUT:-$(mktemp -d)}
 mkdir -p "$D"
