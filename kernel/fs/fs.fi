@@ -931,7 +931,7 @@ fn search_free(state: u64, von: u64, bis: u64) -> u64 {
     var b: u64 = von
     while b < bis {
         let kb: u64 = bm_block_of(state, b)
-        if !ofsj.read(state, kb, buf_bm(state)) {
+        if !bm_load(state, kb) {
             return 0
         }
         var ende: u64 = (b / BITS_PER_BLOCK + 1) * BITS_PER_BLOCK
@@ -950,7 +950,7 @@ fn search_free(state: u64, von: u64, bis: u64) -> u64 {
         }
         if fund != 0 {
             blk.wb_struct(state)
-            if !ofsj.write(state, kb, buf_bm(state)) {
+            if !bm_store(state, kb) {
                 return 0
             }
             kstate.set(state, kstate.FSG_OFF + G_HINT, fund)
@@ -986,6 +986,27 @@ fn free_batch_end(state: u64) {
     fb_on = 0
 }
 
+fn bm_load(state: u64, kb: u64) -> bool {
+    if fb_on == 0 {
+        return ofsj.read(state, kb, buf_bm(state))
+    }
+    if fb_kb == kb {
+        return true
+    }
+    if !free_flush(state) || !ofsj.read(state, kb, buf_bm(state)) {
+        return false
+    }
+    fb_kb = kb
+    return true
+}
+
+fn bm_store(state: u64, kb: u64) -> bool {
+    if fb_on != 0 {
+        return true
+    }
+    return ofsj.write(state, kb, buf_bm(state))
+}
+
 fn block_free(state: u64, b: u64) {
     if b < data_start(state) || b >= total_blocks(state) {
         return
@@ -994,21 +1015,12 @@ fn block_free(state: u64, b: u64) {
         return
     }
     let kb: u64 = bm_block_of(state, b)
-    if fb_on != 0 {
-        if fb_kb != kb {
-            if !free_flush(state) || !ofsj.read(state, kb, buf_bm(state)) {
-                return
-            }
-            fb_kb = kb
-        }
-    } else if !ofsj.read(state, kb, buf_bm(state)) {
+    if !bm_load(state, kb) {
         return
     }
     let p: u64 = buf_bm(state) + bm_byte(b)
     kstate.set8(p, (kstate.get8(p) & (255 ^ (1 << (b % 8)))) as u8)
-    if fb_on == 0 {
-        ofsj.write(state, kb, buf_bm(state))
-    }
+    let _stored: bool = bm_store(state, kb)
     if b < kstate.get(state, kstate.FSG_OFF + G_HINT) {
         kstate.set(state, kstate.FSG_OFF + G_HINT, b)
     }
@@ -1713,6 +1725,15 @@ fn write_at(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
 }
 
 fn write_at_scoped(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
+    let flags: u64 = enter(state)
+    free_batch_begin()
+    let n: u64 = write_at_blocks(state, ino, off, src, len)
+    free_batch_end(state)
+    leave(state, flags)
+    return n
+}
+
+fn write_at_blocks(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
     let flags: u64 = enter(state)
     var n: u64 = 0
     // A full disk stops the writing and is REPORTED as the number of
