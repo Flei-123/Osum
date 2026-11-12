@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <sys/syscall.h>
+#include <time.h>
 
 #define SYS_OSUM_SHOT 1841
 #define SYS_OSUM_TIPP 1843
@@ -203,6 +204,40 @@ static int cmd_grab(void)
     return 0;
 }
 
+static long now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000000L + ts.tv_nsec / 1000;
+}
+
+static int cmd_grabbench(int count)
+{
+    long w = shot(0, 1, 0), h = shot(0, 2, 0), rb = shot(0, 3, 0), rows = shot(0, 5, 0);
+    if (w <= 0 || h <= 0 || rb <= 0 || rows <= 0)
+        return 1;
+    unsigned char *chunk = malloc((size_t)rows * rb);
+    long worst = 0, total = 0;
+    for (int i = 0; i < count; i++) {
+        long t0 = now_us();
+        if (shot(1, 0, 0) < 0)
+            return 2;
+        long y = 0;
+        while (y < h) {
+            long got = shot(2, (long)chunk, rows * rb);
+            if (got <= 0)
+                return 3;
+            y += got / rb;
+        }
+        long dt = now_us() - t0;
+        total += dt;
+        if (dt > worst)
+            worst = dt;
+    }
+    printf("XR-GRABBENCH width=%ld height=%ld count=%d mean_us=%ld worst_us=%ld\n", w, h, count, total / count, worst);
+    return 0;
+}
+
 static int cmd_headlit(void)
 {
     long w = shot(0, 1, 0), h = shot(0, 2, 0), rb = shot(0, 3, 0), rows = shot(0, 5, 0), n = shot(0, 15, 0);
@@ -270,6 +305,8 @@ int main(int argc, char **argv)
         return cmd_exec(atoi(argv[2]));
     if (!strcmp(argv[1], "headlit"))
         return cmd_headlit();
+    if (!strcmp(argv[1], "grabbench") && argc > 2)
+        return cmd_grabbench(atoi(argv[2]));
     if (!strcmp(argv[1], "grab"))
         return cmd_grab();
     return 64;
