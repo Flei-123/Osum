@@ -101,11 +101,11 @@ python3 -c 'import cryptography' 2>/dev/null || {
 # =====================================================================
 echo "== 1. the build: /bin/ota, /bin/fetch and an image in which both live =="
 # =====================================================================
+. tools/lib/firnenv.sh
 [ -x "$FIRNC" ] \
     && ok "the pinned compiler (firn $FIRN_VERSION_USED)" \
     || { bad "pinned compiler missing"; }
 
-. tools/lib/firnenv.sh
 "$FIRNC" kernel/user/ota.fi -o "$OUT/ota-probe.o" \
     2> "$OUT/ota-cc.log" \
     && ok "kernel/user/ota.fi builds ($(bash tools/structure/srcview.sh kernel/user/ota.fi | grep -c .) lines, profile kernel, no heap)" \

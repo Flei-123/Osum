@@ -28,6 +28,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
+. tools/lib/firnenv.sh
 export FIRNLIB="$ROOT/lib"
 . tools/lib/qemu.sh
 OUT=${OUT:-/tmp/time-run}
