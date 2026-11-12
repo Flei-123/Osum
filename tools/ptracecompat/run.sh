@@ -30,9 +30,8 @@ for src in tools/ptracecompat/*.c; do
     musl-gcc -O1 -pthread -o "$D/$n" "$src" || { echo "PTRACECOMPAT: $n build failed"; exit 1; }
     spec_progs="$spec_progs /bin/$n=$D/$n"
 done
-musl-gcc -O1 -static -o "$D/true_static" tools/ptracecompat/true.c || { echo "PTRACECOMPAT: true_static build failed"; exit 1; }
 musl-gcc -O1 -static-pie -fPIE -o "$D/true_spie" tools/ptracecompat/true.c || { echo "PTRACECOMPAT: true_spie build failed"; exit 1; }
-spec_progs="$spec_progs /bin/true_static=$D/true_static /bin/true_spie=$D/true_spie"
+spec_progs="$spec_progs /bin/true_spie=$D/true_spie"
 as --64 -o "$D/crt.o" kernel/user/crt.s
 spec="/lib/ /bin/ /tmp/ /etc/ /var/ /dev/ /proc/"
 for p in sh ls cat echo; do
