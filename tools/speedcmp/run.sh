@@ -21,3 +21,4 @@ LOAD_AFTER=$(cut -d' ' -f1-3 /proc/loadavg)
 
 NOTES="Setup: QEMU/KVM -cpu host, ${SPEED_SMP} vCPU, ${SPEED_MEM} MiB; Osum disk ${OSUM_DRIVE:-ahci} (words: ${SPEED_OSUM_WORDS-nosched noproc nofs}); Linux $(cat "$OUT/linux-kernel.txt" | sed 's/linux kernel: //') disk ${LINUX_DRIVE:-ahci}, init= straight into the bench. Server load (1/5/15 min) before: ${LOAD_BEFORE}, after: ${LOAD_AFTER}. Commit $(git rev-parse --short HEAD)."
 python3 -I tools/speedcmp/aggregate.py "$OUT" docs/speed-osum-vs-linux.md docs/speed-osum-vs-linux.tsv "$NOTES"
+python3 -I tools/speedcmp/budget.py docs/speed-osum-vs-linux.tsv tools/speedcmp/budget.tsv
