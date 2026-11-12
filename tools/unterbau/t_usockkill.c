@@ -7,7 +7,9 @@
 
 #define ROUNDS 5
 #define PAIRS_PER_CHILD 12
-#define PROBE_MAX 64
+#define PROBE_MAX 192
+#define SOCKET_LIMIT 128
+#define LIMIT_MIN_REACH 100
 
 static int probe_fds[PROBE_MAX * 2];
 
@@ -23,6 +25,41 @@ static int free_pairs(void)
     }
     for (int i = 0; i < n * 2; i++) close(probe_fds[i]);
     return n;
+}
+
+static int grab_singles(int *fds, int max, int *last_errno)
+{
+    int n = 0;
+    *last_errno = 0;
+    while (n < max) {
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) {
+            *last_errno = errno;
+            break;
+        }
+        fds[n++] = fd;
+    }
+    return n;
+}
+
+static void release(int *fds, int n)
+{
+    for (int i = 0; i < n; i++) close(fds[i]);
+}
+
+static void check_limit(void)
+{
+    int fds[PROBE_MAX * 2];
+    int err = 0;
+    int first = grab_singles(fds, PROBE_MAX * 2, &err);
+    int first_err = err;
+    release(fds, first);
+    int second = grab_singles(fds, PROBE_MAX * 2, &err);
+    release(fds, second);
+    CHECK("limit_reaches_beyond_old_cap", first >= LIMIT_MIN_REACH, "reached=%d", first);
+    CHECK("limit_at_new_cap", first <= SOCKET_LIMIT, "reached=%d limit=%d", first, SOCKET_LIMIT);
+    CHECK("limit_error_is_enfile", first_err == ENFILE, "errno=%d", first_err);
+    CHECK("limit_no_leak_on_release", second == first, "first=%d second=%d", first, second);
 }
 
 static void grab_pairs(int count)
@@ -120,6 +157,7 @@ int main(void)
     int after = free_pairs();
     CHECK("kill_from_outside_frees", ok && after >= before, "before=%d after=%d ran=%d", before, after, ok);
     CHECK("shared_end_survives", shared_end_survives(), "");
+    check_limit();
     int fin = free_pairs();
     CHECK("final_no_leak", fin >= before, "before=%d final=%d", before, fin);
     return 0;
