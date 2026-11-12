@@ -40,6 +40,7 @@ import drv.blk.nvme
 import drv.blk.ahci
 import block.blkguard
 import block.blkperf
+import block.blkindex
 import arch.arch
 import block.mscbind
 import crypto.cryptstate
@@ -211,12 +212,7 @@ fn nvme_up(state: u64) -> bool {
 }
 
 fn copy(from: u64, to: u64) {
-    var i: u64 = 0
-    while i < BLOCK_SIZE / 8 {
-        __mmio_write64((to + i * 8) as *mut u64,
-            __mmio_read64((from + i * 8) as *mut u64))
-        i = i + 1
-    }
+    arch.copy_words(to, from, BLOCK_SIZE / 8)
 }
 
 // --------------------------------------------------------------- ATA
@@ -1123,6 +1119,7 @@ fn cache_grow(state: u64) {
 
 fn cache_invalidate(state: u64) {
     cs(state, S_VALID, 0)
+    blkindex.reset_devs()
     let total: u64 = ways(state)
     let xb: u64 = cg(state, C_XDATA)
     var w: u64 = 0
@@ -1139,19 +1136,32 @@ fn cache_invalidate(state: u64) {
 // Before this, each metadata write threw away the pointer/inode/bitmap
 // blocks the next operation needed again (measured: 115 disk reads per
 // created file instead of ~50).
-fn cache_drop(state: u64, dev: u64, lba: u64) {
-    cs(state, S_VALID, 0)
+fn drop_foreign_ways(state: u64, dev: u64) {
     let total: u64 = ways(state)
     let xb: u64 = cg(state, C_XDATA)
     var w: u64 = 0
     while w < total {
-        if wgx(state, xb, w, C_VALID) != 0 {
-            let c0: u64 = wgx(state, xb, w, C_LBA)
-            if wgx(state, xb, w, C_DEV) != dev || (lba >= c0 && lba < c0 + wgx(state, xb, w, C_N)) {
-                wsx(state, xb, w, C_VALID, 0)
-            }
+        if wgx(state, xb, w, C_VALID) != 0 && wgx(state, xb, w, C_DEV) != dev {
+            wsx(state, xb, w, C_VALID, 0)
         }
         w = w + 1
+    }
+    blkindex.only_dev(dev)
+}
+
+fn cache_drop(state: u64, dev: u64, lba: u64) {
+    cs(state, S_VALID, 0)
+    if blkindex.foreign(dev) {
+        drop_foreign_ways(state, dev)
+    }
+    let xb: u64 = cg(state, C_XDATA)
+    var nd: u64 = blkindex.first(dev, lba)
+    while nd != 0 {
+        let w: u64 = blkindex.way_of(nd)
+        if way_holds(state, xb, w, dev, lba) {
+            wsx(state, xb, w, C_VALID, 0)
+        }
+        nd = blkindex.next(nd)
     }
 }
 
@@ -1164,19 +1174,17 @@ fn cache_put(state: u64, dev: u64, lba: u64, src: u64) {
             cs(state, S_VALID, 0)
         }
     }
-    let total: u64 = ways(state)
+    if blkindex.foreign(dev) {
+        drop_foreign_ways(state, dev)
+    }
     let xb: u64 = cg(state, C_XDATA)
-    var w: u64 = 0
-    while w < total {
-        if wgx(state, xb, w, C_VALID) != 0 {
-            let c0: u64 = wgx(state, xb, w, C_LBA)
-            if wgx(state, xb, w, C_DEV) != dev {
-                wsx(state, xb, w, C_VALID, 0)
-            } else if lba >= c0 && lba < c0 + wgx(state, xb, w, C_N) {
-                copy(src, gone_data(state, w) + (lba - c0) * BLOCK_SIZE)
-            }
+    var nd: u64 = blkindex.first(dev, lba)
+    while nd != 0 {
+        let w: u64 = blkindex.way_of(nd)
+        if way_holds(state, xb, w, dev, lba) {
+            copy(src, gone_data(state, w) + (lba - wgx(state, xb, w, C_LBA)) * BLOCK_SIZE)
         }
-        w = w + 1
+        nd = blkindex.next(nd)
     }
 }
 
@@ -1504,16 +1512,26 @@ fn clock_victim(state: u64) -> u64 {
     return hand
 }
 
-const HINT_SHIFT: u64 = 3
-const HINT_MASK: u64 = 255
-static mut way_hint: [u64; 256] = [0 as u64; 256]
-
 fn way_holds(state: u64, xb: u64, w: u64, dev: u64, lba: u64) -> bool {
     if wgx(state, xb, w, C_VALID) == 0 || wgx(state, xb, w, C_DEV) != dev {
         return false
     }
     let c0: u64 = wgx(state, xb, w, C_LBA)
     return lba >= c0 && lba < c0 + wgx(state, xb, w, C_N)
+}
+
+const NO_WAY: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn find_way(state: u64, xb: u64, dev: u64, lba: u64) -> u64 {
+    var nd: u64 = blkindex.first(dev, lba)
+    while nd != 0 {
+        let w: u64 = blkindex.way_of(nd)
+        if way_holds(state, xb, w, dev, lba) {
+            return w
+        }
+        nd = blkindex.next(nd)
+    }
+    return NO_WAY
 }
 
 fn cache_serve(state: u64, w: u64, lba: u64, dst: u64) {
@@ -1533,21 +1551,10 @@ fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool 
             return true
         }
     }
-    let hinted: u64 = way_hint[((lba >> HINT_SHIFT) & HINT_MASK) as usize]
-    if hinted < ways(state) && way_holds(state, cg(state, C_XDATA), hinted, dev, lba) {
-        cache_serve(state, hinted, lba, dst)
+    let found: u64 = find_way(state, cg(state, C_XDATA), dev, lba)
+    if found != NO_WAY {
+        cache_serve(state, found, lba, dst)
         return true
-    }
-    let total: u64 = ways(state)
-    let xb: u64 = cg(state, C_XDATA)
-    var w: u64 = 0
-    while w < total {
-        if way_holds(state, xb, w, dev, lba) {
-            way_hint[((lba >> HINT_SHIFT) & HINT_MASK) as usize] = w
-            cache_serve(state, w, lba, dst)
-            return true
-        }
-        w = w + 1
     }
     cs(state, C_MISSES, cg(state, C_MISSES) + 1)
     // KEINE SPURERKENNUNG -- ACHT PLAETZE STATTDESSEN. GEMESSEN:
@@ -1576,8 +1583,8 @@ fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool 
     ws(state, target, C_N, n)
     ws(state, target, C_DEV, dev)
     ws(state, target, C_VALID, 1)
-    way_hint[((lba >> HINT_SHIFT) & HINT_MASK) as usize] = target
-    way_hint[(((lba + n - 1) >> HINT_SHIFT) & HINT_MASK) as usize] = target
+    blkindex.link(target, dev, lba, n)
+    blkindex.note_dev(dev)
     copy(data, dst)
     return true
 }
