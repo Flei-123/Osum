@@ -10,6 +10,7 @@ import serial
 import drv.blk.ahci.ahci_clock
 import drv.blk.ahci.ahci_defs
 import drv.blk.ahci.ahci_reg
+import drv.blk.ahci.ahci_rfis
 import drv.blk.ahci.ahci_state
 
 const S_IRQ_CPU: u64 = 0xB0
@@ -27,6 +28,9 @@ const IS_OFS: u64 = 0x1000000
 const IE_MASK: u64 = IS_DHRS | IS_PSS | IS_SDBS | IS_TFES | IS_HBFS | IS_HBDS | IS_IFS | IS_OFS
 const IRQ_MISS_LIMIT: u64 = 4
 const W_TIMEOUT: u64 = 2
+const W_PENDING: u64 = 3
+const LANDED_CHECK_FIRST: u64 = 16384
+const LANDED_CHECK_EVERY: u64 = 8192
 const ERR_CHECK_MASK: u64 = 15
 
 fn clear_status(state: u64, p: u64) {
@@ -150,9 +154,59 @@ fn wait_sleepy(state: u64, p: u64, deadline: u64) -> u64 {
     return W_TIMEOUT
 }
 
-fn wait_done(state: u64, p: u64, deadline: u64) -> u64 {
+fn settle_landed(state: u64, p: u64, deadline: u64) -> u64 {
+    var reads: u64 = 0
+    while !ahci_clock.expired(deadline, reads, ahci_defs.SPIN_LIMIT) {
+        reads = reads + 1
+        if (ahci_reg.prd(state, p, ahci_defs.P_CI) & 1) == 0 {
+            ahci_rfis.note_landed()
+            return finish_wait(state, false, reads - 1, 0, 0)
+        }
+        if (reads & ERR_CHECK_MASK) == ERR_CHECK_MASK && error_pending(state, p, false) {
+            return ahci_defs.W_FAULT
+        }
+        atomic.pause()
+    }
+    return W_TIMEOUT
+}
+
+fn probe_slow(state: u64, p: u64) -> u64 {
+    if (ahci_reg.prd(state, p, ahci_defs.P_CI) & 1) == 0 {
+        ahci_rfis.note_missed()
+        return finish_wait(state, false, 0, 0, 0)
+    }
+    if error_pending(state, p, false) {
+        return ahci_defs.W_FAULT
+    }
+    return W_PENDING
+}
+
+fn wait_landed(state: u64, p: u64, deadline: u64) -> u64 {
+    var spin: u64 = 0
+    var check_at: u64 = LANDED_CHECK_FIRST
+    while !ahci_clock.expired(deadline, spin, ahci_defs.SPIN_LIMIT) {
+        if ahci_rfis.landed(state) {
+            return settle_landed(state, p, deadline)
+        }
+        if spin >= check_at {
+            let verdict: u64 = probe_slow(state, p)
+            if verdict != W_PENDING {
+                return verdict
+            }
+            check_at = spin + LANDED_CHECK_EVERY
+        }
+        atomic.pause()
+        spin = spin + 1
+    }
+    return W_TIMEOUT
+}
+
+fn wait_done(state: u64, p: u64, deadline: u64, rfis: bool) -> u64 {
     if can_sleep(state, deadline) {
         return wait_sleepy(state, p, deadline)
+    }
+    if rfis && deadline != 0 {
+        return wait_landed(state, p, deadline)
     }
     var spin: u64 = 0
     while !ahci_clock.expired(deadline, spin, ahci_defs.SPIN_LIMIT) {

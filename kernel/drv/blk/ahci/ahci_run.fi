@@ -9,10 +9,24 @@ import drv.blk.ahci.ahci_defs
 import drv.blk.ahci.ahci_port
 import drv.blk.ahci.ahci_recover
 import drv.blk.ahci.ahci_reg
+import drv.blk.ahci.ahci_rfis
 import drv.blk.ahci.ahci_state
 import drv.blk.ahci.ahci_wait
 
 const TFD_ERR: u64 = 0x01
+
+fn typed_cell(cmd: u64) -> u64 {
+    if cmd == ahci_defs.ATA_READ_DMA_EXT {
+        return blkperf.K_AHCI_READ_CMDS
+    }
+    if cmd == ahci_defs.ATA_WRITE_DMA_EXT {
+        return blkperf.K_AHCI_WRITE_CMDS
+    }
+    if cmd == ahci_defs.ATA_FLUSH_EXT {
+        return blkperf.K_AHCI_FLUSH_CMDS
+    }
+    return blkperf.CELLS
+}
 
 fn run(state: u64, cmd: u64, lba: u64, count: u64, addr: u64, len: u64,
     write: bool) -> bool {
@@ -52,20 +66,26 @@ fn run(state: u64, cmd: u64, lba: u64, count: u64, addr: u64, len: u64,
     ahci_cmd.build_fis(ct, cmd, lba, count)
 
     kstate.set(state, ahci_state.sc(ahci_defs.S_IRQ_ERR), 0)
+    let use_rfis: bool = ahci_rfis.usable(state, cmd)
+    if use_rfis {
+        ahci_rfis.arm(state)
+    }
     ahci_reg.pwr(state, p, ahci_defs.P_CI, 1)
     kstate.add(state, ahci_state.sc(ahci_defs.S_CMDS), 1)
 
     let deadline: u64 = ahci_clock.timeout(state, ahci_defs.CMD_US)
     let t_issued: u64 = blkperf.now()
-    let verdict: u64 = ahci_wait.wait_done(state, p, deadline)
+    let verdict: u64 = ahci_wait.wait_done(state, p, deadline, use_rfis)
     if verdict == ahci_defs.W_DONE {
-        let tfd: u64 = ahci_reg.prd(state, p, ahci_defs.P_TFD)
+        let tfd: u64 = ahci_rfis.status_word(state, p, use_rfis)
         let t_done: u64 = blkperf.now()
         blkperf.add(blkperf.K_AHCI_CMDS, 1)
         blkperf.add(blkperf.K_AHCI_POLLS, ahci_defs.wait_polls)
         blkperf.add(blkperf.K_AHCI_IDLE_CYCLES, tscdelta.between(t_start, t_idle))
         blkperf.add(blkperf.K_AHCI_SETUP_CYCLES, tscdelta.between(t_idle, t_issued))
-        blkperf.add(blkperf.K_AHCI_WAIT_CYCLES, tscdelta.between(t_issued, t_done))
+        let waited: u64 = tscdelta.between(t_issued, t_done)
+        blkperf.add(blkperf.K_AHCI_WAIT_CYCLES, waited)
+        blkperf.add_typed(typed_cell(cmd), waited)
         kstate.set(state, ahci_state.sc(ahci_defs.S_TFD), tfd)
         if (tfd & TFD_ERR) != 0 {
             kstate.add(state, ahci_state.sc(ahci_defs.S_ERRS), 1)

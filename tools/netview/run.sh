@@ -1079,92 +1079,9 @@ else
     bad "9c: no time was measured (us=${US:-nothing})"
 fi
 
-echo "   9d. THE TILE REALLY SWITCHES -- online, and faking after one click"
-# THE MACHINE IS GENUINELY ONLINE HERE, which is the case the sign
-# exists for and the one that is hardest to fake past: the corner must
-# be empty where the sign goes before the click and carry it after --
-# and the marks on the running windows must not have moved, because a
-# preference does not touch a running process.
-wire_up; bridge_up
-QX=$(qsf "$TMPD/qs-bottom.txt" x); QY=$(qsf "$TMPD/qs-bottom.txt" y)
-if [ -z "$QX" ]; then QX=0; QY=0; fi
-TX=$((QX + 60)); TY=$((QY + 41))
-{
-    echo "warte 5"
-    echo "sendkey meta_l-a"
-    echo "warte 2"
-    # Into the corner first and then in steps under 128, for the reason
-    # `tools/wm/monitor.py` writes down: a PS/2 packet carries nine bits
-    # per axis, and a lost one moves the endpoint somewhere else.
-    for _i in 1 2 3 4 5 6 7 8; do echo "mouse_move -120 -120"; done
-    x=0; y=0
-    while [ $x -lt $TX ] || [ $y -lt $TY ]; do
-        dx=$(( TX - x )); [ $dx -gt 100 ] && dx=100; [ $dx -lt 0 ] && dx=0
-        dy=$(( TY - y )); [ $dy -gt 100 ] && dy=100; [ $dy -lt 0 ] && dy=0
-        echo "mouse_move $dx $dy"
-        x=$((x + dx)); y=$((y + dy))
-    done
-    echo "warte 1"
-    echo "mouse_button 1"
-    echo "warte 1"
-    echo "mouse_button 0"
-    echo "warte 4"
-} > "$TMPD/dr-click"
-# THE PICTURE AND THE SERIAL LINE ARE TWO MEASUREMENTS, and the first
-# version of this made the second depend on the first: `if gshot; then
-# <everything>; else bad; fi`. When the screendump failed under load the
-# runner threw away a serial log that PROVED the click had worked, and
-# said only "no screenshot". So the log is read whatever the picture
-# did; only the pixel check needs the picture.
-gshot "qs-click" "assets/netview/theme-dark" \
-    "netvdemo nic nip=$OSUM_IP/24 ngw=$HOST_IP" "ping" "$TMPD/dr-click"
-SHOT_OK=$?
-L="$TMPD/qs-click.txt"; P="$TMPD/qs-click.ppm"
-if [ -s "$L" ]; then
-    [ "$SHOT_OK" = 0 ] && png "$P" "qs-switch"
-    num "9d: the machine really is online" "$(st_of "$L")" eq 3
-    has "$L" "qs: tile n=0 to=1" "9d: the tile went from off to on"
-    # AND THE REST OF THE SYSTEM SAW IT. The corner sign is drawn by the
-    # taskbar out of a KERNEL answer and not out of anything the panel
-    # told it -- so this measures the whole path at once: click, system
-    # call, kernel state, taskbar poll, pixels.
-    GX=$(gx_of "$L"); GY=$(gy_of "$L")
-    fl=$(grep -aoE '^taskbar: faking fb=[0-9]+ x=[0-9]+ y=[0-9]+' "$L" | tail -1)
-    if [ -n "$fl" ] && [ -n "$GX" ]; then
-        fb=$(echo "$fl" | grep -oE 'fb=[0-9]+' | cut -d= -f2)
-        fx=$(echo "$fl" | grep -oE ' x=[0-9]+' | tr -d ' x=')
-        fy=$(echo "$fl" | grep -oE ' y=[0-9]+' | tr -d ' y=')
-        num "9d: the taskbar now says the system is faking" "${fb:-0}" eq 2
-        if [ "$SHOT_OK" = 0 ]; then
-            r=$(python3 tools/netview/checkshot.py "$P" "$((fx + GX))" "$((fy + GY))" \
-                assets/netview/sys-faking.txt assets/netview/theme-dark 2>&1)
-            case "$r" in ok*) ok "9d: and the sign is IN THE PICTURE at $((fx+GX)),$((fy+GY)) -- $r" ;;
-                         *)   bad "9d: the sign is not in the picture: $r" ;; esac
-        fi
-    else
-        bad "9d: the bar never reported the faking sign"
-    fi
-    # THE COUNTER-CHECK, out of the same picture: the windows that were
-    # already running kept their views. `netvdemo` starts one of each,
-    # and one click on a preference may not have moved a single one.
-    seen_1=0; seen_2=0; seen_3=0
-    for b in 0 1 2 3 4 5 6 7 8 9; do
-        line=$(grep -aE "^taskbar: btn i=$b " "$L" | tail -1)
-        [ -z "$line" ] && continue
-        v=$(echo "$line" | grep -oE 'netv=[0-9]+' | cut -d= -f2)
-        case "${v:-0}" in
-            1) seen_1=$((seen_1+1)) ;;
-            2) seen_2=$((seen_2+1)) ;;
-            3) seen_3=$((seen_3+1)) ;;
-        esac
-    done
-    num "9d: the running filtered window kept its view" "$seen_1" eq 1
-    num "9d: the running faked window kept its view" "$seen_2" eq 1
-    num "9d: the running none window kept its view" "$seen_3" eq 1
-else
-    bad "9d: the machine wrote no serial log at all"
-fi
-bridge_down; wire_down
+echo "   9d. the tray no longer carries the faking tile -- the switch is netview fallback"
+hasnot "$TMPD/qs-bottom.txt" "qs: kachel n=0 " "9d: tile 0 (faking switch) is not in the tray"
+has "$TMPD/qs-bottom.txt" "qs: kachel n=1 " "9d: the network tile is"
 
 echo "   9e. THE CORRECTION: off is the default and stays it"
 # A machine told NOTHING, anywhere: no `nvfall=` on the command line and

@@ -396,6 +396,15 @@ def main(argv):
             count[t["win"]] = count.get(t["win"], 0) + 1
         want_win = max(count, key=lambda k: count[k])
     texts = [t for t in texts if t["win"] == want_win and t["t"].strip()]
+    if not forced and texts and texts[0].get("ax") is not None:
+        origins = {}
+        for t in texts:
+            if t.get("ax") is not None:
+                key = (t["ax"], t["ay"])
+                origins[key] = origins.get(key, 0) + 1
+        main_origin = max(origins, key=lambda k: origins[k])
+        texts = [t for t in texts
+                 if t.get("ax") is None or (t["ax"], t["ay"]) == main_origin]
     last = {}
     for t in texts:
         last[(t["kind"], t["t"])] = t

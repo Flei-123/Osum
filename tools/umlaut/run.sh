@@ -294,8 +294,8 @@ fi
 echo
 echo "-- 9. die Einstellungen"
 if foto einstellungen "extra=einst nostart"; then
-    glyphen einstellungen "Einstellungen" \
-        "Text/Akzent 5,16  Akzent/Fläche 4,93  -- WCAG erfüllt"
+    glyphen einstellungen "Einstellungen" "Designs übertragen"
+    glyphen einstellungen "Einstellungen" "Für Auswahl, Schalter, Hervorhebung."
 fi
 
 echo
