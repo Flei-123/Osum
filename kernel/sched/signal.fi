@@ -12,11 +12,12 @@ import sched.ctr
 import arch.x86_64.guard
 import libc.regio
 import sched.ptrace
+import sched.ptstate
 
 export {
     init_task, clear_task, exec_reset, inherit,
     send, send_task, send_timer, send_pid, send_pgid, send_tty, fault, alarm_check,
-    check_sys, check_trap, greg_off, pending, deliverable, interrupted,
+    check_sys, check_trap, greg_off, notify_tracer, pending, deliverable, interrupted,
     do_sigaction, do_sigprocmask, do_sigreturn, do_kill, do_pause,
     do_setpgid, do_getpgid, do_setsid, do_alarm, do_sigpending,
     do_setitimer, do_getitimer, do_sigaltstack, do_sigsuspend, do_sigtimedwait,
@@ -301,6 +302,9 @@ fn discarded(state: u64, task: u64, sig: u64) -> bool {
         return false
     }
     if (taskslot.tget(state, task, taskconst.T_SIGMASK) & bit(sig)) != 0 {
+        return false
+    }
+    if ptstate.traced(task) {
         return false
     }
     let h: u64 = handler_of(state, task, sig)
@@ -787,7 +791,9 @@ fn run_pending(state: u64, task: u64, ctx: u64) -> bool {
         taskslot.tset(state, task, taskconst.T_SIGPEND,
             taskslot.tget(state, task, taskconst.T_SIGPEND)
             & (0xFFFFFFFFFFFFFFFF -% bit(raw)))
+        notify_tracer(state, task, raw)
         let sig: u64 = ptrace.signal_stop(state, task, raw)
+        reload_ctx(task, ctx)
         if sig != 0 && dispatch_signal(state, task, sig, ctx) {
             return true
         }
@@ -796,15 +802,25 @@ fn run_pending(state: u64, task: u64, ctx: u64) -> bool {
     return false
 }
 
-fn check_sys(state: u64, task: u64, frame: u64) {
-    if taskslot.tget(state, task, taskconst.T_KIND) != taskconst.K_USER {
+fn notify_tracer(state: u64, task: u64, sig: u64) {
+    if !ptstate.traced(task) || sig == SIGKILL {
         return
     }
-    if deliverable(state, task) == 0 {
-        suspend_done(state, task)
+    send_task(state, ptstate.tracer_slot(task), SIGCHLD)
+}
+
+fn reload_ctx(task: u64, ctx: u64) {
+    if !ptstate.traced(task) {
         return
     }
-    let c: u64 = ctx_of(state, task)
+    let frame: u64 = ptstate.get(task, ptstate.F_FRAME)
+    if frame == 0 || frame == ctx || ptstate.get(task, ptstate.F_LAYOUT) != ptrace.LAYOUT_SYSCALL {
+        return
+    }
+    load_ctx(frame, ctx)
+}
+
+fn load_ctx(frame: u64, c: u64) {
     var i: u64 = 0
     while i < C_WORDS {
         __mmio_write64((c + i * 8) as *mut u64, 0)
@@ -828,6 +844,18 @@ fn check_sys(state: u64, task: u64, frame: u64) {
     __mmio_write64((c + C_RFLAGS) as *mut u64, __mmio_read64((frame + F_RFLAGS) as *mut u64))
     __mmio_write64((c + C_RSP) as *mut u64, __mmio_read64((frame + F_RSP) as *mut u64))
     __mmio_write64((c + C_SS) as *mut u64, USER_SS)
+}
+
+fn check_sys(state: u64, task: u64, frame: u64) {
+    if taskslot.tget(state, task, taskconst.T_KIND) != taskconst.K_USER {
+        return
+    }
+    if deliverable(state, task) == 0 {
+        suspend_done(state, task)
+        return
+    }
+    let c: u64 = ctx_of(state, task)
+    load_ctx(frame, c)
     ptrace.note_frame(task, frame, ptrace.LAYOUT_SYSCALL)
     if !run_pending(state, task, c) {
         suspend_done(state, task)

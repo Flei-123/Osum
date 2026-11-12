@@ -10,6 +10,8 @@ import sched.taskconst
 import sched.taskslot
 import sys.sysuser
 import sys.sysnet
+import sched.proc.procfault
+import sched.proc.procspace
 import libc.regio
 
 export {
@@ -36,7 +38,15 @@ const PT_SYSCALL: u64 = 24
 const PT_SETOPTIONS: u64 = 0x4200
 const PT_GETEVENTMSG: u64 = 0x4201
 const PT_GETSIGINFO: u64 = 0x4202
+const PT_SETSIGINFO: u64 = 0x4203
+const PT_GETREGSET: u64 = 0x4204
+const PT_SETREGSET: u64 = 0x4205
 const PT_SEIZE: u64 = 0x4206
+const PT_INTERRUPT: u64 = 0x4207
+const PT_LISTEN: u64 = 0x4208
+const NT_PRSTATUS: u64 = 1
+const SIGCONT_NUM: u64 = 18
+const IOVEC_BYTES: u64 = 16
 
 const SIGKILL_NUM: u64 = 9
 const SIGSTOP_NUM: u64 = 19
@@ -204,13 +214,28 @@ fn write_register(task: u64, reg: u64, value: u64) -> bool {
     return true
 }
 
-fn get_regs(state: u64, me: u64, tracee: u64, data: u64) -> u64 {
-    var words: [u64; 27] = [0 as u64; 27]
+fn load_words(state: u64, tracee: u64, base: u64) {
     var reg: u64 = 0
     while reg < REG_COUNT {
-        words[reg as usize] = read_register(state, tracee, reg)
+        regio.write64_at(base, reg * WORD_BYTES, read_register(state, tracee, reg))
         reg = reg + 1
     }
+}
+
+fn store_words(tracee: u64, base: u64) -> u64 {
+    var reg: u64 = 0
+    while reg < REG_COUNT {
+        if reg != R_CS && reg != R_SS && !write_register(tracee, reg, regio.read64_at(base, reg * WORD_BYTES)) {
+            return fail(errno.E_IO)
+        }
+        reg = reg + 1
+    }
+    return 0
+}
+
+fn get_regs(state: u64, me: u64, tracee: u64, data: u64) -> u64 {
+    var words: [u64; 27] = [0 as u64; 27]
+    load_words(state, tracee, (&words[0]) as u64)
     if !sysuser.copy_out(state, me, data, (&words[0]) as u64, REGS_BYTES) {
         return fail(errno.E_FAULT)
     }
@@ -222,13 +247,66 @@ fn set_regs(state: u64, me: u64, tracee: u64, data: u64) -> u64 {
     if !sysuser.copy_in(state, me, (&words[0]) as u64, data, REGS_BYTES) {
         return fail(errno.E_FAULT)
     }
-    var reg: u64 = 0
-    while reg < REG_COUNT {
-        if reg != R_CS && reg != R_SS && !write_register(tracee, reg, words[reg as usize]) {
-            return fail(errno.E_IO)
-        }
-        reg = reg + 1
+    return store_words(tracee, (&words[0]) as u64)
+}
+
+fn read_iovec(state: u64, me: u64, data: u64, iov: u64) -> bool {
+    return sysuser.copy_in(state, me, iov, data, IOVEC_BYTES)
+}
+
+fn get_regset(state: u64, me: u64, tracee: u64, nt: u64, data: u64) -> u64 {
+    var iov: [u64; 2] = [0 as u64; 2]
+    if nt != NT_PRSTATUS {
+        return fail(errno.E_INVAL)
     }
+    if !read_iovec(state, me, data, (&iov[0]) as u64) {
+        return fail(errno.E_FAULT)
+    }
+    var words: [u64; 27] = [0 as u64; 27]
+    load_words(state, tracee, (&words[0]) as u64)
+    var len: u64 = iov[1]
+    if len > REGS_BYTES {
+        len = REGS_BYTES
+    }
+    if !sysuser.copy_out(state, me, iov[0], (&words[0]) as u64, len) {
+        return fail(errno.E_FAULT)
+    }
+    iov[1] = len
+    if !sysuser.copy_out(state, me, data, (&iov[0]) as u64, IOVEC_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    return 0
+}
+
+fn set_regset(state: u64, me: u64, tracee: u64, nt: u64, data: u64) -> u64 {
+    var iov: [u64; 2] = [0 as u64; 2]
+    if nt != NT_PRSTATUS {
+        return fail(errno.E_INVAL)
+    }
+    if !read_iovec(state, me, data, (&iov[0]) as u64) {
+        return fail(errno.E_FAULT)
+    }
+    var words: [u64; 27] = [0 as u64; 27]
+    load_words(state, tracee, (&words[0]) as u64)
+    var len: u64 = iov[1]
+    if len > REGS_BYTES {
+        len = REGS_BYTES
+    }
+    if !sysuser.copy_in(state, me, (&words[0]) as u64, iov[0], len) {
+        return fail(errno.E_FAULT)
+    }
+    return store_words(tracee, (&words[0]) as u64)
+}
+
+fn interrupt(state: u64, tracee: u64) -> u64 {
+    if ptstate.get(tracee, ptstate.F_SEIZED) == 0 {
+        return fail(errno.E_IO)
+    }
+    if ptstate.get(tracee, ptstate.F_HOLD) != 0 {
+        return 0
+    }
+    ptstate.set(tracee, ptstate.F_INTERRUPT, 1)
+    signal.send(state, tracee, SIGCONT_NUM)
     return 0
 }
 
@@ -243,7 +321,18 @@ fn peek_word(state: u64, me: u64, tracee: u64, addr: u64, data: u64) -> u64 {
     return 0
 }
 
+fn unshare_range(state: u64, tracee: u64, addr: u64) -> bool {
+    if !procfault.user_ok(state, tracee, addr, WORD_BYTES) {
+        return false
+    }
+    return procspace.unshare_cached(state, tracee, addr)
+        && procspace.unshare_cached(state, tracee, addr + WORD_BYTES - 1)
+}
+
 fn poke_word(state: u64, tracee: u64, addr: u64, data: u64) -> u64 {
+    if !unshare_range(state, tracee, addr) {
+        return fail(errno.E_IO)
+    }
     var word: u64 = data
     if !sysuser.copy_out(state, tracee, addr, (&word) as u64, WORD_BYTES) {
         return fail(errno.E_IO)
@@ -375,6 +464,15 @@ fn stopped_request(state: u64, me: u64, tracee: u64, req: u64, addr: u64, data: 
     if req == PT_GETSIGINFO {
         return get_siginfo(state, me, tracee, data)
     }
+    if req == PT_SETSIGINFO || req == PT_LISTEN {
+        return 0
+    }
+    if req == PT_GETREGSET {
+        return get_regset(state, me, tracee, addr, data)
+    }
+    if req == PT_SETREGSET {
+        return set_regset(state, me, tracee, addr, data)
+    }
     if req == PT_GETEVENTMSG {
         var zero: u64 = 0
         if !sysuser.copy_out(state, me, data, (&zero) as u64, WORD_BYTES) {
@@ -415,6 +513,9 @@ fn call(state: u64, me: u64, req: u64, pid: u64, addr: u64, data: u64) -> u64 {
     if req == PT_SETOPTIONS {
         ptstate.set(tracee, ptstate.F_OPTS, data)
         return 0
+    }
+    if req == PT_INTERRUPT {
+        return interrupt(state, tracee)
     }
     if ptstate.get(tracee, ptstate.F_HOLD) == 0 {
         return fail(errno.E_SRCH)

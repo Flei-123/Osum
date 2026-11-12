@@ -1090,15 +1090,7 @@ fn do_wait4(state: u64, me: u64, pid: u64, status: u64, options: u64) -> u64 {
             // that wins the claim -- DELL STABILITY)
             procswap.reap(state, child)
             if status != 0 {
-                // RUNDE UNTERBAU: a task that died of a signal reports it the way POSIX does -- the signal number in the low bits (WIFSIGNALED,
-                // WTERMSIG) -- and not as an exit with code 128 + n. Everything else keeps `exit code << 8`.
-                // ONLY for the waiter that is a libc program (it has set its thread pointer: T_FSBASE != 0). The programs of this system read
-                // `(status >> 8) & 255` and have measured 128 + n there since round 62; for them nothing changes.
-                var st: u64 = (code & 255) << 8
-                let sl: u64 = taskslot.tget(state, child, taskconst.T_SIGLAST)
-                if (sl & 256) != 0 && taskslot.tget(state, me, taskconst.T_FSBASE) != 0 {
-                    st = sl & 127
-                }
+                let st: u64 = wait_status(state, me, child, code)
                 if !sysuser.put32(state, me, status, st) {
                     return sysuser.neg(errno.E_FAULT)
                 }
@@ -1130,12 +1122,31 @@ fn do_wait4(state: u64, me: u64, pid: u64, status: u64, options: u64) -> u64 {
     return sysuser.neg(errno.E_CHILD)
 }
 
+fn wait_status(state: u64, me: u64, child: u64, code: u64) -> u64 {
+    var st: u64 = (code & 255) << 8
+    let sl: u64 = taskslot.tget(state, child, taskconst.T_SIGLAST)
+    if (sl & 256) != 0 && taskslot.tget(state, me, taskconst.T_FSBASE) != 0 {
+        st = sl & 127
+    }
+    return st
+}
+
 const TRACE_STOP_MARK: u64 = 0x7F
 
 fn report_trace_stop(state: u64, me: u64, want: u64, status: u64) -> u64 {
-    let tracee: u64 = ptstate.find_fresh(state, me, want)
+    let tracee: u64 = ptstate.find_report(state, me, want)
     if tracee >= kstate.MAX_TASKS {
         return 0
+    }
+    let pid: u64 = taskslot.tget(state, tracee, taskconst.T_PID)
+    if ptstate.get(tracee, ptstate.F_ZREP) != 0 {
+        let st: u64 = wait_status(state, me, tracee, taskslot.tget(state, tracee, taskconst.T_EXIT))
+        ptstate.set(tracee, ptstate.F_ZREP, 0)
+        ptstate.set(tracee, ptstate.F_TRACER, 0)
+        if status != 0 {
+            sysuser.put32(state, me, status, st)
+        }
+        return pid
     }
     let code: u64 = ptstate.claim_fresh(tracee)
     if code == 0 {
@@ -1144,7 +1155,7 @@ fn report_trace_stop(state: u64, me: u64, want: u64, status: u64) -> u64 {
     if status != 0 {
         sysuser.put32(state, me, status, (code << 8) | TRACE_STOP_MARK)
     }
-    return taskslot.tget(state, tracee, taskconst.T_PID)
+    return pid
 }
 
 fn find_zombie_child(state: u64, me: u64, pid: u64) -> u64 {

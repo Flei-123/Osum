@@ -2,10 +2,12 @@
 
 import sched.sched
 import sched.ptstate
+import sched.taskconst
+import sched.taskslot
 import libc.regio
 
 export {
-    note_frame, syscall_enter, syscall_exit, signal_stop, apply_step_flag,
+    note_frame, syscall_enter, syscall_exit, signal_stop, apply_step_flag, stops_enter, stops_exit,
     LAYOUT_SYSCALL, LAYOUT_TRAP, OPT_SYSGOOD, OPT_TRACEEXEC, SIGTRAP_NUM, ORIG_NONE, ENOSYS_RESULT
 }
 
@@ -15,6 +17,10 @@ const SYS_EXECVE: u64 = 59
 const SYSGOOD_FLAG: u64 = 0x80
 const EVENT_SHIFT: u64 = 8
 const EVENT_EXEC: u64 = 4
+const EVENT_STOP: u64 = 128
+const SIGCONT_NUM: u64 = 18
+const FAULT_CODE_FIRST: u64 = 128
+const FAULT_CODE_END: u64 = 160
 
 const OPT_SYSGOOD: u64 = 1
 const OPT_TRACEEXEC: u64 = 16
@@ -73,8 +79,19 @@ fn syscall_code(task: u64) -> u64 {
     return SIGTRAP_NUM
 }
 
+fn stops_enter(task: u64) -> bool {
+    return ptstate.get(task, ptstate.F_MODE) == ptstate.MODE_SYSCALL
+}
+
+fn stops_exit(task: u64, number: u64, result: u64) -> bool {
+    if stops_enter(task) {
+        return true
+    }
+    return number == SYS_EXECVE && result == 0 && exec_code(task) != 0
+}
+
 fn syscall_enter(state: u64, task: u64, frame: u64, number: u64) -> u64 {
-    if ptstate.get(task, ptstate.F_MODE) != ptstate.MODE_SYSCALL {
+    if !stops_enter(task) {
         return number
     }
     note_frame(task, frame, LAYOUT_SYSCALL)
@@ -102,7 +119,7 @@ fn syscall_exit(state: u64, task: u64, frame: u64, number: u64, result: u64) {
             stop(state, task, code, ptstate.KIND_SIGNAL)
         }
     }
-    if ptstate.get(task, ptstate.F_MODE) != ptstate.MODE_SYSCALL {
+    if !stops_enter(task) {
         return
     }
     ptstate.set(task, ptstate.F_ORIG, number)
@@ -114,5 +131,19 @@ fn signal_stop(state: u64, task: u64, sig: u64) -> u64 {
         return sig
     }
     ptstate.set(task, ptstate.F_ORIG, ORIG_NONE)
-    return stop(state, task, sig, ptstate.KIND_SIGNAL)
+    if sig == SIGCONT_NUM && ptstate.get(task, ptstate.F_INTERRUPT) != 0 {
+        ptstate.set(task, ptstate.F_INTERRUPT, 0)
+        stop(state, task, SIGTRAP_NUM | (EVENT_STOP << EVENT_SHIFT), ptstate.KIND_SIGNAL)
+        return 0
+    }
+    let inject: u64 = stop(state, task, sig, ptstate.KIND_SIGNAL)
+    drop_fault_code(state, task, inject, sig)
+    return inject
+}
+
+fn drop_fault_code(state: u64, task: u64, inject: u64, sig: u64) {
+    let kc: u64 = taskslot.tget(state, task, taskconst.T_KILLCODE)
+    if inject != sig && kc >= FAULT_CODE_FIRST && kc < FAULT_CODE_END {
+        taskslot.tset(state, task, taskconst.T_KILLCODE, 0)
+    }
 }
