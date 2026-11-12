@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.regio
+import drv.blk.ahci.ahci_defs
+import drv.blk.ahci.ahci_hook
+import drv.blk.ahci.ahci_reg
+
+const RFIS_AT: u64 = 0x40
+const FIS_D2H: u64 = 0x34
+const TYPE_MASK: u64 = 0xFF
+const BSY_BIT: u64 = 0x00800000
+const STATUS_SHIFT: u64 = 16
+const ERROR_SHIFT: u64 = 24
+const BYTE_MASK: u64 = 0xFF
+const MISS_LIMIT: u64 = 4
+
+static mut miss_streak: u64 = 0
+
+static mut rfis_off: bool = false
+
+fn rfis_area(state: u64) -> u64 {
+    return state + ahci_defs.AHCI_OFF + ahci_defs.FB_AT + RFIS_AT
+}
+
+fn arm(state: u64) {
+    ahci_reg.m32(rfis_area(state), BSY_BIT)
+}
+
+fn rfis_word(state: u64) -> u64 {
+    return regio.read32_at(rfis_area(state), 0)
+}
+
+fn word_landed(w: u64) -> bool {
+    return (w & TYPE_MASK) == FIS_D2H && (w & BSY_BIT) == 0
+}
+
+fn landed(state: u64) -> bool {
+    return word_landed(rfis_word(state))
+}
+
+fn tfd_of(w: u64) -> u64 {
+    return ((w >> STATUS_SHIFT) & BYTE_MASK) | (((w >> ERROR_SHIFT) & BYTE_MASK) << 8)
+}
+
+fn status_word(state: u64, p: u64, armed: bool) -> u64 {
+    if armed {
+        let w: u64 = rfis_word(state)
+        if word_landed(w) {
+            return tfd_of(w)
+        }
+    }
+    return ahci_reg.prd(state, p, ahci_defs.P_TFD)
+}
+
+fn note_landed() {
+    miss_streak = 0
+}
+
+fn note_missed() {
+    miss_streak = miss_streak + 1
+    if miss_streak >= MISS_LIMIT {
+        rfis_off = true
+    }
+}
+
+fn usable(state: u64, cmd: u64) -> bool {
+    if rfis_off || ahci_hook.hook_on(state) {
+        return false
+    }
+    return cmd == ahci_defs.ATA_READ_DMA_EXT || cmd == ahci_defs.ATA_WRITE_DMA_EXT || cmd == ahci_defs.ATA_FLUSH_EXT
+}
