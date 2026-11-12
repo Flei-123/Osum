@@ -38,6 +38,8 @@ import drv.gpu.intel.view
 import drv.wdt.wdtview
 import net.wltrace
 import fs.procfs.pfbase
+import fs.procfs.pfgroup
+import fs.procfs.pfnum
 import fs.procfs.pfproc
 import fs.procfs.pfreg
 import fs.procfs.pfsys
@@ -55,6 +57,10 @@ const K_FDDIR: u64 = 5
 const K_FDFILE: u64 = 6
 
 const K_SYS: u64 = 7
+
+const K_TASKDIR: u64 = 9
+
+const K_TIDDIR: u64 = 10
 
 const SF_DEVICES: u64 = 2
 
@@ -217,7 +223,11 @@ const F_MMAPLOG: u64 = 10
 
 const F_LAST: u64 = 10
 
-const F_END: u64 = 26
+const F_TASK: u64 = 27
+
+const F_END: u64 = 27
+
+const TID_FILES: u64 = 5
 
 fn build(state: u64, n: u64) -> u64 {
     let art: u64 = pfproc.n_art(n)
@@ -653,6 +663,10 @@ fn pidfile_of(name: u64) -> u64 {
     var ex: [u8; 4] = "exe\0"
     var cw: [u8; 4] = "cwd\0"
     var ml: [u8; 8] = "mmaplog\0"
+    var tk: [u8; 5] = "task\0"
+    if pfsys.streq(name, (&tk[0]) as u64) {
+        return F_TASK
+    }
     if pfsys.streq(name, (&ml[0]) as u64) {
         return F_MMAPLOG
     }
@@ -684,6 +698,72 @@ fn pidfile_of(name: u64) -> u64 {
         return F_FD
     }
     return pfreg.pid_id(name)
+}
+
+fn tid_sub(i: u64) -> u64 {
+    if i == 0 {
+        return F_STAT
+    }
+    if i == 1 {
+        return F_STATUS
+    }
+    if i == 2 {
+        return F_CMDLINE
+    }
+    if i == 3 {
+        return pfreg.PID_FIRST + 1
+    }
+    if i == 4 {
+        return pfreg.PID_FIRST + 3
+    }
+    return 0
+}
+
+fn tid_file_of(name: u64) -> u64 {
+    let f: u64 = pidfile_of(name)
+    var i: u64 = 0
+    while i < TID_FILES {
+        if tid_sub(i) == f {
+            return f
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn is_dir_art(art: u64) -> bool {
+    return art == pfbase.K_ROOT || art == K_PIDDIR || art == K_FDDIR || art == K_TASKDIR || art == K_TIDDIR
+}
+
+fn task_lookup(state: u64, path: u64, at: u64, slot: u64) -> u64 {
+    var seg: [u8; 24] = [0 as u8; 24]
+    var seg2: [u8; 24] = [0 as u8; 24]
+    var seg3: [u8; 24] = [0 as u8; 24]
+    var next: u64 = pathseg.segment(path, at, (&seg[0]) as u64, 24)
+    if kstate.get8((&seg[0]) as u64) == 0 {
+        return pfproc.node(K_TASKDIR, slot, 0)
+    }
+    let tid: u64 = pfsys.to_num((&seg[0]) as u64)
+    if tid == 0xFFFFFFFF {
+        return 0
+    }
+    let t: u64 = pfgroup.find(state, slot, tid)
+    if t >= kstate.MAX_TASKS {
+        return 0
+    }
+    next = pathseg.segment(path, next, (&seg2[0]) as u64, 24)
+    if kstate.get8((&seg2[0]) as u64) == 0 {
+        return pfproc.node(K_TIDDIR, t, 0)
+    }
+    let f: u64 = tid_file_of((&seg2[0]) as u64)
+    if f == 0 {
+        return 0
+    }
+    pathseg.segment(path, next, (&seg3[0]) as u64, 24)
+    if kstate.get8((&seg3[0]) as u64) != 0 {
+        return 0
+    }
+    return pfproc.node(K_PIDFILE, t, f)
 }
 
 fn p_lookup(state: u64, m: u64, path: u64) -> u64 {
@@ -742,6 +822,9 @@ fn p_lookup(state: u64, m: u64, path: u64) -> u64 {
     let f: u64 = pidfile_of((&seg2[0]) as u64)
     if f == 0 {
         return 0
+    }
+    if f == F_TASK {
+        return task_lookup(state, path, at, slot)
     }
     var seg3: [u8; 24] = [0 as u8; 24]
     at = pathseg.segment(path, at, (&seg3[0]) as u64, 24)
@@ -949,6 +1032,11 @@ fn global_name(state: u64, sub: u64, out: u64) {
 }
 
 fn pidfile_name(state: u64, sub: u64, out: u64) {
+    if sub == F_TASK {
+        var tk: [u8; 5] = "task\0"
+        pfsys.copy_z(out, (&tk[0]) as u64)
+        return
+    }
     if sub > F_LAST {
         pfreg.pid_name(sub, out)
         return
@@ -991,29 +1079,6 @@ fn pidfile_name(state: u64, sub: u64, out: u64) {
     kstate.set8(out + i, 0 as u8)
 }
 
-fn num_name(state: u64, v: u64, out: u64) {
-    var digits: [u8; 24] = [0 as u8; 24]
-    var n: u64 = 0
-    var x: u64 = v
-    if x == 0 {
-        kstate.set8(out, 48 as u8)
-        kstate.set8(out + 1, 0 as u8)
-        return
-    }
-    while x > 0 {
-        digits[n as usize] = ((x % 10) + 48) as u8
-        x = x / 10
-        n = n + 1
-    }
-    var k: u64 = 0
-    while n > 0 {
-        n = n - 1
-        kstate.set8(out + k, digits[n as usize])
-        k = k + 1
-    }
-    kstate.set8(out + k, 0 as u8)
-}
-
 fn p_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
     pfproc.tick(state)
     let art: u64 = pfproc.n_art(dir)
@@ -1041,9 +1106,9 @@ fn p_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
         var t: u64 = 0
         let n: u64 = kstate.get(state, kstate.TASKS)
         while t < n {
-            if pfproc.alive(state, t) {
+            if pfgroup.listed(state, t) {
                 if seen == i - G_END {
-                    num_name(state, taskslot.tget(state, t, taskconst.T_PID), out)
+                    pfnum.num_name(state, taskslot.tget(state, t, taskconst.T_PID), out)
                     return pfproc.node(K_PIDDIR, t, 0)
                 }
                 seen = seen + 1
@@ -1058,9 +1123,28 @@ fn p_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
             if i + 1 == F_FD {
                 return pfproc.node(K_FDDIR, slot, 0)
             }
+            if i + 1 == F_TASK {
+                return pfproc.node(K_TASKDIR, slot, 0)
+            }
             return pfproc.node(K_PIDFILE, slot, i + 1)
         }
         return 0
+    }
+    if art == K_TASKDIR {
+        let t: u64 = pfgroup.nth(state, slot, i)
+        if t >= kstate.MAX_TASKS {
+            return 0
+        }
+        pfnum.num_name(state, taskslot.tget(state, t, taskconst.T_PID), out)
+        return pfproc.node(K_TIDDIR, t, 0)
+    }
+    if art == K_TIDDIR {
+        let sub: u64 = tid_sub(i)
+        if sub == 0 {
+            return 0
+        }
+        pidfile_name(state, sub, out)
+        return pfproc.node(K_PIDFILE, slot, sub)
     }
     if art == K_SYS {
         let c: u64 = pfsysreg.nth(pfsysreg.id_of(dir), i)
@@ -1076,7 +1160,7 @@ fn p_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
         while fd < file.MAX_FD {
             if file.fd_of(state, slot, fd) < file.MAX_OPEN {
                 if seen == i {
-                    num_name(state, fd, out)
+                    pfnum.num_name(state, fd, out)
                     return pfproc.node(K_FDFILE, slot, fd)
                 }
                 seen = seen + 1
@@ -1095,7 +1179,7 @@ fn p_attr(state: u64, m: u64, n: u64, what: u64) -> u64 {
         return sfs_attr(state, n, what)
     }
     if what == vfsops.A_TYPE {
-        if art == pfbase.K_ROOT || art == K_PIDDIR || art == K_FDDIR {
+        if is_dir_art(art) {
             return vfsops.N_DIR
         }
         if art == K_SYS {
@@ -1113,7 +1197,7 @@ fn p_attr(state: u64, m: u64, n: u64, what: u64) -> u64 {
         return vfsops.N_NONE
     }
     if what == vfsops.A_SIZE {
-        if art == pfbase.K_ROOT || art == K_PIDDIR || art == K_FDDIR || (art == K_SYS && pfsysreg.is_dir(pfsysreg.id_of(n))) {
+        if is_dir_art(art) || (art == K_SYS && pfsysreg.is_dir(pfsysreg.id_of(n))) {
             return 0
         }
         if art == K_GLOBAL && pfproc.n_sub(n) == G_ACPIDUMP {
@@ -1128,7 +1212,7 @@ fn p_attr(state: u64, m: u64, n: u64, what: u64) -> u64 {
         return len
     }
     if what == vfsops.A_MODE {
-        if art == pfbase.K_ROOT || art == K_PIDDIR || art == K_FDDIR || (art == K_SYS && pfsysreg.is_dir(pfsysreg.id_of(n))) {
+        if is_dir_art(art) || (art == K_SYS && pfsysreg.is_dir(pfsysreg.id_of(n))) {
             return 365
         }
         if art == K_PIDFILE && (pfproc.n_sub(n) == F_EXE || pfproc.n_sub(n) == F_CWD) {
@@ -1291,7 +1375,7 @@ fn sfs_name(state: u64, n: u64, out: u64) {
         kstate.set8(out, 99 as u8)
         kstate.set8(out + 1, 112 as u8)
         kstate.set8(out + 2, 117 as u8)
-        num_name(state, pfproc.n_slot(n), out + 3)
+        pfnum.num_name(state, pfproc.n_slot(n), out + 3)
     } else if sub == SF_CACHE {
         pfsys.copy_z(out, (&a7[0]) as u64)
     } else if sub == SF_IDX0 {
