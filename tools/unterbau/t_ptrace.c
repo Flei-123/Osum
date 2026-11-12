@@ -341,6 +341,86 @@ static void check_poke_text_private(void)
     CHECK("poketext_visible_in_tracee", WIFEXITED(st) && WEXITSTATUS(st) == 7, "st %x", st);
 }
 
+static void body_exit5(void)
+{
+    _exit(5);
+}
+
+static void body_fork_child(void)
+{
+    pid_t c = fork();
+    if (c == 0)
+        _exit(3);
+    int st = 0;
+    waitpid(c, &st, 0);
+    _exit(WIFEXITED(st) && WEXITSTATUS(st) == 3 ? 8 : 9);
+}
+
+static void check_event_exit(void)
+{
+    int st = 0;
+    pid_t pid = spawn_traced(body_exit5);
+    waitpid(pid, &st, 0);
+    CHECKC("exit_setoptions", ptrace(PTRACE_SETOPTIONS, pid, 0, (void *)PTRACE_O_TRACEEXIT) == 0);
+    ptrace(PTRACE_CONT, pid, 0, 0);
+    waitpid(pid, &st, 0);
+    CHECK("exit_event_reported", WIFSTOPPED(st) && (st >> 16) == PTRACE_EVENT_EXIT, "st %x", st);
+    unsigned long msg = 0;
+    CHECKC("exit_geteventmsg", ptrace(PTRACE_GETEVENTMSG, pid, 0, &msg) == 0);
+    CHECK("exit_eventmsg_status", (msg >> 8) == 5, "msg %lx", msg);
+    ptrace(PTRACE_CONT, pid, 0, 0);
+    waitpid(pid, &st, 0);
+    CHECK("exit_after_event", WIFEXITED(st) && WEXITSTATUS(st) == 5, "st %x", st);
+}
+
+static void check_event_fork(void)
+{
+    int st = 0;
+    pid_t pid = spawn_traced(body_fork_child);
+    waitpid(pid, &st, 0);
+    CHECKC("fork_setoptions", ptrace(PTRACE_SETOPTIONS, pid, 0, (void *)PTRACE_O_TRACEFORK) == 0);
+    ptrace(PTRACE_CONT, pid, 0, 0);
+    waitpid(pid, &st, 0);
+    CHECK("fork_event_reported", WIFSTOPPED(st) && (st >> 16) == PTRACE_EVENT_FORK, "st %x", st);
+    unsigned long child = 0;
+    CHECKC("fork_geteventmsg", ptrace(PTRACE_GETEVENTMSG, pid, 0, &child) == 0 && child > 0);
+    pid_t got = waitpid((pid_t)child, &st, __WALL);
+    CHECK("fork_child_autoattached", got == (pid_t)child && WIFSTOPPED(st) && WSTOPSIG(st) == SIGSTOP, "got %d st %x", (int)got, st);
+    ptrace(PTRACE_CONT, (pid_t)child, 0, 0);
+    ptrace(PTRACE_CONT, pid, 0, 0);
+    waitpid((pid_t)child, &st, __WALL);
+    CHECK("fork_child_exit", WIFEXITED(st) && WEXITSTATUS(st) == 3, "st %x", st);
+    waitpid(pid, &st, 0);
+    while (WIFSTOPPED(st)) {
+        ptrace(PTRACE_CONT, pid, 0, (void *)(long)(WSTOPSIG(st) == SIGCHLD ? SIGCHLD : 0));
+        waitpid(pid, &st, 0);
+    }
+    CHECK("fork_parent_exit", WIFEXITED(st) && WEXITSTATUS(st) == 8, "st %x", st);
+}
+
+static void check_process_vm(void)
+{
+    int st = 0;
+    shared_word = 0x1234;
+    pid_t pid = spawn_traced(body_getpid);
+    waitpid(pid, &st, 0);
+    long got = 0;
+    struct iovec local = { &got, sizeof got };
+    struct iovec remote = { (void *)&shared_word, sizeof got };
+    long n = syscall(SYS_process_vm_readv, pid, &local, 1, &remote, 1, 0);
+    CHECK("vm_readv", n == (long)sizeof got && got == 0x1234, "n %ld got %lx", n, got);
+    long put = 0x5678;
+    struct iovec lw = { &put, sizeof put };
+    n = syscall(SYS_process_vm_writev, pid, &lw, 1, &remote, 1, 0);
+    long back = 0;
+    struct iovec lb = { &back, sizeof back };
+    long m = syscall(SYS_process_vm_readv, pid, &lb, 1, &remote, 1, 0);
+    CHECK("vm_writev", n == (long)sizeof put && m == (long)sizeof back && back == 0x5678, "n %ld m %ld back %lx", n, m, back);
+    CHECK("vm_writev_private", shared_word == 0x1234, "tracer saw %lx", shared_word);
+    ptrace(PTRACE_KILL, pid, 0, 0);
+    waitpid(pid, &st, 0);
+}
+
 int main(void)
 {
     alarm(60);
@@ -357,5 +437,8 @@ int main(void)
     check_interrupt();
     check_exit_report_nonparent();
     check_poke_text_private();
+    check_event_exit();
+    check_event_fork();
+    check_process_vm();
     return 0;
 }
