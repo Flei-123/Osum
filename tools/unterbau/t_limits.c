@@ -6,6 +6,8 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <sys/wait.h>
 
 static void *sleeper(void *a) { (void)a; sleep(2); return 0; }
@@ -34,6 +36,22 @@ int main(void)
     for (int i = 0; i < p; i++) { kill(pids[i], SIGKILL); }
     for (int i = 0; i < p; i++) waitpid(pids[i], 0, 0);
     t_emit("processes_at_once", p >= 16 ? "PASS" : "FAIL", "%d processes alive at once; a browser wants >= 16", p);
+
+    /* shared mappings alive at once (Firefox maps a shared segment per IPC buffer) */
+    {
+        enum { SHARED_WANT = 300 };
+        void *maps[SHARED_WANT]; int made = 0, me = 0;
+        int mfd = (int)syscall(SYS_memfd_create, "limits", 0);
+        if (mfd >= 0 && ftruncate(mfd, 4096) == 0) {
+            for (; made < SHARED_WANT; made++) {
+                maps[made] = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, 0);
+                if (maps[made] == MAP_FAILED) { me = errno; break; }
+            }
+        }
+        for (int i = 0; i < made; i++) munmap(maps[i], 4096);
+        if (mfd >= 0) close(mfd);
+        t_emit("shared_maps_at_once", made >= 256 ? "PASS" : "FAIL", "%d shared mappings alive at once (errno %d); a browser wants >= 256", made, me);
+    }
 
     /* committed memory */
     size_t got = 0; void *chunks[600]; int c = 0;
