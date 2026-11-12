@@ -68,7 +68,8 @@ def cmd_gate(args):
 
 def cmd_red(args):
     for r in read_tsv_rows(args.tsv):
-        if r[5] in ("red", "fail", "nodata"):
+        gated = r[4] not in ("", "-")
+        if r[5] == "red" or (gated and r[5] in ("fail", "nodata")):
             print(r[0])
 
 
