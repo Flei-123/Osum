@@ -3,6 +3,7 @@
 devstones_spec() { # devstones_spec <stonesdir>: image spec words for make, tcc (+ musl headers/crt) and the git https helpers
     local S=$1 out="" d f rel
     [ -r "$S/make" ] && out="$out /bin/make=$S/make"
+    [ -r "$S/strace" ] && out="$out /bin/strace=$S/strace"
     if [ -r "$S/gitexec/git-remote-http" ]; then
         out="$out /libexec/ /libexec/git-core/ /libexec/git-core/git-remote-http=$S/gitexec/git-remote-http"
         out="$out /libexec/git-core/git-remote-https@/libexec/git-core/git-remote-http"

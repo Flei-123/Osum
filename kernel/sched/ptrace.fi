@@ -5,9 +5,10 @@ import sched.ptstate
 import sched.taskconst
 import sched.taskslot
 import libc.regio
+import lib.kstate
 
 export {
-    note_frame, syscall_enter, syscall_exit, signal_stop, apply_step_flag, stops_enter, stops_exit,
+    adopt_child, child_start, exit_event, note_frame, syscall_enter, syscall_exit, signal_stop, apply_step_flag, stops_enter, stops_exit,
     LAYOUT_SYSCALL, LAYOUT_TRAP, OPT_SYSGOOD, OPT_TRACEEXEC, SIGTRAP_NUM, ORIG_NONE, ENOSYS_RESULT
 }
 
@@ -24,6 +25,26 @@ const FAULT_CODE_END: u64 = 160
 
 const OPT_SYSGOOD: u64 = 1
 const OPT_TRACEEXEC: u64 = 16
+const OPT_TRACEFORK: u64 = 2
+const OPT_TRACEVFORK: u64 = 4
+const OPT_TRACECLONE: u64 = 8
+const OPT_TRACEEXIT: u64 = 64
+const EVENT_FORK: u64 = 1
+const EVENT_VFORK: u64 = 2
+const EVENT_CLONE: u64 = 3
+const EVENT_EXIT: u64 = 6
+const SYS_CLONE: u64 = 56
+const SYS_FORK: u64 = 57
+const SYS_VFORK: u64 = 58
+const CLONE_VFORK: u64 = 0x4000
+const CLONE_THREAD: u64 = 0x10000
+const SIGCHLD_NUM: u64 = 17
+const SIGSTOP_NUM: u64 = 19
+const SIGTTOU_NUM: u64 = 22
+const OFF_RAX: u64 = 96
+const OFF_RDI: u64 = 88
+const CTX_BYTES: u64 = 128
+const EXIT_STATUS_SHIFT: u64 = 8
 
 const LAYOUT_SYSCALL: u64 = 0
 const LAYOUT_TRAP: u64 = 1
@@ -112,6 +133,7 @@ fn exec_code(task: u64) -> u64 {
 
 fn syscall_exit(state: u64, task: u64, frame: u64, number: u64, result: u64) {
     note_frame(task, frame, LAYOUT_SYSCALL)
+    report_pending_event(state, task)
     if number == SYS_EXECVE && result == 0 {
         let code: u64 = exec_code(task)
         if code != 0 {
@@ -146,4 +168,88 @@ fn drop_fault_code(state: u64, task: u64, inject: u64, sig: u64) {
     if inject != sig && kc >= FAULT_CODE_FIRST && kc < FAULT_CODE_END {
         taskslot.tset(state, task, taskconst.T_KILLCODE, 0)
     }
+}
+
+fn fork_event(frame: u64) -> u64 {
+    let nr: u64 = regio.read64_at(frame, OFF_RAX)
+    if nr == SYS_FORK {
+        return EVENT_FORK
+    }
+    if nr == SYS_VFORK {
+        return EVENT_VFORK
+    }
+    if nr != SYS_CLONE {
+        return 0
+    }
+    let flags: u64 = regio.read64_at(frame, OFF_RDI)
+    if (flags & CLONE_VFORK) != 0 {
+        return EVENT_VFORK
+    }
+    if (flags & 255) == SIGCHLD_NUM && (flags & CLONE_THREAD) == 0 {
+        return EVENT_FORK
+    }
+    return EVENT_CLONE
+}
+
+fn event_option(event: u64) -> u64 {
+    if event == EVENT_FORK {
+        return OPT_TRACEFORK
+    }
+    if event == EVENT_VFORK {
+        return OPT_TRACEVFORK
+    }
+    return OPT_TRACECLONE
+}
+
+fn adopt_child(state: u64, parent: u64, child: u64, frame: u64) {
+    if !ptstate.traced(parent) {
+        return
+    }
+    let event: u64 = fork_event(frame)
+    let opts: u64 = ptstate.get(parent, ptstate.F_OPTS)
+    if event == 0 || (opts & event_option(event)) == 0 {
+        return
+    }
+    ptstate.set(child, ptstate.F_TRACER, ptstate.get(parent, ptstate.F_TRACER))
+    ptstate.set(child, ptstate.F_OPTS, opts)
+    ptstate.set(child, ptstate.F_SEIZED, ptstate.get(parent, ptstate.F_SEIZED))
+    ptstate.set(child, ptstate.F_MODE, 0)
+    ptstate.set(child, ptstate.F_INITSTOP, 1)
+    ptstate.set(parent, ptstate.F_PENDEV, event)
+    ptstate.set(parent, ptstate.F_EVENT, taskslot.tget(state, child, taskconst.T_PID))
+}
+
+fn child_start(state: u64, task: u64) {
+    if ptstate.get(task, ptstate.F_INITSTOP) == 0 {
+        return
+    }
+    ptstate.set(task, ptstate.F_INITSTOP, 0)
+    if !ptstate.traced(task) {
+        return
+    }
+    note_frame(task, state + kstate.CTX_OFF + task * CTX_BYTES, LAYOUT_SYSCALL)
+    ptstate.set(task, ptstate.F_ORIG, ORIG_NONE)
+    var code: u64 = SIGSTOP_NUM
+    if ptstate.get(task, ptstate.F_SEIZED) != 0 {
+        code = SIGTRAP_NUM | (EVENT_STOP << EVENT_SHIFT)
+    }
+    stop(state, task, code, ptstate.KIND_SIGNAL)
+}
+
+fn report_pending_event(state: u64, task: u64) {
+    let event: u64 = ptstate.get(task, ptstate.F_PENDEV)
+    if event == 0 {
+        return
+    }
+    ptstate.set(task, ptstate.F_PENDEV, 0)
+    stop(state, task, SIGTRAP_NUM | (event << EVENT_SHIFT), ptstate.KIND_SIGNAL)
+}
+
+fn exit_event(state: u64, task: u64, frame: u64, code: u64) {
+    if !ptstate.traced(task) || (ptstate.get(task, ptstate.F_OPTS) & OPT_TRACEEXIT) == 0 {
+        return
+    }
+    note_frame(task, frame, LAYOUT_SYSCALL)
+    ptstate.set(task, ptstate.F_EVENT, (code & 255) << EXIT_STATUS_SHIFT)
+    stop(state, task, SIGTRAP_NUM | (EVENT_EXIT << EVENT_SHIFT), ptstate.KIND_SIGNAL)
 }

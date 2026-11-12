@@ -19,6 +19,10 @@ export {
 }
 
 const SYS_PTRACE: u64 = 101
+const SYS_PROCESS_VM_READV: u64 = 310
+const SYS_PROCESS_VM_WRITEV: u64 = 311
+const IOV_MAX: u64 = 1024
+const VM_CHUNK: u64 = 256
 
 const PT_TRACEME: u64 = 0
 const PT_PEEKTEXT: u64 = 1
@@ -83,7 +87,7 @@ fn fail(e: u64) -> u64 {
 }
 
 fn handles(number: u64) -> bool {
-    return number == SYS_PTRACE
+    return number == SYS_PTRACE || number == SYS_PROCESS_VM_READV || number == SYS_PROCESS_VM_WRITEV
 }
 
 fn greg_of(reg: u64) -> u64 {
@@ -474,8 +478,8 @@ fn stopped_request(state: u64, me: u64, tracee: u64, req: u64, addr: u64, data: 
         return set_regset(state, me, tracee, addr, data)
     }
     if req == PT_GETEVENTMSG {
-        var zero: u64 = 0
-        if !sysuser.copy_out(state, me, data, (&zero) as u64, WORD_BYTES) {
+        var message: u64 = ptstate.get(tracee, ptstate.F_EVENT)
+        if !sysuser.copy_out(state, me, data, (&message) as u64, WORD_BYTES) {
             return fail(errno.E_FAULT)
         }
         return 0
@@ -495,7 +499,86 @@ fn stopped_request(state: u64, me: u64, tracee: u64, req: u64, addr: u64, data: 
     return fail(errno.E_IO)
 }
 
-fn call(state: u64, me: u64, req: u64, pid: u64, addr: u64, data: u64) -> u64 {
+fn vm_iovec(state: u64, me: u64, table: u64, index: u64, out: u64) -> bool {
+    return sysuser.copy_in(state, me, out, table + index * IOVEC_BYTES, IOVEC_BYTES)
+}
+
+fn vm_copy(state: u64, me: u64, other: u64, write: bool, local: u64, remote: u64, len: u64) -> bool {
+    var buf: [u64; 32] = [0 as u64; 32]
+    let addr: u64 = (&buf[0]) as u64
+    if write {
+        return sysuser.copy_in(state, me, addr, local, len) && sysuser.copy_out(state, other, remote, addr, len)
+    }
+    return sysuser.copy_in(state, other, addr, remote, len) && sysuser.copy_out(state, me, local, addr, len)
+}
+
+fn vm_transfer(state: u64, me: u64, other: u64, write: bool, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    var local: [u64; 2] = [0 as u64; 2]
+    var remote: [u64; 2] = [0 as u64; 2]
+    var li: u64 = 0
+    var ri: u64 = 0
+    var lused: u64 = 0
+    var rused: u64 = 0
+    var total: u64 = 0
+    while li < a2 && ri < a4 {
+        if !vm_iovec(state, me, a1, li, (&local[0]) as u64) || !vm_iovec(state, me, a3, ri, (&remote[0]) as u64) {
+            if total != 0 {
+                return total
+            }
+            return fail(errno.E_FAULT)
+        }
+        if lused >= local[1] {
+            li = li + 1
+            lused = 0
+        } else {
+            if rused >= remote[1] {
+                ri = ri + 1
+                rused = 0
+            } else {
+                var n: u64 = local[1] - lused
+                if remote[1] - rused < n {
+                    n = remote[1] - rused
+                }
+                if n > VM_CHUNK {
+                    n = VM_CHUNK
+                }
+                if !vm_copy(state, me, other, write, local[0] + lused, remote[0] + rused, n) {
+                    if total != 0 {
+                        return total
+                    }
+                    return fail(errno.E_FAULT)
+                }
+                lused = lused + n
+                rused = rused + n
+                total = total + n
+            }
+        }
+    }
+    return total
+}
+
+fn process_vm(state: u64, me: u64, number: u64, pid: u64, a1: u64, a2: u64, a3: u64, a4: u64, flags: u64) -> u64 {
+    if flags != 0 || a2 > IOV_MAX || a4 > IOV_MAX {
+        return fail(errno.E_INVAL)
+    }
+    let other: u64 = sched.find_pid(state, pid)
+    if other >= kstate.MAX_TASKS || pid == 0 {
+        return fail(errno.E_SRCH)
+    }
+    if other != me && !sysnet.kill_allowed(state, me, pid) {
+        return fail(errno.E_PERM)
+    }
+    return vm_transfer(state, me, other, number == SYS_PROCESS_VM_WRITEV, a1, a2, a3, a4)
+}
+
+fn call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
+    if number != SYS_PTRACE {
+        return process_vm(state, me, number, a0, a1, a2, a3, a4, a5)
+    }
+    return ptrace_call(state, me, a0, a1, a2, a3)
+}
+
+fn ptrace_call(state: u64, me: u64, req: u64, pid: u64, addr: u64, data: u64) -> u64 {
     if req == PT_TRACEME {
         return trace_me(state, me)
     }
