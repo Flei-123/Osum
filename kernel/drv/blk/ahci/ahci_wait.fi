@@ -91,14 +91,15 @@ fn can_sleep(state: u64, deadline: u64) -> bool {
     return cpu.here(state) == kstate.get(state, ahci_state.sc(S_IRQ_CPU))
 }
 
-fn sleep_once(state: u64, p: u64) {
+fn sleep_if_busy(state: u64, p: u64) -> bool {
     let saved: u64 = arch.irq_save()
     if (ahci_reg.prd(state, p, ahci_defs.P_CI) & 1) == 0 {
         arch.irq_restore(saved)
-        return
+        return true
     }
     blkperf.add(blkperf.K_AHCI_SLEEPS, 1)
     arch.irq_wait()
+    return false
 }
 
 fn judge_interrupts(state: u64, sleeps0: u64, irqs0: u64) {
@@ -117,31 +118,51 @@ fn judge_interrupts(state: u64, sleeps0: u64, irqs0: u64) {
     }
 }
 
-fn error_pending(state: u64, p: u64) -> bool {
-    return ((ahci_reg.prd(state, p, ahci_defs.P_IS) | kstate.get(state, ahci_state.sc(ahci_defs.S_IRQ_ERR))) & IS_TFES) != 0
+fn error_pending(state: u64, p: u64, sleepy: bool) -> bool {
+    var pis: u64 = kstate.get(state, ahci_state.sc(ahci_defs.S_IRQ_ERR))
+    if !sleepy {
+        pis = pis | ahci_reg.prd(state, p, ahci_defs.P_IS)
+    }
+    return (pis & IS_TFES) != 0
 }
 
-fn wait_done(state: u64, p: u64, deadline: u64) -> u64 {
-    let sleepy: bool = can_sleep(state, deadline)
+fn finish_wait(state: u64, sleepy: bool, spin: u64, sleeps0: u64, irqs0: u64) -> u64 {
+    ahci_defs.wait_polls = spin + 1
+    if sleepy {
+        judge_interrupts(state, sleeps0, irqs0)
+    }
+    return ahci_defs.W_DONE
+}
+
+fn wait_sleepy(state: u64, p: u64, deadline: u64) -> u64 {
     let sleeps0: u64 = blkperf.get(blkperf.K_AHCI_SLEEPS)
     let irqs0: u64 = blkperf.get(blkperf.K_AHCI_IRQS)
     var spin: u64 = 0
     while !ahci_clock.expired(deadline, spin, ahci_defs.SPIN_LIMIT) {
-        if (ahci_reg.prd(state, p, ahci_defs.P_CI) & 1) == 0 {
-            ahci_defs.wait_polls = spin + 1
-            if sleepy {
-                judge_interrupts(state, sleeps0, irqs0)
-            }
-            return ahci_defs.W_DONE
+        if sleep_if_busy(state, p) {
+            return finish_wait(state, true, spin, sleeps0, irqs0)
         }
-        if (sleepy || (spin & ERR_CHECK_MASK) == ERR_CHECK_MASK) && error_pending(state, p) {
+        if error_pending(state, p, true) {
             return ahci_defs.W_FAULT
         }
-        if sleepy {
-            sleep_once(state, p)
-        } else {
-            atomic.pause()
+        spin = spin + 1
+    }
+    return W_TIMEOUT
+}
+
+fn wait_done(state: u64, p: u64, deadline: u64) -> u64 {
+    if can_sleep(state, deadline) {
+        return wait_sleepy(state, p, deadline)
+    }
+    var spin: u64 = 0
+    while !ahci_clock.expired(deadline, spin, ahci_defs.SPIN_LIMIT) {
+        if (ahci_reg.prd(state, p, ahci_defs.P_CI) & 1) == 0 {
+            return finish_wait(state, false, spin, 0, 0)
         }
+        if (spin & ERR_CHECK_MASK) == ERR_CHECK_MASK && error_pending(state, p, false) {
+            return ahci_defs.W_FAULT
+        }
+        atomic.pause()
         spin = spin + 1
     }
     return W_TIMEOUT

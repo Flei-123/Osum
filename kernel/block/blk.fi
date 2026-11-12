@@ -986,6 +986,21 @@ fn way_cell(state: u64, way: u64, off: u64) -> *mut u64 {
     return (cg(state, C_XDATA) + XWAYS * kstate.BLKC_SECTORS * BLOCK_SIZE + (way - INLINE_WAYS) * C_STRIDE + off) as *mut u64
 }
 
+fn cell_at(state: u64, xbase: u64, way: u64, off: u64) -> *mut u64 {
+    if way < INLINE_WAYS {
+        return (state + kstate.BLKC_OFF + way * C_STRIDE + off) as *mut u64
+    }
+    return (xbase + XWAYS * kstate.BLKC_SECTORS * BLOCK_SIZE + (way - INLINE_WAYS) * C_STRIDE + off) as *mut u64
+}
+
+fn wgx(state: u64, xbase: u64, way: u64, off: u64) -> u64 {
+    return __mmio_read64(cell_at(state, xbase, way, off))
+}
+
+fn wsx(state: u64, xbase: u64, way: u64, off: u64, v: u64) {
+    __mmio_write64(cell_at(state, xbase, way, off), v)
+}
+
 fn wg(state: u64, way: u64, off: u64) -> u64 {
     return __mmio_read64(way_cell(state, way, off))
 }
@@ -1108,9 +1123,11 @@ fn cache_grow(state: u64) {
 
 fn cache_invalidate(state: u64) {
     cs(state, S_VALID, 0)
+    let total: u64 = ways(state)
+    let xb: u64 = cg(state, C_XDATA)
     var w: u64 = 0
-    while w < ways(state) {
-        ws(state, w, C_VALID, 0)
+    while w < total {
+        wsx(state, xb, w, C_VALID, 0)
         w = w + 1
     }
 }
@@ -1124,12 +1141,14 @@ fn cache_invalidate(state: u64) {
 // created file instead of ~50).
 fn cache_drop(state: u64, dev: u64, lba: u64) {
     cs(state, S_VALID, 0)
+    let total: u64 = ways(state)
+    let xb: u64 = cg(state, C_XDATA)
     var w: u64 = 0
-    while w < ways(state) {
-        if wg(state, w, C_VALID) != 0 {
-            let c0: u64 = wg(state, w, C_LBA)
-            if wg(state, w, C_DEV) != dev || (lba >= c0 && lba < c0 + wg(state, w, C_N)) {
-                ws(state, w, C_VALID, 0)
+    while w < total {
+        if wgx(state, xb, w, C_VALID) != 0 {
+            let c0: u64 = wgx(state, xb, w, C_LBA)
+            if wgx(state, xb, w, C_DEV) != dev || (lba >= c0 && lba < c0 + wgx(state, xb, w, C_N)) {
+                wsx(state, xb, w, C_VALID, 0)
             }
         }
         w = w + 1
@@ -1145,13 +1164,15 @@ fn cache_put(state: u64, dev: u64, lba: u64, src: u64) {
             cs(state, S_VALID, 0)
         }
     }
+    let total: u64 = ways(state)
+    let xb: u64 = cg(state, C_XDATA)
     var w: u64 = 0
-    while w < ways(state) {
-        if wg(state, w, C_VALID) != 0 {
-            let c0: u64 = wg(state, w, C_LBA)
-            if wg(state, w, C_DEV) != dev {
-                ws(state, w, C_VALID, 0)
-            } else if lba >= c0 && lba < c0 + wg(state, w, C_N) {
+    while w < total {
+        if wgx(state, xb, w, C_VALID) != 0 {
+            let c0: u64 = wgx(state, xb, w, C_LBA)
+            if wgx(state, xb, w, C_DEV) != dev {
+                wsx(state, xb, w, C_VALID, 0)
+            } else if lba >= c0 && lba < c0 + wgx(state, xb, w, C_N) {
                 copy(src, gone_data(state, w) + (lba - c0) * BLOCK_SIZE)
             }
         }
@@ -1487,12 +1508,12 @@ const HINT_SHIFT: u64 = 3
 const HINT_MASK: u64 = 255
 static mut way_hint: [u64; 256] = [0 as u64; 256]
 
-fn way_holds(state: u64, w: u64, dev: u64, lba: u64) -> bool {
-    if wg(state, w, C_VALID) == 0 || wg(state, w, C_DEV) != dev {
+fn way_holds(state: u64, xb: u64, w: u64, dev: u64, lba: u64) -> bool {
+    if wgx(state, xb, w, C_VALID) == 0 || wgx(state, xb, w, C_DEV) != dev {
         return false
     }
-    let c0: u64 = wg(state, w, C_LBA)
-    return lba >= c0 && lba < c0 + wg(state, w, C_N)
+    let c0: u64 = wgx(state, xb, w, C_LBA)
+    return lba >= c0 && lba < c0 + wgx(state, xb, w, C_N)
 }
 
 fn cache_serve(state: u64, w: u64, lba: u64, dst: u64) {
@@ -1513,13 +1534,15 @@ fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool 
         }
     }
     let hinted: u64 = way_hint[((lba >> HINT_SHIFT) & HINT_MASK) as usize]
-    if hinted < ways(state) && way_holds(state, hinted, dev, lba) {
+    if hinted < ways(state) && way_holds(state, cg(state, C_XDATA), hinted, dev, lba) {
         cache_serve(state, hinted, lba, dst)
         return true
     }
+    let total: u64 = ways(state)
+    let xb: u64 = cg(state, C_XDATA)
     var w: u64 = 0
-    while w < ways(state) {
-        if way_holds(state, w, dev, lba) {
+    while w < total {
+        if way_holds(state, xb, w, dev, lba) {
             way_hint[((lba >> HINT_SHIFT) & HINT_MASK) as usize] = w
             cache_serve(state, w, lba, dst)
             return true

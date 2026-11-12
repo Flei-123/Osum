@@ -13,4 +13,5 @@ while [ $n -le ${FX_RUNS:-3} ]; do
     n=$((n+1))
 done
 cat /proc/vfscache | head -40
+grep -a "blk" /proc/bench
 echo FX-END
