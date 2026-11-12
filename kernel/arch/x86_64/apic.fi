@@ -4,6 +4,7 @@ import serial
 import lib.kstate
 import bus.pci
 import libc.regio
+import arch.x86_64.pdmirror
 
 export {
     present, init, active, hz, id,
@@ -102,9 +103,10 @@ fn kernel_pd(state: u64) -> u64 {
     return __mmio_read64(pdpt as *mut u64) & ADDR_MASK
 }
 
-fn window_install(pd: u64, i: u64, block: u64) {
-    __mmio_write64((pd + (WIN_FIRST + i) * 8) as *mut u64,
-        block | PAGE_PRESENT | PAGE_WRITE | PAGE_PCD | PAGE_PWT | PAGE_HUGE)
+fn window_install(state: u64, pd: u64, i: u64, block: u64) {
+    let entry: u64 = block | PAGE_PRESENT | PAGE_WRITE | PAGE_PCD | PAGE_PWT | PAGE_HUGE
+    __mmio_write64((pd + (WIN_FIRST + i) * 8) as *mut u64, entry)
+    pdmirror.mirror(state, WIN_FIRST + i, entry)
     let c: u64 = asm("mov rax, cr3", out("rax"))
     asm("mov cr3, rax", in("rax") c)
 }
@@ -126,7 +128,7 @@ fn map_device(state: u64, phys: u64) -> u64 {
     i = 0
     while i < WIN_SLOTS {
         if kstate.get(state, pci.K2_SCALARS + S_WIN + i * 8) == 0 {
-            window_install(pd, i, block)
+            window_install(state, pd, i, block)
             kstate.set(state, pci.K2_SCALARS + S_WIN + i * 8, block + 1)
             return WIN_VIRT + i * HUGE_SIZE + inner
         }
@@ -167,7 +169,7 @@ fn map_range(state: u64, phys: u64, size: u64) -> u64 {
             while j < count {
                 let at: u64 = pci.K2_SCALARS + S_WIN + (start + j) * 8
                 if kstate.get(state, at) == 0 {
-                    window_install(pd, start + j, first + j * HUGE_SIZE)
+                    window_install(state, pd, start + j, first + j * HUGE_SIZE)
                     kstate.set(state, at, first + j * HUGE_SIZE + 1)
                 }
                 j = j + 1
@@ -188,7 +190,7 @@ fn window_claim(state: u64, phys: u64) -> u64 {
     var i: u64 = 0
     while i < WIN_SLOTS {
         if kstate.get(state, pci.K2_SCALARS + S_WIN + i * 8) == 0 {
-            window_install(pd, i, block)
+            window_install(state, pd, i, block)
             kstate.set(state, pci.K2_SCALARS + S_WIN + i * 8, WIN_CLAIMED)
             return WIN_VIRT + i * HUGE_SIZE
         }
@@ -209,7 +211,7 @@ fn window_point(state: u64, virt: u64, phys: u64) -> u64 {
     if pd == 0 {
         return 0
     }
-    window_install(pd, i, phys & (~(HUGE_SIZE - 1)))
+    window_install(state, pd, i, phys & (~(HUGE_SIZE - 1)))
     return 1
 }
 

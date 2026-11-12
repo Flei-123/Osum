@@ -1,0 +1,145 @@
+import lib.kstate
+import arch.arch
+import mm.mmboot
+import mm.mmframe
+import sched.taskconst
+import sched.taskslot
+import sched.proc.procbase
+
+export {
+    LOW_BASE, LOW_END, SHADOW_DELTA, FIRST_SLOT, LAST_SLOT, MIRROR_FIRST, PD_ENTRIES,
+    available, contains, aliased, shadow, attach, free, link_pt, relink, fork_link
+}
+
+const LOW_BASE: u64 = 0x400000
+const LOW_END: u64 = 0x1000000
+const SHADOW_DELTA: u64 = 0x40000000
+const FIRST_SLOT: u64 = 2
+const LAST_SLOT: u64 = 7
+const MIRROR_FIRST: u64 = 496
+const PD_ENTRIES: u64 = 512
+
+fn read_entry(table: u64, i: u64) -> u64 {
+    return __mmio_read64((table + i * 8) as *mut u64)
+}
+
+fn write_entry(table: u64, i: u64, v: u64) {
+    __mmio_write64((table + i * 8) as *mut u64, v)
+}
+
+fn available() -> bool {
+    return mmboot.kernel_start() >= LOW_END
+}
+
+fn contains(addr: u64) -> bool {
+    return addr >= LOW_BASE && addr < LOW_END
+}
+
+fn aliased(addr: u64) -> bool {
+    return contains(addr) && available()
+}
+
+fn shadow(addr: u64) -> u64 {
+    if contains(addr) {
+        return addr + SHADOW_DELTA
+    }
+    return addr
+}
+
+fn copy_range(src: u64, dst: u64, first: u64, count: u64) {
+    var k: u64 = first
+    while k < first + count {
+        write_entry(dst, k, read_entry(src, k))
+        k = k + 1
+    }
+}
+
+fn kernel_pd(state: u64) -> u64 {
+    let kpml4: u64 = kstate.get(state, kstate.KPML4)
+    let kpdpt: u64 = read_entry(kpml4, 0) & procbase.ADDR_MASK
+    let e: u64 = read_entry(kpdpt, 0)
+    if (e & procbase.PAGE_PRESENT) == 0 || (e & procbase.PAGE_HUGE) != 0 {
+        return 0
+    }
+    return e & procbase.ADDR_MASK
+}
+
+fn attach(state: u64, i: u64) -> bool {
+    if taskslot.tget(state, i, taskconst.T_LOWPD) != 0 {
+        return true
+    }
+    if !available() {
+        return false
+    }
+    let pdpt: u64 = taskslot.tget(state, i, taskconst.T_PDPT)
+    let kpd: u64 = kernel_pd(state)
+    if pdpt == 0 || kpd == 0 {
+        return false
+    }
+    let low: u64 = mmframe.frame_alloc(state)
+    if low == 0 {
+        return false
+    }
+    copy_range(kpd, low, 0, PD_ENTRIES)
+    var k: u64 = FIRST_SLOT
+    while k <= LAST_SLOT {
+        write_entry(low, k, 0)
+        k = k + 1
+    }
+    taskslot.tset(state, i, taskconst.T_LOWPD, low)
+    copy_range(kpd, low, MIRROR_FIRST, PD_ENTRIES - MIRROR_FIRST)
+    let old: u64 = read_entry(pdpt, 0)
+    write_entry(pdpt, 0, low | (old & 0xFFF) | procbase.PAGE_USER)
+    let cr3: u64 = asm("mov rax, cr3", out("rax"))
+    if (cr3 & procbase.ADDR_MASK) == taskslot.tget(state, i, taskconst.T_CR3) {
+        asm("mov cr3, rax", in("rax") cr3, clobber("memory"))
+    }
+    return true
+}
+
+fn free(state: u64, i: u64) -> u64 {
+    let low: u64 = taskslot.tget(state, i, taskconst.T_LOWPD)
+    if low == 0 {
+        return 0
+    }
+    taskslot.tset(state, i, taskconst.T_LOWPD, 0)
+    mmframe.frame_free(state, low)
+    return 1
+}
+
+fn link_pt(state: u64, i: u64, slot: u64, pt: u64) {
+    let low: u64 = taskslot.tget(state, i, taskconst.T_LOWPD)
+    if low == 0 || slot < FIRST_SLOT || slot > LAST_SLOT {
+        return
+    }
+    var e: u64 = 0
+    if pt != 0 {
+        e = pt | procbase.PAGE_PRESENT | procbase.PAGE_WRITE | procbase.PAGE_USER
+    }
+    write_entry(low, slot, e)
+}
+
+fn relink(state: u64, i: u64) {
+    let pd: u64 = taskslot.tget(state, i, taskconst.T_PD)
+    var k: u64 = FIRST_SLOT
+    while k <= LAST_SLOT {
+        var pt: u64 = 0
+        let e: u64 = read_entry(pd, k)
+        if (e & procbase.PAGE_PRESENT) != 0 && (e & procbase.PAGE_HUGE) == 0 {
+            pt = e & procbase.ADDR_MASK
+        }
+        link_pt(state, i, k, pt)
+        k = k + 1
+    }
+}
+
+fn fork_link(state: u64, parent: u64, child: u64) -> bool {
+    if taskslot.tget(state, parent, taskconst.T_LOWPD) == 0 {
+        return true
+    }
+    if !attach(state, child) {
+        return false
+    }
+    relink(state, child)
+    return true
+}

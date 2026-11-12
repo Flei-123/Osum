@@ -8,6 +8,7 @@ import sched.taskconst
 import sched.taskslot
 import arch.x86_64.user
 import sched.proc.procbase
+import sched.proc.proclow
 
 const STACK_PAGES: u64 = 8
 
@@ -323,6 +324,9 @@ fn inherit(state: u64, parent: u64, child: u64) -> bool {
 }
 
 fn pt_slot(addr: u64) -> u64 {
+    if proclow.aliased(addr) {
+        return ((proclow.shadow(addr) - procbase.USER_DATA) >> 12) & 511
+    }
     if addr < procbase.USER_DATA {
         return 512
     }
@@ -333,6 +337,9 @@ fn pt_slot(addr: u64) -> u64 {
 }
 
 fn pd_slot(addr: u64) -> u64 {
+    if proclow.aliased(addr) {
+        return (proclow.shadow(addr) - procbase.USER_DATA) >> 21
+    }
     if addr < procbase.USER_DATA {
         return procbase.PRIV_SLOTS
     }
@@ -342,7 +349,33 @@ fn pd_slot(addr: u64) -> u64 {
     return (addr - procbase.USER_DATA) >> 21
 }
 
+fn low_pt_for(state: u64, i: u64, addr: u64, allocate: bool) -> u64 {
+    if taskslot.tget(state, i, taskconst.T_LOWPD) == 0 {
+        return 0
+    }
+    let k: u64 = pd_slot(addr)
+    let pd: u64 = taskslot.tget(state, i, taskconst.T_PD)
+    let e: u64 = read_entry(pd, k)
+    if (e & procbase.PAGE_PRESENT) != 0 {
+        return e & procbase.ADDR_MASK
+    }
+    if !allocate {
+        return 0
+    }
+    let f: u64 = mmframe.frame_alloc(state)
+    if f == 0 {
+        return 0
+    }
+    zero_frame(f)
+    write_entry(pd, k, f | procbase.PAGE_PRESENT | procbase.PAGE_WRITE | procbase.PAGE_USER)
+    proclow.link_pt(state, i, k, f)
+    return f
+}
+
 fn pt_for(state: u64, i: u64, addr: u64, allocate: bool) -> u64 {
+    if proclow.aliased(addr) {
+        return low_pt_for(state, i, addr, allocate)
+    }
     let k: u64 = pd_slot(addr)
     if k >= procbase.PRIV_SLOTS {
         return 0
