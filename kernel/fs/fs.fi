@@ -1978,8 +1978,27 @@ fn entry_at(state: u64, dir: u64, index: u64, out: u64, cap: u64) -> u64 {
     return got
 }
 
-fn dir_in_one_block(state: u64, dir: u64) -> bool {
-    return dir_entries(state, dir) * dirent_size(state) <= BS
+static mut added_slot: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn entry_block(state: u64, slot: u64) -> u64 {
+    let de: u64 = dirent_size(state)
+    let first: u64 = slot * de / BS
+    if (slot + 1) * de - 1 >= (first + 1) * BS {
+        return NO_SLOT
+    }
+    return first
+}
+
+fn rename_needs_barrier(state: u64, odir: u64, ndir: u64, oldname: u64) -> bool {
+    if odir != ndir {
+        return true
+    }
+    let old_slot: u64 = dir_slot_of(state, odir, oldname)
+    if old_slot == NO_SLOT || added_slot == NO_SLOT {
+        return true
+    }
+    let a: u64 = entry_block(state, old_slot)
+    return a == NO_SLOT || a != entry_block(state, added_slot)
 }
 
 fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
@@ -2025,6 +2044,7 @@ fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
         dirindex.touch(state, dir)
         return false
     }
+    added_slot = slot
     dirindex.note_add(state, dir, dirindex.name_hash(name, nl), slot)
     if inode_type(state, ino) == T_FILE {
         dcache.forget_name(state, name)
@@ -2572,7 +2592,7 @@ fn rename_path_run(state: u64, from: u64, to: u64) -> u64 {
         leave(state, flags)
         return 28 // ENOSPC
     }
-    if odir != ndir || !dir_in_one_block(state, odir) {
+    if rename_needs_barrier(state, odir, ndir, oldname) {
         wbscope.barrier(state)
     }
     if dir_remove(state, odir, oldname) == 0 {
