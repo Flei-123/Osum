@@ -1,0 +1,243 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import net.inet
+import net.tcp
+import fs.procfs.pfnetdev
+import fs.procfs.pfproc
+import fs.procfs.pfwrite
+
+export { make_tcp, make_udp, make_arp, make_route }
+
+const ST_ESTABLISHED: u64 = 0x01
+const ST_SYN_SENT: u64 = 0x02
+const ST_SYN_RECV: u64 = 0x03
+const ST_FIN_WAIT1: u64 = 0x04
+const ST_FIN_WAIT2: u64 = 0x05
+const ST_TIME_WAIT: u64 = 0x06
+const ST_CLOSE: u64 = 0x07
+const ST_CLOSE_WAIT: u64 = 0x08
+const ST_LAST_ACK: u64 = 0x09
+const ST_LISTEN: u64 = 0x0A
+const ST_CLOSING: u64 = 0x0B
+
+const TAB_MARK: u64 = 124
+const RTF_UP: u64 = 1
+const RTF_GATEWAY: u64 = 2
+const ARP_IP_COLUMN: u64 = 16
+const ARP_HEX_COLUMN: u64 = 12
+const TCP_SLOT_COLUMN: u64 = 4
+const UDP_SLOT_COLUMN: u64 = 5
+const NO_HANDLE: u64 = 0xFFFFFFFF
+
+fn bswap32(a: u64) -> u64 {
+    return ((a & 0xFF) << 24) | ((a & 0xFF00) << 8) | ((a >> 8) & 0xFF00) | ((a >> 24) & 0xFF)
+}
+
+fn pad_to(state: u64, at: u64, start: u64, width: u64) -> u64 {
+    if at - start >= width {
+        return at
+    }
+    return pfwrite.w_spaces(state, at, width - (at - start))
+}
+
+fn linux_state(s: u64) -> u64 {
+    if s == tcp.S_ESTABLISHED as u64 {
+        return ST_ESTABLISHED
+    }
+    if s == tcp.S_LISTEN as u64 {
+        return ST_LISTEN
+    }
+    if s == tcp.S_SYN_SENT as u64 {
+        return ST_SYN_SENT
+    }
+    if s == tcp.S_SYN_RECEIVED as u64 {
+        return ST_SYN_RECV
+    }
+    if s == tcp.S_FIN_WAIT_1 as u64 {
+        return ST_FIN_WAIT1
+    }
+    if s == tcp.S_FIN_WAIT_2 as u64 {
+        return ST_FIN_WAIT2
+    }
+    if s == tcp.S_CLOSE_WAIT as u64 {
+        return ST_CLOSE_WAIT
+    }
+    if s == tcp.S_CLOSING as u64 {
+        return ST_CLOSING
+    }
+    if s == tcp.S_LAST_ACK as u64 {
+        return ST_LAST_ACK
+    }
+    if s == tcp.S_TIME_WAIT as u64 {
+        return ST_TIME_WAIT
+    }
+    return ST_CLOSE
+}
+
+fn w_endpoint(state: u64, at: u64, addr: u64, port: u64) -> u64 {
+    var p: u64 = pfwrite.w_hex_upper(state, at, bswap32(addr), 8)
+    p = pfproc.w_ch(state, p, 58)
+    return pfwrite.w_hex_upper(state, p, port, 4)
+}
+
+fn w_socket_row(state: u64, at: u64, row: u64, i: u64, st: u64, slot_column: u64) -> u64 {
+    var laddr: u64 = 0
+    var lport: u64 = 0
+    var raddr: u64 = 0
+    var rport: u64 = 0
+    var common: [u8; 39] = " 00:00000000 00000000     0        0 0\0"
+    inet.sock_local(state, i, &laddr, &lport)
+    inet.sock_peer(state, i, &raddr, &rport)
+    var p: u64 = pfwrite.w_pad_num(state, at, row, slot_column)
+    p = pfproc.w_ch(state, p, 58)
+    p = pfproc.w_ch(state, p, 32)
+    p = w_endpoint(state, p, laddr, lport)
+    p = pfproc.w_ch(state, p, 32)
+    p = w_endpoint(state, p, raddr, rport)
+    p = pfproc.w_ch(state, p, 32)
+    p = pfwrite.w_hex_upper(state, p, st, 2)
+    p = pfproc.w_ch(state, p, 32)
+    p = pfwrite.w_hex_upper(state, p, 0, 8)
+    p = pfproc.w_ch(state, p, 58)
+    p = pfwrite.w_hex_upper(state, p, inet.sock_readable(state, i), 8)
+    return pfproc.w_str(state, p, (&common[0]) as u64)
+}
+
+fn tcp_row_open(state: u64, i: u64) -> bool {
+    return inet.sock_kind(state, i) == inet.SK_TCP && inet.sock_handle(state, i) != NO_HANDLE
+}
+
+fn udp_row_open(state: u64, i: u64) -> bool {
+    if inet.sock_kind(state, i) != inet.SK_UDP {
+        return false
+    }
+    var addr: u64 = 0
+    var port: u64 = 0
+    inet.sock_local(state, i, &addr, &port)
+    return port != 0
+}
+
+fn udp_state(state: u64, i: u64) -> u64 {
+    var addr: u64 = 0
+    var port: u64 = 0
+    if inet.sock_peer(state, i, &addr, &port) == 0 {
+        return ST_ESTABLISHED
+    }
+    return ST_CLOSE
+}
+
+fn make_tcp(state: u64) -> u64 {
+    var header: [u8; 98] = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\0"
+    var tail: [u8; 33] = " 1 0000000000000000 100 0 0 10 0\0"
+    var p: u64 = pfproc.w_str(state, 0, (&header[0]) as u64)
+    var row: u64 = 0
+    var i: u64 = 0
+    while i < inet.SOCK_MAX {
+        if tcp_row_open(state, i) {
+            p = w_socket_row(state, p, row, i, linux_state(inet.sock_state(state, i)), TCP_SLOT_COLUMN)
+            p = pfproc.w_str(state, p, (&tail[0]) as u64)
+            p = pfproc.w_nl(state, p)
+            row = row + 1
+        }
+        i = i + 1
+    }
+    return p
+}
+
+fn make_udp(state: u64) -> u64 {
+    var header: [u8; 117] = "   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n\0"
+    var tail: [u8; 22] = " 2 0000000000000000 0\0"
+    var p: u64 = pfproc.w_str(state, 0, (&header[0]) as u64)
+    var row: u64 = 0
+    var i: u64 = 0
+    while i < inet.SOCK_MAX {
+        if udp_row_open(state, i) {
+            p = w_socket_row(state, p, row, i, udp_state(state, i), UDP_SLOT_COLUMN)
+            p = pfproc.w_str(state, p, (&tail[0]) as u64)
+            p = pfproc.w_nl(state, p)
+            row = row + 1
+        }
+        i = i + 1
+    }
+    return p
+}
+
+fn w_arp_row(state: u64, at: u64, ip: u64, mac: u64) -> u64 {
+    var hw: [u8; 4] = "0x1\0"
+    var flags: [u8; 4] = "0x2\0"
+    var mask_gap: [u8; 15] = "     *        \0"
+    var p: u64 = pfproc.w_ip4(state, at, ip)
+    p = pad_to(state, p, at, ARP_IP_COLUMN)
+    p = pfproc.w_ch(state, p, 32)
+    var start: u64 = p
+    p = pfproc.w_str(state, p, (&hw[0]) as u64)
+    p = pad_to(state, p, start, ARP_HEX_COLUMN)
+    start = p
+    p = pfproc.w_str(state, p, (&flags[0]) as u64)
+    p = pad_to(state, p, start, ARP_HEX_COLUMN)
+    p = pfproc.w_mac_packed(state, p, mac)
+    p = pfproc.w_str(state, p, (&mask_gap[0]) as u64)
+    p = pfnetdev.w_uplink_name(state, p)
+    return pfproc.w_nl(state, p)
+}
+
+fn make_arp(state: u64) -> u64 {
+    var header: [u8; 80] = "IP address       HW type     Flags       HW address            Mask     Device\n\0"
+    var p: u64 = pfproc.w_str(state, 0, (&header[0]) as u64)
+    var i: u64 = 0
+    while i < inet.arp_slots() {
+        let a: u64 = inet.arp_ip_at(state, i)
+        if a != 0 {
+            p = w_arp_row(state, p, a, inet.arp_mac_slot(state, i))
+        }
+        i = i + 1
+    }
+    return p
+}
+
+fn w_tabbed(state: u64, at: u64, s: u64) -> u64 {
+    var p: u64 = at
+    var i: u64 = 0
+    while kstate.get8(s + i) != 0 {
+        var c: u64 = kstate.get8(s + i) as u64
+        if c == TAB_MARK {
+            c = 9
+        }
+        p = pfproc.w_ch(state, p, c)
+        i = i + 1
+    }
+    return p
+}
+
+fn w_route_row(state: u64, at: u64, dest: u64, gateway: u64, flags: u64, mask: u64) -> u64 {
+    var counters: [u8; 8] = "|0|0|0|\0"
+    var tail: [u8; 7] = "|0|0|0\0"
+    var p: u64 = pfnetdev.w_uplink_name(state, at)
+    p = pfproc.w_ch(state, p, 9)
+    p = pfwrite.w_hex_upper(state, p, bswap32(dest), 8)
+    p = pfproc.w_ch(state, p, 9)
+    p = pfwrite.w_hex_upper(state, p, bswap32(gateway), 8)
+    p = pfproc.w_ch(state, p, 9)
+    p = pfwrite.w_hex_upper(state, p, flags, 4)
+    p = w_tabbed(state, p, (&counters[0]) as u64)
+    p = pfwrite.w_hex_upper(state, p, bswap32(mask), 8)
+    p = w_tabbed(state, p, (&tail[0]) as u64)
+    return pfproc.w_nl(state, p)
+}
+
+fn make_route(state: u64) -> u64 {
+    var header: [u8; 74] = "Iface|Destination|Gateway |Flags|RefCnt|Use|Metric|Mask||MTU|Window|IRTT\n\0"
+    var p: u64 = w_tabbed(state, 0, (&header[0]) as u64)
+    let ip: u64 = inet.ip(state)
+    if ip == 0 {
+        return p
+    }
+    let mask: u64 = inet.mask(state)
+    let gw: u64 = inet.gw(state)
+    if gw != 0 {
+        p = w_route_row(state, p, 0, gw, RTF_UP | RTF_GATEWAY, 0)
+    }
+    return w_route_row(state, p, ip & mask, 0, RTF_UP, mask)
+}

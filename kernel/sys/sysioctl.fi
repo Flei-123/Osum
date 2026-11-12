@@ -1,0 +1,229 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.errno
+import serial
+import drv.con.tty
+import drv.con.sercon
+import fs.file
+import fs.fs
+import fs.vfs
+import fs.vfsops
+import net.inet
+import net.tcp
+import fs.unixsock
+import sched.proc.procfault
+import sys.sysuser
+import sys.sysfd
+import sys.systerm
+
+export { owns, do_ioctl }
+
+const FIGETBSZ: u64 = 2
+const TIOCOUTQ: u64 = 0x5411
+const TIOCMGET: u64 = 0x5415
+const FIONREAD: u64 = 0x541B
+const FIONCLEX: u64 = 0x5450
+const FIOCLEX: u64 = 0x5451
+
+const OFS_BLOCK_SIZE: u64 = 512
+const INT_BYTES: u64 = 4
+
+const MSR_OFFSET: u64 = 6
+const MCR_OFFSET: u64 = 4
+const MSR_CTS: u64 = 0x10
+const MSR_DSR: u64 = 0x20
+const MSR_RI: u64 = 0x40
+const MSR_DCD: u64 = 0x80
+const MCR_DTR: u64 = 0x01
+const MCR_RTS: u64 = 0x02
+const TIOCM_DTR: u64 = 0x002
+const TIOCM_RTS: u64 = 0x004
+const TIOCM_CTS: u64 = 0x020
+const TIOCM_CAR: u64 = 0x040
+const TIOCM_RNG: u64 = 0x080
+const TIOCM_DSR: u64 = 0x100
+
+fn owns(req: u64) -> bool {
+    return req == FIGETBSZ || req == TIOCOUTQ || req == TIOCMGET || req == FIONREAD
+        || req == FIONCLEX || req == FIOCLEX
+}
+
+fn put_int(state: u64, me: u64, arg: u64, v: u64) -> u64 {
+    if arg == 0 || !procfault.user_ok(state, me, arg, INT_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    if !sysuser.put32(state, me, arg, v) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return 0
+}
+
+fn remaining(size: u64, off: u64) -> u64 {
+    if off >= size {
+        return 0
+    }
+    return size - off
+}
+
+fn tty_of_file(state: u64, me: u64, of: u64) -> u64 {
+    let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_CONIN || kind == file.K_CONOUT {
+        return systerm.tty_of(state, me)
+    }
+    if kind == file.K_TTY {
+        return file.open_ino(state, of)
+    }
+    return tty.MAX_TTY
+}
+
+fn socket_unread(state: u64, i: u64) -> u64 {
+    if inet.sock_kind(state, i) == inet.SK_UDP {
+        return inet.sock_next_len(state, i)
+    }
+    return inet.sock_readable(state, i)
+}
+
+fn unix_unread(state: u64, i: u64) -> u64 {
+    if unixsock.sock_kind(state, i) == unixsock.UK_DGRAM {
+        return unixsock.dgram_len(state, i)
+    }
+    return unixsock.waiting(state, i)
+}
+
+fn vfs_regular(state: u64, of: u64) -> bool {
+    let art: u64 = vfs.v_attr(state, file.open_mnt(state, of), file.open_ino(state, of), vfsops.A_TYPE)
+    return art != vfsops.N_CHR && art != vfsops.N_BLK
+}
+
+fn unread_bytes(state: u64, me: u64, of: u64) -> u64 {
+    let kind: u64 = file.open_kind(state, of)
+    let ino: u64 = file.open_ino(state, of)
+    if kind == file.K_PIPER || kind == file.K_PIPEW {
+        return file.pipe_bytes(state, ino)
+    }
+    if kind == file.K_USOCK {
+        return unix_unread(state, ino)
+    }
+    if kind == file.K_SOCK {
+        return socket_unread(state, ino)
+    }
+    if kind == file.K_FILE {
+        return remaining(fs.inode_size(state, ino), file.open_off(state, of))
+    }
+    if kind == file.K_VFILE && vfs_regular(state, of) {
+        let size: u64 = vfs.v_attr(state, file.open_mnt(state, of), ino, vfsops.A_SIZE)
+        return remaining(size, file.open_off(state, of))
+    }
+    let t: u64 = tty_of_file(state, me, of)
+    if t < tty.MAX_TTY {
+        return tty.waiting(state, t)
+    }
+    return errno.neg(errno.E_NOTTY)
+}
+
+fn do_fionread(state: u64, me: u64, of: u64, arg: u64) -> u64 {
+    let n: u64 = unread_bytes(state, me, of)
+    if errno.is_error(n) {
+        return n
+    }
+    return put_int(state, me, arg, n)
+}
+
+fn socket_unsent(state: u64, i: u64) -> u64 {
+    if inet.sock_kind(state, i) != inet.SK_TCP {
+        return 0
+    }
+    let s: u64 = inet.sock_state(state, i)
+    if s != tcp.S_ESTABLISHED as u64 && s != tcp.S_CLOSE_WAIT as u64 {
+        return 0
+    }
+    return (tcp.SND_CAP as u64) - inet.sock_writable(state, i)
+}
+
+fn do_outq(state: u64, me: u64, of: u64, arg: u64) -> u64 {
+    let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_SOCK {
+        return put_int(state, me, arg, socket_unsent(state, file.open_ino(state, of)))
+    }
+    let t: u64 = tty_of_file(state, me, of)
+    if t >= tty.MAX_TTY {
+        return errno.neg(errno.E_NOTTY)
+    }
+    return put_int(state, me, arg, tty.out_waiting(state, t))
+}
+
+fn line_bits(state: u64) -> u64 {
+    let base: u64 = sercon.port_of(state)
+    let msr: u64 = serial.in8((base + MSR_OFFSET) as u16) as u64
+    let mcr: u64 = serial.in8((base + MCR_OFFSET) as u16) as u64
+    var bits: u64 = 0
+    if (msr & MSR_CTS) != 0 {
+        bits = bits | TIOCM_CTS
+    }
+    if (msr & MSR_DSR) != 0 {
+        bits = bits | TIOCM_DSR
+    }
+    if (msr & MSR_RI) != 0 {
+        bits = bits | TIOCM_RNG
+    }
+    if (msr & MSR_DCD) != 0 {
+        bits = bits | TIOCM_CAR
+    }
+    if (mcr & MCR_DTR) != 0 {
+        bits = bits | TIOCM_DTR
+    }
+    if (mcr & MCR_RTS) != 0 {
+        bits = bits | TIOCM_RTS
+    }
+    return bits
+}
+
+fn do_modem_get(state: u64, me: u64, of: u64, arg: u64) -> u64 {
+    let t: u64 = tty_of_file(state, me, of)
+    if t >= tty.MAX_TTY || t != tty.console() || !sercon.active(state) {
+        return errno.neg(errno.E_NOTTY)
+    }
+    return put_int(state, me, arg, line_bits(state))
+}
+
+fn block_size(state: u64, of: u64) -> u64 {
+    let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_FILE || kind == file.K_DIR {
+        return OFS_BLOCK_SIZE
+    }
+    if (kind == file.K_VFILE && vfs_regular(state, of)) || kind == file.K_VDIR {
+        return vfs.v_attr(state, file.open_mnt(state, of), file.open_ino(state, of), vfsops.A_BLKSIZE)
+    }
+    return 0
+}
+
+fn do_block_size(state: u64, me: u64, of: u64, arg: u64) -> u64 {
+    let size: u64 = block_size(state, of)
+    if size == 0 {
+        return errno.neg(errno.E_NOTTY)
+    }
+    return put_int(state, me, arg, size)
+}
+
+fn do_ioctl(state: u64, me: u64, fd: u64, req: u64, arg: u64) -> u64 {
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if req == FIONREAD {
+        return do_fionread(state, me, of, arg)
+    }
+    if req == FIOCLEX || req == FIONCLEX {
+        sysfd.cx_put(state, me, fd, req == FIOCLEX)
+        return 0
+    }
+    if req == FIGETBSZ {
+        return do_block_size(state, me, of, arg)
+    }
+    if req == TIOCOUTQ {
+        return do_outq(state, me, of, arg)
+    }
+    return do_modem_get(state, me, of, arg)
+}

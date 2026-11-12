@@ -4,7 +4,7 @@ profile kernel
 import net.netdev
 import fs.procfs.pfproc
 
-export { make }
+export { make, w_card_name, w_uplink_name }
 
 fn w_col(state: u64, at: u64, v: u64) -> u64 {
     let p: u64 = pfproc.w_ch(state, at, 32)
@@ -21,10 +21,10 @@ fn w_zeros(state: u64, at: u64, n: u64) -> u64 {
     return p
 }
 
-fn w_name(state: u64, at: u64, k: u64, eth_index: u64) -> u64 {
-    var s_eth: [u8; 6] = "  eth\0"
-    var s_usb: [u8; 6] = "  usb\0"
-    var s_wlan: [u8; 7] = "  wlan\0"
+fn w_ifname(state: u64, at: u64, k: u64, eth_index: u64) -> u64 {
+    var s_eth: [u8; 4] = "eth\0"
+    var s_usb: [u8; 4] = "usb\0"
+    var s_wlan: [u8; 5] = "wlan\0"
     var p: u64 = at
     if k == netdev.KIND_WLAN {
         p = pfproc.w_str(state, p, (&s_wlan[0]) as u64)
@@ -36,7 +36,39 @@ fn w_name(state: u64, at: u64, k: u64, eth_index: u64) -> u64 {
         p = pfproc.w_str(state, p, (&s_eth[0]) as u64)
         p = pfproc.w_num(state, p, eth_index)
     }
+    return p
+}
+
+fn w_name(state: u64, at: u64, k: u64, eth_index: u64) -> u64 {
+    var p: u64 = pfproc.w_ch(state, at, 32)
+    p = pfproc.w_ch(state, p, 32)
+    p = w_ifname(state, p, k, eth_index)
     return pfproc.w_ch(state, p, 58)
+}
+
+fn is_eth(k: u64) -> bool {
+    return k != netdev.KIND_WLAN && k != netdev.KIND_USBNET
+}
+
+fn w_card_name(state: u64, at: u64, card: u64) -> u64 {
+    var eth: u64 = 0
+    var c: u64 = 0
+    while c < card {
+        let k: u64 = netdev.kind_on(state, c)
+        if k != netdev.KIND_NONE && netdev.present_on(state, c) && is_eth(k) {
+            eth = eth + 1
+        }
+        c = c + 1
+    }
+    return w_ifname(state, at, netdev.kind_on(state, card), eth)
+}
+
+fn w_uplink_name(state: u64, at: u64) -> u64 {
+    var s_default: [u8; 5] = "eth0\0"
+    if netdev.uplink(state) >= netdev.MAX_CARDS {
+        return pfproc.w_str(state, at, (&s_default[0]) as u64)
+    }
+    return w_card_name(state, at, netdev.uplink(state))
 }
 
 fn w_card(state: u64, at: u64, c: u64, eth_index: u64) -> u64 {
@@ -66,7 +98,7 @@ fn make(state: u64) -> u64 {
         let k: u64 = netdev.kind_on(state, c)
         if k != netdev.KIND_NONE && netdev.present_on(state, c) {
             p = w_card(state, p, c, eth)
-            if k != netdev.KIND_WLAN && k != netdev.KIND_USBNET {
+            if is_eth(k) {
                 eth = eth + 1
             }
         }
