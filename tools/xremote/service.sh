@@ -35,8 +35,9 @@ for t in qemu-system-x86_64 node python3; do
     command -v "$t" >/dev/null 2>&1 || { echo "XRSERVICE: skipped, $t missing"; exit 0; }
 done
 T=$(mktemp -d)
-RP=""; VP=""
+RP=""; VP=""; DP=""
 cleanup() {
+    [ -n "$DP" ] && kill "$DP" 2>/dev/null
     [ -n "$RP" ] && kill "$RP" 2>/dev/null
     [ -n "$VP" ] && kill "$VP" 2>/dev/null
     rm -rf "$T"
@@ -110,13 +111,29 @@ viewer() {
     viewer "$T/v_ok2.txt" 45 "$ID2" "$PW2" 5
 ) &
 VP=$!
+MONSOCK="$T/mon.sock"
+(
+    answered=0
+    while true; do
+        dialogs=$(grep -ac 'wm: trusted dialog up no=' "$S" 2>/dev/null)
+        if [ "${dialogs:-0}" -gt "$answered" ]; then
+            sleep 2
+            printf 'sendkey j\n' > "$T/dialog-key.txt"
+            python3 tools/wm/monitor.py "$MONSOCK" "$T/dialog-key.txt" 0.15 > /dev/null 2>&1
+            answered=$((answered + 1))
+        fi
+        sleep 1
+    done
+) &
+DP=$!
 ACC=(); [ -w /dev/kvm ] && ACC=(-accel kvm -cpu host)
 BOOTARGS="gfx disp wm wmdauer wmshell osum vfs bus fremdtrace nic nip=10.0.2.15/24 ngw=10.0.2.2 script=sh /etc/fx.sh;exit"
 KERNEL=${KERNEL:-} DONE=SV-END TMO=${XR_TMO:-900} MEM=1024 GUI=1 GUI_EXTRA="xremoted settingsd apprights orientbus act" \
     EXTRA="/etc/svc.sh=$T/svc.sh@755 /etc/settings.schema=etc/settings.schema@644 /etc/actions.d/@755 /etc/actions.d/settings.actions=etc/actions.d/settings.actions@644" KARGS="$BOOTARGS" \
-    QEMU_EXTRA="-vga std -netdev user,id=n0 -device virtio-net-pci,netdev=n0,mac=52:54:00:5b:1d:02" \
+    QEMU_EXTRA="-monitor unix:$MONSOCK,server,nowait -vga std -netdev user,id=n0 -device virtio-net-pci,netdev=n0,mac=52:54:00:5b:1d:02" \
     SPEC="$T/wd/fxrun/spec.txt" bash tools/linuxapps/run.sh "$WD" "$T/fx.sh" "$OUT" > "$T/linuxapps.log" 2>&1
 wait "$VP" 2>/dev/null; VP=""
+kill "$DP" 2>/dev/null; DP=""
 C="$OUT/ser.clean"
 tail -n 3 "$T/linuxapps.log" | sed 's/^/        /'
 line() { grep -a "^$1" "$C" | head -1; }
@@ -131,7 +148,7 @@ else
 fi
 L=$(line 'SV-BUS-GET0'); chk "$(has "$L" 'enabled=.*value=false')" "bus: remote.enabled reads false before the first switch-on ($L)"
 L=$(line 'SV-BUS-SET true'); chk "$(has "$L" 'confirm [0-9]* settings.remote.enabled')" "bus: settings.set remote.enabled is critical and asks for a confirmation ($L)"
-L=$(line 'SV-BUS-CONFIRM true'); chk "$(has "$L" 'ok')" "bus: the confirmation applies the change ($L)"
+L=$(line 'SV-BUS-CONFIRM true'); chk "$(has "$L" 'use_dialog')" "bus: the window's own confirm is refused, only the system dialog says yes ($L)"
 NK=$(grep -c '^setting ' etc/settings.schema)
 grep -aq "settingsd: schema ok keys=$NK" "$C" && ok "settingsd loads the shipped schema with the remote.* keys (keys=$NK)" || bad "settingsd schema check: $(grep -a 'settingsd:' "$C" | head -1)"
 grep -aq 'xremoted: started' "$C" && ok "xremoted started in the guest" || bad "xremoted did not start"

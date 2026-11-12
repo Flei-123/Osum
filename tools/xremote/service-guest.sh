@@ -14,6 +14,7 @@ act_q() { /bin/act "$@" 2>&1 | $B tr '\n' ' '; }
 bus_set() {
     echo "SV-BUS-SET $1 $(act_q call settings.set key=remote.enabled value=$1)"
     echo "SV-BUS-CONFIRM $1 $(act_q confirm last)"
+    $B sleep 8
 }
 wait_id() {
     i=0
