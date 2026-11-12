@@ -9,6 +9,7 @@ import sched.taskslot
 import sched.origin
 import sched.proc.procbase
 import sched.proc.procfault
+import sched.proc.proclow
 import sched.proc.procmap
 import sched.proc.procspace
 import sched.proc.procswap
@@ -220,13 +221,19 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
     if size - off < filesz {
         return R_SEGFILE
     }
-    if vaddr < procmap.IMAGE_BASE {
+    var limit: u64 = procmap.IMAGE_END
+    if bias == 0 && proclow.contains(vaddr) {
+        if !proclow.available() {
+            return R_RANGE
+        }
+        limit = proclow.LOW_END
+    } else if vaddr < procmap.IMAGE_BASE {
         return R_RANGE
     }
-    if vaddr >= procmap.IMAGE_END {
+    if vaddr >= limit {
         return R_RANGE
     }
-    if procmap.IMAGE_END - vaddr < memsz {
+    if limit - vaddr < memsz {
         return R_RANGE
     }
     let offset: u64 = vaddr & PAGE_MASK
@@ -235,7 +242,7 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
     }
     let first: u64 = vaddr - offset
     let span: u64 = memsz + offset
-    if procmap.IMAGE_END - first < span {
+    if limit - first < span {
         return R_RANGE
     }
     let file_first: u64 = off - (off & PAGE_MASK)
@@ -355,6 +362,21 @@ fn entry_runnable(state: u64, t: u64, h: u64, n: u64, bias: u64) -> bool {
             if entry >= lo && entry - lo < len {
                 return true
             }
+        }
+        seg = seg + 1
+    }
+    return false
+}
+
+fn has_low_segment(state: u64) -> bool {
+    let h: u64 = head(state)
+    let n: u64 = regio.read16(h + E_PHNUM)
+    var seg: u64 = 0
+    while seg < n {
+        let ph: u64 = h + EHSIZE + seg * PHENTSIZE
+        if regio.read32(ph + P_TYPE) == PT_LOAD && regio.read64(ph + P_MEMSZ) > 0
+                && proclow.contains(regio.read64(ph + P_VADDR)) {
+            return true
         }
         seg = seg + 1
     }
@@ -1165,6 +1187,13 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
             bias = bigpie.HIGH_BASE
         }
     }
+    let low_exec: bool = !ist_dyn && has_low_segment(state)
+    if low_exec && !proclow.attach(state, t) {
+        procswap.discard(state, t)
+        sched.irq_restore(flags)
+        fail(state, R_RANGE)
+        return 0
+    }
     let r: u64 = load_at(state, t, ino, bias)
     if r != R_OK {
         procswap.discard(state, t)
@@ -1248,7 +1277,7 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     }
     taskslot.tset(state, t, taskconst.T_ENTRY, eentry)
     var ustack: u64 = procspace.ARGS_BASE
-    if braucht_lader || ist_dyn {
+    if braucht_lader || ist_dyn || low_exec {
         let sp: u64 = build_stack(state, t, a, n, at_phdr, at_phnum,
             at_entry, at_base, path)
         if sp == 0 {
