@@ -43,6 +43,7 @@ lines_of() { grep -ac "^$2\$" "$TMPD/$1.txt"; }
 old_served() { awk '/^osum\$ mv ->/{f=1;next} /^\[after-old\]/{f=0} f' "$TMPD/$1.txt" | grep -ac '^alpha$'; }
 done_ok() { grep -qax "vfsdone" "$TMPD/$1.txt" && ok "$2 script ran to the end" || bad "$2 vfsdone missing"; }
 SCRIPT_D="cat /etc/alpha.txt;cat /etc/alpha.txt;cat /etc/nothere;cat /etc/nothere;mv /etc/alpha.txt /etc/beta.txt;cat /etc/alpha.txt;echo [after-old];cat /etc/beta.txt;echo [after-new];cat /proc/vfscache"
+SCRIPT_N="cat /etc/new.txt;echo hi > /etc/new.txt;cat /etc/new.txt;cat /etc/new.txt;rm /etc/new.txt;cat /etc/new.txt;echo [gone];cat /proc/vfscache"
 SCRIPT_P="cat /etc/f.txt;echo bbb > /etc/f.txt;cat /etc/f.txt;cat /etc/f.txt;cat /proc/vfscache"
 echo "== A. default: both caches hit, rename and rewrite stay coherent =="
 qboot a "" "$SCRIPT_D"
@@ -73,6 +74,13 @@ qboot n "nopcache" "$SCRIPT_P"
 done_ok n E
 [ "$(stat_of n pcache.hit)" = 0 ] && [ "$(stat_of n pcache.insert)" = 0 ] && ok "E no page hits or inserts" || bad "E page cache active"
 [ "$(lines_of n aaa)" = 1 ] && [ "$(lines_of n bbb)" -ge 2 ] && ok "E same data as default" || bad "E differs"
+echo "== F. create and unlink of a file invalidate only that name =="
+qboot f "" "$SCRIPT_N"
+done_ok f F
+hi_after_gone() { awk '/^\[gone\]/{f=1;next} f' "$TMPD/$1.txt" | grep -ac '^hi$'; }
+[ "$(lines_of f hi)" = 2 ] && [ "$(hi_after_gone f)" = 0 ] && ok "F created file visible after a negative entry, gone after rm" || bad "F hi lines $(lines_of f hi), after rm $(hi_after_gone f)"
+[ "$(stat_of f dcache.name)" -gt 0 ] && [ "$(stat_of f dcache.node)" -gt 0 ] && ok "F targeted invalidation by name and by node" || bad "F name=$(stat_of f dcache.name) node=$(stat_of f dcache.node)"
+[ "$(stat_of f dcache.full)" -le 10 ] && ok "F no full flush for create and unlink ($(stat_of f dcache.full))" || bad "F full flushes $(stat_of f dcache.full)"
 echo
 if [ -n "${VFSCACHE_OUT:-}" ]; then mkdir -p "$VFSCACHE_OUT"; cp "$TMPD"/*.ser "$VFSCACHE_OUT/" 2>/dev/null; fi
 echo "VFSCACHE: $pass passed, $fail failed"

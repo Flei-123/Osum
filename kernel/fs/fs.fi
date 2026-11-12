@@ -1984,7 +1984,11 @@ fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
         return false
     }
     dirindex.note_add(state, dir, dirindex.name_hash(name, nl), slot)
-    dcache.bump_add(state)
+    if inode_type(state, ino) == T_FILE {
+        dcache.forget_name(state, name)
+    } else {
+        dcache.bump_add(state)
+    }
     if !punktname(name) {
         var kind: u64 = 0
         var sz: u64 = 0
@@ -2012,6 +2016,10 @@ fn punktname(p: u64) -> bool {
 }
 
 fn dir_remove(state: u64, dir: u64, name: u64) -> u64 {
+    return dir_remove_kind(state, dir, name, T_FREE)
+}
+
+fn dir_remove_kind(state: u64, dir: u64, name: u64, known_kind: u64) -> u64 {
     let slot: u64 = dir_slot_of(state, dir, name)
     if slot == NO_SLOT {
         return 0
@@ -2031,7 +2039,11 @@ fn dir_remove(state: u64, dir: u64, name: u64) -> u64 {
         kind = regio.read64(at + I_TYPE)
         sz = regio.read64(at + I_SIZE)
     }
-    if kind == T_FILE {
+    var drop_kind: u64 = known_kind
+    if drop_kind == T_FREE {
+        drop_kind = kind
+    }
+    if drop_kind == T_FILE {
         dcache.forget_node(state, ino)
     } else {
         dcache.bump(state)
@@ -2419,16 +2431,17 @@ fn unlink_path(state: u64, p: u64) -> bool {
         }
     }
     let nl: u64 = inode_get(state, ino, I_NLINK)
-    if nl > 1 && inode_type(state, ino) == T_FILE {
+    let kind: u64 = inode_type(state, ino)
+    if nl > 1 && kind == T_FILE {
         inode_set(state, ino, I_NLINK, nl - 1)
-        dir_remove(state, dir, name)
+        dir_remove_kind(state, dir, name, kind)
         leave(state, flags)
         return true
     }
     file_truncate(state, ino)
     inode_release(state, ino)
     inode_set(state, ino, I_NLINK, 0)
-    dir_remove(state, dir, name)
+    dir_remove_kind(state, dir, name, kind)
     leave(state, flags)
     return true
 }
@@ -2475,7 +2488,7 @@ fn rename_path(state: u64, from: u64, to: u64) -> u64 {
             inode_release(state, ex)
             inode_set(state, ex, I_NLINK, 0)
         }
-        dir_remove(state, ndir, newname)
+        dir_remove_kind(state, ndir, newname, T_FILE)
     }
     if !dir_add(state, ndir, newname, ino) {
         leave(state, flags)

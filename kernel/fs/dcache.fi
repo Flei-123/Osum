@@ -4,16 +4,16 @@ profile kernel
 import lib.kstate
 import fs.cachelock
 
-export { attach, FRAMES, probe, insert, stamp, bump, bump_add, forget_node, hits, misses, negative_hits, inserts, flushes, MISS, NEG }
+export { attach, FRAMES, probe, insert, stamp, bump, bump_add, forget_node, forget_name, hits, misses, negative_hits, inserts, flushes, skipped_long, skipped_dot, kind_count, stale, evictions, MISS, NEG }
 
 const MISS: u64 = 0xFFFFFFFFFFFFFFFF
 const NEG: u64 = 0xFFFFFFFFFFFFFFFE
 const NODE_LIMIT: u64 = 0x4000000000000000
 const WAYS: u64 = 4
-const SETS: u64 = 128
+const SETS: u64 = 512
 const ENTRY_BYTES: u64 = 128
 const ENTRIES_AT: u64 = 4096
-const FRAMES: u64 = 17
+const FRAMES: u64 = 65
 const PATH_AT: u64 = 40
 const PATH_MAX: u64 = 87
 const H_GEN: u64 = 8
@@ -25,6 +25,11 @@ const H_INSERTS: u64 = 48
 const H_FLUSHES: u64 = 56
 const H_VICTIM: u64 = 64
 const H_NEG_GEN: u64 = 72
+const H_SKIP_LONG: u64 = 80
+const H_SKIP_DOT: u64 = 88
+const H_STALE: u64 = 96
+const H_EVICT: u64 = 104
+const H_KIND_AT: u64 = 112
 const E_GEN: u64 = 0
 const E_MOUNT: u64 = 8
 const E_NODE: u64 = 16
@@ -56,15 +61,43 @@ fn path_len(path: u64) -> u64 {
     return n
 }
 
+fn dot_component_end(c: u64) -> bool {
+    return c == 0 || c == 47
+}
+
 fn dotted(path: u64, n: u64) -> bool {
     var i: u64 = 0
     while i < n {
         if kstate.get8(path + i) == 47 && i + 1 < n && kstate.get8(path + i + 1) == 46 {
-            return true
+            let c1: u64 = kstate.get8(path + i + 2)
+            if i + 2 >= n || dot_component_end(c1) {
+                return true
+            }
+            if c1 == 46 && (i + 3 >= n || dot_component_end(kstate.get8(path + i + 3))) {
+                return true
+            }
         }
         i = i + 1
     }
     return false
+}
+
+fn leaf_tag(path: u64, n: u64) -> u64 {
+    var start: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        if kstate.get8(path + i) == 47 {
+            start = i + 1
+        }
+        i = i + 1
+    }
+    var h: u64 = FNV_OFFSET
+    i = start
+    while i < n {
+        h = (h ^ kstate.get8(path + i)) *% FNV_PRIME
+        i = i + 1
+    }
+    return h | 1
 }
 
 fn hash_of(m: u64, path: u64, n: u64) -> u64 {
@@ -108,7 +141,12 @@ fn probe(state: u64, m: u64, path: u64) -> u64 {
         return MISS
     }
     let n: u64 = path_len(path)
-    if n > PATH_MAX || dotted(path, n) {
+    if n > PATH_MAX {
+        kstate.set(b, H_SKIP_LONG, kstate.get(b, H_SKIP_LONG) + 1)
+        return MISS
+    }
+    if dotted(path, n) {
+        kstate.set(b, H_SKIP_DOT, kstate.get(b, H_SKIP_DOT) + 1)
         return MISS
     }
     let h: u64 = hash_of(m, path, n)
@@ -118,6 +156,9 @@ fn probe(state: u64, m: u64, path: u64) -> u64 {
     var way: u64 = 0
     while way < WAYS {
         let e: u64 = slot_at(b, h, way)
+        if !entry_live(e, gen, neg_gen) && kstate.get(e, E_HASH) == h && kstate.get(e, E_MOUNT) == m && path_same(e, path, n) {
+            kstate.set(b, H_STALE, kstate.get(b, H_STALE) + 1)
+        }
         if entry_live(e, gen, neg_gen) && kstate.get(e, E_HASH) == h && kstate.get(e, E_MOUNT) == m && path_same(e, path, n) {
             var r: u64 = kstate.get(e, E_NODE)
             kstate.set(b, H_HITS, kstate.get(b, H_HITS) + 1)
@@ -181,6 +222,7 @@ fn insert(state: u64, m: u64, path: u64, node: u64, stamp_at_start: u64) {
         way = way + 1
     }
     if pick == 0 {
+        kstate.set(b, H_EVICT, kstate.get(b, H_EVICT) + 1)
         let v: u64 = kstate.get(b, H_VICTIM)
         kstate.set(b, H_VICTIM, v + 1)
         pick = slot_at(b, h, v % WAYS)
@@ -189,7 +231,7 @@ fn insert(state: u64, m: u64, path: u64, node: u64, stamp_at_start: u64) {
     kstate.set(pick, E_HASH, h)
     if node == 0 {
         kstate.set(pick, E_GEN, neg_gen)
-        kstate.set(pick, E_NEG, 1)
+        kstate.set(pick, E_NEG, leaf_tag(path, n))
         kstate.set(pick, E_NODE, 0)
     } else {
         kstate.set(pick, E_GEN, gen)
@@ -213,6 +255,7 @@ fn bump(state: u64) {
     if b == 0 {
         return
     }
+    count_kind(b, 0)
     let flags: u64 = cachelock.take(b)
     kstate.set(b, H_GEN, kstate.get(b, H_GEN) + 1)
     kstate.set(b, H_NEG_GEN, kstate.get(b, H_NEG_GEN) + 1)
@@ -229,6 +272,7 @@ fn bump_add(state: u64) {
     if b == 0 {
         return
     }
+    count_kind(b, 1)
     let flags: u64 = cachelock.take(b)
     kstate.set(b, H_NEG_GEN, kstate.get(b, H_NEG_GEN) + 1)
     kstate.set(b, H_EPOCH, kstate.get(b, H_EPOCH) + 1)
@@ -244,6 +288,7 @@ fn forget_node(state: u64, node: u64) {
     if b == 0 {
         return
     }
+    count_kind(b, 2)
     let flags: u64 = cachelock.take(b)
     let gen: u64 = kstate.get(b, H_GEN)
     var i: u64 = 0
@@ -277,4 +322,54 @@ fn inserts(state: u64) -> u64 {
 
 fn flushes(state: u64) -> u64 {
     return cachelock.field(state, kstate.DCACHE_BASE, H_FLUSHES)
+}
+
+fn skipped_long(state: u64) -> u64 {
+    return cachelock.field(state, kstate.DCACHE_BASE, H_SKIP_LONG)
+}
+
+fn skipped_dot(state: u64) -> u64 {
+    return cachelock.field(state, kstate.DCACHE_BASE, H_SKIP_DOT)
+}
+
+fn stale(state: u64) -> u64 {
+    return cachelock.field(state, kstate.DCACHE_BASE, H_STALE)
+}
+
+fn evictions(state: u64) -> u64 {
+    return cachelock.field(state, kstate.DCACHE_BASE, H_EVICT)
+}
+
+fn forget_name(state: u64, name: u64) {
+    if kstate.mode_on(state, kstate.M_DCNOINVAL) {
+        return
+    }
+    let b: u64 = kstate.get(state, kstate.DCACHE_BASE)
+    if b == 0 {
+        return
+    }
+    let n: u64 = path_len(name)
+    let tag: u64 = leaf_tag(name, n)
+    count_kind(b, 3)
+    let flags: u64 = cachelock.take(b)
+    let neg_gen: u64 = kstate.get(b, H_NEG_GEN)
+    var i: u64 = 0
+    while i < SETS * WAYS {
+        let e: u64 = b + ENTRIES_AT + i * ENTRY_BYTES
+        if kstate.get(e, E_NEG) == tag && kstate.get(e, E_GEN) == neg_gen {
+            kstate.set(e, E_GEN, 0)
+        }
+        i = i + 1
+    }
+    kstate.set(b, H_EPOCH, kstate.get(b, H_EPOCH) + 1)
+    kstate.set(b, H_FLUSHES, kstate.get(b, H_FLUSHES) + 1)
+    cachelock.give(b, flags)
+}
+
+fn count_kind(b: u64, k: u64) {
+    kstate.set(b, H_KIND_AT + k * 8, kstate.get(b, H_KIND_AT + k * 8) + 1)
+}
+
+fn kind_count(state: u64, k: u64) -> u64 {
+    return cachelock.field(state, kstate.DCACHE_BASE, H_KIND_AT + k * 8)
 }
