@@ -90,6 +90,7 @@ int main(void)
     CHECK("cost_one_owner_ns", c1 >= 0 && c1 < 20000, "%lld ns per mirror call", c1);
     CHECK("cost_twenty_owners_ns", c20 >= 0 && c20 < 40000, "%lld ns per mirror call", c20);
     CHECK("zero_cheaper_than_owned", c0 <= c1 && c0 <= c20, "c0 %lld c1 %lld c20 %lld", c0, c1, c20);
+    PASS("measured_ns", "owners0=%lld owners1=%lld owners20=%lld", c0, c1, c20);
     release_all();
     long long after = per_call_ns();
     CHECK("cost_back_to_zero_ns", after >= 0 && after < 2000, "%lld ns per mirror call", after);
