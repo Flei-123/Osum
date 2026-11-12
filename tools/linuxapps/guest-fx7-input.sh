@@ -8,7 +8,7 @@ echo 'user_pref("gfx.webrender.software", true);' > /tmp/p/user.js
 echo 'user_pref("browser.shell.checkDefaultBrowser", false);' >> /tmp/p/user.js
 echo 'user_pref("browser.dom.window.dump.enabled", true);' >> /tmp/p/user.js
 cat > /tmp/in.html <<'HTML'
-<html><body style="margin:0"><input id="i" autofocus style="font-size:30px;width:400px"><div style="height:6000px;background:linear-gradient(#fff,#06c)">tall</div>
+<html><body style="margin:0"><input id="i" autofocus style="font-size:30px;width:400px"><a id="l" href="in.html?nav" style="display:block;height:2000px;background:#eee">link</a><div id="b" style="position:fixed;right:0;bottom:0;width:600px;height:300px;display:none"></div><div style="height:6000px;background:linear-gradient(#fff,#06c)">tall</div>
 <script>
 addEventListener('keydown', function (e) { dump('FXKEY ' + e.key + '\n'); });
 addEventListener('wheel', function (e) { dump('FXWHEEL ' + e.deltaY + ' mode=' + e.deltaMode + '\n'); });
@@ -16,7 +16,13 @@ addEventListener('mousemove', function (e) { dump('FXMOVE ' + e.clientX + ',' + 
 addEventListener('scroll', function () { dump('FXSCROLL ' + scrollY + '\n'); });
 addEventListener('click', function (e) { dump('FXCLICK ' + e.clientX + ',' + e.clientY + '\n'); });
 document.getElementById('i').addEventListener('input', function (e) { dump('FXINPUT ' + e.target.value + '\n'); });
+var query = location.search;
+var marks = { '?nav': ['FXNAV', '#0000c8'], '?u': ['FXURL', '#00c800'] };
 dump('FXLOAD ' + document.getElementsByTagName('div').length + ' h=' + document.body.scrollHeight + '\n');
+if (marks[query]) {
+    document.getElementById('b').style.cssText += ';display:block;background:' + marks[query][1];
+    dump(marks[query][0] + ' ' + query + '\n');
+}
 </script></body></html>
 HTML
 up() { read u _ < /proc/uptime; echo ${u%.*}${u#*.}; }
@@ -30,7 +36,7 @@ rss() {
 }
 echo "FX7 launch t=$(up)"
 /usr/lib/firefox/firefox --no-remote --profile /tmp/p file:///tmp/in.html > /tmp/fx3.log 2>&1 &
-( while true; do echo "FX7 t=$(up) rss=$(rss) last=$(grep -a '^FX[A-Z]* ' /tmp/fx3.log | tail -n 1)"; sleep 10; done ) &
+( while true; do echo "FX7 t=$(up) rss=$(rss) nav=$(grep -ac '^FXNAV ' /tmp/fx3.log) url=$(grep -ac '^FXURL ' /tmp/fx3.log) last=$(grep -a '^FX[A-Z]* ' /tmp/fx3.log | tail -n 1)"; sleep 10; done ) &
 sleep ${FX7_WAIT:-420}
 echo "FX7 all events:"
 grep -a '^FX[A-Z]* ' /tmp/fx3.log | head -60

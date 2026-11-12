@@ -5,6 +5,11 @@ WD=${1:?workdir}
 OUT=${2:?outdir}
 mkdir -p "$OUT"
 SOCK="$OUT/mon.sock"
+wait_marker() {
+    local pattern=$1 waited=0
+    until grep -qa "$pattern" "$OUT/ser.txt" 2>/dev/null || [ "$waited" -ge "${FX7_MARKERCAP:-420}" ]; do sleep 5; waited=$((waited + 5)); done
+    sleep "${FX7_PAINTWAIT:-25}"
+}
 mon() { printf '%s\n' "$1" | socat - "UNIX-CONNECT:$SOCK" > /dev/null 2>&1; }
 (
     i=0
@@ -12,12 +17,22 @@ mon() { printf '%s\n' "$1" | socat - "UNIX-CONNECT:$SOCK" > /dev/null 2>&1; }
     j=0
     until grep -qa 'FXLOAD' "$OUT/ser.txt" 2>/dev/null || [ "$j" -ge "${FX7_LOADWAIT:-150}" ]; do sleep 2; j=$((j + 2)); done
     sleep 15
-    [ -n "${FX7_NOINPUT:-}" ] && exit 0
+    if [ -n "${FX7_NOINPUT:-}" ]; then
+        sleep 60
+        mon "screendump $OUT/nav.ppm"; sleep 3
+        mon "screendump $OUT/url.ppm"; sleep 3
+        exit 0
+    fi
     for k in a b c; do mon "sendkey $k"; sleep 2; done
     sleep 5
     for k in pgdn pgdn pgdn end; do mon "sendkey $k"; sleep 3; done
-    mon "mouse_move 60 40"; sleep 1; mon "mouse_button 1"; sleep 1; mon "mouse_button 0"; sleep 1
+    mon "mouse_move 60 40"; sleep 1; mon "mouse_button 1"; sleep 1; mon "mouse_button 0"; wait_marker "nav=[1-9]"
+    mon "screendump $OUT/nav.ppm"; sleep 3
     for n in 1 2 3 4 5 6; do mon "mouse_move 0 0 -1"; sleep ${FX7_WHEELGAP:-3}; done
+    sleep 20; mon "sendkey ctrl-l"; sleep ${FX7_URLFOCUSWAIT:-30}
+    for k in f i l e shift-semicolon slash slash slash t m p slash i n dot h t m l shift-slash u; do mon "sendkey $k"; sleep 2; done
+    mon "sendkey ret"; wait_marker "url=[1-9]"
+    mon "screendump $OUT/url.ppm"; sleep 3
 ) &
 DP=$!
 trap 'kill $DP 2>/dev/null' EXIT
