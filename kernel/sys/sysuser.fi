@@ -167,13 +167,7 @@ fn fetch_name(state: u64, me: u64, addr: u64, dst: u64, max: u64) -> u64 {
 // ring 3 may straddle a page boundary, and `peek` is the only reader that
 // checks every page it touches.
 fn user_word(state: u64, me: u64, addr: u64) -> u64 {
-    var v: u64 = 0
-    var i: u64 = 0
-    while i < 8 {
-        v = v | (peek(state, me, addr + i) << (i * 8))
-        i = i + 1
-    }
-    return v
+    return load_le(state, me, addr, WIDTH_64)
 }
 
 // ------------------------------------------------------- the descriptors
@@ -185,9 +179,38 @@ fn of_of(state: u64, me: u64, fd: u64) -> u64 {
     return file.fd_of(state, me, fd)
 }
 
-fn put32(state: u64, me: u64, addr: u64, v: u64) -> bool {
+const PAGE_BYTES: u64 = 4096
+const WIDTH_32: u64 = 4
+const WIDTH_64: u64 = 8
+
+fn fits_page(addr: u64, width: u64) -> bool {
+    return (addr & (PAGE_BYTES - 1)) + width <= PAGE_BYTES
+}
+
+fn store_le(state: u64, me: u64, addr: u64, v: u64, width: u64) -> bool {
+    if !fits_page(addr, width) {
+        return store_octets(state, me, addr, v, width)
+    }
+    let mmfl: u64 = mmlock.mm_lock(state)
+    let phys: u64 = procmap.translate(state, me, addr)
+    if phys == 0 {
+        mmlock.mm_unlock(state, mmfl)
+        return false
+    }
+    guard.stac(state)
+    if width == WIDTH_64 {
+        __mmio_write64(phys as *mut u64, v)
+    } else {
+        __mmio_write32(phys as *mut u32, v as u32)
+    }
+    guard.clac(state)
+    mmlock.mm_unlock(state, mmfl)
+    return true
+}
+
+fn store_octets(state: u64, me: u64, addr: u64, v: u64, width: u64) -> bool {
     var i: u64 = 0
-    while i < 4 {
+    while i < width {
         if !poke(state, me, addr + i, (v >> (i * 8)) & 255) {
             return false
         }
@@ -196,14 +219,44 @@ fn put32(state: u64, me: u64, addr: u64, v: u64) -> bool {
     return true
 }
 
-fn get32(state: u64, me: u64, addr: u64) -> u64 {
+fn load_le(state: u64, me: u64, addr: u64, width: u64) -> u64 {
+    if !fits_page(addr, width) {
+        return load_octets(state, me, addr, width)
+    }
+    let mmfl: u64 = mmlock.mm_lock(state)
+    let phys: u64 = procmap.translate(state, me, addr)
+    if phys == 0 {
+        mmlock.mm_unlock(state, mmfl)
+        return 0
+    }
+    guard.stac(state)
+    var v: u64 = 0
+    if width == WIDTH_64 {
+        v = __mmio_read64(phys as *mut u64)
+    } else {
+        v = __mmio_read32(phys as *mut u32) as u64
+    }
+    guard.clac(state)
+    mmlock.mm_unlock(state, mmfl)
+    return v
+}
+
+fn load_octets(state: u64, me: u64, addr: u64, width: u64) -> u64 {
     var v: u64 = 0
     var i: u64 = 0
-    while i < 4 {
+    while i < width {
         v = v | (peek(state, me, addr + i) << (i * 8))
         i = i + 1
     }
     return v
+}
+
+fn put32(state: u64, me: u64, addr: u64, v: u64) -> bool {
+    return store_le(state, me, addr, v, WIDTH_32)
+}
+
+fn get32(state: u64, me: u64, addr: u64) -> u64 {
+    return load_le(state, me, addr, WIDTH_32)
 }
 
 fn get16(state: u64, me: u64, addr: u64) -> u64 {
@@ -218,13 +271,7 @@ fn put16(state: u64, me: u64, addr: u64, v: u64) -> bool {
 }
 
 fn get_user64(state: u64, me: u64, addr: u64) -> u64 {
-    var v: u64 = 0
-    var i: u64 = 0
-    while i < 8 {
-        v = v | (peek(state, me, addr + i) << (i * 8))
-        i = i + 1
-    }
-    return v
+    return load_le(state, me, addr, WIDTH_64)
 }
 
 fn user_half(state: u64, me: u64, addr: u64) -> u64 {
@@ -247,25 +294,11 @@ fn put_half(state: u64, me: u64, addr: u64, v: u64) -> bool {
 }
 
 fn put_word32(state: u64, me: u64, addr: u64, v: u64) -> bool {
-    var i: u64 = 0
-    while i < 4 {
-        if !poke(state, me, addr + i, (v >> (i * 8)) & 255) {
-            return false
-        }
-        i = i + 1
-    }
-    return true
+    return store_le(state, me, addr, v, WIDTH_32)
 }
 
 fn put64(state: u64, me: u64, addr: u64, v: u64) -> bool {
-    var i: u64 = 0
-    while i < 8 {
-        if !poke(state, me, addr + i, (v >> (i * 8)) & 255) {
-            return false
-        }
-        i = i + 1
-    }
-    return true
+    return store_le(state, me, addr, v, WIDTH_64)
 }
 
 // `futex` lives in sched/futex.fi (real wait queue, r714).

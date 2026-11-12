@@ -28,6 +28,7 @@
 typedef void (*bench_fn)(long n);
 
 static const char *only_filter;
+static long long min_ns = MIN_NS;
 
 static char *io_buf;
 static int data_fd = -1;
@@ -57,6 +58,13 @@ static int selected(const char *name)
             ssize_t n = read(fd, only, sizeof(only) - 1);
             only[n > 0 ? n : 0] = 0;
             close(fd);
+            char *nl = strchr(only, 10);
+            if (nl) {
+                long ms = atol(nl + 1);
+                *nl = 0;
+                if (ms > 0)
+                    min_ns = ms * 1000000LL;
+            }
         }
     }
     return !only[0] || strstr(only, name);
@@ -73,7 +81,7 @@ static void measure(const char *name, bench_fn fn, long batch, long min_batches,
         fn(batch);
         total += batch;
         elapsed = now_ns() - t0;
-    } while ((elapsed < MIN_NS || total < batch * min_batches) && elapsed < MAX_NS);
+    } while ((elapsed < min_ns || total < batch * min_batches) && elapsed < MAX_NS);
     emit(name, (double)elapsed / (double)(total * ops_per_item), total * ops_per_item);
 }
 
@@ -87,6 +95,20 @@ static void run_lseek(long n)
 {
     for (long i = 0; i < n; i++)
         lseek(data_fd, 0, SEEK_SET);
+}
+
+static void run_clock_gettime(long n)
+{
+    struct timespec t;
+    for (long i = 0; i < n; i++)
+        clock_gettime(CLOCK_MONOTONIC, &t);
+}
+
+static void run_fstat(long n)
+{
+    struct stat st;
+    for (long i = 0; i < n; i++)
+        fstat(data_fd, &st);
 }
 
 static void run_read_small(long n)
@@ -152,6 +174,22 @@ static void run_read_4m(long n)
         for (long off = 0; off < IO_BYTES; off += IO_CHUNK)
             (void)!read(data_fd, io_buf, IO_CHUNK);
     }
+}
+
+static void run_read_4k_calls(long n)
+{
+    for (long i = 0; i < n; i++) {
+        lseek(data_fd, 0, SEEK_SET);
+        for (long off = 0; off < IO_BYTES; off += PAGE)
+            (void)!read(data_fd, io_buf, PAGE);
+    }
+}
+
+static void run_pread_4k_calls(long n)
+{
+    for (long i = 0; i < n; i++)
+        for (long off = 0; off < IO_BYTES; off += PAGE)
+            (void)!pread(data_fd, io_buf, PAGE, off);
 }
 
 static void run_read_512k(long n)
@@ -253,13 +291,25 @@ int main(int argc, char **argv)
         return 2;
     measure("syscall_getpid", run_getpid, 20000, 1, 1);
     measure("syscall_lseek", run_lseek, 20000, 1, 1);
+    measure("clock_gettime", run_clock_gettime, 20000, 1, 1);
+    measure("fstat", run_fstat, 20000, 1, 1);
+    measure("syscall_getpid_late", run_getpid, 20000, 1, 1);
+    measure("clock_gettime_late", run_clock_gettime, 20000, 1, 1);
     measure("read_64b_devzero", run_read_small, 5000, 1, 1);
     measure("write_64b_devnull", run_write_small, 5000, 1, 1);
     measure("pagefault_anon_page", run_anon_fault, 1, 1, ANON_PAGES);
     fill_file(data_fd, FILE_PAGES * PAGE);
     measure("pagefault_filemap_page", run_file_fault, 1, 1, FILE_PAGES);
     measure("file_write_4mib", run_write_4m, 1, 3, 1);
+    if (selected("file_read")) {
+        ftruncate(data_fd, 0);
+        fill_file(data_fd, IO_BYTES);
+        fsync(data_fd);
+        run_read_4m(1);
+    }
     measure("file_read_4mib_warm", run_read_4m, 1, 3, 1);
+    measure("file_read_4mib_page_calls", run_read_4k_calls, 1, 3, 1);
+    measure("file_pread_4mib_page_calls", run_pread_4k_calls, 1, 3, 1);
     ftruncate(data_fd, SMALL_FILE_BYTES);
     measure("file_read_512kib_warm", run_read_512k, 1, 3, 1);
     measure("file_write_4mib_fsync", run_write_fsync, 1, 3, 1);

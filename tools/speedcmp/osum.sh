@@ -28,7 +28,7 @@ for p in sh ls cat echo; do
     SPEC="$SPEC /bin/$p=$W/$p.elf"
 done
 printf 'root:x:0:0:root:/root:/bin/sh\n' > "$W/passwd"
-if [ -n "${SPEED_ONLY:-}" ]; then printf '%s\n' "$SPEED_ONLY" > "$W/speedonly"; SPEC="$SPEC /etc/speedonly=$W/speedonly"; fi
+if [ -n "${SPEED_ONLY:-}" ]; then printf '%s\n%s\n' "$SPEED_ONLY" "${SPEED_MIN_MS:-0}" > "$W/speedonly"; SPEC="$SPEC /etc/speedonly=$W/speedonly"; fi
 SPEC="$SPEC /lib/ld-musl-x86_64.so.1=$LIBC /bin/speedbench=$BENCH /etc/passwd=$W/passwd"
 bash tools/mkfsfi/mkfs.sh build "$W/disk.img" 98304 --v3 --inodes=1024 ${SPEED_MKFS_OPTS-} $SPEC > "$W/mkfs.txt" 2>&1 || { tail -5 "$W/mkfs.txt" >&2; exit 1; }
 
@@ -37,7 +37,7 @@ for i in $(seq 1 "$SPEED_RUNS"); do
     cp "$W/disk.img" "$W/live.img"
     drive_args "$OSUM_DRIVE" "$W/live.img" "${SPEED_DRIVE_EXTRA-}" || exit 1
     timeout "$SPEED_BOOT_TIMEOUT" qemu-system-x86_64 "${SPEED_KVM[@]}" -smp "$SPEED_SMP" -m "$SPEED_MEM" -kernel "$W/k.mb" \
-        -append "osum vfs nokbd ${SPEED_OSUM_WORDS-nosched noproc nofs} script=${SPEED_SCRIPT:-/bin/speedbench;exit}" -serial "file:$OUT/osum-$i.raw" -display none -no-reboot ${SPEED_MONITOR:+-monitor "unix:$SPEED_MONITOR,server,nowait"} \
+        -append "osum vfs nokbd ${SPEED_OSUM_WORDS-nosched noproc nofs} script=${SPEED_SCRIPT:-/bin/speedbench;exit}" -serial "file:$OUT/osum-$i.raw" -display none -no-reboot ${SPEED_MONITOR:+-monitor unix:$SPEED_MONITOR,server,nowait} \
         "${DRIVE_ARGS[@]}" -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
     echo "osum run $i rc=$?" >&2
     grep -a '^S ' "$OUT/osum-$i.raw" | tr -d '\r' > "$OUT/osum-$i.txt"
