@@ -33,14 +33,14 @@ for stage in ${STAGES:-F3 F4 F5 F6 F7 F7N}; do
         fi
     fi
     if [ "$stage" = F7 ]; then
-        BLOCKS=${BLOCKS:-1000000} TMO=${TMO:-1500} FX7_WAIT=${FX7_WAIT:-240} "${KERNEL_ARG[@]}" bash tools/linuxapps/fx7.sh "$WD" "$OUT/F7" > "$OUT/F7.log" 2>&1
-        verdict=$(python3 -I tools/linuxapps/f7check.py "$OUT/F7/ser.clean" 2>&1)
+        BLOCKS=${BLOCKS:-1000000} TMO=${TMO:-1500} FX7_WAIT=${FX7_WAIT:-720} "${KERNEL_ARG[@]}" bash tools/linuxapps/fx7.sh "$WD" "$OUT/F7" > "$OUT/F7.log" 2>&1
+        verdict=$(bash tools/linuxapps/f7verdict.sh "$OUT/F7" 2>&1)
         if [ "${verdict%% *}" = green ]; then got=green; first=""; else first="$verdict"; fi
     fi
     if [ "$stage" = F7N ]; then
         BLOCKS=${BLOCKS:-1000000} TMO=${TMO:-1500} FX7_WAIT=${FX7_WAIT:-240} FX7_NOINPUT=1 "${KERNEL_ARG[@]}" bash tools/linuxapps/fx7.sh "$WD" "$OUT/F7N" > "$OUT/F7N.log" 2>&1
-        verdict=$(python3 -I tools/linuxapps/f7check.py "$OUT/F7N/ser.clean" 2>&1)
-        if [ "${verdict%% *}" = red ] && [[ "$verdict" == *"typed text, key press, wheel, scroll, click" && "$verdict" != *"load"* ]]; then got=green; first=""; else first="counter-proof: $verdict"; fi
+        verdict=$(bash tools/linuxapps/f7verdict.sh "$OUT/F7N" 2>&1)
+        if [ "${verdict%% *}" = red ] && [[ "$verdict" == *"typed text, key press, wheel, scroll, click, link navigation, url bar navigation"* && "$verdict" != *"load"* && "$verdict" == *"nav pixels red"* && "$verdict" == *"url pixels red"* ]]; then got=green; first=""; else first="counter-proof: $verdict"; fi
     fi
     if [ "$got" = "${want:-red}" ]; then pass=$((pass+1)); printf '  OK    %s is %s (expected %s)%s\n' "$stage" "$got" "${want:-red}" "${first:+; first failure: $first}"
     else fail=$((fail+1)); printf '  FAIL  %s is %s, expected %s%s\n' "$stage" "$got" "${want:-red}" "${first:+; first failure: $first}"; fi

@@ -10,6 +10,8 @@ NEEDED = (
     ("wheel", re.compile(rb"^FXWHEEL ")),
     ("scroll", re.compile(rb"^FXSCROLL [1-9]")),
     ("click", re.compile(rb"^FXCLICK ")),
+    ("link navigation", re.compile(rb"^FXNAV \?nav")),
+    ("url bar navigation", re.compile(rb"^FXURL \?u")),
 )
 
 
@@ -22,7 +24,7 @@ def verdict(path):
     missing = [name for name, pat in NEEDED if not any(pat.match(l) for l in lines)]
     if missing:
         return "red", "page never saw: " + ", ".join(missing)
-    return "green", "load, typing, key, wheel, scroll and click all reached the page"
+    return "green", "load, typing, key, wheel, scroll, click, link navigation and url bar navigation all reached the page"
 
 
 if __name__ == "__main__":
