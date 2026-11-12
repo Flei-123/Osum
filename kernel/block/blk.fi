@@ -40,6 +40,7 @@ import drv.blk.nvme
 import drv.blk.ahci
 import block.blkguard
 import block.blkperf
+import block.blkstat
 import block.blkindex
 import arch.arch
 import block.mscbind
@@ -1461,6 +1462,9 @@ fn cache_runs(state: u64) -> u64 {
 fn dev_read_run(state: u64, dev: u64, lba: u64, n: u64, buf: u64) -> bool {
     let t0: u64 = blkperf.now()
     let ok: bool = dev_read_run_raw(state, dev, lba, n, buf)
+    if ok {
+        blkstat.note_read(dev, n)
+    }
     blkperf.add(blkperf.K_RUN_CMDS, 1)
     blkperf.add(blkperf.K_RUN_SECTORS, n)
     blkperf.add(blkperf.K_RUN_CYCLES, blkperf.since(t0))
@@ -1629,6 +1633,14 @@ fn read_on(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
 }
 
 fn read_on_held(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
+    let ok: bool = read_on_body(state, dev, lba, dst)
+    if ok {
+        blkstat.note_read(dev, 1)
+    }
+    return ok
+}
+
+fn read_on_body(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
     if lba >= blocks_on(state, dev) {
         return false
     }
@@ -1675,6 +1687,9 @@ fn write_on_held(state: u64, dev: u64, lba: u64, src: u64) -> bool {
     }
     stat_writes = stat_writes + 1
     let ok: bool = write_on_store(state, dev, lba, src)
+    if ok {
+        blkstat.note_write(dev, 1)
+    }
     if ok {
         cache_put(state, dev, lba, src)
     } else {
@@ -1747,6 +1762,14 @@ fn read_raw(state: u64, lba: u64, dst: u64) -> bool {
 }
 
 fn read_raw_held(state: u64, lba: u64, dst: u64) -> bool {
+    let ok: bool = read_raw_body(state, lba, dst)
+    if ok {
+        blkstat.note_read(kstate.get(state, kstate.DISK_DEV), 1)
+    }
+    return ok
+}
+
+fn read_raw_body(state: u64, lba: u64, dst: u64) -> bool {
     if lba >= blocks(state) {
         return false
     }
@@ -1800,6 +1823,7 @@ fn write_raw_held(state: u64, lba: u64, src: u64) -> bool {
     let wdv: u64 = kstate.get(state, kstate.DISK_DEV)
     let ok: bool = write_raw_store(state, wdv, abs, src)
     if ok {
+        blkstat.note_write(wdv, 1)
         cache_put(state, wdv, abs, src)
     } else {
         cache_drop(state, wdv, abs)
@@ -1875,6 +1899,9 @@ fn write_run_held(state: u64, lba: u64, src: u64, n: u64) -> bool {
             c = 128
         }
         let wrote: bool = ata_write_run_twice(abs + done, src + done * BLOCK_SIZE, c, dv == DEV_ATA1)
+        if wrote {
+            blkstat.note_write(dv, c)
+        }
         var j: u64 = 0
         while j < c {
             if wrote {

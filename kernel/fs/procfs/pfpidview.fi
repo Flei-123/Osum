@@ -1,0 +1,264 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import arch.x86_64.guard
+import lib.kstate
+import sched.proc.procbase
+import sched.proc.procmap
+import sched.proc.procspace
+import sched.taskconst
+import sched.taskslot
+import fs.procfs.pfproc
+import fs.procfs.pfwrite
+
+export { make_environ, make_auxv, make_comm, make_statm, make_smaps_rollup, make_oom_score, make_oom_score_adj, make_io, make_personality, make_mounts }
+
+const PAGE: u64 = 4096
+const PAGE_KB: u64 = 4
+const WORD: u64 = 8
+const ENV_MAX: u64 = 256
+const AUX_MAX: u64 = 64
+const BAD: u64 = 0xFFFFFFFFFFFFFFFF
+const AT_NULL: u64 = 0
+const AT_PAGESZ: u64 = 6
+const OOM_MAX: u64 = 1000
+const ROLLUP_COLUMN: u64 = 73
+const USER_WINDOW_LOW: u64 = 0x1000
+const USER_WINDOW_HIGH: u64 = 0x53600000
+const COMM_LEN: u64 = 15
+const COMM_HALF: u64 = 8
+
+fn word(frame: u64, slot: u64) -> u64 {
+    return __mmio_read64((frame + slot * WORD) as *mut u64)
+}
+
+fn in_page(ptr: u64) -> bool {
+    return ptr >= procspace.INIT_STACK && ptr < procspace.INIT_STACK + PAGE
+}
+
+fn init_frame(state: u64, t: u64) -> u64 {
+    return procmap.translate(state, t, procspace.INIT_STACK)
+}
+
+fn env_slot(frame: u64) -> u64 {
+    let argc: u64 = word(frame, 0)
+    if argc == 0 || argc > procbase.MAX_ARGS {
+        return 0
+    }
+    var k: u64 = 0
+    while k < argc {
+        if !in_page(word(frame, 1 + k)) {
+            return 0
+        }
+        k = k + 1
+    }
+    if word(frame, 1 + argc) != 0 {
+        return 0
+    }
+    return argc + 2
+}
+
+fn env_count(frame: u64, first: u64) -> u64 {
+    var n: u64 = 0
+    while n < ENV_MAX && (first + n) * WORD < PAGE {
+        let v: u64 = word(frame, first + n)
+        if v == 0 {
+            return n
+        }
+        if !in_page(v) {
+            return BAD
+        }
+        n = n + 1
+    }
+    return BAD
+}
+
+fn aux_pairs(frame: u64, first: u64) -> u64 {
+    var n: u64 = 0
+    var seen_page: bool = false
+    while n < AUX_MAX && (first + n * 2 + 1) * WORD < PAGE {
+        let key: u64 = word(frame, first + n * 2)
+        let value: u64 = word(frame, first + n * 2 + 1)
+        if key == AT_PAGESZ && value == PAGE {
+            seen_page = true
+        }
+        n = n + 1
+        if key == AT_NULL {
+            if seen_page {
+                return n
+            }
+            return 0
+        }
+    }
+    return 0
+}
+
+fn make_environ(state: u64, t: u64) -> u64 {
+    let frame: u64 = init_frame(state, t)
+    if frame == 0 {
+        return 0
+    }
+    var p: u64 = 0
+    guard.stac(state)
+    let first: u64 = env_slot(frame)
+    var envc: u64 = BAD
+    if first != 0 {
+        envc = env_count(frame, first)
+    }
+    var k: u64 = 0
+    while envc != BAD && k < envc {
+        var at: u64 = frame + (word(frame, first + k) - procspace.INIT_STACK)
+        while at < frame + PAGE && kstate.get8(at) != 0 {
+            p = pfproc.w_ch(state, p, kstate.get8(at))
+            at = at + 1
+        }
+        p = pfproc.w_ch(state, p, 0)
+        k = k + 1
+    }
+    guard.clac(state)
+    return p
+}
+
+fn make_auxv(state: u64, t: u64) -> u64 {
+    let frame: u64 = init_frame(state, t)
+    if frame == 0 {
+        return 0
+    }
+    var p: u64 = 0
+    guard.stac(state)
+    let first: u64 = env_slot(frame)
+    var envc: u64 = BAD
+    if first != 0 {
+        envc = env_count(frame, first)
+    }
+    if envc != BAD {
+        let aux_first: u64 = first + envc + 1
+        let pairs: u64 = aux_pairs(frame, aux_first)
+        var i: u64 = 0
+        while i < pairs * 2 {
+            p = pfwrite.w_le64(state, p, word(frame, aux_first + i))
+            i = i + 1
+        }
+    }
+    guard.clac(state)
+    return p
+}
+
+fn make_comm(state: u64, t: u64) -> u64 {
+    var kind: [u8; 12] = [0 as u8; 12]
+    let ca: u64 = taskslot.tget(state, t, taskconst.T_COMMA)
+    let cb: u64 = taskslot.tget(state, t, taskconst.T_COMMB)
+    var p: u64 = 0
+    if ca == 0 {
+        pfproc.kind_name(taskslot.tget(state, t, taskconst.T_KIND), (&kind[0]) as u64)
+        p = pfproc.w_str(state, p, (&kind[0]) as u64)
+        return pfproc.w_nl(state, p)
+    }
+    var i: u64 = 0
+    var going: bool = true
+    while going && i < COMM_LEN {
+        var b: u64 = 0
+        if i < COMM_HALF {
+            b = (ca >> (i * 8)) & 255
+        } else {
+            b = (cb >> ((i - COMM_HALF) * 8)) & 255
+        }
+        if b == 0 {
+            going = false
+        } else {
+            p = pfproc.w_ch(state, p, b)
+            i = i + 1
+        }
+    }
+    return pfproc.w_nl(state, p)
+}
+
+fn make_statm(state: u64, t: u64) -> u64 {
+    let pages: u64 = taskslot.tget(state, t, taskconst.T_UPAGES)
+    var p: u64 = pfproc.w_num(state, 0, pages)
+    p = pfwrite.w_field_num(state, p, pages)
+    p = pfwrite.w_field_num(state, p, 0)
+    p = pfwrite.w_field_num(state, p, 0)
+    p = pfwrite.w_field_num(state, p, 0)
+    p = pfwrite.w_field_num(state, p, pages)
+    p = pfwrite.w_field_num(state, p, 0)
+    return pfproc.w_nl(state, p)
+}
+
+fn make_smaps_rollup(state: u64, t: u64) -> u64 {
+    var perms: [u8; 24] = "---p 00000000 00:00 0 \0\0"
+    var rss: [u8; 4] = "Rss\0"
+    var p: u64 = pfproc.w_hexn(state, 0, USER_WINDOW_LOW, 8)
+    p = pfproc.w_ch(state, p, 45)
+    p = pfproc.w_hexn(state, p, USER_WINDOW_HIGH, 8)
+    p = pfproc.w_ch(state, p, 32)
+    p = pfproc.w_str(state, p, (&perms[0]) as u64)
+    if p < ROLLUP_COLUMN {
+        p = pfwrite.w_spaces(state, p, ROLLUP_COLUMN - p)
+    }
+    var tag: [u8; 9] = "[rollup]\0"
+    p = pfproc.w_str(state, p, (&tag[0]) as u64)
+    p = pfproc.w_nl(state, p)
+    return pfwrite.w_kb_line(state, p, (&rss[0]) as u64, taskslot.tget(state, t, taskconst.T_UPAGES) * PAGE_KB)
+}
+
+fn oom_safe(state: u64, t: u64) -> bool {
+    return taskslot.tget(state, t, taskconst.T_OOMSAFE) != 0
+}
+
+fn make_oom_score(state: u64, t: u64) -> u64 {
+    let total: u64 = kstate.get(state, kstate.MEM_USABLE) / PAGE
+    var score: u64 = 0
+    if total != 0 && !oom_safe(state, t) {
+        score = taskslot.tget(state, t, taskconst.T_UPAGES) * OOM_MAX / total
+        if score > OOM_MAX {
+            score = OOM_MAX
+        }
+    }
+    return pfproc.w_nl(state, pfproc.w_num(state, 0, score))
+}
+
+fn make_oom_score_adj(state: u64, t: u64) -> u64 {
+    var p: u64 = 0
+    if oom_safe(state, t) {
+        p = pfproc.w_ch(state, p, 45)
+        p = pfproc.w_num(state, p, OOM_MAX)
+    } else {
+        p = pfproc.w_num(state, p, 0)
+    }
+    return pfproc.w_nl(state, p)
+}
+
+fn io_line(state: u64, at: u64, label: u64, v: u64) -> u64 {
+    var p: u64 = pfproc.w_str(state, at, label)
+    p = pfproc.w_ch(state, p, 32)
+    p = pfproc.w_num(state, p, v)
+    return pfproc.w_nl(state, p)
+}
+
+fn make_io(state: u64, t: u64) -> u64 {
+    var l_rchar: [u8; 7] = "rchar:\0"
+    var l_wchar: [u8; 7] = "wchar:\0"
+    var l_syscr: [u8; 7] = "syscr:\0"
+    var l_syscw: [u8; 7] = "syscw:\0"
+    var l_rbytes: [u8; 13] = "read_bytes:\0\0"
+    var l_wbytes: [u8; 14] = "write_bytes:\0\0"
+    var l_cancel: [u8; 23] = "cancelled_write_bytes:\0"
+    let read_total: u64 = taskslot.tget(state, t, taskconst.T_DISKR)
+    let write_total: u64 = taskslot.tget(state, t, taskconst.T_DISKW)
+    var p: u64 = io_line(state, 0, (&l_rchar[0]) as u64, read_total)
+    p = io_line(state, p, (&l_wchar[0]) as u64, write_total)
+    p = io_line(state, p, (&l_syscr[0]) as u64, 0)
+    p = io_line(state, p, (&l_syscw[0]) as u64, 0)
+    p = io_line(state, p, (&l_rbytes[0]) as u64, read_total)
+    p = io_line(state, p, (&l_wbytes[0]) as u64, write_total)
+    return io_line(state, p, (&l_cancel[0]) as u64, 0)
+}
+
+fn make_personality(state: u64, t: u64) -> u64 {
+    return pfproc.w_nl(state, pfproc.w_hexn(state, 0, 0, 8))
+}
+
+fn make_mounts(state: u64, t: u64) -> u64 {
+    return pfproc.make_mounts(state)
+}

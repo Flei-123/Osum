@@ -1,0 +1,211 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import block.blk
+import block.blkstat
+import block.part
+import diag.cmdcopy
+import lib.kstate
+import mm.mmswap
+import fs.procfs.pfproc
+import fs.procfs.pfwrite
+
+export { make_filesystems, make_cmdline, make_swaps, make_vmstat, make_diskstats, make_partitions, make_devices }
+
+const TAB: u64 = 9
+const SECTORS_PER_KB: u64 = 2
+const PAGE_KB: u64 = 4
+const SWAP_NAME_WIDTH: u64 = 40
+const SWAP_DEFAULT_PRIORITY: u64 = 2
+const DIGIT_0: u64 = 48
+const DIGIT_9: u64 = 57
+const LETTER_P: u64 = 112
+const MAJOR_WIDTH: u64 = 4
+const MINOR_WIDTH: u64 = 7
+const BLOCKS_WIDTH: u64 = 10
+const DISKSTAT_ZERO_TAIL: u64 = 10
+
+static mut text_filesystems: [u8; 54] = b"nodev\x09proc\x0anodev\x09devfs\x0a\x09ofs\x0a\x09vfat\x0a\x09ext4\x0a\x09ntfs\x0a\x09exfat\x0a\x00"
+
+static mut text_swaps_head: [u8; 40] = b"Filename\x09\x09\x09\x09Type\x09\x09Size\x09\x09Used\x09\x09Priority\x0a\x00"
+
+static mut text_swap_file: [u8; 10] = b"/swapfile\x00"
+
+static mut text_devices: [u8; 149] = b"Character devices:\x0a  1 mem\x0a  4 tty\x0a  5 /dev/tty\x0a  5 /dev/console\x0a  5 /dev/ptmx\x0a 29 fb\x0a136 pts\x0a\x0aBlock devices:\x0a  1 ramdisk\x0a  3 ide\x0a  8 sd\x0a259 blkext\x0a\x00"
+
+static mut disk_names: [u8; 42] = b"ram0\x00hda\x00nvme0\x00hdb\x00usb\x00sda\x00usb1\x00usb2\x00usb3\x00"
+
+static mut disk_major: [u64; 9] = [1, 3, 259, 3, 8, 8, 8, 8, 8]
+
+static mut disk_minor: [u64; 9] = [0, 0, 0, 64, 16, 0, 32, 48, 64]
+
+fn disk_present(state: u64, dev: u64) -> bool {
+    return blk.present_on(state, dev) && blk.blocks_on(state, dev) != 0
+}
+
+fn w_disk_name(state: u64, at: u64, dev: u64) -> u64 {
+    var pos: u64 = 0
+    var skip: u64 = dev
+    while skip > 0 {
+        while disk_names[pos as usize] != 0 {
+            pos = pos + 1
+        }
+        pos = pos + 1
+        skip = skip - 1
+    }
+    var p: u64 = at
+    while disk_names[pos as usize] != 0 {
+        p = pfproc.w_ch(state, p, disk_names[pos as usize] as u64)
+        pos = pos + 1
+    }
+    return p
+}
+
+fn w_part_name(state: u64, at: u64, dev: u64, number: u64) -> u64 {
+    var p: u64 = w_disk_name(state, at, dev)
+    let last: u64 = kstate.get8(pfproc.buf(state) + p - 1)
+    if last >= DIGIT_0 && last <= DIGIT_9 {
+        p = pfproc.w_ch(state, p, LETTER_P)
+    }
+    return pfproc.w_num(state, p, number)
+}
+
+fn w_device_head(state: u64, at: u64, dev: u64, minor: u64) -> u64 {
+    var p: u64 = pfwrite.w_pad_num(state, at, disk_major[dev as usize], MAJOR_WIDTH)
+    p = pfproc.w_ch(state, p, 32)
+    return pfwrite.w_pad_num(state, p, minor, MINOR_WIDTH)
+}
+
+fn part_number(state: u64, i: u64) -> u64 {
+    var n: u64 = 0
+    var j: u64 = 0
+    while j <= i {
+        if part.index_of(state, j) != 0 && part.dev_of(state, j) == part.dev_of(state, i) {
+            n = n + 1
+        }
+        j = j + 1
+    }
+    return n
+}
+
+fn make_filesystems(state: u64) -> u64 {
+    return pfproc.w_str(state, 0, (&text_filesystems[0]) as u64)
+}
+
+fn make_cmdline(state: u64) -> u64 {
+    var p: u64 = 0
+    let cmd: u64 = cmdcopy.cmd_copy(state)
+    if cmd != 0 {
+        p = pfproc.w_str(state, p, cmd)
+    }
+    return pfproc.w_nl(state, p)
+}
+
+fn make_swaps(state: u64) -> u64 {
+    var kind: [u8; 5] = "file\0"
+    var p: u64 = pfproc.w_str(state, 0, (&text_swaps_head[0]) as u64)
+    if !mmswap.active() {
+        return p
+    }
+    let start: u64 = p
+    p = pfproc.w_str(state, p, (&text_swap_file[0]) as u64)
+    if p - start < SWAP_NAME_WIDTH {
+        p = pfwrite.w_spaces(state, p, SWAP_NAME_WIDTH - (p - start))
+    }
+    p = pfproc.w_str(state, p, (&kind[0]) as u64)
+    p = pfproc.w_ch(state, p, TAB)
+    p = pfproc.w_num(state, p, mmswap.capacity() * PAGE_KB)
+    p = pfproc.w_ch(state, p, TAB)
+    p = pfproc.w_num(state, p, mmswap.used() * PAGE_KB)
+    p = pfproc.w_ch(state, p, TAB)
+    p = pfproc.w_ch(state, p, 45)
+    p = pfproc.w_num(state, p, SWAP_DEFAULT_PRIORITY)
+    return pfproc.w_nl(state, p)
+}
+
+fn vm_line(state: u64, at: u64, label: u64, v: u64) -> u64 {
+    var p: u64 = pfproc.w_str(state, at, label)
+    p = pfproc.w_ch(state, p, 32)
+    p = pfproc.w_num(state, p, v)
+    return pfproc.w_nl(state, p)
+}
+
+fn make_vmstat(state: u64) -> u64 {
+    var l_free: [u8; 14] = "nr_free_pages\0"
+    var l_in: [u8; 7] = "pgpgin\0"
+    var l_out: [u8; 8] = "pgpgout\0"
+    var l_swin: [u8; 7] = "pswpin\0"
+    var l_swout: [u8; 8] = "pswpout\0"
+    var p: u64 = vm_line(state, 0, (&l_free[0]) as u64, kstate.get(state, kstate.FRAMES_FREE))
+    p = vm_line(state, p, (&l_in[0]) as u64, blkstat.total_read_sectors() / SECTORS_PER_KB)
+    p = vm_line(state, p, (&l_out[0]) as u64, blkstat.total_write_sectors() / SECTORS_PER_KB)
+    p = vm_line(state, p, (&l_swin[0]) as u64, mmswap.ins())
+    return vm_line(state, p, (&l_swout[0]) as u64, mmswap.outs())
+}
+
+fn make_diskstats(state: u64) -> u64 {
+    var p: u64 = 0
+    var dev: u64 = 0
+    while dev < blkstat.DEVS {
+        if disk_present(state, dev) {
+            p = w_device_head(state, p, dev, disk_minor[dev as usize])
+            p = pfproc.w_ch(state, p, 32)
+            p = w_disk_name(state, p, dev)
+            p = pfwrite.w_field_num(state, p, blkstat.read_ios(dev))
+            p = pfwrite.w_field_num(state, p, 0)
+            p = pfwrite.w_field_num(state, p, blkstat.read_sectors(dev))
+            p = pfwrite.w_field_num(state, p, 0)
+            p = pfwrite.w_field_num(state, p, blkstat.write_ios(dev))
+            p = pfwrite.w_field_num(state, p, 0)
+            p = pfwrite.w_field_num(state, p, blkstat.write_sectors(dev))
+            var z: u64 = 0
+            while z < DISKSTAT_ZERO_TAIL {
+                p = pfwrite.w_field_num(state, p, 0)
+                z = z + 1
+            }
+            p = pfproc.w_nl(state, p)
+        }
+        dev = dev + 1
+    }
+    return p
+}
+
+fn w_partition_row(state: u64, at: u64, dev: u64, minor: u64, kb: u64, number: u64) -> u64 {
+    var p: u64 = w_device_head(state, at, dev, minor)
+    p = pfproc.w_ch(state, p, 32)
+    p = pfwrite.w_pad_num(state, p, kb, BLOCKS_WIDTH)
+    p = pfproc.w_ch(state, p, 32)
+    if number == 0 {
+        p = w_disk_name(state, p, dev)
+    } else {
+        p = w_part_name(state, p, dev, number)
+    }
+    return pfproc.w_nl(state, p)
+}
+
+fn make_partitions(state: u64) -> u64 {
+    var head: [u8; 27] = "major minor  #blocks  name\0"
+    var p: u64 = pfproc.w_str(state, 0, (&head[0]) as u64)
+    p = pfproc.w_nl(state, p)
+    p = pfproc.w_nl(state, p)
+    var dev: u64 = 0
+    while dev < blkstat.DEVS {
+        if disk_present(state, dev) {
+            p = w_partition_row(state, p, dev, disk_minor[dev as usize], blk.blocks_on(state, dev) / SECTORS_PER_KB, 0)
+            var i: u64 = 0
+            while i < part.MAX_PARTS {
+                if part.index_of(state, i) != 0 && part.dev_of(state, i) == dev {
+                    let n: u64 = part_number(state, i)
+                    p = w_partition_row(state, p, dev, disk_minor[dev as usize] + n, part.blocks(state, i) / SECTORS_PER_KB, 0, n)
+                }
+                i = i + 1
+            }
+        }
+        dev = dev + 1
+    }
+    return p
+}
+
+fn make_devices(state: u64) -> u64 {
+    return pfproc.w_str(state, 0, (&text_devices[0]) as u64)
+}
