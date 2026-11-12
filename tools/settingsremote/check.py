@@ -25,7 +25,7 @@ def declared_controls():
 
 
 def shot(run_dir, name):
-    found = sorted(glob.glob(os.path.join(run_dir, "*" + name + "*.png")))
+    found = sorted(glob.glob(os.path.join(run_dir, "*" + name + "*.png")) + glob.glob(os.path.join(run_dir, "*" + name + "*.ppm")))
     return Image.open(found[0]).convert("RGB") if found else None
 
 
