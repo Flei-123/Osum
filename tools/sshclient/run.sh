@@ -4,8 +4,7 @@ cd "$(dirname "$0")/../.."
 . tools/lib/pidkill.sh
 ROOT=$(pwd)
 
-export FIRNLIB="$ROOT/lib"
-FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+. tools/lib/firnenv.sh
 LDSCRIPT=kernel/kernel.ld
 ULD=kernel/user/user.ld
 PROGS="sh ls cat echo sleep true false init shasum ssh scp sftp"
@@ -30,7 +29,6 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 note(){ printf '        %s\n' "$1"; }
 is() { if [ "$2" = "$3" ]; then ok "$1 ($2)"; else bad "$1: '$2', expected '$3'"; fi; }
 
-bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc missing: $FIRNC"; exit 1; }
 for t in qemu-system-x86_64 ssh scp ssh-keygen sha256sum; do
     command -v "$t" >/dev/null 2>&1 || { echo "SSHCLIENT: skipped, $t missing"; exit 0; }
