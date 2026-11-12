@@ -1,0 +1,163 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import arch.arch
+import mm.mmframe
+import mm.mmlock
+import mm.mmswap
+import sched.taskconst
+import sched.taskslot
+import sched.proc.procbase
+import sched.proc.procmap
+import sched.proc.procpt
+import sched.proc.procspace
+
+fn release_slots(state: u64, pt: u64, from: u64, to: u64) -> u64 {
+    var freed: u64 = 0
+    var s: u64 = from
+    let flags: u64 = mmlock.mm_lock(state)
+    var frame_flags: u64 = mmframe.lock(state)
+    while s < to {
+        s = s + arch.zero_run(pt + s * 8, to - s)
+        if s >= to {
+            break
+        }
+        let e: u64 = procpt.read_entry(pt, s)
+        if (e & procbase.PAGE_PRESENT) != 0 {
+            procpt.write_entry(pt, s, 0)
+            if (e & procbase.PAGE_SHARED) == 0 {
+                mmframe.frame_free_inner(state, e & procbase.ADDR_MASK)
+            }
+            freed = freed + 1
+        } else if (e & procbase.PAGE_LAZY) != 0 {
+            procpt.write_entry(pt, s, 0)
+        } else if procmap.is_swap_entry(e) {
+            procpt.write_entry(pt, s, 0)
+            mmframe.unlock(state, frame_flags)
+            mmswap.release(state, procmap.swap_slot_of(e))
+            frame_flags = mmframe.lock(state)
+        }
+        s = s + 1
+    }
+    mmframe.unlock(state, frame_flags)
+    mmlock.mm_unlock(state, flags)
+    return freed
+}
+
+fn drop_upages(state: u64, i: u64, freed: u64) {
+    let had: u64 = taskslot.tget(state, i, taskconst.T_UPAGES)
+    if had > freed {
+        taskslot.tset(state, i, taskconst.T_UPAGES, had - freed)
+    } else {
+        taskslot.tset(state, i, taskconst.T_UPAGES, 0)
+    }
+}
+
+fn pd_present(state: u64, i: u64, k: u64) -> bool {
+    if k < 512 {
+        return true
+    }
+    let pdpt: u64 = taskslot.tget(state, i, taskconst.T_PDPT)
+    return pdpt != 0 && (procpt.read_entry(pdpt, 1 + (k >> 9)) & procbase.PAGE_PRESENT) != 0
+}
+
+fn release(state: u64, i: u64, start: u64, end: u64) {
+    var a: u64 = start
+    var freed: u64 = 0
+    while a < end {
+        let k: u64 = procpt.pd_slot(a)
+        if k >= procbase.PRIV_SLOTS {
+            break
+        }
+        if !pd_present(state, i, k) {
+            a = ((a >> 30) + 1) << 30
+            continue
+        }
+        let tile_end: u64 = ((a >> 21) + 1) << 21
+        let pt: u64 = procpt.pt_for(state, i, a, false)
+        if pt != 0 {
+            freed = freed + release_slots(state, pt, procpt.pt_slot(a), tile_slots(a, end))
+        }
+        a = tile_end
+    }
+    if freed != 0 {
+        drop_upages(state, i, freed)
+    }
+    procspace.tlb_flush_if_current(state, i)
+}
+
+fn mark_run(state: u64, i: u64, base: u64, pages: u64, bits: u64) -> bool {
+    var done: u64 = 0
+    while done < pages {
+        let a: u64 = base + done * 4096
+        let s: u64 = procpt.pt_slot(a)
+        let pt: u64 = procpt.pt_for(state, i, a, true)
+        if pt == 0 || s >= 512 {
+            release(state, i, base, a)
+            return false
+        }
+        var n: u64 = 512 - s
+        if n > pages - done {
+            n = pages - done
+        }
+        if arch.zero_run(pt + s * 8, n) != n {
+            release(state, i, base, a)
+            return false
+        }
+        arch.fill_words(pt + s * 8, bits, n)
+        done = done + n
+    }
+    return true
+}
+
+fn tile_slots(a: u64, end: u64) -> u64 {
+    let tile_end: u64 = ((a >> 21) + 1) << 21
+    if end < tile_end {
+        return procpt.pt_slot(end - 1) + 1
+    }
+    return 512
+}
+
+fn all_mapped(state: u64, i: u64, base: u64, pages: u64) -> bool {
+    let end: u64 = base + pages * 4096
+    var a: u64 = base
+    while a < end {
+        let pt: u64 = procpt.pt_for(state, i, a, false)
+        let s: u64 = procpt.pt_slot(a)
+        if pt == 0 || s >= 512 {
+            return false
+        }
+        let last: u64 = tile_slots(a, end)
+        var k: u64 = s
+        while k < last {
+            if (procpt.read_entry(pt, k) & (procbase.PAGE_PRESENT | procbase.PAGE_LAZY)) == 0 {
+                return false
+            }
+            k = k + 1
+        }
+        a = ((a >> 21) + 1) << 21
+    }
+    return true
+}
+
+fn protect_run(state: u64, i: u64, base: u64, pages: u64, readable: bool, writable: bool, runnable: bool) -> u64 {
+    let end: u64 = base + pages * 4096
+    var a: u64 = base
+    while a < end {
+        let pt: u64 = procpt.pt_for(state, i, a, false)
+        let s: u64 = procpt.pt_slot(a)
+        if pt == 0 || s >= 512 {
+            return 1
+        }
+        let last: u64 = tile_slots(a, end)
+        var k: u64 = s
+        while k < last {
+            let r: u64 = procspace.protect_entry(state, i, pt, k, readable, writable, runnable)
+            if r != 0 {
+                return r
+            }
+            k = k + 1
+        }
+        a = ((a >> 21) + 1) << 21
+    }
+    return 0
+}
