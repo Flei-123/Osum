@@ -1,0 +1,202 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import drv.con.tty
+import fs.file
+import net.inet
+import sched.proc.procbase
+import sched.rand
+import sched.taskconst
+import sys.utsinfo
+import fs.procfs.pfnetdev
+import fs.procfs.pfproc
+
+export { make }
+
+const P_HOSTNAME: u64 = 1
+const P_OSRELEASE: u64 = 2
+const P_OSTYPE: u64 = 3
+const P_VERSION: u64 = 4
+const P_DOMAINNAME: u64 = 5
+const P_UUID: u64 = 6
+const P_NETDEV: u64 = 7
+const P_FILE_NR: u64 = 8
+const P_ENTROPY: u64 = 9
+const P_BOOT_ID: u64 = 10
+const P_THREADS_MAX: u64 = 11
+const P_NGROUPS_MAX: u64 = 12
+const P_FILE_MAX: u64 = 13
+const P_NR_OPEN: u64 = 14
+const P_PIPE_MAX: u64 = 15
+const P_PTY_MAX: u64 = 17
+const P_PTY_NR: u64 = 18
+const P_MMAP_MIN_ADDR: u64 = 19
+const P_PORT_RANGE: u64 = 20
+
+const ENTROPY_FULL: u64 = 256
+const UUID_BYTES: u64 = 16
+const UUID_SCRATCH: u64 = 4064
+const SPLIT_MIX_A: u64 = 0x9E3779B97F4A7C15
+const SPLIT_MIX_B: u64 = 0xBF58476D1CE4E5B9
+const SPLIT_MIX_C: u64 = 0x94D049BB133111EB
+
+fn number_line(state: u64, v: u64) -> u64 {
+    return pfproc.w_nl(state, pfproc.w_num(state, 0, v))
+}
+
+fn uts_line(state: u64, field: u64) -> u64 {
+    var tmp: [u8; 72] = [0 as u8; 72]
+    let n: u64 = utsinfo.copy_field(field, (&tmp[0]) as u64)
+    var p: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        p = pfproc.w_ch(state, p, tmp[i as usize] as u64)
+        i = i + 1
+    }
+    return pfproc.w_nl(state, p)
+}
+
+fn write_uuid(state: u64, scratch: u64) -> u64 {
+    kstate.set8(scratch + 6, ((kstate.get8(scratch + 6) & 15) | 64) as u8)
+    kstate.set8(scratch + 8, ((kstate.get8(scratch + 8) & 63) | 128) as u8)
+    var p: u64 = 0
+    var i: u64 = 0
+    while i < UUID_BYTES {
+        if i == 4 || i == 6 || i == 8 || i == 10 {
+            p = pfproc.w_ch(state, p, 45)
+        }
+        p = pfproc.w_hexb(state, p, kstate.get8(scratch + i))
+        i = i + 1
+    }
+    return pfproc.w_nl(state, p)
+}
+
+fn uuid_random(state: u64) -> u64 {
+    let scratch: u64 = pfproc.buf(state) + UUID_SCRATCH
+    if rand.bytes(state, scratch, UUID_BYTES) != UUID_BYTES {
+        var z: u64 = 0
+        while z < UUID_BYTES {
+            kstate.set8(scratch + z, 0 as u8)
+            z = z + 1
+        }
+    }
+    return write_uuid(state, scratch)
+}
+
+fn mix(v: u64) -> u64 {
+    var z: u64 = v +% SPLIT_MIX_A
+    z = (z ^ (z >> 30)) *% SPLIT_MIX_B
+    z = (z ^ (z >> 27)) *% SPLIT_MIX_C
+    return z ^ (z >> 31)
+}
+
+fn uuid_boot(state: u64) -> u64 {
+    let scratch: u64 = pfproc.buf(state) + UUID_SCRATCH
+    let seed: u64 = kstate.get(state, kstate.BM_BASE + 8)
+    let a: u64 = mix(seed)
+    let b: u64 = mix(a ^ seed)
+    var i: u64 = 0
+    while i < 8 {
+        kstate.set8(scratch + i, ((a >> (i * 8)) & 255) as u8)
+        kstate.set8(scratch + 8 + i, ((b >> (i * 8)) & 255) as u8)
+        i = i + 1
+    }
+    return write_uuid(state, scratch)
+}
+
+fn file_nr(state: u64) -> u64 {
+    var p: u64 = pfproc.w_num(state, 0, file.open_count(state))
+    p = pfproc.w_ch(state, p, 9)
+    p = pfproc.w_num(state, p, 0)
+    p = pfproc.w_ch(state, p, 9)
+    p = pfproc.w_num(state, p, file.MAX_OPEN)
+    return pfproc.w_nl(state, p)
+}
+
+fn pty_count(state: u64) -> u64 {
+    var count: u64 = 0
+    var slot: u64 = 1
+    while slot < tty.MAX_TTY {
+        if tty.valid(state, slot) && tty.kind_of(state, slot) == tty.K_PTY_SLAVE {
+            count = count + 1
+        }
+        slot = slot + 1
+    }
+    return count
+}
+
+fn port_range(state: u64) -> u64 {
+    var p: u64 = pfproc.w_num(state, 0, inet.EPHEMERAL_BASE)
+    p = pfproc.w_ch(state, p, 9)
+    p = pfproc.w_num(state, p, inet.EPHEMERAL_BASE + inet.EPHEMERAL_MASK)
+    return pfproc.w_nl(state, p)
+}
+
+fn entropy(state: u64) -> u64 {
+    if rand.ready(state) != 0 {
+        return number_line(state, ENTROPY_FULL)
+    }
+    return number_line(state, 0)
+}
+
+fn make(state: u64, provider: u64) -> u64 {
+    if provider == P_HOSTNAME {
+        return uts_line(state, utsinfo.F_NODENAME)
+    }
+    if provider == P_OSRELEASE {
+        return uts_line(state, utsinfo.F_RELEASE)
+    }
+    if provider == P_OSTYPE {
+        return uts_line(state, utsinfo.F_SYSNAME)
+    }
+    if provider == P_VERSION {
+        return uts_line(state, utsinfo.F_VERSION)
+    }
+    if provider == P_DOMAINNAME {
+        return uts_line(state, utsinfo.F_DOMAIN)
+    }
+    if provider == P_UUID {
+        return uuid_random(state)
+    }
+    if provider == P_BOOT_ID {
+        return uuid_boot(state)
+    }
+    if provider == P_NETDEV {
+        return pfnetdev.make(state)
+    }
+    if provider == P_FILE_NR {
+        return file_nr(state)
+    }
+    if provider == P_ENTROPY {
+        return entropy(state)
+    }
+    if provider == P_THREADS_MAX {
+        return number_line(state, kstate.MAX_TASKS)
+    }
+    if provider == P_NGROUPS_MAX {
+        return number_line(state, taskconst.GROUPS_MAX)
+    }
+    if provider == P_FILE_MAX {
+        return number_line(state, file.MAX_OPEN)
+    }
+    if provider == P_NR_OPEN {
+        return number_line(state, file.MAX_FD)
+    }
+    if provider == P_PIPE_MAX {
+        return number_line(state, file.PIPE_CAP)
+    }
+    if provider == P_PTY_MAX {
+        return number_line(state, tty.MAX_TTY)
+    }
+    if provider == P_PTY_NR {
+        return number_line(state, pty_count(state))
+    }
+    if provider == P_MMAP_MIN_ADDR {
+        return number_line(state, procbase.USER_DATA)
+    }
+    if provider == P_PORT_RANGE {
+        return port_range(state)
+    }
+    return 0
+}

@@ -1,0 +1,256 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import fs.pathseg
+import fs.procfs.pfproc
+import fs.procfs.pfsystab
+import fs.procfs.pfsysval
+
+export { sys_root, net_root, id_of, is_dir, walk, nth, name, make }
+
+const DIR_FLAG: u64 = 0x800000
+const PLEN_SHIFT: u64 = 13
+const PLEN_MASK: u64 = 0x7F
+const OFFSET_MASK: u64 = 0x1FFF
+const ID_MASK: u64 = 0xFFFFFF
+const TREE_PREFIX_LEN: u64 = 4
+const SEP_FIELD: u64 = 124
+const SEP_DIR: u64 = 47
+const NEWLINE: u64 = 10
+const KIND_NUMBER: u64 = 110
+const KIND_PROVIDER: u64 = 112
+const SEG_MAX: u64 = 40
+
+fn tab(at: u64) -> u64 {
+    return kstate.get8(pfsystab.base() + at)
+}
+
+fn dir_id(offset: u64, plen: u64) -> u64 {
+    return DIR_FLAG | (plen << PLEN_SHIFT) | offset
+}
+
+fn id_of(node: u64) -> u64 {
+    return node & ID_MASK
+}
+
+fn is_dir(id: u64) -> bool {
+    return (id & DIR_FLAG) != 0
+}
+
+fn plen_of(id: u64) -> u64 {
+    return (id >> PLEN_SHIFT) & PLEN_MASK
+}
+
+fn offset_of(id: u64) -> u64 {
+    return id & OFFSET_MASK
+}
+
+fn tree_root(first: u64) -> u64 {
+    var at: u64 = 0
+    while at < pfsystab.LEN {
+        if tab(at) == first {
+            return dir_id(at, TREE_PREFIX_LEN)
+        }
+        at = next_line(at)
+    }
+    return 0
+}
+
+fn sys_root() -> u64 {
+    return tree_root(115)
+}
+
+fn net_root() -> u64 {
+    return tree_root(110)
+}
+
+fn next_line(at: u64) -> u64 {
+    var i: u64 = at
+    while i < pfsystab.LEN && tab(i) != NEWLINE {
+        i = i + 1
+    }
+    return i + 1
+}
+
+fn has_prefix(line: u64, ref: u64, plen: u64) -> bool {
+    var i: u64 = 0
+    while i < plen {
+        if tab(line + i) != tab(ref + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn part_len(line: u64, plen: u64) -> u64 {
+    var n: u64 = 0
+    while tab(line + plen + n) != SEP_DIR && tab(line + plen + n) != SEP_FIELD {
+        n = n + 1
+    }
+    return n
+}
+
+fn same_part(a: u64, b: u64, plen: u64, n: u64) -> bool {
+    if part_len(b, plen) != n {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        if tab(a + plen + i) != tab(b + plen + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn child_id(line: u64, plen: u64) -> u64 {
+    let n: u64 = part_len(line, plen)
+    if tab(line + plen + n) == SEP_DIR {
+        return dir_id(line, plen + n + 1)
+    }
+    return line
+}
+
+fn first_of_part(line: u64, ref: u64, plen: u64) -> bool {
+    let n: u64 = part_len(line, plen)
+    var at: u64 = 0
+    while at < line {
+        if has_prefix(at, ref, plen) && same_part(line, at, plen, n) {
+            return false
+        }
+        at = next_line(at)
+    }
+    return true
+}
+
+fn nth(dir: u64, index: u64) -> u64 {
+    let ref: u64 = offset_of(dir)
+    let plen: u64 = plen_of(dir)
+    var seen: u64 = 0
+    var at: u64 = 0
+    while at < pfsystab.LEN {
+        if has_prefix(at, ref, plen) && first_of_part(at, ref, plen) {
+            if seen == index {
+                return child_id(at, plen)
+            }
+            seen = seen + 1
+        }
+        at = next_line(at)
+    }
+    return 0
+}
+
+fn find_child(dir: u64, seg: u64, seg_len: u64) -> u64 {
+    let ref: u64 = offset_of(dir)
+    let plen: u64 = plen_of(dir)
+    var at: u64 = 0
+    while at < pfsystab.LEN {
+        if has_prefix(at, ref, plen) && part_len(at, plen) == seg_len {
+            var i: u64 = 0
+            while i < seg_len && tab(at + plen + i) == kstate.get8(seg + i) {
+                i = i + 1
+            }
+            if i == seg_len {
+                return child_id(at, plen)
+            }
+        }
+        at = next_line(at)
+    }
+    return 0
+}
+
+fn str_len(p: u64) -> u64 {
+    var n: u64 = 0
+    while kstate.get8(p + n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn walk(path: u64, from: u64, root: u64) -> u64 {
+    var cur: u64 = root
+    var pos: u64 = from
+    var seg: [u8; 40] = [0 as u8; 40]
+    var guard: u64 = 0
+    while guard < 8 {
+        pos = pathseg.segment(path, pos, (&seg[0]) as u64, SEG_MAX)
+        let n: u64 = str_len((&seg[0]) as u64)
+        if n == 0 {
+            return cur
+        }
+        if !is_dir(cur) {
+            return 0
+        }
+        cur = find_child(cur, (&seg[0]) as u64, n)
+        if cur == 0 {
+            return 0
+        }
+        guard = guard + 1
+    }
+    return 0
+}
+
+fn name(id: u64, out: u64) {
+    var end: u64 = offset_of(id)
+    if is_dir(id) {
+        end = end + plen_of(id) - 1
+    } else {
+        end = end + path_len(end)
+    }
+    var start: u64 = end
+    while start > 0 && tab(start - 1) != SEP_DIR && tab(start - 1) != NEWLINE {
+        start = start - 1
+    }
+    var i: u64 = 0
+    while start + i < end {
+        kstate.set8(out + i, tab(start + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(out + i, 0 as u8)
+}
+
+fn path_len(line: u64) -> u64 {
+    var n: u64 = 0
+    while tab(line + n) != SEP_FIELD {
+        n = n + 1
+    }
+    return n
+}
+
+fn number_at(at: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = at
+    while tab(i) >= 48 && tab(i) <= 57 {
+        v = v * 10 + (tab(i) - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn write_text(state: u64, at: u64) -> u64 {
+    var p: u64 = 0
+    var i: u64 = at
+    while tab(i) != NEWLINE {
+        p = pfproc.w_ch(state, p, tab(i))
+        i = i + 1
+    }
+    return pfproc.w_nl(state, p)
+}
+
+fn make(state: u64, id: u64) -> u64 {
+    if is_dir(id) {
+        return 0
+    }
+    let value: u64 = offset_of(id) + path_len(offset_of(id)) + 3
+    let kind: u64 = tab(value - 2)
+    if kind == KIND_PROVIDER {
+        return pfsysval.make(state, number_at(value))
+    }
+    if kind == KIND_NUMBER {
+        return pfproc.w_nl(state, pfproc.w_num(state, 0, number_at(value)))
+    }
+    return write_text(state, value)
+}

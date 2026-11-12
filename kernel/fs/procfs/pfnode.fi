@@ -40,6 +40,7 @@ import net.wltrace
 import fs.procfs.pfbase
 import fs.procfs.pfproc
 import fs.procfs.pfsys
+import fs.procfs.pfsysreg
 
 const K_GLOBAL: u64 = 2
 
@@ -374,7 +375,7 @@ fn build(state: u64, n: u64) -> u64 {
         return 0
     }
     if art == K_SYS {
-        return pfsys.make_sys(state, sub)
+        return pfsysreg.make(state, pfsysreg.id_of(n))
     }
     if art == K_PIDFILE {
         if !pfproc.alive(state, slot) {
@@ -694,28 +695,15 @@ fn p_lookup(state: u64, m: u64, path: u64) -> u64 {
     let is_sys: bool = pfsys.streq((&seg[0]) as u64, (&w_sys[0]) as u64)
     let is_net: bool = pfsys.streq((&seg[0]) as u64, (&w_net[0]) as u64)
     if is_sys || is_net {
-        var cur: u64 = pfbase.S_SYS
+        var root: u64 = pfsysreg.sys_root()
         if is_net {
-            cur = pfbase.S_NET
+            root = pfsysreg.net_root()
         }
-        var pos: u64 = at
-        var guard: u64 = 0
-        while guard < 6 {
-            var sg: [u8; 24] = [0 as u8; 24]
-            pos = pathseg.segment(path, pos, (&sg[0]) as u64, 24)
-            if kstate.get8((&sg[0]) as u64) == 0 {
-                return pfproc.node(K_SYS, 0, cur)
-            }
-            if !pfsys.sys_is_dir(cur) {
-                return 0
-            }
-            cur = pfsys.sys_child(cur, (&sg[0]) as u64)
-            if cur == 0 {
-                return 0
-            }
-            guard = guard + 1
+        let found: u64 = pfsysreg.walk(path, at, root)
+        if found == 0 {
+            return 0
         }
-        return 0
+        return pfproc.node(K_SYS, 0, found)
     }
     var w_self: [u8; 5] = "self\0"
     var slot: u64 = kstate.MAX_TASKS
@@ -1019,10 +1007,10 @@ fn p_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
         if i < G_LAST {
             global_name(state, i + 1, out)
             if i + 1 == G_SYSDIR {
-                return pfproc.node(K_SYS, 0, pfbase.S_SYS)
+                return pfproc.node(K_SYS, 0, pfsysreg.sys_root())
             }
             if i + 1 == G_NETDIR {
-                return pfproc.node(K_SYS, 0, pfbase.S_NET)
+                return pfproc.node(K_SYS, 0, pfsysreg.net_root())
             }
             return pfproc.node(K_GLOBAL, 0, i + 1)
         }
@@ -1052,11 +1040,11 @@ fn p_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
         return 0
     }
     if art == K_SYS {
-        let c: u64 = pfsys.sys_nth(pfproc.n_sub(dir), i)
+        let c: u64 = pfsysreg.nth(pfsysreg.id_of(dir), i)
         if c == 0 {
             return 0
         }
-        pfsys.sys_name(c, out)
+        pfsysreg.name(c, out)
         return pfproc.node(K_SYS, 0, c)
     }
     if art == K_FDDIR {
@@ -1088,7 +1076,7 @@ fn p_attr(state: u64, m: u64, n: u64, what: u64) -> u64 {
             return vfsops.N_DIR
         }
         if art == K_SYS {
-            if pfsys.sys_is_dir(pfproc.n_sub(n)) {
+            if pfsysreg.is_dir(pfsysreg.id_of(n)) {
                 return vfsops.N_DIR
             }
             return vfsops.N_FILE
@@ -1102,7 +1090,7 @@ fn p_attr(state: u64, m: u64, n: u64, what: u64) -> u64 {
         return vfsops.N_NONE
     }
     if what == vfsops.A_SIZE {
-        if art == pfbase.K_ROOT || art == K_PIDDIR || art == K_FDDIR || (art == K_SYS && pfsys.sys_is_dir(pfproc.n_sub(n))) {
+        if art == pfbase.K_ROOT || art == K_PIDDIR || art == K_FDDIR || (art == K_SYS && pfsysreg.is_dir(pfsysreg.id_of(n))) {
             return 0
         }
         if art == K_GLOBAL && pfproc.n_sub(n) == G_ACPIDUMP {
@@ -1117,7 +1105,7 @@ fn p_attr(state: u64, m: u64, n: u64, what: u64) -> u64 {
         return len
     }
     if what == vfsops.A_MODE {
-        if art == pfbase.K_ROOT || art == K_PIDDIR || art == K_FDDIR || (art == K_SYS && pfsys.sys_is_dir(pfproc.n_sub(n))) {
+        if art == pfbase.K_ROOT || art == K_PIDDIR || art == K_FDDIR || (art == K_SYS && pfsysreg.is_dir(pfsysreg.id_of(n))) {
             return 365
         }
         if art == K_PIDFILE && (pfproc.n_sub(n) == F_EXE || pfproc.n_sub(n) == F_CWD) {
