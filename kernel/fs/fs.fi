@@ -62,6 +62,7 @@ import fs.iattr
 import fs.pcache
 import mm.fileshare
 import fs.ofsj
+import fs.wbscope
 import fs.ofsext
 import sched.time
 import libc.regio
@@ -1307,7 +1308,11 @@ fn walk_level(state: u64, block: u64, k: u64, grow: bool) -> u64 {
 
 // Every block of a file back to the bitmap.
 fn file_truncate(state: u64, ino: u64) {
+    let flags: u64 = lock_only(state)
+    let scoped: bool = wbscope.begin(state)
     file_truncate_run(state, ino)
+    let _flushed: bool = wbscope.finish(state, scoped)
+    unlock_only(state, flags)
     pcache.drop_ino(state, ino)
     fileshare.drop_ino(state, ino)
     dirindex.touch(state, ino)
@@ -2339,7 +2344,7 @@ fn parent_ino(state: u64, p: u64) -> u64 {
     return dir
 }
 
-fn create_path(state: u64, p: u64, kind: u64) -> u64 {
+fn create_path_run(state: u64, p: u64, kind: u64) -> u64 {
     let flags: u64 = enter(state)
     let name: u64 = state + kstate.OFS3_OFF + kstate.OP_OLD
     let dir: u64 = parent_of(state, p, name)
@@ -2363,6 +2368,7 @@ fn create_path(state: u64, p: u64, kind: u64) -> u64 {
             return 0
         }
     }
+    wbscope.barrier(state)
     if !dir_add(state, dir, name, ino) {
         inode_release(state, ino)
         leave(state, flags)
@@ -2370,6 +2376,41 @@ fn create_path(state: u64, p: u64, kind: u64) -> u64 {
     }
     leave(state, flags)
     return ino
+}
+
+const EIO: u64 = 5
+
+fn create_path(state: u64, p: u64, kind: u64) -> u64 {
+    let flags: u64 = lock_only(state)
+    let scoped: bool = wbscope.begin(state)
+    let ino: u64 = create_path_run(state, p, kind)
+    let flushed: bool = wbscope.finish(state, scoped)
+    unlock_only(state, flags)
+    if !flushed {
+        return 0
+    }
+    return ino
+}
+
+fn unlink_path(state: u64, p: u64) -> bool {
+    let flags: u64 = lock_only(state)
+    let scoped: bool = wbscope.begin(state)
+    let ok: bool = unlink_path_run(state, p)
+    let flushed: bool = wbscope.finish(state, scoped)
+    unlock_only(state, flags)
+    return ok && flushed
+}
+
+fn rename_path(state: u64, from: u64, to: u64) -> u64 {
+    let flags: u64 = lock_only(state)
+    let scoped: bool = wbscope.begin(state)
+    let r: u64 = rename_path_run(state, from, to)
+    let flushed: bool = wbscope.finish(state, scoped)
+    unlock_only(state, flags)
+    if r == 0 && !flushed {
+        return EIO
+    }
+    return r
 }
 
 // ---------------------------------------------------------- RUNDE OFS3
@@ -2425,7 +2466,7 @@ fn dir_init(state: u64, ino: u64, parent: u64) -> bool {
     return dir_add(state, ino, (&dotdot[0]) as u64, parent)
 }
 
-fn unlink_path(state: u64, p: u64) -> bool {
+fn unlink_path_run(state: u64, p: u64) -> bool {
     let flags: u64 = enter(state)
     let name: u64 = state + kstate.OFS3_OFF + kstate.OP_OLD
     let dir: u64 = parent_of(state, p, name)
@@ -2472,7 +2513,7 @@ fn unlink_path(state: u64, p: u64) -> bool {
 }
 
 // ------------------------------------------------- Runde K14: umbenennen
-fn rename_path(state: u64, from: u64, to: u64) -> u64 {
+fn rename_path_run(state: u64, from: u64, to: u64) -> u64 {
     let oldname: u64 = state + kstate.OFS3_OFF + kstate.OP_OLD
     let newname: u64 = state + kstate.OFS3_OFF + kstate.OP_NEW
     var dotdot: [u8; 3] = "..\0"
@@ -2519,6 +2560,7 @@ fn rename_path(state: u64, from: u64, to: u64) -> u64 {
         leave(state, flags)
         return 28 // ENOSPC
     }
+    wbscope.barrier(state)
     if dir_remove(state, odir, oldname) == 0 {
         dir_remove(state, ndir, newname)
         leave(state, flags)
