@@ -289,8 +289,6 @@ for v in "classic day light" "modern day light" "modern night dark" "classic nig
             # test.
             is "$1/$2: button radius" "${RB:-x}" "8"
         fi
-        K=$(grep -aoE 'Text/Akzent [0-9,]+  Akzent/Fläche [0-9,]+  -- WCAG [^ ]+' "$S" | tail -1)
-        [ -n "$K" ] && echo "        contrast: $K"
     else
         bad "$n did not boot"
     fi
