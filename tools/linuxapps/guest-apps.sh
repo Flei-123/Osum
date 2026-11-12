@@ -21,6 +21,7 @@ t bb-ps PID ps
 t bb-top Mem top -b -n 1
 t htop-version htop htop --version
 t htop-run Tasks timeout 8 htop -d 5
+t htop-tasks "Tasks: [1-9]" sh -c 'timeout 8 htop -d 5 | tr -d "\033" | sed "s/\[[0-9;?]*[a-zA-Z]//g; s/(B//g" | grep -E "Tasks: *[1-9]"'
 t nano-version GNU nano --version
 t vim-version VIM vim --version
 t vim-batch hi sh -c 'vim -es -u NONE -c "call setline(1,\"hi\")" -c "w! /tmp/v.txt" -c q; cat /tmp/v.txt'

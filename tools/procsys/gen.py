@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "kernel/fs/procfs/sysreg.txt"
 TARGET = ROOT / "kernel/fs/procfs/pfsystab.fi"
 OFFSET_LIMIT = 0x2000
-TREES = ("sys/", "net/")
+TREES = ("sys/", "net/", "sfs/", "node/")
 
 
 def load_rows():
@@ -31,10 +31,10 @@ def check_rows(rows):
         seen.add(path)
     order = [path.split("/", 1)[0] for path, _, _ in rows]
     if order != sorted(order, key=TREES_ORDER.index):
-        sys.exit("rows must be grouped sys first, then net")
+        sys.exit("rows must be grouped by tree in TREES order")
 
 
-TREES_ORDER = ["sys", "net"]
+TREES_ORDER = ["sys", "net", "sfs", "node"]
 
 
 def encode(rows):
