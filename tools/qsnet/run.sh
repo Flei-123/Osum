@@ -8,6 +8,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 SCALES=${*:-"1 2"}
+MODES=${QSNET_MODES:-"dark light"}
 
 cat > "$TMPD/script.txt" <<'SCRIPT'
 warteauf 'taskbar: steht|taskbar: geom' || 120
@@ -44,19 +45,20 @@ print(n)
 PY
 }
 
+for mode in $MODES; do
 for sc in $SCALES; do
-    echo "== ui_scale $sc =="
+    echo "== ui_scale $sc, $mode =="
     res=1280x800; [ "$sc" != 1 ] && res=1920x1080
-    D="$TMPD/s$sc"
+    D="$TMPD/$mode-s$sc"
     for try in 1 2; do
         rm -rf "$D"
-        bash tools/design/eh6.sh "$D" res=$res uiscale=$sc mode=dark accel=kvm tafel=nein drehbuch="$TMPD/script.txt" \
-            > "$TMPD/s$sc.log" 2>&1
+        bash tools/design/eh6.sh "$D" res=$res uiscale=$sc mode=$mode accel=kvm tafel=nein drehbuch="$TMPD/script.txt" \
+            > "$TMPD/$mode-s$sc.log" 2>&1
         grep -aq 'qsnet: page open' "$D/serial.txt" 2>/dev/null && break
     done
     S="$D/serial.txt"
     if [ -n "${QSNET_OUT:-}" ]; then
-        mkdir -p "$QSNET_OUT/s$sc"; cp "$D"/*.ppm "$S" "$QSNET_OUT/s$sc/" 2>/dev/null
+        mkdir -p "$QSNET_OUT/$mode-s$sc"; cp "$D"/*.ppm "$S" "$QSNET_OUT/$mode-s$sc/" 2>/dev/null
     fi
     if [ ! -s "$D/02-net.ppm" ]; then bad "scale $sc: no pictures"; continue; fi
     if grep -aq 'qsnet: page open' "$S"; then ok "scale $sc: a click on the network tile opens the network page"
@@ -71,6 +73,10 @@ for sc in $SCALES; do
     else bad "scale $sc: counter-proof broken ($n0)"; fi
     if grep -aq 'qs: closed by escape' "$S"; then ok "scale $sc: Escape still closes the panel"
     else bad "scale $sc: Escape did not close the panel"; fi
+    tiles=$(grep -a '^qs: kachel n=' "$S" | grep -ao 'kachel n=[0-9]*' | sort -u | wc -l)
+    if [ "$tiles" -ge 3 ] && [ "$tiles" -le 8 ]; then ok "scale $sc, $mode: $tiles tiles, only working ones (3 to 8)"
+    else bad "scale $sc, $mode: $tiles tiles reported"; fi
+done
 done
 bash tools/qsnet/wifi.sh ${SCALES%% *} || fail=$((fail+1))
 echo; echo "QSNET: $pass passed, $fail failed"

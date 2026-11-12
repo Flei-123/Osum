@@ -1705,30 +1705,42 @@ fn shot_copy(state: u64, me: u64, dst: u64, rows: u64, from: u64) -> u64 {
     while y < rows {
         var x: u64 = 0
         while x < w {
-            let c: u64 = shot.rgb_at(state, x, from + y)
-            var k: u64 = 0
-            while k < 3 {
-                let a: u64 = at +% k
-                let pg: u64 = a & 0xFFFFFFFFFFFFF000
-                if pg != page {
-                    phys = procmap.translate(state, me, pg)
-                    if phys == 0 {
-                        return sysuser.neg(errno.E_FAULT)
-                    }
-                    page = pg
+            let pg: u64 = at & 0xFFFFFFFFFFFFF000
+            if pg != page {
+                phys = procmap.translate(state, me, pg)
+                if phys == 0 {
+                    return sysuser.neg(errno.E_FAULT)
                 }
-                var v: u64 = c >> 16
-                if k == 1 {
-                    v = c >> 8
-                }
-                if k == 2 {
-                    v = c
-                }
-                kstate.set8(phys +% (a & 0xFFF), (v & 0xFF) as u8)
-                k = k + 1
+                page = pg
             }
-            at = at +% 3
-            x = x + 1
+            let fit: u64 = (0x1000 - (at & 0xFFF)) / 3
+            if fit == 0 {
+                let c: u64 = shot.pixel_rgb(state, x, from + y)
+                var k: u64 = 0
+                while k < 3 {
+                    let a: u64 = at +% k
+                    let apg: u64 = a & 0xFFFFFFFFFFFFF000
+                    if apg != page {
+                        phys = procmap.translate(state, me, apg)
+                        if phys == 0 {
+                            return sysuser.neg(errno.E_FAULT)
+                        }
+                        page = apg
+                    }
+                    kstate.set8(phys +% (a & 0xFFF), ((c >> (16 - 8 * k)) & 0xFF) as u8)
+                    k = k + 1
+                }
+                at = at +% 3
+                x = x + 1
+            } else {
+                var run: u64 = w - x
+                if run > fit {
+                    run = fit
+                }
+                shot.pack_run(state, from + y, x, run, phys +% (at & 0xFFF))
+                at = at +% run *% 3
+                x = x + run
+            }
         }
         y = y + 1
     }
@@ -1817,7 +1829,7 @@ fn shot_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
             return shot.KEY
         }
         if a1 == sys.SI_FRAMES {
-            return fb.frames(state)
+            return fb.frames(state) +% fb.tx_rects(state)
         }
         if a1 == sys.SI_HEADS {
             return shot_head_count(state)

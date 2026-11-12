@@ -6,6 +6,7 @@ echo "XR1 rc=$?"
 /opt/xr/xrprobe screen
 /opt/xr/xrprobe heads
 /opt/xr/xrprobe grab
+/opt/xr/xrprobe grabbench 10
 echo "XR2 rc=$?"
 /opt/xr/xrprobe input
 /opt/xr/xrprobe wheel

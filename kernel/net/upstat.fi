@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import net.nethealth
+
+export { UP_UNKNOWN, UP_ONLINE, UP_LOCAL, UP_OFFLINE, CARDS, status, usable, record, forget }
+
+const CARDS: u64 = 8
+
+const UP_UNKNOWN: u64 = 0
+const UP_ONLINE: u64 = 1
+const UP_LOCAL: u64 = 2
+const UP_OFFLINE: u64 = 3
+
+const RETRY_BASE_TICKS: u64 = 3000
+const RETRY_MAX_SHIFT: u64 = 4
+
+static mut up_status: [u64; 8] = [0 as u64; 8]
+static mut up_until: [u64; 8] = [0 as u64; 8]
+static mut up_fails: [u64; 8] = [0 as u64; 8]
+
+fn status(c: u64) -> u64 {
+    if c >= CARDS { return UP_UNKNOWN }
+    return up_status[c as usize]
+}
+
+fn usable(state: u64, c: u64) -> bool {
+    let s: u64 = status(c)
+    if s == UP_UNKNOWN || s == UP_ONLINE { return true }
+    return kstate.get(state, kstate.TICKS) >= up_until[c as usize]
+}
+
+fn forget(c: u64) {
+    if c >= CARDS { return }
+    up_status[c as usize] = UP_UNKNOWN
+    up_until[c as usize] = 0
+    up_fails[c as usize] = 0
+}
+
+fn from_stage(stage: u64) -> u64 {
+    if stage == nethealth.H_OK { return UP_ONLINE }
+    if stage == nethealth.H_NOINET || stage == nethealth.H_NODNS { return UP_LOCAL }
+    if stage == nethealth.H_NOGW { return UP_OFFLINE }
+    return UP_UNKNOWN
+}
+
+fn record(state: u64, c: u64, stage: u64) {
+    if c >= CARDS { return }
+    let next: u64 = from_stage(stage)
+    if next == UP_UNKNOWN { return }
+    let i: usize = c as usize
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if next == UP_ONLINE {
+        up_status[i] = UP_ONLINE
+        up_until[i] = 0
+        up_fails[i] = 0
+        return
+    }
+    let was_waiting: bool = up_status[i] != UP_UNKNOWN && up_status[i] != UP_ONLINE && now < up_until[i]
+    up_status[i] = next
+    if was_waiting { return }
+    var shift: u64 = up_fails[i]
+    if shift > RETRY_MAX_SHIFT { shift = RETRY_MAX_SHIFT }
+    up_fails[i] = up_fails[i] + 1
+    up_until[i] = now + (RETRY_BASE_TICKS << shift)
+}
