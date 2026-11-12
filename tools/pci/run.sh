@@ -161,7 +161,9 @@ run_kernel() {
     timeout 300 $QEMU_X86 -kernel "$image" -m 128 -append "$append" \
         -serial "file:$out" -display none -no-reboot "$@" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
-    return $?
+    local rc=$?
+    perl -0pi -e 's/nvme: command timeout\r?\n//g; s/(\[ *\d+\] \d+\/\d+ E )?hang: [^\n]*\n//g' "$out" 2>/dev/null
+    return $rc
 }
 
 # A fresh pair of images per case. Two reasons: a case must not see what
@@ -411,6 +413,7 @@ M="$TMPD/nobm.txt"
 [ "$rc" -eq 21 ] && ok "without the master bit the kernel gets to the end instead of hanging" \
                  || bad "nobm: exit code $rc, expected 21"
 has "$M" "master=0" "the bus master bit really is off"
+grep -qa "nvme: format 0  mount=0" "$M" || { echo "        --- nobm log ---"; grep -a "nvme" "$M" | tr -d "\r" | sed "s/^/        /"; }
 has "$M" "nvme: format 0  mount=0" "COUNTER-CHECK: the file system cannot be written without the master bit"
 has "$M" "nvme: wrote=0  read=0  same=0" "COUNTER-CHECK: not one block goes through"
 if grep -qa "nvme wrote this line over DMA" "$TMPD/nv.img"; then
