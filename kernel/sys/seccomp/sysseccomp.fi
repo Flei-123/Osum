@@ -1,0 +1,281 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.errno
+import lib.kstate
+import libc.regio
+import sched.prstate
+import sched.signal
+import sched.taskconst
+import sched.taskslot
+import sys.seccomp.bpf
+import sys.seccomp.filter
+import sys.sysuser
+
+export {
+    SYS_SECCOMP, PASS, handles, call, prctl_handles, do_prctl, enter
+}
+
+const SYS_SECCOMP: u64 = 317
+const PR_GET_SECCOMP: u64 = 21
+const PR_SET_SECCOMP: u64 = 22
+const PR_SET_NO_NEW_PRIVS: u64 = 38
+const PR_GET_NO_NEW_PRIVS: u64 = 39
+
+const SECCOMP_SET_MODE_FILTER: u64 = 1
+const SECCOMP_GET_ACTION_AVAIL: u64 = 2
+const MODE_FILTER: u64 = 2
+
+const FLAG_TSYNC: u64 = 1
+const FLAG_LOG: u64 = 2
+const FLAG_SPEC_ALLOW: u64 = 4
+const FLAG_TSYNC_ESRCH: u64 = 16
+const FLAGS_SUPPORTED: u64 = 23
+
+const RET_KILL_PROCESS: u64 = 0x80000000
+const RET_KILL_THREAD: u64 = 0
+const RET_TRAP: u64 = 0x00030000
+const RET_ERRNO: u64 = 0x00050000
+const RET_USER_NOTIF: u64 = 0x7FC00000
+const RET_TRACE: u64 = 0x7FF00000
+const RET_LOG: u64 = 0x7FFC0000
+const RET_ALLOW: u64 = 0x7FFF0000
+const RET_ACTION_MASK: u64 = 0xFFFF0000
+const RET_DATA_MASK: u64 = 0xFFFF
+const ERRNO_MAX: u64 = 4095
+
+const PROG_LEN_OFF: u64 = 0
+const PROG_PTR_OFF: u64 = 8
+const PROG_BYTES: u64 = 16
+const ACTION_BYTES: u64 = 4
+const AUDIT_ARCH_X86_64: u64 = 0xC000003E
+const SIGSYS: u64 = 31
+const SIGKILL: u64 = 9
+
+const D_NR: u64 = 0
+const D_ARCH: u64 = 4
+const D_IP: u64 = 8
+const D_ARGS: u64 = 16
+const F_RIP: u64 = 104
+const F_RDI: u64 = 88
+const F_RSI: u64 = 80
+const F_RDX: u64 = 72
+const F_R10: u64 = 64
+const F_R8: u64 = 56
+const F_R9: u64 = 48
+
+const PASS: u64 = 0x5EC0000000000000
+
+fn fail(e: u64) -> u64 {
+    return sysuser.neg(e)
+}
+
+fn handles(number: u64) -> bool {
+    return number == SYS_SECCOMP
+}
+
+fn prctl_handles(option: u64) -> bool {
+    return option == PR_GET_SECCOMP || option == PR_SET_SECCOMP
+        || option == PR_SET_NO_NEW_PRIVS || option == PR_GET_NO_NEW_PRIVS
+}
+
+fn tgid_of(state: u64, t: u64) -> u64 {
+    let g: u64 = taskslot.tget(state, t, taskconst.T_TGID)
+    if g != 0 {
+        return g
+    }
+    return taskslot.tget(state, t, taskconst.T_PID)
+}
+
+fn alive(state: u64, t: u64) -> bool {
+    let st: u64 = taskslot.tget(state, t, taskconst.T_STATE)
+    return st != taskconst.S_FREE && st != taskconst.S_ZOMBIE && st != taskconst.S_REAPING
+}
+
+fn is_sibling(state: u64, me: u64, t: u64) -> bool {
+    return t != me && alive(state, t) && tgid_of(state, t) == tgid_of(state, me)
+}
+
+fn load_block(state: u64, me: u64, uprog: u64) -> u64 {
+    var hdr: [u8; 16] = [0 as u8; 16]
+    let hp: u64 = (&hdr[0]) as u64
+    if !sysuser.copy_in(state, me, hp, uprog, PROG_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    let count: u64 = regio.read16_at(hp, PROG_LEN_OFF)
+    if count == 0 || count > bpf.INSN_MAX {
+        return fail(errno.E_INVAL)
+    }
+    let blk: u64 = filter.block_alloc(state, count)
+    if blk == 0 {
+        return fail(errno.E_NOMEM)
+    }
+    if !sysuser.copy_in(state, me, filter.block_insns(blk), regio.read64_at(hp, PROG_PTR_OFF), count * bpf.INSN_BYTES) {
+        filter.release(state, blk)
+        return fail(errno.E_FAULT)
+    }
+    if !bpf.validate(filter.block_insns(blk), count) {
+        filter.release(state, blk)
+        return fail(errno.E_INVAL)
+    }
+    return blk
+}
+
+fn sync_blocker(state: u64, me: u64) -> u64 {
+    let mine: u64 = filter.head_of(state, me)
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 0
+    while i < n {
+        if is_sibling(state, me, i) {
+            let theirs: u64 = filter.head_of(state, i)
+            if theirs != filter.HEAD_NONE && !filter.is_ancestor(mine, theirs) {
+                return taskslot.tget(state, i, taskconst.T_PID)
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn sync_all(state: u64, me: u64, blk: u64) {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 0
+    while i < n {
+        if is_sibling(state, me, i) {
+            filter.share_to(state, i, blk)
+        }
+        i = i + 1
+    }
+}
+
+fn permitted(state: u64, me: u64) -> bool {
+    return prstate.flag_get(state, me, prstate.FLAG_NO_NEW_PRIVS) || taskslot.tget(state, me, taskconst.T_EUID) == 0
+}
+
+fn set_filter(state: u64, me: u64, flags: u64, uprog: u64) -> u64 {
+    if (flags & (0xFFFFFFFFFFFFFFFF -% FLAGS_SUPPORTED)) != 0 {
+        return fail(errno.E_INVAL)
+    }
+    if !permitted(state, me) {
+        return fail(errno.E_ACCES)
+    }
+    let blk: u64 = load_block(state, me, uprog)
+    if errno.is_error(blk) {
+        return blk
+    }
+    if (flags & FLAG_TSYNC) != 0 {
+        let blocker: u64 = sync_blocker(state, me)
+        if blocker != 0 {
+            filter.release(state, blk)
+            return blocker
+        }
+    }
+    filter.attach(state, me, blk)
+    if (flags & FLAG_TSYNC) != 0 {
+        sync_all(state, me, blk)
+    }
+    return 0
+}
+
+fn action_avail(state: u64, me: u64, uaction: u64) -> u64 {
+    var buf: [u8; 8] = [0 as u8; 8]
+    let bp: u64 = (&buf[0]) as u64
+    if !sysuser.copy_in(state, me, bp, uaction, ACTION_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    let action: u64 = regio.read32(bp)
+    if action == RET_KILL_PROCESS || action == RET_KILL_THREAD || action == RET_TRAP
+        || action == RET_ERRNO || action == RET_USER_NOTIF || action == RET_TRACE
+        || action == RET_LOG || action == RET_ALLOW {
+        return 0
+    }
+    return fail(errno.E_OPNOTSUPP)
+}
+
+fn call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64) -> u64 {
+    if a0 == SECCOMP_SET_MODE_FILTER {
+        return set_filter(state, me, a1, a2)
+    }
+    if a0 == SECCOMP_GET_ACTION_AVAIL && a1 == 0 {
+        return action_avail(state, me, a2)
+    }
+    return fail(errno.E_INVAL)
+}
+
+fn do_prctl(state: u64, me: u64, option: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
+    if option == PR_GET_NO_NEW_PRIVS {
+        if prstate.flag_get(state, me, prstate.FLAG_NO_NEW_PRIVS) {
+            return 1
+        }
+        return 0
+    }
+    if option == PR_SET_NO_NEW_PRIVS {
+        if a2 != 1 || a3 != 0 || a4 != 0 || a5 != 0 {
+            return fail(errno.E_INVAL)
+        }
+        prstate.flag_set(state, me, prstate.FLAG_NO_NEW_PRIVS, true)
+        return 0
+    }
+    if option == PR_GET_SECCOMP {
+        if filter.head_of(state, me) != filter.HEAD_NONE {
+            return MODE_FILTER
+        }
+        return 0
+    }
+    if a2 != MODE_FILTER {
+        return fail(errno.E_INVAL)
+    }
+    return set_filter(state, me, 0, a3)
+}
+
+fn fill_data(data: u64, number: u64, frame: u64) {
+    regio.write32(data + D_NR, number)
+    regio.write32(data + D_ARCH, AUDIT_ARCH_X86_64)
+    regio.write64(data + D_IP, regio.read64_at(frame, F_RIP))
+    regio.write64(data + D_ARGS, regio.read64_at(frame, F_RDI))
+    regio.write64(data + D_ARGS + 8, regio.read64_at(frame, F_RSI))
+    regio.write64(data + D_ARGS + 16, regio.read64_at(frame, F_RDX))
+    regio.write64(data + D_ARGS + 24, regio.read64_at(frame, F_R10))
+    regio.write64(data + D_ARGS + 32, regio.read64_at(frame, F_R8))
+    regio.write64(data + D_ARGS + 40, regio.read64_at(frame, F_R9))
+}
+
+fn kill_group(state: u64, me: u64) {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 0
+    while i < n {
+        if i == me || is_sibling(state, me, i) {
+            let _r: bool = signal.send_task(state, i, SIGKILL)
+        }
+        i = i + 1
+    }
+}
+
+fn verdict(state: u64, me: u64, ret: u64) -> u64 {
+    let action: u64 = ret & RET_ACTION_MASK
+    if action == RET_ALLOW || action == RET_LOG {
+        return PASS
+    }
+    if action == RET_ERRNO {
+        var code: u64 = ret & RET_DATA_MASK
+        if code > ERRNO_MAX {
+            code = ERRNO_MAX
+        }
+        return 0 -% code
+    }
+    if action == RET_TRAP || action == RET_KILL_THREAD {
+        let _t: bool = signal.send_task(state, me, SIGSYS)
+        return fail(errno.E_NOSYS)
+    }
+    if action == RET_TRACE || action == RET_USER_NOTIF {
+        return fail(errno.E_NOSYS)
+    }
+    kill_group(state, me)
+    return fail(errno.E_NOSYS)
+}
+
+fn enter(state: u64, me: u64, head: u64, number: u64, frame: u64) -> u64 {
+    var data: [u8; 64] = [0 as u8; 64]
+    let dp: u64 = (&data[0]) as u64
+    fill_data(dp, number, frame)
+    return verdict(state, me, filter.evaluate(head, dp))
+}
