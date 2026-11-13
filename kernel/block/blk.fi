@@ -53,7 +53,7 @@ import bus.drvreg
 export {
     dev_flushes,
     ram_init, use_ata, use_nvme, read, write, blocks, present,
-    read_raw, read_stream, read_stream_span, S_SECTORS, S_SECTORS_WIDE, write_raw, write_run, wb_begin, wb_begin_data, wb_struct, wb_struct_lazy, wb_mark_freed, wb_freed_pending, wb_set_meta, wb_due, wb_release, wb_end, wb_flush,
+    read_raw, read_stream, read_stream_span, S_SECTORS, S_SECTORS_WIDE, write_raw, write_run, wb_begin, wb_begin_data, wb_set_big_runs, wb_struct, wb_struct_lazy, wb_mark_freed, wb_freed_pending, wb_set_meta, wb_due, wb_release, wb_end, wb_flush,
     BLOCK_SIZE, DEV_RAM, DEV_ATA, DEV_NVME, DEV_ATA1, DEV_USB,
     removable,
     // ---- Runde K14 ----
@@ -1210,6 +1210,7 @@ const W_DEPTH: u64 = 0x248 // open scopes
 const W_DIRTY: u64 = 0x250 // valid slots
 const W_SINCE: u64 = 0x298 // tick of the oldest dirty slot
 const W_MODE: u64 = 0x2A0 // 0 eager, 1 data-only scope, 2 structural
+const W_BIGRUN: u64 = 0x2B8
 const W_META: u64 = 0x2B0 // first lba after the metadata sectors written before directory data, 0 = no ordering
 const W_FREED: u64 = 0x2A8 // 1 while freed blocks or inodes are not yet on the drive
 const WB_SLOTS: u64 = 2048
@@ -1249,17 +1250,34 @@ fn wb_dev(dv: u64, state: u64) -> bool {
     return false
 }
 
-const WB_AHCI_RUN: u64 = 128
+const WB_RUN_SMALL: u64 = 128
+const WB_RUN_BIG: u64 = 2048
 const WB_NVME_PAGES: u64 = 2
 
 static mut wb_nvme_pending: [u64; 1] = [0 as u64; 1]
+
+fn wb_set_big_runs(state: u64, on: bool) {
+    var v: u64 = 0
+    if on {
+        v = 1
+    }
+    cs(state, W_BIGRUN, v)
+}
+
+fn wb_run_cap(state: u64) -> u64 {
+    if cg(state, W_BIGRUN) != 0 {
+        return WB_RUN_BIG
+    }
+    return WB_RUN_SMALL
+}
 
 fn wb_ahci_run(state: u64, lba: u64, src: u64, n: u64) -> bool {
     var done: u64 = 0
     while done < n {
         var c: u64 = n - done
-        if c > WB_AHCI_RUN {
-            c = WB_AHCI_RUN
+        let cap: u64 = wb_run_cap(state)
+        if c > cap {
+            c = cap
         }
         if !ahci.write_many(state, lba + done, c, src + done * BLOCK_SIZE) {
             return false
@@ -1414,12 +1432,11 @@ fn wb_held_frames(state: u64) -> u64 {
     return WB_FRAMES
 }
 
-const WB_RUN_MAX: u64 = 128
 
 fn wb_run_end(state: u64, sl: u64, m: u64, high: u64) -> u64 {
     let lba: u64 = m & WB_LBA_MASK
     var e: u64 = sl + 1
-    while e < WB_SLOTS && e - sl < WB_RUN_MAX && wb_meta(state, e) == m + (e - sl) && lba + (e - sl) < high {
+    while e < WB_SLOTS && e - sl < wb_run_cap(state) && wb_meta(state, e) == m + (e - sl) && lba + (e - sl) < high {
         e = e + 1
     }
     return e
