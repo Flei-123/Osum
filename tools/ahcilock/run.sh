@@ -38,7 +38,7 @@ echo "== 1. build =="
 if [ -n "${AHCILOCK_BUILT:-}" ] && [ -s "$AHCILOCK_BUILT/quelle.img" ]; then
     cp -f "$AHCILOCK_BUILT/quelle.img" "$AHCILOCK_BUILT/k.mb" "$OUT/"
     ok "reused build $AHCILOCK_BUILT"
-elif bash tools/install/build.sh "$OUT" > "$OUT/build.log" 2>&1; then
+elif QUELL_BLOCKS="${AHCILOCK_BLOCKS:-49152}" bash tools/install/build.sh "$OUT" > "$OUT/build.log" 2>&1; then
     ok "image built"
 else
     bad "tools/install/build.sh"; tail -20 "$OUT/build.log"
