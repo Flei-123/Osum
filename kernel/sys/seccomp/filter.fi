@@ -9,11 +9,12 @@ import sched.taskslot
 import sys.seccomp.bpf
 
 export {
-    HEAD_NONE, BLOCK_HEADER, LOAD_OK, LOAD_NOMEM, LOAD_NOT_ANCESTOR,
+    HEAD_NONE, HEAD_STRICT, BLOCK_HEADER, LOAD_OK, LOAD_NOMEM, LOAD_NOT_ANCESTOR,
     block_alloc, block_insns, attach, share_to, inherit, release, evaluate, head_of, is_ancestor
 }
 
 const HEAD_NONE: u64 = 0
+const HEAD_STRICT: u64 = 1
 const BLOCK_HEADER: u64 = 24
 const OFF_REFS: u64 = 0
 const OFF_COUNT: u64 = 8
@@ -47,7 +48,7 @@ fn block_insns(blk: u64) -> u64 {
 fn release_locked(state: u64, head: u64) {
     var cur: u64 = head
     var guard: u64 = 0
-    while cur != HEAD_NONE && guard < CHAIN_LIMIT {
+    while cur > HEAD_STRICT && guard < CHAIN_LIMIT {
         let refs: u64 = regio.read64(cur + OFF_REFS) - 1
         regio.write64(cur + OFF_REFS, refs)
         if refs != 0 {
@@ -61,7 +62,7 @@ fn release_locked(state: u64, head: u64) {
 }
 
 fn release(state: u64, head: u64) {
-    if head == HEAD_NONE {
+    if head <= HEAD_STRICT {
         return
     }
     let flags: u64 = mmframe.lock(state)
@@ -77,7 +78,7 @@ fn attach(state: u64, t: u64, blk: u64) {
 fn is_ancestor(blk: u64, other: u64) -> bool {
     var cur: u64 = blk
     var guard: u64 = 0
-    while cur != HEAD_NONE && guard < CHAIN_LIMIT {
+    while cur > HEAD_STRICT && guard < CHAIN_LIMIT {
         if cur == other {
             return true
         }
@@ -101,6 +102,10 @@ fn inherit(state: u64, child: u64, parent: u64) {
     if head == HEAD_NONE {
         return
     }
+    if head == HEAD_STRICT {
+        taskslot.tset(state, child, taskconst.T_SECCOMP, HEAD_STRICT)
+        return
+    }
     let flags: u64 = mmframe.lock(state)
     regio.write64(head + OFF_REFS, regio.read64(head + OFF_REFS) + 1)
     taskslot.tset(state, child, taskconst.T_SECCOMP, head)
@@ -116,7 +121,7 @@ fn evaluate(head: u64, data: u64) -> u64 {
     var cur: u64 = head
     var guard: u64 = 0
     var first: bool = true
-    while cur != HEAD_NONE && guard < CHAIN_LIMIT {
+    while cur > HEAD_STRICT && guard < CHAIN_LIMIT {
         let ret: u64 = bpf.run(block_insns(cur), regio.read64(cur + OFF_COUNT), data)
         if first || rank(ret) < rank(best) {
             best = ret

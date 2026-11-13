@@ -14,6 +14,13 @@
 #define PR_SET_NNP 38
 #define PR_GET_NNP 39
 #define PR_GET_SECCOMP_NR 21
+#define PR_SET_SECCOMP_NR 22
+#define SC_SET_MODE_STRICT 0
+#define RET_KILL_THREAD 0u
+#define SYS_SECCOMP_CODE 1
+#define SIGINFO_CALL_ADDR 16
+#define SIGINFO_SYSCALL 24
+#define SIGINFO_ARCH 28
 #define SC_SET_MODE_FILTER 1
 #define SC_GET_ACTION_AVAIL 2
 #define SC_FLAG_TSYNC 1
@@ -63,6 +70,23 @@ static int probe_errno(void)
 static volatile sig_atomic_t trapped;
 static void on_sigsys(int s) { (void)s; trapped = 1; }
 
+static volatile int info_signo, info_code, info_syscall;
+static volatile long info_rax;
+static volatile unsigned info_arch;
+static volatile unsigned long info_call_addr;
+
+static void on_sigsys_info(int s, siginfo_t *si, void *uc)
+{
+    info_rax = ((ucontext_t *)uc)->uc_mcontext.gregs[REG_RAX];
+    const unsigned char *raw = (const unsigned char *)si;
+    info_signo = s == si->si_signo ? s : -1;
+    info_code = si->si_code;
+    info_call_addr = *(const unsigned long *)(raw + SIGINFO_CALL_ADDR);
+    info_syscall = *(const int *)(raw + SIGINFO_SYSCALL);
+    info_arch = *(const unsigned *)(raw + SIGINFO_ARCH);
+    trapped = 1;
+}
+
 static int child_status(int (*body)(void))
 {
     pid_t pid = fork();
@@ -109,6 +133,110 @@ static int body_trap(void)
         return 90;
     syscall(NR_PROBE);
     return trapped ? 0 : 91;
+}
+
+static int body_trap_info(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = on_sigsys_info;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSYS, &sa, 0);
+    prctl(PR_SET_NNP, 1, 0, 0, 0);
+    if (install_nr_action(NR_PROBE, RET_TRAP, 0) != 0)
+        return 90;
+    errno = 0;
+    long r = syscall(NR_PROBE);
+    int e = errno;
+    if (!trapped)
+        return 91;
+    if (info_signo != SIGSYS || info_code != SYS_SECCOMP_CODE)
+        return 92;
+    if (info_syscall != NR_PROBE || info_arch != ARCH_X86_64 || info_call_addr == 0)
+        return 93;
+    (void)e;
+    if (info_rax != NR_PROBE)
+        return 95;
+    return r == NR_PROBE ? 0 : 94;
+}
+
+static int body_trap_blocked(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_sigsys;
+    sigaction(SIGSYS, &sa, 0);
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGSYS);
+    sigprocmask(SIG_BLOCK, &set, 0);
+    prctl(PR_SET_NNP, 1, 0, 0, 0);
+    if (install_nr_action(NR_PROBE, RET_TRAP, 0) != 0)
+        return 90;
+    syscall(NR_PROBE);
+    return trapped ? 0 : 91;
+}
+
+static int body_kill_thread_with_handler(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_sigsys;
+    sigaction(SIGSYS, &sa, 0);
+    prctl(PR_SET_NNP, 1, 0, 0, 0);
+    if (install_nr_action(NR_PROBE, RET_KILL_THREAD, 0) != 0)
+        return 90;
+    syscall(NR_PROBE);
+    return trapped ? 93 : 92;
+}
+
+static int body_strict_exit(void)
+{
+    int p[2];
+    if (pipe(p) != 0)
+        return 90;
+    if (prctl(PR_SET_SECCOMP_NR, 1, 0, 0, 0) != 0)
+        return 91;
+    if (syscall(SYS_write, p[1], "x", 1) != 1)
+        syscall(SYS_exit, 92);
+    syscall(SYS_exit, 0);
+    return 93;
+}
+
+static int body_strict_seccomp_call(void)
+{
+    int p[2];
+    if (pipe(p) != 0)
+        return 90;
+    if (seccomp_call(SC_SET_MODE_STRICT, 0, 0) != 0)
+        return 91;
+    char c = 0;
+    if (syscall(SYS_write, p[1], "x", 1) != 1 || syscall(SYS_read, p[0], &c, 1) != 1 || c != 'x')
+        syscall(SYS_exit, 92);
+    syscall(SYS_exit, 0);
+    return 93;
+}
+
+static int body_strict_kill(void)
+{
+    if (prctl(PR_SET_SECCOMP_NR, 1, 0, 0, 0) != 0)
+        return 91;
+    syscall(NR_PROBE);
+    syscall(SYS_exit, 92);
+    return 93;
+}
+
+static int body_strict_conflicts(void)
+{
+    prctl(PR_SET_NNP, 1, 0, 0, 0);
+    int bits = 0;
+    errno = 0; if (seccomp_call(SC_SET_MODE_STRICT, 1, 0) == -1 && errno == EINVAL) bits |= 1;
+    errno = 0; if (seccomp_call(SC_SET_MODE_STRICT, 0, (void *)8) == -1 && errno == EINVAL) bits |= 2;
+    if (install_nr_action(NR_PROBE, RET_ALLOW, 0) != 0)
+        return 90;
+    errno = 0; if (seccomp_call(SC_SET_MODE_STRICT, 0, 0) == -1 && errno == EINVAL) bits |= 4;
+    errno = 0; if (prctl(PR_SET_SECCOMP_NR, 1, 0, 0, 0) == -1 && errno == EINVAL) bits |= 8;
+    return bits == 15 ? 0 : bits + 1;
 }
 
 static int body_inherit(void)
@@ -338,6 +466,19 @@ int main(void)
         CHECK("kill_process", WIFSIGNALED(st), "status=0x%x", st);
     }
     check_exit("trap_delivers_sigsys", body_trap);
+    check_exit("trap_siginfo_fields", body_trap_info);
+    check_exit("trap_forced_when_blocked", body_trap_blocked);
+    {
+        int st = child_status(body_kill_thread_with_handler);
+        CHECK("kill_thread_ignores_handler", WIFSIGNALED(st) && WTERMSIG(st) == SIGSYS, "status=0x%x", st);
+    }
+    check_exit("strict_mode_prctl_allows_core", body_strict_exit);
+    check_exit("strict_mode_seccomp_call", body_strict_seccomp_call);
+    {
+        int st = child_status(body_strict_kill);
+        CHECK("strict_mode_kills_other_syscall", WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL, "status=0x%x", st);
+    }
+    check_exit("strict_mode_conflicts", body_strict_conflicts);
     check_exit("inherited_by_fork", body_inherit);
     check_exit("strictest_filter_wins", body_stack);
     check_exit("argument_match", body_arg);
