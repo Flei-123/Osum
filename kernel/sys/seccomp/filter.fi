@@ -1,0 +1,134 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.errno
+import libc.regio
+import mm.mmframe
+import mm.mmheap
+import sched.taskconst
+import sched.taskslot
+import sys.seccomp.bpf
+
+export {
+    HEAD_NONE, HEAD_STRICT, BLOCK_HEADER, LOAD_OK, LOAD_NOMEM, LOAD_NOT_ANCESTOR,
+    block_alloc, block_insns, attach, share_to, inherit, release, evaluate, head_of, is_ancestor
+}
+
+const HEAD_NONE: u64 = 0
+const HEAD_STRICT: u64 = 1
+const BLOCK_HEADER: u64 = 24
+const OFF_REFS: u64 = 0
+const OFF_COUNT: u64 = 8
+const OFF_PREV: u64 = 16
+const ACTION_SIGN: u64 = 0x80000000
+const ACTION_ORDER_MASK: u64 = 0xFFFF0000
+const CHAIN_LIMIT: u64 = 512
+const LOAD_OK: u64 = 0
+const LOAD_NOMEM: u64 = 1
+const LOAD_NOT_ANCESTOR: u64 = 2
+
+fn head_of(state: u64, t: u64) -> u64 {
+    return taskslot.tget(state, t, taskconst.T_SECCOMP)
+}
+
+fn block_alloc(state: u64, count: u64) -> u64 {
+    let blk: u64 = mmheap.kalloc(state, BLOCK_HEADER + count * bpf.INSN_BYTES)
+    if blk == 0 {
+        return 0
+    }
+    regio.write64(blk + OFF_REFS, 1)
+    regio.write64(blk + OFF_COUNT, count)
+    regio.write64(blk + OFF_PREV, HEAD_NONE)
+    return blk
+}
+
+fn block_insns(blk: u64) -> u64 {
+    return blk + BLOCK_HEADER
+}
+
+fn release_locked(state: u64, head: u64) {
+    var cur: u64 = head
+    var guard: u64 = 0
+    while cur > HEAD_STRICT && guard < CHAIN_LIMIT {
+        let refs: u64 = regio.read64(cur + OFF_REFS) - 1
+        regio.write64(cur + OFF_REFS, refs)
+        if refs != 0 {
+            return
+        }
+        let prev: u64 = regio.read64(cur + OFF_PREV)
+        mmheap.kfree_inner(state, cur)
+        cur = prev
+        guard = guard + 1
+    }
+}
+
+fn release(state: u64, head: u64) {
+    if head <= HEAD_STRICT {
+        return
+    }
+    let flags: u64 = mmframe.lock(state)
+    release_locked(state, head)
+    mmframe.unlock(state, flags)
+}
+
+fn attach(state: u64, t: u64, blk: u64) {
+    regio.write64(blk + OFF_PREV, head_of(state, t))
+    taskslot.tset(state, t, taskconst.T_SECCOMP, blk)
+}
+
+fn is_ancestor(blk: u64, other: u64) -> bool {
+    var cur: u64 = blk
+    var guard: u64 = 0
+    while cur > HEAD_STRICT && guard < CHAIN_LIMIT {
+        if cur == other {
+            return true
+        }
+        cur = regio.read64(cur + OFF_PREV)
+        guard = guard + 1
+    }
+    return false
+}
+
+fn share_to(state: u64, t: u64, blk: u64) {
+    let flags: u64 = mmframe.lock(state)
+    let old: u64 = head_of(state, t)
+    regio.write64(blk + OFF_REFS, regio.read64(blk + OFF_REFS) + 1)
+    taskslot.tset(state, t, taskconst.T_SECCOMP, blk)
+    release_locked(state, old)
+    mmframe.unlock(state, flags)
+}
+
+fn inherit(state: u64, child: u64, parent: u64) {
+    let head: u64 = head_of(state, parent)
+    if head == HEAD_NONE {
+        return
+    }
+    if head == HEAD_STRICT {
+        taskslot.tset(state, child, taskconst.T_SECCOMP, HEAD_STRICT)
+        return
+    }
+    let flags: u64 = mmframe.lock(state)
+    regio.write64(head + OFF_REFS, regio.read64(head + OFF_REFS) + 1)
+    taskslot.tset(state, child, taskconst.T_SECCOMP, head)
+    mmframe.unlock(state, flags)
+}
+
+fn rank(ret: u64) -> u64 {
+    return (ret & ACTION_ORDER_MASK) ^ ACTION_SIGN
+}
+
+fn evaluate(head: u64, data: u64) -> u64 {
+    var best: u64 = 0xFFFFFFFF
+    var cur: u64 = head
+    var guard: u64 = 0
+    var first: bool = true
+    while cur > HEAD_STRICT && guard < CHAIN_LIMIT {
+        let ret: u64 = bpf.run(block_insns(cur), regio.read64(cur + OFF_COUNT), data)
+        if first || rank(ret) < rank(best) {
+            best = ret
+            first = false
+        }
+        cur = regio.read64(cur + OFF_PREV)
+        guard = guard + 1
+    }
+    return best
+}

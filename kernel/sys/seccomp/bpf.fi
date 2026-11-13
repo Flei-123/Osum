@@ -1,0 +1,283 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import libc.regio
+
+export {
+    INSN_BYTES, INSN_MAX, DATA_BYTES, validate, run
+}
+
+const INSN_BYTES: u64 = 8
+const INSN_MAX: u64 = 4096
+const DATA_BYTES: u64 = 64
+const MEM_WORDS: u64 = 16
+const WORD_MASK: u64 = 0xFFFFFFFF
+const WORD_BYTES: u64 = 4
+const SHIFT_MASK: u64 = 31
+
+const CLASS_MASK: u64 = 7
+const C_LD: u64 = 0
+const C_LDX: u64 = 1
+const C_ST: u64 = 2
+const C_STX: u64 = 3
+const C_ALU: u64 = 4
+const C_JMP: u64 = 5
+const C_RET: u64 = 6
+const C_MISC: u64 = 7
+
+const MODE_MASK: u64 = 0xE0
+const SIZE_MASK: u64 = 0x18
+const M_IMM: u64 = 0x00
+const M_ABS: u64 = 0x20
+const M_MEM: u64 = 0x60
+const M_LEN: u64 = 0x80
+
+const SRC_X: u64 = 0x08
+const OP_MASK: u64 = 0xF0
+const A_ADD: u64 = 0x00
+const A_SUB: u64 = 0x10
+const A_MUL: u64 = 0x20
+const A_DIV: u64 = 0x30
+const A_OR: u64 = 0x40
+const A_AND: u64 = 0x50
+const A_LSH: u64 = 0x60
+const A_RSH: u64 = 0x70
+const A_NEG: u64 = 0x80
+const A_MOD: u64 = 0x90
+const A_XOR: u64 = 0xA0
+
+const J_JA: u64 = 0x00
+const J_JEQ: u64 = 0x10
+const J_JGT: u64 = 0x20
+const J_JGE: u64 = 0x30
+const J_JSET: u64 = 0x40
+
+const RET_A_CODE: u64 = 0x16
+const MISC_TAX: u64 = 0x07
+const MISC_TXA: u64 = 0x87
+
+fn mem_get(mem: u64, idx: u64) -> u64 {
+    return regio.read64_at(mem, idx * 8)
+}
+
+fn mem_set(mem: u64, idx: u64, v: u64) {
+    regio.write64(mem + idx * 8, v)
+}
+
+fn load_a(code: u64, k: u64, data: u64, mem: u64) -> u64 {
+    let mode: u64 = code & MODE_MASK
+    if mode == M_ABS {
+        return regio.read32_at(data, k)
+    }
+    if mode == M_MEM {
+        return mem_get(mem, k)
+    }
+    if mode == M_LEN {
+        return DATA_BYTES
+    }
+    return k
+}
+
+fn load_x(code: u64, k: u64, mem: u64) -> u64 {
+    let mode: u64 = code & MODE_MASK
+    if mode == M_MEM {
+        return mem_get(mem, k)
+    }
+    if mode == M_LEN {
+        return DATA_BYTES
+    }
+    return k
+}
+
+fn alu(op: u64, a: u64, b: u64) -> u64 {
+    if op == A_ADD {
+        return (a + b) & WORD_MASK
+    }
+    if op == A_SUB {
+        return (a -% b) & WORD_MASK
+    }
+    if op == A_MUL {
+        return (a * b) & WORD_MASK
+    }
+    if op == A_DIV {
+        return a / b
+    }
+    if op == A_MOD {
+        return a % b
+    }
+    if op == A_OR {
+        return a | b
+    }
+    if op == A_AND {
+        return a & b
+    }
+    if op == A_XOR {
+        return a ^ b
+    }
+    if op == A_LSH {
+        return (a << (b & SHIFT_MASK)) & WORD_MASK
+    }
+    if op == A_RSH {
+        return a >> (b & SHIFT_MASK)
+    }
+    return (0 -% a) & WORD_MASK
+}
+
+fn cond_taken(op: u64, a: u64, b: u64) -> bool {
+    if op == J_JEQ {
+        return a == b
+    }
+    if op == J_JGT {
+        return a > b
+    }
+    if op == J_JGE {
+        return a >= b
+    }
+    return (a & b) != 0
+}
+
+fn run(prog: u64, n: u64, data: u64) -> u64 {
+    var mem: [u64; 16] = [0 as u64; 16]
+    let mp: u64 = (&mem[0]) as u64
+    var a: u64 = 0
+    var x: u64 = 0
+    var pc: u64 = 0
+    while pc < n {
+        let at: u64 = prog + pc * INSN_BYTES
+        let code: u64 = regio.read16(at)
+        let k: u64 = regio.read32_at(at, 4)
+        let cls: u64 = code & CLASS_MASK
+        pc = pc + 1
+        if cls == C_RET {
+            if code == RET_A_CODE {
+                return a
+            }
+            return k
+        }
+        if cls == C_LD {
+            a = load_a(code, k, data, mp)
+        }
+        if cls == C_LDX {
+            x = load_x(code, k, mp)
+        }
+        if cls == C_ST {
+            mem_set(mp, k, a)
+        }
+        if cls == C_STX {
+            mem_set(mp, k, x)
+        }
+        if cls == C_MISC {
+            if code == MISC_TAX {
+                x = a
+            } else {
+                a = x
+            }
+        }
+        if cls == C_ALU {
+            var b: u64 = k
+            if (code & SRC_X) != 0 {
+                b = x
+            }
+            let op: u64 = code & OP_MASK
+            if (op == A_DIV || op == A_MOD) && b == 0 {
+                return 0
+            }
+            a = alu(op, a, b)
+        }
+        if cls == C_JMP {
+            let op: u64 = code & OP_MASK
+            if op == J_JA {
+                pc = pc + k
+            } else {
+                var b: u64 = k
+                if (code & SRC_X) != 0 {
+                    b = x
+                }
+                if cond_taken(op, a, b) {
+                    pc = pc + regio.read8_at(at, 2)
+                } else {
+                    pc = pc + regio.read8_at(at, 3)
+                }
+            }
+        }
+    }
+    return 0
+}
+
+fn load_ok(code: u64, k: u64) -> bool {
+    let mode: u64 = code & MODE_MASK
+    if mode == M_ABS {
+        return (code & SIZE_MASK) == 0 && k % WORD_BYTES == 0 && k + WORD_BYTES <= DATA_BYTES
+    }
+    if mode == M_MEM {
+        return k < MEM_WORDS
+    }
+    if mode == M_LEN {
+        return (code & SIZE_MASK) == 0
+    }
+    return mode == M_IMM
+}
+
+fn alu_ok(code: u64, k: u64) -> bool {
+    let op: u64 = code & OP_MASK
+    if op > A_XOR {
+        return false
+    }
+    if (op == A_DIV || op == A_MOD) && (code & SRC_X) == 0 && k == 0 {
+        return false
+    }
+    if (op == A_LSH || op == A_RSH) && (code & SRC_X) == 0 && k > SHIFT_MASK {
+        return false
+    }
+    return true
+}
+
+fn jump_ok(code: u64, jt: u64, jf: u64, k: u64, room: u64) -> bool {
+    let op: u64 = code & OP_MASK
+    if op == J_JA {
+        return k < room
+    }
+    if op > J_JSET {
+        return false
+    }
+    return jt < room && jf < room
+}
+
+fn insn_ok(prog: u64, i: u64, n: u64) -> bool {
+    let at: u64 = prog + i * INSN_BYTES
+    let code: u64 = regio.read16(at)
+    let k: u64 = regio.read32_at(at, 4)
+    let cls: u64 = code & CLASS_MASK
+    if cls == C_LDX && (code & MODE_MASK) == M_ABS {
+        return false
+    }
+    if cls == C_LD || cls == C_LDX {
+        return load_ok(code, k)
+    }
+    if cls == C_ST || cls == C_STX {
+        return code == cls && k < MEM_WORDS
+    }
+    if cls == C_ALU {
+        return alu_ok(code, k)
+    }
+    if cls == C_JMP {
+        return jump_ok(code, regio.read8_at(at, 2), regio.read8_at(at, 3), k, n - i - 1)
+    }
+    if cls == C_RET {
+        return code == RET_A_CODE || code == C_RET
+    }
+    return code == MISC_TAX || code == MISC_TXA
+}
+
+fn validate(prog: u64, n: u64) -> bool {
+    if n == 0 || n > INSN_MAX {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        if !insn_ok(prog, i, n) {
+            return false
+        }
+        i = i + 1
+    }
+    return (regio.read16(prog + (n - 1) * INSN_BYTES) & CLASS_MASK) == C_RET
+}

@@ -1,0 +1,465 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import libc.regio
+import sched.sched
+import sched.taskconst
+import sched.taskslot
+
+export {
+    pid_of, live, group_new, group_drop, group_ready, group_flags, group_open_flags,
+    mark_apply, emit_file, emit_entry, opened, wrote, closed, set_actor,
+    queue_pop, QUEUE_NONE,
+    FAN_ACCESS, FAN_MODIFY, FAN_CLOSE_WRITE, FAN_CLOSE_NOWRITE, FAN_OPEN, FAN_MOVED_FROM, FAN_MOVED_TO,
+    FAN_CREATE, FAN_DELETE, FAN_Q_OVERFLOW, FAN_ONDIR, FAN_EVENT_ON_CHILD, FAN_EVENTS_SUPPORTED,
+    MARK_ADD, MARK_REMOVE, MARK_MOUNT, MARK_FLUSH, MARK_FILESYSTEM, MARK_ONLYDIR, MARK_DONT_FOLLOW,
+    MARK_IGNORED_MASK, MARK_IGNORED_SURV_MODIFY, EVENT_PATH_MAX, MARK_PATH_MAX
+}
+
+const FAN_ACCESS: u64 = 0x1
+const FAN_MODIFY: u64 = 0x2
+const FAN_CLOSE_WRITE: u64 = 0x8
+const FAN_CLOSE_NOWRITE: u64 = 0x10
+const FAN_OPEN: u64 = 0x20
+const FAN_MOVED_FROM: u64 = 0x40
+const FAN_MOVED_TO: u64 = 0x80
+const FAN_CREATE: u64 = 0x100
+const FAN_DELETE: u64 = 0x200
+const FAN_Q_OVERFLOW: u64 = 0x4000
+const FAN_ONDIR: u64 = 0x40000000
+const FAN_EVENT_ON_CHILD: u64 = 0x08000000
+const FAN_EVENTS_SUPPORTED: u64 = 0x1 | 0x2 | 0x8 | 0x10 | 0x20 | 0x40 | 0x80 | 0x100 | 0x200 | 0x40000000 | 0x08000000
+
+const MARK_ADD: u64 = 0x1
+const MARK_REMOVE: u64 = 0x2
+const MARK_DONT_FOLLOW: u64 = 0x4
+const MARK_ONLYDIR: u64 = 0x8
+const MARK_MOUNT: u64 = 0x10
+const MARK_IGNORED_MASK: u64 = 0x20
+const MARK_IGNORED_SURV_MODIFY: u64 = 0x40
+const MARK_FLUSH: u64 = 0x80
+const MARK_FILESYSTEM: u64 = 0x100
+
+const E_NOENT: u64 = 2
+const E_NOSPC: u64 = 28
+
+const GROUPS_MAX: u64 = 8
+const MARKS_MAX: u64 = 8
+const MARK_BYTES: u64 = 112
+const MARK_PATH_MAX: u64 = 80
+const MARK_OFF: u64 = 64
+const QUEUE_OFF: u64 = 960
+const QUEUE_MAX: u64 = 24
+const EVENT_BYTES: u64 = 128
+const EVENT_PATH_MAX: u64 = 111
+const EVENT_PATH_OFF: u64 = 16
+const QUEUE_NONE: u64 = 0xFFFFFFFFFFFFFFFF
+
+const G_FLAGS: u64 = 0
+const G_HEAD: u64 = 8
+const G_TAIL: u64 = 16
+const G_OVERFLOW: u64 = 24
+const G_OPEN_FLAGS: u64 = 32
+
+const M_USED: u64 = 0
+const M_MASK: u64 = 8
+const M_KIND: u64 = 16
+const M_LEN: u64 = 24
+const M_PATH: u64 = 32
+const KIND_PATH: u64 = 0
+const KIND_TREE: u64 = 1
+
+const TRACK_MAX: u64 = 64
+const TRACK_PATH_BYTES: u64 = 112
+const ACCMODE: u64 = 3
+
+static mut groups: [u64; 8] = [0 as u64; 8]
+static mut live_count: [u64; 1] = [0 as u64; 1]
+static mut actor_pid: [u64; 1] = [0 as u64; 1]
+static mut track_of: [u64; 64] = [0 as u64; 64]
+static mut track_len: [u64; 64] = [0 as u64; 64]
+static mut track_write: [u64; 64] = [0 as u64; 64]
+static mut track_path: [u8; 7168] = [0 as u8; 7168]
+
+fn pid_of(state: u64, me: u64) -> u64 {
+    let tgid: u64 = taskslot.tget(state, me, taskconst.T_TGID)
+    if tgid != 0 {
+        return tgid
+    }
+    return taskslot.tget(state, me, taskconst.T_PID)
+}
+
+fn live() -> bool {
+    return live_count[0] != 0
+}
+
+fn set_actor(pid: u64) {
+    actor_pid[0] = pid
+}
+
+fn track_at(i: u64) -> u64 {
+    return (&track_path[0]) as u64 + i * TRACK_PATH_BYTES
+}
+
+fn mark_at(fr: u64, i: u64) -> u64 {
+    return fr + MARK_OFF + i * MARK_BYTES
+}
+
+fn queue_at(fr: u64, i: u64) -> u64 {
+    return fr + QUEUE_OFF + i * EVENT_BYTES
+}
+
+fn zero_frame(fr: u64) {
+    var o: u64 = 0
+    while o < 4096 {
+        regio.write64(fr + o, 0)
+        o = o + 8
+    }
+}
+
+fn group_new(fr: u64, flags: u64, open_flags: u64) -> bool {
+    var slot: u64 = GROUPS_MAX
+    var i: u64 = 0
+    while i < GROUPS_MAX {
+        if groups[i as usize] == 0 {
+            slot = i
+            break
+        }
+        i = i + 1
+    }
+    if slot == GROUPS_MAX {
+        return false
+    }
+    zero_frame(fr)
+    regio.write64(fr + G_FLAGS, flags)
+    regio.write64(fr + G_OPEN_FLAGS, open_flags)
+    groups[slot as usize] = fr
+    live_count[0] = live_count[0] + 1
+    return true
+}
+
+fn group_drop(fr: u64) {
+    var i: u64 = 0
+    while i < GROUPS_MAX {
+        if groups[i as usize] == fr {
+            groups[i as usize] = 0
+            live_count[0] = live_count[0] - 1
+        }
+        i = i + 1
+    }
+}
+
+fn group_flags(fr: u64) -> u64 {
+    return regio.read64(fr + G_FLAGS)
+}
+
+fn group_open_flags(fr: u64) -> u64 {
+    return regio.read64(fr + G_OPEN_FLAGS)
+}
+
+fn group_ready(fr: u64) -> bool {
+    return regio.read64(fr + G_TAIL) != regio.read64(fr + G_HEAD) || regio.read64(fr + G_OVERFLOW) != 0
+}
+
+fn same_path(a: u64, b: u64, len: u64) -> bool {
+    var o: u64 = 0
+    while o < len {
+        if regio.read8(a + o) != regio.read8(b + o) {
+            return false
+        }
+        o = o + 1
+    }
+    return true
+}
+
+fn parent_len(path: u64, len: u64) -> u64 {
+    var s: u64 = len
+    while s > 0 {
+        if regio.read8(path + s - 1) == 47 {
+            break
+        }
+        s = s - 1
+    }
+    if s <= 1 {
+        return 1
+    }
+    return s - 1
+}
+
+fn mark_find(fr: u64, kind: u64, path: u64, len: u64) -> u64 {
+    var i: u64 = 0
+    while i < MARKS_MAX {
+        let m: u64 = mark_at(fr, i)
+        if regio.read64(m + M_USED) != 0 && regio.read64(m + M_KIND) == kind && regio.read64(m + M_LEN) == len && same_path(m + M_PATH, path, len) {
+            return i
+        }
+        i = i + 1
+    }
+    return MARKS_MAX
+}
+
+fn mark_apply(fr: u64, flags: u64, mask: u64, path: u64, len: u64) -> u64 {
+    if (flags & MARK_FLUSH) != 0 {
+        var f: u64 = 0
+        while f < MARKS_MAX {
+            let fm: u64 = mark_at(fr, f)
+            let is_tree: bool = regio.read64(fm + M_KIND) == KIND_TREE
+            if (flags & (MARK_MOUNT | MARK_FILESYSTEM)) != 0 {
+                if is_tree {
+                    regio.write64(fm + M_USED, 0)
+                }
+            } else if !is_tree {
+                regio.write64(fm + M_USED, 0)
+            }
+            f = f + 1
+        }
+        return 0
+    }
+    var kind: u64 = KIND_PATH
+    if (flags & (MARK_MOUNT | MARK_FILESYSTEM)) != 0 {
+        kind = KIND_TREE
+    }
+    let at: u64 = mark_find(fr, kind, path, len)
+    if (flags & MARK_REMOVE) != 0 {
+        if at == MARKS_MAX {
+            return E_NOENT
+        }
+        let rm: u64 = mark_at(fr, at)
+        let left: u64 = regio.read64(rm + M_MASK) & (0xFFFFFFFFFFFFFFFF -% mask)
+        regio.write64(rm + M_MASK, left)
+        if (left & (0xFFFFFFFFFFFFFFFF -% (FAN_ONDIR | FAN_EVENT_ON_CHILD))) == 0 {
+            regio.write64(rm + M_USED, 0)
+        }
+        return 0
+    }
+    if at != MARKS_MAX {
+        let up: u64 = mark_at(fr, at)
+        regio.write64(up + M_MASK, regio.read64(up + M_MASK) | mask)
+        return 0
+    }
+    var free: u64 = MARKS_MAX
+    var i: u64 = 0
+    while i < MARKS_MAX {
+        if regio.read64(mark_at(fr, i) + M_USED) == 0 {
+            free = i
+            break
+        }
+        i = i + 1
+    }
+    if free == MARKS_MAX {
+        return E_NOSPC
+    }
+    let m: u64 = mark_at(fr, free)
+    regio.write64(m + M_MASK, mask)
+    regio.write64(m + M_KIND, kind)
+    regio.write64(m + M_LEN, len)
+    var o: u64 = 0
+    while o < len {
+        regio.write8(m + M_PATH + o, regio.read8(path + o))
+        o = o + 1
+    }
+    regio.write64(m + M_USED, 1)
+    return 0
+}
+
+fn under_tree(m: u64, path: u64, len: u64) -> bool {
+    let mlen: u64 = regio.read64(m + M_LEN)
+    if mlen > len || !same_path(m + M_PATH, path, mlen) {
+        return false
+    }
+    return mlen == 1 || mlen == len || regio.read8(path + mlen) == 47
+}
+
+fn mark_hits(m: u64, path: u64, len: u64, entry: bool) -> bool {
+    if regio.read64(m + M_USED) == 0 {
+        return false
+    }
+    if regio.read64(m + M_KIND) == KIND_TREE {
+        return under_tree(m, path, len)
+    }
+    let mlen: u64 = regio.read64(m + M_LEN)
+    let plen: u64 = parent_len(path, len)
+    let in_parent: bool = plen == mlen && same_path(m + M_PATH, path, mlen)
+    if entry {
+        return in_parent
+    }
+    if mlen == len && same_path(m + M_PATH, path, len) {
+        return true
+    }
+    return in_parent && (regio.read64(m + M_MASK) & FAN_EVENT_ON_CHILD) != 0
+}
+
+fn push(state: u64, fr: u64, mask: u64, pid: u64, path: u64, len: u64) {
+    let head: u64 = regio.read64(fr + G_HEAD)
+    let tail: u64 = regio.read64(fr + G_TAIL)
+    var plen: u64 = len
+    if plen > EVENT_PATH_MAX {
+        plen = EVENT_PATH_MAX
+    }
+    if tail != head {
+        let last: u64 = queue_at(fr, (tail - 1) % QUEUE_MAX)
+        if regio.read64(last) == mask && regio.read32(last + 8) == pid && regio.read32(last + 12) == plen && same_path(last + EVENT_PATH_OFF, path, plen) {
+            return
+        }
+    }
+    if tail - head >= QUEUE_MAX {
+        regio.write64(fr + G_OVERFLOW, 1)
+        return
+    }
+    let q: u64 = queue_at(fr, tail % QUEUE_MAX)
+    regio.write64(q, mask)
+    regio.write32(q + 8, pid)
+    regio.write32(q + 12, plen)
+    var o: u64 = 0
+    while o < plen {
+        regio.write8(q + EVENT_PATH_OFF + o, regio.read8(path + o))
+        o = o + 1
+    }
+    regio.write64(fr + G_TAIL, tail + 1)
+    sched.poll_kick(state)
+}
+
+fn emit(state: u64, mask: u64, pid: u64, path: u64, len: u64, entry: bool) {
+    var g: u64 = 0
+    while g < GROUPS_MAX {
+        let fr: u64 = groups[g as usize]
+        if fr != 0 {
+            var i: u64 = 0
+            while i < MARKS_MAX {
+                let m: u64 = mark_at(fr, i)
+                if (regio.read64(m + M_MASK) & mask & 0xFFFF) != 0 && mark_hits(m, path, len, entry) {
+                    if (mask & FAN_ONDIR) == 0 || (regio.read64(m + M_MASK) & FAN_ONDIR) != 0 {
+                        push(state, fr, mask, pid, path, len)
+                    }
+                    break
+                }
+                i = i + 1
+            }
+        }
+        g = g + 1
+    }
+}
+
+fn emit_file(state: u64, mask: u64, pid: u64, path: u64, len: u64) {
+    if live() {
+        emit(state, mask, pid, path, len, false)
+    }
+}
+
+fn emit_entry(state: u64, mask: u64, pid: u64, path: u64, len: u64) {
+    if live() {
+        emit(state, mask, pid, path, len, true)
+    }
+}
+
+fn watched(path: u64, len: u64) -> bool {
+    var g: u64 = 0
+    while g < GROUPS_MAX {
+        let fr: u64 = groups[g as usize]
+        if fr != 0 {
+            var i: u64 = 0
+            while i < MARKS_MAX {
+                if mark_hits(mark_at(fr, i), path, len, false) {
+                    return true
+                }
+                i = i + 1
+            }
+        }
+        g = g + 1
+    }
+    return false
+}
+
+fn track_find(of: u64) -> u64 {
+    var i: u64 = 0
+    while i < TRACK_MAX {
+        if track_of[i as usize] == of + 1 {
+            return i
+        }
+        i = i + 1
+    }
+    return TRACK_MAX
+}
+
+fn track_add(of: u64, path: u64, len: u64, writable: bool) {
+    if len > EVENT_PATH_MAX {
+        return
+    }
+    var i: u64 = 0
+    while i < TRACK_MAX {
+        if track_of[i as usize] == 0 {
+            track_of[i as usize] = of + 1
+            track_len[i as usize] = len
+            track_write[i as usize] = 0
+            if writable {
+                track_write[i as usize] = 1
+            }
+            var o: u64 = 0
+            while o < len {
+                regio.write8(track_at(i) + o, regio.read8(path + o))
+                o = o + 1
+            }
+            return
+        }
+        i = i + 1
+    }
+}
+
+fn opened(state: u64, of: u64, pid: u64, path: u64, len: u64, flags: u64) {
+    if !watched(path, len) {
+        return
+    }
+    emit(state, FAN_OPEN, pid, path, len, false)
+    if track_find(of) == TRACK_MAX {
+        track_add(of, path, len, (flags & ACCMODE) != 0)
+    }
+}
+
+fn wrote(state: u64, of: u64, pid: u64) {
+    let i: u64 = track_find(of)
+    if i == TRACK_MAX || track_write[i as usize] == 0 {
+        return
+    }
+    emit(state, FAN_MODIFY, pid, track_at(i), track_len[i as usize], false)
+}
+
+fn closed(state: u64, of: u64) {
+    let i: u64 = track_find(of)
+    if i == TRACK_MAX {
+        return
+    }
+    var mask: u64 = FAN_CLOSE_NOWRITE
+    if track_write[i as usize] != 0 {
+        mask = FAN_CLOSE_WRITE
+    }
+    emit(state, mask, actor_pid[0], track_at(i), track_len[i as usize], false)
+    track_of[i as usize] = 0
+}
+
+fn queue_pop(fr: u64, dst: u64) -> u64 {
+    let head: u64 = regio.read64(fr + G_HEAD)
+    let tail: u64 = regio.read64(fr + G_TAIL)
+    if head == tail {
+        if regio.read64(fr + G_OVERFLOW) == 0 {
+            return QUEUE_NONE
+        }
+        regio.write64(fr + G_OVERFLOW, 0)
+        regio.write64(dst, FAN_Q_OVERFLOW)
+        regio.write32(dst + 8, 0)
+        regio.write32(dst + 12, 0)
+        return 0
+    }
+    let q: u64 = queue_at(fr, head % QUEUE_MAX)
+    let plen: u64 = regio.read32(q + 12)
+    regio.write64(dst, regio.read64(q))
+    regio.write32(dst + 8, regio.read32(q + 8))
+    regio.write32(dst + 12, plen)
+    var o: u64 = 0
+    while o < plen {
+        regio.write8(dst + EVENT_PATH_OFF + o, regio.read8(q + EVENT_PATH_OFF + o))
+        o = o + 1
+    }
+    regio.write8(dst + EVENT_PATH_OFF + plen, 0)
+    regio.write64(fr + G_HEAD, head + 1)
+    return plen
+}

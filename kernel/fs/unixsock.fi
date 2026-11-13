@@ -19,7 +19,7 @@ export {
     sock_peer, sock_set_peer, sock_state, sock_set_state,
     bind_path, name_of, name_len, name_byte, find_listener, listen_on, accept_from, connect_to, connect_pair,
     pending,
-    send_bytes, recv_bytes, waiting, room, peer_gone, shutdown_sock,
+    send_bytes, recv_bytes, waiting, room, peer_gone, read_closed, write_closed, shutdown_sock,
     push_fd, pop_fd, fd_waiting, fd_room,
     map_room, map_note, map_release, map_release_all, maps_live, map_rec_base, map_rec_word, shm_file_find, shm_file_mark, shm_file_key,
     map_arena_find, shm_demand, shm_lazy, shm_frame_demand, shm_resident, UM_LAZY, UM_WRITE,
@@ -64,6 +64,12 @@ const RING_CAP: u64 = 4096
 const FDQ_MAX: u64 = 16
 
 const SK_USED: u64 = 0
+const USED_LIVE: u64 = 1
+const USED_NO_IN: u64 = 2
+const USED_NO_OUT: u64 = 4
+const SHUT_RD: u64 = 0
+const SHUT_WR: u64 = 1
+const SHUT_RDWR: u64 = 2
 const SK_KIND: u64 = 8
 const SK_STATE: u64 = 16
 const SK_PEER: u64 = 24
@@ -245,7 +251,7 @@ fn sock_new(state: u64, kind: u64) -> u64 {
     var i: u64 = 0
     while i < USOCK_MAX {
         if kstate.get(state, sk_at(i) + SK_USED) == 0 {
-            kstate.set(state, sk_at(i) + SK_USED, 1)
+            kstate.set(state, sk_at(i) + SK_USED, USED_LIVE)
             kstate.set(state, sk_at(i) + SK_KIND, kind)
             kstate.set(state, sk_at(i) + SK_STATE, S_OPEN)
             kstate.set(state, sk_at(i) + SK_PEER, USOCK_MAX)
@@ -614,7 +620,7 @@ fn send_bytes(state: u64, i: u64, src: u64, len: u64) -> u64 {
         return errno.E_BADF
     }
     let p: u64 = kstate.get(state, sk_at(i) + SK_PEER)
-    if p >= USOCK_MAX {
+    if p >= USOCK_MAX || shut_bit(state, i, USED_NO_OUT) {
         return errno.E_PIPE
     }
     let r: u64 = kstate.get(state, sk_at(p) + SK_RING)
@@ -806,17 +812,49 @@ fn recv_dgram(state: u64, i: u64, dst: u64, len: u64) -> u64 {
     return n
 }
 
-fn shutdown_sock(state: u64, i: u64) -> u64 {
+fn mark_shut(state: u64, i: u64, bit: u64) {
+    if i < USOCK_MAX {
+        kstate.set(state, sk_at(i) + SK_USED, kstate.get(state, sk_at(i) + SK_USED) | bit)
+    }
+}
+
+fn shut_bit(state: u64, i: u64, bit: u64) -> bool {
+    return (kstate.get(state, sk_at(i) + SK_USED) & bit) != 0
+}
+
+fn read_closed(state: u64, i: u64) -> bool {
+    if i >= USOCK_MAX {
+        return true
+    }
+    return shut_bit(state, i, USED_NO_IN) || peer_gone(state, i)
+}
+
+fn write_closed(state: u64, i: u64) -> bool {
+    if i >= USOCK_MAX {
+        return true
+    }
+    return shut_bit(state, i, USED_NO_OUT) || peer_gone(state, i)
+}
+
+fn shutdown_sock(state: u64, i: u64, how: u64) -> u64 {
     if i >= USOCK_MAX {
         return errno.E_BADF
     }
-    let p: u64 = kstate.get(state, sk_at(i) + SK_PEER)
-    if p < USOCK_MAX {
-        kstate.set(state, sk_at(p) + SK_STATE, S_CLOSED)
-        kstate.set(state, sk_at(p) + SK_PEER, USOCK_MAX)
+    if how > SHUT_RDWR {
+        return errno.E_INVAL
     }
-    kstate.set(state, sk_at(i) + SK_PEER, USOCK_MAX)
-    kstate.set(state, sk_at(i) + SK_STATE, S_CLOSED)
+    let p: u64 = kstate.get(state, sk_at(i) + SK_PEER)
+    if p >= USOCK_MAX && kstate.get(state, sk_at(i) + SK_KIND) != UK_DGRAM {
+        return errno.E_NOTCONN
+    }
+    if how == SHUT_RD || how == SHUT_RDWR {
+        mark_shut(state, i, USED_NO_IN)
+        mark_shut(state, p, USED_NO_OUT)
+    }
+    if how == SHUT_WR || how == SHUT_RDWR {
+        mark_shut(state, i, USED_NO_OUT)
+        mark_shut(state, p, USED_NO_IN)
+    }
     return 0
 }
 

@@ -9,6 +9,8 @@ import sched.proc.procfault
 import lib.errno
 import fs.file
 import fs.evfd
+import fs.fanotify
+import ipc.mqueue
 import ipc.handle
 import ipc.async
 import sched.signal
@@ -70,6 +72,15 @@ fn poll_of(state: u64, me: u64, of: u64) -> u64 {
     if sysfd.ev_kind(kind) {
         return ev_poll(state, me, of, kind)
     }
+    if kind == file.K_MQUEUE {
+        return mqueue.poll_bits(file.open_ino(state, of))
+    }
+    if kind == file.K_FANOTIFY {
+        if fanotify.group_ready(file.open_off(state, of)) {
+            return POLLIN
+        }
+        return 0
+    }
     if kind == file.K_PIDFD {
         if evfd.pidfd_gone(state, of) {
             return POLLIN
@@ -115,11 +126,17 @@ fn poll_of(state: u64, me: u64, of: u64) -> u64 {
             if unixsock.pending(state, us) {
                 r = r | POLLIN
             }
-        } else if unixsock.peer_gone(state, us) {
+        } else if unixsock.peer_gone(state, us)
+            || (unixsock.read_closed(state, us) && unixsock.write_closed(state, us)) {
             r = r | POLLHUP
-        } else if unixsock.room(state,
-            unixsock.sock_peer(state, us)) != 0 {
-            r = r | POLLOUT
+        } else {
+            if unixsock.read_closed(state, us) {
+                r = r | POLLIN
+            }
+            if unixsock.write_closed(state, us) || unixsock.room(state,
+                unixsock.sock_peer(state, us)) != 0 {
+                r = r | POLLOUT
+            }
         }
         return r
     }

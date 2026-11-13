@@ -223,7 +223,7 @@ import re, sys
 t = open("kernel/user/expmodell.fi", encoding="latin1").read()
 b = t[t.index("fn icon_for("):]
 b = b[:b.index("\n}\n")]
-pairs = re.findall(r"icon_tint\(wlib\.icon_id\(icons\.(\w+)\), (\d+)\)", b)
+pairs = re.findall(r"icon_tint\(\w+\.icon_id\(icons\.(\w+)\), (\d+)\)", b)
 sys.exit(0 if len(pairs) == 9 and len(set(pairs)) == 9 else 1)
 PY
 

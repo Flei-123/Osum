@@ -1,0 +1,363 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import libc.regio
+import sync.atomic
+import mm.mmframe
+
+export {
+    QUEUES_MAX, NONE, NOMEM, NO_MSG, MSGS_LIMIT, SIZE_LIMIT, DEFAULT_MAXMSG, DEFAULT_MSGSIZE, PRIO_MAX, NAME_LIMIT,
+    find, create, unlink, open_ref, drop, reserve, abort, commit, take, release,
+    msg_len, msg_prio, msg_addr, maxmsg, msgsize, count, waiter_add, waiter_sub,
+    notify_set, notify_clear, poll_bits
+}
+
+const QUEUES_MAX: u64 = 8
+const NONE: u64 = 8
+const NOMEM: u64 = 9
+const NO_MSG: u64 = 255
+const MSGS_LIMIT: u64 = 64
+const SIZE_LIMIT: u64 = 8192
+const DEFAULT_MAXMSG: u64 = 10
+const DEFAULT_MSGSIZE: u64 = 8192
+const PRIO_MAX: u64 = 32768
+const NAME_LIMIT: u64 = 63
+const NAME_STRIDE: u64 = 64
+const FRAME_BYTES: u64 = 4096
+const POLLIN: u64 = 1
+const POLLOUT: u64 = 4
+
+static mut lock_word: [u64; 1] = [0 as u64; 1]
+static mut q_live: [u64; 8] = [0 as u64; 8]
+static mut q_linked: [u64; 8] = [0 as u64; 8]
+static mut q_open: [u64; 8] = [0 as u64; 8]
+static mut q_maxmsg: [u64; 8] = [0 as u64; 8]
+static mut q_msgsize: [u64; 8] = [0 as u64; 8]
+static mut q_count: [u64; 8] = [0 as u64; 8]
+static mut q_used: [u64; 8] = [0 as u64; 8]
+static mut q_used_n: [u64; 8] = [0 as u64; 8]
+static mut q_region: [u64; 8] = [0 as u64; 8]
+static mut q_frames: [u64; 8] = [0 as u64; 8]
+static mut q_waiters: [u64; 8] = [0 as u64; 8]
+static mut q_notify_pid: [u64; 8] = [0 as u64; 8]
+static mut q_notify_sig: [u64; 8] = [0 as u64; 8]
+static mut q_notify_of: [u64; 8] = [0 as u64; 8]
+static mut q_name_len: [u64; 8] = [0 as u64; 8]
+static mut q_name: [u8; 512] = [0 as u8; 512]
+static mut q_order: [u64; 512] = [0 as u64; 512]
+static mut m_len: [u64; 512] = [0 as u64; 512]
+static mut m_prio: [u64; 512] = [0 as u64; 512]
+
+fn lock() {
+    let p: u64 = (&lock_word[0]) as u64
+    while atomic.cas(p, 0, 1) != 0 {
+        atomic.pause()
+    }
+}
+
+fn unlock() {
+    atomic.store((&lock_word[0]) as u64, 0)
+}
+
+fn name_at(slot: u64, i: u64) -> u64 {
+    return q_name[(slot * NAME_STRIDE + i) as usize] as u64
+}
+
+fn name_equal(slot: u64, name: u64, len: u64) -> bool {
+    if q_name_len[slot as usize] != len {
+        return false
+    }
+    var i: u64 = 0
+    while i < len {
+        if name_at(slot, i) != regio.read8(name + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn find_locked(name: u64, len: u64) -> u64 {
+    var slot: u64 = 0
+    while slot < QUEUES_MAX {
+        if q_live[slot as usize] != 0 && q_linked[slot as usize] != 0 && name_equal(slot, name, len) {
+            return slot
+        }
+        slot = slot + 1
+    }
+    return NONE
+}
+
+fn find(name: u64, len: u64) -> u64 {
+    lock()
+    let slot: u64 = find_locked(name, len)
+    unlock()
+    return slot
+}
+
+fn free_slot_locked() -> u64 {
+    var slot: u64 = 0
+    while slot < QUEUES_MAX {
+        if q_live[slot as usize] == 0 {
+            return slot
+        }
+        slot = slot + 1
+    }
+    return NONE
+}
+
+fn frames_for(maxmsg: u64, msgsize: u64) -> u64 {
+    return (maxmsg * msgsize + FRAME_BYTES - 1) / FRAME_BYTES
+}
+
+fn init_slot(slot: u64, name: u64, len: u64, maxmsg: u64, msgsize: u64, region: u64, frames: u64) {
+    let s: usize = slot as usize
+    q_live[s] = 1
+    q_linked[s] = 1
+    q_open[s] = 0
+    q_maxmsg[s] = maxmsg
+    q_msgsize[s] = msgsize
+    q_count[s] = 0
+    q_used[s] = 0
+    q_used_n[s] = 0
+    q_region[s] = region
+    q_frames[s] = frames
+    q_waiters[s] = 0
+    q_notify_pid[s] = 0
+    q_notify_sig[s] = 0
+    q_notify_of[s] = 0
+    q_name_len[s] = len
+    var i: u64 = 0
+    while i < len {
+        q_name[(slot * NAME_STRIDE + i) as usize] = regio.read8(name + i) as u8
+        i = i + 1
+    }
+}
+
+fn create(state: u64, name: u64, len: u64, maxmsg: u64, msgsize: u64) -> u64 {
+    let frames: u64 = frames_for(maxmsg, msgsize)
+    let region: u64 = mmframe.frame_run(state, frames)
+    if region == 0 {
+        return NOMEM
+    }
+    lock()
+    var slot: u64 = free_slot_locked()
+    if slot != NONE && find_locked(name, len) != NONE {
+        slot = NONE
+    }
+    if slot != NONE {
+        init_slot(slot, name, len, maxmsg, msgsize, region, frames)
+    }
+    unlock()
+    if slot == NONE {
+        mmframe.frame_free_run(state, region, frames)
+    }
+    return slot
+}
+
+fn destroy_locked(state: u64, slot: u64) {
+    let s: usize = slot as usize
+    q_live[s] = 0
+    q_linked[s] = 0
+    mmframe.frame_free_run(state, q_region[s], q_frames[s])
+    q_region[s] = 0
+}
+
+fn unlink(state: u64, slot: u64) {
+    lock()
+    q_linked[slot as usize] = 0
+    if q_open[slot as usize] == 0 {
+        destroy_locked(state, slot)
+    }
+    unlock()
+}
+
+fn open_ref(slot: u64) {
+    lock()
+    q_open[slot as usize] = q_open[slot as usize] + 1
+    unlock()
+}
+
+fn drop(state: u64, slot: u64, of: u64) {
+    if slot >= QUEUES_MAX {
+        return
+    }
+    lock()
+    let s: usize = slot as usize
+    if q_notify_of[s] == of + 1 {
+        q_notify_pid[s] = 0
+        q_notify_of[s] = 0
+    }
+    if q_open[s] > 0 {
+        q_open[s] = q_open[s] - 1
+    }
+    if q_open[s] == 0 && q_linked[s] == 0 && q_live[s] != 0 {
+        destroy_locked(state, slot)
+    }
+    unlock()
+}
+
+fn maxmsg(slot: u64) -> u64 {
+    return q_maxmsg[slot as usize]
+}
+
+fn msgsize(slot: u64) -> u64 {
+    return q_msgsize[slot as usize]
+}
+
+fn count(slot: u64) -> u64 {
+    return q_count[slot as usize]
+}
+
+fn msg_addr(slot: u64, idx: u64) -> u64 {
+    return q_region[slot as usize] + idx * q_msgsize[slot as usize]
+}
+
+fn msg_len(slot: u64, idx: u64) -> u64 {
+    return m_len[(slot * MSGS_LIMIT + idx) as usize]
+}
+
+fn msg_prio(slot: u64, idx: u64) -> u64 {
+    return m_prio[(slot * MSGS_LIMIT + idx) as usize]
+}
+
+fn reserve(slot: u64) -> u64 {
+    lock()
+    let s: usize = slot as usize
+    var idx: u64 = NO_MSG
+    if q_used_n[s] < q_maxmsg[s] {
+        var i: u64 = 0
+        while i < q_maxmsg[s] {
+            if (q_used[s] & (1 << i)) == 0 {
+                q_used[s] = q_used[s] | (1 << i)
+                q_used_n[s] = q_used_n[s] + 1
+                idx = i
+                i = MSGS_LIMIT
+            }
+            i = i + 1
+        }
+    }
+    unlock()
+    return idx
+}
+
+fn release_locked(slot: u64, idx: u64) {
+    let s: usize = slot as usize
+    q_used[s] = q_used[s] & ~(1 << idx)
+    q_used_n[s] = q_used_n[s] - 1
+}
+
+fn abort(slot: u64, idx: u64) {
+    lock()
+    release_locked(slot, idx)
+    unlock()
+}
+
+fn insert_locked(slot: u64, idx: u64, prio: u64) {
+    let s: usize = slot as usize
+    let base: u64 = slot * MSGS_LIMIT
+    var pos: u64 = q_count[s]
+    while pos > 0 && m_prio[(base + q_order[(base + pos - 1) as usize]) as usize] < prio {
+        q_order[(base + pos) as usize] = q_order[(base + pos - 1) as usize]
+        pos = pos - 1
+    }
+    q_order[(base + pos) as usize] = idx
+    q_count[s] = q_count[s] + 1
+}
+
+fn fire_locked(slot: u64) -> u64 {
+    let s: usize = slot as usize
+    let pid: u64 = q_notify_pid[s]
+    let sig: u64 = q_notify_sig[s]
+    q_notify_pid[s] = 0
+    q_notify_of[s] = 0
+    return pid * 256 + sig
+}
+
+fn commit(slot: u64, idx: u64, prio: u64, len: u64) -> u64 {
+    lock()
+    let s: usize = slot as usize
+    m_len[(slot * MSGS_LIMIT + idx) as usize] = len
+    m_prio[(slot * MSGS_LIMIT + idx) as usize] = prio
+    let was_empty: bool = q_count[s] == 0
+    insert_locked(slot, idx, prio)
+    var fired: u64 = 0
+    if was_empty && q_waiters[s] == 0 && q_notify_pid[s] != 0 {
+        fired = fire_locked(slot)
+    }
+    unlock()
+    return fired
+}
+
+fn take(slot: u64) -> u64 {
+    lock()
+    let s: usize = slot as usize
+    var idx: u64 = NO_MSG
+    if q_count[s] != 0 {
+        let base: u64 = slot * MSGS_LIMIT
+        idx = q_order[base as usize]
+        var i: u64 = 1
+        while i < q_count[s] {
+            q_order[(base + i - 1) as usize] = q_order[(base + i) as usize]
+            i = i + 1
+        }
+        q_count[s] = q_count[s] - 1
+    }
+    unlock()
+    return idx
+}
+
+fn release(slot: u64, idx: u64) {
+    lock()
+    release_locked(slot, idx)
+    unlock()
+}
+
+fn waiter_add(slot: u64) {
+    lock()
+    q_waiters[slot as usize] = q_waiters[slot as usize] + 1
+    unlock()
+}
+
+fn waiter_sub(slot: u64) {
+    lock()
+    q_waiters[slot as usize] = q_waiters[slot as usize] - 1
+    unlock()
+}
+
+fn notify_set(slot: u64, of: u64, pid: u64, sig: u64) -> bool {
+    lock()
+    let s: usize = slot as usize
+    var ok: bool = false
+    if q_notify_pid[s] == 0 {
+        q_notify_pid[s] = pid
+        q_notify_sig[s] = sig
+        q_notify_of[s] = of + 1
+        ok = true
+    }
+    unlock()
+    return ok
+}
+
+fn notify_clear(slot: u64, pid: u64) {
+    lock()
+    let s: usize = slot as usize
+    if q_notify_pid[s] == pid {
+        q_notify_pid[s] = 0
+        q_notify_of[s] = 0
+    }
+    unlock()
+}
+
+fn poll_bits(slot: u64) -> u64 {
+    if slot >= QUEUES_MAX {
+        return 0
+    }
+    var r: u64 = 0
+    if q_count[slot as usize] != 0 {
+        r = POLLIN
+    }
+    if q_count[slot as usize] < q_maxmsg[slot as usize] {
+        r = r | POLLOUT
+    }
+    return r
+}

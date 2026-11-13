@@ -39,7 +39,7 @@ echo "FX7 launch t=$(up)"
 ( while true; do echo "FX7 t=$(up) rss=$(rss) nav=$(grep -ac '^FXNAV ' /tmp/fx3.log) url=$(grep -ac '^FXURL ' /tmp/fx3.log) last=$(grep -a '^FX[A-Z]* ' /tmp/fx3.log | tail -n 1)"; sleep 10; done ) &
 waited=0
 until [ "$(grep -ac '^FXURL ' /tmp/fx3.log)" -ge 1 ] || [ "$waited" -ge "${FX7_WAIT:-420}" ]; do sleep 5; waited=$((waited + 5)); done
-[ "$(grep -ac '^FXURL ' /tmp/fx3.log)" -ge 1 ] && sleep "${FX7_TAIL:-150}"
+[ "$(grep -ac '^FXURL ' /tmp/fx3.log)" -ge 1 ] && sleep "${FX7_TAIL:-300}"
 echo "FX7 all events:"
 grep -a '^FX[A-Z]* ' /tmp/fx3.log | head -60
 echo "FX7 wayland axis:"

@@ -11,6 +11,8 @@ import fs.fs
 import lib.errno
 import fs.file
 import fs.evfd
+import fs.fanotify
+import libc.regio
 import ipc.uio
 import ipc.handle
 import sched.signal
@@ -73,7 +75,26 @@ fn readable(state: u64, of: u64) -> bool {
 
 const MAX_FWRITE: u64 = 1048576
 
+fn fan_modified(state: u64, me: u64, fd: u64) {
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return
+    }
+    let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_FILE || kind == file.K_VFILE {
+        fanotify.wrote(state, of, fanotify.pid_of(state, me))
+    }
+}
+
 fn do_write(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
+    let r: u64 = write_checked(state, me, fd, buf, want)
+    if fanotify.live() && (r >> 63) == 0 && r != 0 {
+        fan_modified(state, me, fd)
+    }
+    return r
+}
+
+fn write_checked(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
     var len: u64 = want
     if len > MAX_FWRITE {
         len = MAX_FWRITE
@@ -360,6 +381,9 @@ fn read_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if ev_kind(kind) {
         return ev_read(state, me, of, buf, len)
     }
+    if kind == file.K_FANOTIFY {
+        return fan_read(state, me, of, buf, len)
+    }
     if kind == file.K_CONIN {
         return systerm.console_read(state, me, buf, len)
     }
@@ -394,6 +418,9 @@ fn read_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     let ino: u64 = file.open_ino(state, of)
     let off: u64 = file.open_off(state, of)
     let n: u64 = fs.read_at(state, ino, off, bounce, len)
+    if fs.read_failed(state, ino, off, len, n) {
+        return sysuser.neg(errno.E_IO)
+    }
     if !sysuser.copy_out(state, me, buf, bounce, n) {
         return sysuser.neg(errno.E_FAULT)
     }
@@ -952,7 +979,11 @@ fn do_open_mode(state: u64, me: u64, name: u64, flags: u64, mode: u64) -> u64 {
     if len == 0 {
         return sysuser.neg(errno.E_NOENT)
     }
-    return open_named(state, me, buf, len, flags, mode)
+    let opened: u64 = open_named(state, me, buf, len, flags, mode)
+    if fanotify.live() && !errno.is_error(opened) {
+        fanotify.opened(state, sysuser.of_of(state, me, opened), fanotify.pid_of(state, me), buf, len, flags)
+    }
+    return opened
 }
 
 fn create_mode(mode: u64) -> u64 {
@@ -1105,6 +1136,12 @@ fn do_close(state: u64, me: u64, fd: u64) -> u64 {
         return sysuser.neg(errno.E_BADF)
     }
     file.fd_free(state, me, fd)
+    if fanotify.live() {
+        fanotify.set_actor(fanotify.pid_of(state, me))
+        unref_of(state, of)
+        fanotify.set_actor(0)
+        return 0
+    }
     unref_of(state, of)
     return 0
 }
@@ -1268,7 +1305,11 @@ fn do_writev(state: u64, me: u64, fd: u64, iov: u64, n: u64, writing: bool) -> u
     if writing && n > 1 {
         let of: u64 = file.fd_check(state, me, fd, handle.R_WRITE)
         if of < file.MAX_OPEN && file_like(file.open_kind(state, of)) {
-            return writev_staged(state, me, of, iov, n)
+            let staged: u64 = writev_staged(state, me, of, iov, n)
+            if fanotify.live() && (staged >> 63) == 0 && staged != 0 {
+                fan_modified(state, me, fd)
+            }
+            return staged
         }
     }
     var total: u64 = 0
@@ -2071,7 +2112,7 @@ fn cx_close_marked(state: u64, me: u64) {
 // commands carry long runs instead of one block each. The data is on the drive when the call returns.
 fn file_io_loop(state: u64, me: u64, fd: u64, buf: u64, len: u64, writing: bool) -> u64 {
     if writing && len > sysconst.MAX_IO {
-        blk.wb_begin(state)
+        wbscope.begin_data(state)
         let r: u64 = file_io_loop_steps(state, me, fd, buf, len, writing)
         if !blk.wb_end(state) {
             return sysuser.neg(errno.E_IO)
@@ -2180,7 +2221,7 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool,
         return sysuser.neg(errno.E_FAULT)
     }
     if writing {
-        if unixsock.peer_gone(state, si) {
+        if unixsock.write_closed(state, si) {
             return sysuser.neg(errno.E_PIPE)
         }
         var free: u64 = unixsock.room(state, unixsock.sock_peer(state, si))
@@ -2195,7 +2236,7 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool,
             if nonblock {
                 return sysuser.neg(errno.E_AGAIN)
             }
-            if unixsock.peer_gone(state, si) {
+            if unixsock.write_closed(state, si) {
                 return sysuser.neg(errno.E_PIPE)
             }
             if signal.interrupted(state, me) {
@@ -2225,7 +2266,7 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool,
         if unixsock.waiting(state, si) != 0 {
             break
         }
-        if unixsock.peer_gone(state, si) {
+        if unixsock.read_closed(state, si) {
             return 0
         }
         if nonblock {
@@ -2336,6 +2377,87 @@ fn ev_take(state: u64, me: u64, of: u64, kind: u64, buf: u64, len: u64) -> u64 {
         return sysuser.neg(errno.E_FAULT)
     }
     return total
+}
+
+const FAN_META_BYTES: u64 = 24
+const FAN_META_VERSION: u64 = 3
+const FAN_NOFD: u64 = 0xFFFFFFFF
+const FAN_FD_EVENTS: u64 = 0x1 | 0x2 | 0x8 | 0x10 | 0x20
+const FAN_READ_MAX: u64 = 2040
+
+fn fan_event_fd(state: u64, me: u64, fr: u64, mask: u64, path: u64, plen: u64) -> u64 {
+    if (mask & FAN_FD_EVENTS) == 0 || plen == 0 {
+        return FAN_NOFD
+    }
+    let nb: u64 = sysuser.nameb(state)
+    var o: u64 = 0
+    while o < plen {
+        regio.write8(nb + o, regio.read8(path + o))
+        o = o + 1
+    }
+    regio.write8(nb + plen, 0)
+    let oflags: u64 = fanotify.group_open_flags(fr)
+    let fd: u64 = open_named(state, me, nb, plen, oflags & 3, 0)
+    if errno.is_error(fd) {
+        return FAN_NOFD
+    }
+    return cx_result(state, me, fd, oflags) & 0xFFFFFFFF
+}
+
+fn fan_take(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    let fr: u64 = file.open_off(state, of)
+    if !fanotify.group_ready(fr) {
+        return 0
+    }
+    if len < FAN_META_BYTES {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let kb: u64 = sysuser.blockb(state)
+    var tmp: [u8; 144] = [0 as u8; 144]
+    let tp: u64 = (&tmp[0]) as u64
+    var total: u64 = 0
+    while total + FAN_META_BYTES <= len && total + FAN_META_BYTES <= FAN_READ_MAX && fanotify.group_ready(fr) {
+        let plen: u64 = fanotify.queue_pop(fr, tp)
+        let mask: u64 = regio.read64(tp)
+        let fd: u64 = fan_event_fd(state, me, fr, mask, tp + 16, plen)
+        let at: u64 = kb + total
+        regio.write32(at, FAN_META_BYTES)
+        regio.write8(at + 4, FAN_META_VERSION)
+        regio.write8(at + 5, 0)
+        regio.write16(at + 6, FAN_META_BYTES)
+        regio.write64(at + 8, mask)
+        regio.write32(at + 16, fd)
+        regio.write32(at + 20, regio.read32(tp + 8))
+        total = total + FAN_META_BYTES
+    }
+    if !sysuser.copy_out(state, me, buf, kb, total) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return total
+}
+
+fn fan_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    if len < FAN_META_BYTES {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !procfault.user_ok(state, me, buf, FAN_META_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    while true {
+        let seen: u64 = sched.poll_seq(state)
+        let r: u64 = fan_take(state, me, of, buf, len)
+        if r != 0 {
+            return r
+        }
+        if (file.open_flags(state, of) & sysconst.UB_O_NONBLOCK) != 0 {
+            return sysuser.neg(errno.E_AGAIN)
+        }
+        if signal.interrupted(state, me) {
+            return sysuser.neg(errno.E_INTR)
+        }
+        sched.poll_sleep(state, seen, taskconst.POLL_FOREVER)
+    }
+    return sysuser.neg(errno.E_AGAIN)
 }
 
 fn ev_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {

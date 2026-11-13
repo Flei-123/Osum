@@ -17,6 +17,7 @@ import ldr.elf
 import lib.errno
 import fs.file
 import fs.evfd
+import fs.fanotify
 import ipc.uio
 import fs.nidx
 import fs.ftype
@@ -39,7 +40,7 @@ import sys.sysfd
 import sys.sysfifo
 
 export {
-    at_enter1, do_access, do_chdir, do_chmod, do_chown, do_chown_at, do_chroot, do_lchown, do_diskup, do_fallocate, do_fchdir, do_fchmod, do_fchown, do_flist, do_fopen, do_freg, do_fstat, do_ftype, do_getcwd, do_getdents, do_jrnl, do_link, do_lstat, do_memfd, do_mkdir_mode, do_mntstat, do_mount, do_readlink, do_rename, do_rmdir, do_scan, do_stat, do_statfs, do_statx, do_symlink, do_sync, do_unlink, do_utimensat, do_vfs_mount, do_vfs_umount, ev_in_any, ev_in_path, ev_in_rename, ev_open_create, lc_at
+    at_enter1, do_access, do_chdir, do_chmod, do_chown, do_chown_at, do_chroot, do_lchown, do_diskup, do_fallocate, do_fchdir, do_fchmod, do_fchown, do_flist, do_fopen, do_freg, do_fstat, do_ftype, do_getcwd, do_getdents, do_jrnl, do_link, do_lstat, do_memfd, do_mkdir_mode, do_mntstat, do_mount, do_readlink, do_rename, do_rmdir, do_scan, do_stat, do_statfs, do_statx, do_symlink, do_sync, do_unlink, do_utimensat, do_vfs_mount, do_vfs_umount, ev_in_any, ev_in_path, ev_in_rename, ev_open_create, ev_path_exists, lc_at
 }
 
 const UTIME_NOW: u64 = 1073741823 // (1 << 30) - 1
@@ -108,7 +109,7 @@ fn do_unlink(state: u64, me: u64, name: u64) -> u64 {
         let m: u64 = vfs.mount_for(state, buf)
         if m < vfs.MAX_MNT {
             if m != 0 || vfs.all_mode(state) {
-                let node: u64 = vfs.node_for(state, m, buf)
+                let node: u64 = vfs.node_for_nofollow(state, m, buf)
                 if node == 0 {
                     return sysuser.neg(errno.E_NOENT)
                 }
@@ -127,7 +128,7 @@ fn do_unlink(state: u64, me: u64, name: u64) -> u64 {
     if kstate.get(state, kstate.FS_READY) == 0 {
         return sysuser.neg(errno.E_NOSYS)
     }
-    let ino: u64 = fs.path(state, buf)
+    let ino: u64 = fs.path_nofollow(state, buf)
     if ino == 0 {
         return sysuser.neg(errno.E_NOENT)
     }
@@ -160,7 +161,7 @@ fn do_rmdir(state: u64, me: u64, name: u64) -> u64 {
         let m: u64 = vfs.mount_for(state, buf)
         if m < vfs.MAX_MNT {
             if m != 0 || vfs.all_mode(state) {
-                let node: u64 = vfs.node_for(state, m, buf)
+                let node: u64 = vfs.node_for_nofollow(state, m, buf)
                 if node == 0 {
                     return sysuser.neg(errno.E_NOENT)
                 }
@@ -179,7 +180,7 @@ fn do_rmdir(state: u64, me: u64, name: u64) -> u64 {
     if kstate.get(state, kstate.FS_READY) == 0 {
         return sysuser.neg(errno.E_NOSYS)
     }
-    let ino: u64 = fs.path(state, buf)
+    let ino: u64 = fs.path_nofollow(state, buf)
     if ino == 0 {
         return sysuser.neg(errno.E_NOENT)
     }
@@ -218,7 +219,7 @@ fn do_mkdir_mode(state: u64, me: u64, name: u64, mode: u64) -> u64 {
         let m: u64 = vfs.mount_for(state, buf)
         if m < vfs.MAX_MNT {
             if m != 0 || vfs.all_mode(state) {
-                if vfs.node_for(state, m, buf) != 0 {
+                if vfs.node_for_nofollow(state, m, buf) != 0 {
                     return sysuser.neg(errno.E_EXIST)
                 }
                 if !vfs.can(state, m, vfsops.OP_CREATE) {
@@ -240,7 +241,7 @@ fn do_mkdir_mode(state: u64, me: u64, name: u64, mode: u64) -> u64 {
     if kstate.get(state, kstate.FS_READY) == 0 {
         return sysuser.neg(errno.E_NOSYS)
     }
-    if fs.path(state, buf) != 0 {
+    if fs.path_nofollow(state, buf) != 0 {
         return sysuser.neg(errno.E_EXIST)
     }
     let dir: u64 = fs.parent_ino(state, buf)
@@ -1757,6 +1758,9 @@ const IN_MOVED_TO: u64 = 0x80
 
 // Is any inotify instance open? (The hooks cost nothing else when nobody watches.)
 fn ev_in_any(state: u64) -> bool {
+    if fanotify.live() {
+        return true
+    }
     var i: u64 = 0
     while i < file.MAX_OPEN {
         if file.open_kind(state, i) == file.K_INOTIFY {
@@ -1812,6 +1816,7 @@ fn ev_in_path(state: u64, me: u64, addr: u64, ev: u64, cookie: u64) {
     if errno.is_error(len) {
         return
     }
+    fanotify.emit_entry(state, ev & fanotify.FAN_EVENTS_SUPPORTED, fanotify.pid_of(state, me), buf, len)
     ev_in_fire(state, buf, len, ev, cookie)
 }
 
