@@ -10,6 +10,17 @@ wait_marker() {
     until grep -qa "$pattern" "$OUT/ser.txt" 2>/dev/null || [ "$waited" -ge "${FX7_MARKERCAP:-420}" ]; do sleep 5; waited=$((waited + 5)); done
     sleep "${FX7_PAINTWAIT:-60}"
 }
+url_painted() { python3 -I tools/linuxapps/f7pix.py "$OUT/url.ppm" 00c800 > /dev/null; }
+poll_url_paint() {
+    local n=0
+    while [ "$n" -lt "${FX7_URLPOLLS:-10}" ]; do
+        mon "screendump $OUT/url.ppm"; sleep 3
+        url_painted && return 0
+        echo "url poll $n red" >> "$OUT/poll.log"
+        sleep "${FX7_URLPOLLGAP:-12}"; n=$((n + 1))
+    done
+    return 1
+}
 mon() { printf '%s\n' "$1" | socat - "UNIX-CONNECT:$SOCK" > /dev/null 2>&1; }
 (
     i=0
@@ -32,7 +43,7 @@ mon() { printf '%s\n' "$1" | socat - "UNIX-CONNECT:$SOCK" > /dev/null 2>&1; }
     sleep 20; mon "sendkey ctrl-l"; sleep ${FX7_URLFOCUSWAIT:-30}
     for k in f i l e shift-semicolon slash slash slash t m p slash i n dot h t m l shift-slash u; do mon "sendkey $k"; sleep 2; done
     mon "sendkey ret"; wait_marker "url=[1-9]"
-    mon "screendump $OUT/url.ppm"; sleep 3
+    poll_url_paint
 ) &
 DP=$!
 trap 'kill $DP 2>/dev/null' EXIT

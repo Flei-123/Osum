@@ -576,6 +576,15 @@ fn do_connect(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
 }
 
 fn do_shutdown(state: u64, me: u64, fd: u64, how: u64) -> u64 {
+    let usi: u64 = usock_of(state, me, fd)
+    if usi < unixsock.USOCK_MAX {
+        let r: u64 = unixsock.shutdown_sock(state, usi, how)
+        if r != 0 {
+            return sysuser.neg(r)
+        }
+        sched.poll_kick(state)
+        return 0
+    }
     let si: u64 = sysfd.sock_of(state, me, fd)
     if si >= inet.SOCK_MAX {
         return sysuser.neg(errno.E_BADF)
@@ -1547,7 +1556,7 @@ fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
     if !procfault.user_ok(state, me, mh, sysconst.MH_BYTES) {
         return sysuser.neg(errno.E_FAULT)
     }
-    if unixsock.peer_gone(state, si) {
+    if unixsock.write_closed(state, si) {
         return sysuser.neg(errno.E_PIPE)
     }
     if unixsock.sock_kind(state, si) == unixsock.UK_DGRAM {
@@ -1583,7 +1592,7 @@ fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
             var qwait: u64 = 0
             while unixsock.fd_room(state, si) < nfds {
                 let seen: u64 = sched.poll_seq(state)
-                if unixsock.peer_gone(state, si) {
+                if unixsock.write_closed(state, si) {
                     return sysuser.neg(errno.E_PIPE)
                 }
                 if (flags & sysconst.MSG_DONTWAIT) != 0 || qwait >= sysconst.NET_ROUNDS {
@@ -1709,7 +1718,7 @@ fn sendmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
     var waits: u64 = 0
     while true {
         let seen: u64 = sched.poll_seq(state)
-        if unixsock.peer_gone(state, si) {
+        if unixsock.write_closed(state, si) {
             return sysuser.neg(errno.E_PIPE)
         }
         if unixsock.dgram_room(state, unixsock.sock_peer(state, si)) >= total && unixsock.fd_room(state, si) >= nfds {
@@ -1760,7 +1769,7 @@ fn recvmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
     var waited: u64 = 0
     while unixsock.waiting(state, si) < unixsock.DGRAM_HDR {
         let seen: u64 = sched.poll_seq(state)
-        if unixsock.peer_gone(state, si) {
+        if unixsock.read_closed(state, si) {
             return 0
         }
         if nonblock || waited >= sysconst.NET_ROUNDS {
@@ -1878,7 +1887,7 @@ fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
     var waited: u64 = 0
     while unixsock.waiting(state, si) == 0 {
         let seen: u64 = sched.poll_seq(state)
-        if unixsock.peer_gone(state, si) {
+        if unixsock.read_closed(state, si) {
             return 0
         }
         if (flags & sysconst.MSG_DONTWAIT) != 0 {
