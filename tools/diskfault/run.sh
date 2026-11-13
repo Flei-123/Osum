@@ -65,7 +65,7 @@ if python3 -I tools/diskfault/check.py "$D/ahci.txt"; then pass=$((pass+1)); els
 if [ -z "${NOMUTANT:-}" ] && [ -z "${KERNEL:-}" ]; then
     echo "== counter-probe: ahci limited to 32 KiB per command =="
     cp kernel/drv/blk/ahci/ahci_defs.fi "$D/ahci_defs.fi.keep"
-    sed -i 's/^const PRDT_MAX: u64 = 32$/const PRDT_MAX: u64 = 8/' kernel/drv/blk/ahci/ahci_defs.fi
+    sed -i 's/^const MAX_TRANSFER: u64 = 1048576$/const MAX_TRANSFER: u64 = 28672/' kernel/drv/blk/ahci/ahci_defs.fi
     bash tools/build-kernel.sh "$D/mutant.mb" --stufe 1 > "$D/mk.log" 2>&1
     cp "$D/ahci_defs.fi.keep" kernel/drv/blk/ahci/ahci_defs.fi
     run_drive ahci "$D/mutant.mb" mutant
