@@ -3,6 +3,8 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdio.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 
@@ -153,6 +155,91 @@ static void check_dup_survives(void)
     close(sv[1]);
 }
 
+static char name_buf[64];
+
+static const char *named(const char *prefix, const char *suffix)
+{
+    snprintf(name_buf, sizeof name_buf, "%s_%s", prefix, suffix);
+    return name_buf;
+}
+
+static int send_msg(int fd, const char *msg)
+{
+    errno = 0;
+    return (int)send(fd, msg, strlen(msg), MSG_NOSIGNAL | MSG_DONTWAIT);
+}
+
+static void check_message_kind(int type, const char *prefix)
+{
+    int sv[2];
+    char buf[16];
+    if (socketpair(AF_UNIX, type, 0, sv) != 0) {
+        FAIL(named(prefix, "pair"), "errno=%d", errno);
+        return;
+    }
+    send_msg(sv[0], "one");
+    send_msg(sv[0], "second");
+    int r = shutdown(sv[0], SHUT_WR);
+    CHECKC(named(prefix, "wr_returns_zero"), r == 0);
+    int first = recv_now(sv[1], buf, sizeof buf);
+    int second = recv_now(sv[1], buf, sizeof buf);
+    CHECK(named(prefix, "wr_peer_keeps_boundaries"), first == 3 && second == 6, "first=%d second=%d errno=%d", first, second, errno);
+    CHECK(named(prefix, "wr_peer_sees_eof"), recv_now(sv[1], buf, sizeof buf) == 0, "errno=%d", errno);
+    CHECK(named(prefix, "wr_self_send_epipe"), send_now(sv[0]) < 0 && errno == EPIPE, "errno=%d", errno);
+    CHECK(named(prefix, "wr_other_direction_open"), send_now(sv[1]) == 1 && recv_now(sv[0], buf, sizeof buf) == 1, "errno=%d", errno);
+    close(sv[0]);
+    close(sv[1]);
+
+    if (socketpair(AF_UNIX, type, 0, sv) != 0) {
+        FAIL(named(prefix, "rd_pair"), "errno=%d", errno);
+        return;
+    }
+    r = shutdown(sv[0], SHUT_RD);
+    CHECKC(named(prefix, "rd_returns_zero"), r == 0);
+    CHECK(named(prefix, "rd_self_sees_eof"), recv_now(sv[0], buf, sizeof buf) == 0, "errno=%d", errno);
+    CHECK(named(prefix, "rd_peer_send_epipe"), send_now(sv[1]) < 0 && errno == EPIPE, "errno=%d", errno);
+    CHECK(named(prefix, "rd_self_send_open"), send_now(sv[0]) == 1 && recv_now(sv[1], buf, sizeof buf) == 1, "errno=%d", errno);
+    close(sv[0]);
+    close(sv[1]);
+
+    if (socketpair(AF_UNIX, type, 0, sv) != 0) {
+        FAIL(named(prefix, "both_pair"), "errno=%d", errno);
+        return;
+    }
+    r = shutdown(sv[0], SHUT_RDWR);
+    CHECKC(named(prefix, "rdwr_returns_zero"), r == 0);
+    CHECK(named(prefix, "rdwr_both_eof"), recv_now(sv[0], buf, sizeof buf) == 0 && recv_now(sv[1], buf, sizeof buf) == 0, "errno=%d", errno);
+    CHECK(named(prefix, "rdwr_both_send_epipe"), send_now(sv[0]) < 0 && errno == EPIPE && send_now(sv[1]) < 0 && errno == EPIPE, "errno=%d", errno);
+    close(sv[0]);
+    close(sv[1]);
+}
+
+static void check_message_poll(int type, const char *prefix)
+{
+    int sv[2];
+    if (socketpair(AF_UNIX, type, 0, sv) != 0) {
+        FAIL(named(prefix, "poll_pair"), "errno=%d", errno);
+        return;
+    }
+    struct pollfd p = { .fd = sv[1], .events = POLLIN };
+    int idle = poll(&p, 1, 0);
+    CHECK(named(prefix, "poll_idle_quiet"), idle == 0, "ready=%d", idle);
+    shutdown(sv[0], SHUT_WR);
+    p.revents = 0;
+    int ready = poll(&p, 1, 0);
+    CHECK(named(prefix, "poll_eof_readable"), ready == 1 && (p.revents & POLLIN), "ready=%d revents=%x", ready, p.revents);
+    close(sv[0]);
+    close(sv[1]);
+}
+
+static void check_message_kinds(void)
+{
+    check_message_kind(SOCK_SEQPACKET, "seq");
+    check_message_kind(SOCK_DGRAM, "dgram");
+    check_message_poll(SOCK_SEQPACKET, "seq");
+    check_message_poll(SOCK_DGRAM, "dgram");
+}
+
 int main(void)
 {
     signal(SIGPIPE, SIG_IGN);
@@ -163,5 +250,6 @@ int main(void)
     check_poll();
     check_wakeup();
     check_dup_survives();
+    check_message_kinds();
     return 0;
 }
