@@ -2,8 +2,8 @@
 profile kernel
 
 import lib.kstate
-import libc.regio
 import fs.fs
+import fs.iattr
 import fs.ofsj
 import fs.vfs
 import fs.vfsops
@@ -27,6 +27,14 @@ const AT_ATIME: u64 = 80
 const AT_FIFO: u64 = 88
 const AT_BYTES: u64 = 96
 const ROOT_MOUNT: u64 = 0
+const RAW_TYPE: u64 = 0
+const RAW_SIZE: u64 = 8
+const RAW_MODE: u64 = 16
+const RAW_UID: u64 = 24
+const RAW_GID: u64 = 32
+const RAW_MTIME: u64 = 40
+const RAW_CTIME: u64 = 48
+const RAW_ATIME: u64 = 56
 
 fn node_type(art: u64) -> u64 {
     if art == fs.T_DIR {
@@ -41,6 +49,7 @@ fn node_type(art: u64) -> u64 {
     return vfsops.N_NONE
 }
 
+#[inline]
 fn put(out: u64, at: u64, v: u64) {
     kstate.set(out, at, v)
 }
@@ -60,18 +69,45 @@ fn load_generic(state: u64, m: u64, node: u64, out: u64) {
     put(out, AT_FIFO, 0)
 }
 
+fn fill_cached(raw: u64, out: u64) {
+    let raw_mode: u64 = kstate.get(raw, RAW_MODE)
+    put(out, AT_TYPE, node_type(kstate.get(raw, RAW_TYPE)))
+    put(out, AT_SIZE, kstate.get(raw, RAW_SIZE))
+    put(out, AT_NLINK, 1)
+    put(out, AT_RDEV, 0)
+    put(out, AT_BLKSIZE, 512)
+    put(out, AT_MODE, raw_mode & 4095)
+    put(out, AT_UID, kstate.get(raw, RAW_UID))
+    put(out, AT_GID, kstate.get(raw, RAW_GID))
+    put(out, AT_MTIME, kstate.get(raw, RAW_MTIME))
+    put(out, AT_CTIME, kstate.get(raw, RAW_CTIME))
+    put(out, AT_ATIME, kstate.get(raw, RAW_ATIME))
+    put(out, AT_FIFO, raw_mode & fs.FIFO_BIT)
+}
+
 fn load_root(state: u64, node: u64, out: u64) -> bool {
     if node == 0 || node > fs.inode_count(state) {
         return false
     }
     let ver: u64 = fs.version(state)
     let flags: u64 = fs.enter(state)
-    let ok: bool = ofsj.read(state, fs.inode_block_of(state, node), fs.buf_in(state))
+    let lba: u64 = fs.inode_block_of(state, node)
+    let off: u64 = fs.inode_off(state, node)
+    if ver >= fs.OFS_V3 {
+        var raw: [u64; 8] = [0 as u64; 8]
+        let raw_at: u64 = (&raw[0 as usize]) as u64
+        if iattr.attr_get(state, lba, off / fs.inode_bytes(state), raw_at) {
+            fs.leave(state, flags)
+            fill_cached(raw_at, out)
+            return true
+        }
+    }
+    let ok: bool = ofsj.read(state, lba, fs.buf_in(state))
     if ok {
-        let at: u64 = fs.buf_in(state) + fs.inode_off(state, node)
-        let raw_mode: u64 = regio.read64(at + fs.I_MODE)
-        put(out, AT_TYPE, node_type(regio.read64(at + fs.I_TYPE)))
-        put(out, AT_SIZE, regio.read64(at + fs.I_SIZE))
+        let at: u64 = fs.buf_in(state) + off
+        let raw_mode: u64 = kstate.get(at, fs.I_MODE)
+        put(out, AT_TYPE, node_type(kstate.get(at, fs.I_TYPE)))
+        put(out, AT_SIZE, kstate.get(at, fs.I_SIZE))
         put(out, AT_NLINK, 1)
         put(out, AT_RDEV, 0)
         put(out, AT_BLKSIZE, 512)
@@ -84,14 +120,15 @@ fn load_root(state: u64, node: u64, out: u64) -> bool {
         put(out, AT_FIFO, 0)
         if ver >= fs.OFS_V2 {
             put(out, AT_MODE, raw_mode & 4095)
-            put(out, AT_UID, regio.read64(at + fs.I_UID))
-            put(out, AT_GID, regio.read64(at + fs.I_GID))
+            put(out, AT_UID, kstate.get(at, fs.I_UID))
+            put(out, AT_GID, kstate.get(at, fs.I_GID))
             put(out, AT_FIFO, raw_mode & fs.FIFO_BIT)
         }
         if ver >= fs.OFS_V3 {
-            put(out, AT_MTIME, regio.read64(at + fs.I_MTIME))
-            put(out, AT_CTIME, regio.read64(at + fs.I_CTIME))
-            put(out, AT_ATIME, regio.read64(at + fs.I_ATIME))
+            put(out, AT_MTIME, kstate.get(at, fs.I_MTIME))
+            put(out, AT_CTIME, kstate.get(at, fs.I_CTIME))
+            put(out, AT_ATIME, kstate.get(at, fs.I_ATIME))
+            fs.put_attrs(state, lba, off / fs.inode_bytes(state), at)
         }
     }
     fs.leave(state, flags)
