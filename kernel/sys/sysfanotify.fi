@@ -1,0 +1,167 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.errno
+import mm.mmframe
+import sched.taskconst
+import sched.taskslot
+import fs.fanotify
+import fs.file
+import sys.sysconst
+import sys.sysfd
+import sys.sysfile
+import sys.sysuser
+import ipc.uio
+
+export {
+    handles, call
+}
+
+const SYS_FANOTIFY_INIT: u64 = 300
+const SYS_FANOTIFY_MARK: u64 = 301
+
+const INT_MASK: u64 = 0xFFFFFFFF
+const INIT_CLOEXEC: u64 = 0x1
+const INIT_NONBLOCK: u64 = 0x2
+const INIT_CLASS_MASK: u64 = 0xC
+const INIT_SUPPORTED: u64 = 0x1 | 0x2 | 0x10 | 0x20 | 0x100
+const O_NONBLOCK: u64 = 2048
+const OPEN_FLAGS_KEEP: u64 = 3 | 2048 | 524288 | 0x8000 | 0x400
+
+const MARK_OPS: u64 = 0x1 | 0x2 | 0x80
+const MARK_SUPPORTED: u64 = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x80 | 0x100
+
+fn fail(e: u64) -> u64 {
+    return sysuser.neg(e)
+}
+
+fn handles(number: u64) -> bool {
+    return number == SYS_FANOTIFY_INIT || number == SYS_FANOTIFY_MARK
+}
+
+fn call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    if number == SYS_FANOTIFY_INIT {
+        return do_init(state, me, a0 & INT_MASK, a1 & INT_MASK)
+    }
+    return do_mark(state, me, a0 & INT_MASK, a1 & INT_MASK, a2, a3 & INT_MASK, a4)
+}
+
+fn do_init(state: u64, me: u64, flags: u64, open_flags: u64) -> u64 {
+    if taskslot.tget(state, me, taskconst.T_EUID) != 0 {
+        return fail(errno.E_PERM)
+    }
+    if (flags & (0xFFFFFFFF -% INIT_SUPPORTED)) != 0 || (flags & INIT_CLASS_MASK) != 0 {
+        return fail(errno.E_INVAL)
+    }
+    if (open_flags & 3) == 3 {
+        return fail(errno.E_INVAL)
+    }
+    let fr: u64 = mmframe.frame_alloc(state)
+    if fr == 0 {
+        return fail(errno.E_NOMEM)
+    }
+    if !fanotify.group_new(fr, flags, open_flags & OPEN_FLAGS_KEEP) {
+        mmframe.frame_free(state, fr)
+        return fail(errno.E_MFILE)
+    }
+    var of_flags: u64 = 2
+    if (flags & INIT_NONBLOCK) != 0 {
+        of_flags = of_flags | O_NONBLOCK
+    }
+    let of: u64 = file.open_alloc(state, file.K_FANOTIFY, 0, of_flags)
+    if of >= file.MAX_OPEN {
+        fanotify.group_drop(fr)
+        mmframe.frame_free(state, fr)
+        return fail(errno.E_NFILE)
+    }
+    file.open_set_off(state, of, fr)
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        return fail(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    return sysfd.cx_result(state, me, fd, flags & INIT_CLOEXEC)
+}
+
+fn group_of(state: u64, me: u64, fd: u64) -> u64 {
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return file.MAX_OPEN
+    }
+    if file.open_kind(state, of) != file.K_FANOTIFY {
+        return file.MAX_OPEN
+    }
+    return of
+}
+
+fn mark_path(state: u64, me: u64, dirfd: u64, path: u64) -> u64 {
+    let enter: u64 = sysfile.at_enter1(state, me, dirfd, path)
+    if errno.is_error(enter) {
+        return enter
+    }
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = sysuser.fetch_path(state, me, path, buf, sysconst.MAX_NAME)
+    uio.set_atbase(state, me, 0)
+    if errno.is_error(len) {
+        return len
+    }
+    if len == 0 {
+        return fail(errno.E_NOENT)
+    }
+    if len > fanotify.MARK_PATH_MAX {
+        return fail(errno.E_NAMETOOLONG)
+    }
+    if !sysfile.ev_path_exists(state, buf) {
+        return fail(errno.E_NOENT)
+    }
+    return len
+}
+
+fn mark_args_ok(flags: u64, mask: u64) -> bool {
+    if (flags & (0xFFFFFFFF -% MARK_SUPPORTED)) != 0 {
+        return false
+    }
+    let ops: u64 = flags & MARK_OPS
+    if ops != 1 && ops != 2 && ops != 0x80 {
+        return false
+    }
+    if (flags & fanotify.MARK_MOUNT) != 0 && (flags & fanotify.MARK_FILESYSTEM) != 0 {
+        return false
+    }
+    if ops == 0x80 {
+        return true
+    }
+    if mask == 0 || (mask & (0xFFFFFFFFFFFFFFFF -% fanotify.FAN_EVENTS_SUPPORTED)) != 0 {
+        return false
+    }
+    return true
+}
+
+fn do_mark(state: u64, me: u64, fd: u64, flags: u64, mask: u64, dirfd: u64, path: u64) -> u64 {
+    let of: u64 = group_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        if sysuser.of_of(state, me, fd) >= file.MAX_OPEN {
+            return fail(errno.E_BADF)
+        }
+        return fail(errno.E_INVAL)
+    }
+    if !mark_args_ok(flags, mask) {
+        return fail(errno.E_INVAL)
+    }
+    let fr: u64 = file.open_off(state, of)
+    if (flags & fanotify.MARK_FLUSH) != 0 {
+        return fanotify.mark_apply(fr, flags, 0, 0, 0)
+    }
+    if path == 0 {
+        return fail(errno.E_INVAL)
+    }
+    let len: u64 = mark_path(state, me, dirfd, path)
+    if errno.is_error(len) {
+        return len
+    }
+    let code: u64 = fanotify.mark_apply(fr, flags, mask, sysuser.nameb(state), len)
+    if code != 0 {
+        return fail(code)
+    }
+    return 0
+}
