@@ -21,7 +21,7 @@ import sys.sysconst
 import libc.regio
 
 export {
-    blockb, copy_in, copy_out, fetch_name, fetch_path, get16, get32, get64u, get_user64, ino_of_fd, ino_of_path, ino_of_path_nofollow, kcopy_word, nameb, neg, of_of, ofs_ino_of_open, peek, poke, put16, put32, put64, put_pair64, put_half, put_word32, satzpuffer, user_half, user_word, user_word32
+    blockb, copy_in, copy_out, copy_out_checked, fetch_name, fetch_path, get16, get32, get64u, get_user64, ino_of_fd, ino_of_path, ino_of_path_nofollow, kcopy_word, nameb, neg, of_of, ofs_ino_of_open, peek, poke, put16, put32, put64, put_pair64, put_half, put_word32, satzpuffer, user_half, user_word, user_word32
 }
 
 fn blockb(state: u64) -> u64 {
@@ -92,6 +92,10 @@ fn copy_out(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
     if !procfault.user_ok(state, me, dst, len) {
         return false
     }
+    return copy_out_checked(state, me, dst, src, len)
+}
+
+fn copy_out_checked(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
     var n: u64 = 0
     while n < len {
         // r721: translate + copy of ONE page under the MM lock (see `mmlock.mm_lock`): `munmap` on another core cannot free the frame in between
@@ -139,6 +143,9 @@ fn copy_in(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
     return true
 }
 
+const LOW_BYTES: u64 = 0x0101010101010101
+const HIGH_BITS: u64 = 0x8080808080808080
+
 fn copy_name_span(state: u64, me: u64, va: u64, dst: u64, span: u64) -> u64 {
     let mmfl: u64 = mmlock.mm_lock(state)
     let phys: u64 = procmap.translate(state, me, va)
@@ -150,6 +157,16 @@ fn copy_name_span(state: u64, me: u64, va: u64, dst: u64, span: u64) -> u64 {
     guard.stac(state)
     var i: u64 = 0
     var found: bool = false
+    var wide: bool = true
+    while wide && i + 8 <= span {
+        let w: u64 = *((phys + i) as *mut u64)
+        if ((w -% LOW_BYTES) & ~w & HIGH_BITS) != 0 {
+            wide = false
+        } else {
+            *((dst + i) as *mut u64) = w
+            i = i + 8
+        }
+    }
     while i < span && !found {
         let c: u8 = *((phys + i) as *mut u8)
         *((dst + i) as *mut u8) = c
@@ -225,9 +242,9 @@ fn store_le(state: u64, me: u64, addr: u64, v: u64, width: u64) -> bool {
     }
     guard.stac(state)
     if width == WIDTH_64 {
-        __mmio_write64(phys as *mut u64, v)
+        *(phys as *mut u64) = v
     } else {
-        __mmio_write32(phys as *mut u32, v as u32)
+        *(phys as *mut u32) = v as u32
     }
     guard.clac(state)
     mmlock.mm_unlock(state, mmfl)
@@ -258,9 +275,9 @@ fn load_le(state: u64, me: u64, addr: u64, width: u64) -> u64 {
     guard.stac(state)
     var v: u64 = 0
     if width == WIDTH_64 {
-        v = __mmio_read64(phys as *mut u64)
+        v = *(phys as *mut u64)
     } else {
-        v = __mmio_read32(phys as *mut u32) as u64
+        v = (*(phys as *mut u32)) as u64
     }
     guard.clac(state)
     mmlock.mm_unlock(state, mmfl)
@@ -334,8 +351,8 @@ fn put_pair64(state: u64, me: u64, addr: u64, first: u64, second: u64) -> bool {
         return false
     }
     guard.stac(state)
-    __mmio_write64(phys as *mut u64, first)
-    __mmio_write64((phys + 8) as *mut u64, second)
+    *(phys as *mut u64) = first
+    *((phys + 8) as *mut u64) = second
     guard.clac(state)
     mmlock.mm_unlock(state, mmfl)
     return true
