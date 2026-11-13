@@ -1,0 +1,437 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.errno
+import lib.kstate
+import sched.sched
+import sched.signal
+import sched.taskconst
+import sched.taskslot
+import sched.time
+import sched.proc.procfault
+import fs.file
+import ipc.mqueue
+import sys.sysfd
+import sys.sysuser
+
+export {
+    handles, call
+}
+
+const SYS_MQ_OPEN: u64 = 240
+const SYS_MQ_UNLINK: u64 = 241
+const SYS_MQ_TIMEDSEND: u64 = 242
+const SYS_MQ_TIMEDRECEIVE: u64 = 243
+const SYS_MQ_NOTIFY: u64 = 244
+const SYS_MQ_GETSETATTR: u64 = 245
+
+const O_ACCMODE: u64 = 3
+const O_WRONLY: u64 = 1
+const O_RDONLY: u64 = 0
+const O_CREAT: u64 = 64
+const O_EXCL: u64 = 128
+const O_NONBLOCK: u64 = 2048
+const O_CLOEXEC: u64 = 524288
+const INT_MASK: u64 = 0xFFFFFFFF
+
+const ATTR_BYTES: u64 = 64
+const ATTR_FLAGS: u64 = 0
+const ATTR_MAXMSG: u64 = 8
+const ATTR_MSGSIZE: u64 = 16
+const ATTR_CURMSGS: u64 = 24
+const ATTR_WORDS: u64 = 8
+const SIGEV_BYTES: u64 = 16
+const SIGEV_SIGNO: u64 = 8
+const SIGEV_NOTIFY: u64 = 12
+const SIGEV_SIGNAL: u64 = 0
+const SIGEV_NONE: u64 = 1
+const SIGNAL_MAX: u64 = 64
+const TIMESPEC_BYTES: u64 = 16
+const NSEC_PER_SEC: u64 = 1000000000
+const SEC_LIMIT: u64 = 4000000000
+const SIGNED_BIT: u64 = 0x8000000000000000
+const DEADLINE_ERR: u64 = 0xF000000000000000
+const SIG_MASK: u64 = 255
+const PID_SHIFT: u64 = 8
+
+fn fail(e: u64) -> u64 {
+    return sysuser.neg(e)
+}
+
+fn handles(number: u64) -> bool {
+    return number >= SYS_MQ_OPEN && number <= SYS_MQ_GETSETATTR
+}
+
+fn call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    if number == SYS_MQ_OPEN {
+        return do_open(state, me, a0, a1, a3)
+    }
+    if number == SYS_MQ_UNLINK {
+        return do_unlink(state, me, a0)
+    }
+    if number == SYS_MQ_TIMEDSEND {
+        return do_send(state, me, a0, a1, a2, a3, a4)
+    }
+    if number == SYS_MQ_TIMEDRECEIVE {
+        return do_receive(state, me, a0, a1, a2, a3, a4)
+    }
+    if number == SYS_MQ_NOTIFY {
+        return do_notify(state, me, a0, a1)
+    }
+    return do_attr(state, me, a0, a1, a2)
+}
+
+fn queue_of(state: u64, me: u64, fd: u64) -> u64 {
+    let of: u64 = sysuser.of_of(state, me, fd & INT_MASK)
+    if of >= file.MAX_OPEN || file.open_kind(state, of) != file.K_MQUEUE {
+        return file.MAX_OPEN
+    }
+    return of
+}
+
+fn name_checked(state: u64, me: u64, name: u64, buf: u64) -> u64 {
+    let len: u64 = sysuser.fetch_name(state, me, name, buf, mqueue.NAME_LIMIT + 1)
+    if errno.is_error(len) {
+        return len
+    }
+    if len == 0 {
+        return fail(errno.E_NOENT)
+    }
+    var dots: u64 = 0
+    var i: u64 = 0
+    while i < len {
+        let c: u64 = name_byte(buf + i)
+        if c == 47 {
+            return fail(errno.E_ACCES)
+        }
+        if c == 46 {
+            dots = dots + 1
+        }
+        i = i + 1
+    }
+    if dots == len && len <= 2 {
+        return fail(errno.E_ACCES)
+    }
+    return len
+}
+
+fn name_byte(addr: u64) -> u64 {
+    return kstate.get8(addr)
+}
+
+fn read_attr(state: u64, me: u64, attr: u64, maxmsg: *mut u64, msgsize: *mut u64) -> u64 {
+    *maxmsg = mqueue.DEFAULT_MAXMSG
+    *msgsize = mqueue.DEFAULT_MSGSIZE
+    if attr == 0 {
+        return 0
+    }
+    if !procfault.user_ok(state, me, attr, ATTR_BYTES) {
+        return errno.E_FAULT
+    }
+    let mm: u64 = sysuser.get64u(state, me, attr + ATTR_MAXMSG)
+    let ms: u64 = sysuser.get64u(state, me, attr + ATTR_MSGSIZE)
+    if (mm & SIGNED_BIT) != 0 || (ms & SIGNED_BIT) != 0 || mm == 0 || ms == 0 {
+        return errno.E_INVAL
+    }
+    if mm > mqueue.MSGS_LIMIT || ms > mqueue.SIZE_LIMIT {
+        return errno.E_INVAL
+    }
+    *maxmsg = mm
+    *msgsize = ms
+    return 0
+}
+
+fn install(state: u64, me: u64, slot: u64, oflag: u64) -> u64 {
+    let acc: u64 = oflag & O_ACCMODE
+    let of: u64 = file.open_alloc(state, file.K_MQUEUE, slot, acc | (oflag & O_NONBLOCK))
+    if of >= file.MAX_OPEN {
+        return fail(errno.E_NFILE)
+    }
+    mqueue.open_ref(slot)
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        return fail(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    return sysfd.cx_result(state, me, fd, oflag & O_CLOEXEC)
+}
+
+fn do_open(state: u64, me: u64, name: u64, oflag_raw: u64, attr: u64) -> u64 {
+    let oflag: u64 = oflag_raw & INT_MASK
+    if (oflag & O_ACCMODE) == O_ACCMODE {
+        return fail(errno.E_INVAL)
+    }
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = name_checked(state, me, name, buf)
+    if errno.is_error(len) {
+        return len
+    }
+    var slot: u64 = mqueue.find(buf, len)
+    if slot != mqueue.NONE {
+        if (oflag & O_CREAT) != 0 && (oflag & O_EXCL) != 0 {
+            return fail(errno.E_EXIST)
+        }
+        return install(state, me, slot, oflag)
+    }
+    if (oflag & O_CREAT) == 0 {
+        return fail(errno.E_NOENT)
+    }
+    var maxmsg: u64 = 0
+    var msgsize: u64 = 0
+    let bad: u64 = read_attr(state, me, attr, &maxmsg, &msgsize)
+    if bad != 0 {
+        return fail(bad)
+    }
+    slot = mqueue.create(state, buf, len, maxmsg, msgsize)
+    if slot == mqueue.NOMEM {
+        return fail(errno.E_NOMEM)
+    }
+    if slot == mqueue.NONE {
+        if mqueue.find(buf, len) != mqueue.NONE {
+            return do_open(state, me, name, oflag, attr)
+        }
+        return fail(errno.E_NOSPC)
+    }
+    let fd: u64 = install(state, me, slot, oflag)
+    if errno.is_error(fd) {
+        mqueue.unlink(state, slot)
+    }
+    return fd
+}
+
+fn do_unlink(state: u64, me: u64, name: u64) -> u64 {
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = name_checked(state, me, name, buf)
+    if errno.is_error(len) {
+        return len
+    }
+    let slot: u64 = mqueue.find(buf, len)
+    if slot == mqueue.NONE {
+        return fail(errno.E_NOENT)
+    }
+    mqueue.unlink(state, slot)
+    return 0
+}
+
+fn deadline_of(state: u64, me: u64, ts: u64) -> u64 {
+    if ts == 0 {
+        return taskconst.POLL_FOREVER
+    }
+    if !procfault.user_ok(state, me, ts, TIMESPEC_BYTES) {
+        return DEADLINE_ERR | errno.E_FAULT
+    }
+    let sec: u64 = sysuser.get64u(state, me, ts)
+    let nsec: u64 = sysuser.get64u(state, me, ts + 8)
+    if (sec & SIGNED_BIT) != 0 || nsec >= NSEC_PER_SEC {
+        return DEADLINE_ERR | errno.E_INVAL
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if sec > SEC_LIMIT {
+        return taskconst.POLL_FOREVER - 1
+    }
+    let target: u64 = sec * NSEC_PER_SEC + nsec
+    let clock: u64 = time.real_ns(state)
+    if target <= clock {
+        return now
+    }
+    return now + (target - clock) / time.TICK_NS + 1
+}
+
+fn deadline_failed(dl: u64) -> bool {
+    return (dl & DEADLINE_ERR) == DEADLINE_ERR && dl != taskconst.POLL_FOREVER
+}
+
+fn timed_out(state: u64, dl: u64) -> bool {
+    return dl != taskconst.POLL_FOREVER && kstate.get(state, kstate.TICKS) >= dl
+}
+
+fn deliver_notify(state: u64, fired: u64) {
+    if fired == 0 {
+        return
+    }
+    let sig: u64 = fired & SIG_MASK
+    if sig != 0 {
+        let _r: u64 = signal.send_pid(state, fired >> PID_SHIFT, sig)
+    }
+}
+
+fn do_send(state: u64, me: u64, fd: u64, msg: u64, len: u64, prio_raw: u64, ts: u64) -> u64 {
+    let of: u64 = queue_of(state, me, fd)
+    if of >= file.MAX_OPEN || (file.open_flags(state, of) & O_ACCMODE) == O_RDONLY {
+        return fail(errno.E_BADF)
+    }
+    let slot: u64 = file.open_ino(state, of)
+    let prio: u64 = prio_raw & INT_MASK
+    if prio >= mqueue.PRIO_MAX {
+        return fail(errno.E_INVAL)
+    }
+    let dl: u64 = deadline_of(state, me, ts)
+    if deadline_failed(dl) {
+        return fail(dl & INT_MASK)
+    }
+    if len > mqueue.msgsize(slot) {
+        return fail(errno.E_MSGSIZE)
+    }
+    while true {
+        let seen: u64 = sched.poll_seq(state)
+        let idx: u64 = mqueue.reserve(slot)
+        if idx != mqueue.NO_MSG {
+            return store_message(state, me, slot, idx, msg, len, prio)
+        }
+        if (file.open_flags(state, of) & O_NONBLOCK) != 0 {
+            return fail(errno.E_AGAIN)
+        }
+        if signal.interrupted(state, me) {
+            return fail(errno.E_INTR)
+        }
+        if timed_out(state, dl) {
+            return fail(errno.E_TIMEDOUT)
+        }
+        sched.poll_sleep(state, seen, dl)
+    }
+    return fail(errno.E_AGAIN)
+}
+
+fn store_message(state: u64, me: u64, slot: u64, idx: u64, msg: u64, len: u64, prio: u64) -> u64 {
+    if len != 0 && !sysuser.copy_in(state, me, mqueue.msg_addr(slot, idx), msg, len) {
+        mqueue.abort(slot, idx)
+        return fail(errno.E_FAULT)
+    }
+    let fired: u64 = mqueue.commit(slot, idx, prio, len)
+    sched.poll_kick(state)
+    deliver_notify(state, fired)
+    return 0
+}
+
+fn do_receive(state: u64, me: u64, fd: u64, buf: u64, len: u64, prio_out: u64, ts: u64) -> u64 {
+    let of: u64 = queue_of(state, me, fd)
+    if of >= file.MAX_OPEN || (file.open_flags(state, of) & O_ACCMODE) == O_WRONLY {
+        return fail(errno.E_BADF)
+    }
+    let slot: u64 = file.open_ino(state, of)
+    let dl: u64 = deadline_of(state, me, ts)
+    if deadline_failed(dl) {
+        return fail(dl & INT_MASK)
+    }
+    if len < mqueue.msgsize(slot) {
+        return fail(errno.E_MSGSIZE)
+    }
+    if !procfault.user_ok(state, me, buf, mqueue.msgsize(slot)) {
+        return fail(errno.E_FAULT)
+    }
+    if prio_out != 0 && !procfault.user_ok(state, me, prio_out, 4) {
+        return fail(errno.E_FAULT)
+    }
+    while true {
+        let seen: u64 = sched.poll_seq(state)
+        let idx: u64 = mqueue.take(slot)
+        if idx != mqueue.NO_MSG {
+            return deliver_message(state, me, slot, idx, buf, prio_out)
+        }
+        if (file.open_flags(state, of) & O_NONBLOCK) != 0 {
+            return fail(errno.E_AGAIN)
+        }
+        if signal.interrupted(state, me) {
+            return fail(errno.E_INTR)
+        }
+        if timed_out(state, dl) {
+            return fail(errno.E_TIMEDOUT)
+        }
+        mqueue.waiter_add(slot)
+        sched.poll_sleep(state, seen, dl)
+        mqueue.waiter_sub(slot)
+    }
+    return fail(errno.E_AGAIN)
+}
+
+fn deliver_message(state: u64, me: u64, slot: u64, idx: u64, buf: u64, prio_out: u64) -> u64 {
+    let n: u64 = mqueue.msg_len(slot, idx)
+    var ok: bool = true
+    if n != 0 {
+        ok = sysuser.copy_out(state, me, buf, mqueue.msg_addr(slot, idx), n)
+    }
+    if ok && prio_out != 0 {
+        ok = sysuser.put32(state, me, prio_out, mqueue.msg_prio(slot, idx))
+    }
+    mqueue.release(slot, idx)
+    sched.poll_kick(state)
+    if !ok {
+        return fail(errno.E_FAULT)
+    }
+    return n
+}
+
+fn do_notify(state: u64, me: u64, fd: u64, sev: u64) -> u64 {
+    let of: u64 = queue_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return fail(errno.E_BADF)
+    }
+    let slot: u64 = file.open_ino(state, of)
+    let pid: u64 = taskslot.tget(state, me, taskconst.T_PID)
+    if sev == 0 {
+        mqueue.notify_clear(slot, pid)
+        return 0
+    }
+    if !procfault.user_ok(state, me, sev, SIGEV_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    let how: u64 = sysuser.get32(state, me, sev + SIGEV_NOTIFY)
+    var sig: u64 = 0
+    if how == SIGEV_SIGNAL {
+        sig = sysuser.get32(state, me, sev + SIGEV_SIGNO)
+        if sig == 0 || sig > SIGNAL_MAX {
+            return fail(errno.E_INVAL)
+        }
+    } else if how != SIGEV_NONE {
+        return fail(errno.E_INVAL)
+    }
+    if !mqueue.notify_set(slot, of, pid, sig) {
+        return fail(errno.E_BUSY)
+    }
+    return 0
+}
+
+fn do_attr(state: u64, me: u64, fd: u64, newp: u64, oldp: u64) -> u64 {
+    let of: u64 = queue_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return fail(errno.E_BADF)
+    }
+    let slot: u64 = file.open_ino(state, of)
+    var new_flags: u64 = 0
+    if newp != 0 {
+        if !procfault.user_ok(state, me, newp, ATTR_BYTES) {
+            return fail(errno.E_FAULT)
+        }
+        new_flags = sysuser.get64u(state, me, newp + ATTR_FLAGS)
+        if (new_flags & ~O_NONBLOCK) != 0 {
+            return fail(errno.E_INVAL)
+        }
+    }
+    if oldp != 0 {
+        if !put_attr(state, me, oldp, slot, file.open_flags(state, of) & O_NONBLOCK) {
+            return fail(errno.E_FAULT)
+        }
+    }
+    if newp != 0 {
+        let kept: u64 = file.open_flags(state, of) & ~O_NONBLOCK
+        file.open_set_flags(state, of, kept | new_flags)
+    }
+    return 0
+}
+
+fn put_attr(state: u64, me: u64, out: u64, slot: u64, flags: u64) -> bool {
+    if !procfault.user_ok(state, me, out, ATTR_BYTES) {
+        return false
+    }
+    var w: u64 = 0
+    while w < ATTR_WORDS {
+        if !sysuser.put64(state, me, out + w * 8, 0) {
+            return false
+        }
+        w = w + 1
+    }
+    return sysuser.put64(state, me, out + ATTR_FLAGS, flags)
+        && sysuser.put64(state, me, out + ATTR_MAXMSG, mqueue.maxmsg(slot))
+        && sysuser.put64(state, me, out + ATTR_MSGSIZE, mqueue.msgsize(slot))
+        && sysuser.put64(state, me, out + ATTR_CURMSGS, mqueue.count(slot))
+}

@@ -9,13 +9,19 @@ import sched.proc.procfault
 import sys.sysfd
 import sys.sysuser
 
-export { handles, call, SYS_IO_SETUP, SYS_IO_DESTROY, SYS_IO_GETEVENTS, SYS_IO_SUBMIT, SYS_IO_CANCEL }
+export { handles, call, SYS_IO_SETUP, SYS_IO_DESTROY, SYS_IO_GETEVENTS, SYS_IO_SUBMIT, SYS_IO_CANCEL, SYS_IO_PGETEVENTS }
 
 const SYS_IO_SETUP: u64 = 206
 const SYS_IO_DESTROY: u64 = 207
 const SYS_IO_GETEVENTS: u64 = 208
 const SYS_IO_SUBMIT: u64 = 209
 const SYS_IO_CANCEL: u64 = 210
+const SYS_IO_PGETEVENTS: u64 = 333
+
+const TIMESPEC_BYTES: u64 = 16
+const AIO_SIGSET_BYTES: u64 = 8
+const AIO_SIGMASK_ARG_BYTES: u64 = 16
+const NSEC_PER_SEC: u64 = 1000000000
 
 const CTX_MAX: u64 = 8
 const QUEUE_DEPTH: u64 = 256
@@ -49,7 +55,7 @@ fn fail(e: u64) -> u64 {
 }
 
 fn handles(number: u64) -> bool {
-    return number >= SYS_IO_SETUP && number <= SYS_IO_CANCEL
+    return (number >= SYS_IO_SETUP && number <= SYS_IO_CANCEL) || number == SYS_IO_PGETEVENTS
 }
 
 fn reclaim(state: u64) {
@@ -225,7 +231,39 @@ fn do_getevents(state: u64, me: u64, ctx: u64, min_nr: u64, nr: u64, out: u64) -
     return pop_events(state, me, slot, nr, out)
 }
 
-fn call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
+fn pgetevents_args_ok(state: u64, me: u64, timeout: u64, usig: u64) -> u64 {
+    if timeout != 0 {
+        if !procfault.user_ok(state, me, timeout, TIMESPEC_BYTES) {
+            return errno.E_FAULT
+        }
+        if sysuser.get64u(state, me, timeout + 8) >= NSEC_PER_SEC || (sysuser.get64u(state, me, timeout) >> 63) != 0 {
+            return errno.E_INVAL
+        }
+    }
+    if usig == 0 {
+        return 0
+    }
+    if !procfault.user_ok(state, me, usig, AIO_SIGMASK_ARG_BYTES) {
+        return errno.E_FAULT
+    }
+    if sysuser.get64u(state, me, usig) != 0 && sysuser.get64u(state, me, usig + 8) != AIO_SIGSET_BYTES {
+        return errno.E_INVAL
+    }
+    return 0
+}
+
+fn do_pgetevents(state: u64, me: u64, ctx: u64, min_nr: u64, nr: u64, out: u64, timeout: u64, usig: u64) -> u64 {
+    let bad: u64 = pgetevents_args_ok(state, me, timeout, usig)
+    if bad != 0 {
+        return fail(bad)
+    }
+    return do_getevents(state, me, ctx, min_nr, nr, out)
+}
+
+fn call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
+    if number == SYS_IO_PGETEVENTS {
+        return do_pgetevents(state, me, a0, a1, a2, a3, a4, a5)
+    }
     if number == SYS_IO_SETUP {
         return do_setup(state, me, a0, a1)
     }

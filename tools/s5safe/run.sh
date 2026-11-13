@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# Usage: bash tools/s5safe/* [new-kernel.img] [old-kernel.img]
+# Usage: bash tools/s5safe/run.sh [new-kernel.img] [old-poweroff-kernel.img] [old-procfs-kernel.img]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -8,7 +8,7 @@ cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"
 . tools/lib/firnenv.sh
 MEM=${S5SAFE_MEM:-3072}
-PROGS="sh echo reboot shutdown"
+PROGS="sh echo reboot shutdown ls cat"
 
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
@@ -29,6 +29,7 @@ fi
 echo "== 1. build =="
 NEW=${1:-}
 OLD=${2:-}
+OLD_PROC=${3:-}
 if [ -z "$NEW" ]; then
     NEW="$TMPD/new.img"
     bash tools/build-kernel.sh "$NEW" --stufe 0 > "$TMPD/build.txt" 2>&1 \
@@ -45,7 +46,7 @@ for p in $PROGS; do
     SPEC="$SPEC /bin/$p=$TMPD/$p.elf"
 done
 printf 'root:x:0:0:root:/:/bin/sh\n' > "$TMPD/passwd"
-bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" 16384 /bin/ /etc/ /run/ $SPEC \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" 16384 /bin/ /etc/ /run/ /proc/ $SPEC \
     /etc/passwd="$TMPD/passwd"@644:0:0 > "$TMPD/mkfs.txt" 2>&1 \
     && ok "disk image built" || { bad "mkfs failed"; head -5 "$TMPD/mkfs.txt"; exit 1; }
 
@@ -80,8 +81,29 @@ hasnot "$F" "power: acpi pm1a" "reboot never writes the S5 sleep type"
 has "$F" "power: reset" "reboot went through the reset chain"
 is "machine reset (QEMU exits on reset with -no-reboot)" "$rc" "0"
 
+PROC_BASE="osum vfs initsh nokbd nosched nofs noring3"
+PROC_SCRIPT="script=echo ==BEGIN==;ls /proc;cat /proc/s3;echo ==END=="
+
+echo "== 4. ls /proc with the FACS above the first GiB =="
+for mem in 3072 1024; do
+    MEM=$mem run_case "proc$mem" "$NEW" "$PROC_BASE $PROC_SCRIPT" > /dev/null
+    F="$TMPD/proc$mem.txt"
+    has "$F" "==END==" "-m $mem: script reached the end"
+    hasnot "$F" "EXCEPTION" "-m $mem: listing /proc does not fault"
+    hasnot "$F" "CRASH REPORT" "-m $mem: no crash report"
+done
+
+if [ -n "$OLD_PROC" ]; then
+    echo "== 5. counter-check: the old kernel faults on ls /proc =="
+    MEM=3072 run_case oldproc "$OLD_PROC" "$PROC_BASE $PROC_SCRIPT" > /dev/null
+    F="$TMPD/oldproc.txt"
+    grep -aqE "EXCEPTION|CRASH REPORT|vector 14" "$F" \
+        && ok "old kernel faults on ls /proc" \
+        || bad "old kernel did not fault on ls /proc"
+fi
+
 if [ -n "$OLD" ]; then
-    echo "== 4. counter-check: the old kernel faults =="
+    echo "== 6. counter-check: the old kernel faults =="
     rc=$(run_case oldoff "$OLD" "$BASE script=echo ==BEGIN==;shutdown -f;echo ==END==")
     F="$TMPD/oldoff.txt"
     if grep -aqE "EXCEPTION|CRASH REPORT|vector 14" "$F" || [ "$rc" != "0" ]; then

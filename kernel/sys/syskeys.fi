@@ -1,0 +1,555 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.errno
+import libc.regio
+import ipc.keystore
+import sys.sysuser
+
+export {
+    handles, call
+}
+
+const SYS_ADD_KEY: u64 = 248
+const SYS_REQUEST_KEY: u64 = 249
+const SYS_KEYCTL: u64 = 250
+
+const KEYCTL_GET_KEYRING_ID: u64 = 0
+const KEYCTL_JOIN_SESSION_KEYRING: u64 = 1
+const KEYCTL_UPDATE: u64 = 2
+const KEYCTL_REVOKE: u64 = 3
+const KEYCTL_CHOWN: u64 = 4
+const KEYCTL_SETPERM: u64 = 5
+const KEYCTL_DESCRIBE: u64 = 6
+const KEYCTL_CLEAR: u64 = 7
+const KEYCTL_LINK: u64 = 8
+const KEYCTL_UNLINK: u64 = 9
+const KEYCTL_SEARCH: u64 = 10
+const KEYCTL_READ: u64 = 11
+const KEYCTL_SET_TIMEOUT: u64 = 15
+const KEYCTL_INVALIDATE: u64 = 21
+
+const INT_MASK: u64 = 0xFFFFFFFF
+const SPEC_FIRST: u64 = 0xFFFFFFFB
+const SPEC_SESSION: u64 = 3
+const SPEC_COUNT: u64 = 6
+const TYPE_BYTES: u64 = 32
+const DESC_BYTES: u64 = 64
+const STAGE_DESC_OFF: u64 = 64
+const E_NOKEY: u64 = 126
+const E_KEYREVOKED: u64 = 128
+const E_DQUOT: u64 = 122
+const SEARCH_DEPTH: u64 = 3
+const COLON: u64 = 58
+const SEMICOLON: u64 = 59
+
+static mut spec_serial: [u64; 6] = [0 as u64; 6]
+static mut n_thread: [u8; 5] = "_tid\0"
+static mut n_process: [u8; 5] = "_pid\0"
+static mut n_session: [u8; 5] = "_ses\0"
+static mut n_user: [u8; 5] = "_uid\0"
+static mut n_user_session: [u8; 9] = "_uid_ses\0"
+static mut t_user: [u8; 5] = "user\0"
+static mut t_logon: [u8; 6] = "logon\0"
+static mut t_ring: [u8; 8] = "keyring\0"
+static mut p_perm: [u8; 14] = ";0;0;3f010000\0"
+
+fn fail(e: u64) -> u64 {
+    return sysuser.neg(e)
+}
+
+fn handles(number: u64) -> bool {
+    return number >= SYS_ADD_KEY && number <= SYS_KEYCTL
+}
+
+fn call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    if number == SYS_ADD_KEY {
+        return do_add(state, me, a0, a1, a2, a3, a4)
+    }
+    if number == SYS_REQUEST_KEY {
+        return do_request(state, me, a0, a1, a3)
+    }
+    return do_keyctl(state, me, a0 & INT_MASK, a1, a2, a3, a4)
+}
+
+fn word_equal(buf: u64, len: u64, word: u64) -> bool {
+    var i: u64 = 0
+    while i < len {
+        if regio.read8(word + i) != regio.read8(buf + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return regio.read8(word + len) == 0
+}
+
+fn kind_of(buf: u64, len: u64) -> u64 {
+    if word_equal(buf, len, (&t_user[0]) as u64) {
+        return keystore.TYPE_USER
+    }
+    if word_equal(buf, len, (&t_logon[0]) as u64) {
+        return keystore.TYPE_LOGON
+    }
+    if word_equal(buf, len, (&t_ring[0]) as u64) {
+        return keystore.TYPE_RING
+    }
+    return 0
+}
+
+fn spec_name(index: u64) -> u64 {
+    if index == 1 {
+        return (&n_thread[0]) as u64
+    }
+    if index == 2 {
+        return (&n_process[0]) as u64
+    }
+    if index == SPEC_SESSION {
+        return (&n_session[0]) as u64
+    }
+    if index == 4 {
+        return (&n_user[0]) as u64
+    }
+    return (&n_user_session[0]) as u64
+}
+
+fn c_len(addr: u64) -> u64 {
+    var n: u64 = 0
+    while regio.read8(addr + n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn special_ring(index: u64) -> u64 {
+    var slot: u64 = keystore.find_serial(spec_serial[index as usize])
+    if slot == keystore.NONE {
+        let name: u64 = spec_name(index)
+        slot = keystore.alloc(keystore.TYPE_RING, name, c_len(name))
+        if slot != keystore.NONE {
+            spec_serial[index as usize] = keystore.serial_of(slot)
+        }
+    }
+    return slot
+}
+
+fn resolve(id_raw: u64) -> u64 {
+    let id: u64 = id_raw & INT_MASK
+    if id >= SPEC_FIRST {
+        return special_ring(0x100000000 - id)
+    }
+    return keystore.find_serial(id)
+}
+
+fn ring_of(id_raw: u64, err: *mut u64) -> u64 {
+    let slot: u64 = resolve(id_raw)
+    if slot == keystore.NONE {
+        *err = E_NOKEY
+        return keystore.NONE
+    }
+    if keystore.type_of(slot) != keystore.TYPE_RING {
+        *err = errno.E_NOTDIR
+        return keystore.NONE
+    }
+    return slot
+}
+
+fn fetch_type(state: u64, me: u64, addr: u64, buf: u64) -> u64 {
+    let len: u64 = sysuser.fetch_name(state, me, addr, buf, TYPE_BYTES)
+    if errno.is_error(len) {
+        return len
+    }
+    let kind: u64 = kind_of(buf, len)
+    if kind == 0 {
+        return fail(errno.E_NODEV)
+    }
+    return kind
+}
+
+fn fetch_desc(state: u64, me: u64, addr: u64, buf: u64) -> u64 {
+    let len: u64 = sysuser.fetch_name(state, me, addr, buf, DESC_BYTES)
+    if errno.is_error(len) {
+        if len == fail(errno.E_NAMETOOLONG) {
+            return fail(errno.E_INVAL)
+        }
+        return len
+    }
+    if len == 0 {
+        return fail(errno.E_INVAL)
+    }
+    return len
+}
+
+fn has_byte(buf: u64, len: u64, c: u64) -> bool {
+    var i: u64 = 0
+    while i < len {
+        if regio.read8(buf + i) == c {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn store_payload(state: u64, me: u64, slot: u64, src: u64, len: u64) -> u64 {
+    if len == 0 {
+        return errno.E_INVAL
+    }
+    if len > keystore.PAYLOAD_MAX {
+        return E_DQUOT
+    }
+    let stage: u64 = sysuser.blockb(state)
+    if !sysuser.copy_in(state, me, stage, src, len) {
+        return errno.E_FAULT
+    }
+    keystore.set_payload(slot, stage, len)
+    return 0
+}
+
+fn do_add(state: u64, me: u64, type_u: u64, desc_u: u64, payload: u64, plen_raw: u64, ring_id: u64) -> u64 {
+    let tbuf: u64 = sysuser.nameb(state)
+    let dbuf: u64 = tbuf + STAGE_DESC_OFF
+    let kind: u64 = fetch_type(state, me, type_u, tbuf)
+    if errno.is_error(kind) {
+        return kind
+    }
+    let dlen: u64 = fetch_desc(state, me, desc_u, dbuf)
+    if errno.is_error(dlen) {
+        return dlen
+    }
+    let plen: u64 = plen_raw
+    if kind == keystore.TYPE_LOGON && !has_byte(dbuf, dlen, COLON) {
+        return fail(errno.E_INVAL)
+    }
+    if kind == keystore.TYPE_RING && (payload != 0 || plen != 0) {
+        return fail(errno.E_INVAL)
+    }
+    var err: u64 = 0
+    var ring: u64 = keystore.NONE
+    if (ring_id & INT_MASK) != 0 {
+        ring = ring_of(ring_id, &err)
+        if ring == keystore.NONE {
+            return fail(err)
+        }
+    }
+    var slot: u64 = keystore.NONE
+    if ring != keystore.NONE {
+        slot = keystore.find_member(ring, kind, dbuf, dlen)
+    }
+    if slot == keystore.NONE {
+        slot = keystore.alloc(kind, dbuf, dlen)
+        if slot == keystore.NONE {
+            return fail(E_DQUOT)
+        }
+    }
+    if kind != keystore.TYPE_RING {
+        let bad: u64 = store_payload(state, me, slot, payload, plen)
+        if bad != 0 {
+            keystore.release_key(slot)
+            return fail(bad)
+        }
+    }
+    if ring != keystore.NONE {
+        keystore.link(ring, slot)
+    }
+    return keystore.serial_of(slot)
+}
+
+fn search_ring(ring: u64, kind: u64, desc: u64, len: u64, depth: u64) -> u64 {
+    let direct: u64 = keystore.find_member(ring, kind, desc, len)
+    if direct != keystore.NONE || depth == 0 {
+        return direct
+    }
+    var slot: u64 = 0
+    while slot < keystore.KEYS_MAX {
+        if keystore.linked(ring, slot) && keystore.serial_of(slot) != 0 && keystore.type_of(slot) == keystore.TYPE_RING {
+            let nested: u64 = search_ring(slot, kind, desc, len, depth - 1)
+            if nested != keystore.NONE {
+                return nested
+            }
+        }
+        slot = slot + 1
+    }
+    return keystore.NONE
+}
+
+fn search_session(kind: u64, desc: u64, len: u64) -> u64 {
+    var index: u64 = 1
+    while index < SPEC_COUNT {
+        let ring: u64 = keystore.find_serial(spec_serial[index as usize])
+        if ring != keystore.NONE {
+            let found: u64 = search_ring(ring, kind, desc, len, SEARCH_DEPTH)
+            if found != keystore.NONE {
+                return found
+            }
+        }
+        index = index + 1
+    }
+    return keystore.NONE
+}
+
+fn finish_search(found: u64, dest_id: u64) -> u64 {
+    if found == keystore.NONE {
+        return fail(E_NOKEY)
+    }
+    if keystore.revoked(found) {
+        return fail(E_KEYREVOKED)
+    }
+    if (dest_id & INT_MASK) != 0 {
+        var err: u64 = 0
+        let dest: u64 = ring_of(dest_id, &err)
+        if dest == keystore.NONE {
+            return fail(err)
+        }
+        keystore.link(dest, found)
+    }
+    return keystore.serial_of(found)
+}
+
+fn do_request(state: u64, me: u64, type_u: u64, desc_u: u64, dest_id: u64) -> u64 {
+    let tbuf: u64 = sysuser.nameb(state)
+    let dbuf: u64 = tbuf + STAGE_DESC_OFF
+    let kind: u64 = fetch_type(state, me, type_u, tbuf)
+    if errno.is_error(kind) {
+        return kind
+    }
+    let dlen: u64 = fetch_desc(state, me, desc_u, dbuf)
+    if errno.is_error(dlen) {
+        return dlen
+    }
+    return finish_search(search_session(kind, dbuf, dlen), dest_id)
+}
+
+fn do_keyctl(state: u64, me: u64, cmd: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
+    if cmd == KEYCTL_GET_KEYRING_ID {
+        return get_ring_id(a2)
+    }
+    if cmd == KEYCTL_JOIN_SESSION_KEYRING {
+        return join_session(state, me, a2)
+    }
+    if cmd == KEYCTL_UPDATE {
+        return update_key(state, me, a2, a3, a4)
+    }
+    if cmd == KEYCTL_DESCRIBE {
+        return describe_key(state, me, a2, a3, a4)
+    }
+    if cmd == KEYCTL_READ {
+        return read_key(state, me, a2, a3, a4)
+    }
+    if cmd == KEYCTL_SEARCH {
+        return search_cmd(state, me, a2, a3, a4, a5)
+    }
+    if cmd == KEYCTL_REVOKE || cmd == KEYCTL_INVALIDATE || cmd == KEYCTL_CLEAR || cmd == KEYCTL_LINK || cmd == KEYCTL_UNLINK {
+        return edit_cmd(cmd, a2, a3)
+    }
+    if cmd == KEYCTL_CHOWN || cmd == KEYCTL_SETPERM || cmd == KEYCTL_SET_TIMEOUT {
+        return keep_cmd(a2)
+    }
+    return fail(errno.E_OPNOTSUPP)
+}
+
+fn keep_cmd(id: u64) -> u64 {
+    if resolve(id) == keystore.NONE {
+        return fail(E_NOKEY)
+    }
+    return 0
+}
+
+fn get_ring_id(id_raw: u64) -> u64 {
+    let slot: u64 = resolve(id_raw)
+    if slot == keystore.NONE {
+        return fail(E_NOKEY)
+    }
+    return keystore.serial_of(slot)
+}
+
+fn join_session(state: u64, me: u64, name_u: u64) -> u64 {
+    var name: u64 = spec_name(SPEC_SESSION)
+    var len: u64 = c_len(name)
+    let buf: u64 = sysuser.nameb(state)
+    if name_u != 0 {
+        len = sysuser.fetch_name(state, me, name_u, buf, DESC_BYTES)
+        if errno.is_error(len) {
+            return fail(errno.E_INVAL)
+        }
+        name = buf
+    }
+    var slot: u64 = keystore.NONE
+    if name_u != 0 {
+        slot = find_named_ring(name, len)
+    }
+    if slot == keystore.NONE {
+        slot = keystore.alloc(keystore.TYPE_RING, name, len)
+    }
+    if slot == keystore.NONE {
+        return fail(E_DQUOT)
+    }
+    spec_serial[SPEC_SESSION as usize] = keystore.serial_of(slot)
+    return keystore.serial_of(slot)
+}
+
+fn find_named_ring(name: u64, len: u64) -> u64 {
+    var slot: u64 = 0
+    while slot < keystore.KEYS_MAX {
+        if keystore.matches(slot, keystore.TYPE_RING, name, len) {
+            return slot
+        }
+        slot = slot + 1
+    }
+    return keystore.NONE
+}
+
+fn live_key(id: u64, err: *mut u64) -> u64 {
+    let slot: u64 = resolve(id)
+    if slot == keystore.NONE {
+        *err = E_NOKEY
+        return keystore.NONE
+    }
+    if keystore.revoked(slot) {
+        *err = E_KEYREVOKED
+        return keystore.NONE
+    }
+    return slot
+}
+
+fn update_key(state: u64, me: u64, id: u64, payload: u64, plen: u64) -> u64 {
+    var err: u64 = 0
+    let slot: u64 = live_key(id, &err)
+    if slot == keystore.NONE {
+        return fail(err)
+    }
+    if keystore.type_of(slot) == keystore.TYPE_RING {
+        return fail(errno.E_OPNOTSUPP)
+    }
+    let bad: u64 = store_payload(state, me, slot, payload, plen)
+    if bad != 0 {
+        return fail(bad)
+    }
+    return 0
+}
+
+fn type_word(kind: u64) -> u64 {
+    if kind == keystore.TYPE_USER {
+        return (&t_user[0]) as u64
+    }
+    if kind == keystore.TYPE_LOGON {
+        return (&t_logon[0]) as u64
+    }
+    return (&t_ring[0]) as u64
+}
+
+fn put_text(dst: u64, at: u64, src: u64, len: u64) -> u64 {
+    var i: u64 = 0
+    while i < len {
+        regio.write8(dst + at + i, regio.read8(src + i))
+        i = i + 1
+    }
+    return at + len
+}
+
+fn describe_key(state: u64, me: u64, id: u64, buf: u64, buflen: u64) -> u64 {
+    var err: u64 = 0
+    let slot: u64 = live_key(id, &err)
+    if slot == keystore.NONE {
+        return fail(err)
+    }
+    let stage: u64 = sysuser.blockb(state)
+    let kind: u64 = type_word(keystore.type_of(slot))
+    var at: u64 = put_text(stage, 0, kind, c_len(kind))
+    at = put_text(stage, at, (&p_perm[0]) as u64, c_len((&p_perm[0]) as u64))
+    regio.write8(stage + at, SEMICOLON)
+    at = put_text(stage, at + 1, keystore.desc_addr(slot), keystore.desc_len(slot))
+    regio.write8(stage + at, 0)
+    return copy_result(state, me, buf, buflen, stage, at + 1)
+}
+
+fn copy_result(state: u64, me: u64, buf: u64, buflen: u64, src: u64, total: u64) -> u64 {
+    if buf != 0 && buflen != 0 {
+        var n: u64 = total
+        if n > buflen {
+            n = buflen
+        }
+        if !sysuser.copy_out(state, me, buf, src, n) {
+            return fail(errno.E_FAULT)
+        }
+    }
+    return total
+}
+
+fn read_key(state: u64, me: u64, id: u64, buf: u64, buflen: u64) -> u64 {
+    var err: u64 = 0
+    let slot: u64 = live_key(id, &err)
+    if slot == keystore.NONE {
+        return fail(err)
+    }
+    let kind: u64 = keystore.type_of(slot)
+    if kind == keystore.TYPE_LOGON {
+        return fail(errno.E_OPNOTSUPP)
+    }
+    if kind == keystore.TYPE_USER {
+        return copy_result(state, me, buf, buflen, keystore.payload_addr(slot), keystore.payload_len(slot))
+    }
+    let stage: u64 = sysuser.blockb(state)
+    let count: u64 = keystore.member_count(slot)
+    var i: u64 = 0
+    while i < count {
+        let serial: u64 = keystore.member_serial(slot, i)
+        regio.write32(stage + i * 4, serial & INT_MASK)
+        i = i + 1
+    }
+    return copy_result(state, me, buf, buflen, stage, count * 4)
+}
+
+fn search_cmd(state: u64, me: u64, ring_id: u64, type_u: u64, desc_u: u64, dest_id: u64) -> u64 {
+    var err: u64 = 0
+    let ring: u64 = ring_of(ring_id, &err)
+    if ring == keystore.NONE {
+        return fail(err)
+    }
+    let tbuf: u64 = sysuser.nameb(state)
+    let dbuf: u64 = tbuf + STAGE_DESC_OFF
+    let kind: u64 = fetch_type(state, me, type_u, tbuf)
+    if errno.is_error(kind) {
+        return kind
+    }
+    let dlen: u64 = fetch_desc(state, me, desc_u, dbuf)
+    if errno.is_error(dlen) {
+        return dlen
+    }
+    return finish_search(search_ring(ring, kind, dbuf, dlen, SEARCH_DEPTH), dest_id)
+}
+
+fn edit_cmd(cmd: u64, first: u64, second: u64) -> u64 {
+    var err: u64 = 0
+    if cmd == KEYCTL_CLEAR {
+        let ring: u64 = ring_of(first, &err)
+        if ring == keystore.NONE {
+            return fail(err)
+        }
+        keystore.clear_ring(ring)
+        return 0
+    }
+    let key: u64 = resolve(first)
+    if key == keystore.NONE {
+        return fail(E_NOKEY)
+    }
+    if cmd == KEYCTL_REVOKE {
+        keystore.set_revoked(key)
+        return 0
+    }
+    if cmd == KEYCTL_INVALIDATE {
+        keystore.release_key(key)
+        return 0
+    }
+    let ring: u64 = ring_of(second, &err)
+    if ring == keystore.NONE {
+        return fail(err)
+    }
+    if cmd == KEYCTL_LINK {
+        keystore.link(ring, key)
+        return 0
+    }
+    if !keystore.linked(ring, key) {
+        return fail(errno.E_NOENT)
+    }
+    keystore.unlink(ring, key)
+    return 0
+}
