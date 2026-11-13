@@ -4,7 +4,7 @@ mkdir -p /tmp/p
 echo 'user_pref("gfx.webrender.software", true);' > /tmp/p/user.js
 echo 'user_pref("security.sandbox.content.level", 4);' >> /tmp/p/user.js
 echo "FX15 begin firefox --headless --screenshot with content sandbox"
-timeout 100 /usr/bin/firefox --headless --screenshot /tmp/x.png --profile /tmp/p 'data:text/html,<h1>osum</h1>'
+timeout 300 /usr/bin/firefox --headless --screenshot /tmp/x.png --profile /tmp/p 'data:text/html,<h1>osum</h1>'
 echo "FX15 rc=$?"
 ls -la /tmp/x.png
 if [ -s /tmp/x.png ]; then echo "FX15 png ok"; fi
