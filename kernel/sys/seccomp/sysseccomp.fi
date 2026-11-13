@@ -21,9 +21,15 @@ const PR_SET_SECCOMP: u64 = 22
 const PR_SET_NO_NEW_PRIVS: u64 = 38
 const PR_GET_NO_NEW_PRIVS: u64 = 39
 
+const SECCOMP_SET_MODE_STRICT: u64 = 0
 const SECCOMP_SET_MODE_FILTER: u64 = 1
 const SECCOMP_GET_ACTION_AVAIL: u64 = 2
+const MODE_STRICT: u64 = 1
 const MODE_FILTER: u64 = 2
+const STRICT_READ: u64 = 0
+const STRICT_WRITE: u64 = 1
+const STRICT_RT_SIGRETURN: u64 = 15
+const STRICT_EXIT: u64 = 60
 
 const FLAG_TSYNC: u64 = 1
 const FLAG_LOG: u64 = 2
@@ -48,7 +54,6 @@ const PROG_PTR_OFF: u64 = 8
 const PROG_BYTES: u64 = 16
 const ACTION_BYTES: u64 = 4
 const AUDIT_ARCH_X86_64: u64 = 0xC000003E
-const SIGSYS: u64 = 31
 const SIGKILL: u64 = 9
 
 const D_NR: u64 = 0
@@ -155,6 +160,9 @@ fn set_filter(state: u64, me: u64, flags: u64, uprog: u64) -> u64 {
     if (flags & (0xFFFFFFFFFFFFFFFF -% FLAGS_SUPPORTED)) != 0 {
         return fail(errno.E_INVAL)
     }
+    if filter.head_of(state, me) == filter.HEAD_STRICT {
+        return fail(errno.E_INVAL)
+    }
     if !permitted(state, me) {
         return fail(errno.E_ACCES)
     }
@@ -176,6 +184,18 @@ fn set_filter(state: u64, me: u64, flags: u64, uprog: u64) -> u64 {
     return 0
 }
 
+fn set_strict(state: u64, me: u64) -> u64 {
+    let head: u64 = filter.head_of(state, me)
+    if head == filter.HEAD_STRICT {
+        return 0
+    }
+    if head != filter.HEAD_NONE {
+        return fail(errno.E_INVAL)
+    }
+    taskslot.tset(state, me, taskconst.T_SECCOMP, filter.HEAD_STRICT)
+    return 0
+}
+
 fn action_avail(state: u64, me: u64, uaction: u64) -> u64 {
     var buf: [u8; 8] = [0 as u8; 8]
     let bp: u64 = (&buf[0]) as u64
@@ -192,6 +212,12 @@ fn action_avail(state: u64, me: u64, uaction: u64) -> u64 {
 }
 
 fn call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64) -> u64 {
+    if a0 == SECCOMP_SET_MODE_STRICT {
+        if a1 != 0 || a2 != 0 {
+            return fail(errno.E_INVAL)
+        }
+        return set_strict(state, me)
+    }
     if a0 == SECCOMP_SET_MODE_FILTER {
         return set_filter(state, me, a1, a2)
     }
@@ -216,10 +242,17 @@ fn do_prctl(state: u64, me: u64, option: u64, a2: u64, a3: u64, a4: u64, a5: u64
         return 0
     }
     if option == PR_GET_SECCOMP {
-        if filter.head_of(state, me) != filter.HEAD_NONE {
+        let head: u64 = filter.head_of(state, me)
+        if head == filter.HEAD_STRICT {
+            return MODE_STRICT
+        }
+        if head != filter.HEAD_NONE {
             return MODE_FILTER
         }
         return 0
+    }
+    if a2 == MODE_STRICT {
+        return set_strict(state, me)
     }
     if a2 != MODE_FILTER {
         return fail(errno.E_INVAL)
@@ -250,7 +283,7 @@ fn kill_group(state: u64, me: u64) {
     }
 }
 
-fn verdict(state: u64, me: u64, ret: u64) -> u64 {
+fn verdict(state: u64, me: u64, ret: u64, number: u64, ip: u64) -> u64 {
     let action: u64 = ret & RET_ACTION_MASK
     if action == RET_ALLOW || action == RET_LOG {
         return PASS
@@ -263,7 +296,7 @@ fn verdict(state: u64, me: u64, ret: u64) -> u64 {
         return 0 -% code
     }
     if action == RET_TRAP || action == RET_KILL_THREAD {
-        let _t: bool = signal.send_task(state, me, SIGSYS)
+        let _t: bool = signal.force_sigsys(state, me, number, ip, action == RET_KILL_THREAD)
         return fail(errno.E_NOSYS)
     }
     if action == RET_TRACE || action == RET_USER_NOTIF {
@@ -273,9 +306,21 @@ fn verdict(state: u64, me: u64, ret: u64) -> u64 {
     return fail(errno.E_NOSYS)
 }
 
+fn strict_allows(number: u64) -> bool {
+    return number == STRICT_READ || number == STRICT_WRITE
+        || number == STRICT_RT_SIGRETURN || number == STRICT_EXIT
+}
+
 fn enter(state: u64, me: u64, head: u64, number: u64, frame: u64) -> u64 {
+    if head == filter.HEAD_STRICT {
+        if strict_allows(number) {
+            return PASS
+        }
+        kill_group(state, me)
+        return fail(errno.E_NOSYS)
+    }
     var data: [u8; 64] = [0 as u8; 64]
     let dp: u64 = (&data[0]) as u64
     fill_data(dp, number, frame)
-    return verdict(state, me, filter.evaluate(head, dp))
+    return verdict(state, me, filter.evaluate(head, dp), number, regio.read64_at(frame, F_RIP))
 }

@@ -14,9 +14,10 @@ import libc.regio
 import sched.ptrace
 import sched.ptstate
 import sched.sigrestart
+import sched.sigsysinfo
 
 export {
-    init_task, clear_task, exec_reset, inherit,
+    init_task, clear_task, exec_reset, inherit, force_sigsys,
     send, send_task, send_timer, send_pid, send_pgid, send_tty, fault, alarm_check,
     check_sys, check_trap, greg_off, notify_tracer, pending, deliverable, interrupted,
     do_sigaction, do_sigprocmask, do_sigreturn, do_kill, do_pause,
@@ -54,6 +55,10 @@ const SIGTTIN: u64 = 21
 const SIGTTOU: u64 = 22
 const SIGWINCH: u64 = 28
 const NSIG: u64 = 65
+const SIGSYS: u64 = 31
+const SYS_SECCOMP_CODE: u64 = 1
+const AUDIT_ARCH_X86_64: u64 = 0xC000003E
+const SI_CALL_NR_OFF: u64 = 24
 const SI_TIMER_CODE: u64 = 0xFFFFFFFE
 static mut timer_marks: [u64; 256] = [0 as u64; 256]
 const NSIG_OLD: u64 = 32
@@ -314,6 +319,17 @@ fn discarded(state: u64, task: u64, sig: u64) -> bool {
 
 fn send_task(state: u64, task: u64, sig: u64) -> bool {
     return raise(state, task, sig, false)
+}
+
+fn force_sigsys(state: u64, task: u64, nr: u64, ip: u64, kill: bool) -> bool {
+    sigsysinfo.put(task, nr, ip)
+    let m: u64 = taskslot.tget(state, task, taskconst.T_SIGMASK)
+    taskslot.tset(state, task, taskconst.T_SIGMASK, m & (0xFFFFFFFFFFFFFFFF -% bit(SIGSYS)))
+    if kill || handler_of(state, task, SIGSYS) == SIG_IGN {
+        regio.write64(act(state, task, SIGSYS) + A_HANDLER, SIG_DFL)
+        regio.write64(act(state, task, SIGSYS) + A_FLAGS, 0)
+    }
+    return send_task(state, task, SIGSYS)
 }
 
 fn send_timer(state: u64, pid: u64, sig: u64) -> u64 {
@@ -674,9 +690,15 @@ fn deliver(state: u64, task: u64, sig: u64, ctx: u64, restart_nr: u64) -> bool {
             }
         }
     }
+    var info_addr: u64 = addr
+    if sig == SIGSYS && sigsysinfo.take(task) {
+        code = SYS_SECCOMP_CODE
+        info_addr = sigsysinfo.ip_of(task)
+        poke64(state, task, base + SF_INFO + SI_CALL_NR_OFF, sigsysinfo.nr_of(task) | (AUDIT_ARCH_X86_64 << 32))
+    }
     poke64(state, task, base + SF_INFO, sig)
     poke64(state, task, base + SF_INFO + 8, code)
-    poke64(state, task, base + SF_INFO + 16, addr)
+    poke64(state, task, base + SF_INFO + 16, info_addr)
     let ucb: u64 = base + SF_UC
     poke64(state, task, ucb + 296, taskslot.tget(state, task, taskconst.T_SIGMASK))
     var gi: u64 = 0

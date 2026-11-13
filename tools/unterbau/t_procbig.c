@@ -8,7 +8,8 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 
-#define MAP_PAGES 800
+#define MAP_PAGES 4400
+#define MAPS_CHUNK 4093
 #define BIG_BUF (1 << 20)
 #define CHUNK 100
 #define THREADS 3
@@ -68,11 +69,16 @@ int main(void)
     snprintf(last, sizeof last, "%lx-", (unsigned long)(area + (MAP_PAGES - 1) * 4096UL));
     CHECK("maps_last_split_listed", strstr(whole, last) != 0, "last page %s missing from %d bytes", last, n);
     CHECK("maps_tail_whole_line", n > 0 && whole[n - 1] == '\n', "ends with 0x%02x", n > 0 ? whole[n - 1] : 0);
-    int m = slurp("/proc/self/maps", pieces, sizeof pieces, CHUNK);
+    CHECK("maps_over_128k", n > 131072, "only %d bytes", n);
+    int m = slurp("/proc/self/maps", pieces, sizeof pieces, MAPS_CHUNK);
     CHECK("maps_chunked_size", m == n, "chunked=%d whole=%d", m, n);
+    CHECK("maps_chunked_same", m == n && memcmp(whole, pieces, n) == 0, "chunked read differs");
+    CHECK("maps_first_line_start", strncmp(whole, pieces, 64) == 0 && strchr(whole, '-') != 0, "first line differs");
+    int small = slurp("/proc/self/maps", pieces, 2000, CHUNK);
+    CHECK("maps_small_chunk_prefix", small == 1999 && memcmp(whole, pieces, 1999) == 0, "small=%d", small);
     struct stat st;
     errno = 0;
-    CHECK("maps_fstat_size", stat("/proc/self/maps", &st) == 0 && st.st_size >= n - 256, "st_size=%ld n=%d", (long)st.st_size, n);
+    CHECK("maps_fstat_size", stat("/proc/self/maps", &st) == 0 && st.st_size >= n - 256 && st.st_size > 131072, "st_size=%ld n=%d", (long)st.st_size, n);
 
     errno = 0;
     n = slurp("/proc/cpuinfo", whole, sizeof whole, BIG_BUF);
