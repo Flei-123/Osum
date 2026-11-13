@@ -71,12 +71,13 @@ static volatile sig_atomic_t trapped;
 static void on_sigsys(int s) { (void)s; trapped = 1; }
 
 static volatile int info_signo, info_code, info_syscall;
+static volatile long info_rax;
 static volatile unsigned info_arch;
 static volatile unsigned long info_call_addr;
 
 static void on_sigsys_info(int s, siginfo_t *si, void *uc)
 {
-    (void)uc;
+    info_rax = ((ucontext_t *)uc)->uc_mcontext.gregs[REG_RAX];
     const unsigned char *raw = (const unsigned char *)si;
     info_signo = s == si->si_signo ? s : -1;
     info_code = si->si_code;
@@ -153,7 +154,10 @@ static int body_trap_info(void)
         return 92;
     if (info_syscall != NR_PROBE || info_arch != ARCH_X86_64 || info_call_addr == 0)
         return 93;
-    return r == -1 && e == ENOSYS ? 0 : 94;
+    (void)e;
+    if (info_rax != NR_PROBE)
+        return 95;
+    return r == NR_PROBE ? 0 : 94;
 }
 
 static int body_trap_blocked(void)
