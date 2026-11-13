@@ -2,6 +2,7 @@
 
 import lib.errno
 import sched.futex
+import sched.proc.procfault
 import sys.sysuser
 
 export {
@@ -10,6 +11,14 @@ export {
 
 const SYS_FUTEX_WAKE: u64 = 454
 const SYS_FUTEX_WAIT: u64 = 455
+const SYS_FUTEX_REQUEUE: u64 = 456
+
+const WAITV_BYTES: u64 = 24
+const WAITV_VAL: u64 = 0
+const WAITV_UADDR: u64 = 8
+const WAITV_FLAGS: u64 = 16
+const OP_CMP_REQUEUE: u64 = 4
+const INT_MAX: u64 = 0x7FFFFFFF
 
 const FUTEX2_SIZE_MASK: u64 = 3
 const FUTEX2_SIZE_U32: u64 = 2
@@ -29,7 +38,7 @@ fn fail(e: u64) -> u64 {
 }
 
 fn handles(number: u64) -> bool {
-    return number == SYS_FUTEX_WAKE || number == SYS_FUTEX_WAIT
+    return number == SYS_FUTEX_WAKE || number == SYS_FUTEX_WAIT || number == SYS_FUTEX_REQUEUE
 }
 
 fn flags_ok(flags: u64) -> bool {
@@ -45,6 +54,9 @@ fn op_of(base: u64, flags: u64) -> u64 {
 }
 
 fn call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
+    if number == SYS_FUTEX_REQUEUE {
+        return do_requeue(state, me, a0, a1, a2, a3)
+    }
     if number == SYS_FUTEX_WAKE {
         return do_wake(state, me, a0, a1, a2, a3)
     }
@@ -71,4 +83,25 @@ fn do_wait(state: u64, me: u64, uaddr: u64, val: u64, mask: u64, flags: u64, tim
         }
     }
     return futex.call(state, me, uaddr, op, val & INT_MASK, timeout, 0, mask & INT_MASK)
+}
+
+fn do_requeue(state: u64, me: u64, waiters: u64, flags: u64, nr_wake: u64, nr_requeue: u64) -> u64 {
+    if (flags & INT_MASK) != 0 || (nr_wake & INT_MASK) > INT_MAX || (nr_requeue & INT_MASK) > INT_MAX {
+        return fail(errno.E_INVAL)
+    }
+    if !procfault.user_ok(state, me, waiters, WAITV_BYTES * 2) {
+        return fail(errno.E_FAULT)
+    }
+    let flags1: u64 = sysuser.get32(state, me, waiters + WAITV_FLAGS)
+    let flags2: u64 = sysuser.get32(state, me, waiters + WAITV_BYTES + WAITV_FLAGS)
+    if !flags_ok(flags1) || !flags_ok(flags2) || (flags1 & FUTEX2_PRIVATE) != (flags2 & FUTEX2_PRIVATE) {
+        return fail(errno.E_INVAL)
+    }
+    let expected: u64 = sysuser.get64u(state, me, waiters + WAITV_VAL)
+    if (expected >> 32) != 0 {
+        return fail(errno.E_INVAL)
+    }
+    let uaddr1: u64 = sysuser.get64u(state, me, waiters + WAITV_UADDR)
+    let uaddr2: u64 = sysuser.get64u(state, me, waiters + WAITV_BYTES + WAITV_UADDR)
+    return futex.call(state, me, uaddr1, op_of(OP_CMP_REQUEUE, flags1), nr_wake & INT_MASK, nr_requeue & INT_MASK, uaddr2, expected)
 }
