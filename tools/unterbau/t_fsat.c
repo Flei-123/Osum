@@ -117,6 +117,26 @@ int main(void)
     CHECKC("unlinkat_removedir", r == 0);
     CHECK("unlinkat_removedir_gone", access("/tmp/fat/sub", F_OK) != 0, "sub still there");
 
+    errno = 0; r = symlink("127.0.0.1:+1", "/tmp/fat/dangle");
+    CHECKC("symlink_dangling", r == 0);
+    errno = 0; r = symlink("x", "/tmp/fat/dangle");
+    CHECK("symlink_dangling_exists", r < 0 && errno == EEXIST, "r=%ld errno=%d", r, errno);
+    errno = 0; r = unlink("/tmp/fat/dangle");
+    CHECKC("unlink_dangling_symlink", r == 0);
+    CHECK("unlink_dangling_gone", lstat("/tmp/fat/dangle", &st) != 0, "link still there");
+
+    errno = 0; r = symlink("/tmp/fat/b", "/tmp/fat/lnb");
+    CHECKC("symlink_to_file", r == 0);
+    errno = 0; r = unlink("/tmp/fat/lnb");
+    CHECKC("unlink_symlink_to_file", r == 0);
+    CHECK("unlink_symlink_keeps_target", access("/tmp/fat/b", F_OK) == 0, "target removed");
+
+    errno = 0; r = symlink("/tmp/fat", "/tmp/fat/lndir");
+    CHECKC("symlink_to_dir", r == 0);
+    errno = 0; r = unlink("/tmp/fat/lndir");
+    CHECKC("unlink_symlink_to_dir", r == 0);
+    CHECK("unlink_symlink_to_dir_keeps_dir", access("/tmp/fat/b", F_OK) == 0, "dir content lost");
+
     /* cleanup */
     unlink("/tmp/fat/b"); unlink("/tmp/fat/d"); unlink("/tmp/fat/e"); unlink("/tmp/fat/ln");
     rmdir("/tmp/fat");
