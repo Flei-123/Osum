@@ -137,6 +137,24 @@ int main(void)
     CHECKC("unlink_symlink_to_dir", r == 0);
     CHECK("unlink_symlink_to_dir_keeps_dir", access("/tmp/fat/b", F_OK) == 0, "dir content lost");
 
+    errno = 0; r = symlink("/tmp/fat/nowhere", "/tmp/fat/dangle2");
+    CHECKC("symlink_dangling2", r == 0);
+    errno = 0; r = mkdir("/tmp/fat/dangle2", 0755);
+    CHECK("mkdir_over_dangling_eexist", r < 0 && errno == EEXIST, "r=%ld errno=%d", r, errno);
+    errno = 0; r = rmdir("/tmp/fat/dangle2");
+    CHECK("rmdir_dangling_enotdir", r < 0 && errno == ENOTDIR, "r=%ld errno=%d", r, errno);
+    unlink("/tmp/fat/dangle2");
+
+    errno = 0; r = mkdir("/tmp/fat/ed", 0755);
+    CHECKC("mkdir_empty_dir", r == 0);
+    errno = 0; r = symlink("/tmp/fat/ed", "/tmp/fat/lned");
+    CHECKC("symlink_to_empty_dir", r == 0);
+    errno = 0; r = rmdir("/tmp/fat/lned");
+    CHECK("rmdir_symlink_to_dir_enotdir", r < 0 && errno == ENOTDIR, "r=%ld errno=%d", r, errno);
+    CHECK("rmdir_symlink_keeps_link", lstat("/tmp/fat/lned", &st) == 0, "link removed");
+    CHECK("rmdir_symlink_keeps_dir", access("/tmp/fat/ed", F_OK) == 0, "dir removed");
+    unlink("/tmp/fat/lned"); rmdir("/tmp/fat/ed");
+
     /* cleanup */
     unlink("/tmp/fat/b"); unlink("/tmp/fat/d"); unlink("/tmp/fat/e"); unlink("/tmp/fat/ln");
     rmdir("/tmp/fat");
