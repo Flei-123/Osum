@@ -2244,6 +2244,54 @@ fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
     return true
 }
 
+fn dir_rename_inplace(state: u64, dir: u64, oldname: u64, newname: u64) -> bool {
+    let slot: u64 = dir_slot_of(state, dir, oldname)
+    if slot == NO_SLOT || entry_block(state, slot) == NO_SLOT {
+        return false
+    }
+    let de: u64 = dirent_size(state)
+    let nl: u64 = name_len(state)
+    let ino: u64 = regio.read64(buf_nm(state))
+    let old_hash: u64 = dirindex.name_hash(oldname, nl)
+    octets.zero(buf_nm(state), de)
+    regio.write64(buf_nm(state), ino)
+    var k: u64 = 0
+    while k < nl - 1 && kstate.get8(newname + k) != 0 {
+        kstate.set8(buf_nm(state) + 8 + k, kstate.get8(newname + k) as u8)
+        k = k + 1
+    }
+    dirindex.hold(true)
+    let wrote: u64 = write_at(state, dir, slot * de, buf_nm(state), de)
+    dirindex.hold(false)
+    if wrote != de {
+        dirindex.touch(state, dir)
+        return false
+    }
+    dirindex.note_remove(state, dir, old_hash, slot)
+    dirindex.note_add(state, dir, dirindex.name_hash(newname, nl), slot)
+    var kind: u64 = 0
+    var sz: u64 = 0
+    if ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
+        let at: u64 = buf_in(state) + inode_off(state, ino)
+        kind = regio.read64(at + I_TYPE)
+        sz = regio.read64(at + I_SIZE)
+    }
+    if kind == T_FILE {
+        dcache.forget_node(state, ino)
+        dcache.forget_name(state, newname)
+    } else {
+        dcache.bump(state)
+        dcache.bump_add(state)
+    }
+    if !punktname(oldname) {
+        nidx.note(state, nidx.OP_DEL, dir, ino, kind, sz, oldname)
+    }
+    if !punktname(newname) {
+        nidx.note(state, nidx.OP_ADD, dir, ino, kind, sz, newname)
+    }
+    return true
+}
+
 fn punktname(p: u64) -> bool {
     if kstate.get8(p) != 46 {
         return false
@@ -2767,6 +2815,10 @@ fn rename_path_run(state: u64, from: u64, to: u64) -> u64 {
             inode_set(state, ex, I_NLINK, 0)
         }
         dir_remove_kind(state, ndir, newname, T_FILE)
+    }
+    if odir == ndir && dir_rename_inplace(state, odir, oldname, newname) {
+        leave(state, flags)
+        return 0
     }
     if !dir_add(state, ndir, newname, ino) {
         leave(state, flags)

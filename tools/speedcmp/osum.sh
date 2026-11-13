@@ -35,7 +35,7 @@ bash tools/mkfsfi/mkfs.sh build "$W/disk.img" ${SPEED_DISK_BLOCKS:-393216} --v3 
 OSUM_DRIVE=${OSUM_DRIVE:-ahci}
 for i in $(seq 1 "$SPEED_RUNS"); do
     cp "$W/disk.img" "$W/live.img"
-    drive_args "$OSUM_DRIVE" "$W/live.img" "${SPEED_DRIVE_EXTRA-}" || exit 1
+    drive_args "$OSUM_DRIVE" "$W/live.img" "${SPEED_DRIVE_EXTRA-,snapshot=on}" || exit 1
     timeout "$SPEED_BOOT_TIMEOUT" qemu-system-x86_64 "${SPEED_KVM[@]}" -smp "$SPEED_SMP" -m "$SPEED_MEM" -kernel "$W/k.mb" \
         -append "osum vfs nokbd ${SPEED_OSUM_WORDS-nosched noproc nofs} script=${SPEED_SCRIPT:-/bin/speedbench;exit}" -serial "file:$OUT/osum-$i.raw" -display none -no-reboot ${SPEED_MONITOR:+-monitor unix:$SPEED_MONITOR,server,nowait} \
         "${DRIVE_ARGS[@]}" -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
