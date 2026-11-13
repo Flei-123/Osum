@@ -52,14 +52,14 @@ ok "$(echo $PROGS | wc -w) Programme gebaut, darunter /bin/fsck"
 
 SPEC="/bin/ /tmp/ /dev/ /proc/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/$p.elf"; done
-bash tools/mkfsfi/mkfs.sh build "$TMPD/j.img" 65536 --v3 --inodes=512 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/j.img" 65536 --v3 --inodes=1024 \
     --journal --time=1780000000 $SPEC > "$TMPD/mkj.txt" 2>&1 \
     || bad "mkfs mit Journal"
 sed 's/^/        /' "$TMPD/mkj.txt"
-grep -qa 'jstart=273 jblocks=522' "$TMPD/mkj.txt" \
+grep -qa 'jstart=529 jblocks=522' "$TMPD/mkj.txt" \
     && ok "the journal area lies between inode table and data (522 blocks)" \
     || bad "the journal area is not where it should be"
-bash tools/mkfsfi/mkfs.sh build "$TMPD/nj.img" 65536 --v3 --inodes=512 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/nj.img" 65536 --v3 --inodes=1024 \
     --time=1780000000 $SPEC >/dev/null 2>&1 || bad "mkfs without journal"
 
 lauf() { # abbild anhang ausgabe [zeitlimit]
@@ -253,8 +253,8 @@ bash tools/mkfsfi/mkfs.sh build "$TMPD/v2b.img" 4096 /bin/ \
 cmp -s "$TMPD/v2a.img" "$TMPD/v2b.img" \
     && ok "built twice gives the same image octet for octet (version 2)" \
     || bad "two runs of mkfs give different images"
-bash tools/mkfsfi/mkfs.sh meta "$TMPD/v2a.img" 2>/dev/null | head -1 \
-    | grep -qa 'version=2 bmblocks=1 isize=128 dirent=32 namelen=24' \
+meta_line=$(bash tools/mkfsfi/mkfs.sh meta "$TMPD/v2a.img" 2>/dev/null | head -1) || true
+[[ $meta_line == *'version=2 bmblocks=1 isize=128 dirent=32 namelen=24'* ]] \
     && ok "the default is still version 2, unchanged" \
     || bad "the default of mkfs has shifted"
 
