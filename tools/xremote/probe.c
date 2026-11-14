@@ -187,7 +187,8 @@ static int cmd_grab(void)
     if (shot(1, 0, 0) < 0)
         return 2;
     unsigned char *chunk = malloc((size_t)rows * rb);
-    long y = 0, lit = 0, sum = 0;
+    long y = 0, lit = 0, sum = 0, mid = 0;
+    long bpp = rb / w, x0 = w / 4, x1 = w * 3 / 4, y0 = h * 45 / 100, y1 = h * 90 / 100;
     while (y < h) {
         long got = shot(2, (long)chunk, rows * rb);
         if (got <= 0)
@@ -198,9 +199,15 @@ static int cmd_grab(void)
             if (chunk[i])
                 lit++;
         }
+        for (long r = 0; r < n; r++) {
+            if (y + r < y0 || y + r >= y1)
+                continue;
+            for (long i = x0 * bpp; i < x1 * bpp; i++)
+                mid += chunk[r * rb + i];
+        }
         y += n;
     }
-    printf("XR-GRAB width=%ld height=%ld lit=%ld sum=%ld\n", w, h, lit, sum);
+    printf("XR-GRAB width=%ld height=%ld lit=%ld sum=%ld mid=%ld\n", w, h, lit, sum, mid);
     return 0;
 }
 

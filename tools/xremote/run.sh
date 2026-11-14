@@ -161,11 +161,11 @@ if [ -n "$KEYTEST" ]; then
     fi
     if [ "$DESKTOP" = 1 ]; then
         G1=$(grep -a '^XR-GRAB' "$S" | head -1); G2=$(grep -a '^XR-GRAB' "$S" | tail -1)
-        S1=$(echo "$G1" | grep -o 'sum=[0-9]*' | cut -d= -f2); S2=$(echo "$G2" | grep -o 'sum=[0-9]*' | cut -d= -f2)
+        S1=$(echo "$G1" | grep -o 'mid=[0-9]*' | cut -d= -f2); S2=$(echo "$G2" | grep -o 'mid=[0-9]*' | cut -d= -f2)
         if [ "$KT_WANT" = 0 ]; then
-            [ -n "$S2" ] && [ "$S2" = "$S1" ] && ok "control: the screen did not change (sum $S1)" || bad "control: the screen changed without keys: $G1 / $G2"
+            [ -n "$S2" ] && [ "$S2" = "$S1" ] && ok "control: the centre of the screen did not change (mid $S1)" || bad "control: the screen centre changed without keys: $G1 / $G2"
         else
-            [ -n "$S2" ] && [ "$S2" != "$S1" ] && ok "the $KEYTEST test changed the desktop (sum $S1 -> $S2)" || bad "the $KEYTEST test left the screen unchanged: $G1 / $G2"
+            [ -n "$S2" ] && [ "$S2" != "$S1" ] && ok "the $KEYTEST test changed the centre of the desktop (mid $S1 -> $S2)" || bad "the $KEYTEST test left the screen centre unchanged: $G1 / $G2"
         fi
     fi
     echo "== $pass ok, $fail fail"
