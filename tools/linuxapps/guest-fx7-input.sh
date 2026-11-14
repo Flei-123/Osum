@@ -10,7 +10,9 @@ echo 'user_pref("browser.dom.window.dump.enabled", true);' >> /tmp/p/user.js
 cat > /tmp/in.html <<'HTML'
 <html><body style="margin:0"><input id="i" autofocus style="font-size:30px;width:400px"><a id="l" href="in.html?nav" style="display:block;height:2000px;background:#eee">link</a><div id="b" style="position:fixed;right:0;bottom:0;width:600px;height:300px;display:none"></div><div style="height:6000px;background:linear-gradient(#fff,#06c)">tall</div>
 <script>
-addEventListener('keydown', function (e) { dump('FXKEY ' + e.key + '\n'); });
+addEventListener('keydown', function (e) { dump('FXKEY ' + e.key + ' shift=' + e.shiftKey + '\n'); });
+addEventListener('contextmenu', function (e) { e.preventDefault(); dump('FXCTX ' + e.clientX + ',' + e.clientY + '\n'); });
+addEventListener('mousedown', function (e) { dump('FXDOWN ' + e.button + '\n'); });
 addEventListener('wheel', function (e) { dump('FXWHEEL ' + e.deltaY + ' mode=' + e.deltaMode + '\n'); });
 addEventListener('mousemove', function (e) { dump('FXMOVE ' + e.clientX + ',' + e.clientY + '\n'); });
 addEventListener('scroll', function () { dump('FXSCROLL ' + scrollY + '\n'); });
@@ -36,7 +38,7 @@ rss() {
 }
 echo "FX7 launch t=$(up)"
 /usr/lib/firefox/firefox --no-remote --profile /tmp/p file:///tmp/in.html > /tmp/fx3.log 2>&1 &
-( while true; do echo "FX7 t=$(up) rss=$(rss) nav=$(grep -ac '^FXNAV ' /tmp/fx3.log) url=$(grep -ac '^FXURL ' /tmp/fx3.log) last=$(grep -a '^FX[A-Z]* ' /tmp/fx3.log | tail -n 1)"; sleep 10; done ) &
+( while true; do echo "FX7 t=$(up) rss=$(rss) shm=$(grep -a "^ShmObjects:" /proc/meminfo | tr -dc 0-9) usock=$(grep -a "^UnixSockets:" /proc/meminfo | tr -dc 0-9) nav=$(grep -ac '^FXNAV ' /tmp/fx3.log) url=$(grep -ac '^FXURL ' /tmp/fx3.log) last=$(grep -a '^FX[A-Z]* ' /tmp/fx3.log | tail -n 1)"; sleep 10; done ) &
 waited=0
 until [ "$(grep -ac '^FXURL ' /tmp/fx3.log)" -ge 1 ] || [ "$waited" -ge "${FX7_WAIT:-420}" ]; do sleep 5; waited=$((waited + 5)); done
 [ "$(grep -ac '^FXURL ' /tmp/fx3.log)" -ge 1 ] && sleep "${FX7_TAIL:-300}"

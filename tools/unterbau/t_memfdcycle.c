@@ -11,8 +11,8 @@
 #define RING 8
 #define SEALS 23
 #define MFD_FLAGS 11
-#define ROOM_TARGET 64
-#define ROOM_MAX 100
+#define ROOM_TARGET 300
+#define ROOM_MAX 512
 
 struct item {
     int writable_fd;

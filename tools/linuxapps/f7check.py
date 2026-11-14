@@ -6,6 +6,10 @@ BAD_MARKERS = (b"MOZ_CRASH", b"Redirecting call to abort", b"Gtk:ERROR", b"Segme
 NEEDED = (
     ("load", re.compile(rb"^FXLOAD ")),
     ("typed text", re.compile(rb"^FXINPUT a")),
+    ("shifted key", re.compile(rb"^FXKEY D shift=true")),
+    ("backspace", re.compile(rb"^FXKEY Backspace")),
+    ("cursor edit", re.compile(rb"^FXINPUT abxc")),
+    ("right click", re.compile(rb"^FXCTX ")),
     ("key press", re.compile(rb"^FXKEY ")),
     ("wheel", re.compile(rb"^FXWHEEL ")),
     ("scroll", re.compile(rb"^FXSCROLL [1-9]")),
@@ -24,7 +28,7 @@ def verdict(path):
     missing = [name for name, pat in NEEDED if not any(pat.match(l) for l in lines)]
     if missing:
         return "red", "page never saw: " + ", ".join(missing)
-    return "green", "load, typing, key, wheel, scroll, click, link navigation and url bar navigation all reached the page"
+    return "green", "load, typing, shifted key, backspace, cursor edit, key, wheel, scroll, click, right click, link navigation and url bar navigation all reached the page"
 
 
 if __name__ == "__main__":
