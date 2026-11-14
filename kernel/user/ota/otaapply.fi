@@ -13,6 +13,7 @@ import ota.otabase
 import ota.otacmd
 import ota.otajoin
 import ota.otaloader
+import ota.otatrial
 import ota.kpublish
 import libc.regio
 
@@ -42,6 +43,10 @@ static mut C_JOIN: [u8; 5] = "join\0"
 static mut N_DESK: [u8; 8] = "desktop\0"
 
 static mut N_GLOG: [u8; 7] = "glogin\0"
+
+static mut N_TASKBAR: [u8; 8] = "taskbar\0"
+
+static mut P_TASKBAR: [u8; 13] = "/bin/taskbar\0"
 
 static mut S_BGUT: [u8; 43] = "ota: start healthy, trial confirmed after \0"
 
@@ -78,6 +83,22 @@ fn cmd_bestaetigen() -> u64 {
 
 const SYS_CHMOD: u64 = 90
 
+fn boot_healthy(extra: u64) -> bool {
+    if extra != 0 && otacmd.name_laeuft(extra) {
+        return true
+    }
+    if otacmd.name_laeuft((&N_GLOG[0 as usize]) as u64) {
+        return true
+    }
+    if !otacmd.name_laeuft((&N_DESK[0 as usize]) as u64) {
+        return false
+    }
+    if !su_exists((&P_TASKBAR[0 as usize]) as u64) {
+        return true
+    }
+    return otacmd.name_laeuft((&N_TASKBAR[0 as usize]) as u64)
+}
+
 fn cmd_boot(extra: u64) -> u64 {
     otajoin.join_all()
     otacmd.conf_load()
@@ -92,10 +113,7 @@ fn cmd_boot(extra: u64) -> u64 {
         while s < timeout && !gut {
             clockapi.sleep_ms(1000)
             s = s + 1
-            if s >= gesund && otacmd.in_erprobung()
-                && (otacmd.name_laeuft((&N_DESK[0 as usize]) as u64)
-                    || otacmd.name_laeuft((&N_GLOG[0 as usize]) as u64)
-                    || (extra != 0 && otacmd.name_laeuft(extra))) {
+            if s >= gesund && otacmd.in_erprobung() && boot_healthy(extra) {
                 gut = true
             }
             if !otacmd.in_erprobung() {
@@ -598,7 +616,11 @@ fn su_conf_arm() -> bool {
         otacmd.remove((&P_SU_NEW[0 as usize]) as u64)
     }
     ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
-    return otacmd.size((&P_SU_CONF[0 as usize]) as u64) == w
+    if otacmd.size((&P_SU_CONF[0 as usize]) as u64) != w {
+        return false
+    }
+    otatrial.counter_reset()
+    return true
 }
 
 // ONE byte: `default_entry: 2` -> `default_entry: 1` (same size, one sector).
@@ -623,7 +645,11 @@ fn su_conf_unarm() -> bool {
     let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, (&one[0 as usize]) as u64, 1)
     ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
     ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
-    return !ulib.bad(w) && w == 1
+    if ulib.bad(w) || w != 1 {
+        return false
+    }
+    otatrial.counter_reset()
+    return true
 }
 
 fn su_copy(src: u64, dst: u64) -> bool {
@@ -1517,6 +1543,12 @@ fn su_finish() -> u64 {
     // A promotion that only failed halfway (power cut, full ESP) keeps the pending
     // note: slot B still runs and the next confirm retries.
     if !running || flipped {
+        if !running && su_esp_open() {
+            su_conf_unarm()
+            otatrial.counter_reset()
+            su_esp_close()
+        }
+        otatrial.log_rollback((&com[0 as usize]) as u64, cnt)
         otacmd.remove((&P_SU_PEND[0 as usize]) as u64)
         su_ovl_restore()
         otacmd.su_stand_write((&W_SU_FAILW[0 as usize]) as u64)
