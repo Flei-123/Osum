@@ -1,0 +1,444 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import std.rt
+import jarvisd.jdbase
+import jarvisd.jdcmd
+
+const S_TIPP: i64 = 1843
+
+const TI_INFO: i64 = 0
+
+const TI_ARM: i64 = 1
+
+const TI_DROP: i64 = 2
+
+const TI_KEY: i64 = 3
+
+const TI_MOVE: i64 = 4
+
+const TI_BUTTON: i64 = 5
+
+const TI_SCAN: i64 = 6
+
+const TI_WHEEL: i64 = 9
+
+const TQ_USED: i64 = 2
+
+const TQ_LOCKED: i64 = 9
+
+const TQ_KEYFOR: i64 = 11
+
+const PERMIT_REFRESH_AT: i64 = 170
+
+const MAX_TYPED_BYTES: usize = 4096
+
+const MOVE_SETTLE_MS: u64 = 50
+
+const CLICK_HOLD_MS: u64 = 40
+
+const MULTI_CLICK_GAP_MS: u64 = 70
+
+const KEY_GAP_MS: u64 = 8
+
+const DRAG_STEPS: i64 = 10
+
+const DRAG_STEP_MS: u64 = 30
+
+const MAX_BUTTON_MASK: u64 = 7
+
+const MAX_CLICKS: u64 = 3
+
+const MAX_WHEEL_NOTCHES: u64 = 64
+
+const SCAN_SHIFT: i64 = 0x2A
+
+const SCAN_ALTGR: i64 = 0x38
+
+const SCAN_EXTENDED: i64 = 0xE0
+
+const SCAN_RELEASE: i64 = 0x80
+
+const CODE_SHIFT_BIT: i64 = 0x200
+
+const CODE_ALTGR_BIT: i64 = 0x400
+
+const SCAN_SPACE: i64 = 0x39
+
+const SCAN_ENTER: i64 = 0x1C
+
+const SCAN_TAB: i64 = 0x0F
+
+const CP_TAB: u64 = 9
+
+const CP_LF: u64 = 10
+
+const CP_CR: u64 = 13
+
+const CP_SPACE: u64 = 32
+
+const CP_REPLACEMENT: u64 = 0xFFFD
+
+const WHEEL_DOWN: u64 = 0
+
+const WHEEL_UP: u64 = 1
+
+const WHEEL_RIGHT: u64 = 2
+
+const WHEEL_LEFT: u64 = 3
+
+fn inj(what: i64, a: i64, b: i64) -> bool {
+    return syscall(S_TIPP, what, a, b, 0, 0, 0) >= 0
+}
+
+fn refresh_permit() {
+    let used: i64 = syscall(S_TIPP, TI_INFO, TQ_USED, 0, 0, 0, 0)
+    if used > PERMIT_REFRESH_AT {
+        inj(TI_ARM, 0, 0)
+    }
+}
+
+fn scan(code: i64) -> bool {
+    refresh_permit()
+    return inj(TI_SCAN, code, 0)
+}
+
+fn word_is(p: u64, n: usize, w: str) -> bool {
+    return jdcmd.eq(p, n, w.p as u64, w.n)
+}
+
+fn field(p: u64, f: *mut jdbase.Felder, i: usize) -> u64 {
+    if i >= (*f).n {
+        return 0
+    }
+    return jdcmd.num_from(p + (*f).off[i] as u64, (*f).len[i])
+}
+
+fn say_line(aus: *mut rt.Buf, s: str) {
+    rt.buf_push_bytes(aus, s.p as u64, s.n)
+    rt.buf_push(aus, 10 as u8)
+}
+
+fn say_num(aus: *mut rt.Buf, name: str, v: u64) {
+    rt.buf_push_bytes(aus, name.p as u64, name.n)
+    rt.buf_push(aus, 32 as u8)
+    rt.buf_push_dec_u64(aus, v)
+    rt.buf_push(aus, 10 as u8)
+}
+
+fn modifiers_down(shift: bool, altgr: bool) -> bool {
+    var ok: bool = true
+    if shift {
+        ok = scan(SCAN_SHIFT)
+    }
+    if altgr && ok {
+        ok = scan(SCAN_EXTENDED) && scan(SCAN_ALTGR)
+    }
+    return ok
+}
+
+fn modifiers_up(shift: bool, altgr: bool) -> bool {
+    var ok: bool = true
+    if altgr {
+        ok = scan(SCAN_EXTENDED) && scan(SCAN_ALTGR | SCAN_RELEASE)
+    }
+    if shift && ok {
+        ok = scan(SCAN_SHIFT | SCAN_RELEASE)
+    }
+    return ok
+}
+
+fn tap_code(code: i64) -> bool {
+    let key: i64 = code & 0xFF
+    let shift: bool = (code & CODE_SHIFT_BIT) != 0
+    let altgr: bool = (code & CODE_ALTGR_BIT) != 0
+    var ok: bool = modifiers_down(shift, altgr)
+    ok = ok && scan(key) && scan(key | SCAN_RELEASE)
+    ok = modifiers_up(shift, altgr) && ok
+    jdcmd.schlafe_ms(KEY_GAP_MS)
+    return ok
+}
+
+fn code_for(cp: u64) -> i64 {
+    if cp == CP_SPACE {
+        return SCAN_SPACE
+    }
+    if cp == CP_LF {
+        return SCAN_ENTER
+    }
+    if cp == CP_TAB {
+        return SCAN_TAB
+    }
+    let r: i64 = syscall(S_TIPP, TI_INFO, TQ_KEYFOR, cp as i64, 0, 0, 0)
+    if r < 0 {
+        return 0
+    }
+    return r
+}
+
+fn decode_utf8(p: u64, n: usize, at: usize) -> u64 {
+    let c: u64 = rt.ld8(p, at) as u64
+    if c < 0x80 {
+        return (1 << 32) | c
+    }
+    var size: usize = 0
+    var cp: u64 = 0
+    if (c & 0xE0) == 0xC0 {
+        size = 2
+        cp = c & 0x1F
+    } else if (c & 0xF0) == 0xE0 {
+        size = 3
+        cp = c & 0x0F
+    } else if (c & 0xF8) == 0xF0 {
+        size = 4
+        cp = c & 0x07
+    } else {
+        return (1 << 32) | CP_REPLACEMENT
+    }
+    if at + size > n {
+        return (((n - at) as u64) << 32) | CP_REPLACEMENT
+    }
+    var k: usize = 1
+    while k < size {
+        cp = (cp << 6) | ((rt.ld8(p, at + k) as u64) & 0x3F)
+        k = k + 1
+    }
+    return ((size as u64) << 32) | cp
+}
+
+fn do_type(text: *mut rt.Buf, aus: *mut rt.Buf) -> bool {
+    var n: usize = (*text).len
+    if n == 0 {
+        return jdcmd.ablehnen(aus, "type needs the text as payload")
+    }
+    if n > MAX_TYPED_BYTES {
+        return jdcmd.ablehnen(aus, "text is longer than 4096 bytes")
+    }
+    var at: usize = 0
+    var typed: u64 = 0
+    var skipped: u64 = 0
+    while at < n {
+        let packed: u64 = decode_utf8((*text).ptr, n, at)
+        let cp: u64 = packed & 0xFFFFFFFF
+        at = at + (packed >> 32) as usize
+        if cp == CP_CR {
+            continue
+        }
+        let code: i64 = code_for(cp)
+        if code == 0 {
+            skipped = skipped + 1
+            continue
+        }
+        if !tap_code(code) {
+            return jdcmd.ablehnen(aus, "the kernel rejected a key while typing")
+        }
+        typed = typed + 1
+    }
+    say_num(aus, "typed", typed)
+    say_num(aus, "skipped", skipped)
+    return true
+}
+
+fn do_size(aus: *mut rt.Buf) -> bool {
+    let w: i64 = syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_WIDTH, 0, 0, 0, 0)
+    let h: i64 = syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_HEIGHT, 0, 0, 0, 0)
+    if w <= 0 || h <= 0 {
+        return jdcmd.ablehnen(aus, "the kernel reports no screen size")
+    }
+    rt.buf_push_dec_u64(aus, w as u64)
+    rt.buf_push(aus, 32 as u8)
+    rt.buf_push_dec_u64(aus, h as u64)
+    rt.buf_push(aus, 10 as u8)
+    return true
+}
+
+fn press_buttons(mask: u64, count: u64) -> bool {
+    var k: u64 = 0
+    while k < count {
+        if !inj(TI_BUTTON, mask as i64, 1) {
+            return false
+        }
+        jdcmd.schlafe_ms(CLICK_HOLD_MS)
+        if !inj(TI_BUTTON, mask as i64, 0) {
+            return false
+        }
+        if k + 1 < count {
+            jdcmd.schlafe_ms(MULTI_CLICK_GAP_MS)
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn move_to(x: i64, y: i64) -> bool {
+    if !inj(TI_MOVE, x, y) {
+        return false
+    }
+    jdcmd.schlafe_ms(MOVE_SETTLE_MS)
+    return true
+}
+
+fn do_tap(p: u64, f: *mut jdbase.Felder) -> bool {
+    let mask: u64 = field(p, f, 3)
+    let count: u64 = field(p, f, 4)
+    if mask == 0 || mask > MAX_BUTTON_MASK || count == 0 || count > MAX_CLICKS {
+        return false
+    }
+    return move_to(field(p, f, 1) as i64, field(p, f, 2) as i64) && press_buttons(mask, count)
+}
+
+fn drag_path(x0: i64, y0: i64, x1: i64, y1: i64) -> bool {
+    var s: i64 = 1
+    while s <= DRAG_STEPS {
+        if !inj(TI_MOVE, x0 + (x1 - x0) * s / DRAG_STEPS, y0 + (y1 - y0) * s / DRAG_STEPS) {
+            return false
+        }
+        jdcmd.schlafe_ms(DRAG_STEP_MS)
+        s = s + 1
+    }
+    return true
+}
+
+fn do_drag(p: u64, f: *mut jdbase.Felder) -> bool {
+    let mask: u64 = field(p, f, 5)
+    if mask == 0 || mask > MAX_BUTTON_MASK {
+        return false
+    }
+    let x0: i64 = field(p, f, 1) as i64
+    let y0: i64 = field(p, f, 2) as i64
+    if !move_to(x0, y0) || !inj(TI_BUTTON, mask as i64, 1) {
+        return false
+    }
+    jdcmd.schlafe_ms(MOVE_SETTLE_MS)
+    if !drag_path(x0, y0, field(p, f, 3) as i64, field(p, f, 4) as i64) {
+        inj(TI_BUTTON, mask as i64, 0)
+        return false
+    }
+    return inj(TI_BUTTON, mask as i64, 0)
+}
+
+fn do_scroll(p: u64, f: *mut jdbase.Felder) -> bool {
+    let dir: u64 = field(p, f, 3)
+    let amount: u64 = field(p, f, 4)
+    if dir > WHEEL_LEFT || amount == 0 || amount > MAX_WHEEL_NOTCHES {
+        return false
+    }
+    if !move_to(field(p, f, 1) as i64, field(p, f, 2) as i64) {
+        return false
+    }
+    var notches: i64 = amount as i64
+    if dir == WHEEL_UP || dir == WHEEL_LEFT {
+        notches = 0 - notches
+    }
+    var horizontal: i64 = 0
+    if dir >= WHEEL_RIGHT {
+        horizontal = 1
+    }
+    return inj(TI_WHEEL, notches, horizontal)
+}
+
+fn do_scan(p: u64, f: *mut jdbase.Felder) -> bool {
+    var k: usize = 1
+    var ok: bool = true
+    while k < (*f).n && ok {
+        ok = scan(field(p, f, k) as i64)
+        k = k + 1
+    }
+    return ok
+}
+
+fn dispatch(p: u64, f: *mut jdbase.Felder, text: *mut rt.Buf, aus: *mut rt.Buf) -> bool {
+    let wp: u64 = p + (*f).off[0] as u64
+    let wn: usize = (*f).len[0]
+    if word_is(wp, wn, "key") {
+        return inj(TI_KEY, field(p, f, 1) as i64, field(p, f, 2) as i64)
+    }
+    if word_is(wp, wn, "mouse") {
+        return inj(TI_MOVE, field(p, f, 1) as i64, field(p, f, 2) as i64)
+    }
+    if word_is(wp, wn, "click") {
+        return inj(TI_BUTTON, field(p, f, 1) as i64, field(p, f, 2) as i64)
+    }
+    if word_is(wp, wn, "scan") {
+        return do_scan(p, f)
+    }
+    if word_is(wp, wn, "tap") {
+        return do_tap(p, f)
+    }
+    if word_is(wp, wn, "drag") {
+        return do_drag(p, f)
+    }
+    if word_is(wp, wn, "scroll") {
+        return do_scroll(p, f)
+    }
+    if word_is(wp, wn, "type") {
+        return do_type(text, aus)
+    }
+    return false
+}
+
+fn is_known(wp: u64, wn: usize) -> bool {
+    return word_is(wp, wn, "key") || word_is(wp, wn, "mouse") || word_is(wp, wn, "click")
+        || word_is(wp, wn, "scan") || word_is(wp, wn, "tap") || word_is(wp, wn, "drag")
+        || word_is(wp, wn, "scroll") || word_is(wp, wn, "type")
+}
+
+fn do_input(p: u64, n: usize, text: *mut rt.Buf, aus: *mut rt.Buf) -> bool {
+    if !jdcmd.k_tipp {
+        return jdcmd.ablehnen(aus, "`input = no` in /etc/jarvis/permissions.conf")
+    }
+    var f: jdbase.Felder = jdbase.Felder { off: [0; 10], len: [0; 10], n: 0 }
+    jdcmd.zerlege(p, n, &f)
+    if f.n < 1 {
+        return jdcmd.ablehnen(aus, "input needs: size | key | mouse | click | scan | tap | drag | scroll | type")
+    }
+    if word_is(p + f.off[0] as u64, f.len[0], "size") {
+        return do_size(aus)
+    }
+    if !is_known(p + f.off[0] as u64, f.len[0]) {
+        return jdcmd.ablehnen(aus, "unknown input kind -- size, key, mouse, click, scan, tap, drag, scroll or type")
+    }
+    let cert: i64 = syscall(S_TIPP, TI_ARM, 0, 0, 0, 0, 0)
+    if cert < 0 {
+        if syscall(S_TIPP, TI_INFO, TQ_LOCKED, 0, 0, 0, 0) == 1 {
+            return jdcmd.ablehnen(aus, "emergency stop engaged on the device (Win+Esc / jarvisctl input off)")
+        }
+        return jdcmd.ablehnen(aus, "this kernel has no input call (built without the bridge) or the taskbar is not running")
+    }
+    let done: bool = dispatch(p, &f, text, aus)
+    syscall(S_TIPP, TI_DROP, 0, 0, 0, 0, 0)
+    if !done {
+        if (*aus).len == 0 {
+            return jdcmd.ablehnen(aus, "the kernel rejected the input or its arguments are invalid")
+        }
+        return false
+    }
+    if (*aus).len == 0 {
+        say_line(aus, "injected")
+    }
+    return true
+}
+
+fn probe(target: u64, payload: u64) -> i32 {
+    jdcmd.conf_read()
+    var text: rt.Buf = rt.buf_new()
+    var out: rt.Buf = rt.buf_new()
+    if payload != 0 {
+        rt.buf_push_bytes(&text, payload, rt.c_length(payload))
+    }
+    let done: bool = do_input(target, rt.c_length(target), &text, &out)
+    if done {
+        jdcmd.say("input: OK\n")
+    } else {
+        jdcmd.say("input: REFUSED: ")
+    }
+    syscall(jdcmd.S_WRITE, 1, out.ptr as i64, out.len as i64, 0, 0, 0)
+    if !done {
+        jdcmd.say("\n")
+    }
+    rt.buf_free(&text)
+    rt.buf_free(&out)
+    if done {
+        return 0
+    }
+    return 1
+}

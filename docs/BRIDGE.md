@@ -649,3 +649,11 @@ Gegenprobe). Die volle Kette Auftrag → Gerät → Ergebnis: `tools/bridge2/cha
 - A change of the device IP or gateway ends the session and starts a fresh round (new DNS lookup, new sign-in).
 - `/var/log/jarvisd.log` gets `net <kind> <count> <secs>` on failures 1, 2, 4, 8, ..., and `net recovered <count> <secs>` when a sign-in works again. Kinds: connect, tls, send, recv, status, roots. The log rotates to `jarvisd.log.1` at 64 KiB.
 - Gate: `tools/bridgerecon/run.sh` (fake https bridge with DNS, stalled requests, link black hole, `-o` counter-proof).
+
+## Remote input for JARVIS (14.11.2026)
+
+- `computer(device, action)` on an OrientOS device now passes `left_click`, `double_click`, `right_click`, `mouse_move`, `drag`, `scroll`, `type` and `key`. `ui_snapshot` / `list_windows` / `focus_window` are still refused (no UI tree over the bridge yet).
+- Server side: `lib/osumInput.js` plans the job, `lib/osumBridgeDevices.js` queues it as an `input` job (`eingabe` on the wire) and returns a fresh screenshot. Coordinates are screenshot pixels; the server asks the device for the framebuffer size (`input size`) and scales when the PNG was halved.
+- Device side: `kernel/app/jarvisd/jdinput.fi`. Job targets: `size`, `key`, `mouse x y`, `click mask down`, `scan c...` (up to 9 codes; key names are turned into set-1 scancodes by the server), `tap x y mask count`, `drag x0 y0 x1 y1 mask`, `scroll x y dir amount` (dir 0 down, 1 up, 2 right, 3 left), `type` (text is the job value; layout-aware through `TQ_KEYFOR`, up to 4096 bytes, permit refreshed every 170 strokes).
+- Same rules as before: `input = yes` in `/etc/jarvis/permissions.conf`, the red JARVIS field, `Win+Esc` / `jarvisctl input off` stop. Without permission the tool answers with the hint to set `input = yes`.
+- Local probe: `jarvisd [-c conf] -i "<target>" ["<text>"]` runs one input job in the guest; gate `tools/helperinput/run.sh`.
