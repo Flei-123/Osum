@@ -1650,8 +1650,87 @@ fn wb_flush_range(state: u64, low: u64, high: u64) -> bool {
     return wb_flush_class(state, low, high, WC_ANY)
 }
 
+const WB_BATCH_MAX: u64 = 8
+const WB_BATCH_MIN: u64 = 2
+const WB_BATCH_RUN_MAX: u64 = 32
+
+static mut wb_batch_runs: [u64; 24] = [0 as u64; 24]
+static mut wb_batch_sl: [u64; 8] = [0 as u64; 8]
+static mut wb_batch_end: [u64; 8] = [0 as u64; 8]
+static mut wb_batch_n: [u64; 1] = [0 as u64; 1]
+
+fn wb_run_done(state: u64, sl: u64, e: u64) {
+    var j: u64 = sl
+    while j < e {
+        wb_meta_set(state, j, 0)
+        j = j + 1
+    }
+    cs(state, W_DIRTY, cg(state, W_DIRTY) - (e - sl))
+}
+
+fn wb_batch_add(state: u64, sl: u64, e: u64, lba: u64) {
+    let i: u64 = wb_batch_n[0]
+    wb_batch_runs[(i * 3) as usize] = lba
+    wb_batch_runs[(i * 3 + 1) as usize] = wb_data(state, sl)
+    wb_batch_runs[(i * 3 + 2) as usize] = e - sl
+    wb_batch_sl[i as usize] = sl
+    wb_batch_end[i as usize] = e
+    wb_batch_n[0] = i + 1
+}
+
+fn wb_batch_write_each(state: u64, n: u64) -> bool {
+    var ok: bool = true
+    var i: u64 = 0
+    while i < n {
+        if !wb_ahci_run(state, wb_batch_runs[(i * 3) as usize], wb_batch_runs[(i * 3 + 1) as usize], wb_batch_runs[(i * 3 + 2) as usize]) {
+            ok = false
+        }
+        i = i + 1
+    }
+    return ok
+}
+
+fn wb_batch_commit(state: u64) -> bool {
+    let n: u64 = wb_batch_n[0]
+    if n == 0 {
+        return true
+    }
+    wb_batch_n[0] = 0
+    var ok: bool = false
+    if n >= WB_BATCH_MIN {
+        ok = ahci.write_batch(state, (&wb_batch_runs[0]) as u64, n)
+    }
+    if !ok {
+        ok = wb_batch_write_each(state, n)
+    }
+    var i: u64 = 0
+    while i < n {
+        wb_run_done(state, wb_batch_sl[i as usize], wb_batch_end[i as usize])
+        i = i + 1
+    }
+    return ok
+}
+
+fn wb_batchable(state: u64, dv: u64, n: u64) -> bool {
+    return dv == DEV_AHCI && n <= WB_BATCH_RUN_MAX && ahci.ncq_depth(state) >= WB_BATCH_MIN
+}
+
+fn wb_flush_run(state: u64, sl: u64, e: u64, lba: u64, dv: u64) -> bool {
+    if wb_batchable(state, dv, e - sl) {
+        wb_batch_add(state, sl, e, lba)
+        if wb_batch_n[0] >= WB_BATCH_MAX || wb_batch_n[0] >= ahci.ncq_depth(state) {
+            return wb_batch_commit(state)
+        }
+        return true
+    }
+    let ok: bool = wb_dev_run(state, dv, lba, wb_data(state, sl), e - sl)
+    wb_run_done(state, sl, e)
+    return ok
+}
+
 fn wb_flush_class(state: u64, low: u64, high: u64, cls: u64) -> bool {
     var ok: bool = true
+    wb_batch_n[0] = 0
     var sl: u64 = cg(state, W_LO)
     while sl <= cg(state, W_HI) {
         let m: u64 = wb_meta(state, sl)
@@ -1660,18 +1739,14 @@ fn wb_flush_class(state: u64, low: u64, high: u64, cls: u64) -> bool {
             sl = sl + 1
         } else {
             let e: u64 = wb_run_end(state, sl, m, high)
-            let dv: u64 = (m >> 48) & WB_DEV_MASK
-            if !wb_dev_run(state, dv, lba, wb_data(state, sl), e - sl) {
+            if !wb_flush_run(state, sl, e, lba, (m >> 48) & WB_DEV_MASK) {
                 ok = false
             }
-            var j: u64 = sl
-            while j < e {
-                wb_meta_set(state, j, 0)
-                j = j + 1
-            }
-            cs(state, W_DIRTY, cg(state, W_DIRTY) - (e - sl))
             sl = e
         }
+    }
+    if !wb_batch_commit(state) {
+        ok = false
     }
     if cg(state, W_DIRTY) == 0 {
         wb_bounds_reset(state)

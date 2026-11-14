@@ -1,0 +1,149 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import block.wlock
+import lib.kstate
+import sync.atomic
+import drv.blk.ahci.ahci_clock
+import drv.blk.ahci.ahci_cmd
+import drv.blk.ahci.ahci_defs
+import drv.blk.ahci.ahci_port
+import drv.blk.ahci.ahci_recover
+import drv.blk.ahci.ahci_reg
+import drv.blk.ahci.ahci_state
+import drv.blk.ahci.ahci_wait
+
+const RUN_WORDS: u64 = 3
+const RUN_BYTES: u64 = 24
+const HEADER_BYTES: u64 = 32
+const FIS_BYTES: u64 = 64
+const DEVICE_LBA: u64 = 0x40
+const TAG_SHIFT: u64 = 3
+const TFD_ERR: u64 = 0x01
+const ERR_CHECK_MASK: u64 = 15
+const SECTOR: u64 = 512
+const W_TIMEOUT: u64 = 2
+
+fn depth(state: u64) -> u64 {
+    return kstate.get(state, ahci_state.sc(ahci_defs.S_NCQ))
+}
+
+fn table(state: u64, slot: u64) -> u64 {
+    return state + ahci_defs.AHCI_ID_OFF + ahci_defs.NCQ_AT + slot * ahci_defs.NCQ_SLOT_BYTES
+}
+
+fn build_fis(ct: u64, cmd: u64, lba: u64, count: u64, tag: u64) {
+    var i: u64 = 0
+    while i < FIS_BYTES {
+        ahci_reg.m8(ct + i, 0)
+        i = i + 1
+    }
+    ahci_reg.m8(ct + 0, ahci_cmd.FIS_H2D)
+    ahci_reg.m8(ct + 1, 0x80)
+    ahci_reg.m8(ct + 2, cmd)
+    ahci_reg.m8(ct + 3, count)
+    ahci_reg.m8(ct + 4, lba)
+    ahci_reg.m8(ct + 5, lba >> 8)
+    ahci_reg.m8(ct + 6, lba >> 16)
+    ahci_reg.m8(ct + 7, DEVICE_LBA)
+    ahci_reg.m8(ct + 8, lba >> 24)
+    ahci_reg.m8(ct + 9, lba >> 32)
+    ahci_reg.m8(ct + 10, lba >> 40)
+    ahci_reg.m8(ct + 11, count >> 8)
+    ahci_reg.m8(ct + 12, tag << TAG_SHIFT)
+}
+
+fn run_word(runs: u64, i: u64, w: u64) -> u64 {
+    return __mmio_read64((runs + i * RUN_BYTES + w * 8) as *mut u64)
+}
+
+fn queue_run(state: u64, slot: u64, lba: u64, src: u64, count: u64) -> bool {
+    let cl: u64 = state + ahci_defs.AHCI_OFF + ahci_defs.CLB_AT + slot * HEADER_BYTES
+    let ct: u64 = table(state, slot)
+    let prdtl: u64 = ahci_cmd.build_prdt(ct, src, count * SECTOR)
+    if prdtl == 0 || prdtl > ahci_defs.NCQ_PRDT_MAX {
+        return false
+    }
+    ahci_cmd.build_hdr(cl, ct, true, prdtl)
+    build_fis(ct, ahci_defs.ATA_WRITE_FPDMA, lba, count, slot)
+    return true
+}
+
+fn queue_all(state: u64, runs: u64, count: u64) -> u64 {
+    var mask: u64 = 0
+    var i: u64 = 0
+    while i < count {
+        if !queue_run(state, i, run_word(runs, i, 0), run_word(runs, i, 1), run_word(runs, i, 2)) {
+            return 0
+        }
+        mask = mask | (1 << i)
+        i = i + 1
+    }
+    return mask
+}
+
+fn wait_mask(state: u64, p: u64, mask: u64, deadline: u64) -> u64 {
+    var spin: u64 = 0
+    while !ahci_clock.expired(deadline, spin, ahci_defs.SPIN_LIMIT) {
+        if ((ahci_reg.prd(state, p, ahci_defs.P_SACT) | ahci_reg.prd(state, p, ahci_defs.P_CI)) & mask) == 0 {
+            return ahci_defs.W_DONE
+        }
+        if (spin & ERR_CHECK_MASK) == ERR_CHECK_MASK
+            && (ahci_reg.prd(state, p, ahci_defs.P_IS) & ahci_wait.IS_TFES) != 0 {
+            return ahci_defs.W_FAULT
+        }
+        atomic.pause()
+        spin = spin + 1
+    }
+    return W_TIMEOUT
+}
+
+fn disable(state: u64) {
+    kstate.add(state, ahci_state.sc(ahci_defs.S_NCQ_FAILS), 1)
+    kstate.set(state, ahci_state.sc(ahci_defs.S_NCQ), 0)
+}
+
+fn fail(state: u64, p: u64) -> bool {
+    kstate.set(state, ahci_state.sc(ahci_defs.S_TFD), ahci_reg.prd(state, p, ahci_defs.P_TFD))
+    kstate.add(state, ahci_state.sc(ahci_defs.S_ERRS), 1)
+    disable(state)
+    ahci_recover.recover(state, p)
+    return false
+}
+
+fn write_batch(state: u64, runs: u64, count: u64) -> bool {
+    if !wlock.allowed(wlock.D_AHCI) || ahci_state.mode(state) != ahci_defs.MODE_AHCI {
+        return false
+    }
+    if kstate.get(state, ahci_state.sc(ahci_defs.S_DEAD)) != 0 || count == 0 || count > depth(state) {
+        return false
+    }
+    ahci_defs.cache_dirty = true
+    let p: u64 = ahci_state.port(state)
+    ahci_defs.idle_known = false
+    ahci_wait.clear_status(state, p)
+    if !ahci_port.await_idle(state, p) {
+        kstate.add(state, ahci_state.sc(ahci_defs.S_ERRS), 1)
+        return false
+    }
+    let mask: u64 = queue_all(state, runs, count)
+    if mask == 0 {
+        return false
+    }
+    kstate.set(state, ahci_state.sc(ahci_defs.S_IRQ_ERR), 0)
+    ahci_reg.pwr(state, p, ahci_defs.P_SACT, mask)
+    ahci_reg.pwr(state, p, ahci_defs.P_CI, mask)
+    kstate.add(state, ahci_state.sc(ahci_defs.S_CMDS), count)
+    kstate.add(state, ahci_state.sc(ahci_defs.S_NCQ_BATCHES), 1)
+    let verdict: u64 = wait_mask(state, p, mask, ahci_clock.timeout(state, ahci_defs.CMD_US))
+    if verdict != ahci_defs.W_DONE {
+        return fail(state, p)
+    }
+    let tfd: u64 = ahci_reg.prd(state, p, ahci_defs.P_TFD)
+    kstate.set(state, ahci_state.sc(ahci_defs.S_TFD), tfd)
+    if (tfd & TFD_ERR) != 0 {
+        ahci_wait.clear_status(state, p)
+        return fail(state, p)
+    }
+    ahci_defs.timeouts = 0
+    ahci_defs.idle_known = (tfd & (ahci_defs.TFD_BSY | ahci_defs.TFD_DRQ)) == 0
+    return true
+}
