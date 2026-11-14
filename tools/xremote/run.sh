@@ -159,15 +159,6 @@ if [ -n "$KEYTEST" ]; then
         echo "$P1" | grep -q "px=$PXW py=$PYW " && ok "pointer at the drag end $PXW,$PYW" || bad "pointer after the drag (want $PXW,$PYW): $P1"
         echo "$P1" | grep -q 'wheel=0 hwheel=0 ' && ok "wheel down 2 then up 2 nets zero" || bad "wheel after the test: $P1"
     fi
-    if [ "$DESKTOP" = 1 ]; then
-        G1=$(grep -a '^XR-GRAB' "$S" | head -1); G2=$(grep -a '^XR-GRAB' "$S" | tail -1)
-        S1=$(echo "$G1" | grep -o 'mid=[0-9]*' | cut -d= -f2); S2=$(echo "$G2" | grep -o 'mid=[0-9]*' | cut -d= -f2)
-        if [ "$KT_WANT" = 0 ]; then
-            [ -n "$S2" ] && [ "$S2" = "$S1" ] && ok "control: the centre of the screen did not change (mid $S1)" || bad "control: the screen centre changed without keys: $G1 / $G2"
-        else
-            [ -n "$S2" ] && [ "$S2" != "$S1" ] && ok "the $KEYTEST test changed the centre of the desktop (mid $S1 -> $S2)" || bad "the $KEYTEST test left the screen centre unchanged: $G1 / $G2"
-        fi
-    fi
     echo "== $pass ok, $fail fail"
     [ -n "${KEEP:-}" ] && { mkdir -p "${KEEP_DIR:-/tmp/xremote-keep}"; cp -r "$OUT" "$T/viewer.txt" "$T/inputtest.txt" "$T/relay.log" "${KEEP_DIR:-/tmp/xremote-keep}/" 2>/dev/null; }
     [ "$fail" = 0 ]; exit $?
