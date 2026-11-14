@@ -53,7 +53,7 @@ import bus.drvreg
 export {
     dev_flushes,
     ram_init, use_ata, use_nvme, read, write, blocks, present,
-    read_raw, read_stream, read_stream_span, S_SECTORS, S_SECTORS_WIDE, write_raw, write_run, wb_begin, wb_begin_data, wb_set_big_runs, wb_struct, wb_struct_lazy, wb_mark_freed, wb_freed_pending, wb_flush_block, wb_set_meta, wb_due, wb_release, wb_end, wb_flush,
+    read_raw, read_stream, read_stream_span, S_SECTORS, S_SECTORS_WIDE, write_raw, write_run, write_blocks, wb_begin, wb_begin_data, wb_set_big_runs, wb_struct, wb_struct_lazy, wb_mark_freed, wb_freed_pending, wb_flush_block, wb_set_meta, wb_due, wb_release, wb_end, wb_flush,
     BLOCK_SIZE, DEV_RAM, DEV_ATA, DEV_NVME, DEV_ATA1, DEV_USB,
     removable,
     // ---- Runde K14 ----
@@ -2074,6 +2074,93 @@ fn write_raw_store(state: u64, wdv: u64, abs: u64, src: u64) -> bool {
     }
     copy(src, base + abs * BLOCK_SIZE)
     return true
+}
+
+fn wb_free_span(state: u64, dev: u64, abs: u64, want: u64) -> u64 {
+    let first: u64 = abs & (WB_SLOTS - 1)
+    var cap: u64 = WB_SLOTS - first
+    if cap > want {
+        cap = want
+    }
+    var k: u64 = 0
+    while k < cap {
+        let m: u64 = wb_meta(state, first + k)
+        if m != 0 && m != wb_key(dev, abs + k) {
+            return k
+        }
+        k = k + 1
+    }
+    return k
+}
+
+fn wb_put_span(state: u64, dev: u64, abs: u64, src: u64, k: u64) {
+    let first: u64 = abs & (WB_SLOTS - 1)
+    if cg(state, W_DIRTY) == 0 {
+        cs(state, W_SINCE, kstate.get(state, kstate.TICKS))
+    }
+    arch.copy_words(wb_data(state, first), src, k * (BLOCK_SIZE / 8))
+    var fresh: u64 = 0
+    var j: u64 = 0
+    while j < k {
+        if wb_meta(state, first + j) == 0 {
+            fresh = fresh + 1
+        }
+        wb_meta_set(state, first + j, wb_key(dev, abs + j))
+        j = j + 1
+    }
+    cs(state, W_DIRTY, cg(state, W_DIRTY) + fresh)
+}
+
+fn write_blocks_held(state: u64, lba: u64, src: u64, n: u64) -> bool {
+    let dev: u64 = kstate.get(state, kstate.DISK_DEV)
+    if lba + n > blocks(state) {
+        return false
+    }
+    let abs: u64 = lba + kstate.get(state, kstate.DISK_FIRST)
+    var done: u64 = 0
+    while done < n {
+        var k: u64 = 0
+        if wb_dev(dev, state) && wb_active(state) {
+            dma_up(state)
+            k = wb_free_span(state, dev, abs + done, n - done)
+        }
+        if k == 0 {
+            if !write_raw_held(state, lba + done, src + done * BLOCK_SIZE) {
+                return false
+            }
+            done = done + 1
+        } else {
+            wb_put_span(state, dev, abs + done, src + done * BLOCK_SIZE, k)
+            var j: u64 = 0
+            while j < k {
+                cache_put(state, dev, abs + done + j, src + (done + j) * BLOCK_SIZE)
+                j = j + 1
+            }
+            blkstat.note_write(dev, k)
+            done = done + k
+        }
+    }
+    return true
+}
+
+fn write_blocks(state: u64, lba: u64, src: u64, n: u64) -> bool {
+    if cryptstate.active(state) {
+        var i: u64 = 0
+        while i < n {
+            if !write_crypt(state, lba + i, src + i * BLOCK_SIZE) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+    let g: u64 = blkguard.enter(state)
+    if g == blkguard.G_REFUSE {
+        return false
+    }
+    let ok: bool = write_blocks_held(state, lba, src, n)
+    blkguard.leave(state, g)
+    return ok
 }
 
 // r728: write n consecutive sectors (volume-relative lba). Plain ATA and AHCI
