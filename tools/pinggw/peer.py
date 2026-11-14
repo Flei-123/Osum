@@ -95,6 +95,7 @@ def main():
     ap.add_argument("--no-dns", action="store_true")
     ap.add_argument("--no-inet", action="store_true")
     ap.add_argument("--no-icmp", action="store_true")
+    ap.add_argument("--no-arp", action="store_true")
     ap.add_argument("--tls-cert")
     ap.add_argument("--tls-key")
     a = ap.parse_args()
@@ -122,7 +123,9 @@ def main():
         if kind == 0x0806 and len(frame) >= 42:
             op = struct.unpack("!H", frame[20:22])[0]
             spa, tpa = frame[28:32], frame[38:42]
-            if op == 1 and tpa == GW_IP:
+            if op == 1 and tpa == GW_IP and a.no_arp:
+                log.write("ARP-GW-IGNORED from %s\n" % ".".join(map(str, spa)))
+            elif op == 1 and tpa == GW_IP:
                 log.write("ARP-GW-ASK from %s\n" % ".".join(map(str, spa)))
                 reply = struct.pack("!HHBBH", 1, 0x0800, 6, 4, 2) + GW_MAC + GW_IP + src_mac + spa
                 sock.sendto(eth(src_mac, GW_MAC, 0x0806, reply), out)

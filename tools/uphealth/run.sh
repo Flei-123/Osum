@@ -11,24 +11,25 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 command -v qemu-system-x86_64 >/dev/null || { echo "UPHEALTH: skipped, no qemu"; exit 0; }
-CASES="${*:-stay fallback control}"
+CASES="${*:-stay fallback control nogw nodns pingnogw pingnoinet}"
 trap 'for f in "$T"/*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done; [ -n "${UPHEALTH_WORK:-}" ] || rm -rf "$T"' EXIT
 if [ ! -f "$T/k.img" ] || [ ! -f "$T/bin/sh.elf" ]; then
-    bash tools/sync/build.sh "$T/bin" 0 sh sleep echo dhcp cat > "$T/b.txt" 2>&1 || { tail "$T/b.txt"; exit 1; }
+    bash tools/sync/build.sh "$T/bin" 0 sh sleep echo dhcp cat ping > "$T/b.txt" 2>&1 || { tail "$T/b.txt"; exit 1; }
     "$FIRNC" -c --profile=app -o "$T/netcheck.o" kernel/app/netcheck.fi > "$T/app.txt" 2>&1 || { tail "$T/app.txt"; exit 1; }
     ld -T kernel/user/user.ld -o "$T/bin/netcheck.elf" "$T/netcheck.o" >> "$T/app.txt" 2>&1 || { tail "$T/app.txt"; exit 1; }
     ./tools/build-kernel.sh "$T/k.img" --stufe 0 > "$T/k.txt" 2>&1 || { tail "$T/k.txt"; exit 1; }
 fi
 printf 'echo ==START==\ndhcp\nnetcheck -c 14 -i 1 -b 1\nnetcheck get\ncat /proc/net/connectivity\necho ==END==\n' > "$T/s_loop.sh"
+printf 'echo ==START==\ndhcp\nnetcheck -c 10 -i 1 -b 1\nping -c 1 192.168.1.1\nping -c 1 1.1.1.1\necho ==END==\n' > "$T/s_ping.sh"
 bash tools/mkfsfi/mkfs.sh build "$T/d.img" 8000 /bin/ /t/ /etc/ /var/ /var/log/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
-    /bin/dhcp="$T/bin/dhcp.elf" /bin/netcheck="$T/bin/netcheck.elf" /bin/cat="$T/bin/cat.elf" /proc/ \
-    /t/s_loop.sh="$T/s_loop.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
+    /bin/dhcp="$T/bin/dhcp.elf" /bin/netcheck="$T/bin/netcheck.elf" /bin/cat="$T/bin/cat.elf" /bin/ping="$T/bin/ping.elf" /proc/ \
+    /t/s_loop.sh="$T/s_loop.sh" /t/s_ping.sh="$T/s_ping.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
 PORT=$((49000 + ($$ % 500) * 8))
 
 run() {
-    local n=$1 words=$2 args0=$3 args1=$4 p=$PORT
+    local n=$1 words=$2 args0=$3 args1=$4 script=${5:-s_loop.sh} p=$PORT
     PORT=$((PORT+8))
     rm -f "$T/$n".*
     python3 -I tools/pinggw/peer.py --local "$((p+1))" --remote "$p" --log "$T/$n.peer0" --secs 150 $args0 &
@@ -37,7 +38,7 @@ run() {
     echo $! > "$T/$n.ppid1"
     sleep 1
     timeout 140 qemu-system-x86_64 -accel $ACC -kernel "$T/k.img" -m 256 \
-        -append "osum nokbd nosched vfs usb usbhold usbpoll nic nip=169.254.10.1/16 nsvc=0 nwait=0 $words script=sh /t/s_loop.sh;exit" \
+        -append "osum nokbd nosched vfs usb usbhold usbpoll nic nip=169.254.10.1/16 nsvc=0 nwait=0 $words script=sh /t/$script;exit" \
         -serial "file:$T/$n.txt" -display none -no-reboot -pidfile "$T/$n.pid" \
         -netdev "dgram,id=n0,local.type=inet,local.host=127.0.0.1,local.port=$p,remote.type=inet,remote.host=127.0.0.1,remote.port=$((p+1))" \
         -device virtio-net-pci,netdev=n0,mac=52:54:00:aa:bb:cc \
@@ -84,6 +85,33 @@ for c in $CASES; do
         chk control "status file: USB local-only and still default" 'usb0 local-only default'
         chk control "old logic stays without internet" 'health 4'
         panics control
+        ;;
+    nogw)
+        run nogw "" "--no-arp --no-echo" ""
+        chk nogw "script finished" '==END=='
+        chk nogw "status file: dead-gateway LAN is offline" 'eth0 offline'
+        chk nogw "status file: healthy USB is default" 'usb0 online default'
+        nochk nogw "dead-gateway LAN is not the default" 'eth0 [a-z-]* default'
+        panics nogw
+        ;;
+    nodns)
+        run nodns "" "" "--no-dns"
+        chk nodns "script finished" '==END=='
+        chk nodns "status file: LAN online and default" 'eth0 online default'
+        chk nodns "status file: USB without DNS is local-only" 'usb0 local-only'
+        panics nodns
+        ;;
+    pingnogw)
+        run pingnogw "" "--no-arp --no-echo" "--no-arp --no-echo" s_ping.sh
+        chk pingnogw "script finished" '==END=='
+        chk pingnogw "ping names the dead gateway" 'ping: cause: link is up but the gateway does not answer'
+        panics pingnogw
+        ;;
+    pingnoinet)
+        run pingnoinet "" "--no-inet" "--no-inet" s_ping.sh
+        chk pingnoinet "script finished" '==END=='
+        chk pingnoinet "ping names the missing internet" 'ping: cause: gateway answers, this network has no internet'
+        panics pingnoinet
         ;;
     esac
 done
