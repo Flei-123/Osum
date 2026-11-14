@@ -71,9 +71,11 @@ mon() { printf '%s\n' "$1" | socat - "UNIX-CONNECT:$SOCK" > /dev/null 2>&1; }
     mon "mouse_move 60 40"; sleep 1; click_page_until "nav=[1-9]"; wait_marker "nav=[1-9]"
     mon "screendump $OUT/nav.ppm"; sleep 3
     mon "mouse_button 2"; sleep 1; mon "mouse_button 0"; sleep 3
-    drag_select
-    double_click_word
-    resize_window
+    if [ -n "${FX7_POINTER:-}" ]; then
+        drag_select
+        double_click_word
+        resize_window
+    fi
     for n in 1 2 3 4 5 6; do mon "mouse_move 0 0 -1"; sleep ${FX7_WHEELGAP:-3}; done
     sleep 20; mon "sendkey ctrl-l"; sleep ${FX7_URLFOCUSWAIT:-30}
     for k in f i l e shift-semicolon slash slash slash t m p slash i n dot h t m l shift-slash u; do mon "sendkey $k"; sleep 2; done

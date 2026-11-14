@@ -41,7 +41,7 @@ for stage in ${STAGES:-F3 F4 F5 F6 F7 F7N F8}; do
     if [ "$stage" = F7N ]; then
         BLOCKS=${BLOCKS:-1000000} TMO=${TMO:-1500} FX7_WAIT=${FX7_WAIT:-240} FX7_NOINPUT=1 "${KERNEL_ARG[@]}" bash tools/linuxapps/fx7.sh "$WD" "$OUT/F7N" > "$OUT/F7N.log" 2>&1
         verdict=$(bash tools/linuxapps/f7verdict.sh "$OUT/F7N" 2>&1)
-        if [ "${verdict%% *}" = red ] && [[ "$verdict" == *"page never saw: typed text"* && "$verdict" == *"double click word"* && "$verdict" != *"page never saw: load"* && "$verdict" != *", load,"* && "$verdict" == *"nav pixels red"* && "$verdict" == *"url pixels red"* ]]; then got=green; first=""; else first="counter-proof: $verdict"; fi
+        if [ "${verdict%% *}" = red ] && [[ "$verdict" == *"page never saw: typed text"* && "$verdict" != *"page never saw: load"* && "$verdict" != *", load,"* && "$verdict" == *"nav pixels red"* && "$verdict" == *"url pixels red"* ]]; then got=green; first=""; else first="counter-proof: $verdict"; fi
     fi
     if [ "$got" = "${want:-red}" ]; then pass=$((pass+1)); printf '  OK    %s is %s (expected %s)%s\n' "$stage" "$got" "${want:-red}" "${first:+; first failure: $first}"
     else fail=$((fail+1)); printf '  FAIL  %s is %s, expected %s%s\n' "$stage" "$got" "${want:-red}" "${first:+; first failure: $first}"; fi

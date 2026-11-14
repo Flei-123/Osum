@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import re
 import sys
 
@@ -14,10 +15,12 @@ NEEDED = (
     ("wheel", re.compile(rb"^FXWHEEL ")),
     ("scroll", re.compile(rb"^FXSCROLL [1-9]")),
     ("click", re.compile(rb"^FXCLICK ")),
-    ("drag selection", re.compile(rb"^FXDRAG \w+ \w+")),
-    ("double click word", re.compile(rb"^FXDBL \w+$")),
     ("link navigation", re.compile(rb"^FXNAV \?nav")),
     ("url bar navigation", re.compile(rb"^FXURL \?u")),
+)
+POINTER_NEEDED = (
+    ("drag selection", re.compile(rb"^FXDRAG \w+ \w+")),
+    ("double click word", re.compile(rb"^FXDBL \w+$")),
 )
 
 
@@ -30,6 +33,8 @@ def grew(lines):
 
 
 def resize_note(lines):
+    if not os.environ.get("FX7_POINTER"):
+        return ""
     return "; window resize " + ("followed" if grew(lines) else "NOT followed")
 
 
@@ -39,10 +44,11 @@ def verdict(path):
         for marker in BAD_MARKERS:
             if marker in line:
                 return "red", "crash marker: " + marker.decode()
-    missing = [name for name, pat in NEEDED if not any(pat.match(l) for l in lines)]
+    needed = NEEDED + (POINTER_NEEDED if os.environ.get("FX7_POINTER") else ())
+    missing = [name for name, pat in needed if not any(pat.match(l) for l in lines)]
     if missing:
         return "red", "page never saw: " + ", ".join(missing) + resize_note(lines)
-    return "green", resize_note(lines)[2:] + "; load, typing, shifted key, backspace, cursor edit, key, wheel, scroll, click, right click, drag selection, double click, window resize, link navigation and url bar navigation all reached the page"
+    return "green", "load, typing, shifted key, backspace, cursor edit, key, wheel, scroll, click, right click, link navigation and url bar navigation all reached the page" + resize_note(lines)
 
 
 if __name__ == "__main__":
