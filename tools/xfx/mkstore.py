@@ -9,7 +9,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
-PKG_DIR = os.path.join(ROOT, "pakete", "firefox")
+PKG_DIR = os.path.join(ROOT, "assets", "apps", "firefox.osp")
 sys.path.insert(0, os.path.join(HERE, "..", "linuxapps"))
 sys.path.insert(0, os.path.join(HERE, "..", "lib"))
 import opkpfad

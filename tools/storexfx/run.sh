@@ -87,8 +87,8 @@ python3 "$OPK" zeigen "$TMPD/srv/good/firefox-1.opk" > "$TMPD/show.txt" 2>&1
 for f in start INFO symbol xfx.manifest user.js store.meta; do
     grep -qE "^  f $f " "$TMPD/show.txt" && ok "package holds $f" || bad "package misses $f"
 done
-python3 tools/sdk/osdk.py check pakete/firefox/INFO --strict > /dev/null 2>&1 && ok "INFO passes osdk --strict" || bad "INFO fails osdk --strict"
-grep -qx 'keys=.*firefox.*browser.*' pakete/firefox/INFO && grep -qx 'perm=net' pakete/firefox/INFO && grep -qx 'net=real' pakete/firefox/INFO \
+python3 tools/sdk/osdk.py check assets/apps/firefox.osp/INFO --strict > /dev/null 2>&1 && ok "INFO passes osdk --strict" || bad "INFO fails osdk --strict"
+grep -qx 'keys=.*firefox.*browser.*' assets/apps/firefox.osp/INFO && grep -qx 'perm=net' assets/apps/firefox.osp/INFO && grep -qx 'net=real' assets/apps/firefox.osp/INFO \
     && ok "INFO has the search keys firefox, browser and the net right" || bad "INFO misses search keys or net right"
 [ -f "$TMPD/srv/good/store.meta.sig" ] && grep -q '^title=Firefox' "$TMPD/srv/good/store.meta" \
     && ok "store.meta (display data) is published and signed" || bad "store.meta"
