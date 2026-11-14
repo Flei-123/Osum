@@ -3,25 +3,32 @@ profile app
 
 import actcli
 import fuiscene
+import libc.text
 import msg
 import ulib
 import settings.setbase
 import settings.setcore
 import settings.setsystem
 
-export { load, tick, page, rects, toggle, confirm, owns, enabled }
+export { load, tick, page, rects, toggle, toggle_fixed, set_password, toggle_show, confirm, owns, enabled }
 
 const TEXT_CAP: u64 = 72
 const LINE_CAP: u64 = 120
 const RELOAD_TICKS: u64 = 200
 const REPLY_WAIT_TICKS: u64 = 300
 const PENDING_NONE: u64 = 0
+const PASSWORD_MIN: u64 = 8
+const PASSWORD_MAX: u64 = 32
+const NOT_FOUND: u64 = 0xFFFFFFFFFFFFFFFF
 
 static mut call_get: [u8; 18] = "call settings.get\0"
 static mut call_set: [u8; 18] = "call settings.set\0"
 static mut arg_key: [u8; 4] = "key\0"
 static mut arg_value: [u8; 6] = "value\0"
 static mut key_enabled: [u8; 15] = "remote.enabled\0"
+static mut key_fixed: [u8; 13] = "remote.fixed\0"
+static mut key_fixedpw: [u8; 15] = "remote.fixedpw\0"
+static mut key_mode: [u8; 12] = "remote.mode\0"
 static mut key_id: [u8; 10] = "remote.id\0"
 static mut key_password: [u8; 16] = "remote.password\0"
 static mut key_status: [u8; 14] = "remote.status\0"
@@ -40,6 +47,17 @@ static mut m_confirm: [u8; 24] = "settings.remote.confirm\0"
 static mut m_ask: [u8; 20] = "settings.remote.ask\0"
 static mut m_denied: [u8; 23] = "settings.remote.denied\0"
 static mut m_nobus: [u8; 22] = "settings.remote.nobus\0"
+static mut m_fixed: [u8; 22] = "settings.remote.fixed\0"
+static mut m_fixedhint: [u8; 26] = "settings.remote.fixedhint\0"
+static mut m_pwset: [u8; 22] = "settings.remote.pwset\0"
+static mut m_pwshort: [u8; 24] = "settings.remote.pwshort\0"
+static mut m_pwsaved: [u8; 24] = "settings.remote.pwsaved\0"
+static mut m_show: [u8; 21] = "settings.remote.show\0"
+static mut m_hide: [u8; 21] = "settings.remote.hide\0"
+static mut m_mode: [u8; 21] = "settings.remote.mode\0"
+static mut m_nopw: [u8; 1] = "\0"
+static mut s_mask: [u8; 9] = "********\0"
+static mut s_space: [u8; 2] = " \0"
 static mut m_stop: [u8; 21] = "settings.remote.stop\0"
 static mut m_svc: [u8; 21] = "settings.remote.svc.\0"
 static mut s_dialog: [u8; 11] = "use_dialog\0"
@@ -47,10 +65,16 @@ static mut m_dash: [u8; 2] = "-\0"
 static mut t_sep: [u8; 3] = ": \0"
 static mut r_switch: [u8; 5] = "xrsw\0"
 static mut r_confirm: [u8; 5] = "xrcf\0"
+static mut r_fixed: [u8; 5] = "xrfx\0"
+static mut r_pw: [u8; 5] = "xrpw\0"
+static mut r_pwset: [u8; 5] = "xrst\0"
+static mut r_show: [u8; 5] = "xrsh\0"
 static mut s_page: [u8; 31] = "settings: remote page enabled=\0"
 static mut s_svc: [u8; 10] = " service=\0"
 static mut s_id: [u8; 5] = " id=\0"
 static mut s_peer: [u8; 7] = " peer=\0"
+static mut s_fixedtag: [u8; 8] = " fixed=\0"
+static mut s_modetag: [u8; 7] = " mode=\0"
 static mut s_end: [u8; 2] = "\n\0"
 
 static mut id_text: [u8; 72] = [0 as u8; 72]
@@ -58,6 +82,9 @@ static mut password_text: [u8; 72] = [0 as u8; 72]
 static mut status_text: [u8; 72] = [0 as u8; 72]
 static mut peer_text: [u8; 72] = [0 as u8; 72]
 static mut service_text: [u8; 72] = [0 as u8; 72]
+static mut mode_text: [u8; 72] = [0 as u8; 72]
+static mut fixed_on: bool = false
+static mut show_password: bool = false
 static mut line_text: [u8; 120] = [0 as u8; 120]
 static mut svc_key: [u8; 48] = [0 as u8; 48]
 static mut notice_key: u64 = 0
@@ -67,7 +94,7 @@ static mut last_reload: u64 = 0
 static mut pending_no: u64 = 0
 
 fn owns(id: u64) -> bool {
-    return id == setbase.K_XR_SWITCH || id == setbase.K_XR_CONFIRM
+    return id == setbase.K_XR_SWITCH || id == setbase.K_XR_CONFIRM || id == setbase.K_XR_FIXED || id == setbase.K_XR_PWSET || id == setbase.K_XR_SHOW
 }
 
 fn enabled() -> bool {
@@ -93,6 +120,9 @@ fn reload_values() {
     let flag_p: u64 = (&flag[0 as usize]) as u64
     let _e: bool = fetch((&key_enabled[0 as usize]) as u64, flag_p)
     enabled_on = is_true(flag_p)
+    let _f: bool = fetch((&key_fixed[0 as usize]) as u64, flag_p)
+    fixed_on = is_true(flag_p)
+    let _m: bool = fetch((&key_mode[0 as usize]) as u64, (&mode_text[0 as usize]) as u64)
     let _i: bool = fetch((&key_id[0 as usize]) as u64, (&id_text[0 as usize]) as u64)
     let _p: bool = fetch((&key_password[0 as usize]) as u64, (&password_text[0 as usize]) as u64)
     let _s: bool = fetch((&key_status[0 as usize]) as u64, (&status_text[0 as usize]) as u64)
@@ -102,6 +132,8 @@ fn reload_values() {
 
 fn clear_values() {
     enabled_on = false
+    fixed_on = false
+    __mmio_write8((&mode_text[0 as usize]) as u64 as *mut u8, 0 as u8)
     __mmio_write8((&id_text[0 as usize]) as u64 as *mut u8, 0 as u8)
     __mmio_write8((&password_text[0 as usize]) as u64 as *mut u8, 0 as u8)
     __mmio_write8((&status_text[0 as usize]) as u64 as *mut u8, 0 as u8)
@@ -124,6 +156,12 @@ fn signature() -> u64 {
     if enabled_on {
         sig = 11
     }
+    if fixed_on {
+        sig = sig + 5
+    }
+    if show_password {
+        sig = sig + 17
+    }
     sig = sig * 31 + hash_text((&id_text[0 as usize]) as u64)
     sig = sig * 31 + hash_text((&password_text[0 as usize]) as u64)
     sig = sig * 31 + hash_text((&status_text[0 as usize]) as u64)
@@ -144,6 +182,14 @@ fn trace() {
     setcore.say((&id_text[0 as usize]) as u64)
     setcore.say((&s_peer[0 as usize]) as u64)
     setcore.say((&peer_text[0 as usize]) as u64)
+    setcore.say((&s_fixedtag[0 as usize]) as u64)
+    if fixed_on {
+        setcore.say((&word_true[0 as usize]) as u64)
+    } else {
+        setcore.say((&word_false[0 as usize]) as u64)
+    }
+    setcore.say((&s_modetag[0 as usize]) as u64)
+    setcore.say((&mode_text[0 as usize]) as u64)
     setcore.say((&s_end[0 as usize]) as u64)
 }
 
@@ -214,13 +260,43 @@ fn info_row(parent: usize, label_key: u64, value: u64) {
     let _n: usize = fuiscene.label(parent, labeled(label_key, value))
 }
 
+fn password_label() -> u64 {
+    if __mmio_read8((&password_text[0 as usize]) as u64 as *mut u8) == 0 as u8 {
+        return (&m_dash[0 as usize]) as u64
+    }
+    if show_password {
+        return (&password_text[0 as usize]) as u64
+    }
+    return (&s_mask[0 as usize]) as u64
+}
+
+fn show_caption() -> u64 {
+    if show_password {
+        return msg.get((&m_hide[0 as usize]) as u64)
+    }
+    return msg.get((&m_show[0 as usize]) as u64)
+}
+
+fn fixed_block(left: usize) {
+    let _fx: usize = fuiscene.toggle(left, msg.get((&m_fixed[0 as usize]) as u64), setbase.K_XR_FIXED, fixed_on)
+    if !fixed_on {
+        return
+    }
+    let _hint: usize = fuiscene.label_wrap(left, msg.get((&m_fixedhint[0 as usize]) as u64), 2)
+    let _en: usize = fuiscene.entry(left, setbase.K_XR_PW, 0, (&setbase.e_xrpw[0 as usize]) as u64)
+    fuiscene.entry_secret(setbase.K_XR_PW, true)
+    let _ps: usize = fuiscene.button(left, msg.get((&m_pwset[0 as usize]) as u64), setbase.K_XR_PWSET)
+}
+
 fn page(left: usize, right: usize) {
     let _note: usize = fuiscene.label_wrap(left, msg.get((&m_note[0 as usize]) as u64), 3)
     let _sw: usize = fuiscene.toggle(left, msg.get((&m_switch[0 as usize]) as u64), setbase.K_XR_SWITCH, enabled_on)
     info_row(left, (&m_status[0 as usize]) as u64, status_label())
+    fixed_block(left)
     if enabled_on {
         info_row(left, (&m_id[0 as usize]) as u64, dash_if_empty((&id_text[0 as usize]) as u64))
-        info_row(left, (&m_password[0 as usize]) as u64, dash_if_empty((&password_text[0 as usize]) as u64))
+        info_row(left, (&m_password[0 as usize]) as u64, password_label())
+        let _sh: usize = fuiscene.button(left, show_caption(), setbase.K_XR_SHOW)
         info_row(left, (&m_peer[0 as usize]) as u64, dash_if_empty((&peer_text[0 as usize]) as u64))
     }
     if pending_no != PENDING_NONE {
@@ -235,6 +311,10 @@ fn page(left: usize, right: usize) {
 fn rects() {
     setcore.rect_say((&r_switch[0 as usize]) as u64, setbase.K_XR_SWITCH)
     setcore.rect_say((&r_confirm[0 as usize]) as u64, setbase.K_XR_CONFIRM)
+    setcore.rect_say((&r_fixed[0 as usize]) as u64, setbase.K_XR_FIXED)
+    setcore.rect_say((&r_pw[0 as usize]) as u64, setbase.K_XR_PW)
+    setcore.rect_say((&r_pwset[0 as usize]) as u64, setbase.K_XR_PWSET)
+    setcore.rect_say((&r_show[0 as usize]) as u64, setbase.K_XR_SHOW)
 }
 
 fn answer(rc: u64) {
@@ -260,21 +340,56 @@ fn answer(rc: u64) {
     }
 }
 
-fn toggle() {
+fn put(key: u64, value: u64) {
     if !actcli.open() {
         answer(actcli.R_NOBUS)
         fuiscene.refresh()
         return
     }
-    var wanted: u64 = (&word_false[0 as usize]) as u64
-    if (fuiscene.value_of(setbase.K_XR_SWITCH) as u64) != 0 {
-        wanted = (&word_true[0 as usize]) as u64
-    }
     actcli.req((&call_set[0 as usize]) as u64)
-    actcli.arg((&arg_key[0 as usize]) as u64, (&key_enabled[0 as usize]) as u64)
-    actcli.arg((&arg_value[0 as usize]) as u64, wanted)
+    actcli.arg((&arg_key[0 as usize]) as u64, key)
+    actcli.arg((&arg_value[0 as usize]) as u64, value)
     answer(actcli.send(REPLY_WAIT_TICKS))
     let _c: bool = load()
+    fuiscene.refresh()
+}
+
+fn flag_word(switch_id: u64) -> u64 {
+    if (fuiscene.value_of(switch_id) as u64) != 0 {
+        return (&word_true[0 as usize]) as u64
+    }
+    return (&word_false[0 as usize]) as u64
+}
+
+fn toggle() {
+    put((&key_enabled[0 as usize]) as u64, flag_word(setbase.K_XR_SWITCH))
+}
+
+fn toggle_fixed() {
+    put((&key_fixed[0 as usize]) as u64, flag_word(setbase.K_XR_FIXED))
+}
+
+fn password_ok(t: u64) -> bool {
+    let n: u64 = text.length(t)
+    return n >= PASSWORD_MIN && n <= PASSWORD_MAX && ulib.find(t, (&s_space[0 as usize]) as u64) == NOT_FOUND
+}
+
+fn set_password() {
+    let t: u64 = fuiscene.entry_text(setbase.K_XR_PW)
+    if t == 0 || !password_ok(t) {
+        notice_key = (&m_pwshort[0 as usize]) as u64
+        fuiscene.refresh()
+        return
+    }
+    put((&key_fixedpw[0 as usize]) as u64, t)
+    if notice_key == 0 {
+        fuiscene.entry_set(setbase.K_XR_PW, (&m_nopw[0 as usize]) as u64)
+        notice_key = (&m_pwsaved[0 as usize]) as u64
+    }
+}
+
+fn toggle_show() {
+    show_password = !show_password
     fuiscene.refresh()
 }
 

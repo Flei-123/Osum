@@ -15,6 +15,9 @@ const POLL_MS: u64 = 2000
 const RESTART_WAIT: u64 = 3
 static mut W_NOSESSION: [u8; 10] = "nosession\0"
 static mut F_ENABLED: [u8; 8] = "enabled\0"
+static mut F_FIXED: [u8; 6] = "fixed\0"
+static mut MODE_FIXED: [u8; 6] = "fixed\0"
+static mut MODE_RANDOM: [u8; 7] = "random\0"
 static mut F_RELAY: [u8; 6] = "relay\0"
 static mut V_ONE: [u8; 2] = "1\0"
 static mut V_TRUE: [u8; 5] = "true\0"
@@ -29,17 +32,43 @@ static mut M_HOST: [u8; 23] = "xremoted: host started\0"
 static mut M_STOP: [u8; 23] = "xremoted: host stopped\0"
 static mut M_FAIL: [u8; 28] = "xremoted: host start failed\0"
 static mut M_PW: [u8; 43] = "xremoted: no random bytes for the password\0"
-static mut password: [u8; 16] = [0 as u8; 16]
+static mut password: [u8; 40] = [0 as u8; 40]
+static mut fixed_mode: bool = false
 static mut relay: [u8; 200] = [0 as u8; 200]
 static mut state_word: u64 = 0
 static mut need_session: bool = true
 
-fn is_enabled() -> bool {
+fn flag_set(field: u64) -> bool {
     var v: [u8; 8] = [0 as u8; 8]
-    if !actwire.kvfile_get(xrpath.p_conf(), (&F_ENABLED[0 as usize]) as u64, (&v[0 as usize]) as u64, 8) {
+    if !actwire.kvfile_get(xrpath.p_conf(), field, (&v[0 as usize]) as u64, 8) {
         return false
     }
     return ulib.streq((&v[0 as usize]) as u64, (&V_ONE[0 as usize]) as u64) || ulib.streq((&v[0 as usize]) as u64, (&V_TRUE[0 as usize]) as u64)
+}
+
+fn is_enabled() -> bool {
+    return flag_set((&F_ENABLED[0 as usize]) as u64)
+}
+
+fn fixed_wanted(out: u64) -> bool {
+    xrhost.secure_secret()
+    return flag_set((&F_FIXED[0 as usize]) as u64) && xrhost.read_fixed(out)
+}
+
+fn fixed_changed() -> bool {
+    var cand: [u8; 40] = [0 as u8; 40]
+    let want: bool = fixed_wanted((&cand[0 as usize]) as u64)
+    if want != fixed_mode {
+        return true
+    }
+    return want && !ulib.streq((&cand[0 as usize]) as u64, (&password[0 as usize]) as u64)
+}
+
+fn mode_word() -> u64 {
+    if fixed_mode {
+        return (&MODE_FIXED[0 as usize]) as u64
+    }
+    return (&MODE_RANDOM[0 as usize]) as u64
 }
 
 fn session_ok() -> bool {
@@ -52,7 +81,7 @@ fn session_ok() -> bool {
 fn publish(word: u64) {
     if state_word != word {
         state_word = word
-        xrhost.write_info((&password[0 as usize]) as u64, word)
+        xrhost.write_info((&password[0 as usize]) as u64, word, mode_word())
     }
 }
 
@@ -63,13 +92,19 @@ fn stop_all() {
     if password[0 as usize] != 0 as u8 || xrhost.host_running() {
         xrhost.stop_host()
         password[0 as usize] = 0 as u8
+        fixed_mode = false
         state_word = 0
     }
 }
 
 fn start_host() -> bool {
+    xrhost.migrate_home()
     if password[0 as usize] == 0 as u8 {
-        if !xrhost.make_password((&password[0 as usize]) as u64) {
+        var cand: [u8; 40] = [0 as u8; 40]
+        if fixed_wanted((&cand[0 as usize]) as u64) {
+            ulib.strcpy((&password[0 as usize]) as u64, (&cand[0 as usize]) as u64)
+            fixed_mode = true
+        } else if !xrhost.make_password((&password[0 as usize]) as u64) {
             xfxio.msg((&M_PW[0 as usize]) as u64)
             return false
         }
@@ -96,6 +131,10 @@ fn step(wait: u64) -> u64 {
         return 0
     }
     if !session_ok() {
+        stop_all()
+        return 0
+    }
+    if password[0 as usize] != 0 as u8 && fixed_changed() {
         stop_all()
         return 0
     }

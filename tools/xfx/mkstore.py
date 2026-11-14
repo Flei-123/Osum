@@ -8,6 +8,8 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
+PKG_DIR = os.path.join(ROOT, "pakete", "firefox")
 sys.path.insert(0, os.path.join(HERE, "..", "linuxapps"))
 sys.path.insert(0, os.path.join(HERE, "..", "lib"))
 import opkpfad
@@ -31,6 +33,8 @@ datei=start {start}
 datei=xfx.manifest {manifest}
 datei=user.js {userjs}
 datei=store.meta {meta}
+datei=INFO {info}
+datei=symbol {symbol}
 """
 
 
@@ -72,6 +76,18 @@ def write_meta(path, version):
             handle.write("%s=%s\n" % (key, fields[key]))
 
 
+def write_info(path, version):
+    lines = open(os.path.join(PKG_DIR, "INFO"), encoding="utf-8").read().splitlines()
+    with open(path, "w", encoding="utf-8") as handle:
+        for line in lines:
+            handle.write(("version=%s" % version if line.startswith("version=") else line) + "\n")
+
+
+def build_symbol(path):
+    run([sys.executable, "-I", os.path.join(ROOT, "tools", "k15", "icon.py"),
+         os.path.join(PKG_DIR, "symbol.txt"), path])
+
+
 def run(cmd):
     subprocess.run(cmd, check=True)
 
@@ -98,9 +114,14 @@ def main():
         recipe = os.path.join(work, "firefox.rezept")
         write_manifest(manifest, args.pack, args.out, part_names)
         write_meta(meta, args.version)
+        info = os.path.join(work, "INFO")
+        symbol = os.path.join(work, "symbol")
+        write_info(info, args.version)
+        build_symbol(symbol)
         with open(recipe, "w") as handle:
             handle.write(RECIPE.format(version=args.version, start=args.xfx_elf,
-                                       manifest=manifest, userjs=args.user_js, meta=meta))
+                                       manifest=manifest, userjs=args.user_js, meta=meta,
+                                       info=info, symbol=symbol))
         package = os.path.join(args.out, "firefox-%s.opk" % args.version.split(".")[0])
         run([sys.executable, "-I", opk, "bauen", recipe, "-o", package])
         shutil.copy(meta, os.path.join(args.out, "store.meta"))

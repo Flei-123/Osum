@@ -4,6 +4,7 @@
 2. **HP:** Open the Store, install **Remote control**. Then sign out and sign in once (or reboot): sign-in starts the service, no inittab edit needed.
 3. **HP:** Settings -> search "remote desktop" -> switch **Allow remote control** on, confirm the system dialog. Wait about 10 s: Status turns "On", **ID** and **Password** appear on the page.
 4. **Windows:** start `freeviewer.exe` (0.30.0, `/root/projects/freeviewer/dist-0.30.0/`), "Connect to a computer", enter ID + password.
+4a. **Fixed password (optional):** Settings -> remote desktop -> switch **Use a fixed password**, type your own (8-32 characters, no spaces), press **Set password**, confirm both system dialogs. The service restarts with it in about 10 s; the **Password** row shows `********` until you press **Show**. ID stays the same. Switch the option off to return to random passwords.
 5. **Check:** picture, mouse, keyboard, wheel, clipboard, both monitors (if two heads), emergency stop `Super+Esc` and the switch off.
 
 ## Feed stand (Boss runs this, nothing is published by the worker)
@@ -39,3 +40,7 @@ Use this when the Store does not offer "Remote control" on the HP. Nothing is pu
 
 ## Capture and input on the HP (open)
 Not verified on the real Intel framebuffer (HD 620): the host uses `osum_shot` (grab of `/dev/fb`, per-head rects) and `osum_tipp`. Proven only in QEMU (gate tools/xremote/run.sh). The HP framebuffer is the same plain linear kind QEMU uses, so a working grab is expected; the first real run is this test; report what step 5 shows.
+
+## Firefox on the HP (Store package)
+- Build the feed entry: `python3 tools/xfx/mkstore.py --pack /root/fxhp/feedpack --xfx-elf <xfx.elf> --user-js assets/xfx/user.js --key <feed key> --out <feed dir>`. The package carries `INFO` (name Firefox, keys firefox,browser,web,internet,www,mozilla,surf, `perm=net`, `kind=gui`), `symbol`, `start` (the `xfx` launcher), the signed parts list; the 37 parts (~333 MB tar, ~1 GiB disk while joining) come from the same feed.
+- On the HP: Store -> Firefox -> install (progress bar), then the start menu / search finds "firefox"; the icon starts `xfx`, which opens the Firefox window through wayd.
