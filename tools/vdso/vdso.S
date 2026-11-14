@@ -9,6 +9,19 @@ vdso_data:
 .set TSC0, vdso_data + 16
 .set REAL_BASE, vdso_data + 24
 .set REAL_OK, vdso_data + 32
+.set MULT, vdso_data + 40
+
+.macro split_ns
+    mov rcx,rax
+    shr rax,9
+    movabs rdx,19342813113834067
+    mul rdx
+    shr rdx,11
+    mov rax,rdx
+    imul rdx,rdx,1000000000
+    sub rcx,rdx
+    mov rdx,rcx
+.endm
 
 .text
 
@@ -18,7 +31,7 @@ vdso_calc:
     mov r8,[rip+SEQ]
     test r8d,1
     jnz .Lspin
-    mov r9,[rip+KHZ]
+    mov r9,[rip+MULT]
     test r9,r9
     jz .Lfail
     mov r10,[rip+TSC0]
@@ -29,15 +42,8 @@ vdso_calc:
     shl rdx,32
     or rax,rdx
     sub rax,r10
-    xor edx,edx
-    div r9
-    imul rax,rax,1000000
-    imul rdx,rdx,1000000
-    mov r10,rax
+    mul r9
     mov rax,rdx
-    xor edx,edx
-    div r9
-    add rax,r10
     cmp r8,[rip+SEQ]
     jne .Lretry
     test edi,edi
@@ -76,9 +82,7 @@ __vdso_clock_gettime:
     pop rdi
     cmp rax,-1
     je .Lcgt_syscall
-    mov rcx,1000000000
-    xor edx,edx
-    div rcx
+    split_ns
     mov [rsi],rax
     mov [rsi+8],rdx
     xor eax,eax
@@ -99,15 +103,14 @@ __vdso_gettimeofday:
     je .Lgtod_syscall
     test rdi,rdi
     jz .Lgtod_zero
-    mov rcx,1000000000
-    xor edx,edx
-    div rcx
+    split_ns
     mov [rdi],rax
     mov rax,rdx
-    xor edx,edx
-    mov rcx,1000
-    div rcx
-    mov [rdi+8],rax
+    shr rax,3
+    movabs rcx,2361183241434822607
+    mul rcx
+    shr rdx,4
+    mov [rdi+8],rdx
 .Lgtod_zero:
     xor eax,eax
     ret
@@ -125,9 +128,7 @@ __vdso_time:
     pop rdi
     cmp rax,-1
     je .Ltime_syscall
-    mov rcx,1000000000
-    xor edx,edx
-    div rcx
+    split_ns
     test rdi,rdi
     jz .Ltime_ret
     mov [rdi],rax
