@@ -81,7 +81,7 @@ export {
     enter, leave, lock_only, unlock_only, flags_nested,
     // ---- RUNDE PROTOKOLL ----
     free, ready,
-    inode_count, data_start, scan, geom, entry_slot, slot_count,
+    inode_count, data_start, scan, geom, entry_slot, slot_count, entry_batch, entry_run, entry_type, ENTRY_FIFO, dirent_size,
     // ---------------------------------------------------- RUNDE OFS3
     OFS_V3, T_LINK, DIRENT_V3, NAME_V3, INODE_SIZE, INODE_SIZE_V3,
     dirent_size, name_len, inode_bytes, bm_start, bm_blocks, itable,
@@ -2157,6 +2157,37 @@ fn entry_slot(state: u64, dir: u64, slot: u64, out: u64, cap: u64) -> u64 {
     return ino
 }
 
+const ENTRY_FIFO: u64 = 0xFF
+
+fn entry_batch(state: u64, dir: u64, first: u64, out: u64, cap: u64) -> u64 {
+    let de: u64 = dirent_size(state)
+    if de > cap {
+        return 0
+    }
+    let flags: u64 = enter(state)
+    let total: u64 = dir_entries(state, dir)
+    var count: u64 = 0
+    if first < total {
+        count = total - first
+        if count > cap / de {
+            count = cap / de
+        }
+        count = read_at_cached(state, dir, first * de, out, count * de) / de
+    }
+    leave(state, flags)
+    return count
+}
+
+fn entry_type(state: u64, ino: u64) -> u64 {
+    let flags: u64 = enter(state)
+    var kind: u64 = inode_get(state, ino, I_TYPE)
+    if kind != T_DIR && kind != T_LINK && inode_is_fifo(state, ino) {
+        kind = ENTRY_FIFO
+    }
+    leave(state, flags)
+    return kind
+}
+
 fn slot_count(state: u64, dir: u64) -> u64 {
     let flags: u64 = enter(state)
     let n: u64 = dir_entries(state, dir)
@@ -2199,6 +2230,50 @@ fn entry_at(state: u64, dir: u64, index: u64, out: u64, cap: u64) -> u64 {
             k = k + 1
         }
         i = i + count
+    }
+    leave(state, flags)
+    return got
+}
+
+fn entry_run(state: u64, dir: u64, index: u64, out: u64, cap: u64) -> u64 {
+    let de: u64 = dirent_size(state)
+    let max: u64 = cap / de
+    if max == 0 {
+        return 0
+    }
+    let flags: u64 = enter(state)
+    let n: u64 = dir_entries(state, dir)
+    var i: u64 = 0
+    var seen: u64 = 0
+    var got: u64 = 0
+    var next_slot: u64 = 0
+    let resume: u64 = dirindex.cursor_slot(state, dir, index)
+    if resume != dirindex.NO_CURSOR && resume <= n {
+        i = resume
+        seen = index
+    }
+    while i < n && got < max {
+        let count: u64 = dir_chunk(state, dir, i, n)
+        if count == 0 {
+            i = n
+        }
+        var k: u64 = 0
+        while k < count && got < max {
+            let e: u64 = dirscan.entry(k, de)
+            if regio.read64(e) != 0 {
+                if seen >= index {
+                    copy(e, out + got * de, de)
+                    got = got + 1
+                    next_slot = i + k + 1
+                }
+                seen = seen + 1
+            }
+            k = k + 1
+        }
+        i = i + count
+    }
+    if got != 0 {
+        dirindex.cursor_save(state, dir, index + got, next_slot)
     }
     leave(state, flags)
     return got
