@@ -120,5 +120,9 @@ for k, name in enumerate(order):
         if qx < x or qx >= x + ww or qy < y or qy >= y + hh: continue
         if not near(at_px(qx, qy), ref, 10): bad.append((name, qx, qy, at_px(qx, qy), ref))
 say(not bad, "no plate/chip around any symbol or text: the pixels next to the ink are the bar ground (bad: %s)" % (bad[:3],))
+snd_all = re.findall(r"taskbar: field snd x=(\d+) y=\d+ w=(\d+) h=\d+ lines=\d+", ser)
+open_at = ser.find("traypop: open")
+say(open_at > 0 and len(snd_all) >= 1, "the log holds sound-cell geometry and the flyout opened")
+say(len(set(snd_all)) == 1, "the sound cell keeps one geometry before, during and after the chevron flyout (%s)" % sorted(set(snd_all)))
 print("RESULT ok=%d fail=%d" % (ok, fail))
 sys.exit(1 if fail else 0)

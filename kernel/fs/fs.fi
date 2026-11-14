@@ -81,7 +81,7 @@ export {
     enter, leave, lock_only, unlock_only, flags_nested,
     // ---- RUNDE PROTOKOLL ----
     free, ready,
-    inode_count, data_start, scan, geom, entry_slot, slot_count,
+    inode_count, data_start, scan, geom, entry_slot, slot_count, entry_batch, entry_run, entry_type, ENTRY_FIFO, dirent_size,
     // ---------------------------------------------------- RUNDE OFS3
     OFS_V3, T_LINK, DIRENT_V3, NAME_V3, INODE_SIZE, INODE_SIZE_V3,
     dirent_size, name_len, inode_bytes, bm_start, bm_blocks, itable,
@@ -95,7 +95,7 @@ export {
     SB_JSTART, SB_JBLOCKS, journal_start, journal_blocks, journal_on,
     race_ino, race_soll, race_core,
     inode_block_of, inode_off, bm_block_of, bm_byte, ext_itable, inode_zap,
-    buf_in, I_TYPE, I_SIZE, I_MODE, I_UID, I_GID, I_MTIME, I_CTIME, I_ATIME, FIFO_BIT
+    buf_in, put_attrs, I_TYPE, I_SIZE, I_MODE, I_UID, I_GID, I_MTIME, I_CTIME, I_ATIME, FIFO_BIT
 }
 
 const BS: u64 = 512 // one block
@@ -672,6 +672,19 @@ fn inode_off(state: u64, ino: u64) -> u64 {
 //     elf: refused, reason 1  no such file
 //     desk: start /bin/launcher pid=0
 //     elf: refused, reason 2  not a plain file
+fn put_attrs(state: u64, lba: u64, idx: u64, at: u64) {
+    var mtime: u64 = 0
+    var ctime: u64 = 0
+    var atime: u64 = 0
+    if version(state) >= OFS_V3 {
+        mtime = kstate.get(at, I_MTIME)
+        ctime = kstate.get(at, I_CTIME)
+        atime = kstate.get(at, I_ATIME)
+    }
+    iattr.put(state, lba, idx, kstate.get(at, I_TYPE), kstate.get(at, I_SIZE), kstate.get(at, I_MODE),
+        kstate.get(at, I_UID), kstate.get(at, I_GID), mtime, ctime, atime)
+}
+
 fn inode_get(state: u64, ino: u64, field: u64) -> u64 {
     if ino == 0 || ino > inode_count(state) {
         return 0
@@ -691,10 +704,9 @@ fn inode_get(state: u64, ino: u64, field: u64) -> u64 {
     }
     if ofsj.read(state, lba, buf_in(state)) {
         let at: u64 = buf_in(state) + off
-        v = regio.read64(at + field)
+        v = kstate.get(at, field)
         if which != iattr.MISS {
-            iattr.put(state, lba, off / inode_bytes(state), regio.read64(at + I_TYPE), regio.read64(at + I_SIZE),
-                regio.read64(at + I_MODE), regio.read64(at + I_UID), regio.read64(at + I_GID))
+            put_attrs(state, lba, off / inode_bytes(state), at)
         }
     }
     leave(state, flags)
@@ -702,10 +714,10 @@ fn inode_get(state: u64, ino: u64, field: u64) -> u64 {
 }
 
 fn inode_perm_slow(state: u64, ino: u64, out: u64) {
-    __mmio_write64(out as *mut u64, inode_type(state, ino))
-    __mmio_write64((out + 8) as *mut u64, inode_mode(state, ino))
-    __mmio_write64((out + 16) as *mut u64, inode_uid(state, ino))
-    __mmio_write64((out + 24) as *mut u64, inode_gid(state, ino))
+    *(out as *mut u64) = inode_type(state, ino)
+    *((out + 8) as *mut u64) = inode_mode(state, ino)
+    *((out + 16) as *mut u64) = inode_uid(state, ino)
+    *((out + 24) as *mut u64) = inode_gid(state, ino)
 }
 
 fn inode_perm(state: u64, ino: u64, out: u64) {
@@ -722,7 +734,7 @@ fn inode_perm(state: u64, ino: u64, out: u64) {
         inode_perm_slow(state, ino, out)
         return
     }
-    __mmio_write64((out + 8) as *mut u64, kstate.get(out, 8) & 4095)
+    *((out + 8) as *mut u64) = kstate.get(out, 8) & 4095
 }
 
 fn inode_set(state: u64, ino: u64, field: u64, v: u64) -> bool {
@@ -1892,6 +1904,33 @@ fn write_at_scoped(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
     return n
 }
 
+const WRITE_RUN_BLOCKS: u64 = 256
+
+fn write_full_run(state: u64, ino: u64, pos: u64, src: u64, want: u64) -> u64 {
+    var count: u64 = 0
+    var first: u64 = 0
+    var cap: u64 = want
+    if cap > WRITE_RUN_BLOCKS {
+        cap = WRITE_RUN_BLOCKS
+    }
+    data_overwrite = 1
+    while count < cap {
+        let b: u64 = file_block_cached(state, ino, pos / BS + count)
+        if b == 0 || (count > 0 && b != first + count) {
+            break
+        }
+        if count == 0 {
+            first = b
+        }
+        count = count + 1
+    }
+    data_overwrite = 0
+    if count == 0 || !ofsj.write_blocks(state, first, src, count) {
+        return 0
+    }
+    return count * BS
+}
+
 fn write_at_blocks(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
     var n: u64 = 0
     // A full disk stops the writing and is REPORTED as the number of
@@ -1904,6 +1943,13 @@ fn write_at_blocks(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
         var chunk: u64 = BS - inb
         if chunk > len - n {
             chunk = len - n
+        }
+        if chunk == BS && len - n >= 2 * BS && !ofsj.enabled(state) {
+            let run: u64 = write_full_run(state, ino, pos, src + n, (len - n) / BS)
+            if run != 0 {
+                n = n + run
+                continue
+            }
         }
         // ------------------------------------------- RUNDE FSROBUST
         if ofsj.enabled(state) && ofsj.room(state) < 8 {
@@ -2111,6 +2157,37 @@ fn entry_slot(state: u64, dir: u64, slot: u64, out: u64, cap: u64) -> u64 {
     return ino
 }
 
+const ENTRY_FIFO: u64 = 0xFF
+
+fn entry_batch(state: u64, dir: u64, first: u64, out: u64, cap: u64) -> u64 {
+    let de: u64 = dirent_size(state)
+    if de > cap {
+        return 0
+    }
+    let flags: u64 = enter(state)
+    let total: u64 = dir_entries(state, dir)
+    var count: u64 = 0
+    if first < total {
+        count = total - first
+        if count > cap / de {
+            count = cap / de
+        }
+        count = read_at_cached(state, dir, first * de, out, count * de) / de
+    }
+    leave(state, flags)
+    return count
+}
+
+fn entry_type(state: u64, ino: u64) -> u64 {
+    let flags: u64 = enter(state)
+    var kind: u64 = inode_get(state, ino, I_TYPE)
+    if kind != T_DIR && kind != T_LINK && inode_is_fifo(state, ino) {
+        kind = ENTRY_FIFO
+    }
+    leave(state, flags)
+    return kind
+}
+
 fn slot_count(state: u64, dir: u64) -> u64 {
     let flags: u64 = enter(state)
     let n: u64 = dir_entries(state, dir)
@@ -2153,6 +2230,50 @@ fn entry_at(state: u64, dir: u64, index: u64, out: u64, cap: u64) -> u64 {
             k = k + 1
         }
         i = i + count
+    }
+    leave(state, flags)
+    return got
+}
+
+fn entry_run(state: u64, dir: u64, index: u64, out: u64, cap: u64) -> u64 {
+    let de: u64 = dirent_size(state)
+    let max: u64 = cap / de
+    if max == 0 {
+        return 0
+    }
+    let flags: u64 = enter(state)
+    let n: u64 = dir_entries(state, dir)
+    var i: u64 = 0
+    var seen: u64 = 0
+    var got: u64 = 0
+    var next_slot: u64 = 0
+    let resume: u64 = dirindex.cursor_slot(state, dir, index)
+    if resume != dirindex.NO_CURSOR && resume <= n {
+        i = resume
+        seen = index
+    }
+    while i < n && got < max {
+        let count: u64 = dir_chunk(state, dir, i, n)
+        if count == 0 {
+            i = n
+        }
+        var k: u64 = 0
+        while k < count && got < max {
+            let e: u64 = dirscan.entry(k, de)
+            if regio.read64(e) != 0 {
+                if seen >= index {
+                    copy(e, out + got * de, de)
+                    got = got + 1
+                    next_slot = i + k + 1
+                }
+                seen = seen + 1
+            }
+            k = k + 1
+        }
+        i = i + count
+    }
+    if got != 0 {
+        dirindex.cursor_save(state, dir, index + got, next_slot)
     }
     leave(state, flags)
     return got
@@ -2240,6 +2361,54 @@ fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
             sz = regio.read64(at + I_SIZE)
         }
         nidx.note(state, nidx.OP_ADD, dir, ino, kind, sz, name)
+    }
+    return true
+}
+
+fn dir_rename_inplace(state: u64, dir: u64, oldname: u64, newname: u64) -> bool {
+    let slot: u64 = dir_slot_of(state, dir, oldname)
+    if slot == NO_SLOT || entry_block(state, slot) == NO_SLOT {
+        return false
+    }
+    let de: u64 = dirent_size(state)
+    let nl: u64 = name_len(state)
+    let ino: u64 = regio.read64(buf_nm(state))
+    let old_hash: u64 = dirindex.name_hash(oldname, nl)
+    octets.zero(buf_nm(state), de)
+    regio.write64(buf_nm(state), ino)
+    var k: u64 = 0
+    while k < nl - 1 && kstate.get8(newname + k) != 0 {
+        kstate.set8(buf_nm(state) + 8 + k, kstate.get8(newname + k) as u8)
+        k = k + 1
+    }
+    dirindex.hold(true)
+    let wrote: u64 = write_at(state, dir, slot * de, buf_nm(state), de)
+    dirindex.hold(false)
+    if wrote != de {
+        dirindex.touch(state, dir)
+        return false
+    }
+    dirindex.note_remove(state, dir, old_hash, slot)
+    dirindex.note_add(state, dir, dirindex.name_hash(newname, nl), slot)
+    var kind: u64 = 0
+    var sz: u64 = 0
+    if ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
+        let at: u64 = buf_in(state) + inode_off(state, ino)
+        kind = regio.read64(at + I_TYPE)
+        sz = regio.read64(at + I_SIZE)
+    }
+    if kind == T_FILE {
+        dcache.forget_node(state, ino)
+        dcache.forget_name(state, newname)
+    } else {
+        dcache.bump(state)
+        dcache.bump_add(state)
+    }
+    if !punktname(oldname) {
+        nidx.note(state, nidx.OP_DEL, dir, ino, kind, sz, oldname)
+    }
+    if !punktname(newname) {
+        nidx.note(state, nidx.OP_ADD, dir, ino, kind, sz, newname)
     }
     return true
 }
@@ -2556,6 +2725,18 @@ fn parent_ino(state: u64, p: u64) -> u64 {
     return dir
 }
 
+fn order_dir_blocks(state: u64, dir: u64) {
+    let count: u64 = (2 * dirent_size(state) + BS - 1) / BS
+    var i: u64 = 0
+    while i < count {
+        let b: u64 = block_of(state, dir, i)
+        if b != 0 {
+            wbscope.mark_pre(state, b)
+        }
+        i = i + 1
+    }
+}
+
 fn create_path_run(state: u64, p: u64, kind: u64) -> u64 {
     let flags: u64 = enter(state)
     let name: u64 = state + kstate.OFS3_OFF + kstate.OP_OLD
@@ -2580,7 +2761,10 @@ fn create_path_run(state: u64, p: u64, kind: u64) -> u64 {
             return 0
         }
     }
-    wbscope.order_create(state, inode_block_of(state, ino), data_start(state), kind == T_DIR)
+    wbscope.order_create(state, inode_block_of(state, ino), data_start(state))
+    if kind == T_DIR {
+        order_dir_blocks(state, ino)
+    }
     if !dir_add(state, dir, name, ino) {
         inode_release(state, ino)
         leave(state, flags)
@@ -2767,6 +2951,10 @@ fn rename_path_run(state: u64, from: u64, to: u64) -> u64 {
             inode_set(state, ex, I_NLINK, 0)
         }
         dir_remove_kind(state, ndir, newname, T_FILE)
+    }
+    if odir == ndir && dir_rename_inplace(state, odir, oldname, newname) {
+        leave(state, flags)
+        return 0
     }
     if !dir_add(state, ndir, newname, ino) {
         leave(state, flags)

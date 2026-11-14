@@ -7,20 +7,21 @@ OUT=${2:-$(mktemp -d)}
 osum_tmp_guard "${2:-}" "$OUT"
 EXPECT=${EXPECT:-tools/linuxapps/expected-red.txt}
 mkdir -p "$OUT"
-declare -A GUEST=( [F3]=tools/linuxapps/guest-fx1-version.sh [F4]=tools/linuxapps/guest-fx2-shot.sh [F5]=tools/linuxapps/guest-fx3-boot.sh [F6]=tools/linuxapps/guest-fx11-https-runs.sh )
-declare -A MARK=( [F3]="FX1 rc=0" [F4]="FX2 png ok" [F5]="wayd: window c=" )
+declare -A GUEST=( [F3]=tools/linuxapps/guest-fx1-version.sh [F4]=tools/linuxapps/guest-fx2-shot.sh [F5]=tools/linuxapps/guest-fx3-boot.sh [F6]=tools/linuxapps/guest-fx11-https-runs.sh [F8]=tools/linuxapps/guest-fx15-sandbox.sh )
+declare -A MARK=( [F3]="FX1 rc=0" [F4]="FX2 png ok" [F5]="wayd: window c=" [F8]="FX15 png ok" )
 pass=0
 fail=0
 KERNEL_ARG=()
 [ -n "${KERNEL:-}" ] && KERNEL_ARG=(env "KERNEL=$KERNEL")
 HTTPS_ARGS=("KARGS=osum vfs nokbd nosched noproc nofs fremdtrace gfx nic nip=10.0.2.15/24 ngw=10.0.2.2" "QEMU_EXTRA=-netdev user,id=n0 -device e1000,netdev=n0")
-for stage in ${STAGES:-F3 F4 F5 F6 F7 F7N}; do
+for stage in ${STAGES:-F3 F4 F5 F6 F7 F7N F8}; do
     want=$(awk -v s="$stage" '$1==s{print $2}' "$EXPECT")
     got=red
     first="no run: window stage needs a Wayland-capable run (F5 not implemented)"
     if [ -n "${GUEST[$stage]:-}" ]; then
         STAGE_ENV=()
         [ "$stage" = F6 ] && STAGE_ENV=(env "${HTTPS_ARGS[@]}")
+        [ "$stage" = F8 ] && STAGE_ENV=(env DRIVE=ahci)
         [ "$stage" = F5 ] && STAGE_ENV=(env GUI=1 "EXTRA=/etc/fx3.sh=$PWD/tools/linuxapps/guest-fx3-window.sh@755" "KARGS=gfx disp wm wmdauer wmshell osum vfs bus fremdtrace script=sh /etc/fx.sh;exit")
         BLOCKS=${BLOCKS:-1000000} TMO=${TMO:-900} "${STAGE_ENV[@]}" bash tools/linuxapps/run.sh "$WD" "${GUEST[$stage]}" "$OUT/$stage" > "$OUT/$stage.log" 2>&1
         if [ "$stage" = F5 ]; then verdict=$(python3 -I tools/linuxapps/f5check.py "$OUT/$stage/ser.clean" 2>&1); else verdict=""; fi

@@ -70,7 +70,7 @@ static int probe_errno(void)
 static volatile sig_atomic_t trapped;
 static void on_sigsys(int s) { (void)s; trapped = 1; }
 
-static volatile int info_signo, info_code, info_syscall;
+static volatile int info_signo, info_code, info_syscall, info_errno;
 static volatile long info_rax;
 static volatile unsigned info_arch;
 static volatile unsigned long info_call_addr;
@@ -81,6 +81,7 @@ static void on_sigsys_info(int s, siginfo_t *si, void *uc)
     const unsigned char *raw = (const unsigned char *)si;
     info_signo = s == si->si_signo ? s : -1;
     info_code = si->si_code;
+    info_errno = si->si_errno;
     info_call_addr = *(const unsigned long *)(raw + SIGINFO_CALL_ADDR);
     info_syscall = *(const int *)(raw + SIGINFO_SYSCALL);
     info_arch = *(const unsigned *)(raw + SIGINFO_ARCH);
@@ -158,6 +159,22 @@ static int body_trap_info(void)
     if (info_rax != NR_PROBE)
         return 95;
     return r == NR_PROBE ? 0 : 94;
+}
+
+static int body_trap_data(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = on_sigsys_info;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSYS, &sa, 0);
+    prctl(PR_SET_NNP, 1, 0, 0, 0);
+    if (install_nr_action(NR_PROBE, RET_TRAP | 0x2A5, 0) != 0)
+        return 90;
+    syscall(NR_PROBE);
+    if (!trapped)
+        return 91;
+    return info_errno == 0x2A5 ? 0 : 92;
 }
 
 static int body_trap_blocked(void)
@@ -467,6 +484,7 @@ int main(void)
     }
     check_exit("trap_delivers_sigsys", body_trap);
     check_exit("trap_siginfo_fields", body_trap_info);
+    check_exit("trap_errno_carries_data", body_trap_data);
     check_exit("trap_forced_when_blocked", body_trap_blocked);
     {
         int st = child_status(body_kill_thread_with_handler);

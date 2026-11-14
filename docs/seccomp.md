@@ -18,7 +18,7 @@ Scope: seccomp filter mode for browser sandboxes (Firefox, Chrome). `bpf()` stay
 
 ## Strict mode and SIGSYS
 - Strict mode (`seccomp(SECCOMP_SET_MODE_STRICT)`, `PR_SET_SECCOMP` 1) stores `HEAD_STRICT` in `T_SECCOMP`; only read, write, exit and rt_sigreturn pass, anything else kills the thread group. `PR_GET_SECCOMP` returns 1 strict, 2 filter. Filter and strict cannot be mixed (EINVAL).
-- TRAP and KILL_THREAD use `signal.force_sigsys`: SIGSYS is unblocked, KILL_THREAD (and SIG_IGN) reset the handler to default. The signal frame carries si_code SYS_SECCOMP, si_call_addr, si_syscall and si_arch (`sched/sigsysinfo.fi`). A TRAP leaves the syscall number in rax (Linux `syscall_rollback`), so Chromium/Firefox trap handlers read the right number; the call returns that number unless the handler overwrites rax.
+- TRAP and KILL_THREAD use `signal.force_sigsys`: SIGSYS is unblocked, KILL_THREAD (and SIG_IGN) reset the handler to default. The signal frame carries si_code SYS_SECCOMP, si_errno (the 16-bit filter data, the trap id Chromium/Firefox handlers look up), si_call_addr, si_syscall and si_arch (`sched/sigsysinfo.fi`). A TRAP leaves the syscall number in rax (Linux `syscall_rollback`), so Chromium/Firefox trap handlers read the right number; the call returns that number unless the handler overwrites rax.
 
 ## Not done
 - SECCOMP_RET_USER_NOTIF and SECCOMP_RET_TRACE have no supervisor.
