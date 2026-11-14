@@ -49,15 +49,17 @@ make_disk() {
     local disk=$1 efi=$2 bmode=$3 default=$4
     rm -f "$disk"
     head -c 64M /dev/zero > "$disk"
-    mkfs.vfat -F 32 "$disk" > /dev/null
-    mmd -i "$disk" ::EFI ::EFI/BOOT
-    mcopy -i "$disk" "$efi" ::EFI/BOOT/BOOTX64.EFI
+    sgdisk -n 1:2048:+60M -t 1:EF00 "$disk" > /dev/null
+    mkfs.vfat -F 32 --offset 2048 "$disk" > /dev/null
+    local esp="$disk@@$OSB_OFF"
+    mmd -i "$esp" ::EFI ::EFI/BOOT
+    mcopy -i "$esp" "$efi" ::EFI/BOOT/BOOTX64.EFI
     bash tools/abkernel/stub.sh "$OUT/a.mb" STUB-SLOT-A up
     bash tools/abkernel/stub.sh "$OUT/b.mb" "STUB-SLOT-B-$bmode" "$bmode"
-    mcopy -i "$disk" "$OUT/a.mb" ::osum-a.mb
-    mcopy -i "$disk" "$OUT/b.mb" ::osum-b.mb
+    mcopy -i "$esp" "$OUT/a.mb" ::osum-a.mb
+    mcopy -i "$esp" "$OUT/b.mb" ::osum-b.mb
     make_conf "$OUT/limine.conf" "$default"
-    mcopy -i "$disk" "$OUT/limine.conf" ::limine.conf
+    mcopy -i "$esp" "$OUT/limine.conf" ::limine.conf
 }
 
 power_cycle() {
@@ -87,8 +89,8 @@ slot_of() {
     else echo none; fi
 }
 
-counter() { mcopy -i "$1" ::osboot.try - 2>/dev/null | tr -d '\n' || true; }
-counter_set() { printf '%s\n' "$2" > "$OUT/try"; mcopy -o -i "$1" "$OUT/try" ::osboot.try; }
+counter() { mcopy -i "$1@@$OSB_OFF" ::osboot.try - 2>/dev/null | tr -d '\n' || true; }
+counter_set() { printf '%s\n' "$2" > "$OUT/try"; mcopy -o -i "$1@@$OSB_OFF" "$OUT/try" ::osboot.try; }
 
 cycles() {
     local disk=$1 tag=$2 n=$3 seq=""
