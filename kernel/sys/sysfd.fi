@@ -40,6 +40,7 @@ import fs.exfat
 import fs.fat
 import sys.sysconst
 import sys.sysuser
+import sys.widebuf
 import sys.systerm
 import sys.sysfifo
 import sys.sysfdalias
@@ -155,10 +156,18 @@ fn write_steps(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     var put: u64 = 0
     while put < len {
         var step: u64 = len - put
-        if step > sysconst.MAX_IO {
-            step = sysconst.MAX_IO
+        var r: u64 = 0
+        if step > widebuf.WIDE_BYTES {
+            step = widebuf.WIDE_BYTES
         }
-        let r: u64 = write_of(state, me, of, buf + put, step)
+        if wide_ok(state, of) {
+            r = write_wide(state, me, of, buf + put, step)
+        } else {
+            if step > sysconst.MAX_IO {
+                step = sysconst.MAX_IO
+            }
+            r = write_of(state, me, of, buf + put, step)
+        }
         if r >= 0xFFFFFFFFFFFFF000 {
             if put == 0 {
                 return r
@@ -285,8 +294,39 @@ fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     return file_commit(state, me, of, len)
 }
 
+fn wide_ok(state: u64, of: u64) -> bool {
+    let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_FILE {
+        return true
+    }
+    return kind == file.K_VFILE && vfs.type_of(state, file.open_mnt(state, of)) == vfsops.FS_OFS
+}
+
+fn write_wide(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    if !writable(state, of) {
+        return sysuser.neg(errno.E_BADF)
+    }
+    let bounce: u64 = widebuf.buffer(state)
+    if file.open_kind(state, of) == file.K_VFILE {
+        if mnt_gone(state, file.open_mnt(state, of)) {
+            return sysuser.neg(errno.E_NODEV)
+        }
+        if !sysuser.copy_in(state, me, bounce, buf, len) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        return vfs_commit_from(state, me, of, bounce, len)
+    }
+    if !sysuser.copy_in(state, me, bounce, buf, len) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return file_commit_from(state, me, of, bounce, len)
+}
+
 fn file_commit(state: u64, me: u64, of: u64, len: u64) -> u64 {
-    let bounce: u64 = sysuser.blockb(state)
+    return file_commit_from(state, me, of, sysuser.blockb(state), len)
+}
+
+fn file_commit_from(state: u64, me: u64, of: u64, bounce: u64, len: u64) -> u64 {
     let ino: u64 = file.open_ino(state, of)
     var off: u64 = file.open_off(state, of)
     if (file.open_flags(state, of) & sysconst.O_APPEND) != 0 {
@@ -780,8 +820,11 @@ fn vfs_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
 }
 
 fn vfs_commit(state: u64, me: u64, of: u64, want: u64) -> u64 {
+    return vfs_commit_from(state, me, of, sysuser.blockb(state), want)
+}
+
+fn vfs_commit_from(state: u64, me: u64, of: u64, bounce: u64, want: u64) -> u64 {
     let m: u64 = file.open_mnt(state, of)
-    let bounce: u64 = sysuser.blockb(state)
     let node: u64 = file.open_ino(state, of)
     var off: u64 = file.open_off(state, of)
     if (file.open_flags(state, of) & sysconst.O_APPEND) != 0 {
