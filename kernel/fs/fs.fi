@@ -1904,6 +1904,33 @@ fn write_at_scoped(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
     return n
 }
 
+const WRITE_RUN_BLOCKS: u64 = 256
+
+fn write_full_run(state: u64, ino: u64, pos: u64, src: u64, want: u64) -> u64 {
+    var count: u64 = 0
+    var first: u64 = 0
+    var cap: u64 = want
+    if cap > WRITE_RUN_BLOCKS {
+        cap = WRITE_RUN_BLOCKS
+    }
+    data_overwrite = 1
+    while count < cap {
+        let b: u64 = file_block_cached(state, ino, pos / BS + count)
+        if b == 0 || (count > 0 && b != first + count) {
+            break
+        }
+        if count == 0 {
+            first = b
+        }
+        count = count + 1
+    }
+    data_overwrite = 0
+    if count == 0 || !ofsj.write_blocks(state, first, src, count) {
+        return 0
+    }
+    return count * BS
+}
+
 fn write_at_blocks(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
     var n: u64 = 0
     // A full disk stops the writing and is REPORTED as the number of
@@ -1916,6 +1943,13 @@ fn write_at_blocks(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
         var chunk: u64 = BS - inb
         if chunk > len - n {
             chunk = len - n
+        }
+        if chunk == BS && len - n >= 2 * BS && !ofsj.enabled(state) {
+            let run: u64 = write_full_run(state, ino, pos, src + n, (len - n) / BS)
+            if run != 0 {
+                n = n + run
+                continue
+            }
         }
         // ------------------------------------------- RUNDE FSROBUST
         if ofsj.enabled(state) && ofsj.room(state) < 8 {
