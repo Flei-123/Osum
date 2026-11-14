@@ -210,7 +210,7 @@ L=$(line 'SV-H1'); chk "$(has "$L" 'secret=1 perm=-rw-------')" "an 11-character
 chk "$(has "$L" 'mode=random')" "storing the password alone does not change the running random mode ($L)"
 L=$(line 'SV-H '); chk "$(has "$L" 'service=running mode=fixed pw=Sup3rS3cret samepw=1')" "fixed password on: host restarted with exactly that password, mode fixed ($L)"
 chk "$(has "$L" 'sameid=1 identity=1 oldhome=0')" "the ID is unchanged after the restart, the identity lives in /var/xremote, not in /run ($L)"
-L=$(line 'SV-H-PERMS'); chk "$(has "$L" 'secret=-rw------- pw=-rw------- info=-rw-------')" "secret, password file and info file are 0600 ($L)"
+L=$(line 'SV-H-PERMS'); chk "$(has "$L" 'secret=-rw------- pw=-rw------- info=-rw------- home=drwx------')" "secret, password file, info file are 0600 and the identity home is 0700 ($L)"
 L=$(line 'SV-BUS-GETPW')
 echo "$L" | grep -q Sup3rS3cret && bad "fixed password leaks through settings.get" || ok "fixed password does not leak through settings.get"
 L=$(line 'SV-BUS-GETMODE'); chk "$(has "$L" 'value=fixed')" "bus: remote.mode reads fixed ($L)"

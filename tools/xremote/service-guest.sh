@@ -109,7 +109,7 @@ PWF3=$($B cat /run/xremote.pw 2>/dev/null)
 echo "SV-ID3 $ID3"
 echo "SV-PW3 $PW3"
 echo "SV-H service=$(kv $INFO service) mode=$(kv $INFO mode) pw=$PW3 samepw=$([ "$PW3" = "$PWF3" ] && echo 1 || echo 0) sameid=$([ "$ID3" = "$ID" ] && echo 1 || echo 0) identity=$(ex $HOMEID) oldhome=$(ex /run/xremote)"
-echo "SV-H-PERMS secret=$(perm $SECRET) pw=$(perm /run/xremote.pw) info=$(perm $INFO) home=$(perm /var/xremote/.)"
+echo "SV-H-PERMS secret=$(perm $SECRET) pw=$(perm /run/xremote.pw) info=$(perm $INFO) home=$($B ls -ld /var/xremote | $B cut -c1-10)"
 echo "SV-BUS-GETPW $(act_q call settings.get key=remote.fixedpw)"
 echo "SV-BUS-GETMODE $(act_q call settings.get key=remote.mode)"
 echo "SV-BUS-GETFIXED $(act_q call settings.get key=remote.fixed) conf=$($B tr '\n' ' ' < $CONF)"
