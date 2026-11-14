@@ -54,6 +54,8 @@ echo "FX7 all events:"
 grep -a '^FX[A-Z]* ' /tmp/fx3.log | grep -av '^FXMOVE ' | head -${FX7_EVENTS:-400}
 echo "FX7 wayland axis:"
 grep -a "pointer.*axis\|wl_pointer@[0-9]*\.\(enter\|leave\|motion\|frame\)" /tmp/fx3.log | tail -${FX7_AXTAIL:-30} | cut -c1-200
+echo "FX7 xdg:"
+grep -a "xdg_toplevel#[0-9]*\.\(configure\|set_\)\|xdg_surface#[0-9]*\.\(configure\|ack\|set_window\)\|wl_shm\(_pool\)\?#[0-9]*\.\(create_pool\|resize\)" /tmp/fx3.log | tail -${FX7_XDGTAIL:-40} | cut -c1-200
 echo "FX7 widget log:"
 grep -a -i "key\|focus\|enter\|leave\|seat" /tmp/fx3.log /tmp/e.log* | grep -av "FX[A-Z]* " | tail -${FX7_LOGTAIL:-40} | cut -c1-200
 echo "FX7 logsize: $(wc -c < /tmp/fx3.log) fx3, $(wc -c /tmp/e.log* | tail -n 1)"

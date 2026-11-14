@@ -48,6 +48,11 @@ const WIG_SCREEN: u64 = 1805
 const WM_FLUSH: u64 = 2105
 const WM_CLOSE: u64 = 2107
 const WM_APP: u64 = 2116
+const FIT_MARGIN: u64 = 16
+const FIT_DECO_X: u64 = 4
+const FIT_DECO_Y: u64 = 24
+const FIT_TASKBAR: u64 = 48
+const FIT_TRIES: u64 = 4
 
 const EMPTY_MAX: u64 = 20000
 
@@ -711,6 +716,56 @@ fn dbg_win(c: u64, win: u64) {
     ulib.sys(SYS_WRITE, 1, (&dbg_line[0 as usize]) as u64, dbg_pos)
 }
 
+fn fit_origin(want: u64, extent: u64, screen: u64) -> u64 {
+    if screen == 0 || screen > 16384 || want + extent <= screen {
+        return want
+    }
+    if extent >= screen {
+        return 0
+    }
+    return screen - extent
+}
+
+fn refit_oversized(c: u64, sid: u64, w: u64, h: u64, sw: u64, sh: u64) -> bool {
+    if sw == 0 || sw > 16384 || sh == 0 || sh > 16384 {
+        return false
+    }
+    let max_w: u64 = sw - FIT_DECO_X - FIT_MARGIN
+    let max_h: u64 = sh - FIT_DECO_Y - FIT_TASKBAR - FIT_MARGIN
+    if w <= max_w && h <= max_h {
+        return false
+    }
+    let xs: u64 = obj_get(c, sid, O_C)
+    if xs == 0 {
+        return false
+    }
+    let tl: u64 = obj_get(c, xs, O_B)
+    if tl == 0 {
+        return false
+    }
+    let tries: u64 = obj_get(c, tl, O_C)
+    if tries >= FIT_TRIES {
+        return false
+    }
+    obj_set(c, tl, O_C, tries + 1)
+    var fw: u64 = w
+    var fh: u64 = h
+    let last: u64 = obj_get(c, tl, O_D)
+    if last != 0 {
+        fw = last >> 16
+        fh = last & 0xFFFF
+    }
+    if w > max_w {
+        fw = fw - (w - max_w)
+    }
+    if h > max_h {
+        fh = fh - (h - max_h)
+    }
+    obj_set(c, tl, O_D, (fw << 16) | fh)
+    send_configure(c, tl, xs, fw, fh)
+    return true
+}
+
 fn surface_commit(c: u64, sid: u64) {
     if obj_get(c, sid, O_E) != 0 {
         sub_commit(c, sid)
@@ -729,7 +784,17 @@ fn surface_commit(c: u64, sid: u64) {
     }
     var win: u64 = obj_get(c, sid, O_A)
     if win == 0 {
-        let xy: u64 = ((60 + c * 220) << 16) | (60 + c * 40)
+        let sw: u64 = ulib.sys(WIG_SCREEN, 0, 0, 0)
+        let sh: u64 = ulib.sys(WIG_SCREEN, 1, 0, 0)
+        if refit_oversized(c, sid, w, h, sw, sh) {
+            let released: u64 = ev_begin(c, bid, 0)
+            ev_end(c, released, 0)
+            obj_set(c, sid, O_B, 0)
+            return
+        }
+        let x0: u64 = fit_origin(60 + c * 220, w + FIT_DECO_X, sw)
+        let y0: u64 = fit_origin(60 + c * 40, h + FIT_DECO_Y + FIT_TASKBAR, sh)
+        let xy: u64 = (x0 << 16) | y0
         let wh: u64 = (w << 16) | h
         var versuch: u64 = 0
         while versuch < 600 && (win == 0
@@ -1157,6 +1222,18 @@ fn on_xdg_surface(c: u64, id: u64, op: u64, argp: u64) {
         return
     }
     send_error(c, id, 1)
+}
+
+fn send_configure(c: u64, tl: u64, xs: u64, w: u64, h: u64) {
+    let pt: u64 = ev_begin(c, tl, 0)
+    ev_arg(c, pt, 0, w)
+    ev_arg(c, pt, 1, h)
+    ev_arg(c, pt, 2, 0)
+    ev_end(c, pt, 3)
+    let ps: u64 = ev_begin(c, xs, 0)
+    ev_arg(c, ps, 0, next_serial)
+    ev_end(c, ps, 1)
+    next_serial = next_serial + 1
 }
 
 fn on_xdg_toplevel(c: u64, id: u64, op: u64, argp: u64) {

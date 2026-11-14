@@ -21,6 +21,17 @@ poll_url_paint() {
     done
     return 1
 }
+wait_nav_paint() {
+    local n=0
+    until grep -qa "nav=[1-9]" "$OUT/ser.txt" 2>/dev/null || [ "$n" -ge "${FX7_MARKERCAP:-420}" ]; do sleep 5; n=$((n + 5)); done
+    n=0
+    while [ "$n" -lt "${FX7_NAVPOLLS:-20}" ]; do
+        mon "screendump $OUT/nav.ppm"; sleep 3
+        python3 -I tools/linuxapps/f7pix.py "$OUT/nav.ppm" 0000c8 > /dev/null && break
+        sleep "${FX7_NAVPOLLGAP:-5}"; n=$((n + 1))
+    done
+    sleep "${FX7_SETTLE:-10}"
+}
 build_guest_script() {
     local name
     for name in $(compgen -v FX7_); do printf '%s=%q\n' "$name" "${!name}"; done > "$OUT/fx7-guest.sh"
@@ -39,7 +50,7 @@ click_page_until() {
     return 1
 }
 drag_select() {
-    mon "mouse_move ${FX7_DRAGX0:--386} ${FX7_DRAGY0:--80}"; sleep 2
+    mon "mouse_move ${FX7_DRAGX0:--650} ${FX7_DRAGY0:--164}"; sleep 2
     mon "mouse_button 1"; sleep 1
     mon "mouse_move ${FX7_DRAGDX:-245} 0"; sleep 2
     mon "mouse_button 0"; sleep 5
@@ -68,7 +79,7 @@ mon() { printf '%s\n' "$1" | socat - "UNIX-CONNECT:$SOCK" > /dev/null 2>&1; }
     for k in a b c shift-d backspace left x; do mon "sendkey $k"; sleep 2; done
     sleep 5
     for k in pgdn pgdn pgdn end; do mon "sendkey $k"; sleep 3; done
-    mon "mouse_move 60 40"; sleep 1; click_page_until "nav=[1-9]"; wait_marker "nav=[1-9]"
+    mon "mouse_move 60 40"; sleep 1; click_page_until "nav=[1-9]"; wait_nav_paint
     mon "screendump $OUT/nav.ppm"; sleep 3
     mon "mouse_button 2"; sleep 1; mon "mouse_button 0"; sleep 3
     if [ -n "${FX7_POINTER:-}" ]; then
