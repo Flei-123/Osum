@@ -1213,9 +1213,11 @@ const W_SINCE: u64 = 0x298 // tick of the oldest dirty slot
 const W_MODE: u64 = 0x2A0 // 0 eager, 1 data-only scope, 2 structural
 const W_BIGRUN: u64 = 0x2B8
 const W_META: u64 = 0x2B0 // first lba after the metadata sectors written before directory data, 0 = no ordering
+const W_LO: u64 = 0x2C0
+const W_HI: u64 = 0x2C8
 const W_FREED: u64 = 0x2A8 // 1 while freed blocks or inodes are not yet on the drive
-const WB_SLOTS: u64 = 2048
-const WB_KEY_BYTES: u64 = 16384
+const WB_SLOTS: u64 = 4096
+const WB_KEY_BYTES: u64 = 32768
 const WB_IDLE_TICKS: u64 = 25
 const WB_MAX_TICKS: u64 = 100
 const WM_EAGER: u64 = 0
@@ -1346,7 +1348,7 @@ fn wb_active(state: u64) -> bool {
     return cg(state, W_BASE) != 0 && cg(state, W_DEPTH) != 0
 }
 
-const WB_FRAMES: u64 = 260
+const WB_FRAMES: u64 = 520
 
 static mut wb_last: [u64; 1] = [0 as u64; 1]
 
@@ -1362,7 +1364,7 @@ fn wb_grab(state: u64) -> u64 {
 
 fn wb_begin(state: u64) {
     if cg(state, W_BASE) == 0 && kstate.get(state, kstate.BITMAP) != 0 {
-        // 4 frames of slot keys + 256 frames of sector data
+        // 8 frames of slot keys + 512 frames of sector data
         let b: u64 = wb_grab(state)
         if b != 0 {
             var i: u64 = 0
@@ -1372,9 +1374,24 @@ fn wb_begin(state: u64) {
             }
             cs(state, W_BASE, b)
             cs(state, W_DIRTY, 0)
+            wb_bounds_reset(state)
         }
     }
     cs(state, W_DEPTH, cg(state, W_DEPTH) + 1)
+}
+
+fn wb_bounds_reset(state: u64) {
+    cs(state, W_LO, WB_SLOTS)
+    cs(state, W_HI, 0)
+}
+
+fn wb_bounds_note(state: u64, low: u64, high: u64) {
+    if low < cg(state, W_LO) {
+        cs(state, W_LO, low)
+    }
+    if high > cg(state, W_HI) {
+        cs(state, W_HI, high)
+    }
 }
 
 fn wb_begin_data(state: u64) {
@@ -1485,8 +1502,8 @@ fn wb_evict_run(state: u64, sl: u64) -> bool {
 
 fn wb_flush_range(state: u64, low: u64, high: u64) -> bool {
     var ok: bool = true
-    var sl: u64 = 0
-    while sl < WB_SLOTS {
+    var sl: u64 = cg(state, W_LO)
+    while sl <= cg(state, W_HI) {
         let m: u64 = wb_meta(state, sl)
         let lba: u64 = m & WB_LBA_MASK
         if m == 0 || lba < low || lba >= high {
@@ -1505,6 +1522,9 @@ fn wb_flush_range(state: u64, low: u64, high: u64) -> bool {
             cs(state, W_DIRTY, cg(state, W_DIRTY) - (e - sl))
             sl = e
         }
+    }
+    if cg(state, W_DIRTY) == 0 {
+        wb_bounds_reset(state)
     }
     return ok
 }
@@ -1535,6 +1555,7 @@ fn wb_flush(state: u64) -> bool {
         }
     }
     cs(state, W_DIRTY, 0)
+    wb_bounds_reset(state)
     cs(state, W_FREED, 0)
     if !wb_nvme_sync(state) {
         ok = false
@@ -1632,6 +1653,7 @@ fn wb_put(state: u64, dev: u64, lba: u64, src: u64) -> bool {
     }
     copy(src, wb_data(state, sl))
     wb_meta_set(state, sl, key)
+    wb_bounds_note(state, sl, sl)
     return true
 }
 
@@ -2109,6 +2131,7 @@ fn wb_put_span(state: u64, dev: u64, abs: u64, src: u64, k: u64) {
         j = j + 1
     }
     cs(state, W_DIRTY, cg(state, W_DIRTY) + fresh)
+    wb_bounds_note(state, first, first + k - 1)
 }
 
 fn write_blocks_held(state: u64, lba: u64, src: u64, n: u64) -> bool {
