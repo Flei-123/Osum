@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 
 /* SCM_RIGHTS queue: many descriptors per message, several messages queued, all-or-nothing push,
  * MSG_CTRUNC, MSG_CMSG_CLOEXEC. Each passed descriptor is the read end of a pipe holding one id byte. */
@@ -164,5 +165,43 @@ int main(void)
     int fl = n == 1 ? fcntl(got[0], F_GETFD) : -1;
     CHECK("cmsg_cloexec", n == 1 && fl >= 0 && (fl & FD_CLOEXEC), "n=%d fl=%d", n, fl);
     closeall(got, n > 0 ? n : 0);
+
+    /* 7. a received descriptor lands in a freed stdio slot (Firefox content has stderr closed) */
+    int sq[2];
+    socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sq);
+    mkpipes(src, 1, 160);
+    int hi = dup(sv[1]);
+    close(2);
+    r = send_fds(sv[0], src, 1, 0);
+    close(src[0]);
+    n = recv_fds(hi, got, 1, MSG_CMSG_CLOEXEC, &mf);
+    int slot = n == 1 ? got[0] : -1;
+    int gfd = slot >= 0 ? fcntl(slot, F_GETFD) : -1;
+    struct stat st;
+    int fst = slot >= 0 ? fstat(slot, &st) : -1;
+    CHECK("stdio_slot_reused", slot == 2, "slot=%d", slot);
+    CHECK("stdio_slot_getfd", gfd >= 0 && (gfd & FD_CLOEXEC), "gfd=%d errno=%d", gfd, errno);
+    CHECK("stdio_slot_fstat", fst == 0, "fstat=%d errno=%d", fst, errno);
+    CHECK("stdio_slot_read", slot >= 0 && ids_ok(got, 1, 160), "slot=%d", slot);
+    closeall(got, n > 0 ? n : 0);
+    close(hi);
+    /* 8. the same over SOCK_SEQPACKET (SandboxBroker) */
+    int hold = dup(sv[1]);
+    mkpipes(src, 1, 170);
+    hi = dup(sq[1]);
+    close(hold);
+    r = send_fds(sq[0], src, 1, 0);
+    int send_errno = errno;
+    close(src[0]);
+    n = recv_fds(hi, got, 1, MSG_CMSG_CLOEXEC, &mf);
+    slot = n == 1 ? got[0] : -1;
+    gfd = slot >= 0 ? fcntl(slot, F_GETFD) : -1;
+    fst = slot >= 0 ? fstat(slot, &st) : -1;
+    CHECK("seq_slot_reused", slot == 2, "slot=%d send=%d send_errno=%d recv=%d sq=%d,%d hi=%d", slot, r, send_errno, n, sq[0], sq[1], hi);
+    CHECK("seq_slot_getfd", gfd >= 0 && (gfd & FD_CLOEXEC), "gfd=%d errno=%d", gfd, errno);
+    CHECK("seq_slot_fstat", fst == 0, "fstat=%d errno=%d", fst, errno);
+    CHECK("seq_slot_read", slot >= 0 && ids_ok(got, 1, 170), "slot=%d", slot);
+    closeall(got, n > 0 ? n : 0);
+    close(hi);
     return 0;
 }

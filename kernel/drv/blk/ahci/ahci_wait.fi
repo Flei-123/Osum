@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+import diag.cmdopt
 import drv.blk.ahci_irq
 import arch.arch
 import sync.atomic
@@ -40,6 +41,10 @@ fn clear_status(state: u64, p: u64) {
 
 static mut s_irq_up: [u8; 35] = "ahci: interrupts on, msi vector 41\0"
 
+static mut s_irq_all: [u8; 11] = "ahciirqall\0"
+
+static mut irq_always: bool = false
+
 static mut s_irq_lost: [u8; 36] = "ahci: interrupt lost, polling again\0"
 
 fn irq_on(state: u64) -> bool {
@@ -58,7 +63,8 @@ fn irq_enable(state: u64, b: u64, p: u64) {
     kstate.set(state, ahci_state.sc(ahci_defs.S_IRQ_ERR), 0)
     clear_status(state, p)
     regio.write32_at(b, R_IS, 0xFFFFFFFF)
-    ahci_reg.pwr(state, p, ahci_defs.P_IE, IE_MASK)
+    irq_always = cmdopt.has(state, (&s_irq_all[0]) as u64)
+    completion_irq(state, p, irq_always)
     regio.write32_at(b, ahci_defs.R_GHC, regio.read32_at(b, ahci_defs.R_GHC) | GHC_IE)
     kstate.set(state, ahci_state.sc(ahci_defs.S_IRQ_ON), 1)
     serial.puts((&s_irq_up[0]) as u64)
@@ -138,7 +144,25 @@ fn finish_wait(state: u64, sleepy: bool, spin: u64, sleeps0: u64, irqs0: u64) ->
     return ahci_defs.W_DONE
 }
 
+fn completion_irq(state: u64, p: u64, on: bool) {
+    if irq_always && !on {
+        return
+    }
+    var mask: u64 = 0
+    if on {
+        mask = IE_MASK
+    }
+    ahci_reg.pwr(state, p, ahci_defs.P_IE, mask)
+}
+
 fn wait_sleepy(state: u64, p: u64, deadline: u64) -> u64 {
+    completion_irq(state, p, true)
+    let verdict: u64 = wait_sleepy_armed(state, p, deadline)
+    completion_irq(state, p, false)
+    return verdict
+}
+
+fn wait_sleepy_armed(state: u64, p: u64, deadline: u64) -> u64 {
     let sleeps0: u64 = blkperf.get(blkperf.K_AHCI_SLEEPS)
     let irqs0: u64 = blkperf.get(blkperf.K_AHCI_IRQS)
     var spin: u64 = 0

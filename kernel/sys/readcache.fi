@@ -5,6 +5,7 @@ import fs.file
 import fs.vfs
 import fs.pcache
 import fs.pcacherun
+import lib.kstate
 import sched.proc.procfault
 import sched.proc.procmap
 import arch.arch
@@ -14,7 +15,7 @@ import sys.sysuser
 
 export { serve }
 
-const PIECES_PER_LOCK: u64 = 4
+const PIECES_PER_LOCK: u64 = 16
 
 fn copy_run(state: u64, me: u64, dst: u64, pos: u64, end: u64, m: u64, node: u64, idx0: u64, packed: u64) -> u64 {
     let count: u64 = packed >> pcacherun.COUNT_SHIFT
@@ -22,7 +23,10 @@ fn copy_run(state: u64, me: u64, dst: u64, pos: u64, end: u64, m: u64, node: u64
     var j: u64 = 0
     var pieces: u64 = 0
     var failed: bool = false
+    let cache: u64 = kstate.get(state, kstate.PCACHE_BASE)
+    let set0: u64 = pcache.set_of(cache, node, m, idx0)
     var fl: u64 = mmlock.mm_lock(state)
+    guard.stac(state)
     while j < count && !failed {
         let page_at: u64 = (idx0 + j) << 12
         var from: u64 = 0
@@ -33,7 +37,7 @@ fn copy_run(state: u64, me: u64, dst: u64, pos: u64, end: u64, m: u64, node: u64
         if want > end - (page_at + from) {
             want = end - (page_at + from)
         }
-        let frame: u64 = pcacherun.run_frame(state, m, node, idx0, packed, j) + from
+        let frame: u64 = pcacherun.run_frame(cache, set0, packed, j) + from
         var inpage: u64 = 0
         while inpage < want && !failed {
             let to: u64 = dst + copied
@@ -43,26 +47,29 @@ fn copy_run(state: u64, me: u64, dst: u64, pos: u64, end: u64, m: u64, node: u64
             }
             let phys: u64 = procmap.user_phys(state, me, to)
             if phys != 0 {
-                guard.stac(state)
                 arch.copy_octets(phys, frame + inpage, piece)
-                guard.clac(state)
             } else {
+                guard.clac(state)
                 mmlock.mm_unlock(state, fl)
                 failed = !sysuser.copy_out(state, me, to, frame + inpage, piece)
                 fl = mmlock.mm_lock(state)
+                guard.stac(state)
             }
             if !failed {
                 copied = copied + piece
                 inpage = inpage + piece
                 pieces = pieces + 1
                 if pieces % PIECES_PER_LOCK == 0 {
+                    guard.clac(state)
                     mmlock.mm_unlock(state, fl)
                     fl = mmlock.mm_lock(state)
+                    guard.stac(state)
                 }
             }
         }
         j = j + 1
     }
+    guard.clac(state)
     mmlock.mm_unlock(state, fl)
     return copied
 }

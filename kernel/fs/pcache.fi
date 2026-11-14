@@ -10,7 +10,7 @@ export {
     drop_node, drop_ino, drop_mount, drop_all, take_frame,
     hits, misses, inserts, evictions, drops, resident, shrunk, bypassed,
     note_bypass, MISS, PAGE_BYTES, pin, unpin, valid_of,
-    base_of, find_way, slot_at, pin_slot, unpin_slot, pin_page, frame_at
+    base_of, find_way, slot_at, pin_slot, unpin_slot, pin_page, frame_at, set_of, run_slot, run_frame, pin_page_run
 }
 
 const MISS: u64 = 0xFFFFFFFFFFFFFFFF
@@ -155,12 +155,12 @@ fn base_of(state: u64) -> u64 {
 
 fn find_way(b: u64, node: u64, m: u64, idx: u64) -> u64 {
     let key: u64 = key_of(m, idx)
-    let sets_mask: u64 = __mmio_read64((b + H_SETS) as *mut u64) - 1
+    let sets_mask: u64 = *((b + H_SETS) as *mut u64) - 1
     let first: u64 = ((((node ^ (m << 56)) *% GOLDEN) >> 32) + idx) & sets_mask
     var s: u64 = b + SLOTS_AT + first * WAYS * SLOT_BYTES
     var way: u64 = 0
     while way < WAYS {
-        if __mmio_read64((s + S_KEY) as *mut u64) == key && __mmio_read64((s + S_NODE) as *mut u64) == node {
+        if *((s + S_KEY) as *mut u64) == key && *((s + S_NODE) as *mut u64) == node {
             return way + 1
         }
         s = s + SLOT_BYTES
@@ -175,15 +175,41 @@ fn pin_page(b: u64, node: u64, m: u64, idx: u64, need: u64) -> u64 {
         return 0
     }
     let s: u64 = slot_at(b, node, m, idx, way - 1)
-    if __mmio_read64((s + S_VALID) as *mut u64) < need {
+    if *((s + S_VALID) as *mut u64) < need {
         return 0
     }
     pin_slot(b, s)
     return way
 }
 
+fn run_slot(b: u64, set0: u64, j: u64, way: u64) -> u64 {
+    return slot_of(b, ((set0 + j) & (*((b + H_SETS) as *mut u64) - 1)) * WAYS + way)
+}
+
+fn run_frame(b: u64, set0: u64, j: u64, way: u64) -> u64 {
+    return *((run_slot(b, set0, j, way) + S_FRAME) as *mut u64)
+}
+
+fn pin_page_run(b: u64, set0: u64, j: u64, node: u64, m: u64, idx: u64, need: u64) -> u64 {
+    let key: u64 = key_of(m, idx)
+    var s: u64 = run_slot(b, set0, j, 0)
+    var way: u64 = 0
+    while way < WAYS {
+        if *((s + S_KEY) as *mut u64) == key && *((s + S_NODE) as *mut u64) == node {
+            if *((s + S_VALID) as *mut u64) < need {
+                return 0
+            }
+            pin_slot(b, s)
+            return way + 1
+        }
+        s = s + SLOT_BYTES
+        way = way + 1
+    }
+    return 0
+}
+
 fn frame_at(b: u64, node: u64, m: u64, idx: u64, way: u64) -> u64 {
-    return __mmio_read64((slot_at(b, node, m, idx, way) + S_FRAME) as *mut u64)
+    return *((slot_at(b, node, m, idx, way) + S_FRAME) as *mut u64)
 }
 
 fn slot_at(b: u64, node: u64, m: u64, idx: u64, way: u64) -> u64 {
