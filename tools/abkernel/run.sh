@@ -66,7 +66,7 @@ power_cycle() {
     local disk=$1 name=$2
     cp "$OSB_VARS" "$OUT/$name.vars"
     rm -f "$OUT/$name.txt"
-    timeout $((BOOT_SECS + 10)) qemu-system-x86_64 "${KVM[@]}" -machine q35 -m 512 -smp 1 \
+    timeout $((BOOT_SECS + 10)) qemu-system-x86_64 "${KVM[@]}" -machine q35 -m 2048 -smp 2 \
         -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OSB_CODE" \
         -drive "if=pflash,format=raw,unit=1,file=$OUT/$name.vars" \
         -drive "file=$disk,format=raw,if=none,id=d" -device ide-hd,drive=d,bus=ide.0,bootindex=0 \
