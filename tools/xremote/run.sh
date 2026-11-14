@@ -19,6 +19,9 @@ HOSTBIN=${XR_HOST:-$XRTOOLS/freeviewer-host}
 VIEWER=${XR_VIEWER:-$XRTOOLS/freeviewer-glibc}
 HEADS=${XR_HEADS:-1}
 DESKTOP=${XR_DESKTOP:-0}
+KEYTEST=${XR_KEYTEST:-}
+KEYS_EXPECT=${XR_KEYS_EXPECT:-22}
+MOUSE_EXPECT=${XR_MOUSE_EXPECT:-16}
 RELAYDIR=${XR_RELAY:-/root/projects/freeviewer/relay}
 NODEPATH=${XR_LIBS:-/root/jarvis/node_modules}
 LIBGCC=${XR_LIBGCC:-$WD/fx-root/usr/lib/libgcc_s.so.1}
@@ -75,7 +78,11 @@ ACC=(); [ -w /dev/kvm ] && ACC=(-accel kvm -cpu host)
     sleep 3
     timeout 90 "$VIEWER" --connect "$ID" xrpass 5 > "$T/viewer.txt" 2>&1
     sleep 2
-    timeout 90 "$VIEWER" --inputtest "$ID" xrpass > "$T/inputtest.txt" 2>&1
+    if [ -n "$KEYTEST" ]; then
+        timeout 90 "$VIEWER" --keytest "$ID" xrpass "$KEYTEST" > "$T/inputtest.txt" 2>&1
+    else
+        timeout 90 "$VIEWER" --inputtest "$ID" xrpass > "$T/inputtest.txt" 2>&1
+    fi
     if [ "$HEADS" -ge 2 ]; then
         sleep 2
         timeout 90 "$VIEWER" --connect "$ID" xrpass 4 --monitor 1 > "$T/viewer1.txt" 2>&1
@@ -138,6 +145,32 @@ else
     FR=$(grep -ac '^frame ' "$T/viewer.txt" 2>/dev/null)
     [ "${FR:-0}" -ge 2 ] && ok "viewer received $FR frames of the guest screen" || bad "viewer received ${FR:-0} frames"
     grep -aq "frame [0-9]* ${SW}x${SH}" "$T/viewer.txt" 2>/dev/null && ok "frame size equals the kernel screen size" || bad "frame size differs from the kernel screen size"
+fi
+if [ -n "$KEYTEST" ]; then
+    KT_BASE=$(grep -a '^XR-INPUT' "$S" | sed -n 2p | grep -o 'total=[0-9]*' | cut -d= -f2); KT_LAST=$(grep -a '^XR-INPUT' "$S" | tail -1 | grep -o 'total=[0-9]*' | cut -d= -f2)
+    KT_DELTA=$(( ${KT_LAST:-0} - ${KT_BASE:-0} ))
+    KT_WANT=$([ "$KEYTEST" = keys ] && echo "$KEYS_EXPECT" || echo "$MOUSE_EXPECT")
+    grep -aq '^OK: keytest done' "$T/inputtest.txt" 2>/dev/null && ok "viewer finished the $KEYTEST test" || bad "viewer keytest did not finish: $(tail -n 2 "$T/inputtest.txt" 2>/dev/null | tr '\n' ';')"
+    [ "$KT_DELTA" = "$KT_WANT" ] && ok "$KEYTEST test injected exactly $KT_WANT strokes in the guest (base $KT_BASE, last $KT_LAST)" || bad "$KEYTEST test injected $KT_DELTA strokes, expected $KT_WANT (base $KT_BASE, last $KT_LAST)"
+    P1=$(grep -a '^XR-INPUT' "$S" | tail -1)
+    echo "$P1" | grep -q 'buttons=0$' && ok "no button left pressed after the test" || bad "button state after the test: $P1"
+    if [ "$KEYTEST" = mouse ]; then
+        PXW=$((SW * 7000 / 10000)); PYW=$((SH * 7000 / 10000))
+        echo "$P1" | grep -q "px=$PXW py=$PYW " && ok "pointer at the drag end $PXW,$PYW" || bad "pointer after the drag (want $PXW,$PYW): $P1"
+        echo "$P1" | grep -q 'wheel=0 hwheel=0 ' && ok "wheel down 2 then up 2 nets zero" || bad "wheel after the test: $P1"
+    fi
+    if [ "$DESKTOP" = 1 ]; then
+        G1=$(grep -a '^XR-GRAB' "$S" | head -1); G2=$(grep -a '^XR-GRAB' "$S" | tail -1)
+        S1=$(echo "$G1" | grep -o 'sum=[0-9]*' | cut -d= -f2); S2=$(echo "$G2" | grep -o 'sum=[0-9]*' | cut -d= -f2)
+        if [ "$KT_WANT" = 0 ]; then
+            [ -n "$S2" ] && [ "$S2" = "$S1" ] && ok "control: the screen did not change (sum $S1)" || bad "control: the screen changed without keys: $G1 / $G2"
+        else
+            [ -n "$S2" ] && [ "$S2" != "$S1" ] && ok "the $KEYTEST test changed the desktop (sum $S1 -> $S2)" || bad "the $KEYTEST test left the screen unchanged: $G1 / $G2"
+        fi
+    fi
+    echo "== $pass ok, $fail fail"
+    [ -n "${KEEP:-}" ] && { mkdir -p "${KEEP_DIR:-/tmp/xremote-keep}"; cp -r "$OUT" "$T/viewer.txt" "$T/inputtest.txt" "$T/relay.log" "${KEEP_DIR:-/tmp/xremote-keep}/" 2>/dev/null; }
+    [ "$fail" = 0 ]; exit $?
 fi
 IN_BASE=$(grep -a '^XR-INPUT' "$S" | sed -n 2p | grep -o 'total=[0-9]*' | cut -d= -f2); IN_LAST=$(grep -a '^XR-INPUT' "$S" | tail -1 | grep -o 'total=[0-9]*' | cut -d= -f2)
 [ "${IN_LAST:-0}" -gt "${IN_BASE:-0}" ] && ok "viewer input arrived as $((IN_LAST - IN_BASE)) osum_tipp strokes after the baseline $IN_BASE" || bad "no osum_tipp strokes after the input test"
