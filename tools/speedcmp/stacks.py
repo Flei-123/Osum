@@ -16,7 +16,7 @@ def main():
         total += 1
         frames = [resolve(int(parts[3], 16))]
         if len(parts) > 4:
-            frames += [resolve(int(x, 16)) for x in parts[4].split(",")]
+            frames += [resolve(int(x, 16)) for x in parts[4].split(",") if x != "-"]
         stacks[" < ".join(frames[:depth])] += 1
     print("samples", total)
     for stack, count in stacks.most_common(top):

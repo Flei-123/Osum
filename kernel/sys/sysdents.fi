@@ -1,0 +1,154 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.errno
+import arch.arch
+import fs.fs
+import fs.file
+import sys.sysuser
+
+export { read_ofs, read_indexed }
+
+const DIRENT_HEAD: u64 = 19
+const STAGE_AT: u64 = 2048
+const STAGE_BYTES: u64 = 2048
+const BATCH_AT: u64 = 0
+const BATCH_BYTES: u64 = 2048
+const NAME_AT: u64 = 8
+const D_OFF_AT: u64 = 8
+const D_RECLEN_AT: u64 = 16
+const D_TYPE_AT: u64 = 18
+const DT_FIFO: u64 = 1
+const DT_DIR: u64 = 4
+const DT_REG: u64 = 8
+const DT_LNK: u64 = 10
+const WORD: u64 = 8
+
+fn dirent_type(state: u64, ino: u64) -> u64 {
+    let kind: u64 = fs.entry_type(state, ino)
+    if kind == fs.T_DIR {
+        return DT_DIR
+    }
+    if kind == fs.T_LINK {
+        return DT_LNK
+    }
+    if kind == fs.ENTRY_FIFO {
+        return DT_FIFO
+    }
+    return DT_REG
+}
+
+fn name_length(text: u64) -> u64 {
+    var n: u64 = 0
+    while kstate.get8(text + n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn reclen_of(name_len: u64) -> u64 {
+    return (DIRENT_HEAD + name_len + 1 + 7) & 0xFFFFFFFFFFFFFFF8
+}
+
+fn build_entry(state: u64, at: u64, ino: u64, pos: u64, text: u64, n: u64) -> u64 {
+    let reclen: u64 = reclen_of(n)
+    arch.fill_words(at, 0, reclen / WORD)
+    kstate.set(at, 0, ino)
+    kstate.set(at, D_OFF_AT, pos + 1)
+    kstate.set8(at + D_RECLEN_AT, (reclen & 255) as u8)
+    kstate.set8(at + D_RECLEN_AT + 1, (reclen >> 8) as u8)
+    kstate.set8(at + D_TYPE_AT, dirent_type(state, ino) as u8)
+    arch.copy_octets(at + DIRENT_HEAD, text, n)
+    return reclen
+}
+
+fn flush_stage(state: u64, me: u64, of: u64, out: u64, stage: u64, staged: u64, next_pos: u64) -> bool {
+    if staged == 0 {
+        return true
+    }
+    if !sysuser.copy_out(state, me, out, stage, staged) {
+        return false
+    }
+    file.open_set_off(state, of, next_pos)
+    return true
+}
+
+fn stage_flush(state: u64, me: u64, of: u64, dst: u64, stage: u64, staged: u64, next_pos: u64) -> bool {
+    if staged == 0 {
+        return true
+    }
+    if !sysuser.copy_out(state, me, dst, stage, staged) {
+        return false
+    }
+    file.open_set_off(state, of, next_pos)
+    return true
+}
+
+fn read_ofs(state: u64, me: u64, of: u64, out: u64, size: u64) -> u64 {
+    return read_dir(state, me, of, out, size, false)
+}
+
+fn read_indexed(state: u64, me: u64, of: u64, out: u64, size: u64) -> u64 {
+    return read_dir(state, me, of, out, size, true)
+}
+
+fn fetch(state: u64, dir: u64, pos: u64, batch: u64, indexed: bool) -> u64 {
+    if indexed {
+        return fs.entry_run(state, dir, pos, batch, BATCH_BYTES)
+    }
+    return fs.entry_batch(state, dir, pos, batch, BATCH_BYTES)
+}
+
+fn read_dir(state: u64, me: u64, of: u64, out: u64, size: u64, indexed: bool) -> u64 {
+    let dir: u64 = file.open_ino(state, of)
+    let batch: u64 = sysuser.blockb(state) + BATCH_AT
+    let stage: u64 = sysuser.blockb(state) + STAGE_AT
+    let stride: u64 = fs.dirent_size(state)
+    var slots: u64 = 0xFFFFFFFFFFFFFFFF
+    if !indexed {
+        slots = fs.slot_count(state, dir)
+    }
+    var pos: u64 = file.open_off(state, of)
+    var written: u64 = 0
+    var staged: u64 = 0
+    var full: bool = false
+    while !full && pos < slots {
+        let count: u64 = fetch(state, dir, pos, batch, indexed)
+        var k: u64 = 0
+        if count == 0 {
+            full = true
+        }
+        while k < count && !full {
+            let entry: u64 = batch + k * stride
+            let ino: u64 = kstate.get(entry, 0)
+            let text: u64 = entry + NAME_AT
+            let n: u64 = name_length(text)
+            let reclen: u64 = reclen_of(n)
+            if ino != 0 && written + staged + reclen > size {
+                if written + staged == 0 {
+                    return sysuser.neg(errno.E_INVAL)
+                }
+                full = true
+            } else if ino != 0 {
+                if staged + reclen > STAGE_BYTES {
+                    if !stage_flush(state, me, of, out + written, stage, staged, pos) {
+                        return sysuser.neg(errno.E_FAULT)
+                    }
+                    written = written + staged
+                    staged = 0
+                }
+                staged = staged + build_entry(state, stage + staged, ino, pos, text, n)
+            }
+            if !full {
+                pos = pos + 1
+                k = k + 1
+            }
+        }
+    }
+    if !stage_flush(state, me, of, out + written, stage, staged, pos) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    file.open_set_off(state, of, pos)
+    return written + staged
+}

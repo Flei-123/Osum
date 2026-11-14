@@ -126,6 +126,13 @@ static void run_write_fsync_small(long n)
     }
 }
 
+static long long timed_write_fsync_small(long n)
+{
+    long long t0 = now_ns();
+    run_write_fsync_small(n);
+    return now_ns() - t0;
+}
+
 static long long timed_create(long n)
 {
     long long t0 = now_ns();
@@ -174,7 +181,7 @@ static void wb_run_all(void)
     wb_prepare();
     measure("write_4kib_seq", run_write_seq, 256, 1, 1);
     measure("pwrite_4kib", run_pwrite, 256, 1, 1);
-    measure("write_4kib_fsync", run_write_fsync_small, WB_FSYNC_BATCH, 1, 1);
+    measure_timed("write_4kib_fsync", timed_write_fsync_small, WB_FSYNC_BATCH);
     measure_timed("create_write_close", timed_create, WB_BATCH);
     measure_timed("rename_file", timed_rename, WB_BATCH);
     measure_timed("unlink_file", timed_unlink, WB_BATCH);

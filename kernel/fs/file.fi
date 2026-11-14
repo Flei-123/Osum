@@ -28,7 +28,7 @@ export {
     K_FREE, K_FILE, K_DIR, K_CONIN, K_CONOUT, K_PIPER, K_PIPEW, K_FB,
     K_TTY, K_SOCK, K_VFILE, K_VDIR, K_USOCK, K_SHM,
     K_EVENT, K_TIMER, K_SIGFD, K_EPOLL, K_INOTIFY, K_NETLINK, K_PIDFD, K_MQUEUE, K_FANOTIFY,
-    open_x1, open_set_x1, open_x2, open_set_x2, open_addr, of_at, OF_OFF, OF_BYTES, OF_KIND, OF_INO, OF_FLAGS, OF_MNT,
+    inotify_live, open_x1, open_set_x1, open_x2, open_set_x2, open_addr, of_at, OF_OFF, OF_BYTES, OF_KIND, OF_INO, OF_FLAGS, OF_MNT,
     open_mnt, open_set_mnt, open_settle,
     fd_handle, fd_rights, fd_may, fd_check, fd_set_rights, fd_pass,
     rights_of_open,
@@ -132,12 +132,11 @@ fn fd_check(state: u64, task: u64, fd: u64, need: u64) -> u64 {
         return MAX_OPEN
     }
     var t: u64 = task
-    if (__mmio_read64((state + kstate.TASK_OFF + task * kstate.TASK_BYTES
+    if (*((state + kstate.TASK_OFF + task * kstate.TASK_BYTES
         + taskconst.T_FDOWN) as *mut u64) & FDOWN_SLOT) != 0 {
         t = owner(state, task)
     }
-    let h: u64 = __mmio_read64(
-        (state + kstate.FDTAB_OFF + (t * MAX_FD + fd) * 8) as *mut u64)
+    let h: u64 = *((state + kstate.FDTAB_OFF + (t * MAX_FD + fd) * 8) as *mut u64)
     if h == handle.HANDLE_NONE {
         return MAX_OPEN
     }
@@ -476,11 +475,20 @@ fn open_used(state: u64, i: u64) -> bool {
     return kstate.get(state, of_at(i) + OF_KIND) != K_FREE
 }
 
+static mut inotify_open: u64 = 0
+
+fn inotify_live() -> bool {
+    return atomic.load((&inotify_open) as u64) != 0
+}
+
 fn open_alloc(state: u64, kind: u64, ino: u64, flags: u64) -> u64 {
     var i: u64 = CON_ERR + 1
     while i < MAX_OPEN {
         if kstate.get(state, of_at(i) + OF_KIND) == K_FREE {
             kstate.set(state, of_at(i) + OF_KIND, kind)
+            if kind == K_INOTIFY {
+                atomic.fetch_add((&inotify_open) as u64, 1)
+            }
             kstate.set(state, of_at(i) + OF_INO, ino)
             kstate.set(state, of_at(i) + OF_OFF, 0)
             kstate.set(state, of_at(i) + OF_REF, 1)
@@ -583,6 +591,9 @@ fn open_teardown(state: u64, i: u64) {
         if dt == vfsops.FS_FAT {
             fat.node_drop(state, p)
         }
+    }
+    if kind == K_INOTIFY {
+        atomic.fetch_sub((&inotify_open) as u64, 1)
     }
     kstate.set(state, of_at(i) + OF_KIND, K_FREE)
     kstate.set(state, of_at(i) + OF_INO, 0)
