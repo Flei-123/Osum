@@ -24,7 +24,7 @@ import net.kodb
 export { arp_flush, arp_ask, echoes, EPHEMERAL_BASE, EPHEMERAL_MASK,
     init, ready, pump, netd_body, wake, configure, readdr, us, set_task,
     ip, mask, gw, mac_at, stat, pumps, frames_in, frames_out,
-    carrier, gw_known, link_speed, hwstat,
+    carrier, gw_known, gw_verified, link_speed, hwstat,
     bounce, saddr,
     tcp_stat, sock_dbg, task_slot, print_state,
     card_octets, hw_for,
@@ -86,6 +86,8 @@ const SOCK_MAX: u64 = 16
 const ARP_OFF: u64 = 0x600
 const ARP_BYTES: u64 = 16
 const ARP_MAX: u64 = 8
+const ARP_MAC_MASK: u64 = 0xFFFFFFFFFFFF
+const ARP_VERIFIED: u64 = 0x8000000000000000
 
 const ICMP_OFF: u64 = 0x700
 const ICMP_BYTES: u64 = 256
@@ -197,6 +199,14 @@ fn gw_known(state: u64) -> bool {
         return false
     }
     return arp_look(state, g) != 0
+}
+
+fn gw_verified(state: u64) -> bool {
+    let g: u64 = gw(state)
+    if g == 0 {
+        return false
+    }
+    return arp_verified(state, g)
 }
 
 fn pumps(state: u64) -> u64 {
@@ -703,12 +713,14 @@ fn learn(state: u64, f: u64, n: u64) {
         return
     }
     var src: u64 = 0
+    var reply: bool = false
     let et: u64 = wire.eth_type(f as *mut u8) as u64
     if et == wire.ETYPE_ARP as u64 {
         if n < 14 + wire.ARP_LEN as u64 {
             return
         }
         src = wire.arp_spa(((f + 14) as *mut u8)) as u64
+        reply = wire.arp_op(((f + 14) as *mut u8)) == wire.ARP_REPLY
     } else if et == wire.ETYPE_IP4 as u64 {
         if n < 14 + 20 {
             return
@@ -744,8 +756,17 @@ fn learn(state: u64, f: u64, n: u64) {
         slot = kstate.get(state, sc(S_ARPN)) % ARP_MAX
         kstate.set(state, sc(S_ARPN), slot + 1)
     }
+    var word: u64 = mac
+    if reply {
+        word = word | ARP_VERIFIED
+    } else if kstate.get(state, arp_at(slot)) == src {
+        let old: u64 = kstate.get(state, arp_at(slot) + 8)
+        if (old & ARP_MAC_MASK) == mac {
+            word = word | (old & ARP_VERIFIED)
+        }
+    }
     kstate.set(state, arp_at(slot), src)
-    kstate.set(state, arp_at(slot) + 8, mac)
+    kstate.set(state, arp_at(slot) + 8, word)
 }
 
 fn next_hop(state: u64, dst: u64) -> u64 {
@@ -789,18 +810,29 @@ fn arp_ip_at(state: u64, i: u64) -> u64 {
 }
 
 fn arp_mac_slot(state: u64, i: u64) -> u64 {
-    return kstate.get(state, arp_at(i) + 8)
+    return kstate.get(state, arp_at(i) + 8) & ARP_MAC_MASK
 }
 
 fn arp_look(state: u64, target: u64) -> u64 {
     var i: u64 = 0
     while i < ARP_MAX {
         if kstate.get(state, arp_at(i)) == target {
-            return kstate.get(state, arp_at(i) + 8)
+            return kstate.get(state, arp_at(i) + 8) & ARP_MAC_MASK
         }
         i = i + 1
     }
     return 0
+}
+
+fn arp_verified(state: u64, target: u64) -> bool {
+    var i: u64 = 0
+    while i < ARP_MAX {
+        if kstate.get(state, arp_at(i)) == target {
+            return (kstate.get(state, arp_at(i) + 8) & ARP_VERIFIED) != 0
+        }
+        i = i + 1
+    }
+    return false
 }
 
 fn arp_ask(state: u64, target: u64) {
