@@ -14,9 +14,23 @@ NEEDED = (
     ("wheel", re.compile(rb"^FXWHEEL ")),
     ("scroll", re.compile(rb"^FXSCROLL [1-9]")),
     ("click", re.compile(rb"^FXCLICK ")),
+    ("drag selection", re.compile(rb"^FXDRAG \w+ \w+")),
+    ("double click word", re.compile(rb"^FXDBL \w+$")),
     ("link navigation", re.compile(rb"^FXNAV \?nav")),
     ("url bar navigation", re.compile(rb"^FXURL \?u")),
 )
+
+
+SIZE = re.compile(rb"^FX(?:SIZE|RESIZE) (\d+)x(\d+)")
+
+
+def grew(lines):
+    sizes = [int(m.group(1)) for m in (SIZE.match(l) for l in lines) if m]
+    return len(sizes) >= 2 and max(sizes[1:]) > sizes[0]
+
+
+def resize_note(lines):
+    return "; window resize " + ("followed" if grew(lines) else "NOT followed")
 
 
 def verdict(path):
@@ -27,8 +41,8 @@ def verdict(path):
                 return "red", "crash marker: " + marker.decode()
     missing = [name for name, pat in NEEDED if not any(pat.match(l) for l in lines)]
     if missing:
-        return "red", "page never saw: " + ", ".join(missing)
-    return "green", "load, typing, shifted key, backspace, cursor edit, key, wheel, scroll, click, right click, link navigation and url bar navigation all reached the page"
+        return "red", "page never saw: " + ", ".join(missing) + resize_note(lines)
+    return "green", resize_note(lines)[2:] + "; load, typing, shifted key, backspace, cursor edit, key, wheel, scroll, click, right click, drag selection, double click, window resize, link navigation and url bar navigation all reached the page"
 
 
 if __name__ == "__main__":
