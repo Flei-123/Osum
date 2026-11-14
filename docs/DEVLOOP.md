@@ -50,7 +50,7 @@ Schweregrad: **BLOCKIERT** = ohne das kein Alltag/keine Schleife, **STÖRT** = g
 | L4 | **OTA hat am Dell-Stick keinen Platz**: 20,3 MB nötig (vorher 47,4) / 5,4 MB frei; Wurzel liegt als `root.img` auf 96-MiB-ESP, Fernupdate passt nur knapp („Tight“, `dell-update.py`); r469 will ESP ≥ 192 MiB | **BLOCKIERT** (für OTA auf Stick) | r542, r550, r336, r351, r469; nach Installation auf Platte entfällt das teilweise (Platzbedarf der Platten-Wurzel ungeprüft) |
 | L5 | **Kern/GUI-Änderungen nur per Voll-Update + Neustart**: Fenster, Titelleisten, Menüs, Rahmen leben im Kern (`wm.fi`, 14k Zeilen) bzw. in Starter/wlib — nicht im Feed. Das sind genau die Dinge, zu denen du Feedback gibst. | **BLOCKIERT** für „Strg+F5-Gefühl“ | r330, r104, r413 (wm.fi nach Ring 3 = Risiko, Planung) |
 | L6 | **Eingabe-Pfad (Klick/Tippen) am Dell ungeprüft**; `dell_walk echt` nie gelaufen; USB-Tasten-Reihenfolge bei schnellem Tippen vertauscht (H-001); Maus am Dell zuletzt „bewegt sich nicht“ (r153, mit neuem Abbild nachtesten) | **BLOCKIERT** für Auto-Test am Dell | r526, r157, r153 |
-| L7 | **Rollback des Kerns braucht einen Menschen** (Bootmenü). OTA-Rollback gilt nur für Programme; Gesundheitsprüfung nur 60 s nach Start (r274); Taskleiste/Starter werden bei Tod nicht neu gestartet (r331); `jarvisd`-Respawn nicht belegt (r531: `respawn.sh` 0/3) | STÖRT (Risiko: Dell hängt, keiner am Gerät) | r274, r331, r531, `dell-update.py` Kopf |
+| L7 | ~~Rollback des Kerns braucht einen Menschen~~ (osboot-Fehlstartzähler, siehe 9; offen nur: Kern und osboot selbst gleichzeitig kaputt). OTA-Rollback gilt nur für Programme; Gesundheitsprüfung nur 60 s nach Start (r274); Taskleiste/Starter werden bei Tod nicht neu gestartet (r331); `jarvisd`-Respawn nicht belegt (r531: `respawn.sh` 0/3) | STÖRT (Risiko: Dell hängt, keiner am Gerät) | r274, r331, r531, `dell-update.py` Kopf |
 | L8 | **Feed liegt nicht auf dem Stand von main**: Veröffentlichen ist Handarbeit (r178), `stable/`/`test/`-Verzeichnisse existieren auf dem Live-Store nicht (Freigabe nötig), Abbild kennt seine Fassung nicht (r314: `FASSUNG = 0`) | STÖRT | r178, r314, `docs/OTA.md` Abschnitt Kanäle |
 | L9 | **OTA-Einspielen langsam**: 14 Pakete ≈ 25 min in VM (≈1 min Download + 1,5 min `opk` je Paket); wo die Zeit bleibt: ungemessen | STÖRT | r179 |
 | L10 | **Browser**: Certus nicht im Personal-Abbild (Platz, r546), Web-Konformität lückenhaft (r120–r124), TLS 1.2 fehlt (r405). Firefox-Unterbau gemessen: freie Deskriptoren 13 (Ziel ≥256), Fäden 28 (≥64), anonymer Speicher 185 MiB (≥256), Dateischreiben 26 KiB/s (≥10000); Aufgabentafel 32 Plätze (r344) | STÖRT (Alltag), Firefox = **Wochen** | Kennzahlen, r516–r519, r344 |
@@ -285,3 +285,22 @@ Source: `docs/ACCEL.md` (C-03, C-02/B-03, B-01/B-02). Everything below is measur
 - Measured (`bash tools/kernel/buildcache-test.sh`, 15/0, load ~10): cold 40.5 s, warm 1.7 s, uncached 46.1 s (before this change: 43.6 s with two builds at once, ~58 s single). Counter-proof: a changed source line gives 2 misses and a different image; `OSUM_BUILD_CACHE_VERIFY=1` compiles on a hit and compares.
 - Switches: `OSUM_BUILD_CACHE=off|<dir>`, `OSUM_BUILD_CACHE_MAX_MB` (default 1024, oldest entries pruned), `OSUM_BUILD_CACHE_VERIFY=1`. Log lines `buildcache: hit|miss <root> key=<12 hex> (<n> ms)`.
 - Not done (next): one kernel image per commit shared by all gates (artifact store) - gates that call `build-kernel.sh` with other options (`--gui off`, `--ohne-tunnel`, other `OSUM_*`) are other keys, which is correct. Gates that still link their own `ld` line or use `firnc` directly do not use the cache yet.
+
+## 9. Test directly on the HP (14.11.2026): the HP always comes back
+
+QEMU stays for quick regression and parallel runs; features are tried on the HP itself.
+
+### 9.1 Flow
+1. Publish: `JARVIS_DEVICE_KEY=<dummy key> HP_REF=origin/main HP_BASE=/root/abbilder/hp-base-b5f6673 heavy bash tools/ota/republish-hp.sh "<notes>"`.
+2. On the HP: `ota system apply` (slot B + `default_entry: 2` + `/osboot.try` = 0, trial armed), then restart.
+3. Trial boot: osboot counts the start in `/osboot.try` (ESP) BEFORE it loads slot 2. After 2 starts without confirm the third start boots slot 1.
+4. Health: `ota boot` (started by the desktop) confirms after 60 s when `desktop` AND `taskbar` run (or `glogin`). Confirm promotes slot B to slot A and resets the counter.
+5. Failure: hang (NMI detector resets after 10 s), panic (trial boots set `crashrestart`, reset after 20 s), reset loop, dead desktop (`ota boot` reboots after 120 s): all end on slot 1 without a person at the boot menu. `ota boot` there writes `/var/log/ota-rollback.log` and the Updates state `failed`.
+
+### 9.2 What does NOT rescue the HP
+- Slot 1 itself broken, or osboot / ESP broken: the recover stick (`tools/recover`) is the way back.
+- A trial kernel that boots, passes the health check and is wrong in a way only the Boss sees: `ota rollback`.
+- Power cut during ESP writes (FAT): the counter file is 2 bytes, `limine.conf` is a one byte flip; both are single-sector writes.
+
+### 9.3 Gates
+`tools/abkernel/run.sh` (stub kernels: ok, hang, reset; counter-proof without the counter), `tools/bootloader/run.sh`, `tools/ota/run.sh --kurz`, `tools/abkern/run.sh`.

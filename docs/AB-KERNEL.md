@@ -22,3 +22,11 @@ Not started: both need ESP writes from the running system and a two-slot install
 - `ab.esp_flip` (kernel/lib/ab.fi): when `ab_boot` rolls the generation back (attempts used up), the kernel mounts the ESP of its boot disk on `/mnt` (first GPT EFI/FAT32 partition of the root device), looks for a line `default_entry: N` at a line start in `/limine.conf` and rewrites the digit to `1` (ONE byte = one sector write), then unmounts (FAT sync). Serial: `ab: esp: default_entry set to 1`; other outcomes: `no gpt`, `mount failed`, `no limine.conf`, `no default_entry`, `default_entry is 1`.
 - Arming a slot B is NOT automated yet: nothing writes `osum-b.mb` / `default_entry: 2` / the matching `/system/ERPROBUNG` (that is the OTA kernel-update path, ring 3 needs an ESP write). The kernel half is measured with a hand-armed disk: `tools/abkern/run.sh`.
 - Limits unchanged: only kernels that reach `ab_boot` are caught (a kernel that dies earlier still needs option 1, the EFI selector). Single-digit `default_entry` only.
+
+## Status 14.11.2026 (W-HP-FALLBACK9): option 1 built inside osboot
+- `boot/uefi/trycount.fi`: when the default entry is not entry 1, osboot reads `/osboot.try` (one digit + newline) on the ESP, boots entry 1 when the digit is >= 2 (`osboot: trial slot failed, falling back to slot 1`), else writes digit+1 and boots the default entry. The count happens before the kernel runs, so kernels that die before `ab_boot` (panic, reset, hang) are covered.
+- Reset: `ota` (`otatrial.counter_reset`) writes `0` when it arms the trial (`su_conf_arm`), when it promotes (`su_conf_unarm`) and when it finds the trial lost on slot 1 (`su_finish`, which also puts `default_entry` back to 1 and writes `/var/log/ota-rollback.log`).
+- `ab_boot` turns on `crashrestart` (M_PANICBOOT) for every trial attempt so a panic resets after 20 s; the NMI hang detector (default on) resets after a hard hang. Both end in a power cycle that osboot counts.
+- `ota boot` health: `desktop` running needs `taskbar` too (when `/bin/taskbar` exists).
+- Gate: `tools/abkernel/run.sh`. Limit: UEFI only; BIOS loader has no counter.
+
