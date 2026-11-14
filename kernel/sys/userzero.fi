@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.kstate
+import sched.proc.procfault
+import sched.proc.procmap
+import arch.arch
+import arch.x86_64.guard
+import mm.mmlock
+
+export { zero_out }
+
+const PAGE_BYTES: u64 = 4096
+const WORD_BYTES: u64 = 8
+
+fn zero_page_span(phys: u64, room: u64) {
+    let words: u64 = room / WORD_BYTES
+    arch.fill_words(phys, 0, words)
+    var i: u64 = words * WORD_BYTES
+    while i < room {
+        kstate.set8(phys + i, 0 as u8)
+        i = i + 1
+    }
+}
+
+fn zero_out(state: u64, me: u64, dst: u64, len: u64) -> bool {
+    if !procfault.user_ok(state, me, dst, len) {
+        return false
+    }
+    var n: u64 = 0
+    while n < len {
+        let mmfl: u64 = mmlock.mm_lock(state)
+        let phys: u64 = procmap.translate(state, me, dst + n)
+        if phys == 0 {
+            mmlock.mm_unlock(state, mmfl)
+            return false
+        }
+        var room: u64 = PAGE_BYTES - ((dst + n) & (PAGE_BYTES - 1))
+        if room > len - n {
+            room = len - n
+        }
+        guard.stac(state)
+        zero_page_span(phys, room)
+        guard.clac(state)
+        mmlock.mm_unlock(state, mmfl)
+        n = n + room
+    }
+    return true
+}
