@@ -1201,6 +1201,58 @@ fn cache_put(state: u64, dev: u64, lba: u64, src: u64) {
     }
 }
 
+fn cache_put_overlap(state: u64, xb: u64, w: u64, dev: u64, lba: u64, src: u64, n: u64) {
+    if wgx(state, xb, w, C_VALID) == 0 || wgx(state, xb, w, C_DEV) != dev {
+        return
+    }
+    let c0: u64 = wgx(state, xb, w, C_LBA)
+    let c1: u64 = c0 + wgx(state, xb, w, C_N)
+    var lo: u64 = lba
+    var hi: u64 = lba + n
+    if c0 > lo {
+        lo = c0
+    }
+    if c1 < hi {
+        hi = c1
+    }
+    if lo >= hi {
+        return
+    }
+    arch.copy_words(gone_data(state, w) + (lo - c0) * BLOCK_SIZE, src + (lo - lba) * BLOCK_SIZE, (hi - lo) * (BLOCK_SIZE / 8))
+}
+
+fn cache_put_span(state: u64, dev: u64, lba: u64, src: u64, n: u64) {
+    if cg(state, S_VALID) != 0 && cg(state, S_DEV) == dev {
+        let s0: u64 = cg(state, S_LBA)
+        let s1: u64 = s0 + cg(state, S_N)
+        var lo: u64 = lba
+        var hi: u64 = lba + n
+        if s0 > lo {
+            lo = s0
+        }
+        if s1 < hi {
+            hi = s1
+        }
+        if lo < hi {
+            arch.copy_words(cg(state, S_DATA) + (lo - s0) * BLOCK_SIZE, src + (lo - lba) * BLOCK_SIZE, (hi - lo) * (BLOCK_SIZE / 8))
+        }
+    }
+    if blkindex.foreign(dev) {
+        drop_foreign_ways(state, dev)
+    }
+    let xb: u64 = cg(state, C_XDATA)
+    var g: u64 = lba >> 3
+    let last: u64 = (lba + n - 1) >> 3
+    while g <= last {
+        var nd: u64 = blkindex.first(dev, g << 3)
+        while nd != 0 {
+            cache_put_overlap(state, xb, blkindex.way_of(nd), dev, lba, src, n)
+            nd = blkindex.next(nd)
+        }
+        g = g + 1
+    }
+}
+
 // ------------------------------------------------------------ r728
 // WRITE-BEHIND for the ATA volume path, scoped to one file-system call.
 //
@@ -2174,11 +2226,14 @@ fn wb_put_span(state: u64, dev: u64, abs: u64, src: u64, k: u64) {
     arch.copy_words(wb_data(state, first), src, k * (BLOCK_SIZE / 8))
     var fresh: u64 = 0
     var j: u64 = 0
+    let meta: u64 = cg(state, W_BASE) + first * 8
+    let key: u64 = wb_key(dev, abs)
     while j < k {
-        if wb_meta(state, first + j) == 0 {
+        let old: u64 = *((meta + j * 8) as *mut u64)
+        if old == 0 {
             fresh = fresh + 1
         }
-        wb_meta_set(state, first + j, wb_key(dev, abs + j) | (wb_meta(state, first + j) & WB_PRE))
+        __mmio_write64((meta + j * 8) as *mut u64, (key + j) | (old & WB_PRE))
         j = j + 1
     }
     cs(state, W_DIRTY, cg(state, W_DIRTY) + fresh)
@@ -2205,11 +2260,7 @@ fn write_blocks_held(state: u64, lba: u64, src: u64, n: u64) -> bool {
             done = done + 1
         } else {
             wb_put_span(state, dev, abs + done, src + done * BLOCK_SIZE, k)
-            var j: u64 = 0
-            while j < k {
-                cache_put(state, dev, abs + done + j, src + (done + j) * BLOCK_SIZE)
-                j = j + 1
-            }
+            cache_put_span(state, dev, abs + done, src + done * BLOCK_SIZE, k)
             blkstat.note_write(dev, k)
             done = done + k
         }
