@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+import diag.cmdopt
 import lib.kstate
 import libc.regio
 import drv.blk.ahci.ahci_defs
@@ -6,6 +7,10 @@ import drv.blk.ahci.ahci_run
 import drv.blk.ahci.ahci_state
 
 const ATA_IDENTIFY: u64 = 0xEC
+const W76_NCQ: u64 = 0x100
+const W75_DEPTH_MASK: u64 = 0x1F
+
+static mut s_ncq_on: [u8; 9] = "ncqwrite\0"
 
 fn identify(state: u64) -> bool {
     let buf: u64 = state + ahci_defs.AHCI_ID_OFF
@@ -39,6 +44,7 @@ fn identify(state: u64) -> bool {
             shift = s
         }
     }
+    kstate.set(state, ahci_state.sc(ahci_defs.S_NCQ), ncq_depth(state, buf))
     kstate.set(state, ahci_state.sc(ahci_defs.S_BLOCKS), n)
     kstate.set(state, ahci_state.sc(ahci_defs.S_LBASZ), shift)
     return true
@@ -46,4 +52,22 @@ fn identify(state: u64) -> bool {
 
 fn w(buf: u64, i: u64) -> u64 {
     return regio.read8(buf + i * 2) | (regio.read8(buf + i * 2 + 1) << 8)
+}
+
+fn ncq_depth(state: u64, buf: u64) -> u64 {
+    if !cmdopt.has(state, (&s_ncq_on[0]) as u64) {
+        return 0
+    }
+    let cap: u64 = regio.read32_at(ahci_state.abar(state), ahci_defs.R_CAP)
+    if (cap & ahci_defs.CAP_SNCQ) == 0 || (w(buf, 76) & W76_NCQ) == 0 {
+        return 0
+    }
+    var depth: u64 = (w(buf, 75) & W75_DEPTH_MASK) + 1
+    if depth > ahci_defs.NCQ_SLOTS {
+        depth = ahci_defs.NCQ_SLOTS
+    }
+    if depth > ahci_state.slots(state) {
+        depth = ahci_state.slots(state)
+    }
+    return depth
 }

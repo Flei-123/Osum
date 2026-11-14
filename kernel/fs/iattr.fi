@@ -2,7 +2,7 @@ profile kernel
 
 import lib.kstate
 
-export { MISS, which_of, get, put, perm_get, attr_get, drop, flush }
+export { MISS, which_of, get, put, perm_get, attr_get, drop, drop_range, flush }
 
 const MISS: u64 = 0xFFFFFFFFFFFFFFFF
 const LINES: u64 = 128
@@ -22,8 +22,13 @@ const F_SIZE: u64 = 8
 const F_MODE: u64 = 88
 const F_UID: u64 = 96
 const F_GID: u64 = 104
+const F_CTIME: u64 = 136
+const F_MTIME: u64 = 144
+const F_ATIME: u64 = 152
 
 static mut cells: [u64; 8448] = [0 as u64; 8448]
+static mut held_low: u64 = 0xFFFFFFFFFFFFFFFF
+static mut held_high: u64 = 0
 
 fn which_of(field: u64) -> u64 {
     if field == F_TYPE {
@@ -40,6 +45,15 @@ fn which_of(field: u64) -> u64 {
     }
     if field == F_GID {
         return 4
+    }
+    if field == F_MTIME {
+        return 5
+    }
+    if field == F_CTIME {
+        return 6
+    }
+    if field == F_ATIME {
+        return 7
     }
     return MISS
 }
@@ -107,6 +121,12 @@ fn put(state: u64, lba: u64, idx: u64, kind: u64, size: u64, mode: u64, uid: u64
     }
     let base: u64 = line_of(lba) * LINE_WORDS
     let tag: u64 = tag_of(state, lba)
+    if lba < held_low {
+        held_low = lba
+    }
+    if lba > held_high {
+        held_high = lba
+    }
     if cells[base as usize] != tag {
         cells[base as usize] = tag
         cells[(base + 1) as usize] = 0
@@ -131,7 +151,20 @@ fn drop(state: u64, lba: u64) {
     }
 }
 
+fn drop_range(state: u64, lba: u64, n: u64) {
+    if lba > held_high || lba + n <= held_low {
+        return
+    }
+    var i: u64 = 0
+    while i < n {
+        drop(state, lba + i)
+        i = i + 1
+    }
+}
+
 fn flush() {
+    held_low = 0xFFFFFFFFFFFFFFFF
+    held_high = 0
     var i: u64 = 0
     while i < LINES {
         cells[(i * LINE_WORDS) as usize] = 0
