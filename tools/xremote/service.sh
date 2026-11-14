@@ -45,6 +45,8 @@ cleanup() {
 trap cleanup EXIT
 OUT=${XR_OUT:-$T/out}
 mkdir -p "$OUT" "$T/relay" "$T/home" "$T/fx"
+SEED=$(printf 'ab%.0s' $(seq 1 32))
+printf '%s' "$SEED" > "$T/identity.seed"
 sed -e "s/@RELAYPORT@/$RELAYPORT/g" -e "s/@HOSTSECS@/$HOSTSECS/g" -e "s/@WINDOW@/$WINDOW/g" -e "s/@WINDOW2@/$WINDOW2/g" -e "s/@AFTERSECS@/$AFTERSECS/g" -e "s/@REALRELAY@/${XR_REAL_RELAY:-0}/g" tools/xremote/service-guest.sh > "$T/svc.sh"
 [ "${XR_DBG:-0}" = 1 ] && sed -i 's/^#DBG //' "$T/svc.sh"
 cp tools/xremote/service-guest-boot.sh "$T/fx.sh"
@@ -72,6 +74,8 @@ printf 'xremote\t%s\n' "$(printf 'a%.0s' $(seq 1 32))" > "$T/xr.plan"
     echo "/system/CURRENT=$T/xr.current@644"; echo "/system/generations/1/PLAN=$T/xr.plan@644"
     [ "${XR_REAL_RELAY:-0}" = 1 ] && echo "/etc/resolv.conf=$WD/fx-root/etc/resolv.conf@644"
     [ "${XR_DBG:-0}" = 1 ] && { echo "/opt/@755"; echo "/opt/xr/@755"; echo "/opt/xr/freeviewer-old=$XRTOOLS/freeviewer-host@755"; echo "/usr/@755"; echo "/usr/lib/@755"; echo "/usr/lib/libgcc_s.so.1=$LIBGCC@755"; }
+    echo "/run/xremote/@700"; echo "/run/xremote/.config/@755"; echo "/run/xremote/.config/freeviewer/@755"
+    echo "/run/xremote/.config/freeviewer/identity.txt=$T/identity.seed@600"
     echo "/run/@755"; echo "/var/@755"; echo "/var/log/@755"; echo "/etc/@755"
 } | awk '!seen[$0]++' >> "$T/fx/spec.txt"
 awk '!seen[$0]++' "$T/fx/spec.txt" > "$T/fx/spec.dedup"
@@ -109,6 +113,13 @@ viewer() {
     sleep 3
     viewer "$T/v_old.txt" 30 "$ID2" "$PW" 3
     viewer "$T/v_ok2.txt" 45 "$ID2" "$PW2" 5
+    wait_marker '^SV-PW3 [A-Za-z0-9]' 400 || exit 0
+    ID3=$(grep -a '^SV-ID3 ' "$S" | head -1 | cut -d' ' -f2)
+    sleep 3
+    viewer "$T/v_fbad.txt" 40 "$ID3" WRONGPW1 3
+    viewer "$T/v_fok.txt" 50 "$ID3" Sup3rS3cret 5
+    wait_marker '^SV-I mode' 400 || exit 0
+    viewer "$T/v_fold.txt" 35 "$ID3" Sup3rS3cret 3
 ) &
 VP=$!
 MONSOCK="$T/mon.sock"
@@ -128,7 +139,7 @@ MONSOCK="$T/mon.sock"
 DP=$!
 ACC=(); [ -w /dev/kvm ] && ACC=(-accel kvm -cpu host)
 BOOTARGS="gfx disp wm wmdauer wmshell osum vfs bus fremdtrace nic nip=10.0.2.15/24 ngw=10.0.2.2 script=sh /etc/fx.sh;exit"
-KERNEL=${KERNEL:-} DONE=SV-END TMO=${XR_TMO:-900} MEM=1024 GUI=1 GUI_EXTRA="xremoted settingsd apprights orientbus act" \
+KERNEL=${KERNEL:-} DONE=SV-END TMO=${XR_TMO:-1700} MEM=1024 GUI=1 GUI_EXTRA="xremoted settingsd apprights orientbus act" \
     EXTRA="/etc/svc.sh=$T/svc.sh@755 /etc/settings.schema=etc/settings.schema@644 /etc/actions.d/@755 /etc/actions.d/settings.actions=etc/actions.d/settings.actions@644" KARGS="$BOOTARGS" \
     QEMU_EXTRA="-monitor unix:$MONSOCK,server,nowait -vga std -netdev user,id=n0 -device virtio-net-pci,netdev=n0,mac=52:54:00:5b:1d:02" \
     SPEC="$T/wd/fxrun/spec.txt" bash tools/linuxapps/run.sh "$WD" "$T/fx.sh" "$OUT" > "$T/linuxapps.log" 2>&1
@@ -192,6 +203,24 @@ if [ "${XR_REAL_RELAY:-0}" = 1 ]; then
     L=$(line 'SV-G ')
     chk "$(has "$L" 'service=running id=[0-9]')" "phase G: default relay wss://freeviewer.fleitec.com/fv/ws registers a 9-digit ID from inside the guest ($L)"
 fi
+L=$(line 'SV-MIG'); chk "$(has "$L" "seed=$SEED old=0")" "identity of the old /run/xremote home is moved to the persistent /var/xremote home, old home gone ($L)"
+chk "$(has "$L" 'perms=-rw-------')" "identity file keeps mode 0600 ($L)"
+L=$(line 'SV-H0'); chk "$(has "$L" 'secret=0')" "phase H: a 5-character fixed password is refused, no secret file is written ($L)"
+L=$(line 'SV-H1'); chk "$(has "$L" 'secret=1 perm=-rw-------')" "an 11-character fixed password is stored in a file only root can read ($L)"
+chk "$(has "$L" 'mode=random')" "storing the password alone does not change the running random mode ($L)"
+L=$(line 'SV-H '); chk "$(has "$L" 'service=running mode=fixed pw=Sup3rS3cret samepw=1')" "fixed password on: host restarted with exactly that password, mode fixed ($L)"
+chk "$(has "$L" 'sameid=1 identity=1 oldhome=0')" "the ID is unchanged after the restart, the identity lives in /var/xremote, not in /run ($L)"
+L=$(line 'SV-H-PERMS'); chk "$(has "$L" 'secret=-rw------- pw=-rw------- info=-rw------- home=drwx------')" "secret, password file, info file are 0600 and the identity home is 0700 ($L)"
+L=$(line 'SV-BUS-GETPW')
+echo "$L" | grep -q Sup3rS3cret && bad "fixed password leaks through settings.get" || ok "fixed password does not leak through settings.get"
+L=$(line 'SV-BUS-GETMODE'); chk "$(has "$L" 'value=fixed')" "bus: remote.mode reads fixed ($L)"
+FFB=$(grep -ac '^frame ' "$T/v_fbad.txt" 2>/dev/null)
+[ "${FFB:-0}" = 0 ] && grep -aq 'Passwort falsch' "$T/v_fbad.txt" && ok "fixed mode: wrong password is refused" || bad "fixed mode: wrong password got $FFB frames"
+FFO=$(grep -ac '^frame ' "$T/v_fok.txt" 2>/dev/null)
+[ "${FFO:-0}" -ge 2 ] && ok "fixed mode: the fixed password gives $FFO frames" || bad "fixed mode: fixed password gave ${FFO:-0} frames"
+L=$(line 'SV-I mode'); chk "$(has "$L" 'mode=random service=running pwlen=8 differs=1 secretkept=1 sameid=1')" "fixed off: back to a random password, same ID, secret kept for later ($L)"
+FFL=$(grep -ac '^frame ' "$T/v_fold.txt" 2>/dev/null)
+[ "${FFL:-0}" = 0 ] && [ -e "$T/v_fold.txt" ] && ok "after fixed off the fixed password is refused" || bad "after fixed off the old fixed password got $FFL frames"
 L=$(line 'SV-F ')
 chk "$(has "$L" 'service=disabled pw=0 state=0')" "phase F: disabled again -> host gone, files removed ($L)"
 AFTER=$(awk '/^SV-PKG/{f=1} f' "$C")

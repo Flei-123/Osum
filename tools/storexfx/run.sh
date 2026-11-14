@@ -33,7 +33,8 @@ ULD=kernel/user/user.ld
 echo "== 1. build =="
 . tools/lib/firnenv.sh
 mkdir -p "$TMPD/bin" "$TMPD/src"
-cp kernel/user/*.fi tools/xfx/xfxstub.fi "$TMPD/src/"
+cp -r kernel/user/. "$TMPD/src/"
+cp tools/xfx/xfxstub.fi "$TMPD/src/"
 if USRC="$TMPD/src" bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then
     ok "firnc0 builds $(echo $PROGS | wc -w) programs (xfx $(stat -c%s "$TMPD/bin/xfx.elf") B, stored $(stat -c%s "$TMPD/bin/stored.elf") B)"
 else
@@ -82,6 +83,13 @@ python3 tools/xfx/mkstore.py --pack "$TMPD/pack" --xfx-elf "$TMPD/bin/xfx.elf" -
     --key "$KEY" --out "$TMPD/srv/good" --version 1.0.0 > "$TMPD/mk.log" 2>&1 \
     && ok "good source: $(tail -1 "$TMPD/mk.log")" || { bad "mkstore"; tail -5 "$TMPD/mk.log"; }
 [ "$(wc -l < "$TMPD/srv/good/INDEX")" = 1 ] && ok "INDEX lists the Firefox package, signed" || bad "INDEX"
+python3 "$OPK" zeigen "$TMPD/srv/good/firefox-1.opk" > "$TMPD/show.txt" 2>&1
+for f in start INFO symbol xfx.manifest user.js store.meta; do
+    grep -qE "^  f $f " "$TMPD/show.txt" && ok "package holds $f" || bad "package misses $f"
+done
+python3 tools/sdk/osdk.py check assets/apps/firefox.osp/INFO --strict > /dev/null 2>&1 && ok "INFO passes osdk --strict" || bad "INFO fails osdk --strict"
+grep -qx 'keys=.*firefox.*browser.*' assets/apps/firefox.osp/INFO && grep -qx 'perm=net' assets/apps/firefox.osp/INFO && grep -qx 'net=real' assets/apps/firefox.osp/INFO \
+    && ok "INFO has the search keys firefox, browser and the net right" || bad "INFO misses search keys or net right"
 [ -f "$TMPD/srv/good/store.meta.sig" ] && grep -q '^title=Firefox' "$TMPD/srv/good/store.meta" \
     && ok "store.meta (display data) is published and signed" || bad "store.meta"
 
@@ -249,6 +257,9 @@ has "$TMPD/p.txt" "  firefox -> " "firefox is in the package list"
 has "$TMPD/p.txt" "installed=yes" "xfx says installed"
 has "$TMPD/p.txt" "libfiller.so" "the pack was extracted"
 has "$TMPD/p.txt" "xfx.manifest" "the signed parts list came with the package"
+has "$TMPD/p.txt" "INFO" "the app descriptor (start menu and search read it) is installed"
+has "$TMPD/p.txt" "symbol" "the app icon is installed"
+has "$TMPD/p.txt" "start" "the start program is installed"
 has "$TMPD/p.txt" "|aktuell" "the catalog says aktuell"
 hasnot "$TMPD/p.txt" "firefox.tar.part000" "the parts are gone after the join"
 

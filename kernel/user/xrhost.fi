@@ -7,16 +7,25 @@ import libc.clockapi
 import xfxio
 import xfxproc
 import xrpath
+import actwire
 
-export { make_password, write_pw, write_info, spawn_host, stop_host, package_ready, host_running }
+export { make_password, read_fixed, secure_secret, migrate_home, write_pw, write_info, spawn_host, stop_host, package_ready, host_running }
 
 const SYS_GETRANDOM: u64 = 318
+const SYS_CHMOD: u64 = 90
 const O_LOG: u64 = 1089
 const FMODE: u64 = 420
 const PW_LEN: u64 = 8
+const FIXED_MIN: u64 = 8
+const FIXED_CAP: u64 = 33
+const MODE_PRIVATE: u64 = 384
+const MODE_HOME: u64 = 448
+const MODE_DIR: u64 = 493
 static mut ALPHABET: [u8; 33] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789\0"
 static mut K_PASS: [u8; 10] = "password=\0"
 static mut K_SERVICE: [u8; 9] = "service=\0"
+static mut K_MODE: [u8; 6] = "mode=\0"
+static mut F_PASSWORD: [u8; 9] = "password\0"
 static mut NL: [u8; 2] = "\n\0"
 static mut A_LP: [u8; 15] = "--library-path\0"
 static mut A_RELAY: [u8; 8] = "--relay\0"
@@ -44,13 +53,36 @@ fn make_password(out: u64) -> bool {
     return true
 }
 
-fn write_pw(pw: u64) -> bool {
-    ulib.sys(ulib.SYS_UNLINK, xrpath.p_pw(), 0, 0)
-    return xfxio.write_text(xrpath.p_pw(), pw, ulib.O_MAKE)
+fn read_fixed(out: u64) -> bool {
+    __mmio_write8(out as *mut u8, 0 as u8)
+    if !actwire.kvfile_get(xrpath.p_secret(), (&F_PASSWORD[0 as usize]) as u64, out, FIXED_CAP) {
+        return false
+    }
+    return text.length(out) >= FIXED_MIN
 }
 
-fn write_info(pw: u64, service: u64) -> bool {
-    var b: [u8; 96] = [0 as u8; 96]
+fn secure_secret() {
+    ulib.sys(SYS_CHMOD, xrpath.p_secret(), MODE_PRIVATE, 0)
+}
+
+fn migrate_home() {
+    ulib.sys(ulib.SYS_MKDIR, xrpath.p_var(), MODE_DIR, 0)
+    if !xfxio.exists(xrpath.p_home()) && xfxio.exists(xrpath.p_old_home()) {
+        ulib.sys(ulib.SYS_RENAME, xrpath.p_old_home(), xrpath.p_home(), 0)
+    }
+    ulib.sys(ulib.SYS_MKDIR, xrpath.p_home(), MODE_HOME, 0)
+    ulib.sys(SYS_CHMOD, xrpath.p_home(), MODE_HOME, 0)
+}
+
+fn write_pw(pw: u64) -> bool {
+    ulib.sys(ulib.SYS_UNLINK, xrpath.p_pw(), 0, 0)
+    let ok: bool = xfxio.write_text(xrpath.p_pw(), pw, ulib.O_MAKE)
+    ulib.sys(SYS_CHMOD, xrpath.p_pw(), MODE_PRIVATE, 0)
+    return ok
+}
+
+fn write_info(pw: u64, service: u64, mode: u64) -> bool {
+    var b: [u8; 192] = [0 as u8; 192]
     let p: u64 = (&b[0 as usize]) as u64
     ulib.strcpy(p, (&K_PASS[0 as usize]) as u64)
     ulib.strcat(p, pw)
@@ -58,10 +90,14 @@ fn write_info(pw: u64, service: u64) -> bool {
     ulib.strcat(p, (&K_SERVICE[0 as usize]) as u64)
     ulib.strcat(p, service)
     ulib.strcat(p, (&NL[0 as usize]) as u64)
-    return xfxio.write_text(xrpath.p_info(), p, ulib.O_MAKE)
+    ulib.strcat(p, (&K_MODE[0 as usize]) as u64)
+    ulib.strcat(p, mode)
+    ulib.strcat(p, (&NL[0 as usize]) as u64)
+    let ok: bool = xfxio.write_text(xrpath.p_info(), p, ulib.O_MAKE)
+    ulib.sys(SYS_CHMOD, xrpath.p_info(), MODE_PRIVATE, 0)
+    return ok
 }
 
-const SYS_CHMOD: u64 = 90
 const MODE_EXEC: u64 = 493
 
 fn make_package_executable() {
@@ -117,7 +153,6 @@ fn spawn_host(relay: u64) -> bool {
             n = n + 1
         }
     }
-    ulib.sys(ulib.SYS_MKDIR, xrpath.p_home(), 448, 0)
     let s1: u64 = ulib.sys(ulib.SYS_DUP, 1, 0, 0)
     let s2: u64 = ulib.sys(ulib.SYS_DUP, 2, 0, 0)
     let lf: u64 = ulib.sys(ulib.SYS_OPEN, xrpath.p_log(), O_LOG, FMODE)

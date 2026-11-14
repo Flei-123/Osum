@@ -12,7 +12,7 @@ ROUTE = "settings://privacy/remote-desktop"
 ROUTES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "kernel", "user", "settings.d", "settings.routes")
 CTL = re.compile(r"^settings: controls page=(\d+) n=(\d+)$", re.M)
 RECT = re.compile(r"^settings: rect name=xrsw x=(\d+) y=(\d+) w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)", re.M)
-REMOTE = re.compile(r"^settings: remote page enabled=(\w+) service=(\S*) id=(\S*) peer=(\S*)$", re.M)
+REMOTE = re.compile(r"^settings: remote page enabled=(\w+) service=(\S*) id=(\S*) peer=(\S*) fixed=(\w+) mode=(\S*)$", re.M)
 NAV = re.compile(r"^settings: nav route=" + re.escape(ROUTE) + r" page=(\d+)", re.M)
 MIN_COLORS = 4
 

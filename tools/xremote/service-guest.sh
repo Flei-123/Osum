@@ -2,6 +2,8 @@ B=/bin/busybox
 export HOME=/root
 $B mkdir -p /root /tmp /run /var/log
 CONF=/etc/xremote.conf
+SECRET=/etc/xremote.secret
+HOMEID=/var/xremote/.config/freeviewer/identity.txt
 INFO=/run/xremote.info
 STATE=/run/xremote.state
 LOG=/var/log/xremote.log
@@ -16,6 +18,11 @@ bus_set() {
     echo "SV-BUS-CONFIRM $1 $(act_q confirm last)"
     $B sleep 8
 }
+bus_key() {
+    echo "SV-BUS-SET $1=$2 $(act_q call settings.set key=$1 value=$2)"
+    $B sleep 8
+}
+perm() { $B ls -l "$1" 2>/dev/null | $B cut -c1-10; }
 wait_id() {
     i=0
     while [ $i -lt @HOSTSECS@ ]; do
@@ -55,6 +62,7 @@ PWF=$($B cat /run/xremote.pw 2>/dev/null)
 echo "SV-ID $ID"
 echo "SV-PW $PW"
 echo "SV-B service=$(kv $INFO service) pwlen=${#PW} samepw=$([ "$PW" = "$PWF" ] && echo 1 || echo 0) status=$(kv $STATE status)"
+echo "SV-MIG seed=$($B cat $HOMEID 2>/dev/null) old=$(ex /run/xremote) perms=$(perm $HOMEID)"
 echo "SV-BUS-GET1 id=$(act_q call settings.get key=remote.id)"
 echo "SV-BUS-GET2 password=$(act_q call settings.get key=remote.password)"
 echo "SV-BUS-GET3 status=$(act_q call settings.get key=remote.status)"
@@ -86,6 +94,32 @@ echo "SV-ID2 $ID2"
 echo "SV-PW2 $PW2"
 echo "SV-E service=$(kv $INFO service) pwlen=${#PW2} newpw=$([ "$PW2" != "$PW" ] && echo 1 || echo 0) sameid=$([ "$ID2" = "$ID" ] && echo 1 || echo 0)"
 echo "SV-WINDOW2"
+nap @WINDOW2@
+echo "SV-PHASE H"
+bus_key remote.fixedpw short
+echo "SV-H0 secret=$(ex $SECRET)"
+bus_key remote.fixedpw Sup3rS3cret
+echo "SV-H1 secret=$(ex $SECRET) perm=$(perm $SECRET) mode=$(kv $INFO mode)"
+bus_key remote.fixed true
+$B sleep 6
+wait_id
+ID3=$(kv $STATE id)
+PW3=$(kv $INFO password)
+PWF3=$($B cat /run/xremote.pw 2>/dev/null)
+echo "SV-ID3 $ID3"
+echo "SV-PW3 $PW3"
+echo "SV-H service=$(kv $INFO service) mode=$(kv $INFO mode) pw=$PW3 samepw=$([ "$PW3" = "$PWF3" ] && echo 1 || echo 0) sameid=$([ "$ID3" = "$ID" ] && echo 1 || echo 0) identity=$(ex $HOMEID) oldhome=$(ex /run/xremote)"
+echo "SV-H-PERMS secret=$(perm $SECRET) pw=$(perm /run/xremote.pw) info=$(perm $INFO) home=$($B ls -ld /var/xremote | $B cut -c1-10)"
+echo "SV-BUS-GETPW $(act_q call settings.get key=remote.fixedpw)"
+echo "SV-BUS-GETMODE $(act_q call settings.get key=remote.mode)"
+echo "SV-BUS-GETFIXED $(act_q call settings.get key=remote.fixed) conf=$($B tr '\n' ' ' < $CONF)"
+nap @WINDOW2@
+bus_key remote.fixed false
+$B sleep 6
+wait_id
+ID4=$(kv $STATE id)
+PW4=$(kv $INFO password)
+echo "SV-I mode=$(kv $INFO mode) service=$(kv $INFO service) pwlen=${#PW4} differs=$([ "$PW4" != "$PW3" ] && echo 1 || echo 0) secretkept=$(ex $SECRET) sameid=$([ "$ID4" = "$ID" ] && echo 1 || echo 0)"
 nap @WINDOW2@
 echo "enabled=0" > $CONF
 $B sleep 8
