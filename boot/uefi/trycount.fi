@@ -1,0 +1,82 @@
+import mem
+import ctx
+import efi
+import fsys
+import con
+
+export { read_count, write_count, guard, LIMIT }
+
+const LIMIT: u64 = 2
+const OPEN_READ: u64 = 1
+const OPEN_RW_CREATE: u64 = 0x8000000000000003
+const FILE_CLOSE: u64 = 16
+const FILE_READ: u64 = 32
+const FILE_WRITE: u64 = 40
+const FILE_FLUSH: u64 = 80
+const MAX_DIGIT: u64 = 9
+const COUNT_FILE_LEN: u64 = 2
+
+fn open_file(c: u64, mode: u64) -> u64 {
+    var path: [u8; 13] = "/osboot.try\0\0"
+    let root: u64 = mem.get64(c + ctx.C_ROOT)
+    if efi.call5(mem.get64(root + 8), root, efi.out_addr(c, 0), fsys.wide_path(c, (&path[0]) as u64), mode, 0) != 0 {
+        return 0
+    }
+    return efi.out(c, 0)
+}
+
+fn read_count(c: u64) -> u64 {
+    let f: u64 = open_file(c, OPEN_READ)
+    if f == 0 {
+        return 0
+    }
+    let buf: u64 = c + ctx.C_INFO
+    mem.set64(efi.out_addr(c, 1), 1)
+    var n: u64 = 0
+    if efi.call3(mem.get64(f + FILE_READ), f, efi.out_addr(c, 1), buf) == 0 && efi.out(c, 1) == 1 {
+        let ch: u64 = mem.get8(buf)
+        if ch >= 48 && ch <= 57 {
+            n = ch - 48
+        }
+    }
+    efi.call1(mem.get64(f + FILE_CLOSE), f)
+    return n
+}
+
+fn write_count(c: u64, n: u64) -> bool {
+    let f: u64 = open_file(c, OPEN_RW_CREATE)
+    if f == 0 {
+        return false
+    }
+    var v: u64 = n
+    if v > MAX_DIGIT {
+        v = MAX_DIGIT
+    }
+    let buf: u64 = c + ctx.C_INFO
+    mem.set8(buf, 48 + v)
+    mem.set8(buf + 1, 10)
+    mem.set64(efi.out_addr(c, 1), COUNT_FILE_LEN)
+    let ok: bool = efi.call3(mem.get64(f + FILE_WRITE), f, efi.out_addr(c, 1), buf) == 0
+    efi.call1(mem.get64(f + FILE_FLUSH), f)
+    efi.call1(mem.get64(f + FILE_CLOSE), f)
+    return ok
+}
+
+fn guard(c: u64, first: u64) -> u64 {
+    var s_fell: [u8; 51] = "osboot: trial slot failed, falling back to slot 1\n\0"
+    var s_try: [u8; 20] = "osboot: trial boot \0"
+    var nl: [u8; 2] = "\n\0"
+    if first == 0 {
+        return 0
+    }
+    let n: u64 = read_count(c)
+    if n >= LIMIT {
+        con.say(c, (&s_fell[0]) as u64)
+        return 0
+    }
+    write_count(c, n + 1)
+    con.say(c, (&s_try[0]) as u64)
+    con.say_num(c, n + 1)
+    con.say(c, (&nl[0]) as u64)
+    return first
+}
