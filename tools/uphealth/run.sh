@@ -87,11 +87,11 @@ for c in $CASES; do
         panics control
         ;;
     nogw)
-        run nogw "" "--no-arp --no-echo" ""
+        run nogw "" "" "--no-arp --no-echo"
         chk nogw "script finished" '==END=='
-        chk nogw "status file: dead-gateway LAN is offline" 'eth0 offline'
-        chk nogw "status file: healthy USB is default" 'usb0 online default'
-        nochk nogw "dead-gateway LAN is not the default" 'eth0 [a-z-]* default'
+        chk nogw "status file: dead-gateway USB is offline" 'usb0 offline'
+        chk nogw "status file: healthy LAN is default" 'eth0 online default'
+        nochk nogw "dead-gateway USB is not the default" 'usb0 [a-z-]* default'
         panics nogw
         ;;
     nodns)
