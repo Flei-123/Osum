@@ -1276,8 +1276,10 @@ const W_META: u64 = 0x2B0 // first lba after the metadata sectors written before
 const W_LO: u64 = 0x2C0
 const W_HI: u64 = 0x2C8
 const W_FREED: u64 = 0x2A8 // 1 while freed blocks or inodes are not yet on the drive
-const WB_SLOTS: u64 = 4096
-const WB_KEY_BYTES: u64 = 32768
+const W_SLOTS: u64 = 0x2D0
+const WB_SLOTS_SMALL: u64 = 4096
+const WB_SLOTS_LARGE: u64 = 65536
+const WB_LARGE_MIN_FREE: u64 = 33280
 const WB_IDLE_TICKS: u64 = 25
 const WB_MAX_TICKS: u64 = 100
 const WM_EAGER: u64 = 0
@@ -1297,8 +1299,17 @@ fn wb_meta_set(state: u64, slot: u64, v: u64) {
 }
 
 #[inline]
+fn wb_slots(state: u64) -> u64 {
+    let n: u64 = cg(state, W_SLOTS)
+    if n == 0 {
+        return WB_SLOTS_SMALL
+    }
+    return n
+}
+
+#[inline]
 fn wb_data(state: u64, slot: u64) -> u64 {
-    return cg(state, W_BASE) + WB_KEY_BYTES + slot * BLOCK_SIZE
+    return cg(state, W_BASE) + wb_slots(state) * 8 + slot * BLOCK_SIZE
 }
 
 fn wb_key(dev: u64, lba: u64) -> u64 {
@@ -1408,18 +1419,42 @@ fn wb_active(state: u64) -> bool {
     return cg(state, W_BASE) != 0 && cg(state, W_DEPTH) != 0
 }
 
-const WB_FRAMES: u64 = 520
+const WB_FRAMES_SMALL: u64 = 520
+const WB_FRAMES_LARGE: u64 = 8320
 
-static mut wb_last: [u64; 1] = [0 as u64; 1]
+static mut wb_last: [u64; 2] = [0 as u64; 2]
 
-fn wb_grab(state: u64) -> u64 {
+fn wb_try(state: u64, frames: u64) -> u64 {
     let last: u64 = wb_last[0]
-    if last != 0 && mmframe.frame_run_at(state, last, WB_FRAMES) {
+    if last != 0 && wb_last[1] == frames && mmframe.frame_run_at(state, last, frames) {
         return last
     }
-    let b: u64 = mmframe.frame_run(state, WB_FRAMES)
+    let b: u64 = mmframe.frame_run(state, frames)
     wb_last[0] = b
+    wb_last[1] = frames
     return b
+}
+
+fn wb_grab(state: u64) -> u64 {
+    if mmframe.frames_free(state) >= WB_LARGE_MIN_FREE {
+        let big: u64 = wb_try(state, WB_FRAMES_LARGE)
+        if big != 0 {
+            cs(state, W_SLOTS, WB_SLOTS_LARGE)
+            return big
+        }
+    }
+    let b: u64 = wb_try(state, WB_FRAMES_SMALL)
+    if b != 0 {
+        cs(state, W_SLOTS, WB_SLOTS_SMALL)
+    }
+    return b
+}
+
+fn wb_frames(state: u64) -> u64 {
+    if wb_slots(state) == WB_SLOTS_LARGE {
+        return WB_FRAMES_LARGE
+    }
+    return WB_FRAMES_SMALL
 }
 
 fn wb_begin(state: u64) {
@@ -1428,7 +1463,7 @@ fn wb_begin(state: u64) {
         let b: u64 = wb_grab(state)
         if b != 0 {
             var i: u64 = 0
-            while i < WB_SLOTS {
+            while i < wb_slots(state) {
                 __mmio_write64((b + i * 8) as *mut u64, 0)
                 i = i + 1
             }
@@ -1441,7 +1476,7 @@ fn wb_begin(state: u64) {
 }
 
 fn wb_bounds_reset(state: u64) {
-    cs(state, W_LO, WB_SLOTS)
+    cs(state, W_LO, wb_slots(state))
     cs(state, W_HI, 0)
 }
 
@@ -1519,21 +1554,21 @@ fn wb_release(state: u64) {
         return
     }
     cs(state, W_BASE, 0)
-    mmframe.frame_free_run(state, b, WB_FRAMES)
+    mmframe.frame_free_run(state, b, wb_frames(state))
 }
 
 fn wb_held_frames(state: u64) -> u64 {
     if cg(state, W_BASE) == 0 {
         return 0
     }
-    return WB_FRAMES
+    return wb_frames(state)
 }
 
 
 fn wb_run_end(state: u64, sl: u64, m: u64, high: u64) -> u64 {
     let lba: u64 = m & WB_LBA_MASK
     var e: u64 = sl + 1
-    while e < WB_SLOTS && e - sl < wb_run_cap(state) && wb_meta(state, e) == m + (e - sl) && lba + (e - sl) < high {
+    while e < wb_slots(state) && e - sl < wb_run_cap(state) && wb_meta(state, e) == m + (e - sl) && lba + (e - sl) < high {
         e = e + 1
     }
     return e
@@ -1650,7 +1685,7 @@ fn wb_overlap(state: u64, dev: u64, lba: u64, n: u64) -> bool {
     }
     var i: u64 = 0
     while i < n {
-        if wb_meta(state, (lba + i) & (WB_SLOTS - 1)) == wb_key(dev, lba + i) {
+        if wb_meta(state, (lba + i) & (wb_slots(state) - 1)) == wb_key(dev, lba + i) {
             return true
         }
         i = i + 1
@@ -1670,7 +1705,7 @@ fn wb_serve(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
     if cg(state, W_BASE) == 0 || cg(state, W_DIRTY) == 0 {
         return false
     }
-    let sl: u64 = lba & (WB_SLOTS - 1)
+    let sl: u64 = lba & (wb_slots(state) - 1)
     if wb_meta(state, sl) != wb_key(dev, lba) {
         return false
     }
@@ -1693,7 +1728,7 @@ fn wb_order_before_evict(state: u64, lba: u64) {
 
 fn wb_put(state: u64, dev: u64, lba: u64, src: u64) -> bool {
     dma_up(state)
-    let sl: u64 = lba & (WB_SLOTS - 1)
+    let sl: u64 = lba & (wb_slots(state) - 1)
     let key: u64 = wb_key(dev, lba)
     var old: u64 = wb_meta(state, sl)
     if old != 0 && old != key {
@@ -1833,7 +1868,7 @@ fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool 
     dma_up(state)
     cache_grow(state)
     if cg(state, W_DIRTY) != 0 {
-        let wsl: u64 = lba & (WB_SLOTS - 1)
+        let wsl: u64 = lba & (wb_slots(state) - 1)
         if wb_meta(state, wsl) == wb_key(dev, lba) {
             copy(wb_data(state, wsl), dst)
             return true
@@ -2159,8 +2194,8 @@ fn write_raw_store(state: u64, wdv: u64, abs: u64, src: u64) -> bool {
 }
 
 fn wb_free_span(state: u64, dev: u64, abs: u64, want: u64) -> u64 {
-    let first: u64 = abs & (WB_SLOTS - 1)
-    var cap: u64 = WB_SLOTS - first
+    let first: u64 = abs & (wb_slots(state) - 1)
+    var cap: u64 = wb_slots(state) - first
     if cap > want {
         cap = want
     }
@@ -2176,7 +2211,7 @@ fn wb_free_span(state: u64, dev: u64, abs: u64, want: u64) -> u64 {
 }
 
 fn wb_put_span(state: u64, dev: u64, abs: u64, src: u64, k: u64) {
-    let first: u64 = abs & (WB_SLOTS - 1)
+    let first: u64 = abs & (wb_slots(state) - 1)
     if cg(state, W_DIRTY) == 0 {
         cs(state, W_SINCE, kstate.get(state, kstate.TICKS))
     }
