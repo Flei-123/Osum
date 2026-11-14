@@ -102,9 +102,9 @@ cycles() {
 
 echo "== 0. build =="
 bash tools/bootloader/build.sh "$OUT/new.efi" > "$OUT/build.txt" 2>&1 && ok "osboot with counter built" || { tail -5 "$OUT/build.txt"; bad "osboot build"; }
-git archive HEAD boot | tar -x -C "$OUT"
-bash tools/bootloader/build.sh "$OUT/old.efi" "$OUT" > "$OUT/build-old.txt" 2>&1
-if [ -f "$OUT/old.efi" ] && ! cmp -s "$OUT/old.efi" "$OUT/new.efi"; then ok "old osboot built from HEAD"; else bad "old osboot (HEAD must not contain the counter)"; fi
+mkdir -p "$OUT/nocount" && cp -r boot "$OUT/nocount/boot" && sed -i "/trycount.guard/d" "$OUT/nocount/boot/uefi/main.fi"
+bash tools/bootloader/build.sh "$OUT/old.efi" "$OUT/nocount" > "$OUT/build-old.txt" 2>&1
+if [ -f "$OUT/old.efi" ] && ! cmp -s "$OUT/old.efi" "$OUT/new.efi"; then ok "osboot without the counter call built"; else bad "osboot without the counter call"; fi
 
 echo
 echo "== 1. normal boot, default_entry 1 =="
