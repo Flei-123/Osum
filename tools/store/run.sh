@@ -148,9 +148,10 @@ run() { # <image> <name> [seconds]
     tr -cd '\11\12\15\40-\176' < "$TMPD/$nm.txt" > "$TMPD/$nm.klar" 2>/dev/null || true
 }
 
-if [ -z "${STORE_WINDOW_ONLY:-}" ]; then
-# STORE_FAST=1 skips sections 3 and 4 (the bus + rights runs) when only the window is of interest
-if [ -z "${STORE_FAST:-}" ]; then
+[ -z "${STORE_WINDOW_ONLY:-}" ] || STORE_PART=window
+want() { [ -z "${STORE_PART:-}" ] || [ "$STORE_PART" = "$1" ]; }
+# STORE_PART=bus|auto|window runs one part (STORE_FAST=1 skips the bus part)
+if want bus && [ -z "${STORE_FAST:-}" ]; then
 echo "== 3. the good way, over the bus, from the signed-in person =="
 cat > "$TMPD/sA.sh" <<'EOS'
 mkdir /users/justin
@@ -338,7 +339,9 @@ EOS
     esac
 done
 
+fi
 
+if want auto; then
 echo "== 4b. automatic updates: global switch, per-program switch, manual update, rights =="
 cat > "$TMPD/sC.sh" <<'EOS'
 mkdir /users/justin
@@ -437,9 +440,9 @@ part "$D" D-AFTER FERTIG > "$TMPD/p.txt"
 has "$TMPD/p.txt" "automatisch aktualisiert" "default on: stored ran an automatic round by itself"
 has "$TMPD/p.txt" "|aktuell|1" "... and hallo is now current without any call to install it"
 
-fi # STORE_WINDOW_ONLY
-
 fi
+
+if want window; then
 echo "== 5. the window (/bin/store) on a screen: grid, detail page, install, update, remove, search, keys =="
 # STORE_RES=WxH (default 1024x768)  STORE_MODE=light|dark  STORE_SHOTS=<dir> keeps the pictures as PNG
 RES=${STORE_RES:-1024x768}; MODE=${STORE_MODE:-light}; SHOTS=${STORE_SHOTS:-}
@@ -621,6 +624,7 @@ else
     bad "the script never reached the window part"; wclean | tail -20 | sed 's/^/        /'
 fi
 kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null
+fi
 
 echo
 echo "STORE: $pass passed, $fail failed"
