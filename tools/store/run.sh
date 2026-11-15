@@ -105,10 +105,11 @@ CV=$(curl -s --cacert "$TMPD/certs/ca.pem" --resolve "ota.test:$P0:127.0.0.1" -o
 # ---------------------------------------------------------- the guest
 printf 'root:x:0:0:root:/:/bin/sh\njustin:x:1000:1000:Justin:/:/bin/sh\nmara:x:1001:1001:Mara:/:/bin/sh\n' > "$TMPD/passwd"
 printf 'root:x:0:\njustin:x:1000:\nmara:x:1001:\n' > "$TMPD/group"
-printf 'installieren=admin\nentfernen=admin\nadmins=1000\n' > "$TMPD/conf.admin"
-printf 'installieren=benutzer\nentfernen=benutzer\n' > "$TMPD/conf.benutzer"
-printf 'installieren=aus\nentfernen=aus\n' > "$TMPD/conf.aus"
-printf 'installieren=admin\nentfernen=admin\nadmins=1001\n' > "$TMPD/conf.admins"
+printf 'installieren=admin\nentfernen=admin\nadmins=1000\nautoapps=nein\n' > "$TMPD/conf.admin"
+printf 'installieren=admin\nentfernen=admin\nadmins=1000\nautointervall=10\n' > "$TMPD/conf.auto"
+printf 'installieren=benutzer\nentfernen=benutzer\nautoapps=nein\n' > "$TMPD/conf.benutzer"
+printf 'installieren=aus\nentfernen=aus\nautoapps=nein\n' > "$TMPD/conf.aus"
+printf 'installieren=admin\nentfernen=admin\nadmins=1001\nautoapps=nein\n' > "$TMPD/conf.admins"
 cat > "$TMPD/policy" <<'EOF'
 # the store test: the shipped defaults
 dryfirst jarvis
@@ -126,7 +127,7 @@ image() { # <image> <script> <port>
         "/etc/passwd=$TMPD/passwd" "/etc/group=$TMPD/group"
         "/etc/actions.d/store.actions=etc/actions.d/store.actions"
         "/etc/orientbus/policy=$TMPD/policy"
-        "/etc/store.conf=$TMPD/conf.admin" "/etc/store.admin=$TMPD/conf.admin" "/etc/store.benutzer=$TMPD/conf.benutzer"
+        "/etc/store.conf=${STORE_CONF:-$TMPD/conf.admin}" "/etc/store.admin=$TMPD/conf.admin" "/etc/store.benutzer=$TMPD/conf.benutzer"
         "/etc/store.aus=$TMPD/conf.aus" "/etc/store.admins=$TMPD/conf.admins"
         "/etc/ota.conf=$TMPD/ota.conf" "/etc/ssl/roots.pem=$TMPD/certs/ca.pem"
         "/system/schluessel.pub=$TMPD/pk/schluessel.pub"
@@ -147,9 +148,10 @@ run() { # <image> <name> [seconds]
     tr -cd '\11\12\15\40-\176' < "$TMPD/$nm.txt" > "$TMPD/$nm.klar" 2>/dev/null || true
 }
 
-if [ -z "${STORE_WINDOW_ONLY:-}" ]; then
-# STORE_FAST=1 skips sections 3 and 4 (the bus + rights runs) when only the window is of interest
-if [ -z "${STORE_FAST:-}" ]; then
+[ -z "${STORE_WINDOW_ONLY:-}" ] || STORE_PART=window
+want() { [ -z "${STORE_PART:-}" ] || [ "$STORE_PART" = "$1" ]; }
+# STORE_PART=bus|auto|window runs one part (STORE_FAST=1 skips the bus part)
+if want bus && [ -z "${STORE_FAST:-}" ]; then
 echo "== 3. the good way, over the bus, from the signed-in person =="
 cat > "$TMPD/sA.sh" <<'EOS'
 mkdir /users/justin
@@ -337,9 +339,107 @@ EOS
     esac
 done
 
-fi # STORE_WINDOW_ONLY
+fi
+
+if want auto; then
+echo "== 4b. automatic updates: global switch, per-program switch, manual update, rights =="
+cat > "$TMPD/sC.sh" <<'EOS'
+mkdir /users/justin
+opk install /quelle1/hallo-1.opk
+orientbus serve 26000 &
+sleep -m 300
+stored serve 26000 &
+sleep 1
+setsess 1000
+echo ==C-DEFAULT==
+act call store.list
+act call store.autoset value=off
+echo ==C-GOFF==
+act call store.refresh
+sleep 30
+act call store.list
+sleep 50
+act call store.status
+act call store.list
+echo ==C-POFF==
+act call store.autoset value=on
+act call store.autoset name=hallo value=off
+act call store.autoset name=../x value=off
+act call store.autoset name=nosuch value=off
+act call store.autoset value=maybe
+act call store.autoset name=hallo value=off --dry
+act call store.list
+sleep 50
+act call store.status
+act call store.list
+echo ==C-DENY==
+su mara /bin/act call store.autoset value=off
+act call store.list
+echo ==C-MANUAL==
+act call store.update name=hallo
+act confirm last
+sleep 45
+act call store.status
+act call store.list
+opk list
+echo ==FERTIG==
+EOS
+STORE_CONF="$TMPD/conf.auto" image "$TMPD/C.img" "$TMPD/sC.sh" $P0
+run "$TMPD/C.img" c 900
+C="$TMPD/c.klar"
+grep -qa '==FERTIG==' "$C" || { bad "the auto-update guest did not finish"; tail -25 "$C" | sed 's/^/        /'; }
+part "$C" C-DEFAULT C-GOFF > "$TMPD/p.txt"
+has "$TMPD/p.txt" "autoapps=1" "default: the global switch is on (no key in /etc/store.conf)"
+has "$TMPD/p.txt" "ok" "the global switch can be turned off over the bus"
+part "$C" C-GOFF C-POFF > "$TMPD/p.txt"
+has "$TMPD/p.txt" "autoapps=0" "global off: store.list says autoapps=0"
+has "$TMPD/p.txt" "item=hallo|2.0.0|" "the store has hallo 2.0.0 ..."
+has "$TMPD/p.txt" "|update|1" "... hallo is outdated and its own switch is on (|update|1)"
+[ "$(grep -c '|aktuell' "$TMPD/p.txt")" = 0 ] && ok "global off: after several 10 s cycles hallo was NOT updated" || bad "global off: hallo was updated"
+part "$C" C-POFF C-DENY > "$TMPD/p.txt"
+has "$TMPD/p.txt" "bad_name" "a name with a slash is refused (bad_name)"
+has "$TMPD/p.txt" "not_in_catalog" "a name that is no program is refused (not_in_catalog)"
+has "$TMPD/p.txt" "bad_value" "a value that is no on/off is refused (bad_value)"
+has "$TMPD/p.txt" "would=auto" "a dry run says what it would do"
+has "$TMPD/p.txt" "autoapps=1" "global on again"
+has "$TMPD/p.txt" "|update|0" "hallo's own switch is off (|update|0)"
+[ "$(grep -c '|aktuell' "$TMPD/p.txt")" = 0 ] && ok "global on, hallo off: after several cycles hallo was NOT updated" || bad "per-program off: hallo was updated"
+part "$C" C-DENY C-MANUAL > "$TMPD/p.txt"
+has "$TMPD/p.txt" "not_allowed" "uid 1001 may not switch (the right to install is needed)"
+has "$TMPD/p.txt" "autoapps=1" "... and the switch stayed on"
+part "$C" C-MANUAL FERTIG > "$TMPD/p.txt"
+has "$TMPD/p.txt" "phase=done" "manual update works while the program's automatic switch is off (job done)"
+has "$TMPD/p.txt" "|aktuell|0" "hallo is current, its switch stayed off"
+
+echo "== 4c. automatic updates: it really installs when on =="
+cat > "$TMPD/sD.sh" <<'EOS'
+mkdir /users/justin
+opk install /quelle1/hallo-1.opk
+orientbus serve 27000 &
+sleep -m 300
+stored serve 27000 &
+sleep 1
+setsess 1000
+act call store.refresh
+echo ==D-BEFORE==
+sleep 90
+echo ==D-AFTER==
+act call store.status
+act call store.list
+opk list
+echo ==FERTIG==
+EOS
+STORE_CONF="$TMPD/conf.auto" image "$TMPD/D.img" "$TMPD/sD.sh" $P0
+run "$TMPD/D.img" d 900
+D="$TMPD/d.klar"
+grep -qa '==FERTIG==' "$D" || { bad "the auto-install guest did not finish"; tail -25 "$D" | sed 's/^/        /'; }
+part "$D" D-AFTER FERTIG > "$TMPD/p.txt"
+has "$TMPD/p.txt" "automatisch aktualisiert" "default on: stored ran an automatic round by itself"
+has "$TMPD/p.txt" "|aktuell|1" "... and hallo is now current without any call to install it"
 
 fi
+
+if want window; then
 echo "== 5. the window (/bin/store) on a screen: grid, detail page, install, update, remove, search, keys =="
 # STORE_RES=WxH (default 1024x768)  STORE_MODE=light|dark  STORE_SHOTS=<dir> keeps the pictures as PNG
 RES=${STORE_RES:-1024x768}; MODE=${STORE_MODE:-light}; SHOTS=${STORE_SHOTS:-}
@@ -424,7 +524,7 @@ import sys
 from PIL import Image, ImageChops
 a = Image.open(sys.argv[1]).convert('RGB'); b = Image.open(sys.argv[2]).convert('RGB')
 n = sum(1 for p in ImageChops.difference(a, b).convert('L').getdata() if p > 24)
-sys.exit(0 if n > 4000 else 1)" "$TMPD/$1.ppm" "$TMPD/$2.ppm" 2>/dev/null; }
+sys.exit(0 if n > int(sys.argv[3]) else 1)" "$TMPD/$1.ppm" "$TMPD/$2.ppm" "${3:-4000}" 2>/dev/null; }
 lastn() { wclean | grep -ao "store: tiles=[0-9]*" | tail -1 | tr -cd '0-9'; }
 lasth() { wclean | grep -ao " hits=[0-9]*" | tail -1 | tr -cd '0-9'; }
 if waitfor "==S-WAIT==" 150; then
@@ -487,6 +587,21 @@ if waitfor "==S-WAIT==" 150; then
     key ret; dlgyes "$D0"
     waitlog "done entfernt" 150 && ok "yes: gruss removed" || bad "gruss was not removed"
     shot s9-end
+    echo "  -- the automatic-update switches in the window (global on the updates page, one program on its detail page)"
+    key esc; sleep 2
+    mark; tapt "Updates" || bad "no 'Updates' in the navigation"; sleep 2
+    shot s10-auto-off
+    sawt "Apps automatisch aktualisieren" && ok "the updates page shows the global switch" || bad "no global switch"
+    mark; tapt "Apps automatisch aktualisieren" || bad "global switch not found"; sleep 3
+    shot s10b-auto-on
+    differs s10-auto-off s10b-auto-on 30 && ok "clicking the global switch changes the picture" || bad "global switch click changed nothing"
+    mark; tapt "Alle" || bad "no 'Alle' in the navigation"; sleep 2
+    key ctrl-f down right ret; sleep 2
+    sawt "Automatisch aktualisieren" && ok "the detail page of an installed program shows its own switch" || bad "no per-program switch"
+    shot s11-app-on
+    mark; tapt "Automatisch aktualisieren" || bad "per-program switch not found"; sleep 3
+    shot s11b-app-off
+    differs s11-app-on s11b-app-off 30 && ok "clicking the program's switch changes the picture" || bad "program switch click changed nothing"
     N=$(wclean | grep -ac "==S-SNAP==")
     i=0; while [ $i -lt 100 ]; do [ "$(wclean | grep -ac '==S-SNAP==')" -ge $((N + 2)) ] && break; sleep 2; i=$((i + 1)); done
     sleep 6
@@ -497,6 +612,8 @@ if waitfor "==S-WAIT==" 150; then
     hasnot "$TMPD/e.txt" "  gruss -> " "... and not gruss (installed, then removed through the window)"
     has "$TMPD/e.txt" "item=hallo|2.0.0|" "the catalog says hallo is at 2.0.0"
     has "$TMPD/e.txt" "|aktuell" "hallo is up to date after the update through the window"
+    has "$TMPD/e.txt" "autoapps=1" "the window's click turned the global switch on (it started off)"
+    has "$TMPD/e.txt" "|aktuell|0" "the window's click turned hallo's own switch off"
     has "$TMPD/e.txt" "item=gruss|1.0.0|" "gruss is in the catalog again"
     fi
     [ -n "$SHOTS" ] && { cp "$TMPD/w.txt" "$SHOTS/serial-$MODE-$RES.txt" 2>/dev/null; note "pictures: $SHOTS"; }
@@ -504,6 +621,7 @@ else
     bad "the script never reached the window part"; wclean | tail -20 | sed 's/^/        /'
 fi
 kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null
+fi
 
 echo
 echo "STORE: $pass passed, $fail failed"

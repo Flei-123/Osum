@@ -115,6 +115,13 @@ static mut V_INSTALL: [u8; 19] = "call store.install\0"
 static mut V_UPDATE: [u8; 18] = "call store.update\0"
 static mut V_REMOVE: [u8; 18] = "call store.remove\0"
 static mut K_NAMEARG: [u8; 5] = "name\0"
+static mut K_VALUEARG: [u8; 6] = "value\0"
+static mut V_AUTOSET: [u8; 19] = "call store.autoset\0"
+static mut V_ON: [u8; 3] = "on\0"
+static mut V_OFF: [u8; 4] = "off\0"
+static mut S_AUTOAPPS: [u8; 10] = "autoapps=\0"
+static mut T_AUTOALL: [u8; 14] = "store.autoall\0"
+static mut T_AUTOAPP: [u8; 14] = "store.autoapp\0"
 static mut S_ITEM: [u8; 6] = "item=\0"
 static mut S_CI: [u8; 13] = "can_install=\0"
 static mut S_CR: [u8; 12] = "can_remove=\0"
@@ -148,6 +155,8 @@ const K_ALLUP: u64 = 7
 const K_PGPREV: u64 = 8
 const K_PGNEXT: u64 = 9
 const K_CLEAR: u64 = 10
+const K_AUTOALL: u64 = 11
+const K_AUTOAPP: u64 = 12
 const K_CHIP: u64 = 60
 const MAXCHIP: u64 = 8
 const K_NAV: u64 = 20
@@ -178,6 +187,8 @@ const BTN_H: u64 = 28
 static mut s_names: [u8; 3072] = [0 as u8; 3072]
 static mut s_state: [u8; 64] = [0 as u8; 64]
 static mut s_count: u64 = 0
+static mut s_auto_all: bool = true
+static mut s_autooff: [u8; 64] = [0 as u8; 64]
 static mut s_status: [u8; 160] = [0 as u8; 160]
 static mut s_info: [u8; 96] = [0 as u8; 96]
 static mut s_source: [u8; 100] = [0 as u8; 100]
@@ -577,6 +588,9 @@ fn load_list() {
     var n: u64 = 1
     while actcli.line(n, lp, 160) {
         let _src: bool = kv(lp, (&S_SRC[0 as usize]) as u64, (&s_source[0 as usize]) as u64, 100)
+        if kv(lp, (&S_AUTOAPPS[0 as usize]) as u64, (&v[0 as usize]) as u64, 40) {
+            s_auto_all = (*((&v[0 as usize]) as *mut u8)) != 48 as u8
+        }
         if kv(lp, (&S_CI[0 as usize]) as u64, (&v[0 as usize]) as u64, 40) {
             s_can_i = (*((&v[0 as usize]) as *mut u8)) == 49 as u8
         } else if kv(lp, (&S_CR[0 as usize]) as u64, (&v[0 as usize]) as u64, 40) {
@@ -589,6 +603,7 @@ fn load_list() {
             var i: u64 = 0
             memcopy.fill(row, 0, NAMEW)
             s_state[s_count as usize] = 0 as u8
+            s_autooff[s_count as usize] = 0 as u8
             while (*((t + i) as *mut u8)) != 0 as u8 {
                 let c: u64 = (*((t + i) as *mut u8)) as u64
                 if c == 124 {
@@ -616,6 +631,11 @@ fn load_list() {
                             } else if c == 117 {
                                 s_state[s_count as usize] = 2 as u8
                             }
+                        }
+                        o = o + 1
+                    } else if f == 4 && o == 0 {
+                        if c == 48 {
+                            s_autooff[s_count as usize] = 1 as u8
                         }
                         o = o + 1
                     }
@@ -753,6 +773,27 @@ fn call_verb(verb: u64, name: u64) -> bool {
         set_status(msg.get((&T_FAIL[0 as usize]) as u64), lp2)
     }
     return false
+}
+
+fn set_auto(name: u64, on: bool) {
+    if !actcli.open() {
+        set_status(msg.get((&T_NOBUS[0 as usize]) as u64), 0)
+        return
+    }
+    actcli.req((&V_AUTOSET[0 as usize]) as u64)
+    if on {
+        actcli.arg((&K_VALUEARG[0 as usize]) as u64, (&V_ON[0 as usize]) as u64)
+    } else {
+        actcli.arg((&K_VALUEARG[0 as usize]) as u64, (&V_OFF[0 as usize]) as u64)
+    }
+    if name != 0 {
+        actcli.arg((&K_NAMEARG[0 as usize]) as u64, name)
+    }
+    if actcli.send(300) != actcli.R_OK {
+        set_status(msg.get((&T_DENIED[0 as usize]) as u64), 0)
+        return
+    }
+    load_list()
 }
 
 fn ask_check() {
@@ -1404,6 +1445,10 @@ fn build_detail(col: usize) {
         let rb: usize = fuiscene.button(ar, msg.get((&T_REMOVE[0 as usize]) as u64), K_REMOVE)
         fuiscene.set_size(rb, 130, 36)
         fuiscene.set_enabled(rb, !s_busy && s_bus && s_can_r && st != 0)
+        if st != 0 {
+            let ag: usize = fuiscene.toggle(ar, msg.get((&T_AUTOAPP[0 as usize]) as u64), K_AUTOAPP, s_autooff[i as usize] == 0 as u8)
+            fuiscene.set_enabled(ag, s_bus && s_can_i)
+        }
     }
 }
 
@@ -1463,7 +1508,13 @@ fn build() {
     } else {
         let tr: usize = fuiscene.row(col)
         fuiscene.set_gap(tr, 8)
-        let _ti: usize = fuiscene.canvas(tr, 0, 420, 32, cv_title)
+        if s_cat == 4 {
+            let _tu: usize = fuiscene.canvas(tr, 0, 200, 32, cv_title)
+            let tg: usize = fuiscene.toggle(tr, msg.get((&T_AUTOALL[0 as usize]) as u64), K_AUTOALL, s_auto_all)
+            fuiscene.set_enabled(tg, s_bus && s_can_i)
+        } else {
+            let _ti: usize = fuiscene.canvas(tr, 0, 420, 32, cv_title)
+        }
         let tsp: usize = fuiscene.row(tr)
         fuiscene.set_grow(tsp, 1)
         if s_cat == 4 && s_vis_n > 0 {
@@ -1776,6 +1827,12 @@ fn u_start(args: u64) -> u64 {
             ask(3, s_detail)
         } else if key == K_ALLUP {
             ask_all()
+        } else if key == K_AUTOALL {
+            set_auto(0, !s_auto_all)
+            changed = true
+        } else if key == K_AUTOAPP && s_detail != NONE {
+            set_auto(name_at(s_detail), s_autooff[s_detail as usize] == 1 as u8)
+            changed = true
         } else if key == K_PGPREV {
             if s_page > 0 {
                 s_page = s_page - 1

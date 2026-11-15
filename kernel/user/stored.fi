@@ -46,6 +46,10 @@ static mut P_NEED: [u8; 16] = "/tmp/store/NEED\0"
 static mut F_FILE: [u8; 5] = "file\0"
 static mut F_AUTO: [u8; 5] = "auto\0"
 static mut F_AUTOINT: [u8; 14] = "autointervall\0"
+static mut F_AUTOAPPS: [u8; 9] = "autoapps\0"
+static mut F_AUTOOFF: [u8; 8] = "autooff\0"
+static mut OFF_LIST: [u8; 512] = [0 as u8; 512]
+static mut OFF_NEW: [u8; 512] = [0 as u8; 512]
 static mut V_JA: [u8; 3] = "ja\0"
 static mut V_TRUE: [u8; 5] = "true\0"
 static mut T_DONE_A: [u8; 25] = "automatisch aktualisiert\0"
@@ -416,6 +420,15 @@ fn do_list(uid: u64) {
         r_ch(48)
     }
     r_ch(10)
+    var k_autoapps: [u8; 10] = "autoapps=\0"
+    r_str((&k_autoapps[0 as usize]) as u64)
+    if auto_on() {
+        r_ch(49)
+    } else {
+        r_ch(48)
+    }
+    r_ch(10)
+    off_load()
     var k_src: [u8; 8] = "source=\0"
     var src: [u8; 100] = [0 as u8; 100]
     let has_src: bool = actwire.kvfile_get((&P_OCONF[0 as usize]) as u64, (&F_SOURCE[0 as usize]) as u64, (&src[0 as usize]) as u64, 100)
@@ -453,6 +466,12 @@ fn do_list(uid: u64) {
                 r_str((&s_akt[0 as usize]) as u64)
             } else {
                 r_str((&s_upd[0 as usize]) as u64)
+            }
+            r_ch(124)
+            if app_auto((&nm[0 as usize]) as u64) {
+                r_ch(49)
+            } else {
+                r_ch(48)
             }
             r_ch(10)
         }
@@ -613,6 +632,7 @@ fn handle(msg: u64) -> bool {
         uid = ulib.to_num((&ub[0 as usize]) as u64)
     }
     let nbp: u64 = (&NB[0 as usize]) as u64
+    octets.st8(nbp, 0, 0)
     actwire.kv_find(msg, (&k_name[0 as usize]) as u64, nbp, 64)
 
     var k_ping: [u8; 5] = "ping\0"
@@ -622,6 +642,7 @@ fn handle(msg: u64) -> bool {
     var a_ins: [u8; 14] = "store.install\0"
     var a_upd: [u8; 13] = "store.update\0"
     var a_rem: [u8; 13] = "store.remove\0"
+    var a_auto: [u8; 14] = "store.autoset\0"
     if actwire.str_eq(vp, (&k_ping[0 as usize]) as u64) {
         var s_pong: [u8; 6] = "pong\n\0"
         r_reset()
@@ -652,6 +673,14 @@ fn handle(msg: u64) -> bool {
         do_run((&W_REMOVE[0 as usize]) as u64, nbp, uid, dry)
         return false
     }
+    if actwire.str_eq(np, (&a_auto[0 as usize]) as u64) {
+        var k_value: [u8; 6] = "value\0"
+        var val: [u8; 16] = [0 as u8; 16]
+        let vq: u64 = (&val[0 as usize]) as u64
+        actwire.kv_find(msg, (&k_value[0 as usize]) as u64, vq, 16)
+        do_autoset(uid, nbp, vq, dry)
+        return false
+    }
     var e3: [u8; 15] = "unknown_action\0"
     r_err((&e3[0 as usize]) as u64, np)
     return false
@@ -659,12 +688,172 @@ fn handle(msg: u64) -> bool {
 
 fn auto_on() -> bool {
     var v: [u8; 24] = [0 as u8; 24]
-    if !actwire.kvfile_get((&P_OCONF[0 as usize]) as u64, (&F_AUTO[0 as usize]) as u64,
+    if !actwire.kvfile_get((&P_CONF[0 as usize]) as u64, (&F_AUTOAPPS[0 as usize]) as u64,
         (&v[0 as usize]) as u64, 24) {
         return true
     }
     return actwire.str_eq((&v[0 as usize]) as u64, (&V_JA[0 as usize]) as u64)
         || actwire.str_eq((&v[0 as usize]) as u64, (&V_TRUE[0 as usize]) as u64)
+}
+
+fn off_load() {
+    OFF_LIST[0 as usize] = 0 as u8
+    let _f: bool = actwire.kvfile_get((&P_CONF[0 as usize]) as u64, (&F_AUTOOFF[0 as usize]) as u64,
+        (&OFF_LIST[0 as usize]) as u64, 512)
+}
+
+fn name_listed(list: u64, name: u64) -> bool {
+    let nl: u64 = octets.cstr_len(name)
+    var i: u64 = 0
+    while octets.ld8(list, i) != 0 {
+        var e: u64 = i
+        while octets.ld8(list, e) != 44 && octets.ld8(list, e) != 0 {
+            e = e + 1
+        }
+        var same: bool = e - i == nl
+        var j: u64 = 0
+        while same && j < nl {
+            if octets.ld8(list, i + j) != octets.ld8(name, j) {
+                same = false
+            }
+            j = j + 1
+        }
+        if same {
+            return true
+        }
+        i = e
+        if octets.ld8(list, i) == 44 {
+            i = i + 1
+        }
+    }
+    return false
+}
+
+fn app_auto(name: u64) -> bool {
+    return !name_listed((&OFF_LIST[0 as usize]) as u64, name)
+}
+
+fn list_edit(name: u64, add: bool) {
+    let list: u64 = (&OFF_LIST[0 as usize]) as u64
+    let out: u64 = (&OFF_NEW[0 as usize]) as u64
+    let nl: u64 = octets.cstr_len(name)
+    var o: u64 = 0
+    var i: u64 = 0
+    while octets.ld8(list, i) != 0 {
+        var e: u64 = i
+        while octets.ld8(list, e) != 44 && octets.ld8(list, e) != 0 {
+            e = e + 1
+        }
+        let len: u64 = e - i
+        var same: bool = len == nl
+        var j: u64 = 0
+        while same && j < nl {
+            if octets.ld8(list, i + j) != octets.ld8(name, j) {
+                same = false
+            }
+            j = j + 1
+        }
+        if !same && len > 0 && o + len + 2 < 500 {
+            if o > 0 {
+                octets.st8(out, o, 44)
+                o = o + 1
+            }
+            j = 0
+            while j < len {
+                octets.st8(out, o, octets.ld8(list, i + j))
+                o = o + 1
+                j = j + 1
+            }
+        }
+        i = e
+        if octets.ld8(list, i) == 44 {
+            i = i + 1
+        }
+    }
+    if add && o + nl + 2 < 500 {
+        if o > 0 {
+            octets.st8(out, o, 44)
+            o = o + 1
+        }
+        var j2: u64 = 0
+        while j2 < nl {
+            octets.st8(out, o, octets.ld8(name, j2))
+            o = o + 1
+            j2 = j2 + 1
+        }
+    }
+    octets.st8(out, o, 0)
+}
+
+fn value_on(v: u64) -> bool {
+    var w_on: [u8; 3] = "on\0"
+    var w_1: [u8; 2] = "1\0"
+    return actwire.str_eq(v, (&w_on[0 as usize]) as u64) || actwire.str_eq(v, (&V_JA[0 as usize]) as u64)
+        || actwire.str_eq(v, (&V_TRUE[0 as usize]) as u64) || actwire.str_eq(v, (&w_1[0 as usize]) as u64)
+}
+
+fn value_off(v: u64) -> bool {
+    var w_off: [u8; 4] = "off\0"
+    var w_no: [u8; 5] = "nein\0"
+    var w_false: [u8; 6] = "false\0"
+    var w_0: [u8; 2] = "0\0"
+    return actwire.str_eq(v, (&w_off[0 as usize]) as u64) || actwire.str_eq(v, (&w_no[0 as usize]) as u64)
+        || actwire.str_eq(v, (&w_false[0 as usize]) as u64) || actwire.str_eq(v, (&w_0[0 as usize]) as u64)
+}
+
+fn do_autoset(uid: u64, name: u64, value: u64, dry: bool) {
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_would: [u8; 12] = "would=auto\n\0"
+    var e_perm: [u8; 12] = "not_allowed\0"
+    var e_value: [u8; 10] = "bad_value\0"
+    var e_name: [u8; 9] = "bad_name\0"
+    var e_nokat: [u8; 15] = "not_in_catalog\0"
+    var e_write: [u8; 13] = "write_failed\0"
+    var v_nein: [u8; 5] = "nein\0"
+    if !may_install(uid) {
+        r_err((&e_perm[0 as usize]) as u64, 0)
+        return
+    }
+    let on: bool = value_on(value)
+    if !on && !value_off(value) {
+        r_err((&e_value[0 as usize]) as u64, value)
+        return
+    }
+    let global: bool = octets.ld8(name, 0) == 0
+    if !global {
+        if !name_ok(name) {
+            r_err((&e_name[0 as usize]) as u64, name)
+            return
+        }
+        if kat_read() == 0 || kat_find(name) == actwire.NONE {
+            r_err((&e_nokat[0 as usize]) as u64, name)
+            return
+        }
+    }
+    r_reset()
+    r_str((&s_ok[0 as usize]) as u64)
+    if dry {
+        r_str((&s_would[0 as usize]) as u64)
+        return
+    }
+    mkdirs()
+    var wrote: bool = false
+    if global {
+        var v_ja: [u8; 3] = "ja\0"
+        var nv: u64 = (&v_nein[0 as usize]) as u64
+        if on {
+            nv = (&v_ja[0 as usize]) as u64
+        }
+        wrote = actwire.kvfile_set((&P_CONF[0 as usize]) as u64, (&F_AUTOAPPS[0 as usize]) as u64, nv)
+    } else {
+        off_load()
+        list_edit(name, !on)
+        wrote = actwire.kvfile_set((&P_CONF[0 as usize]) as u64, (&F_AUTOOFF[0 as usize]) as u64,
+            (&OFF_NEW[0 as usize]) as u64)
+    }
+    if !wrote {
+        r_err((&e_write[0 as usize]) as u64, 0)
+    }
 }
 
 fn auto_interval() -> u64 {
@@ -1000,6 +1189,7 @@ fn auto_work(verb: u64) -> u64 {
     if r != 0 {
         return r
     }
+    off_load()
     while again && ntried < 16 {
         again = false
         if kat_read() != 0 {
@@ -1019,7 +1209,7 @@ fn auto_work(verb: u64) -> u64 {
                         }
                         t = t + 1
                     }
-                    if !seen && name_ok((&nm[0 as usize]) as u64) {
+                    if !seen && name_ok((&nm[0 as usize]) as u64) && app_auto((&nm[0 as usize]) as u64) {
                         found = true
                     }
                 }

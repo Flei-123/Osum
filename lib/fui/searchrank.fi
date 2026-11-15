@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
+import search.fold
+import search.typo
+
 export {
     name_tier, fields_tier, fuzzy_tier, rank_key, key_before, name_before, is_default_token,
+    set_query, query_len, tier_name, tier_fields, learned_tier,
     CAT_APP, CAT_SETTING, CAT_FILE,
-    T_EXACT, T_PREFIX, T_WORD, T_SUBSTR, T_KEYWORD, T_INFO, T_FUZZY, NO_MATCH,
+    T_LEARNED, T_EXACT, T_PREFIX, T_WORD, T_ACRONYM, T_SUBSTR, T_KEYWORD, T_TYPO, T_INFO, T_FUZZY, NO_MATCH,
     USE_CAP, FUZZY_MIN_LEN,
 }
 
@@ -10,23 +14,39 @@ const CAT_APP: u64 = 0
 const CAT_SETTING: u64 = 1
 const CAT_FILE: u64 = 2
 
-const T_EXACT: u64 = 0
-const T_PREFIX: u64 = 1
-const T_WORD: u64 = 2
-const T_SUBSTR: u64 = 3
-const T_KEYWORD: u64 = 4
-const T_INFO: u64 = 5
-const T_FUZZY: u64 = 6
+const T_LEARNED: u64 = 0
+const T_EXACT: u64 = 1
+const T_PREFIX: u64 = 2
+const T_WORD: u64 = 3
+const T_ACRONYM: u64 = 4
+const T_SUBSTR: u64 = 5
+const T_KEYWORD: u64 = 6
+const T_TYPO: u64 = 7
+const T_INFO: u64 = 8
+const T_FUZZY: u64 = 9
 const NO_MATCH: u64 = 15
 
 const USE_CAP: u64 = 255
 const FUZZY_MIN_LEN: u64 = 3
+const ACRONYM_MIN_LEN: u64 = 2
+const INFO_MIN_LEN: u64 = 3
 const KEY_SHIFT_CAT: u64 = 32
 const KEY_SHIFT_TIER: u64 = 24
 const KEY_SHIFT_USE: u64 = 16
 const KEY_SHIFT_DEFAULT: u64 = 8
 const COMMA: u64 = 44
 const SLASH: u64 = 47
+const BUF: u64 = 65
+
+static mut q_fold: [u8; 65] = [0 as u8; 65]
+static mut q_starts: [u8; 65] = [0 as u8; 65]
+static mut q_len: u64 = 0
+static mut n_fold: [u8; 65] = [0 as u8; 65]
+static mut n_starts: [u8; 65] = [0 as u8; 65]
+static mut n_init: [u8; 65] = [0 as u8; 65]
+static mut k_fold: [u8; 65] = [0 as u8; 65]
+static mut k_starts: [u8; 65] = [0 as u8; 65]
+static mut k_raw: [u8; 65] = [0 as u8; 65]
 
 fn at(p: u64, i: u64) -> u64 {
     return (*((p + i) as *mut u8)) as u64
@@ -47,14 +67,22 @@ fn length(p: u64) -> u64 {
     return n
 }
 
-fn is_word_char(c: u64) -> bool {
-    return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c >= 128
+fn query_len() -> u64 {
+    return q_len
 }
 
-fn matches_at(hay: u64, pos: u64, needle: u64, n: u64) -> bool {
+fn set_query(query: u64) {
+    q_len = fold.fold(query, (&q_fold[0 as usize]) as u64, (&q_starts[0 as usize]) as u64, fold.MAX_FOLD)
+}
+
+fn qf() -> u64 {
+    return (&q_fold[0 as usize]) as u64
+}
+
+fn same_at(hay: u64, pos: u64, needle: u64, n: u64) -> bool {
     var k: u64 = 0
     while k < n {
-        if lower(at(hay, pos + k)) != lower(at(needle, k)) {
+        if at(hay, pos + k) != at(needle, k) {
             return false
         }
         k = k + 1
@@ -62,90 +90,147 @@ fn matches_at(hay: u64, pos: u64, needle: u64, n: u64) -> bool {
     return true
 }
 
-fn is_word_start(hay: u64, pos: u64) -> bool {
-    if pos == 0 {
-        return true
-    }
-    return !is_word_char(at(hay, pos - 1)) && is_word_char(at(hay, pos))
-}
-
-fn name_tier(name: u64, query: u64) -> u64 {
-    let n: u64 = length(query)
-    let h: u64 = length(name)
-    if n == 0 || n > h {
-        return NO_MATCH
-    }
-    if n == h && matches_at(name, 0, query, n) {
-        return T_EXACT
-    }
-    if matches_at(name, 0, query, n) {
-        return T_PREFIX
-    }
-    var found_sub: bool = false
-    var i: u64 = 1
+fn find_from(hay: u64, h: u64, from: u64, needle: u64, n: u64) -> u64 {
+    var i: u64 = from
     while i + n <= h {
-        if matches_at(name, i, query, n) {
-            if is_word_start(name, i) {
-                return T_WORD
-            }
-            found_sub = true
+        if same_at(hay, i, needle, n) {
+            return i
         }
         i = i + 1
     }
-    if found_sub {
+    return h + 1
+}
+
+fn word_hit(hay: u64, starts: u64, h: u64) -> bool {
+    var i: u64 = find_from(hay, h, 1, qf(), q_len)
+    while i <= h {
+        if at(starts, i) != 0 {
+            return true
+        }
+        i = find_from(hay, h, i + 1, qf(), q_len)
+    }
+    return false
+}
+
+fn name_tier_folded(h: u64) -> u64 {
+    let hay: u64 = (&n_fold[0 as usize]) as u64
+    let starts: u64 = (&n_starts[0 as usize]) as u64
+    if q_len == 0 || q_len > h {
+        return NO_MATCH
+    }
+    if same_at(hay, 0, qf(), q_len) {
+        if q_len == h {
+            return T_EXACT
+        }
+        return T_PREFIX
+    }
+    if word_hit(hay, starts, h) {
+        return T_WORD
+    }
+    if q_len >= ACRONYM_MIN_LEN {
+        let m: u64 = fold.initials(hay, starts, h, (&n_init[0 as usize]) as u64)
+        if q_len <= m && same_at((&n_init[0 as usize]) as u64, 0, qf(), q_len) {
+            return T_ACRONYM
+        }
+    }
+    if find_from(hay, h, 1, qf(), q_len) <= h {
         return T_SUBSTR
     }
     return NO_MATCH
 }
 
-fn keyword_tier(keys: u64, query: u64) -> u64 {
-    let n: u64 = length(query)
-    let h: u64 = length(keys)
-    if n == 0 {
-        return NO_MATCH
-    }
-    var i: u64 = 0
-    while i + n <= h {
-        let starts: bool = i == 0 || at(keys, i - 1) == COMMA
-        if starts && matches_at(keys, i, query, n) {
-            return T_KEYWORD
-        }
-        i = i + 1
-    }
-    return NO_MATCH
+fn fold_name(name: u64) -> u64 {
+    return fold.fold(name, (&n_fold[0 as usize]) as u64, (&n_starts[0 as usize]) as u64, fold.MAX_FOLD)
 }
 
-fn contains_any(hay: u64, query: u64) -> bool {
-    let n: u64 = length(query)
-    let h: u64 = length(hay)
-    var i: u64 = 0
-    while i + n <= h {
-        if matches_at(hay, i, query, n) {
-            return true
+fn tier_name(name: u64) -> u64 {
+    return name_tier_folded(fold_name(name))
+}
+
+fn next_keyword(keys: u64, from: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = from
+    while at(keys, i) != 0 && at(keys, i) != COMMA {
+        if n < 64 {
+            k_raw[(n) as usize] = at(keys, i) as u8
+            n = n + 1
         }
         i = i + 1
+    }
+    k_raw[(n) as usize] = 0 as u8
+    return i
+}
+
+fn keyword_tier(keys: u64) -> u64 {
+    var best: u64 = NO_MATCH
+    var i: u64 = 0
+    while q_len > 0 {
+        let end: u64 = next_keyword(keys, i)
+        let kn: u64 = fold.fold((&k_raw[0 as usize]) as u64, (&k_fold[0 as usize]) as u64,
+            (&k_starts[0 as usize]) as u64, fold.MAX_FOLD)
+        if kn >= q_len && same_at((&k_fold[0 as usize]) as u64, 0, qf(), q_len) {
+            return T_KEYWORD
+        }
+        if kn >= q_len && q_len >= INFO_MIN_LEN
+            && find_from((&k_fold[0 as usize]) as u64, kn, 1, qf(), q_len) <= kn {
+            best = T_INFO
+        }
+        if at(keys, end) == 0 {
+            return best
+        }
+        i = end + 1
+    }
+    return best
+}
+
+fn typo_close(text: u64, tn: u64) -> bool {
+    if q_len < 4 || tn == 0 {
+        return false
+    }
+    if q_len < 6 && at(text, 0) != at(qf(), 0) && !(tn > 1 && at(text, 1) == at(qf(), 0)) {
+        return false
+    }
+    return typo.prefix_distance(qf(), q_len, text, tn) <= typo.max_edits(q_len)
+}
+
+fn typo_in_keywords(keys: u64) -> bool {
+    var i: u64 = 0
+    while true {
+        let end: u64 = next_keyword(keys, i)
+        let kn: u64 = fold.fold((&k_raw[0 as usize]) as u64, (&k_fold[0 as usize]) as u64,
+            (&k_starts[0 as usize]) as u64, fold.MAX_FOLD)
+        if typo_close((&k_fold[0 as usize]) as u64, kn) {
+            return true
+        }
+        if at(keys, end) == 0 {
+            return false
+        }
+        i = end + 1
     }
     return false
 }
 
-fn fuzzy_tier(name: u64, query: u64) -> u64 {
-    let n: u64 = length(query)
-    let h: u64 = length(name)
-    if n < FUZZY_MIN_LEN || h == 0 || lower(at(name, 0)) != lower(at(query, 0)) {
-        return NO_MATCH
+fn info_hit(info: u64) -> bool {
+    if q_len < INFO_MIN_LEN {
+        return false
+    }
+    let n: u64 = fold.fold(info, (&k_fold[0 as usize]) as u64, (&k_starts[0 as usize]) as u64, fold.MAX_FOLD)
+    return n >= q_len && find_from((&k_fold[0 as usize]) as u64, n, 0, qf(), q_len) <= n
+}
+
+fn subsequence_hit(h: u64) -> bool {
+    if q_len < FUZZY_MIN_LEN || h == 0 || at((&n_fold[0 as usize]) as u64, 0) != at(qf(), 0) {
+        return false
     }
     var qi: u64 = 0
     var i: u64 = 0
-    while i < h && qi < n {
-        if lower(at(name, i)) == lower(at(query, qi)) {
+    while i < h && qi < q_len {
+        if at((&n_fold[0 as usize]) as u64, i) == at(qf(), qi) {
             qi = qi + 1
         }
         i = i + 1
     }
-    if qi == n {
-        return T_FUZZY
-    }
-    return NO_MATCH
+    return qi == q_len
 }
 
 fn min_tier(a: u64, b: u64) -> u64 {
@@ -155,19 +240,52 @@ fn min_tier(a: u64, b: u64) -> u64 {
     return b
 }
 
-fn fields_tier(name: u64, info: u64, keys: u64, query: u64, allow_fuzzy: bool) -> u64 {
-    var best: u64 = name_tier(name, query)
+fn tier_fields(name: u64, info: u64, keys: u64, allow_fuzzy: bool) -> u64 {
+    let h: u64 = fold_name(name)
+    var best: u64 = name_tier_folded(h)
     if best == T_EXACT {
         return best
     }
-    best = min_tier(best, keyword_tier(keys, query))
-    if best == NO_MATCH && (contains_any(info, query) || contains_any(keys, query)) {
-        best = T_INFO
+    best = min_tier(best, keyword_tier(keys))
+    if best <= T_KEYWORD {
+        return best
     }
-    if best == NO_MATCH && allow_fuzzy {
-        best = fuzzy_tier(name, query)
+    if allow_fuzzy && (typo_close((&n_fold[0 as usize]) as u64, h) || typo_in_keywords(keys)) {
+        return T_TYPO
     }
-    return best
+    if best == T_INFO || info_hit(info) {
+        return T_INFO
+    }
+    if allow_fuzzy && subsequence_hit(h) {
+        return T_FUZZY
+    }
+    return NO_MATCH
+}
+
+fn name_tier(name: u64, query: u64) -> u64 {
+    set_query(query)
+    return tier_name(name)
+}
+
+fn fields_tier(name: u64, info: u64, keys: u64, query: u64, allow_fuzzy: bool) -> u64 {
+    set_query(query)
+    return tier_fields(name, info, keys, allow_fuzzy)
+}
+
+fn fuzzy_tier(name: u64, query: u64) -> u64 {
+    set_query(query)
+    let h: u64 = fold_name(name)
+    if subsequence_hit(h) {
+        return T_FUZZY
+    }
+    return NO_MATCH
+}
+
+fn learned_tier(tier: u64, learned: bool) -> u64 {
+    if learned && tier != NO_MATCH {
+        return T_LEARNED
+    }
+    return tier
 }
 
 fn rank_key(cat: u64, tier: u64, uses: u64, is_default: bool) -> u64 {
@@ -224,5 +342,5 @@ fn is_default_token(token: u64, handler_path: u64) -> bool {
     }
     let base: u64 = handler_path + basename_start(handler_path)
     let n: u64 = length(token)
-    return length(base) == n && matches_at(base, 0, token, n)
+    return length(base) == n && same_at(base, 0, token, n)
 }

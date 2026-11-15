@@ -4,7 +4,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 TMPD=$(mktemp -d)
-cleanup() { git worktree remove --force "$TMPD/mut" > /dev/null 2>&1; rm -rf "$TMPD"; }
+cleanup() { git worktree remove --force "$TMPD/mut" > /dev/null 2>&1; git worktree remove --force "$TMPD/nol" > /dev/null 2>&1; rm -rf "$TMPD"; }
 trap cleanup EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
@@ -26,10 +26,14 @@ make_bundle ab-certus "Abcertus" "Tool" "tool" /bin/edit
 make_bundle ac-certus-pad "Ac Certus Pad" "Pad" "pad" /bin/edit
 make_bundle notes-one "Notes One" "Notes" "notes" /bin/edit
 make_bundle notes-two "Notes Two" "Notes" "notes" /bin/edit
+make_bundle xremote "Remote control" "Let another device see and control this computer" "remote,fernwartung,freeviewer,host,x-remote,fernsteuerung,fernzugriff" /bin/edit
+make_bundle firefox "Firefox" "Web browser" "firefox,browser,web,internet,www,mozilla,surf" /bin/edit
+make_bundle terminal "Terminal" "A command prompt with a shell" "terminal,konsole,shell,sh,eingabe,befehl,kommando,prompt" /bin/edit
+make_bundle teamlist "Teamlist" "Lists teams" "team" /bin/edit
 printf 'use=notes-two:3\n' > "$TMPD/startuse.conf"
-for f in certus-notes.txt zzqq-file.txt spinatus.txt tattoo.txt; do printf 'x\n' > "$TMPD/files/$f"; done
+for f in certus-notes.txt zzqq-file.txt spinatus.txt tattoo.txt x-remote-notes.txt; do printf 'x\n' > "$TMPD/files/$f"; done
 MKFS_EXTRA="/data/"
-for f in certus-notes.txt zzqq-file.txt spinatus.txt tattoo.txt; do MKFS_EXTRA="$MKFS_EXTRA /data/$f=$TMPD/files/$f@0644"; done
+for f in certus-notes.txt zzqq-file.txt spinatus.txt tattoo.txt x-remote-notes.txt; do MKFS_EXTRA="$MKFS_EXTRA /data/$f=$TMPD/files/$f@0644"; done
 
 echo "== mutant tree: the old ranking =="
 git worktree add --detach "$TMPD/mut" HEAD > /dev/null 2>&1 || { bad "mutant worktree"; echo "SEARCHRANKUI: $pass passed, $fail failed"; exit 1; }
@@ -48,6 +52,23 @@ assert b.count(old) == 1
 open(q, "wb").write(b.replace(old, b"if !g_home {"))
 PY
 
+git worktree add --detach "$TMPD/nol" HEAD > /dev/null 2>&1 || bad "nolearn worktree"
+python3 -I - "$TMPD/nol" <<'PY'
+import re, sys
+p = sys.argv[1] + "/kernel/user/startlearn.fi"
+s = open(p).read()
+def stub(name, sig, body):
+    global s
+    m = re.search(r"fn %s\(.*?\n}\n" % name, s, re.S)
+    assert m, name
+    s = s[:m.start()] + "fn %s%s {\n    %s\n}\n" % (name, sig, body) + s[m.end():]
+stub("record", "(query: u64, token: u64)", "let _ignored: u64 = query + token")
+stub("bonus", "(token: u64) -> u64", "return token * 0")
+stub("pinned", "(query: u64, token: u64) -> bool", "return query + token == 1 && false")
+stub("suggest", "(out: u64, max: u64) -> u64", "return out * 0 + max * 0")
+open(p, "w").write(s)
+PY
+
 run_tree() { # run_tree <tree> <name>
     ( cd "$1" && APPS_DIR="$TMPD/apps" EH_ETC_EXTRA="/etc/startuse.conf=$TMPD/startuse.conf@0644" EH_MKFS_EXTRA="$MKFS_EXTRA" \
         DESIGNBUILD="$TMPD/build-$2" bash tools/design/eh6.sh "$TMPD/$2" res=1920x1080 accel=kvm tafel=nein \
@@ -58,15 +79,21 @@ run_tree "$ROOT" new &
 P1=$!
 run_tree "$TMPD/mut" old &
 P2=$!
-wait $P1 $P2
+run_tree "$TMPD/nol" nol &
+P3=$!
+wait $P1 $P2 $P3
 
+if [ -n "${SEARCHRANKUI_SHOTS:-}" ]; then mkdir -p "$SEARCHRANKUI_SHOTS"; cp "$TMPD"/new/1*.ppm "$TMPD"/new/2*.ppm "$SEARCHRANKUI_SHOTS/" 2>/dev/null; fi
 val() { sed -n "s/^$2=//p" "$1" | head -1; }
-for n in new old; do
+for n in new old nol; do
     S="$TMPD/$n/serial.txt"
     [ -s "$S" ] || { bad "$n: no serial output: $(tail -3 "$TMPD/$n.log" | tr '\n' ' ')"; continue; }
     python3 -I tools/searchrank/check.py "$S" certus > "$TMPD/$n.certus" 2>&1
     python3 -I tools/searchrank/check.py "$S" zzqq > "$TMPD/$n.zzqq" 2>&1
     python3 -I tools/searchrank/check.py "$S" notes > "$TMPD/$n.notes" 2>&1
+    for q in xremote x-remote "X Remote" fernst firfox fire term einst te; do
+        python3 -I tools/searchrank/check.py "$S" "$q" > "$TMPD/$n.q_${q// /_}" 2>&1
+    done
 done
 
 D="$TMPD/new"
@@ -92,12 +119,51 @@ if [ -s "$D/00-menu.ppm" ] && [ -s "$D/01-certus.ppm" ]; then
     [ "${n:-0}" -gt 500 ] && ok "typing changed the menu ($n pixels)" || bad "typing changed ${n:-0} pixels"
 fi
 
+echo "== typo, separators, synonyms: the best hit is the app with its row and card =="
+expect_best() { # expect_best <query-file-suffix> <query label> <expected app>
+    local got; got=$(val "$D.q_$1" best)
+    [ "$got" = "$3" ] && ok "'$2': best match is $3" || bad "'$2': best match is '$got' (want $3)"
+    [ "$(val "$D.q_$1" first_app)" = "$3" ] && ok "'$2': first app row is $3" || bad "'$2': first app row is '$(val "$D.q_$1" first_app)'"
+    grep -q '\.osp' <<< "$(val "$D.q_$1" files)" && bad "'$2': a .osp bundle is listed as file" || ok "'$2': no .osp bundle listed as file"
+}
+expect_best xremote xremote "Remote control"
+expect_best x-remote x-remote "Remote control"
+expect_best X_Remote "X Remote" "Remote control"
+expect_best fernst fernst "Remote control"
+expect_best firfox firfox "Firefox"
+expect_best fire fire "Firefox"
+expect_best term term "Terminal"
+expect_best einst einst "Settings"
+grep -aq 'launcher: rect id=7 ' "$D/serial.txt" && ok "the best match card is reported as a rectangle" || bad "no best match card rectangle"
+h=$(grep -a 'launcher: rect id=7 ' "$D/serial.txt" | tail -1 | sed -n 's/.* h=\([0-9]*\).*/\1/p')
+[ "${h:-0}" -ge 48 ] && ok "the best match card is large (h=$h)" || bad "the best match card is small (h=${h:-0})"
+grep -aq 'launcher: use \[xremote\]' "$D/serial.txt" && ok "Enter on 'xremote' starts the app" || bad "Enter on 'xremote' started nothing"
+maxus=$(grep -a '^launcher: suche \[' "$D/serial.txt" | sed -n 's/.* us=\([0-9]*\).*/\1/p' | sort -n | tail -1)
+[ "${maxus:-999999}" -le 16000 ] && ok "slowest search took ${maxus} us (<= 16 ms)" || bad "slowest search took ${maxus:-?} us"
+echo "SEARCH_MAX_US=${maxus:-0}"
+
+echo "== learning: after picks, the prefix goes to the learned app =="
+[ "$(val $D.q_te best)" = "Terminal" ] && ok "'te': best match is Terminal after 2 picks (Teamlist has more uses)" \
+    || bad "'te': best match is '$(val $D.q_te best)'"
+[ "$(grep -a 'launcher: rec k=0 ' "$D/serial.txt" | tail -1 | sed -n 's/.*name=\[\(.*\)\].*/\1/p')" = "Teamlist" ] \
+    && ok "empty field suggests the most used app first" || bad "empty field suggestion k=0 is '$(grep -a 'launcher: rec k=0 ' "$D/serial.txt" | tail -1)'"
+
 echo "== counter-proof: old ranking =="
 O="$TMPD/old"
 [ "$(val $O.certus first_app)" != "Certus" ] && ok "old ranking: first row is '$(val $O.certus first_app)' not Certus" \
     || bad "old ranking still put Certus first -- the test is blind"
 grep -aq 'launcher: oeffne datei' "$O/serial.txt" && ok "old behaviour: Enter opened a file" \
     || bad "old behaviour did not open a file -- the test is blind"
+
+for q in xremote X_Remote firfox; do
+    [ "$(val $O.q_$q first_app)" != "$(val $D.q_$q first_app)" ] \
+        && ok "old ranking: '$q' gives '$(val $O.q_$q first_app)'" || bad "old ranking answered '$q' as well -- the test is blind"
+done
+grep -q '\.osp' <<< "$(val $O.q_xremote files)" && ok "old ranking: .osp bundle listed as file" || bad "old ranking listed no .osp file -- the test is blind"
+N="$TMPD/nol"
+[ "$(val $N.q_te best)" = "Teamlist" ] && ok "learning off: 'te' stays on Teamlist" || bad "learning off: 'te' best is '$(val $N.q_te best)' -- the test is blind"
+[ "$(grep -a 'launcher: rec k=0 ' "$N/serial.txt" | tail -1 | sed -n 's/.*name=\[\(.*\)\].*/\1/p')" = "Terminal" ] \
+    && ok "learning off: suggestion follows the plain recent list" || bad "learning off: suggestion is unchanged -- the test is blind"
 
 echo
 echo "SEARCHRANKUI: $pass passed, $fail failed"

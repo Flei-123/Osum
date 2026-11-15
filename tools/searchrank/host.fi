@@ -2,6 +2,9 @@
 import std.rt
 import std.io
 import fui.searchrank
+import search.learn
+import search.fold
+import search.typo
 
 struct T {
     fails: i32,
@@ -167,6 +170,85 @@ fn main() -> i32 {
     check(&t, searchrank.name_before(c("abc"), c("abd")), "alphabet before")
     check(&t, !searchrank.name_before(c("abc"), c("ABC")), "alphabet equal ignores case")
 
+
+    let rkeys: u64 = c("remote,host,x-remote,fernsteuerung,fernzugriff,teamviewer")
+    let rinfo: u64 = c("Let another device see and control this computer")
+    check(&t, searchrank.fields_tier(c("Remote control"), rinfo, rkeys, c("xremote"), true) == searchrank.T_KEYWORD, "xremote finds X-Remote via keyword")
+    check(&t, searchrank.fields_tier(c("Remote control"), rinfo, rkeys, c("x-remote"), true) == searchrank.T_KEYWORD, "x-remote finds X-Remote")
+    check(&t, searchrank.fields_tier(c("Remote control"), rinfo, rkeys, c("X Remote"), true) == searchrank.T_KEYWORD, "X Remote finds X-Remote")
+    check(&t, searchrank.fields_tier(c("Remote control"), rinfo, rkeys, c("fernst"), true) == searchrank.T_KEYWORD, "fernst finds X-Remote")
+    check(&t, searchrank.fields_tier(c("Remote control"), rinfo, rkeys, c("teamviewer"), true) == searchrank.T_KEYWORD, "synonym teamviewer")
+    check(&t, searchrank.fields_tier(c("Remote control"), rinfo, rkeys, c("remotecontrol"), true) == searchrank.T_EXACT, "separators ignored in names")
+    check(&t, searchrank.fields_tier(c("Remote control"), rinfo, rkeys, c("rc"), true) == searchrank.T_ACRONYM, "acronym of the name words")
+    check(&t, searchrank.fields_tier(c("Remote control"), rinfo, rkeys, c("control"), true) == searchrank.T_WORD, "word start")
+    let fkeys: u64 = c("firefox,browser,web,internet,www,mozilla,surf")
+    let finfo: u64 = c("Web browser")
+    check(&t, searchrank.fields_tier(c("Firefox"), finfo, fkeys, c("firfox"), true) == searchrank.T_TYPO, "typo missing letter")
+    check(&t, searchrank.fields_tier(c("Firefox"), finfo, fkeys, c("frefox"), true) == searchrank.T_TYPO, "typo missing letter 2")
+    check(&t, searchrank.fields_tier(c("Firefox"), finfo, fkeys, c("fierfox"), true) == searchrank.T_TYPO, "typo transposition")
+    check(&t, searchrank.fields_tier(c("Firefox"), finfo, fkeys, c("fire"), true) == searchrank.T_PREFIX, "prefix fire")
+    check(&t, searchrank.fields_tier(c("Firefox"), finfo, fkeys, c("browser"), true) == searchrank.T_KEYWORD, "synonym browser")
+    check(&t, searchrank.fields_tier(c("Firefox"), finfo, fkeys, c("zzzz"), true) == no, "no match for noise")
+    check(&t, searchrank.fields_tier(c("Terminal"), c("Shell"), c("terminal,konsole"), c("treminal"), true) == searchrank.T_TYPO, "typo swap")
+    check(&t, searchrank.fields_tier(c("Terminal"), c("Shell"), c("terminal,konsole"), c("konsolle"), true) == searchrank.T_TYPO, "typo in keyword")
+    check(&t, searchrank.fields_tier(c("Terminal"), c("Shell"), c("terminal,konsole"), c("konsolle"), false) == no, "typo needs fuzzy on")
+    check(&t, searchrank.fields_tier(c("Settings"), c("System"), c("settings,einstellungen"), c("einst"), true) == searchrank.T_KEYWORD, "einst finds settings")
+    check(&t, searchrank.name_tier(c("Gr\u{f6}\u{df}e"), c("groesse")) == searchrank.T_EXACT, "umlaut and sharp s fold")
+    check(&t, searchrank.name_tier(c("B\u{e4}r"), c("baer")) == searchrank.T_EXACT, "ae fold")
+    check(&t, searchrank.name_tier(c("Baer"), c("b\u{e4}r")) == searchrank.T_EXACT, "ae fold reverse")
+    check(&t, searchrank.name_tier(c("caf\u{e9}"), c("cafe")) == searchrank.T_EXACT, "accent fold")
+    check(&t, searchrank.name_tier(c("my_file-name.txt"), c("myfile")) == searchrank.T_PREFIX, "underscore dash dot ignored")
+    check(&t, searchrank.T_EXACT < searchrank.T_PREFIX && searchrank.T_PREFIX < searchrank.T_WORD && searchrank.T_WORD < searchrank.T_ACRONYM && searchrank.T_ACRONYM < searchrank.T_SUBSTR && searchrank.T_SUBSTR < searchrank.T_KEYWORD && searchrank.T_KEYWORD < searchrank.T_TYPO && searchrank.T_TYPO < searchrank.T_INFO, "tier order")
+    check(&t, searchrank.learned_tier(searchrank.T_TYPO, true) == searchrank.T_LEARNED, "learned promotes a match")
+    check(&t, searchrank.learned_tier(searchrank.NO_MATCH, true) == no, "learned never promotes a non-match")
+    check(&t, typo.prefix_distance(c("firfox"), 6, c("firefox"), 7) == 1, "prefix distance 1")
+    check(&t, typo.prefix_distance(c("fire"), 4, c("firefox"), 7) == 0, "prefix distance 0")
+    check(&t, typo.max_edits(3) == 0 && typo.max_edits(5) == 1 && typo.max_edits(8) == 2, "edit budget by length")
+
+    learn.reset()
+    learn.set_enabled(true)
+    let h0: u64 = 1000
+    learn.record(c("te"), c("terminal"), h0)
+    check(&t, learn.usage_bonus(c("terminal"), h0) > 0, "start raises the usage bonus")
+    check(&t, !learn.is_pinned(c("te"), c("terminal"), h0), "one pick does not pin")
+    learn.record(c("te"), c("terminal"), h0)
+    check(&t, learn.is_pinned(c("te"), c("terminal"), h0), "two picks pin the query")
+    check(&t, learn.is_pinned(c("ter"), c("terminal"), h0), "longer query keeps the pin")
+    check(&t, !learn.is_pinned(c("t"), c("terminal"), h0), "shorter query is not pinned")
+    check(&t, !learn.is_pinned(c("xe"), c("terminal"), h0), "other prefix not pinned")
+    check(&t, !learn.is_pinned(c("te"), c("editor"), h0), "other token not pinned")
+    check(&t, learn.query_score(c("te"), c("terminal"), h0 + 168) < learn.query_score(c("te"), c("terminal"), h0) * 6 / 10, "half life one week")
+    check(&t, learn.query_score(c("te"), c("terminal"), h0 + 168 * 3) < learn.PIN_SCORE, "pin decays after weeks")
+    check(&t, learn.usage_bonus(c("terminal"), h0) <= learn.BONUS_CAP, "bonus capped")
+    var i: usize = 0
+    while i < 40 {
+        learn.record(c(""), c("terminal"), h0)
+        i = i + 1
+    }
+    check(&t, learn.usage_bonus(c("terminal"), h0) == learn.BONUS_CAP, "bonus reaches cap and stays")
+    learn.record(c("ed"), c("editor"), h0 + 1)
+    var order: [u64; 4] = [0 as u64; 4]
+    let top: u64 = learn.top_usage((&order[0 as usize]) as u64, 4, h0 + 1)
+    check(&t, top == 2 && is_name(learn.usage_token(order[0 as usize]), "terminal"), "empty query suggests most used first")
+    var file: [u8; 4096] = [0 as u8; 4096]
+    let fb: u64 = (&file[0 as usize]) as u64
+    let flen: u64 = learn.serialize(fb, 4096)
+    learn.reset()
+    check(&t, learn.usage_count() == 0, "reset clears usage")
+    learn.parse(fb, flen)
+    check(&t, learn.usage_count() == 2 && learn.is_pinned(c("te"), c("terminal"), h0 + 1), "file round trip")
+    learn.parse(c("x\nu\nq a\nu b!d 5 5\nq te tm 99999999999999999999 5\nu good 1 2\n"), 60)
+    check(&t, learn.usage_count() == 1 && learn.query_score(c("te"), c("tm"), 5) == 1000000, "broken file keeps valid lines only")
+    learn.parse(c(""), 0)
+    check(&t, learn.usage_count() == 0 && learn.enabled(), "empty file is a clean start")
+    learn.set_enabled(false)
+    learn.record(c("te"), c("terminal"), h0)
+    check(&t, learn.usage_bonus(c("terminal"), h0) == 0 && learn.usage_count() == 0, "learning off records nothing")
+    let off_len: u64 = learn.serialize(fb, 4096)
+    learn.set_enabled(true)
+    learn.parse(fb, off_len)
+    check(&t, !learn.enabled(), "off state survives the file")
+    learn.set_enabled(true)
     io.fmt_print(f"checks={t.checks} fails={t.fails}\n")
     if t.fails != 0 {
         return 1
