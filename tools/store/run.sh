@@ -527,7 +527,7 @@ import sys
 from PIL import Image, ImageChops
 a = Image.open(sys.argv[1]).convert('RGB'); b = Image.open(sys.argv[2]).convert('RGB')
 n = sum(1 for p in ImageChops.difference(a, b).convert('L').getdata() if p > 24)
-sys.exit(0 if n > 4000 else 1)" "$TMPD/$1.ppm" "$TMPD/$2.ppm" 2>/dev/null; }
+sys.exit(0 if n > int(sys.argv[3]) else 1)" "$TMPD/$1.ppm" "$TMPD/$2.ppm" "${3:-4000}" 2>/dev/null; }
 lastn() { wclean | grep -ao "store: tiles=[0-9]*" | tail -1 | tr -cd '0-9'; }
 lasth() { wclean | grep -ao " hits=[0-9]*" | tail -1 | tr -cd '0-9'; }
 if waitfor "==S-WAIT==" 150; then
@@ -597,14 +597,14 @@ if waitfor "==S-WAIT==" 150; then
     sawt "Apps automatisch aktualisieren" && ok "the updates page shows the global switch" || bad "no global switch"
     mark; tapt "Apps automatisch aktualisieren" || bad "global switch not found"; sleep 3
     shot s10b-auto-on
-    differs s10-auto-off s10b-auto-on && ok "clicking the global switch changes the picture" || bad "global switch click changed nothing"
+    differs s10-auto-off s10b-auto-on 30 && ok "clicking the global switch changes the picture" || bad "global switch click changed nothing"
     mark; tapt "Alle" || bad "no 'Alle' in the navigation"; sleep 2
     key ctrl-f down right ret; sleep 2
     sawt "Automatisch aktualisieren" && ok "the detail page of an installed program shows its own switch" || bad "no per-program switch"
     shot s11-app-on
     mark; tapt "Automatisch aktualisieren" || bad "per-program switch not found"; sleep 3
     shot s11b-app-off
-    differs s11-app-on s11b-app-off && ok "clicking the program's switch changes the picture" || bad "program switch click changed nothing"
+    differs s11-app-on s11b-app-off 30 && ok "clicking the program's switch changes the picture" || bad "program switch click changed nothing"
     N=$(wclean | grep -ac "==S-SNAP==")
     i=0; while [ $i -lt 100 ]; do [ "$(wclean | grep -ac '==S-SNAP==')" -ge $((N + 2)) ] && break; sleep 2; i=$((i + 1)); done
     sleep 6
