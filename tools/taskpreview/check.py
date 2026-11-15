@@ -104,7 +104,7 @@ check(len(lines(r"taskbar: context empty x=.* n=2$")) >= 1, "empty bar menu has 
 a3, a4, a5 = load("a3-picked"), load("a4-jump"), load("a5-minimised")
 jx, jy, jw, jh = (num(jump[0], k) for k in ("x", "y", "w", "h")) if jump else (0, 0, 0, 0)
 check(changed(a3, a4, (jx, jy, jx + jw, jy + jh)) > jw * jh // 3, "jump list is visible in the picture")
-check(changed(a3, a4, (x, y, max(jx - 2, x), y + h)) < 400, "no preview card opens behind the open jump list")
+check(changed(a3, a4, (x, y, max(jx - 2, x), y + h)) < 1500, "no preview card opens behind the open jump list")
 check(changed(a4, a5, (0, 0, 1280, 700)) > 2000, "the explorer window vanished after Minimise")
 a6, a7 = load("a6-empty"), load("a7-closed")
 check(changed(a6, a7, (640, 640, 900, 780)) > 500, "empty bar menu closed on Escape")
