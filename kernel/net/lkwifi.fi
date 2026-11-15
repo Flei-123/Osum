@@ -1,0 +1,159 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.ksym
+import wlan.device
+import wlan.macplan
+import wlan.iwl_ops
+import drv.net.lkwifi_hw
+
+export { init, register_c, unregister_c, ready, attach, default_mac }
+
+const W_READY: u64 = 0
+const W_TX: u64 = 1
+const W_RX_TAKE: u64 = 2
+const W_SET_CHANNEL: u64 = 3
+const W_OP: u64 = 4
+const W_BSSID_SET: u64 = 5
+const W_ADDR_SET: u64 = 6
+const W_AID_SET: u64 = 7
+const W_SCAN_STATE: u64 = 8
+const W_RSSI: u64 = 9
+const W_TAG: u64 = 10
+const WORDS: u64 = 11
+const FIRST_FN: u64 = 1
+const LAST_FN: u64 = 9
+const WORD_BYTES: u64 = 8
+const PLAN_WORDS: u64 = 64
+
+static mut lk_words: [u64; 11] = [0 as u64; 11]
+static mut lk_plan_mem: [u64; 64] = [0 as u64; 64]
+static mut lk_on: u64 = 0
+static mut lk_mac: [u8; 6] = [0 as u8; 6]
+
+fn plan_of() -> *mut macplan.Plan { return ((&lk_plan_mem[0]) as u64) as *mut macplan.Plan }
+
+fn word(i: u64) -> u64 { return lk_words[i as usize] }
+
+fn call0(i: u64) -> i64 {
+    let f: fn() -> i64 = ksym.from_c(word(i)) as fn() -> i64
+    return f()
+}
+
+fn call1(i: u64, a: u64) -> i64 {
+    let f: fn(u64) -> i64 = ksym.from_c(word(i)) as fn(u64) -> i64
+    return f(a)
+}
+
+fn call2(i: u64, a: u64, b: u64) -> i64 {
+    let f: fn(u64, u64) -> i64 = ksym.from_c(word(i)) as fn(u64, u64) -> i64
+    return f(a, b)
+}
+
+fn ready() -> bool { return lk_on != 0 }
+
+fn default_mac(dst: u64) {
+    *((dst) as *mut u8) = 0x02 as u8
+    *((dst + 1) as *mut u8) = 0x4C as u8
+    *((dst + 2) as *mut u8) = 0x4B as u8
+    *((dst + 3) as *mut u8) = 0x50 as u8
+    *((dst + 4) as *mut u8) = 0x49 as u8
+    *((dst + 5) as *mut u8) = 0x01 as u8
+}
+
+fn run_plan() -> i64 {
+    let p: *mut macplan.Plan = plan_of()
+    var i: usize = 0
+    var rc: i64 = 0
+    while i < macplan.plan_count(p) && rc == 0 {
+        rc = call2(W_OP, macplan.plan_op(p, i), macplan.plan_arg(p, i))
+        i = i + 1
+    }
+    macplan.plan_clear(p)
+    return rc
+}
+
+fn event(ev: u64) -> i64 {
+    let n: i64 = macplan.plan_event(plan_of(), ev)
+    if n < 0 { return n }
+    return run_plan()
+}
+
+fn normalize() {
+    let ph: u64 = macplan.plan_phase(plan_of())
+    if ph == macplan.PH_SCAN || ph >= macplan.PH_JOIN {
+        let _rc: i64 = event(macplan.EV_LEAVE)
+    }
+}
+
+fn query_scan() -> i64 {
+    let st: u64 = call0(W_SCAN_STATE) as u64
+    let finished: bool = st == iwl_ops.SCAN_DONE || st == iwl_ops.SCAN_ABORTED
+    if finished && macplan.plan_phase(plan_of()) == macplan.PH_SCAN {
+        let _n: i64 = macplan.plan_event(plan_of(), macplan.EV_SCAN_DONE)
+    }
+    return st as i64
+}
+
+fn board_send(ctx: u64, pkt: u64, len: usize) -> i64 { return call2(W_TX, pkt, len as u64) }
+
+fn board_receive(ctx: u64, buf: u64, room: usize) -> i64 { return call2(W_RX_TAKE, buf, room as u64) }
+
+fn board_channel(ctx: u64, channel: u64, band: u64) -> i64 { return call2(W_SET_CHANNEL, channel, band) }
+
+fn board_key(ctx: u64, art: u64, id: u64, key: u64, len: usize) -> i64 {
+    if art == device.KEY_PTK { return event(macplan.EV_PTK) }
+    if art == device.KEY_GTK { return event(macplan.EV_GTK) }
+    if art == device.KEY_OFF {
+        normalize()
+        return 0
+    }
+    return -1
+}
+
+fn board_lifecycle(ctx: u64, ev: u64, arg: u64) -> i64 {
+    if ev == device.LC_QUERY_SCAN { return query_scan() }
+    if ev == device.LC_QUERY_RSSI { return call0(W_RSSI) }
+    if ev == device.LC_SET_BSSID { return call1(W_BSSID_SET, arg) }
+    if ev == device.LC_SET_ADDR { return call1(W_ADDR_SET, arg) }
+    if ev == device.LC_SET_AID { return call1(W_AID_SET, arg) }
+    if ev == macplan.EV_UP && macplan.plan_phase(plan_of()) != macplan.PH_DOWN {
+        normalize()
+        return 0
+    }
+    if ev == macplan.EV_SCAN { normalize() }
+    return event(ev)
+}
+
+fn attach(g: *mut device.Device) -> bool {
+    if lk_on == 0 { return false }
+    default_mac((&lk_mac[0]) as u64)
+    device.addr_set(g, (&lk_mac[0]) as u64)
+    let ok: bool = device.board_set(g, 0, board_send, board_receive, board_channel, board_key, false)
+    device.lifecycle_set(g, board_lifecycle)
+    return ok
+}
+
+fn register_c(table: u64) -> u64 {
+    if table == 0 || lk_on != 0 { return 0 }
+    var i: u64 = 0
+    while i < WORDS {
+        let w: u64 = __mmio_read64((table + i * WORD_BYTES) as *mut u64)
+        if i >= FIRST_FN && i <= LAST_FN && ksym.from_c(w) == 0 { return 0 }
+        lk_words[i as usize] = w
+        i = i + 1
+    }
+    *plan_of() = macplan.plan_new()
+    lk_on = 1
+    return 1
+}
+
+fn unregister_c(tag: u64) {
+    if lk_on != 0 && tag == word(W_TAG) { lk_on = 0 }
+}
+
+fn init() {
+    ksym.hw_set(ksym.H_WIFI_REGISTER, ksym.addr_1u(register_c))
+    ksym.hw_set(ksym.H_WIFI_UNREGISTER, ksym.addr_1v(unregister_c))
+    ksym.hw_set(ksym.H_WIFI_HW, ksym.addr_4u(lkwifi_hw.call))
+}

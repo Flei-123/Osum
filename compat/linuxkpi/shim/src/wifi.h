@@ -1,10 +1,10 @@
 #ifndef LKPI_WIFI_H
 #define LKPI_WIFI_H
 
+#include <linux/kernel.h>
 #include <osum/lkpi80211.h>
 #include <osum/macplan_ops.h>
 
-#define LKPI_WIFI_HW_SLOTS 2
 #define LKPI_WIFI_PRIV_MAX 8192
 #define LKPI_WIFI_OBJ_PRIV_MAX 256
 

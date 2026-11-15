@@ -24,6 +24,7 @@ import wlan.addba
 import wlan.iwl_cmdq
 import wlan.linkprobe
 import net.wlan_net
+import net.lkwifi
 import net.wlan_port
 import net.wlan_count
 import drv.net.iwl
@@ -56,6 +57,7 @@ static mut wa_task: u64 = 0
 static mut wa_dev: u64 = 0
 static mut wa_mvm: u64 = 0
 static mut wa_bound: u64 = 0
+static mut wa_lk: u64 = 0
 static mut wa_hot_said: u64 = 0
 static mut wa_xid: u64 = 0
 static mut wa_now: u64 = 0
@@ -161,6 +163,27 @@ fn attach_held(state: u64) -> bool {
     if !iwl_ops.ops_attach(g, o, (x) as u64, iwl_xport.tr_submit, iwl_xport.tr_poll) { return false }
     bind((g) as u64, (o) as u64)
     return true
+}
+
+fn attach_lkpi(state: u64) -> bool {
+    if wa_bound != 0 { return true }
+    if !lkwifi.ready() { return false }
+    if !alloc_objects(state) { return false }
+    lkwifi.default_mac(mac_ptr())
+    let o: *mut iwl_ops.Mvm = mvm_of()
+    *o = iwl_ops.mvm_new()
+    let g: *mut device.Device = device_of()
+    *g = device.device_new()
+    if !lkwifi.attach(g) { return false }
+    wa_lk = 1
+    bind((g) as u64, (o) as u64)
+    return true
+}
+
+fn detach_lkpi() {
+    wa_lk = 0
+    unbind()
+    *auto_of() = autojoin.auto_new()
 }
 
 fn bind(g: u64, o: u64) {
@@ -567,7 +590,10 @@ fn task_step(state: u64) -> bool {
         sched.sleep_ticks(state, UP_TICKS)
     } else if hot_blocked(state) {
         sched.sleep_ticks(state, POLL_TICKS)
-    } else if !driver_ready() && !attach_held(state) {
+    } else if wa_lk != 0 && !lkwifi.ready() {
+        detach_lkpi()
+        sched.sleep_ticks(state, POLL_TICKS)
+    } else if !driver_ready() && !attach_held(state) && !attach_lkpi(state) {
         if autojoin.auto_state(auto_of()) != autojoin.AS_WAIT_DRIVER {
             autojoin.auto_driver_wait(auto_of())
         }

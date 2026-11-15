@@ -5,6 +5,7 @@ import wlan.connect
 import wlan.mgmt
 import wlan.iwl_le
 import wlan.iwl_ops
+import wlan.macsel
 
 export {
     Join, join_new, join_idle_set, join_ssid_set, join_pmk_set, join_snonce_set,
@@ -154,20 +155,20 @@ fn take_beacon(j: *mut Join, s: *mut connect.Session, p: u64, n: usize, rssi: i6
 
 fn scan_once(j: *mut Join, s: *mut connect.Session, g: *mut device.Device, o: *mut iwl_ops.Mvm) -> i64 {
     if !(*j).setup_done {
-        if iwl_ops.ops_setup(o) < 0 { return J_SETUP }
+        if macsel.setup(g, o) < 0 { return J_SETUP }
         (*j).setup_done = true
     }
     if !connect.suchlauf_beginnen(s, g) { return J_SCAN }
     var hint: u64 = 0
     if (*j).ssid_len != 0 { hint = (&(*j).ssid[0]) as u64 }
-    if iwl_ops.ops_scan_start(o, hint, (*j).ssid_len as u64) < 0 { return J_SCAN }
+    if macsel.scan_start(g, o, hint, (*j).ssid_len as u64) < 0 { return J_SCAN }
     var tries: u64 = 0
     while tries < SCAN_WAIT {
         let n: i64 = device.receive(g, rx_addr(j), RX_ROOM)
         if n > 0 {
-            take_beacon(j, s, rx_addr(j), n as usize, iwl_ops.ops_rssi(o))
+            take_beacon(j, s, rx_addr(j), n as usize, macsel.rssi(g, o))
         } else {
-            let st: u64 = iwl_ops.ops_scan_state(o)
+            let st: u64 = macsel.scan_state(g, o)
             if st == iwl_ops.SCAN_DONE { return 0 }
             if st == iwl_ops.SCAN_ABORTED { return J_SCAN }
             let f: fn(u64) -> u64 = (*j).idle
@@ -245,7 +246,7 @@ fn join_connect(j: *mut Join, s: *mut connect.Session, g: *mut device.Device,
     connect.pmk_set(s, (&(*j).pmk[0]) as u64)
     connect.akm_set(s, AKM_PSK)
     if !connect.net_choose(s, g, k) { return J_CHOOSE }
-    if iwl_ops.ops_peer_add(o, bssid) < 0 { return J_PEER }
+    if macsel.peer_add(g, o, bssid) < 0 { return J_PEER }
 
     var attempt: u64 = 0
     var answered: bool = false
@@ -261,6 +262,7 @@ fn join_connect(j: *mut Join, s: *mut connect.Session, g: *mut device.Device,
         return J_AUTH_DENIED
     }
     connect.auth_angenommen(s, true)
+    if macsel.auth_ok(g) < 0 { return J_PEER }
 
     let sel: usize = connect.net_ssid_len(s, k)
     var ssid: [u8; 32] = [0; 32]
@@ -276,7 +278,7 @@ fn join_connect(j: *mut Join, s: *mut connect.Session, g: *mut device.Device,
         return J_ASSOC_DENIED
     }
     let aid: u64 = mgmt.assoc_aid(rx_addr(j), an as usize)
-    if iwl_ops.ops_associated(o, aid) < 0 { return J_PEER }
+    if macsel.associated(g, o, aid) < 0 { return J_PEER }
     connect.assoz_angenommen(s, true)
 
     let m1n: i64 = wait_frame(j, g, KIND_EAPOL, bssid)
@@ -315,6 +317,7 @@ fn join_connect(j: *mut Join, s: *mut connect.Session, g: *mut device.Device,
     if m4l < 0 { return J_BUILD }
     if !send_eapol(j, g, (&mac[0]) as u64, bssid, (&m4[0]) as u64, m4l as usize) { return J_SEND }
     if !connect.may_data(s) { return J_KEYS }
+    if macsel.authorize(g) < 0 { return J_KEYS }
     return J_OK
 }
 
