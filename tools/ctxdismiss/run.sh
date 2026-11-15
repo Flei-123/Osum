@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/ctxdismiss/run.sh -- a press OUTSIDE a popup menu dismisses it (kernel/ui/wm.fi popup_outside), a new right click opens the next one.
 #
-#   [BASE=<rev>] bash tools/ctxdismiss/run.sh
+#   bash tools/ctxdismiss/run.sh
 #
 # Machine of the stick (tools/design/eh6.sh, 1280x800, QEMU PS/2 mouse; the pad path uses the same button edges in wm on_mouse_btn).
 #   1. rklick on the bare desktop -> menu; left click elsewhere -> the menu is GONE (picture as before)
@@ -11,10 +11,10 @@
 #   4. bare task bar: rklick -> menu, click outside -> gone, rklick again -> menu again (`taskbar: context empty` twice)
 #   5. start menu: open, click outside -> closed (no regression of the existing dismissal)
 #   6. Esc closes the menu, no ghost at 0,0; a focus change (start menu by the Windows key) closes the menu
-# COUNTER-PROOF: the tree before the fix (BASE, default HEAD~1): the menu survives the outside click, no second menu ever opens.
+# COUNTER-PROOF: this tree with `wminput.popup_outside` switched off (mutant): the menu survives the outside click, no second menu ever opens.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-. tools/lib/firnenv.sh
+. tools/lib/mutant.sh
 ROOT=$(pwd)
 TMPD=$(mktemp -d)
 BT=$TMPD/base
@@ -91,8 +91,7 @@ EOF
 } > "$TMPD/dreh.txt"
 
 run_tree() { # <tree> <out>
-    ( cd "$1" && firnenv_prepare_old_tree . >/dev/null 2>&1
-      DESIGNBUILD="$2/build" bash tools/design/eh6.sh "$2/o" res=1280x800 accel=kvm tafel=nein progs="$PROGS" \
+    ( cd "$1" && DESIGNBUILD="$2/build" bash tools/design/eh6.sh "$2/o" res=1280x800 accel=kvm tafel=nein progs="$PROGS" \
         drehbuch="$TMPD/dreh.txt" > "$2/o.log" 2>&1 )
 }
 diffpix() { # <a.ppm> <b.ppm> <x> <y> <w> <h>
@@ -120,8 +119,7 @@ PY
 }
 
 mkdir -p "$TMPD/new" "$TMPD/old"
-git worktree add --detach "$BT" "${BASE:-3642080c~1}" >/dev/null 2>&1 || { echo "base worktree failed"; exit 1; }
-cp -f tools/design/drive.py "$BT/tools/design/drive.py"
+mutant_tree "$BT" kernel/ui/wm/wminput.fi popup_outside "return" || { echo "mutant tree failed"; exit 1; }
 run_tree "$ROOT" "$TMPD/new" &
 run_tree "$BT" "$TMPD/old" &
 wait
