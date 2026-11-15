@@ -54,9 +54,9 @@ def diff(a, b, box):
     return n
 
 
-def last_fen(wins_from):
+def last_fen(wins_from, wins_to=None):
     rows = {}
-    for ln in ser[wins_from:]:
+    for ln in ser[wins_from:wins_to]:
         m = re.search(r'wm: fen i=\d+ id=(\d+) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) lay=(\d+) fl=(\d+) .* tf=0x([0-9a-f]+)', ln)
         if m:
             rows[int(m[1])] = (int(m[2]), int(m[3]), int(m[4]), int(m[5]), int(m[6]), m[8])
@@ -69,7 +69,9 @@ for ln in ser:
     if m:
         LAUNCHER = int(m[1])
 starts = [i for i, ln in enumerate(ser) if 'launcher: start /apps/terminal.osp/start' in ln]
+last_key = max([i for i, ln in enumerate(ser) if re.match(r'key: I$', ln)] or [len(ser)])
 fok = [(i, int(re.search(r'id=(\d+)', ln)[1])) for i, ln in enumerate(ser) if ln.startswith('wm: fokus id=')]
+click_at = next((i for i, ln in enumerate(ser) if i > last_key and ln.startswith('wm: fokus id=')), len(ser))
 print('== witnesses ==')
 chk(len(starts) == 2, 'two terminal starts from the search (%d)' % len(starts))
 if len(starts) == 2:
@@ -77,14 +79,14 @@ if len(starts) == 2:
         seen = [f[1] for f in fok if f[0] < s]
         run = []
         for f in fok:
-            if f[0] > s:
+            if s < f[0] < click_at:
                 if f[1] == LAUNCHER and run:
                     break
                 run.append(f[1])
         chk(bool(run) and run[-1] > max(seen + [LAUNCHER]),
             'start %d: the focus ends on the NEW window (id %d, older ids up to %d)' % (n + 1, run[-1] if run else 0, max(seen + [0])))
-    third = max([f[1] for f in fok if f[0] > starts[1]] or [0])
-    rows = last_fen(starts[1])
+    third = max([f[1] for f in fok if starts[1] < f[0] < click_at] or [0])
+    rows = last_fen(starts[1], click_at)
     fl_rows = {k: v for k, v in rows.items() if v[4] == 1}
     top_id = third
     chk(top_id in fl_rows, 'the third terminal is a normal window in the wm list (id %d)' % top_id)
@@ -94,13 +96,13 @@ if len(starts) == 2:
         chk(active == 'fafafa', 'the new window has the ACTIVE title colour (%s)' % active)
         chk(all(c == 'd4d4d8' for c in others), 'every older terminal has the INACTIVE title colour (%s)' % ','.join(others))
     chk(sum(1 for ln in ser if re.match(r'key: [HI]$', ln)) >= 2, 'keys H and I were delivered')
-    btn = [ln for ln in ser[starts[1]:] if ln.startswith('taskbar: btn i=') and 'focus=1' in ln]
+    btn = [ln for ln in ser[starts[1]:click_at] if ln.startswith("taskbar: btn i=") and 'focus=1' in ln]
     chk(bool(btn) and ('id=%d ' % top_id) in btn[-1], 'the task bar marks the NEW window active (%s)' % (btn[-1].split(' t=')[0] if btn else 'no button line'))
 
 s2, s3 = load('s2-third'), load('s3-control')
 nx = None
 if len(starts) == 2:
-    rows = last_fen(starts[1])
+    rows = last_fen(starts[1], click_at)
     wins = sorted((k, v) for k, v in rows.items() if v[4] == 1)
     if wins:
         k, v = wins[-1]
