@@ -28,6 +28,7 @@ import ctxreg
 import nidx
 import startrank
 import startuse
+import startlearn
 import namelist
 import startnav
 import pw
@@ -136,11 +137,18 @@ static mut k_recom: [u8; 19] = "launcher.recommend\0"
 static mut k_allapps: [u8; 13] = "launcher.all\0"
 static mut k_backb: [u8; 14] = "launcher.back\0"
 static mut k_resl: [u8; 17] = "launcher.results\0"
+static mut k_best: [u8; 14] = "launcher.best\0"
+static mut g_best: bool = false
 static mut k_nonerec: [u8; 17] = "launcher.nonerec\0"
 const W11_W: u64 = 640
 const W11_IN: u64 = 600
 const K_ALL: u64 = 5
 const K_BACK: u64 = 6
+const K_BEST: u64 = 7
+const BEST_UD: u64 = 200
+const BEST_CARD_H: u64 = 56
+const BEST_BLOCK_H: u64 = 88
+const BEST_MIN_LIST_H: u64 = 104
 const K_PIN: u64 = 100
 const K_REC: u64 = 130
 static mut path: [u8; 256] = [0 as u8; 256]
@@ -205,11 +213,13 @@ fn new_find() {
     var sn: [u8; 8] = "name=[\0\0"
     var sx: [u8; 10] = "] exec=[\0\0"
     var sz: [u8; 4] = "]\0\0\0"
+    let rank_t0: u64 = nidx.mono_us()
     napp = startrank.rank_apps((&suchfeld[0 as usize]) as u64,
         (&treffer[0 as usize]) as u64, 24)
     ntreffer = napp
     // r402: the home view of the Windows 11 window (no query, not "All apps")
     g_home = g_w11 && text.length((&suchfeld[0 as usize]) as u64) == 0 && !g_all
+    g_best = g_w11 && !g_all && napp > 0 && text.length((&suchfeld[0 as usize]) as u64) != 0
     if g_w11 {
         home_prepare()
         // the list's rectangle is reported after the pump that builds it
@@ -296,6 +306,7 @@ fn new_find() {
         }
         ntreffer = napp + ndatei
     }
+    let rank_us: u64 = nidx.mono_us() -% rank_t0
     items[(lp) as usize] = 0 as u8
     // the list is a blob table on the scene tree: describe it again
     fuiscene.refresh()
@@ -308,7 +319,17 @@ fn new_find() {
     var s_da: [u8; 12] = "  dateien=\0\0"
     kv((&s_ap[0 as usize]) as u64, napp)
     kv((&s_da[0 as usize]) as u64, ndatei)
+    var s_us: [u8; 6] = " us=\0\0"
+    kv((&s_us[0 as usize]) as u64, rank_us)
     nl()
+    if napp > 0 {
+        var s_bs: [u8; 22] = "launcher: best name=[\0"
+        var s_bz: [u8; 4] = "]\0\0\0"
+        say((&s_bs[0 as usize]) as u64)
+        say(appdir.name_of(treffer[0 as usize]))
+        say((&s_bz[0 as usize]) as u64)
+        nl()
+    }
     var d2: u64 = 0
     while d2 < ndatei {
         var s_df: [u8; 20] = "launcher: file \0\0\0\0\0"
@@ -356,6 +377,9 @@ fn starten(line: u64) {
             (&path[0 as usize]) as u64, 250)
         let fpid: u64 = ulib.sys(SYS_FOPEN, (&path[0 as usize]) as u64,
             (&argv0[0 as usize]) as u64, 0)
+        var file_tok: [u8; 24] = [0 as u8; 24]
+        startrank.file_token(nidx.name_at(dtreffer[((line - napp)) as usize]), (&file_tok[0 as usize]) as u64)
+        startlearn.record((&suchfeld[0 as usize]) as u64, (&file_tok[0 as usize]) as u64)
         say((&s_df[0 as usize]) as u64)
         say((&path[0 as usize]) as u64)
         say((&s_zu2[0 as usize]) as u64)
@@ -448,6 +472,7 @@ fn starten_app(a: u64) {
     var used_token: [u8; 24] = [0 as u8; 24]
     app_token(a, (&used_token[0 as usize]) as u64)
     startuse.bump((&used_token[0 as usize]) as u64)
+    startlearn.record((&suchfeld[0 as usize]) as u64, (&used_token[0 as usize]) as u64)
     var s_use: [u8; 16] = "launcher: use [\0"
     var s_uses: [u8; 6] = "] n=\0\0"
     say((&s_use[0 as usize]) as u64)
@@ -867,11 +892,21 @@ fn home_prepare() {
     if want > 6 {
         want = 6
     }
-    var m: u64 = 0
+    var m: u64 = startrank.suggest_apps((&rec_app[0 as usize]) as u64, want)
     var j: u64 = 0
     while j < mru_n && m < want {
-        rec_app[(m) as usize] = mru[(j) as usize]
-        m = m + 1
+        var dup: bool = false
+        var d: u64 = 0
+        while d < m {
+            if rec_app[(d) as usize] == mru[(j) as usize] {
+                dup = true
+            }
+            d = d + 1
+        }
+        if !dup {
+            rec_app[(m) as usize] = mru[(j) as usize]
+            m = m + 1
+        }
         j = j + 1
     }
     rec_n = m
@@ -1638,6 +1673,10 @@ fn u_start(args: u64) -> u64 {
             if key - K_REC < rec_n {
                 starten_app(rec_app[(key - K_REC) as usize])
             }
+        } else if g_w11 && key == K_BEST {
+            if napp > 0 {
+                starten_app(treffer[0 as usize])
+            }
         } else if g_w11 && key == K_ALL {
             g_all = true
             new_find()
@@ -1948,7 +1987,26 @@ fn home_arrow(key: u64) {
     }
 }
 
+fn w11_best_card(x: u64, y: u64, w: u64, h: u64) {
+    let a: u64 = treffer[0 as usize]
+    let isz: u64 = fuiscene.sp(40)
+    fuiscene.icon_at(farben[0 as usize], x + fuiscene.sp(12), y + (h - isz) / 2, isz, appdir.name_of(a))
+    let tx: u64 = x + fuiscene.sp(64)
+    let room: u64 = w - fuiscene.sp(64) - fuiscene.sp(8)
+    fuiscene.text_role(tx, y + fuiscene.sp(24), room, appdir.name_of(a), fuiscene.sp(16), true, fuiscene.R_TEXT)
+    fuiscene.text_role(tx, y + fuiscene.sp(42), room, appdir.info_of(a), fuiscene.sp(12), false, fuiscene.R_MUTED)
+}
+
+fn w11_hdr_best(x: u64, y: u64, w: u64, h: u64) {
+    fuiscene.text_role(x + fuiscene.sp(4), y + h / 2 + fuiscene.sp(5), w, msg.get((&k_best[0 as usize]) as u64),
+        fuiscene.sp(14), true, fuiscene.R_TEXT)
+}
+
 fn w11_tile_cb(ud: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
+    if ud == BEST_UD {
+        w11_best_card(x, y, w, h)
+        return
+    }
     if ud < 100 {
         if ud >= pin_n {
             return
@@ -2110,7 +2168,13 @@ fn build_w11_results(col: usize) {
         let bb: usize = fuiscene.button(hr2, msg.get((&k_backb[0 as usize]) as u64), K_BACK)
         fuiscene.set_size(bb, 90, 28)
     }
-    let lh: u64 = g_hd - W11_FIXED_COMPACT
+    var lh: u64 = g_hd - W11_FIXED_COMPACT
+    if g_best && lh >= BEST_MIN_LIST_H + BEST_BLOCK_H {
+        let _hb: usize = fuiscene.canvas(col, 0, 400, 32, w11_hdr_best)
+        let _bc: usize = fuiscene.ftile(col, K_BEST, appdir.name_of(treffer[0 as usize]), W11_IN, BEST_CARD_H,
+            BEST_UD, w11_tile_cb)
+        lh = lh - BEST_BLOCK_H
+    }
     let _ls: usize = fuiscene.table_list(col, K_LIST, W11_IN, lh, 2, (&items[0 as usize]) as u64)
     fuiscene.table_two(K_LIST, true)
     fuiscene.table_icons(K_LIST, (&farben[0 as usize]) as u64)
@@ -2215,6 +2279,7 @@ fn say_rects_w11() {
     if g_home {
         say_node(5, K_ALL)
     } else {
+        say_node(7, K_BEST)
         say_node(2, K_LIST)
         if g_all {
             say_node(6, K_BACK)

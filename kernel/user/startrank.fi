@@ -6,38 +6,29 @@ import appdir
 import nidx
 import handler
 import startuse
+import startlearn
 import ulib
 import libc.text
+import search.fold
 
-export { rank_apps, rank_files, MAX_APPS, MAX_FILES }
+export { rank_apps, rank_files, suggest_apps, file_token, MAX_APPS, MAX_FILES }
 
 const MAX_APPS: u64 = 24
 const MAX_FILES: u64 = 64
+const FILE_TOKEN_PREFIX: u64 = 2
+const FILE_TOKEN_MAX: u64 = 22
 
 static mut keys: [u64; 64] = [0 as u64; 64]
 static mut all_apps: [u64; 24] = [0 as u64; 24]
+static mut found_apps: [u64; 24] = [0 as u64; 24]
 static mut empty_q: [u8; 1] = [0 as u8; 1]
 static mut kind_scheme: [u8; 7] = "scheme\0"
 static mut key_http: [u8; 5] = "http\0"
 static mut handler_path: [u8; 96] = [0 as u8; 96]
 static mut token: [u8; 24] = [0 as u8; 24]
-
-fn sort_by_key(idx: u64, n: u64, name_of_app: bool) {
-    var i: u64 = 1
-    while i < n {
-        let cur_idx: u64 = *((idx + i * 8) as *mut u64)
-        let cur_key: u64 = keys[(i) as usize]
-        var j: u64 = i
-        while j > 0 && key_less(cur_idx, cur_key, *((idx + (j - 1) * 8) as *mut u64), keys[(j - 1) as usize], name_of_app) {
-            __mmio_write64((idx + j * 8) as *mut u64, *((idx + (j - 1) * 8) as *mut u64))
-            keys[(j) as usize] = keys[(j - 1) as usize]
-            j = j - 1
-        }
-        __mmio_write64((idx + j * 8) as *mut u64, cur_idx)
-        keys[(j) as usize] = cur_key
-        i = i + 1
-    }
-}
+static mut file_fold: [u8; 65] = [0 as u8; 65]
+static mut file_starts: [u8; 65] = [0 as u8; 65]
+static mut slot_token: [u8; 24] = [0 as u8; 24]
 
 fn display_name(i: u64, name_of_app: bool) -> u64 {
     if name_of_app {
@@ -48,6 +39,31 @@ fn display_name(i: u64, name_of_app: bool) -> u64 {
 
 fn key_less(ia: u64, ka: u64, ib: u64, kb: u64, name_of_app: bool) -> bool {
     return searchrank.key_before(ka, display_name(ia, name_of_app), kb, display_name(ib, name_of_app))
+}
+
+fn insert_ranked(out: u64, n: u64, max: u64, item: u64, key: u64, name_of_app: bool) -> u64 {
+    var pos: u64 = n
+    while pos > 0 && key_less(item, key, *((out + (pos - 1) * 8) as *mut u64), keys[(pos - 1) as usize], name_of_app) {
+        pos = pos - 1
+    }
+    if pos >= max {
+        return n
+    }
+    var last: u64 = n
+    if last >= max {
+        last = max - 1
+    }
+    while last > pos {
+        __mmio_write64((out + last * 8) as *mut u64, *((out + (last - 1) * 8) as *mut u64))
+        keys[(last) as usize] = keys[(last - 1) as usize]
+        last = last - 1
+    }
+    __mmio_write64((out + pos * 8) as *mut u64, item)
+    keys[(pos) as usize] = key
+    if n < max {
+        return n + 1
+    }
+    return n
 }
 
 fn contains_index(idx: u64, n: u64, value: u64) -> bool {
@@ -61,72 +77,117 @@ fn contains_index(idx: u64, n: u64, value: u64) -> bool {
     return false
 }
 
-fn add_fuzzy_candidates(term: u64, out: u64, n: u64, max: u64) -> u64 {
-    var count: u64 = n
-    if text.length(term) < searchrank.FUZZY_MIN_LEN {
-        return count
-    }
-    let m: u64 = appdir.search((&empty_q[0 as usize]) as u64, (&all_apps[0 as usize]) as u64, MAX_APPS)
-    var k: u64 = 0
-    while k < m && count < max {
-        let a: u64 = all_apps[(k) as usize]
-        if !contains_index(out, count, a)
-            && searchrank.fuzzy_tier(appdir.name_of(a), term) == searchrank.T_FUZZY {
-            __mmio_write64((out + count * 8) as *mut u64, a)
-            count = count + 1
-        }
-        k = k + 1
-    }
-    return count
-}
-
 fn default_prog_known() -> bool {
     handler_path[0 as usize] = 0 as u8
     return handler.find((&kind_scheme[0 as usize]) as u64, (&key_http[0 as usize]) as u64,
         (&handler_path[0 as usize]) as u64, 95)
 }
 
-fn rank_apps(term: u64, out: u64, max: u64) -> u64 {
-    var n: u64 = appdir.search(term, out, max)
-    if text.length(term) == 0 {
-        return n
+fn gather_candidates(term: u64, out: u64, max: u64) -> u64 {
+    var n: u64 = appdir.search((&empty_q[0 as usize]) as u64, out, max)
+    let hits: u64 = appdir.search(term, (&found_apps[0 as usize]) as u64, MAX_APPS)
+    var k: u64 = 0
+    while k < hits && n < max {
+        let a: u64 = found_apps[(k) as usize]
+        if !contains_index(out, n, a) {
+            __mmio_write64((out + n * 8) as *mut u64, a)
+            n = n + 1
+        }
+        k = k + 1
     }
-    n = add_fuzzy_candidates(term, out, n, max)
+    return n
+}
+
+fn learned_uses(token_ptr: u64) -> u64 {
+    return startuse.uses_of(token_ptr) + startlearn.bonus(token_ptr)
+}
+
+fn rank_apps(term: u64, out: u64, max: u64) -> u64 {
+    if text.length(term) == 0 {
+        return appdir.search(term, out, max)
+    }
+    var cand: [u64; 24] = [0 as u64; 24]
+    let n: u64 = gather_candidates(term, (&cand[0 as usize]) as u64, MAX_APPS)
+    searchrank.set_query(term)
+    if searchrank.query_len() == 0 {
+        return 0
+    }
     let has_default: bool = default_prog_known()
     var kept: u64 = 0
     var k: u64 = 0
     while k < n {
-        let a: u64 = *((out + k * 8) as *mut u64)
-        let tier: u64 = searchrank.fields_tier(appdir.name_of(a), appdir.info_of(a), appdir.keys_of(a), term, true)
+        let a: u64 = cand[(k) as usize]
+        var tier: u64 = searchrank.tier_fields(appdir.name_of(a), appdir.info_of(a), appdir.keys_of(a), true)
         if tier != searchrank.NO_MATCH {
             startuse.app_token(appdir.file_of(a), (&token[0 as usize]) as u64)
             let is_default: bool = has_default
                 && searchrank.is_default_token((&token[0 as usize]) as u64, (&handler_path[0 as usize]) as u64)
-            keys[(kept) as usize] = searchrank.rank_key(searchrank.CAT_APP, tier,
-                startuse.uses_of((&token[0 as usize]) as u64), is_default)
-            __mmio_write64((out + kept * 8) as *mut u64, a)
-            kept = kept + 1
+            tier = searchrank.learned_tier(tier, startlearn.pinned(term, (&token[0 as usize]) as u64))
+            kept = insert_ranked(out, kept, max, a, searchrank.rank_key(searchrank.CAT_APP, tier,
+                learned_uses((&token[0 as usize]) as u64), is_default), true)
         }
         k = k + 1
     }
-    sort_by_key(out, kept, true)
     return kept
 }
 
-fn rank_files(term: u64, out: u64, max: u64) -> u64 {
-    let n: u64 = nidx.find(term, out, max)
-    var kept: u64 = 0
-    var k: u64 = 0
-    while k < n {
-        let f: u64 = *((out + k * 8) as *mut u64)
-        let tier: u64 = searchrank.name_tier(nidx.name_at(f), term)
-        if tier != searchrank.NO_MATCH {
-            keys[(kept) as usize] = searchrank.rank_key(searchrank.CAT_FILE, tier, 0, false)
-            __mmio_write64((out + kept * 8) as *mut u64, f)
-            kept = kept + 1
+fn file_token(name: u64, out: u64) {
+    __mmio_write8(out as *mut u8, 102 as u8)
+    __mmio_write8((out + 1) as *mut u8, 46 as u8)
+    let n: u64 = fold.fold(name, (&file_fold[0 as usize]) as u64, (&file_starts[0 as usize]) as u64, FILE_TOKEN_MAX)
+    var i: u64 = 0
+    var w: u64 = FILE_TOKEN_PREFIX
+    while i < n {
+        let c: u64 = (file_fold[(i) as usize]) as u64
+        if c < 128 {
+            __mmio_write8((out + w) as *mut u8, c as u8)
+            w = w + 1
         }
-        k = k + 1
+        i = i + 1
     }
-    sort_by_key(out, kept, false)
+    __mmio_write8((out + w) as *mut u8, 0 as u8)
+}
+
+fn rank_files(term: u64, out: u64, max: u64) -> u64 {
+    searchrank.set_query(term)
+    if searchrank.query_len() == 0 {
+        return 0
+    }
+    let total: u64 = nidx.count()
+    var kept: u64 = 0
+    var f: u64 = 0
+    while f < total {
+        var tier: u64 = searchrank.tier_name(nidx.name_at(f))
+        if tier != searchrank.NO_MATCH && !nidx.in_bundle(f) {
+            file_token(nidx.name_at(f), (&token[0 as usize]) as u64)
+            tier = searchrank.learned_tier(tier, startlearn.pinned(term, (&token[0 as usize]) as u64))
+            kept = insert_ranked(out, kept, max, f, searchrank.rank_key(searchrank.CAT_FILE, tier,
+                startlearn.bonus((&token[0 as usize]) as u64), false), false)
+        }
+        f = f + 1
+    }
+    return kept
+}
+
+fn suggest_apps(out: u64, max: u64) -> u64 {
+    var slots: [u64; 24] = [0 as u64; 24]
+    var apps: [u64; 24] = [0 as u64; 24]
+    let top: u64 = startlearn.suggest((&slots[0 as usize]) as u64, MAX_APPS)
+    let n: u64 = appdir.search((&empty_q[0 as usize]) as u64, (&apps[0 as usize]) as u64, MAX_APPS)
+    var kept: u64 = 0
+    var s: u64 = 0
+    while s < top && kept < max {
+        var k: u64 = 0
+        while k < n {
+            startuse.app_token(appdir.file_of(apps[(k) as usize]), (&slot_token[0 as usize]) as u64)
+            if ulib.streq((&slot_token[0 as usize]) as u64, startlearn.token_at(slots[(s) as usize])) {
+                __mmio_write64((out + kept * 8) as *mut u64, apps[(k) as usize])
+                kept = kept + 1
+                k = n
+            }
+            k = k + 1
+        }
+        s = s + 1
+    }
     return kept
 }

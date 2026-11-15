@@ -20,4 +20,9 @@ echo "searchrank: $(tail -1 "$T/host.out") (exit $prc)"
 checks=$(sed -n "s/^checks=\([0-9]*\) fails=.*/\1/p" "$T/host.out")
 fails=$(sed -n "s/^checks=.* fails=\([0-9]*\)/\1/p" "$T/host.out")
 echo "SEARCHRANK: ${checks:-0} passed, ${fails:-1} failed"
+FIRNLIB="$PWD/lib" "$FIRNC" --profile=app tools/searchrank/bench.fi -o "$T/bench" > "$T/bench.build" 2>&1 \
+    && { t0=$(date +%s%N); "$T/bench" > "$T/bench.out"; t1=$(date +%s%N)
+         n=$(sed -n 's/^searches=\([0-9]*\) .*/\1/p' "$T/bench.out")
+         echo "SEARCHBENCH: $(( (t1 - t0) / 1000 / ${n:-1} )) us per search over 24 apps ($n searches)"; } \
+    || { echo "FAIL  build bench"; rc=1; }
 exit $rc
