@@ -3,10 +3,15 @@
 
 MUTANT_PY="$(dirname "${BASH_SOURCE[0]}")/mutant.py"
 
-mutant_tree() {
+mutant_apply() {
     local tree=$1 file=$2 function=$3 statement=$4
-    git worktree add --detach "$tree" HEAD > /dev/null 2>&1 || return 1
     python3 -I "$MUTANT_PY" insert "$tree/$file" "$function" "$statement"
+}
+
+mutant_tree() {
+    local tree=$1
+    git worktree add --detach "$tree" HEAD > /dev/null 2>&1 || return 1
+    mutant_apply "$@"
 }
 
 mutant_tree_move() {
