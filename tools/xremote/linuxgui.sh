@@ -14,10 +14,14 @@ mon() { printf '%s\n' "$1" | socat - "UNIX-CONNECT:$SOCK" > /dev/null 2>&1; }
     mon "screendump $OUT/window.ppm"
 ) &
 SHOTPID=$!
-env GUI=1 BLOCKS=${BLOCKS:-1200000} TMO=${TMO:-1500} MEM=${MEM:-3072} \
-    "EXTRA=/opt/@755 /opt/fv/@755 /etc/fvgui.sh=$PWD/tools/xremote/guest-gui-app.sh@755 /opt/fv/freeviewer=$BIN@755 ${FVGUI_LIBS:-}" \
+SERVICE_EXTRA=""
+[ -n "${FVGUI_SERVICE:-}" ] && SERVICE_EXTRA="/etc/fvsvc.sh=$PWD/tools/xremote/guest-gui-service.sh@755"
+env GUI=1 GUI_EXTRA="settingsd apprights orientbus act" BLOCKS=${BLOCKS:-1200000} TMO=${TMO:-1500} MEM=${MEM:-3072} \
+    "EXTRA=/opt/@755 /opt/fv/@755 /etc/fvgui.sh=$PWD/tools/xremote/guest-gui-app.sh@755 /etc/settings.schema=etc/settings.schema@644 /etc/actions.d/@755 /etc/actions.d/settings.actions=etc/actions.d/settings.actions@644 $SERVICE_EXTRA /opt/fv/freeviewer=$BIN@755 ${FVGUI_LIBS:-}" \
     "KARGS=gfx disp wm wmdauer wmshell osum vfs bus fremdtrace script=sh /etc/fx.sh;exit" \
     bash tools/linuxapps/run.sh "$WD" tools/xremote/guest-gui-boot.sh "$OUT"
 rc=$?
 kill "$SHOTPID" 2>/dev/null
+[ -f "$OUT/window.ppm" ] || { echo "XRGUI: no screenshot"; exit 1; }
+python3 -I tools/xremote/linuxgui_check.py "$OUT/ser.clean" "$OUT/window.ppm" ${FVGUI_SERVICE:+123456789} || exit 1
 exit $rc

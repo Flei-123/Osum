@@ -14,12 +14,19 @@ Decision (Boss): no own fUi window; the unmodified Linux FreeViewer GUI (eframe 
 ## Host vs GUI (no two hosts with one ID)
 - The GUI already skips its own host when `service::running()` (Windows service); on non-Windows that stub returns false, so on OrientOS the GUI starts its own host and registers the same identity (seen in the run: `host: relay session failed`). Needed: an osum-native `service::running()` that is true while xremoted publishes `/run/xremote.info service=running`, and `published()` taking id/password from the system bus (`settings.get remote.id|remote.password`) because `/run/xremote.info` is root 0600. xremoted stays the only host; the GUI only shows ID/password and connects out.
 
-## Measured in QEMU (tools/xremote/linuxgui.sh, wayd, kernel 772ccf12)
-- Loader and binary start; winit connects to wayd and binds compositor/shm/seat/output/xdg_wm_base globals; xkbcommon works.
-- Then the process is killed by a signal (`signal: pid=.. SIG? -- killed`) before any xdg_toplevel exists: crash inside EGL/llvmpipe initialisation (libgallium + LLVM 22 JIT). No window yet. Cause not identified.
-- Also seen: libopus missing in the Firefox spec (added by `tools/xremote/guestlibs.py`).
+## Signal found and fixed (kernel)
+- The kill was SIGSYNCCALL (musl, signal 34), not EGL: the first `membarrier(PRIVATE_EXPEDITED)` returns EINVAL, musl falls back to `__synccall`, installs a SIGSYNCCALL handler with `sigaction` in one thread and `tgkill`s every sibling. Our kernel kept one handler table per task (copied at `clone`), so siblings still had SIG_DFL and the default action killed the whole group.
+- Fix: `signal.do_sigaction` writes the new action into every live task of the thread group (`share_action`, kernel/sched/signal.fi). Gate: `tools/unterbau/t_sigshare.c` (handler installed after the thread started runs in the sibling; counter-proof on the old kernel in fixed.txt).
+- `membarrier` itself stays EINVAL on purpose: musl then takes the signal path, which is a real barrier on all cores.
 
-## Next
-1. Find the signal (kernel log of the signal number, `EGL_PLATFORM=surfaceless` probe, `GALLIUM_DRIVER=softpipe`/`LP_NUM_THREADS=0` to drop LLVM threads, a tiny EGL+GLES C probe with the same libs).
-2. osum-native `service::running()` / `published()`; then screenshot gate (window.ppm), connect to a second guest through a local relay, key counters like tools/xremote keytest.
-3. Package + start menu entry `X-Remote` + symbol (xfx style), libs in the package.
+## Gate (tools/xremote/linuxgui.sh)
+- QEMU, wayd, real FreeViewer GUI: `wayd: window` marker, no signal/fault after `FVGUI start`, `screendump` after FVGUI_PAINTWAIT, pixel check in the window rectangle (dark panel share, blue accent pixels) by `linuxgui_check.py`.
+- `FVGUI_SERVICE=1`: guest runs orientbus + settingsd + a fake `/run/xremote.info|state` (service=running, id=123456789); the check OCRs the window (tesseract) for the ID and asserts the GUI did not start its own host.
+- Needs: `KERNEL=<k0.img>`, `FVGUI_LIBS="$(cat /root/fvsys/extra.txt)"` (Mesa libs missing from the Firefox spec), WD `/root/fxhp`.
+
+## osum-native service (FreeViewer branch osum-gui)
+- `src/osum/xhost.rs`: `service::running()` is true while `settings.get remote.service` answers `running`; `published()` returns `remote.id` / `remote.password` from the system bus (`/bin/act call settings.get key=...`, because `/run/xremote.info` is root 0600). A background thread refreshes a cache every 3 s so the UI thread never forks. xremoted stays the only host.
+
+## Package size
+- Libs in the guest: libLLVM 183 MB (zstd -3: 66 MB), libgallium 42 MB (13 MB); libgallium NEEDs libLLVM even for softpipe, so LLVM cannot be dropped without a Mesa rebuild.
+- In the test image Firefox and the GUI already share ONE copy (`/usr/lib` of the Alpine root). For the Store: ship Mesa as one shared runtime package (`/apps/mesa.osp/lib`, loaded through LD_LIBRARY_PATH) that both Firefox and X-Remote GUI use, instead of two copies. The package system has no dependency field yet (roadmap).
