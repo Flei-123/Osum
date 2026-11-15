@@ -29,17 +29,21 @@ def load(name):
     return (int(head[1]), int(head[2]), data[head.end():]) if head else None
 
 
-def distinct(img, x0, y0, x1, y1):
+DARK_MAX = 20
+
+
+def dark_percent(img, x0, y0, x1, y1):
     if img is None:
         return -1
     width, _, pix = img
-    seen = {}
+    dark = total = 0
     for y in range(y0, y1, 2):
         for x in range(x0, x1, 2):
             o = (y * width + x) * 3
-            key = (pix[o] >> 3, pix[o + 1] >> 3, pix[o + 2] >> 3)
-            seen[key] = seen.get(key, 0) + 1
-    return len(seen)
+            total += 1
+            if max(pix[o:o + 3]) <= DARK_MAX:
+                dark += 1
+    return dark * 100 // max(total, 1)
 
 
 def changed(a, b, box):
@@ -65,7 +69,7 @@ def num(line, key):
 
 
 previews = lines(r"taskview: preview n=")
-check(len(previews) >= 2, "preview card opened twice (explorer, then terminal): %d" % len(previews))
+check(len(previews) >= 2, "preview card opened for explorer and terminal: %d" % len(previews))
 first = previews[0] if previews else ""
 x, y, w, h = (num(first, k) for k in ("x", "y", "w", "h"))
 check(x >= 8 and x + w <= 1280 and y >= 0 and y + h <= 780,
@@ -74,9 +78,9 @@ dwell = lines(r"taskbar: preview dwell ms=")
 delay = num(dwell[0], "ms") if dwell else -1
 check(100 <= delay <= 400, "hover delay before the card: %d ms" % delay)
 a1 = load("a1-card")
-body = (x + 10, y + 60, x + w - 10, y + h - 10)
-colors = distinct(a1, *body) if x >= 0 else -1
-check(colors >= 40, "the card carries a live thumbnail: %d colours in the thumbnail area" % colors)
+body = (x + 12, y + 44, x + w - 12, y + h - 14)
+dark = dark_percent(a1, *body) if x >= 0 else -1
+check(dark >= 30, "the card carries a live thumbnail: %d %% dark window pixels in the thumbnail area" % dark)
 if mutant:
     print("== counter-proof: without WM_THUMB the thumbnail area is flat")
     print("RESULT %d %d" % (ok, bad))
