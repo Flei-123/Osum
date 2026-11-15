@@ -358,6 +358,8 @@ class Fahrer:
         cmds = []
         if mode == "click":
             cmds += ["mouse_button 1", "mouse_button 0"]
+        elif mode == "rclick":
+            cmds += ["mouse_button 2", "mouse_button 0"]
         elif mode.startswith("key:"):
             cmds.append("sendkey %s" % mode[4:])
         elif mode.startswith("drag:"):
@@ -380,7 +382,7 @@ class Fahrer:
         if pace_ms > 0:
             for c in cmds:
                 self.s.sendall((c + "\n").encode())
-                if c.startswith("screendump"):
+                if c.startswith("screendump") or c.startswith("mouse_button"):
                     time.sleep(pace_ms / 1000.0)
         else:
             self.s.sendall(("\n".join(cmds) + "\n").encode())
