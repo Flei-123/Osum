@@ -35,6 +35,8 @@ import fuiscene
 import icons
 import uikit.uiflyout
 import uikit.uisys
+import libc.clockapi
+import taskthumb
 
 export { init, toggle, step, is_open, hit, preview_open, preview_shut, preview_is_open }
 
@@ -51,6 +53,10 @@ const PV_W: u64 = 300
 const PV_MAXR: u64 = 8
 const KEYC0: u64 = 300
 const APP_LEN: u64 = 24
+const HEAD_ROW_H: u64 = 24
+const REFRESH_TICKS: u64 = 25
+const FADE_TICKS: u64 = 10
+const OPAC_FULL: u64 = 255
 
 static mut tv_win: u64 = 0xFFFFFFFFFFFFFFFF
 static mut tv_h: u64 = 0
@@ -60,6 +66,11 @@ static mut mode_: u64 = 0
 static mut app_f: [u8; 24] = [0 as u8; 24]
 static mut n_rows: u64 = 0
 static mut row_id: [u64; 12] = [0 as u64; 12]
+static mut row_w: [u64; 12] = [0 as u64; 12]
+static mut row_h: [u64; 12] = [0 as u64; 12]
+static mut thumbs_at: u64 = 0
+static mut fade_at: u64 = 0
+static mut fading: u64 = 0
 static mut row_tit: [u8; 480] = [0 as u8; 480] // TV_MAXR x 40
 static mut rec: [u8; 128] = [0 as u8; 128]
 static mut px_: u64 = 0
@@ -85,6 +96,7 @@ static mut s_ti: [u8; 8] = " title=\0"
 static mut s_ra: [u8; 20] = "taskview: raise id=\0"
 static mut s_rc: [u8; 5] = " rc=\0"
 static mut s_shut: [u8; 16] = "taskview: shut \0"
+static mut s_fade: [u8; 19] = "taskview: fade ms=\0"
 static mut s_esc: [u8; 4] = "esc\0"
 static mut s_out: [u8; 8] = "outside\0"
 static mut s_pick: [u8; 5] = "pick\0"
@@ -98,7 +110,14 @@ fn rows_shown() -> u64 {
 }
 
 // the card in design points
+fn thumbs_mode() -> bool {
+    return mode_ == MODE_PREVIEW && n_rows > 0 && n_rows <= taskthumb.MAX_SLOTS
+}
+
 fn card_w() -> u64 {
+    if thumbs_mode() {
+        return PADP * 2 + n_rows * taskthumb.THUMB_W + (n_rows - 1) * GAPP
+    }
     if mode_ == MODE_PREVIEW {
         return PV_W
     }
@@ -106,6 +125,9 @@ fn card_w() -> u64 {
 }
 
 fn card_h() -> u64 {
+    if thumbs_mode() {
+        return PADP + HEAD_ROW_H + GAPP + taskthumb.THUMB_H + PADP
+    }
     if mode_ == MODE_PREVIEW {
         return PADP + rows_shown() * (ROW_H + GAPP) + PADP
     }
@@ -131,9 +153,37 @@ fn build_preview(r: usize) {
     }
 }
 
+fn thumb_paint(ud: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
+    taskthumb.paint(ud, x, y, w, h, st)
+}
+
+fn build_thumbs(r: usize) {
+    let line: usize = fuiscene.row(r)
+    fuiscene.set_gap(line, GAPP)
+    var i: u64 = 0
+    while i < n_rows {
+        let col: usize = fuiscene.column(line)
+        fuiscene.set_gap(col, GAPP)
+        let head: usize = fuiscene.row(col)
+        fuiscene.set_gap(head, GAPP)
+        let t: usize = fuiscene.label(head, (&row_tit[0 as usize]) as u64 + i * 40)
+        fuiscene.set_size(t, taskthumb.THUMB_W - HEAD_ROW_H - GAPP, HEAD_ROW_H)
+        let c: usize = fuiscene.icon_button(head, icons.WINDOW_CLOSE, (&t_close[0 as usize]) as u64, KEYC0 + i)
+        fuiscene.flat(c)
+        fuiscene.set_size(c, HEAD_ROW_H, HEAD_ROW_H)
+        let _b: usize = fuiscene.flat_tile(col, KEY0 + i, (&row_tit[0 as usize]) as u64 + i * 40,
+            taskthumb.THUMB_W, taskthumb.THUMB_H, false, i, thumb_paint)
+        i = i + 1
+    }
+}
+
 fn build() {
     let r: usize = fuiscene.root()
     fuiscene.set_gap(r, GAPP)
+    if thumbs_mode() {
+        build_thumbs(r)
+        return
+    }
     if mode_ == MODE_PREVIEW && n_rows > 0 {
         build_preview(r)
         return
@@ -196,6 +246,8 @@ fn read_windows() {
                 let own: u64 = __mmio_read64((b + hostwinp.WL_ID) as *mut u64)
                 if row_wanted(b, own, layer) {
                     row_id[n_rows as usize] = own
+                    row_w[n_rows as usize] = __mmio_read64((b + hostwinp.WL_W) as *mut u64)
+                    row_h[n_rows as usize] = __mmio_read64((b + hostwinp.WL_H) as *mut u64)
                     var k: u64 = 0
                     while k < 31 {
                         row_tit[(n_rows * 40 + k) as usize] =
@@ -261,6 +313,7 @@ fn preview_open(app: u64, cx: u64, bar_top: u64, bar_bot: u64) -> bool {
     if open_ != 0 || tv_win == 0xFFFFFFFFFFFFFFFF {
         return false
     }
+    fade_finish()
     mode_ = MODE_PREVIEW
     copy_app(app)
     read_windows()
@@ -268,9 +321,37 @@ fn preview_open(app: u64, cx: u64, bar_top: u64, bar_bot: u64) -> bool {
         mode_ = MODE_CARD
         return false
     }
-    preview_place(cx, bar_top, bar_bot, PV_W * uiscale.ui_scale(), card_h() * uiscale.ui_scale())
+    prepare_thumbs()
+    preview_place(cx, bar_top, bar_bot, card_w() * uiscale.ui_scale(), card_h() * uiscale.ui_scale())
     show_card()
     return true
+}
+
+fn prepare_thumbs() {
+    thumbs_at = clockapi.ticks()
+    if !thumbs_mode() || !taskthumb.acquire() {
+        return
+    }
+    var i: u64 = 0
+    while i < n_rows {
+        taskthumb.prepare(i, row_id[i as usize], row_w[i as usize], row_h[i as usize])
+        i = i + 1
+    }
+}
+
+fn refresh_thumbs() {
+    if !thumbs_mode() {
+        return
+    }
+    let now: u64 = clockapi.ticks()
+    if now >= thumbs_at && now - thumbs_at < REFRESH_TICKS {
+        return
+    }
+    thumbs_at = now
+    taskthumb.refresh(n_rows)
+    let _s: bool = fuiscene.win_select(tv_win)
+    fuiscene.touch()
+    let _u: bool = fuiscene.win_select(0)
 }
 
 fn copy_app(app: u64) {
@@ -300,6 +381,7 @@ fn open_now() {
     if open_ != 0 || tv_win == 0xFFFFFFFFFFFFFFFF {
         return
     }
+    fade_finish()
     mode_ = MODE_CARD
     read_windows()
     let w: u64 = CARD_W * uiscale.ui_scale()
@@ -371,12 +453,39 @@ fn show_card() {
     }
 }
 
+fn fade_start() {
+    fading = 1
+    fade_at = clockapi.ticks()
+}
+
+fn fade_finish() {
+    if fading == 0 {
+        return
+    }
+    fading = 0
+    say((&s_fade[0 as usize]) as u64)
+    lineout.add_num((clockapi.ticks() - fade_at) * 10)
+    lineout.end_line()
+    let _v: u64 = hostwin.win_state(tv_h, hostwinp.WS_HIDDEN, 1)
+    let _o: u64 = hostwin.win_set_opac(tv_h, OPAC_FULL)
+    taskthumb.release()
+}
+
+fn fade_step() {
+    let now: u64 = clockapi.ticks()
+    if now < fade_at || now - fade_at >= FADE_TICKS {
+        fade_finish()
+        return
+    }
+    let _o: u64 = hostwin.win_set_opac(tv_h, OPAC_FULL * (FADE_TICKS - (now - fade_at)) / FADE_TICKS)
+}
+
 fn shut(why: u64) {
     if open_ == 0 {
         return
     }
     open_ = 0
-    let _v: u64 = hostwin.win_state(tv_h, hostwinp.WS_HIDDEN, 1)
+    fade_start()
     say((&s_shut[0 as usize]) as u64)
     say(why)
     lineout.end_line()
@@ -391,11 +500,15 @@ fn toggle() {
 }
 
 fn step() -> bool {
+    if fading != 0 {
+        fade_step()
+    }
     if open_ == 0 {
-        return false
+        return fading != 0
     }
     // the events of the window ring go to the canvas of the tree
     let _st: u64 = apphost.step()
+    refresh_thumbs()
     let key: u64 = fuiscene.pump_aux(tv_win)
     if key >= KEYC0 && key < KEYC0 + n_rows {
         let id: u64 = row_id[(key - KEYC0) as usize]

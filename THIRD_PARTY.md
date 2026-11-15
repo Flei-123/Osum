@@ -1,5 +1,8 @@
 # THIRD_PARTY.md -- Osum (the kernel)
 
+Current, machine-checked list of what ships in the images: `licenses/registry.txt` (rules: `docs/LICENSES.md`).
+The text below is the historical inventory of 27 August 2026.
+
 What in this repository is NOT written here. Round INVENTORY,
 27 August 2026.
 

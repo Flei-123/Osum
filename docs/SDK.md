@@ -24,7 +24,8 @@ Full spec: docs/manifest-v2.md (kind, outputs, web.*, service-mapped permissions
 
 Launcher keys stay on top (<1023 octets): `name info keys icon exec revision net` (`fassung` is still read).
 v2 keys: `manifest=2` (required) `id` (reverse-DNS, last part = bundle name) `version` (X.Y.Z)
-`author license min_os perm service actions opens needs`; custom keys `x-...`.
+`author license min_os perm service actions opens needs notices`; custom keys `x-...`.
+`license` is an SPDX expression (`--strict` refuses anything else); `notices` names the file with the licence notices of bundled third-party files (docs/LICENSES.md).
 Lint refuses: unknown/duplicate keys, bad id/version, bundle name equal to a system app,
 service outside the app namespace or >16 octets, unknown/duplicate permission,
 `net` contradicting `perm`, ACTIONS file refused by tools/actionbus/manifest.py or `app` != bundle name.

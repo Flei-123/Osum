@@ -3,6 +3,7 @@ profile kernel
 
 import lib.kstate
 import arch.arch
+import sync.fdlock
 
 export {
     R_NONE, R_READ, R_WRITE, R_EXEC, R_DUP, R_TRANSFER, R_INSPECT,
@@ -234,7 +235,7 @@ fn objects_used(state: u64) -> u64 {
     return n
 }
 
-fn obj_get(state: u64, kind: u64, num: u64) -> u64 {
+fn obj_get_held(state: u64, kind: u64, num: u64) -> u64 {
     if kind == OK_NONE || kind > OK_MAX {
         return MAX_OBJ
     }
@@ -304,7 +305,7 @@ fn object_end_shrink(state: u64, freed: u64) {
     object_end = 0
 }
 
-fn obj_ref(state: u64, i: u64) {
+fn obj_ref_held(state: u64, i: u64) {
     if i >= MAX_OBJ {
         return
     }
@@ -321,7 +322,7 @@ fn obj_free(state: u64, i: u64) {
     object_end_shrink(state, i)
 }
 
-fn obj_unref(state: u64, i: u64) -> bool {
+fn obj_unref_held(state: u64, i: u64) -> bool {
     if i >= MAX_OBJ {
         return false
     }
@@ -359,7 +360,7 @@ fn inflight_on(state: u64, kind: u64, num: u64) -> u64 {
     return n
 }
 
-fn clear_task(state: u64, task: u64, pid: u64) {
+fn clear_task_held(state: u64, task: u64, pid: u64) {
     if task >= kstate.MAX_TASKS {
         return
     }
@@ -378,7 +379,7 @@ fn clear_task(state: u64, task: u64, pid: u64) {
     set_nonce(state, task, nonce_for(pid))
 }
 
-fn insert(state: u64, task: u64, obj: u64, rights: u64) -> u64 {
+fn insert_held(state: u64, task: u64, obj: u64, rights: u64) -> u64 {
     if task >= kstate.MAX_TASKS {
         return HANDLE_NONE
     }
@@ -561,7 +562,7 @@ fn handle_at(state: u64, task: u64, i: u64) -> u64 {
     return make(i, kstate.get(state, a + HS_GEN) ^ nonce_of(state, task))
 }
 
-fn drop(state: u64, task: u64, h: u64) -> bool {
+fn drop_held(state: u64, task: u64, h: u64) -> bool {
     let o: u64 = resolve(state, task, h)
     if o >= MAX_OBJ {
         return false
@@ -588,7 +589,7 @@ fn used(state: u64, task: u64) -> u64 {
     return n
 }
 
-fn give(state: u64, from: u64, to: u64, h: u64, mask: u64) -> u64 {
+fn give_held(state: u64, from: u64, to: u64, h: u64, mask: u64) -> u64 {
     let o: u64 = resolve(state, from, h)
     if o >= MAX_OBJ {
         return err(E_BADHANDLE)
@@ -655,7 +656,7 @@ fn req_state(state: u64, token: u64) -> u64 {
     return kstate.get(state, a + QS_STATE)
 }
 
-fn req_begin(state: u64, task: u64, h: u64, need: u64) -> u64 {
+fn req_begin_held(state: u64, task: u64, h: u64, need: u64) -> u64 {
     let o: u64 = resolve(state, task, h)
     if o >= MAX_OBJ {
         return err(E_BADHANDLE)
@@ -728,7 +729,7 @@ fn req_object(state: u64, token: u64) -> u64 {
     return kstate.get(state, oslot(o) + OB_NUM)
 }
 
-fn req_cancel(state: u64, task: u64, token: u64) -> bool {
+fn req_cancel_held(state: u64, task: u64, token: u64) -> bool {
     let q: u64 = req_find(state, token)
     if q >= MAX_REQ {
         return false
@@ -745,7 +746,7 @@ fn req_cancel(state: u64, task: u64, token: u64) -> bool {
     return true
 }
 
-fn req_end(state: u64, token: u64) -> u64 {
+fn req_end_held(state: u64, token: u64) -> u64 {
     let q: u64 = req_find(state, token)
     if q >= MAX_REQ {
         return 0
@@ -786,4 +787,72 @@ fn req_live(state: u64) -> u64 {
         i = i + 1
     }
     return n
+}
+
+fn obj_get(state: u64, kind: u64, num: u64) -> u64 {
+    let flags: u64 = fdlock.enter(state)
+    let r: u64 = obj_get_held(state, kind, num)
+    fdlock.leave(state, flags)
+    return r
+}
+
+fn obj_ref(state: u64, i: u64) {
+    let flags: u64 = fdlock.enter(state)
+    obj_ref_held(state, i)
+    fdlock.leave(state, flags)
+}
+
+fn obj_unref(state: u64, i: u64) -> bool {
+    let flags: u64 = fdlock.enter(state)
+    let r: bool = obj_unref_held(state, i)
+    fdlock.leave(state, flags)
+    return r
+}
+
+fn clear_task(state: u64, task: u64, pid: u64) {
+    let flags: u64 = fdlock.enter(state)
+    clear_task_held(state, task, pid)
+    fdlock.leave(state, flags)
+}
+
+fn insert(state: u64, task: u64, obj: u64, rights: u64) -> u64 {
+    let flags: u64 = fdlock.enter(state)
+    let r: u64 = insert_held(state, task, obj, rights)
+    fdlock.leave(state, flags)
+    return r
+}
+
+fn drop(state: u64, task: u64, h: u64) -> bool {
+    let flags: u64 = fdlock.enter(state)
+    let r: bool = drop_held(state, task, h)
+    fdlock.leave(state, flags)
+    return r
+}
+
+fn give(state: u64, from: u64, to: u64, h: u64, mask: u64) -> u64 {
+    let flags: u64 = fdlock.enter(state)
+    let r: u64 = give_held(state, from, to, h, mask)
+    fdlock.leave(state, flags)
+    return r
+}
+
+fn req_begin(state: u64, task: u64, h: u64, need: u64) -> u64 {
+    let flags: u64 = fdlock.enter(state)
+    let r: u64 = req_begin_held(state, task, h, need)
+    fdlock.leave(state, flags)
+    return r
+}
+
+fn req_cancel(state: u64, task: u64, token: u64) -> bool {
+    let flags: u64 = fdlock.enter(state)
+    let r: bool = req_cancel_held(state, task, token)
+    fdlock.leave(state, flags)
+    return r
+}
+
+fn req_end(state: u64, token: u64) -> u64 {
+    let flags: u64 = fdlock.enter(state)
+    let r: u64 = req_end_held(state, token)
+    fdlock.leave(state, flags)
+    return r
 }

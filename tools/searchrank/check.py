@@ -12,6 +12,7 @@ def last_search(lines, query):
     if start is None:
         return None
     head = lines[start]
+    best = ""
     apps = []
     files = []
     for line in lines[start + 1:]:
@@ -20,10 +21,13 @@ def last_search(lines, query):
         m = re.match(r"launcher: treffer i=(\d+) name=\[(.*)\] exec=\[(.*)\]", line)
         if m:
             apps.append((m.group(2), m.group(3)))
+        m = re.match(r"launcher: best name=\[(.*)\]", line)
+        if m:
+            best = m.group(1)
         m = re.match(r"launcher: file i=(\d+) name=\[(.*)\]", line)
         if m:
             files.append(m.group(2))
-    return head, apps, files
+    return head, apps, files, best
 
 
 def main():
@@ -33,10 +37,11 @@ def main():
     if found is None:
         print("missing")
         return 1
-    head, apps, files = found
+    head, apps, files, best = found
     print("head=%s" % head)
     print("apps=%s" % "|".join(n for n, _ in apps))
     print("files=%s" % "|".join(files))
+    print("best=%s" % best)
     print("first_app=%s" % (apps[0][0] if apps else ""))
     print("first_exec=%s" % (apps[0][1] if apps else ""))
     return 0
