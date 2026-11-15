@@ -145,7 +145,7 @@ echo @@start
 echo rc=$?
 /bin/xfx status
 /bin/xfxt procs
-/bin/xfxt listening /run/xfx-1000/wayland-0
+/bin/xfxt exists /run/xfx-1000/wayland-0
 /bin/xfxt exists /home/justin/.xfx/profile/user.js
 echo @@twice
 /bin/xfx start
@@ -162,7 +162,7 @@ echo @@stop
 echo rc=$?
 /bin/xfx status
 /bin/xfxt procs
-/bin/xfxt listening /run/xfx-1000/wayland-0
+/bin/xfxt exists /run/xfx-1000/wayland-0
 echo @@log
 cat /var/log/xfx.log
 echo @@end
@@ -317,8 +317,7 @@ has "$M" start 'installed=yes install=done firefox=running pid=[0-9]+ uid=1000' 
 has "$M" start 'proc firefox +uid=1000' "PSTAT shows firefox uid 1000"
 has "$M" start 'proc wayd +uid=1000' "PSTAT shows wayd uid 1000"
 hasnot "$M" start 'proc (firefox|wayd) +uid=0' "no firefox/wayd as root"
-has "$M" start 'listening=yes' "wayd socket accepts connections (not a VFS file)"
-[ "$(seg "$M" start | grep -ac 'exists=yes')" = 1 ] && ok "profile user.js exists" || bad "profile user.js missing"
+[ "$(seg "$M" start | grep -ac 'exists=yes')" = 2 ] && ok "socket and profile user.js exist" || bad "socket or profile user.js missing"
 has "$M" twice 'already running' "second start refused"
 has "$M" nonroot 'root only' "non-root start/install/stop refused"
 [ "$(seg "$M" nonroot | grep -ac 'xfx: root only')" = 3 ] && ok "all three privileged subcommands refused for uid 1000" || bad "not three refusals for uid 1000"
@@ -327,7 +326,7 @@ has "$M" nonroot 'firefox=running' "refused calls did not stop firefox"
 has "$M" stop 'xfx: stopped' "stop reports stopped"
 has "$M" stop 'firefox=stopped' "status after stop"
 hasnot "$M" stop 'proc (firefox|wayd) ' "firefox and wayd gone after stop"
-has "$M" stop 'listening=no' "socket gone after stop"
+has "$M" stop 'exists=no' "socket removed after stop"
 has "$M" log 'xfxstub: wayd uid=1000' "wayd ran as uid 1000"
 has "$M" log 'xfxstub: /usr/lib/firefox/firefox uid=1000 home=/home/justin xdg=/run/xfx-1000 args=5' "firefox ran as uid 1000 with session env and 5 args"
 has "$M" log 'sha256 ok, extracting' "sha verified before extraction"
