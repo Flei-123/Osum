@@ -1,0 +1,90 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+export { reset, count, push, sample, over }
+
+const MAX_LAYERS: u64 = 8
+const ALPHA_SHIFT: u64 = 24
+const ALPHA_OPAQUE: u64 = 255
+const CHANNEL_MASK: u64 = 0xFF
+const RED_SHIFT: u64 = 16
+const GREEN_SHIFT: u64 = 8
+const BLUE_SHIFT: u64 = 0
+const ROUND_HALF: u64 = 127
+
+static mut layer_src: [u64; 8] = [0 as u64; 8]
+static mut layer_w: [u64; 8] = [0 as u64; 8]
+static mut layer_h: [u64; 8] = [0 as u64; 8]
+static mut layer_stride: [u64; 8] = [0 as u64; 8]
+static mut layer_x: [i64; 8] = [0 as i64; 8]
+static mut layer_y: [i64; 8] = [0 as i64; 8]
+static mut layer_count: u64 = 0
+
+fn reset() {
+    layer_count = 0
+}
+
+fn count() -> u64 {
+    return layer_count
+}
+
+fn push(src: u64, w: u64, h: u64, stride: u64, x: i64, y: i64) -> bool {
+    if layer_count >= MAX_LAYERS || src == 0 || w == 0 || h == 0 {
+        return false
+    }
+    let i: usize = layer_count as usize
+    layer_src[i] = src
+    layer_w[i] = w
+    layer_h[i] = h
+    layer_stride[i] = stride
+    layer_x[i] = x
+    layer_y[i] = y
+    layer_count = layer_count + 1
+    return true
+}
+
+fn channel(src: u64, backdrop: u64, shift: u64, inverse: u64) -> u64 {
+    let value: u64 = ((src >> shift) & CHANNEL_MASK) + (((backdrop >> shift) & CHANNEL_MASK) * inverse + ROUND_HALF) / ALPHA_OPAQUE
+    if value > CHANNEL_MASK {
+        return CHANNEL_MASK
+    }
+    return value
+}
+
+fn over(src: u64, backdrop: u64) -> u64 {
+    let inverse: u64 = ALPHA_OPAQUE - ((src >> ALPHA_SHIFT) & CHANNEL_MASK)
+    return (channel(src, backdrop, RED_SHIFT, inverse) << RED_SHIFT)
+        | (channel(src, backdrop, GREEN_SHIFT, inverse) << GREEN_SHIFT)
+        | channel(src, backdrop, BLUE_SHIFT, inverse)
+}
+
+fn layer_pixel(i: u64, x: i64, y: i64) -> u64 {
+    let lx: i64 = x - layer_x[i as usize]
+    let ly: i64 = y - layer_y[i as usize]
+    if lx < 0 || ly < 0 || (lx as u64) >= layer_w[i as usize] || (ly as u64) >= layer_h[i as usize] {
+        return 0
+    }
+    return (__mmio_read32((layer_src[i as usize] + (ly as u64) * layer_stride[i as usize] + (lx as u64) * 4) as *mut u32)) as u64
+}
+
+fn sample(x: i64, y: i64) -> u64 {
+    var base: u64 = layer_count
+    var colour: u64 = 0
+    while base > 0 {
+        let raw: u64 = layer_pixel(base - 1, x, y)
+        if (raw >> ALPHA_SHIFT) == ALPHA_OPAQUE {
+            colour = raw & 0xFFFFFF
+            break
+        }
+        base = base - 1
+    }
+    var i: u64 = base
+    while i < layer_count {
+        let raw: u64 = layer_pixel(i, x, y)
+        if (raw >> ALPHA_SHIFT) != 0 && (raw >> ALPHA_SHIFT) != ALPHA_OPAQUE {
+            colour = over(raw, colour)
+        }
+        i = i + 1
+    }
+    return colour
+}

@@ -26,6 +26,7 @@ mkdir -p "$TMPD/bin"
 WLB=${WLBUILD:-/root/wl-build}
 PROGS="sh sleep echo cat ls wayd"
 POPUP_X=40; POPUP_Y=50; POPUP_W=120; POPUP_H=80
+RING_CLEAR=6; RING_SHADE=4; PARENT_GREY=242; SHADE_EXPECT=121; TOLERANCE=2
 
 echo "== 1. build =="
 . tools/lib/firnenv.sh
@@ -62,7 +63,7 @@ fi
 cat > "$TMPD/g.sh" <<EOS
 wayd /tmp/wayland-0 2000000000 ${WAYD_TRACE:-} &
 sleep 2
-wlpop /tmp/wayland-0 240 P churn popup &
+wlpop /tmp/wayland-0 240 P churn popup ring &
 sleep 5
 echo ==W-READY==
 sleep 700
@@ -177,6 +178,25 @@ has "$(L)" "popup surface destroyed" "the client destroyed the popup after popup
 shot "$TMPD/closed.ppm"
 px=$(pixels "$TMPD/closed.ppm" $((PX + 60)) $((PY + 40)))
 [ "$px" = "242,242,242" ] && ok "the popup window is gone from the screen" || bad "after popup_done the pixel is $px"
+
+near() { # r,g,b expected-r,g,b
+    local IFS=','; local -a a=($1) e=($2); local i
+    for i in 0 1 2; do
+        [ $(( ${a[$i]} - ${e[$i]} )) -le $TOLERANCE ] && [ $(( ${e[$i]} - ${a[$i]} )) -le $TOLERANCE ] || return 1
+    done
+}
+
+echo "== 5. per-pixel alpha =="
+waitfor "popup ring up" 60 && ok "the client opened a popup with an ARGB buffer (clear ring, half-black ring, red inside)" || bad "no ARGB popup"
+sleep 4
+shot "$TMPD/ring.ppm"
+px=$(pixels "$TMPD/ring.ppm" $((PX + 2)) $((PY + 2)) $((PX + RING_CLEAR + 1)) $((PY + 40)) $((PX + POPUP_W - RING_CLEAR - 2)) $((PY + 40)) $((PX + 60)) $((PY + 40)))
+note "pixels: $px"
+read -r c_clear c_shade c_shade_far c_core <<< "$px"
+near "$c_clear" "$PARENT_GREY,$PARENT_GREY,$PARENT_GREY" && ok "alpha 0 shows the parent behind the popup, not black ($c_clear)" || bad "alpha 0 pixel is $c_clear"
+near "$c_shade" "$SHADE_EXPECT,$SHADE_EXPECT,$SHADE_EXPECT" && near "$c_shade_far" "$SHADE_EXPECT,$SHADE_EXPECT,$SHADE_EXPECT" \
+    && ok "half-black pixels are blended with the parent ($c_shade, $c_shade_far)" || bad "shade pixels $c_shade $c_shade_far (want about $SHADE_EXPECT)"
+[ "$c_core" = "224,0,0" ] && ok "opaque pixels stay as they are" || bad "opaque pixel is $c_core"
 
 kill $QPID 2>/dev/null
 wait $QPID 2>/dev/null

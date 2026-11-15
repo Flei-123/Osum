@@ -24,6 +24,9 @@
 #define CHURN_SYNC_EVERY 10
 #define PARENT_COLOUR 0xFFF2F2F2u
 #define POPUP_COLOUR 0xFFE00000u
+#define RING_CLEAR 6
+#define RING_SHADE 4
+#define RING_SHADE_PIXEL 0x80000000u
 
 static const char *name = "?";
 static struct wl_compositor *comp;
@@ -161,7 +164,22 @@ static void pp_done(void *d, struct xdg_popup *p)
 static void pp_repositioned(void *d, struct xdg_popup *p, uint32_t token) {}
 static const struct xdg_popup_listener pp_l = { pp_configure, pp_done, pp_repositioned };
 
-static struct wl_buffer *make_solid(int w, int h, uint32_t colour)
+static uint32_t ring_pixel(int x, int y, int w, int h, uint32_t colour)
+{
+    int edge = x < y ? x : y;
+    int far_x = w - 1 - x, far_y = h - 1 - y;
+    if (far_x < edge)
+        edge = far_x;
+    if (far_y < edge)
+        edge = far_y;
+    if (edge < RING_CLEAR)
+        return 0;
+    if (edge < RING_CLEAR + RING_SHADE)
+        return RING_SHADE_PIXEL;
+    return colour;
+}
+
+static struct wl_buffer *make_solid(int w, int h, uint32_t colour, int ring)
 {
     int stride = w * 4, size = stride * h, i;
     int fd = syscall(SYS_memfd_create, "wlpop", 0);
@@ -174,9 +192,9 @@ static struct wl_buffer *make_solid(int w, int h, uint32_t colour)
     if (px == MAP_FAILED)
         return NULL;
     for (i = 0; i < w * h; i++)
-        px[i] = colour;
+        px[i] = ring ? ring_pixel(i % w, i / w, w, h, colour) : colour;
     pool = wl_shm_create_pool(shm, fd, size);
-    b = wl_shm_pool_create_buffer(pool, 0, w, h, stride, WL_SHM_FORMAT_XRGB8888);
+    b = wl_shm_pool_create_buffer(pool, 0, w, h, stride, ring ? WL_SHM_FORMAT_ARGB8888 : WL_SHM_FORMAT_XRGB8888);
     wl_shm_pool_destroy(pool);
     close(fd);
     return b;
@@ -197,7 +215,7 @@ static int open_parent(void)
     wl_surface_commit(parent_surface);
     while (!parent_configured && wl_display_dispatch(dpy) != -1)
         ;
-    b = make_solid(PARENT_W, PARENT_H, PARENT_COLOUR);
+    b = make_solid(PARENT_W, PARENT_H, PARENT_COLOUR, 0);
     if (!b)
         return 0;
     wl_surface_attach(parent_surface, b, 0, 0);
@@ -217,7 +235,7 @@ static struct xdg_positioner *make_positioner(void)
     return pos;
 }
 
-static void open_popup(void)
+static void open_popup(int ring)
 {
     struct xdg_positioner *pos = make_positioner();
     struct xdg_surface *xs;
@@ -232,15 +250,17 @@ static void open_popup(void)
     xdg_popup_add_listener(pp, &pp_l, NULL);
     xdg_popup_grab(pp, seat, 1);
     xdg_positioner_destroy(pos);
+    popup_configured = 0;
+    popup_gone = 0;
     wl_surface_commit(popup_surface);
     while (!popup_configured && wl_display_dispatch(dpy) != -1)
         ;
-    b = make_solid(POPUP_W, POPUP_H, POPUP_COLOUR);
+    b = make_solid(POPUP_W, POPUP_H, POPUP_COLOUR, ring);
     wl_surface_attach(popup_surface, b, 0, 0);
     wl_surface_damage(popup_surface, 0, 0, POPUP_W, POPUP_H);
     wl_surface_commit(popup_surface);
     wl_display_roundtrip(dpy);
-    say("popup up");
+    say(ring ? "popup ring up" : "popup up");
 }
 
 static void churn_round(void)
@@ -297,7 +317,7 @@ int main(int argc, char **argv)
 {
     const char *sock = argc > 1 ? argv[1] : "/tmp/wayland-0";
     int secs = argc > 2 ? atoi(argv[2]) : 60;
-    int do_churn = 0, do_popup = 0, i;
+    int do_churn = 0, do_popup = 0, do_ring = 0, i;
     long end;
 
     if (argc > 3)
@@ -307,6 +327,8 @@ int main(int argc, char **argv)
             do_churn = 1;
         else if (!strcmp(argv[i], "popup"))
             do_popup = 1;
+        else if (!strcmp(argv[i], "ring"))
+            do_ring = 1;
     }
     dpy = wl_display_connect(sock);
     if (!dpy) {
@@ -329,7 +351,7 @@ int main(int argc, char **argv)
     if (do_churn)
         run_churn();
     if (do_popup)
-        open_popup();
+        open_popup(0);
     end = now_ms() + secs * 1000L;
     while (now_ms() < end) {
         pump_ms(100);
@@ -339,6 +361,10 @@ int main(int argc, char **argv)
             wl_surface_destroy(popup_surface);
             popup_surface = NULL;
             say("popup surface destroyed");
+            if (do_ring) {
+                do_ring = 0;
+                open_popup(1);
+            }
         }
     }
     say("end");

@@ -14,6 +14,7 @@ import wl_input
 import wl_data
 import wl_frame
 import wl_popup
+import wl_backdrop
 import libc.clockapi
 
 export { u_start }
@@ -90,9 +91,10 @@ const O_C: u64 = 4
 const O_D: u64 = 5
 const O_E: u64 = 6
 const O_F: u64 = 7
-const O_FIELDS: u64 = 8
+const O_G: u64 = 8
+const O_FIELDS: u64 = 9
 
-static mut objs: [u64; 4096] = [0 as u64; 4096]
+static mut objs: [u64; 4608] = [0 as u64; 4608]
 
 static mut c_used: [u64; 4] = [0 as u64; 4]
 static mut c_fd: [u64; 4] = [0 as u64; 4]
@@ -116,6 +118,12 @@ static mut c_appid: [u8; 96] = [0 as u8; 96]
 static mut evb: [u64; 2] = [0 as u64; 2]
 static mut n_keys: u64 = 0
 static mut n_ptr: u64 = 0
+static mut paint_blend: bool = false
+static mut paint_layers_ready: bool = false
+static mut paint_client: u64 = 0
+static mut paint_upto: u64 = 0
+static mut paint_ax: i64 = 0
+static mut paint_ay: i64 = 0
 
 fn out_base(c: u64) -> u64 {
     return (&outbuf[(c * OUT_CAP) as usize]) as u64
@@ -156,6 +164,7 @@ fn obj_new(c: u64, id: u64, iface: u64) -> u64 {
             objs[(b + O_D) as usize] = 0
             objs[(b + O_E) as usize] = 0
             objs[(b + O_F) as usize] = 0
+            objs[(b + O_G) as usize] = 0
             return i
         }
         i = i + 1
@@ -898,23 +907,9 @@ fn surface_commit(c: u64, sid: u64) {
             ulib.sys(WM_APP, win, ap, al)
         }
     }
-    let origin: u64 = src + gy * stride + gx * 4
-    var y: u64 = 0
-    while y < gh {
-        var x: u64 = 0
-        while x < gw {
-            let px: u64 = rd32_at(origin + y * stride + x * 4) & 0xFFFFFF
-            var run: u64 = 1
-            while x + run < gw
-                && (rd32_at(origin + y * stride + (x + run) * 4)
-                    & 0xFFFFFF) == px {
-                run = run + 1
-            }
-            fill_colour(win, x, y, run, px)
-            x = x + run
-        }
-        y = y + 1
-    }
+    paint_begin(c, win, sid, pop != 0)
+    paint_main(win, src + gy * stride + gx * 4, stride, gw, gh)
+    obj_set(c, sid, O_G, bid)
     sub_paint_all(c, sid, win)
     ulib.sys(WM_FLUSH, win, 0, 0)
     n_commits = n_commits + 1
@@ -940,6 +935,90 @@ fn s32(v: u64) -> i64 {
     return x
 }
 
+fn paint_begin(c: u64, win: u64, upto: u64, blend: bool) {
+    paint_blend = blend
+    paint_client = c
+    paint_upto = upto
+    paint_layers_ready = false
+    paint_ax = (ulib.sys(WM_INFO, win, WI_X, 0) as i64) + (ulib.sys(WM_INFO, win, WI_INX, 0) as i64)
+    paint_ay = (ulib.sys(WM_INFO, win, WI_Y, 0) as i64) + (ulib.sys(WM_INFO, win, WI_INY, 0) as i64)
+}
+
+fn held_buffer(c: u64, sid: u64) -> u64 {
+    if obj_get(c, sid, O_E) != 0 {
+        return obj_get(c, sid, O_F)
+    }
+    return obj_get(c, sid, O_G)
+}
+
+fn layer_add(c: u64, sid: u64, x: i64, y: i64) {
+    let bid: u64 = held_buffer(c, sid)
+    if bid == 0 || obj_iface(c, bid) != wlproto.IF_WL_BUFFER || obj_get(c, bid, O_E) == 0 {
+        return
+    }
+    let _added: bool = wl_backdrop.push(obj_get(c, bid, O_A), obj_get(c, bid, O_B), obj_get(c, bid, O_C), obj_get(c, bid, O_D), x, y)
+}
+
+fn layer_children(c: u64, par: u64, bx: i64, by: i64, upto: u64) -> bool {
+    var i: u64 = 0
+    while i < MAX_OBJ {
+        let b: u64 = obj_base(c, i)
+        if objs[(b + O_ID) as usize] != 0 && objs[(b + O_IFACE) as usize] == wlproto.IF_WL_SUBSURFACE
+            && objs[(b + O_B) as usize] == par {
+            let child: u64 = objs[(b + O_A) as usize]
+            if child == upto {
+                return true
+            }
+            layer_add(c, child, bx + sub_abs(c, child, 0), by + sub_abs(c, child, 1))
+            if layer_children(c, child, bx, by, upto) {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn layer_tree(c: u64, root: u64, upto: u64) {
+    let win: u64 = window_of_surface(c, root)
+    if win == 0 || root == upto {
+        return
+    }
+    let bx: i64 = (ulib.sys(WM_INFO, win, WI_X, 0) as i64) + (ulib.sys(WM_INFO, win, WI_INX, 0) as i64) - (geom_origin(c, root, 0) as i64)
+    let by: i64 = (ulib.sys(WM_INFO, win, WI_Y, 0) as i64) + (ulib.sys(WM_INFO, win, WI_INY, 0) as i64) - (geom_origin(c, root, 1) as i64)
+    layer_add(c, root, bx, by)
+    let _reached: bool = layer_children(c, root, bx, by, upto)
+}
+
+fn layers_prepare() {
+    let c: u64 = paint_client
+    wl_backdrop.reset()
+    paint_layers_ready = true
+    let root: u64 = root_surface(c, paint_upto)
+    let pop: u64 = popup_of(c, root)
+    if pop != 0 {
+        layer_tree(c, root_surface(c, surface_of_xdg(c, obj_get(c, pop, O_B))), 0)
+    }
+    layer_tree(c, root, paint_upto)
+}
+
+fn shade(raw: u64, x: i64, y: i64) -> u64 {
+    if !paint_blend || (raw >> 24) == 255 {
+        return raw & 0xFFFFFF
+    }
+    if !paint_layers_ready {
+        layers_prepare()
+    }
+    return wl_backdrop.over(raw, wl_backdrop.sample(paint_ax + x, paint_ay + y))
+}
+
+fn extends_run(raw: u64, next: u64) -> bool {
+    if paint_blend {
+        return next == raw && (raw >> 24) == 255
+    }
+    return (next & 0xFFFFFF) == (raw & 0xFFFFFF)
+}
+
 fn blit_sub(win: u64, src: u64, w: u64, h: u64, stride: u64, ox: i64, oy: i64, cw: u64, ch: u64) {
     var y: u64 = 0
     while y < h {
@@ -950,11 +1029,11 @@ fn blit_sub(win: u64, src: u64, w: u64, h: u64, stride: u64, ox: i64, oy: i64, c
                 let dx: i64 = ox + (x as i64)
                 let raw: u64 = rd32_at(src + y * stride + x * 4)
                 if dx >= 0 && (dx as u64) < cw && (raw >> 24) != 0 {
-                    let px: u64 = raw & 0xFFFFFF
+                    let px: u64 = shade(raw, dx, dy)
                     var run: u64 = 1
                     while x + run < w && (dx + (run as i64)) < (cw as i64)
-                        && (rd32_at(src + y * stride + (x + run) * 4) & 0xFFFFFF) == px
-                        && (rd32_at(src + y * stride + (x + run) * 4) >> 24) != 0 {
+                        && (rd32_at(src + y * stride + (x + run) * 4) >> 24) != 0
+                        && extends_run(raw, rd32_at(src + y * stride + (x + run) * 4)) {
                         run = run + 1
                     }
                     fill_colour(win, dx as u64, dy as u64, run, px)
@@ -963,6 +1042,24 @@ fn blit_sub(win: u64, src: u64, w: u64, h: u64, stride: u64, ox: i64, oy: i64, c
                     x = x + 1
                 }
             }
+        }
+        y = y + 1
+    }
+}
+
+fn paint_main(win: u64, origin: u64, stride: u64, gw: u64, gh: u64) {
+    var y: u64 = 0
+    while y < gh {
+        var x: u64 = 0
+        while x < gw {
+            let raw: u64 = rd32_at(origin + y * stride + x * 4)
+            let px: u64 = shade(raw, x as i64, y as i64)
+            var run: u64 = 1
+            while x + run < gw && extends_run(raw, rd32_at(origin + y * stride + (x + run) * 4)) {
+                run = run + 1
+            }
+            fill_colour(win, x, y, run, px)
+            x = x + run
         }
         y = y + 1
     }
@@ -1040,6 +1137,7 @@ fn sub_paint(c: u64, child: u64, win: u64) {
     let root: u64 = root_surface(c, child)
     let ox: i64 = sub_abs(c, child, 0) - (geom_origin(c, root, 0) as i64)
     let oy: i64 = sub_abs(c, child, 1) - (geom_origin(c, root, 1) as i64)
+    paint_begin(c, win, child, true)
     blit_sub(win, src, w, h, stride, ox, oy, cw, ch)
 }
 
