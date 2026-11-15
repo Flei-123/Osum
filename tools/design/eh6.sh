@@ -236,6 +236,7 @@ if [ -n "${EH_APPREG_DIR:-}" ]; then
 fi
 ARGS+=(/users/ /users/justin/ /users/justin/config/
        "/users/justin/config/locale=$OUT/userlocale@0644")
+[ -n "${EH_HOME_EXTRA:-}" ] && ARGS+=(${EH_HOME_EXTRA})
 mkdir -p "$OUT/heim"
 printf 'Notizen zur Runde ECHTHARDWARE-5.\n' > "$OUT/heim/notizen.txt"
 printf 'a,b,c\n1,2,3\n' > "$OUT/heim/tabelle.csv"
