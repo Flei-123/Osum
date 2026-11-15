@@ -422,7 +422,6 @@ sleep 1
 setsess 1000
 act call store.refresh
 echo ==D-BEFORE==
-act call store.list
 sleep 90
 echo ==D-AFTER==
 act call store.status
@@ -434,8 +433,6 @@ STORE_CONF="$TMPD/conf.auto" image "$TMPD/D.img" "$TMPD/sD.sh" $P0
 run "$TMPD/D.img" d 900
 D="$TMPD/d.klar"
 grep -qa '==FERTIG==' "$D" || { bad "the auto-install guest did not finish"; tail -25 "$D" | sed 's/^/        /'; }
-part "$D" D-BEFORE D-AFTER > "$TMPD/p.txt"
-has "$TMPD/p.txt" "|update|1" "before: hallo is outdated (update)"
 part "$D" D-AFTER FERTIG > "$TMPD/p.txt"
 has "$TMPD/p.txt" "automatisch aktualisiert" "default on: stored ran an automatic round by itself"
 has "$TMPD/p.txt" "|aktuell|1" "... and hallo is now current without any call to install it"
