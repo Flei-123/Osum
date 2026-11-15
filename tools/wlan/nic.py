@@ -216,12 +216,27 @@ def check_txq(binary):
     ok(out[-1].startswith("Q take=- pending=0"), "ring drains to the end")
 
 
+def check_txq_refill(binary):
+    f = [bytes([0x70 + i]) * (40 + i) for i in range(10)]
+    lines = ["L 1"] + ["Q 0 " + x.hex() for x in f[:8]]
+    lines += ["Q 1", "Q 0 " + f[8].hex(), "Q 2 %d" % len(f[0]), "Q 1", "Q 0 " + f[9].hex()]
+    out = run(binary, lines)
+    if len(out) != len(lines):
+        ok(False, "txq refill oracle answered %d of %d lines" % (len(out), len(lines)))
+        return
+    ok(out[10].startswith("Q put=1 pending=1 room=0"), "ring refilled after a take is full again")
+    ok(out[11] == "Q untake pending=1 room=0 txp=1 txb=%d" % len(f[0]), "untake on a refilled ring is refused and room stays 0")
+    ok(out[12].startswith("Q take=%s" % f[1].hex()), "refused untake keeps the order of the queued frames")
+    ok(out[13].startswith("Q put=1 pending=1 room=0"), "ring takes one frame again after the refused untake")
+
+
 def main():
     binary = sys.argv[1]
     check_frames(binary)
     check_ring(binary)
     check_amsdu(binary)
     check_txq(binary)
+    check_txq_refill(binary)
     bad = results.count(False)
     print("RESULT pass=%d fail=%d" % (len(results) - bad, bad))
     sys.exit(1 if bad else 0)

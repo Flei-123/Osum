@@ -41,5 +41,6 @@ mut 's/    wn_live_sec = now_sec/    wn_live_sec = wn_live_sec/' "liveness read 
 mut 's/if rx_queued() != 0 { wn_rx_tail = wn_rx_tail + 1 }/if rx_queued() != 0 { wn_rx_tail = wn_rx_tail }/' "recycle does not advance" knet/wlan_net.fi
 mut 's/wn_rx_drop = wn_rx_drop + 1/wn_rx_drop = wn_rx_drop/' "drops not counted" knet/wlan_net.fi
 mut 's/wn_rx_tail = wn_rx_head$/wn_rx_tail = wn_rx_tail/' "link down keeps stale frames" knet/wlan_net.fi
+mut 's/^    if wn_head - wn_tail >= TX_SLOTS {$/    if wn_head - wn_tail >= 99 {/' "untake refills a full ring" knet/wlan_net.fi
 echo "RESULT pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
