@@ -39,8 +39,8 @@ open(p, "w").write(s)
 PY
 
 run_tree() { # run_tree <tree> <name> <script> [seed]
-    local home=""
-    [ -n "${4:-}" ] && home="/users/justin/config/startlearn=$4@0644"
+    local home="/users/root/ /users/root/config/"
+    [ -n "${4:-}" ] && home="$home /users/root/config/startlearn=$4@0644"
     ( cd "$1" && APPS_DIR="$TMPD/apps" EH_ETC_EXTRA="/etc/startuse.conf=$TMPD/startuse.conf@0644" EH_HOME_EXTRA="$home" \
         DESIGNBUILD="$TMPD/build-$2" bash tools/design/eh6.sh "$TMPD/$2" res=1920x1080 accel=kvm tafel=nein \
         drehbuch="$ROOT/tools/settingssearch/$3" > "$TMPD/$2.log" 2>&1 )
