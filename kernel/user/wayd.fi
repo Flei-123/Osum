@@ -48,6 +48,10 @@ const WIG_SCREEN: u64 = 1805
 const WM_FLUSH: u64 = 2105
 const WM_CLOSE: u64 = 2107
 const WM_APP: u64 = 2116
+const WI_W: u64 = 0
+const WI_H: u64 = 1
+const WI_MAXIMIZED: u64 = 15
+const XDG_STATE_MAXIMIZED: u64 = 1
 const FIT_MARGIN: u64 = 16
 const FIT_DECO_X: u64 = 4
 const FIT_DECO_Y: u64 = 24
@@ -512,7 +516,9 @@ fn on_compositor(c: u64, id: u64, op: u64, argp: u64) {
     }
     if op == wlproto.RQ_WL_COMPOSITOR_CREATE_REGION {
         let rid: u64 = rd32(argp)
-        obj_new(c, rid, wlproto.IF_WL_REGION)
+        if obj_new(c, rid, wlproto.IF_WL_REGION) >= MAX_OBJ {
+            send_error(c, id, 0)
+        }
         return
     }
     send_error(c, id, 1)
@@ -762,7 +768,7 @@ fn refit_oversized(c: u64, sid: u64, w: u64, h: u64, sw: u64, sh: u64) -> bool {
         fh = fh - (h - max_h)
     }
     obj_set(c, tl, O_D, (fw << 16) | fh)
-    send_configure(c, tl, xs, fw, fh)
+    send_configure(c, tl, xs, fw, fh, false)
     return true
 }
 
@@ -1224,16 +1230,42 @@ fn on_xdg_surface(c: u64, id: u64, op: u64, argp: u64) {
     send_error(c, id, 1)
 }
 
-fn send_configure(c: u64, tl: u64, xs: u64, w: u64, h: u64) {
+fn send_configure(c: u64, tl: u64, xs: u64, w: u64, h: u64, maximized: bool) {
     let pt: u64 = ev_begin(c, tl, 0)
     ev_arg(c, pt, 0, w)
     ev_arg(c, pt, 1, h)
-    ev_arg(c, pt, 2, 0)
-    ev_end(c, pt, 3)
+    if maximized {
+        ev_arg(c, pt, 2, 4)
+        ev_arg(c, pt, 3, XDG_STATE_MAXIMIZED)
+        ev_end(c, pt, 4)
+    } else {
+        ev_arg(c, pt, 2, 0)
+        ev_end(c, pt, 3)
+    }
     let ps: u64 = ev_begin(c, xs, 0)
     ev_arg(c, ps, 0, next_serial)
     ev_end(c, ps, 1)
     next_serial = next_serial + 1
+}
+
+fn resize_sync(c: u64, sid: u64, win: u64) {
+    let xs: u64 = obj_get(c, sid, O_C)
+    if xs == 0 {
+        return
+    }
+    let tl: u64 = obj_get(c, xs, O_B)
+    if tl == 0 {
+        return
+    }
+    let w: u64 = ulib.sys(WM_INFO, win, WI_W, 0)
+    let h: u64 = ulib.sys(WM_INFO, win, WI_H, 0)
+    let size: u64 = (w << 16) | h
+    let known: u64 = obj_get(c, tl, O_B)
+    obj_set(c, tl, O_B, size)
+    if known == 0 || known == size {
+        return
+    }
+    send_configure(c, tl, xs, w, h, false)
 }
 
 fn on_xdg_toplevel(c: u64, id: u64, op: u64, argp: u64) {
@@ -1305,6 +1337,10 @@ fn dispatch(c: u64, at: u64, len: u64, fd: u64) -> bool {
             let esize: u64 = obj_get(c, id, O_F)
             obj_drop(c, id)
             map_release(c, ebase, esize)
+        }
+    } else if iface == wlproto.IF_WL_REGION {
+        if op == wlproto.RQ_WL_REGION_DESTROY {
+            obj_drop(c, id)
         }
     } else if iface == wlproto.IF_WL_SEAT {
         on_seat(c, id, op, argp)
@@ -1497,6 +1533,9 @@ fn pump_input() {
                             }
                         }
                         n = n + 1
+                    }
+                    if win != 0 && c_outlen[c as usize] + 1024 < OUT_CAP {
+                        resize_sync(c, sid, win)
                     }
                     if win != 0 && c_outlen[c as usize] + 1024 < OUT_CAP && ulib.sys(1870, 0, 0, 0) != 1 {
                         c_outlen[c as usize] = wl_input.ptr_check(c, sid, win, out_base(c), c_outlen[c as usize])
