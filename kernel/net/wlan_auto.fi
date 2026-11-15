@@ -24,6 +24,7 @@ import wlan.addba
 import wlan.iwl_cmdq
 import wlan.linkprobe
 import net.wlan_net
+import net.wlan_port
 import net.wlan_count
 import drv.net.iwl
 import drv.net.iwl_xport
@@ -410,10 +411,10 @@ fn mac_ptr() -> u64 { return (&wa_mac[0]) as u64 }
 
 fn is_up() -> bool { return wa_obj != 0 && autojoin.auto_up(auto_of()) }
 
-fn pump_tx() -> u64 {
+fn pump_tx(state: u64) -> u64 {
     var w: u64 = 0
     while wlan_net.tx_pending() && w < 8 {
-        let n: u64 = wlan_net.tx_take((&wa_eth[0]) as u64, 1536)
+        let n: u64 = wlan_port.tx_take(state, (&wa_eth[0]) as u64, 1536)
         w = w + 1
         if n != 0 {
             let fl: i64 = ethconv.eth_to_wlan((&wa_eth[0]) as u64, n, (&wa_frame[0]) as u64, 1600,
@@ -422,7 +423,7 @@ fn pump_tx() -> u64 {
                 let r: i64 = connect.data_send(session_of(), (wa_dev) as *mut device.Device, (&wa_frame[0]) as u64,
                     fl as usize, (&wa_prot[0]) as u64, 1700)
                 if r == iwl_cmdq.E_CQ_FULL && wa_txwait != 0 {
-                    wlan_net.tx_untake(n)
+                    wlan_port.tx_untake(state, n)
                     wa_txfull = wa_txfull + 1
                     return w - 1
                 }
@@ -439,7 +440,7 @@ fn pump_tx() -> u64 {
     return w
 }
 
-fn deliver_amsdu(n: u64) {
+fn deliver_amsdu(state: u64, n: u64) {
     var at: u64 = ethconv.data_hdr_len((&wa_plain[0]) as u64, n)
     var next: u64 = 0
     var subs: u64 = 0
@@ -447,13 +448,13 @@ fn deliver_amsdu(n: u64) {
         let m: i64 = ethconv.amsdu_sub((&wa_plain[0]) as u64, n, at, (&wa_eth[0]) as u64, 1536, &next)
         if m <= 0 { return }
         wlan_count.note_rx((&wa_eth[0]) as u64, m as u64)
-        let _o: bool = wlan_net.rx_offer((&wa_eth[0]) as u64, m as u64)
+        let _o: bool = wlan_port.rx_offer(state, (&wa_eth[0]) as u64, m as u64)
         wa_amsdu = wa_amsdu + 1
         at = next
         subs = subs + 1
     }
 }
-fn pump_rx() -> u64 {
+fn pump_rx(state: u64) -> u64 {
     var w: u64 = 0
     var tries: u64 = 0
     while tries < 8 && wlan_net.rx_admit(wa_now, wa_old_rx != 0) {
@@ -475,13 +476,13 @@ fn pump_rx() -> u64 {
                 continue
             }
             if ethconv.is_amsdu((&wa_plain[0]) as u64, n as u64) {
-                deliver_amsdu(n as u64)
+                deliver_amsdu(state, n as u64)
                 continue
             }
             let m: i64 = ethconv.wlan_to_eth((&wa_plain[0]) as u64, n as u64, (&wa_eth[0]) as u64, 1536)
             if m > 0 {
                 wlan_count.note_rx((&wa_eth[0]) as u64, m as u64)
-                let _o: bool = wlan_net.rx_offer((&wa_eth[0]) as u64, m as u64)
+                let _o: bool = wlan_port.rx_offer(state, (&wa_eth[0]) as u64, m as u64)
             }
         }
     }
@@ -522,9 +523,9 @@ fn link_watch(state: u64) {
     }
 }
 
-fn pump() -> u64 {
+fn pump(state: u64) -> u64 {
     if !driver_ready() || !is_up() { return 0 }
-    return pump_tx() + pump_rx()
+    return pump_tx(state) + pump_rx(state)
 }
 
 fn hot_say(text: u64) {

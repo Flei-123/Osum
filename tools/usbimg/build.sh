@@ -924,6 +924,12 @@ if [ -n "${USBIMG_SPECFILE:-}" ]; then
     mapfile -t SPEC_LINES < "$USBIMG_SPECFILE"
     ARGS+=("${SPEC_LINES[@]}")
 fi
+ph licenses
+printf '%s\n' "${ARGS[@]:3}" > "$OUT/licenses.in"
+python3 -I tools/licenses/notices.py image "$IMAGE_PROFILE" "$OUT/licenses" "$OUT/licenses.in" \
+    || fehler "image contains a file without a licence entry (licenses/registry.txt)"
+mapfile -t LICENSE_SPECS < "$OUT/licenses/specs.txt"
+ARGS+=("${LICENSE_SPECS[@]}")
 ph pre-mkfs
 if [ -z "${FS_BLOCKS_SET:-}" ] && [ "${ROOT_SLIM:-0}" != 1 ] && [ "${FS_AUTO:-1}" = 1 ]; then
     ARGS[2]=$(python3 -I tools/usbimg/fssize.py "${FS_FREE_MIB:-6}" "$FS_INODES" "${ARGS[@]:3}")
@@ -941,7 +947,7 @@ done
 sagen "wurzel      $(stat -c%s "$OUT/root.img") Oktette OFS v3"
 
 # ============================================ 5. NACHZAEHLEN, NICHT HOFFEN
-PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
+PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages /usr/share/licenses/THIRD-PARTY-NOTICES \
 /lib/sans.ttf /lib/mono.ttf /lib/icons.ttf /lib/bold.ttf /users/root/config/locale \
 /etc/netview/state-online /etc/netview/state-nocarrier \
 /etc/netview/state-noip /etc/netview/state-noroute \

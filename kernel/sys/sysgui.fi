@@ -30,6 +30,7 @@ import fs.file
 import fs.unixsock
 import mm.mmframe
 import ui.wm
+import ui.wm.wmthumb
 import ui.wmplug
 import apprights.policy
 import ui.ax
@@ -512,7 +513,11 @@ fn wm_list(state: u64, me: u64, slot: u64, aus: u64, max: u64) -> u64 {
     if slot >= wm.MAX_WIN || max < sys.WL_BYTES {
         return cap.err(cap.E_INVALID)
     }
-    return wl_fill(state, me, slot, aus, sys.WL_BYTES)
+    var n: u64 = sys.WL_BYTES
+    if max >= sys.FW_BYTES && is_taskbar(state, me) {
+        n = sys.FW_BYTES
+    }
+    return wl_fill(state, me, slot, aus, n)
 }
 
 fn wl_fill(state: u64, me: u64, slot: u64, aus: u64, n: u64) -> u64 {
@@ -779,6 +784,37 @@ fn comp_call(state: u64, me: u64, op: u64, a: u64, b: u64) -> u64 {
     return cap.err(cap.E_INVALID)
 }
 
+fn wm_thumb(state: u64, me: u64, id: u64, out: u64, size: u64) -> u64 {
+    if !is_taskbar(state, me) || wm.lock_on(state) {
+        return cap.err(cap.E_RIGHTS)
+    }
+    let tw: u64 = size & 0xFFFF
+    let th: u64 = (size >> 16) & 0xFFFF
+    if !wmthumb.dims_ok(tw, th) {
+        return cap.err(cap.E_INVALID)
+    }
+    let w: u64 = wm.by_id(state, id)
+    if w >= wm.MAX_WIN {
+        return cap.err(cap.E_NOTFOUND)
+    }
+    if wm.win_layer(state, w) == wm.L_DESK || !wm.allowed(state, w) || wm.tt_is_bg(state, w) {
+        return cap.err(cap.E_RIGHTS)
+    }
+    if !wmthumb.has_pixels(state, w) {
+        return cap.err(cap.E_NOTFOUND)
+    }
+    let row: u64 = blockb(state)
+    var y: u64 = 0
+    while y < th {
+        wmthumb.fill_row(state, w, y, tw, th, row)
+        if !sysuser.copy_out(state, me, out + y * tw * 4, row, tw * 4) {
+            return cap.err(cap.E_INVALID)
+        }
+        y = y + 1
+    }
+    return 0
+}
+
 fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     a3: u64, a4: u64) -> u64 {
     if number > sys.WM_MAXNR {
@@ -917,6 +953,9 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         }
         wm.damage_all(state)
         return 0
+    }
+    if number == sys.WM_THUMB {
+        return wm_thumb(state, me, a0, a1, a2)
     }
     if number == sys.WM_MINRECT {
         if !is_taskbar(state, me) {

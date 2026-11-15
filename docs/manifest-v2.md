@@ -71,3 +71,9 @@ UNSIGNED and informational until a Boss decision signs it with the listing key (
 All 27 shipped INFO files (`assets/apps/*`, `pakete/*`) pass `check --strict --system`; the 22 system bundles got
 `manifest id version author license kind outputs` appended (`kind=gui`, `perm` only where `net=real`; their other rights stay in
 the kernel table until audited). `pakete/xremote` is `kind=app`; its `info` was over 80 octets (old lint error), now shortened.
+
+## Taskbar jump list entries
+
+`task1`, `task2`, `task3` (optional, `<label 1..31>|<argument 1..47>`): rows of the "Tasks" section in the taskbar jump list (right click on the app's icon). A pick starts `/apps/<app>.osp/start <argument>`; the app gets the argument as `argv[1]`. The label may be a message catalogue key.
+Recent files: an app calls `recentfiles.note(app, path)` (kernel/user/recentfiles.fi); the list lives in `/var/recent/<app>.list` (5 entries, newest first); the jump list shows 3 and starts the app with the path as `argv[1]`.
+Fixed rows: app name (start), pin/unpin, end task and close window (only while a window runs).

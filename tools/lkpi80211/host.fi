@@ -1,0 +1,217 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.io
+import wlan.macplan
+
+struct T {
+    fails: i32,
+    checks: i32,
+}
+
+struct Shadow {
+    sta: u64,
+    chanctx: u64,
+    keys: u64,
+    iface: bool,
+}
+
+static mut want_ops: [u64; 32] = [0 as u64; 32]
+static mut want_n: usize = 0
+static mut seed: u64 = 0x2545F4914F6CDD1D
+static mut runs_reached: u64 = 0
+
+fn check(t: *mut T, ok: bool, what: str) {
+    (*t).checks = (*t).checks + 1
+    if ok {
+        io.fmt_print(f"ok   {what}\n")
+    } else {
+        io.fmt_print(f"FAIL {what}\n")
+        (*t).fails = (*t).fails + 1
+    }
+}
+
+fn want(op: u64, arg: u64) {
+    want_ops[want_n] = op | (arg << 8)
+    want_n = want_n + 1
+}
+
+fn run(p: *mut macplan.Plan, ev: u64) -> bool {
+    let n: usize = want_n
+    want_n = 0
+    macplan.plan_clear(p)
+    let r: i64 = macplan.plan_event(p, ev)
+    if r < 0 || r as usize != n { return false }
+    var i: usize = 0
+    while i < n {
+        let got: u64 = macplan.plan_op(p, i) | (macplan.plan_arg(p, i) << 8)
+        if got != want_ops[i] { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn refused(p: *mut macplan.Plan, ev: u64) -> bool {
+    macplan.plan_clear(p)
+    return macplan.plan_event(p, ev) == macplan.E_ORDER && macplan.plan_count(p) == 0
+}
+
+fn want_join() {
+    want(macplan.OP_ADD_CHANCTX, 0)
+    want(macplan.OP_ASSIGN_VIF_CHANCTX, 0)
+    want(macplan.OP_BSS_INFO_CHANGED, macplan.BSS_BSSID)
+    want(macplan.OP_STA_STATE, macplan.STA_NONE)
+    want(macplan.OP_MGD_PREPARE_TX, 0)
+}
+
+fn connect_rsn(t: *mut T, p: *mut macplan.Plan) {
+    want_join()
+    check(t, run(p, macplan.EV_JOIN_RSN), "join: chanctx, bssid, sta NONE, prepare_tx")
+    want(macplan.OP_STA_STATE, macplan.STA_AUTH)
+    want(macplan.OP_MGD_COMPLETE_TX, 0)
+    want(macplan.OP_MGD_PREPARE_TX, 0)
+    check(t, run(p, macplan.EV_AUTH_OK), "auth: sta AUTH, complete_tx, prepare_tx for assoc")
+    var ac: u64 = 0
+    while ac < 4 {
+        want(macplan.OP_CONF_TX, ac)
+        ac = ac + 1
+    }
+    want(macplan.OP_STA_STATE, macplan.STA_ASSOC)
+    want(macplan.OP_VIF_CFG_CHANGED, macplan.CFG_ASSOC)
+    want(macplan.OP_BSS_INFO_CHANGED, macplan.BSS_QOS)
+    want(macplan.OP_MGD_COMPLETE_TX, 0)
+    check(t, run(p, macplan.EV_ASSOC_OK), "assoc: conf_tx x4, sta ASSOC, vif_cfg ASSOC, bss QOS")
+    check(t, refused(p, macplan.EV_AUTHORIZE), "rsn: authorize before pairwise key refused")
+    want(macplan.OP_SET_KEY, macplan.KEY_SET_PAIRWISE)
+    check(t, run(p, macplan.EV_PTK), "ptk: set_key pairwise")
+    want(macplan.OP_SET_KEY, macplan.KEY_SET_GROUP)
+    check(t, run(p, macplan.EV_GTK), "gtk: set_key group")
+    want(macplan.OP_STA_STATE, macplan.STA_AUTHORIZED)
+    check(t, run(p, macplan.EV_AUTHORIZE), "authorize: sta AUTHORIZED")
+}
+
+fn want_leave_from_run() {
+    want(macplan.OP_FLUSH, 0)
+    want(macplan.OP_STA_STATE, macplan.STA_ASSOC)
+    want(macplan.OP_SET_KEY, macplan.KEY_DEL_PAIRWISE)
+    want(macplan.OP_SET_KEY, macplan.KEY_DEL_GROUP)
+    want(macplan.OP_STA_STATE, macplan.STA_AUTH)
+    want(macplan.OP_STA_STATE, macplan.STA_NONE)
+    want(macplan.OP_VIF_CFG_CHANGED, 0)
+    want(macplan.OP_STA_STATE, macplan.STA_NOTEXIST)
+    want(macplan.OP_UNASSIGN_VIF_CHANCTX, 0)
+    want(macplan.OP_REMOVE_CHANCTX, 0)
+}
+
+fn sequences(t: *mut T) {
+    var plan: macplan.Plan = macplan.plan_new()
+    let p: *mut macplan.Plan = &plan
+    check(t, refused(p, macplan.EV_SCAN), "down: scan refused")
+    want(macplan.OP_START, 0)
+    want(macplan.OP_ADD_INTERFACE, 0)
+    check(t, run(p, macplan.EV_UP), "up: start, add_interface")
+    want(macplan.OP_HW_SCAN, 0)
+    check(t, run(p, macplan.EV_SCAN), "scan: hw_scan")
+    check(t, run(p, macplan.EV_SCAN_DONE), "scan done: no driver op")
+    connect_rsn(t, p)
+    want(macplan.OP_SET_KEY, macplan.KEY_SET_GROUP)
+    check(t, run(p, macplan.EV_GTK), "run: group rekey")
+    want_leave_from_run()
+    check(t, run(p, macplan.EV_LEAVE), "leave from run: flush, keys off, sta steps down, chanctx gone")
+    check(t, macplan.plan_keys(p) == 0 && macplan.plan_sta(p) == macplan.STA_NOTEXIST, "leave: no keys, no station")
+    want(macplan.OP_HW_SCAN, 0)
+    check(t, run(p, macplan.EV_SCAN), "rescan after leave")
+    want(macplan.OP_CANCEL_HW_SCAN, 0)
+    want_join()
+    check(t, run(p, macplan.EV_JOIN_OPEN), "join during scan cancels hw_scan first")
+    check(t, refused(p, macplan.EV_ASSOC_OK), "assoc before auth refused")
+    want(macplan.OP_FLUSH, 0)
+    want(macplan.OP_MGD_COMPLETE_TX, 0)
+    want(macplan.OP_STA_STATE, macplan.STA_NOTEXIST)
+    want(macplan.OP_UNASSIGN_VIF_CHANCTX, 0)
+    want(macplan.OP_REMOVE_CHANCTX, 0)
+    want(macplan.OP_REMOVE_INTERFACE, 0)
+    want(macplan.OP_STOP, 0)
+    check(t, run(p, macplan.EV_DOWN), "down while joining: complete_tx, sta gone, interface removed, stop")
+}
+
+fn open_network(t: *mut T) {
+    var plan: macplan.Plan = macplan.plan_new()
+    let p: *mut macplan.Plan = &plan
+    macplan.plan_event(p, macplan.EV_UP)
+    macplan.plan_event(p, macplan.EV_JOIN_OPEN)
+    macplan.plan_event(p, macplan.EV_AUTH_OK)
+    macplan.plan_event(p, macplan.EV_ASSOC_OK)
+    check(t, refused(p, macplan.EV_PTK), "open: pairwise key refused")
+    want(macplan.OP_STA_STATE, macplan.STA_AUTHORIZED)
+    check(t, run(p, macplan.EV_AUTHORIZE), "open: authorize without key")
+    check(t, refused(p, macplan.EV_UP), "up twice refused")
+}
+
+fn next_event() -> u64 {
+    seed = seed ^ (seed << 13)
+    seed = seed ^ (seed >> 7)
+    seed = seed ^ (seed << 17)
+    return 1 + (seed % 12)
+}
+
+fn diff_one(a: u64, b: u64) -> bool {
+    return a == b + 1 || b == a + 1
+}
+
+fn apply(s: *mut Shadow, op: u64, arg: u64) -> bool {
+    if op == macplan.OP_ADD_INTERFACE { (*s).iface = true }
+    if op == macplan.OP_REMOVE_INTERFACE { (*s).iface = false }
+    if op != macplan.OP_START && op != macplan.OP_STOP && !(*s).iface && op != macplan.OP_REMOVE_INTERFACE { return false }
+    if op == macplan.OP_ADD_CHANCTX { (*s).chanctx = (*s).chanctx + 1 }
+    if op == macplan.OP_REMOVE_CHANCTX {
+        if (*s).chanctx == 0 { return false }
+        (*s).chanctx = (*s).chanctx - 1
+    }
+    if op == macplan.OP_STA_STATE {
+        if (*s).chanctx != 1 || !diff_one((*s).sta, arg) { return false }
+        (*s).sta = arg
+    }
+    if op == macplan.OP_SET_KEY {
+        if arg <= macplan.KEY_SET_GROUP && (*s).sta < macplan.STA_ASSOC { return false }
+        if arg > macplan.KEY_SET_GROUP && (*s).sta != macplan.STA_ASSOC { return false }
+    }
+    return (*s).chanctx <= 1
+}
+
+fn idle_clean(p: *mut macplan.Plan, s: *mut Shadow) -> bool {
+    let ph: u64 = macplan.plan_phase(p)
+    if ph > macplan.PH_SCAN { return true }
+    return (*s).sta == macplan.STA_NOTEXIST && (*s).chanctx == 0 && macplan.plan_keys(p) == 0
+}
+
+fn walk(steps: u64) -> bool {
+    var plan: macplan.Plan = macplan.plan_new()
+    let p: *mut macplan.Plan = &plan
+    var s: Shadow = Shadow { sta: 0, chanctx: 0, keys: 0, iface: false }
+    var k: u64 = 0
+    while k < steps {
+        macplan.plan_clear(p)
+        let r: i64 = macplan.plan_event(p, next_event())
+        if r == macplan.E_FULL { return false }
+        var i: usize = 0
+        while i < macplan.plan_count(p) {
+            if !apply(&s, macplan.plan_op(p, i), macplan.plan_arg(p, i)) { return false }
+            i = i + 1
+        }
+        if !idle_clean(p, &s) || s.sta != macplan.plan_sta(p) { return false }
+        if macplan.plan_phase(p) == macplan.PH_RUN { runs_reached = runs_reached + 1 }
+        k = k + 1
+    }
+    return true
+}
+
+fn main() -> i32 {
+    var t: T = T { fails: 0, checks: 0 }
+    sequences(&t)
+    open_network(&t)
+    check(&t, walk(200000), "fuzz: 200000 random events keep every invariant")
+    check(&t, runs_reached > 10, "fuzz: reached the authorized state")
+    io.fmt_print(f"fuzz_runs={runs_reached}\n")
+    io.fmt_print(f"checks={t.checks} fails={t.fails}\n")
+    if t.fails != 0 { return 1 }
+    return 0
+}
