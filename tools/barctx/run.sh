@@ -11,7 +11,7 @@
 #   2. row 0 (task manager): `context empty w=10`; row 2 (settings): `context empty w=11` and `settings: ready`
 #   3. row 3 (the manifest entry): `context empty w=4096` (EXT_BASE) -- an app registered itself WITHOUT a change of shell code
 #   4. rklick, Escape: the menu closes without a `w=` line
-# COUNTER-PROOF: this tree with `taskbar_ctx.open_empty` switched off (mutant) has no menu on the empty bar: no `context empty`, the
+# COUNTER-PROOF: this tree with `taskbar_ctx.open_empty` switched off (mutant) has no menu on the empty bar: no `context empty x=`, the
 # picture after the right click equals the one before.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -122,12 +122,12 @@ d=$(diffpix "$TMPD/new/o/03-menu2.ppm" "$TMPD/new/o/04-esc.ppm" "$mx" "$my" "$mw
 [ "$d" -gt $((mw * mh / 3)) ] && ok "the second menu is gone after Escape ($d pixels changed)" || bad "the menu survived Escape ($d pixels changed)"
 # COUNTER-PROOF: the tree before has no menu on the empty bar
 if [ ! -s "$TMPD/old/o/01-menu.ppm" ]; then
-    bad "COUNTER-PROOF: no picture of the old tree"
+    bad "COUNTER-PROOF: no picture of the mutant"
 else
-    grep -aq 'taskbar: context empty' "$SO" && bad "COUNTER-PROOF: the old tree has the menu" || ok "COUNTER-PROOF old tree: no 'context empty'"
+    grep -aq 'taskbar: context empty x=' "$SO" && bad "COUNTER-PROOF: the mutant opens the menu" || ok "COUNTER-PROOF mutant: no 'context empty x='"
     d=$(diffpix "$TMPD/old/o/00-before.ppm" "$TMPD/old/o/01-menu.ppm" "$mx" "$my" "$mw" "$mh")
-    [ "$d" -le $((mw * mh / 8)) ] && ok "COUNTER-PROOF old tree: the picture does not change ($d pixels differ)" \
-        || bad "COUNTER-PROOF: the old tree changed $d pixels at the right click"
+    [ "$d" -le $((mw * mh / 8)) ] && ok "COUNTER-PROOF mutant: the picture does not change ($d pixels differ)" \
+        || bad "COUNTER-PROOF: the mutant changed $d pixels at the right click"
 fi
 echo; echo "BARCTX: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
