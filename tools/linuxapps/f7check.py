@@ -18,6 +18,7 @@ NEEDED = (
     ("link navigation", re.compile(rb"^FXNAV \?nav")),
     ("url bar navigation", re.compile(rb"^FXURL \?u")),
 )
+POPUP_NEEDED = (("select popup choice", re.compile(rb"^FXSEL [b-f]\d$")),)
 POINTER_NEEDED = (
     ("drag selection", re.compile(rb"^FXDRAG \w+ \w+")),
     ("double click word", re.compile(rb"^FXDBL \w+$")),
@@ -25,6 +26,10 @@ POINTER_NEEDED = (
 
 
 SIZE = re.compile(rb"^FX(?:SIZE|RESIZE) (\d+)x(\d+)")
+
+
+def popup_enabled():
+    return os.environ.get("FX7_POPUP", "0") != "0"
 
 
 def pointer_enabled():
@@ -48,7 +53,7 @@ def verdict(path):
         for marker in BAD_MARKERS:
             if marker in line:
                 return "red", "crash marker: " + marker.decode()
-    needed = NEEDED + (POINTER_NEEDED if pointer_enabled() else ())
+    needed = NEEDED + (POPUP_NEEDED if popup_enabled() else ()) + (POINTER_NEEDED if pointer_enabled() else ())
     missing = [name for name, pat in needed if not any(pat.match(l) for l in lines)]
     if missing:
         return "red", "page never saw: " + ", ".join(missing) + resize_note(lines)

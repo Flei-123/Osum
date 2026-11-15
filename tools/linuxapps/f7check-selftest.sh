@@ -10,7 +10,7 @@ expect() {
     got=$(python3 -I tools/linuxapps/f7check.py "$D/log" 2>&1)
     if [ "${got%% *}" = "$want" ]; then pass=$((pass + 1)); echo "  OK    $name"; else fail=$((fail + 1)); echo "  FAIL  $name: $got"; fi
 }
-full() { printf 'FXLOAD 1 h=6042\nFXSIZE 1256x824\nFXRESIZE 1900x1000\nFXDRAG alpha be\nFXDBL alpha\nFXINPUT a\nFXINPUT abxc\nFXKEY a shift=false\nFXKEY D shift=true\nFXKEY Backspace shift=false\nFXCTX 5,5\nFXWHEEL 114 mode=0\nFXSCROLL 457\nFXCLICK 391,158\nFXNAV ?nav\nFXURL ?u\n'; }
+full() { printf 'FXLOAD 1 h=6042\nFXSIZE 1256x824\nFXRESIZE 1900x1000\nFXDRAG alpha be\nFXDBL alpha\nFXINPUT a\nFXINPUT abxc\nFXKEY a shift=false\nFXKEY D shift=true\nFXKEY Backspace shift=false\nFXCTX 5,5\nFXWHEEL 114 mode=0\nFXSCROLL 457\nFXCLICK 391,158\nFXSEL c2\nFXNAV ?nav\nFXURL ?u\n'; }
 full > "$D/log"; expect "all events present" green
 for name in FXLOAD FXINPUT FXKEY FXWHEEL FXSCROLL FXCLICK FXNAV FXURL FXCTX; do
     full | grep -v "^$name " > "$D/log"; expect "missing $name" red
@@ -19,6 +19,11 @@ export FX7_POINTER=0
 full | grep -v "^FX\(DRAG\|DBL\|SIZE\|RESIZE\) " > "$D/log"; expect "pointer probes absent when disabled" green
 unset FX7_POINTER
 full | grep -v "^FX\(DRAG\|DBL\|SIZE\|RESIZE\) " > "$D/log"; expect "pointer probes absent by default" red
+full | grep -v "^FXSEL " > "$D/log"; expect "popup probe absent by default" green
+export FX7_POPUP=1
+full | grep -v "^FXSEL " > "$D/log"; expect "popup: select choice never reached the page" red
+full > "$D/log"; expect "popup: select choice present" green
+unset FX7_POPUP
 for name in FXDRAG FXDBL; do
     full | grep -v "^$name " > "$D/log"; expect "pointer: missing $name" red
 done

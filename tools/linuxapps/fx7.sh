@@ -59,6 +59,13 @@ double_click_word() {
     mon "mouse_move ${FX7_DBLDX:--210} 0"; sleep 2
     mon "mouse_button 1"; mon "mouse_button 0"; mon "mouse_button 1"; mon "mouse_button 0"; sleep 5
 }
+select_popup() {
+    mon "mouse_button 1"; sleep 1; mon "mouse_button 0"; sleep ${FX7_POPWAIT:-8}
+    mon "screendump $OUT/popup.ppm"; sleep 3
+    mon "mouse_move 0 ${FX7_POPDY:-100}"; sleep 2
+    mon "mouse_button 1"; sleep 1; mon "mouse_button 0"; sleep 5
+    mon "mouse_move 0 -${FX7_POPDY:-100}"; sleep 3
+}
 resize_window() {
     mon "sendkey meta_l-up"; sleep ${FX7_RESIZEWAIT:-15}
     mon "screendump $OUT/resize.ppm"; sleep 3
@@ -82,6 +89,7 @@ mon() { printf '%s\n' "$1" | socat - "UNIX-CONNECT:$SOCK" > /dev/null 2>&1; }
     mon "mouse_move 60 40"; sleep 1; click_page_until "nav=[1-9]"; wait_nav_paint
     mon "screendump $OUT/nav.ppm"; sleep 3
     mon "mouse_button 2"; sleep 1; mon "mouse_button 0"; sleep 3
+    if [ "${FX7_POPUP:-0}" != 0 ]; then select_popup; fi
     if [ "${FX7_POINTER:-1}" != 0 ]; then
         drag_select
         double_click_word
