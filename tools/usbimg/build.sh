@@ -77,7 +77,7 @@ if [ -z "${STONES+set}" ] && [ "$IMAGE_PROFILE" = personal ] && [ -r "$DEVSTONES
 #   BBSH=auto  (default) 1 for IMAGE_PROFILE=personal when BBDYN and the musl libc exist, else 0
 # Cost on the stick: busybox + musl libc, measured in the report (about 1.7 MiB of the free space).
 BBDYN=${BBDYN:-/root/bbdyn/busybox}
-BBLIBC=${BBLIBC:-$(readlink -f /lib/ld-musl-x86_64.so.1 2>/dev/null || true)}
+BBLIBC=${BBLIBC:-assets/musl/ld-musl-x86_64.so.1}
 [ -r "$BBLIBC" ] || BBLIBC=/usr/lib/x86_64-linux-musl/libc.so
 BBSH=${BBSH:-auto}
 if [ "$BBSH" = auto ]; then
