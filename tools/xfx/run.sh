@@ -36,7 +36,7 @@ bash tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/b0.txt" 2>&1 \
 
 SRC="$TMPD/src"
 mkdir -p "$SRC"
-cp kernel/user/*.fi tools/xfx/*.fi "$SRC/"
+cp -r kernel/user/. "$SRC/"; cp tools/xfx/*.fi "$SRC/"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s does not assemble"
 PROGS="sh echo cat sleep tar xfx xfxt xfxstub"
 for p in $PROGS; do

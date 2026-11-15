@@ -15,7 +15,19 @@ const AN_CLOSE: u64 = 2
 
 const AN_MIN: u64 = 3
 
+const AN_POP: u64 = 4
+
 const MOTION_DEF: u64 = 120
+
+const WIN_OPEN_MS: u64 = 150
+
+const POP_MS: u64 = 110
+
+const MOTION_REF_MS: u64 = 160
+
+const POP_SLIDE_PX: i64 = 14
+
+const MOTION_OFF_RAW: u64 = 1
 
 const AN_SCALE0: u64 = 850
 
@@ -53,15 +65,30 @@ fn tw(f: u64, w: u64, v: u64) {
     __mmio_write64((f + w * 8) as *mut u64, v)
 }
 
-fn motion_ms(state: u64) -> u64 {
-    if wmlayout.gs(state, wmlayout.S_FORM + wmlayout.FM_MOTION * 8) == 0 {
-        return MOTION_DEF
+fn motion_raw(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_FORM + wmlayout.FM_MOTION * 8)
+}
+
+fn kind_base_ms(art: u64) -> u64 {
+    if art == AN_OPEN {
+        return WIN_OPEN_MS
     }
-    return wmgeom.form(state, wmlayout.FM_MOTION)
+    if art == AN_POP {
+        return POP_MS
+    }
+    return MOTION_DEF
+}
+
+fn kind_ms(state: u64, art: u64) -> u64 {
+    let raw: u64 = motion_raw(state)
+    if raw == 0 {
+        return kind_base_ms(art)
+    }
+    return kind_base_ms(art) * (raw - 1) / MOTION_REF_MS
 }
 
 fn anim_off(state: u64) -> bool {
-    return wmlayout.gs(state, wmlayout.S_NOANIM) != 0 || motion_ms(state) == 0
+    return wmlayout.gs(state, wmlayout.S_NOANIM) != 0 || motion_raw(state) == MOTION_OFF_RAW
 }
 
 fn ease_out(t: u64) -> u64 {
@@ -81,7 +108,7 @@ fn anim_p(state: u64, i: u64) -> u64 {
 
     let now_ms: u64 = time.mono_ns(state) / 1000000
     let ab: u64 = wmlayout.wg(state, i, wmlayout.W_AN0)
-    if now_ms <= ab {
+    if ab == 0 || now_ms <= ab {
         return 0
     }
     let vergangen: u64 = now_ms - ab
@@ -91,17 +118,35 @@ fn anim_p(state: u64, i: u64) -> u64 {
     return vergangen * 1000 / ms
 }
 
+fn show_anim(state: u64, i: u64) -> bool {
+    let layer: u64 = wmlayout.wg(state, i, wmlayout.W_LAYER)
+    if layer == wmlayout.L_MENU || layer == wmlayout.L_POPUP {
+        return anim_start(state, i, AN_POP)
+    }
+    return false
+}
+
 fn anim_start(state: u64, i: u64, art: u64) -> bool {
-    if !wmbase.valid(state, i) || anim_off(state) {
+    if !wmbase.valid(state, i) || anim_off(state) || kind_ms(state, art) == 0 {
         return false
     }
     wmlayout.wsv(state, i, wmlayout.W_ANK, art)
-    wmlayout.wsv(state, i, wmlayout.W_AN0, time.mono_ns(state) / 1000000)
-    wmlayout.wsv(state, i, wmlayout.W_ANMS, motion_ms(state))
+    wmlayout.wsv(state, i, wmlayout.W_AN0, 0)
+    wmlayout.wsv(state, i, wmlayout.W_ANMS, kind_ms(state, art))
     wmlayout.wsv(state, i, wmlayout.W_ANP, 0)
     wmlayout.ss(state, wmlayout.S_ANIMS, wmlayout.gs(state, wmlayout.S_ANIMS) + 1)
     wmdamage.damage_win(state, i)
     return true
+}
+
+fn begin_if_pending(state: u64, i: u64) {
+    if wmlayout.wg(state, i, wmlayout.W_AN0) == 0 {
+        wmlayout.wsv(state, i, wmlayout.W_AN0, time.mono_ns(state) / 1000000)
+    }
+}
+
+fn keeps_chrome(state: u64, i: u64) -> bool {
+    return wmlayout.wg(state, i, wmlayout.W_ANK) == AN_OPEN && wmbase.deko(state, i)
 }
 
 fn anim_laeuft(state: u64, i: u64) -> bool {
@@ -165,7 +210,7 @@ fn anim_mix(state: u64, i: u64) -> u64 {
         return 1000
     }
     let e: u64 = ease_out(anim_p(state, i))
-    if art == AN_OPEN {
+    if art == AN_OPEN || art == AN_POP {
         return e
     }
     return 1000 - e
@@ -345,8 +390,55 @@ fn drag_paint_on(state: u64, i: u64) -> bool {
     return swing_dx(state, i) != 0 || swing_dy(state, i) != 0
 }
 
+fn pop_dy(state: u64, i: u64, p: u64) -> i64 {
+    let mid: i64 = fb.height(state) as i64 / 2
+    let centre: i64 = wmbase.win_y(state, i) + wmbase.outer_h(state, i) as i64 / 2
+    let rest: i64 = POP_SLIDE_PX * (1000 - p) as i64 / 1000
+    if centre > mid {
+        return rest
+    }
+    return 0 - rest
+}
+
+fn paint_win_pop(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
+    cy1: i64) {
+    let p: u64 = anim_mix(state, i)
+    let a: u64 = 255 * p / 1000
+    let bw: i64 = wmlayout.wg(state, i, wmlayout.W_W) as i64
+    let bh: i64 = wmlayout.wg(state, i, wmlayout.W_H) as i64
+    if a == 0 || bw <= 0 || bh <= 0 {
+        return
+    }
+    let ox: i64 = wmbase.win_x(state, i) + wmbase.inx(state, i) as i64
+    let oy: i64 = wmbase.win_y(state, i) + wmbase.iny(state, i) as i64 + pop_dy(state, i, p)
+    let ax0: i64 = numeric.imax(numeric.imax(ox, wmbase.win_x(state, i)), cx0)
+    let ax1: i64 = numeric.imin(numeric.imin(ox + bw, wmbase.win_x(state, i) + wmbase.outer_w(state, i) as i64), cx1)
+    let ay0: i64 = numeric.imax(numeric.imax(oy, wmbase.win_y(state, i)), cy0)
+    let ay1: i64 = numeric.imin(numeric.imin(oy + bh, wmbase.win_y(state, i) + wmbase.outer_h(state, i) as i64), cy1)
+    if ax1 <= ax0 || ay1 <= ay0 {
+        return
+    }
+    let buf: u64 = wmlayout.wg(state, i, wmlayout.W_BUF)
+    let stride: u64 = wmlayout.wg(state, i, wmlayout.W_W)
+    var y: i64 = ay0
+    while y < ay1 {
+        let sy: i64 = y - oy
+        if sy >= 0 && sy < bh && y >= 0 {
+            fb.scaled_row_a(state, y as u64, ax0, ax1, buf +% (sy as u64) *% stride *% 4, ox, bw, bw, a)
+        }
+        y = y + 1
+    }
+    wmlayout.wsv(state, i, wmlayout.W_PAINTS, wmlayout.wg(state, i, wmlayout.W_PAINTS) + 1)
+    wmlayout.wsv(state, i, wmlayout.W_PX,
+        wmlayout.wg(state, i, wmlayout.W_PX) + ((ax1 - ax0) * (ay1 - ay0)) as u64)
+}
+
 fn paint_win_anim(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
     cy1: i64) {
+    if wmlayout.wg(state, i, wmlayout.W_ANK) == AN_POP {
+        paint_win_pop(state, i, cx0, cy0, cx1, cy1)
+        return
+    }
     let p: u64 = anim_mix(state, i)
 
     let sk: u64 = AN_SCALE0 + (1000 - AN_SCALE0) * p / 1000
