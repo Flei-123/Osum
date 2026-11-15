@@ -1,0 +1,40 @@
+profile kernel
+
+import lib.kstate
+import sync.atomic
+import arch.cpu
+
+export { enter, leave }
+
+const NESTED: u64 = 0x8000000000000000
+const IF_BIT: u64 = 0x200
+
+fn save_irq() -> u64 {
+    return asm("pushfq\npop rax\ncli", out("rax"))
+}
+
+fn restore_irq(flags: u64) {
+    if (flags & IF_BIT) != 0 {
+        asm("sti")
+    }
+}
+
+fn enter(state: u64) -> u64 {
+    let flags: u64 = save_irq()
+    if kstate.mode_on(state, kstate.M_NOFDLOCK) {
+        return flags | NESTED
+    }
+    let me: u64 = cpu.here(state)
+    if atomic.lock_owner(state, atomic.L_FD) == me + 1 {
+        return flags | NESTED
+    }
+    atomic.lock_take(state, atomic.L_FD, me)
+    return flags
+}
+
+fn leave(state: u64, flags: u64) {
+    if (flags & NESTED) == 0 {
+        atomic.lock_give(state, atomic.L_FD)
+    }
+    restore_irq(flags & IF_BIT)
+}
