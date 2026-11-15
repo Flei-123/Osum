@@ -13,6 +13,7 @@ import wl_msg
 import wl_input
 import wl_data
 import wl_frame
+import wl_popup
 import libc.clockapi
 
 export { u_start }
@@ -50,6 +51,15 @@ const WM_CLOSE: u64 = 2107
 const WM_APP: u64 = 2116
 const WI_W: u64 = 0
 const WI_H: u64 = 1
+const WI_X: u64 = 2
+const WI_Y: u64 = 3
+const WI_INX: u64 = 16
+const WI_INY: u64 = 17
+const WO_FRAMELESS: u64 = 2
+const WM_MOVE: u64 = 2106
+const POPUP_BOTTOM_RESERVE: u64 = 48
+const WM_RETRY_TOPLEVEL: u64 = 600
+const WM_RETRY_POPUP: u64 = 40
 const WI_MAXIMIZED: u64 = 15
 const XDG_STATE_MAXIMIZED: u64 = 1
 const FIT_MARGIN: u64 = 16
@@ -61,7 +71,9 @@ const FIT_TRIES: u64 = 4
 const EMPTY_MAX: u64 = 20000
 
 const MAX_CLIENTS: u64 = 4
-const MAX_OBJ: u64 = 64
+const FDQ_CAP: u64 = 32
+const FDQ_RECV_MAX: u64 = 28
+const MAX_OBJ: u64 = 128
 const IN_CAP: u64 = 8192
 const OUT_CAP: u64 = 8192
 
@@ -77,7 +89,7 @@ const O_E: u64 = 6
 const O_F: u64 = 7
 const O_FIELDS: u64 = 8
 
-static mut objs: [u64; 2048] = [0 as u64; 2048]
+static mut objs: [u64; 4096] = [0 as u64; 4096]
 
 static mut c_used: [u64; 4] = [0 as u64; 4]
 static mut c_fd: [u64; 4] = [0 as u64; 4]
@@ -722,6 +734,25 @@ fn dbg_win(c: u64, win: u64) {
     ulib.sys(SYS_WRITE, 1, (&dbg_line[0 as usize]) as u64, dbg_pos)
 }
 
+fn dbg_popup(c: u64, win: u64) {
+    var t: [u8; 19] = "wayd: popup win c=\0"
+    lineout.add_text((&t[0 as usize]) as u64)
+    lineout.add_unum(c)
+    var tx: [u8; 4] = " x=\0"
+    lineout.add_text((&tx[0 as usize]) as u64)
+    lineout.add_unum(ulib.sys(WM_INFO, win, WI_X, 0))
+    var ty: [u8; 4] = " y=\0"
+    lineout.add_text((&ty[0 as usize]) as u64)
+    lineout.add_unum(ulib.sys(WM_INFO, win, WI_Y, 0))
+    var tw: [u8; 4] = " w=\0"
+    lineout.add_text((&tw[0 as usize]) as u64)
+    lineout.add_unum(ulib.sys(WM_INFO, win, WI_W, 0))
+    var th: [u8; 4] = " h=\0"
+    lineout.add_text((&th[0 as usize]) as u64)
+    lineout.add_unum(ulib.sys(WM_INFO, win, WI_H, 0))
+    lineout.end_line()
+}
+
 fn fit_origin(want: u64, extent: u64, screen: u64) -> u64 {
     if screen == 0 || screen > 16384 || want + extent <= screen {
         return want
@@ -789,43 +820,67 @@ fn surface_commit(c: u64, sid: u64) {
         return
     }
     var win: u64 = obj_get(c, sid, O_A)
+    let geo: u64 = commit_geometry(c, sid, w, h)
+    let gx: u64 = wl_popup.field(geo, 0) as u64
+    let gy: u64 = wl_popup.field(geo, 1) as u64
+    let gw: u64 = wl_popup.field(geo, 2) as u64
+    let gh: u64 = wl_popup.field(geo, 3) as u64
+    let pop: u64 = popup_of(c, sid)
     if win == 0 {
+        if pop != 0 && obj_get(c, pop, O_F) != 0 {
+            let dropped: u64 = ev_begin(c, bid, 0)
+            ev_end(c, dropped, 0)
+            obj_set(c, sid, O_B, 0)
+            return
+        }
         let sw: u64 = ulib.sys(WIG_SCREEN, 0, 0, 0)
         let sh: u64 = ulib.sys(WIG_SCREEN, 1, 0, 0)
-        if refit_oversized(c, sid, w, h, sw, sh) {
+        if pop == 0 && refit_oversized(c, sid, gw, gh, sw, sh) {
             let released: u64 = ev_begin(c, bid, 0)
             ev_end(c, released, 0)
             obj_set(c, sid, O_B, 0)
             return
         }
-        let x0: u64 = fit_origin(60 + c * 220, w + FIT_DECO_X, sw)
-        let y0: u64 = fit_origin(60 + c * 40, h + FIT_DECO_Y + FIT_TASKBAR, sh)
-        let xy: u64 = (x0 << 16) | y0
-        let wh: u64 = (w << 16) | h
+        var xy: u64 = 0
+        var opts: u64 = 0
+        var tries: u64 = WM_RETRY_TOPLEVEL
+        if pop != 0 {
+            xy = popup_window_xy(c, pop, gx, gy)
+            opts = WO_FRAMELESS
+            tries = WM_RETRY_POPUP
+        } else {
+            xy = (fit_origin(60 + c * 220, gw + FIT_DECO_X, sw) << 16) | fit_origin(60 + c * 40, gh + FIT_DECO_Y + FIT_TASKBAR, sh)
+        }
+        let wh: u64 = (gw << 16) | gh
         var versuch: u64 = 0
-        while versuch < 600 && (win == 0
+        while versuch < tries && (win == 0
             || win > 0xFFFFFFFFFFFF0000) {
             var tp: u64 = 0
             if c_title[(c * 32) as usize] != 0 as u8 {
                 tp = (&c_title[0 as usize]) as u64 + c * 32
             }
-            win = kcall.sys4(WM_CREATE, xy, wh, tp, 0)
+            win = kcall.sys4(WM_CREATE, xy, wh, tp, opts)
             if win == 0 || win > 0xFFFFFFFFFFFF0000 {
                 ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
                 versuch = versuch + 1
             }
         }
         if win == 0 || win > 0xFFFFFFFFFFFF0000 {
-            var s_wc: [u8; 14] = "wayd: kein wm\0"
+            var s_wc: [u8; 15] = "wayd: no wm e=\0"
             lineout.add_text((&s_wc[0 as usize]) as u64)
+            lineout.add_unum(win)
             lineout.end_line()
             return
         }
         obj_set(c, sid, O_A, win)
         n_wins = n_wins + 1
-        dbg_win(c, win)
+        if pop != 0 {
+            dbg_popup(c, win)
+        } else {
+            dbg_win(c, win)
+        }
         let ap: u64 = (&c_appid[0 as usize]) as u64 + c * 24
-        if c_appid[(c * 24) as usize] != 0 as u8 {
+        if pop == 0 && c_appid[(c * 24) as usize] != 0 as u8 {
             var al: u64 = 0
             while al < 23 && c_appid[(c * 24 + al) as usize] != 0 as u8 {
                 al = al + 1
@@ -833,14 +888,15 @@ fn surface_commit(c: u64, sid: u64) {
             ulib.sys(WM_APP, win, ap, al)
         }
     }
+    let origin: u64 = src + gy * stride + gx * 4
     var y: u64 = 0
-    while y < h {
+    while y < gh {
         var x: u64 = 0
-        while x < w {
-            let px: u64 = rd32_at(src + y * stride + x * 4) & 0xFFFFFF
+        while x < gw {
+            let px: u64 = rd32_at(origin + y * stride + x * 4) & 0xFFFFFF
             var run: u64 = 1
-            while x + run < w
-                && (rd32_at(src + y * stride + (x + run) * 4)
+            while x + run < gw
+                && (rd32_at(origin + y * stride + (x + run) * 4)
                     & 0xFFFFFF) == px {
                 run = run + 1
             }
@@ -1188,7 +1244,9 @@ fn on_xdg_wm_base(c: u64, id: u64, op: u64, argp: u64) {
         return
     }
     if op == wlproto.RQ_XDG_WM_BASE_CREATE_POSITIONER {
-        obj_new(c, rd32(argp), wlproto.IF_NONE)
+        if obj_new(c, rd32(argp), wlproto.IF_XDG_POSITIONER) >= MAX_OBJ {
+            send_error(c, id, 0)
+        }
         return
     }
     send_error(c, id, 1)
@@ -1220,7 +1278,13 @@ fn on_xdg_surface(c: u64, id: u64, op: u64, argp: u64) {
     if op == wlproto.RQ_XDG_SURFACE_ACK_CONFIGURE {
         return
     }
+    if op == wlproto.RQ_XDG_SURFACE_GET_POPUP {
+        popup_create(c, id, argp)
+        return
+    }
     if op == wlproto.RQ_XDG_SURFACE_SET_WINDOW_GEOMETRY {
+        obj_set(c, id, O_D, wl_popup.pack4(s32(rd32(argp)), s32(rd32(argp + 4)),
+            s32(rd32(argp + 8)), s32(rd32(argp + 12))))
         return
     }
     if op == wlproto.RQ_XDG_SURFACE_DESTROY {
@@ -1266,6 +1330,255 @@ fn resize_sync(c: u64, sid: u64, win: u64) {
         return
     }
     send_configure(c, tl, xs, w, h, false)
+}
+
+static mut popup_seq: u64 = 0
+
+fn surface_of_xdg(c: u64, xs: u64) -> u64 {
+    if xs == 0 {
+        return 0
+    }
+    return obj_get(c, xs, O_A)
+}
+
+fn window_of_surface(c: u64, sid: u64) -> u64 {
+    if sid == 0 {
+        return 0
+    }
+    return obj_get(c, sid, O_A)
+}
+
+fn popup_of(c: u64, sid: u64) -> u64 {
+    if sid == 0 {
+        return 0
+    }
+    let xs: u64 = obj_get(c, sid, O_C)
+    if xs == 0 {
+        return 0
+    }
+    return obj_get(c, xs, O_C)
+}
+
+fn geom_origin(c: u64, sid: u64, n: u64) -> u64 {
+    if sid == 0 {
+        return 0
+    }
+    let xs: u64 = obj_get(c, sid, O_C)
+    if xs == 0 {
+        return 0
+    }
+    return wl_popup.field(obj_get(c, xs, O_E), n) as u64
+}
+
+fn commit_geometry(c: u64, sid: u64, bw: u64, bh: u64) -> u64 {
+    let whole: u64 = wl_popup.pack4(0, 0, bw as i64, bh as i64)
+    let xs: u64 = obj_get(c, sid, O_C)
+    if xs == 0 {
+        return whole
+    }
+    let g: u64 = obj_get(c, xs, O_D)
+    let gx: i64 = wl_popup.field(g, 0)
+    let gy: i64 = wl_popup.field(g, 1)
+    let gw: i64 = wl_popup.field(g, 2)
+    let gh: i64 = wl_popup.field(g, 3)
+    var chosen: u64 = g
+    if gw <= 0 || gh <= 0 || gx < 0 || gy < 0 || gx + gw > (bw as i64) || gy + gh > (bh as i64) {
+        chosen = whole
+    }
+    obj_set(c, xs, O_E, chosen)
+    return chosen
+}
+
+fn parent_window(c: u64, pop: u64) -> u64 {
+    return window_of_surface(c, surface_of_xdg(c, obj_get(c, pop, O_B)))
+}
+
+fn popup_abs(c: u64, pop: u64) -> u64 {
+    var ox: i64 = 0
+    var oy: i64 = 0
+    var gx: i64 = 0
+    var gy: i64 = 0
+    let pwin: u64 = parent_window(c, pop)
+    if pwin != 0 {
+        ox = (ulib.sys(WM_INFO, pwin, WI_X, 0) as i64) + (ulib.sys(WM_INFO, pwin, WI_INX, 0) as i64)
+        oy = (ulib.sys(WM_INFO, pwin, WI_Y, 0) as i64) + (ulib.sys(WM_INFO, pwin, WI_INY, 0) as i64)
+        let pxs: u64 = obj_get(c, pop, O_B)
+        gx = wl_popup.field(obj_get(c, pxs, O_E), 0)
+        gy = wl_popup.field(obj_get(c, pxs, O_E), 1)
+    }
+    let rel: u64 = obj_get(c, pop, O_C)
+    return wl_popup.pack4(ox + gx + wl_popup.field(rel, 0), oy + gy + wl_popup.field(rel, 1), 0, 0)
+}
+
+fn popup_place(c: u64, pop: u64, pos: u64) {
+    let rel: u64 = wl_popup.placed(obj_get(c, pos, O_A), obj_get(c, pos, O_B), obj_get(c, pos, O_C), obj_get(c, pos, O_D))
+    obj_set(c, pop, O_C, rel)
+    let sw: u64 = ulib.sys(WIG_SCREEN, 0, 0, 0)
+    let sh: u64 = ulib.sys(WIG_SCREEN, 1, 0, 0)
+    if sw == 0 || sw > 16384 || sh <= POPUP_BOTTOM_RESERVE || sh > 16384 {
+        return
+    }
+    let abs: u64 = popup_abs(c, pop)
+    let w: i64 = wl_popup.field(rel, 2)
+    let h: i64 = wl_popup.field(rel, 3)
+    let ax: i64 = wl_popup.field(abs, 0)
+    let ay: i64 = wl_popup.field(abs, 1)
+    let dx: i64 = wl_popup.clamp_axis(ax, w, sw as i64) - ax
+    let dy: i64 = wl_popup.clamp_axis(ay, h, (sh - POPUP_BOTTOM_RESERVE) as i64) - ay
+    obj_set(c, pop, O_C, wl_popup.pack4(wl_popup.field(rel, 0) + dx, wl_popup.field(rel, 1) + dy, w, h))
+}
+
+fn popup_configure(c: u64, pop: u64) {
+    let rel: u64 = obj_get(c, pop, O_C)
+    let xs: u64 = obj_get(c, pop, O_A)
+    let p: u64 = ev_begin(c, pop, wlproto.EV_XDG_POPUP_CONFIGURE)
+    ev_arg(c, p, 0, (wl_popup.field(rel, 0) as u64) & 0xFFFFFFFF)
+    ev_arg(c, p, 1, (wl_popup.field(rel, 1) as u64) & 0xFFFFFFFF)
+    ev_arg(c, p, 2, wl_popup.field(rel, 2) as u64)
+    ev_arg(c, p, 3, wl_popup.field(rel, 3) as u64)
+    ev_end(c, p, 4)
+    let ps: u64 = ev_begin(c, xs, 0)
+    ev_arg(c, ps, 0, next_serial)
+    ev_end(c, ps, 1)
+    next_serial = next_serial + 1
+}
+
+fn popup_create(c: u64, xs: u64, argp: u64) {
+    let pid: u64 = rd32(argp)
+    let parent: u64 = rd32(argp + 4)
+    let pos: u64 = rd32(argp + 8)
+    if obj_iface(c, pos) != wlproto.IF_XDG_POSITIONER {
+        send_error(c, xs, wlproto.ERR_XDG_WM_BASE_INVALID_POSITIONER)
+        return
+    }
+    if parent != 0 && obj_iface(c, parent) != wlproto.IF_XDG_SURFACE {
+        send_error(c, xs, wlproto.ERR_XDG_WM_BASE_INVALID_POPUP_PARENT)
+        return
+    }
+    if obj_new(c, pid, wlproto.IF_XDG_POPUP) >= MAX_OBJ {
+        send_error(c, xs, 0)
+        return
+    }
+    obj_set(c, pid, O_A, xs)
+    obj_set(c, pid, O_B, parent)
+    obj_set(c, xs, O_C, pid)
+    popup_place(c, pid, pos)
+    popup_configure(c, pid)
+}
+
+fn popup_window_xy(c: u64, pop: u64, gx: u64, gy: u64) -> u64 {
+    let abs: u64 = popup_abs(c, pop)
+    var x: i64 = wl_popup.field(abs, 0) - (gx as i64)
+    var y: i64 = wl_popup.field(abs, 1) - (gy as i64)
+    if x < 0 {
+        x = 0
+    }
+    if y < 0 {
+        y = 0
+    }
+    return ((x as u64) << 16) | (y as u64)
+}
+
+fn popup_close_window(c: u64, pop: u64) {
+    let sid: u64 = surface_of_xdg(c, obj_get(c, pop, O_A))
+    let win: u64 = window_of_surface(c, sid)
+    if win != 0 {
+        ulib.sys(WM_CLOSE, win, 0, 0)
+        obj_set(c, sid, O_A, 0)
+    }
+}
+
+fn popup_destroy(c: u64, pop: u64) {
+    popup_close_window(c, pop)
+    let xs: u64 = obj_get(c, pop, O_A)
+    if xs != 0 {
+        obj_set(c, xs, O_C, 0)
+    }
+    obj_drop(c, pop)
+}
+
+fn popup_done(c: u64, pop: u64) {
+    let p: u64 = ev_begin(c, pop, wlproto.EV_XDG_POPUP_POPUP_DONE)
+    ev_end(c, p, 0)
+    obj_set(c, pop, O_F, 1)
+    popup_close_window(c, pop)
+}
+
+fn dismiss_for_press(c: u64, sid: u64) -> bool {
+    let clicked: u64 = popup_of(c, sid)
+    var floor: u64 = 0
+    if clicked != 0 {
+        floor = obj_get(c, clicked, O_E)
+    }
+    var dismissed: bool = false
+    var o: u64 = 0
+    while o < MAX_OBJ {
+        let b: u64 = obj_base(c, o)
+        if objs[(b + O_ID) as usize] != 0 && objs[(b + O_IFACE) as usize] == wlproto.IF_XDG_POPUP
+            && objs[(b + O_D) as usize] == 1 && objs[(b + O_F) as usize] == 0
+            && objs[(b + O_E) as usize] > floor {
+            popup_done(c, objs[(b + O_ID) as usize])
+            dismissed = true
+        }
+        o = o + 1
+    }
+    return dismissed
+}
+
+fn on_positioner(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_XDG_POSITIONER_DESTROY {
+        obj_drop(c, id)
+        return
+    }
+    if op == wlproto.RQ_XDG_POSITIONER_SET_SIZE {
+        obj_set(c, id, O_A, wl_popup.pack4(s32(rd32(argp)), s32(rd32(argp + 4)), 0, 0))
+        return
+    }
+    if op == wlproto.RQ_XDG_POSITIONER_SET_ANCHOR_RECT {
+        obj_set(c, id, O_B, wl_popup.pack4(s32(rd32(argp)), s32(rd32(argp + 4)), s32(rd32(argp + 8)), s32(rd32(argp + 12))))
+        return
+    }
+    if op == wlproto.RQ_XDG_POSITIONER_SET_ANCHOR {
+        obj_set(c, id, O_C, (obj_get(c, id, O_C) & 0xFF00) | (rd32(argp) & 0xFF))
+        return
+    }
+    if op == wlproto.RQ_XDG_POSITIONER_SET_GRAVITY {
+        obj_set(c, id, O_C, (obj_get(c, id, O_C) & 0xFF) | ((rd32(argp) & 0xFF) << 8))
+        return
+    }
+    if op == wlproto.RQ_XDG_POSITIONER_SET_OFFSET {
+        obj_set(c, id, O_D, wl_popup.pack4(s32(rd32(argp)), s32(rd32(argp + 4)), 0, 0))
+    }
+}
+
+fn on_xdg_popup(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_XDG_POPUP_DESTROY {
+        popup_destroy(c, id)
+        return
+    }
+    if op == wlproto.RQ_XDG_POPUP_GRAB {
+        popup_seq = popup_seq + 1
+        obj_set(c, id, O_D, 1)
+        obj_set(c, id, O_E, popup_seq)
+        return
+    }
+    if op == wlproto.RQ_XDG_POPUP_REPOSITION {
+        let pos: u64 = rd32(argp)
+        if obj_iface(c, pos) != wlproto.IF_XDG_POSITIONER {
+            send_error(c, id, wlproto.ERR_XDG_WM_BASE_INVALID_POSITIONER)
+            return
+        }
+        popup_place(c, id, pos)
+        let pr: u64 = ev_begin(c, id, wlproto.EV_XDG_POPUP_REPOSITIONED)
+        ev_arg(c, pr, 0, rd32(argp + 4))
+        ev_end(c, pr, 1)
+        popup_configure(c, id)
+        let win: u64 = window_of_surface(c, surface_of_xdg(c, obj_get(c, id, O_A)))
+        if win != 0 {
+            let sid: u64 = surface_of_xdg(c, obj_get(c, id, O_A))
+            ulib.sys(WM_MOVE, win, popup_window_xy(c, id, geom_origin(c, sid, 0), geom_origin(c, sid, 1)), 0)
+        }
+    }
 }
 
 fn on_xdg_toplevel(c: u64, id: u64, op: u64, argp: u64) {
@@ -1340,6 +1653,18 @@ fn dispatch(c: u64, at: u64, len: u64, fd: u64) -> bool {
         }
     } else if iface == wlproto.IF_WL_REGION {
         if op == wlproto.RQ_WL_REGION_DESTROY {
+            obj_drop(c, id)
+        }
+    } else if iface == wlproto.IF_XDG_POSITIONER {
+        on_positioner(c, id, op, argp)
+    } else if iface == wlproto.IF_XDG_POPUP {
+        on_xdg_popup(c, id, op, argp)
+    } else if iface == wlproto.IF_WL_TOUCH {
+        if op == wlproto.RQ_WL_TOUCH_RELEASE {
+            obj_drop(c, id)
+        }
+    } else if iface == wlproto.IF_WL_OUTPUT {
+        if op == wlproto.RQ_WL_OUTPUT_RELEASE {
             obj_drop(c, id)
         }
     } else if iface == wlproto.IF_WL_SEAT {
@@ -1437,8 +1762,13 @@ fn on_seat(c: u64, id: u64, op: u64, argp: u64) {
         return
     }
     if op == wlproto.RQ_WL_SEAT_GET_TOUCH {
-        obj_new(c, rd32(argp), wlproto.IF_NONE)
+        if obj_new(c, rd32(argp), wlproto.IF_WL_TOUCH) >= MAX_OBJ {
+            send_error(c, id, 0)
+        }
         return
+    }
+    if op == wlproto.RQ_WL_SEAT_RELEASE {
+        obj_drop(c, id)
     }
 }
 
@@ -1513,10 +1843,12 @@ fn pump_input() {
                             c_outlen[c as usize] = wl_input.on_key(c, sid, ea, ob, ol)
                             n_keys = n_keys + 1
                         } else if typ == 2 || typ == 3 || typ == 4 {
-                            c_outlen[c as usize] = wl_input.on_ptr(c, sid, typ, ea, eb, ec, ob, ol)
+                            if typ != 2 || !dismiss_for_press(c, sid) {
+                                c_outlen[c as usize] = wl_input.on_ptr(c, sid, typ, ea + geom_origin(c, sid, 0), eb + geom_origin(c, sid, 1), ec, ob, ol)
+                            }
                             n_ptr = n_ptr + 1
                         } else if typ == 9 || typ == 10 {
-                            c_outlen[c as usize] = wl_input.on_axis(c, sid, typ == 10, ea, eb, ec, ob, ol)
+                            c_outlen[c as usize] = wl_input.on_axis(c, sid, typ == 10, ea + geom_origin(c, sid, 0), eb + geom_origin(c, sid, 1), ec, ob, ol)
                             n_ptr = n_ptr + 1
                         } else if typ == 6 {
                             c_outlen[c as usize] = wl_input.on_focus(c, sid, ec == 1, ob, ol)
@@ -1552,7 +1884,7 @@ static mut mh: [u64; 8] = [0 as u64; 8]
 static mut iov: [u64; 2] = [0 as u64; 2]
 static mut cmsg: [u64; 16] = [0 as u64; 16]
 
-static mut fdq_v: [u64; 32] = [0 as u64; 32]
+static mut fdq_v: [u64; 128] = [0 as u64; 128]
 static mut fdq_n: [u64; 4] = [0 as u64; 4]
 
 fn fdq_fill(c: u64) {
@@ -1566,14 +1898,14 @@ fn fdq_fill(c: u64) {
     }
     let nfd: u64 = (mh[5 as usize] - 16) / 4
     var k: u64 = 0
-    while k < nfd && k < 24 {
+    while k < nfd && k < FDQ_RECV_MAX {
         let w: u64 = cmsg[(2 + k / 2) as usize]
         var fd: u64 = w & 0xFFFFFFFF
         if (k & 1) != 0 {
             fd = (w >> 32) & 0xFFFFFFFF
         }
-        if fdq_n[c as usize] < 8 {
-            fdq_v[(c * 8 + fdq_n[c as usize]) as usize] = fd
+        if fdq_n[c as usize] < FDQ_CAP {
+            fdq_v[(c * FDQ_CAP + fdq_n[c as usize]) as usize] = fd
             fdq_n[c as usize] = fdq_n[c as usize] + 1
         } else {
             ulib.sys(SYS_CLOSE, fd, 0, 0)
@@ -1586,10 +1918,10 @@ fn fdq_pop(c: u64) -> u64 {
     if fdq_n[c as usize] == 0 {
         return 0
     }
-    let v: u64 = fdq_v[(c * 8) as usize]
+    let v: u64 = fdq_v[(c * FDQ_CAP) as usize]
     var k: u64 = 1
     while k < fdq_n[c as usize] {
-        fdq_v[(c * 8 + k - 1) as usize] = fdq_v[(c * 8 + k) as usize]
+        fdq_v[(c * FDQ_CAP + k - 1) as usize] = fdq_v[(c * FDQ_CAP + k) as usize]
         k = k + 1
     }
     fdq_n[c as usize] = fdq_n[c as usize] - 1

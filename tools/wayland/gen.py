@@ -19,6 +19,7 @@ LIMIT = [
     "wl_subcompositor", "wl_subsurface",
     "wp_viewporter", "wp_viewport",
     "zxdg_decoration_manager_v1", "zxdg_toplevel_decoration_v1",
+    "xdg_positioner", "xdg_popup", "wl_touch",
 ]
 
 VERSION = {
