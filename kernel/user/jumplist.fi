@@ -1,0 +1,242 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import appreg
+import ctxreg
+import libc.regio
+import libc.text
+import msg
+import recentfiles
+import ulib
+
+export {
+    ACT_LAUNCH, ACT_PIN, ACT_UNPIN, ACT_END_TASK, ACT_CLOSE_WINDOW, ACT_HEADER, ACT_RECENT0, ACT_TASK0,
+    MAX_RECENT_ROWS, MAX_TASKS, fill, run_entry, is_entry, task_count
+}
+
+const ACT_LAUNCH: u64 = 0
+const ACT_PIN: u64 = 2
+const ACT_UNPIN: u64 = 3
+const ACT_END_TASK: u64 = 4
+const ACT_CLOSE_WINDOW: u64 = 5
+const ACT_HEADER: u64 = 0x40
+const ACT_RECENT0: u64 = 0x20
+const ACT_TASK0: u64 = 0x30
+const MAX_RECENT_ROWS: u64 = 3
+const MAX_TASKS: u64 = 3
+const LABEL_MAX: u64 = 32
+const ARG_MAX: u64 = 48
+const INFO_BYTES: u64 = 1500
+const NEWLINE: u64 = 10
+const SLASH: u64 = 47
+const EQUALS: u64 = 61
+const BAR: u64 = 124
+
+static mut k_recent: [u8; 12] = "ctx.recent\0\0"
+static mut k_tasks: [u8; 11] = "ctx.tasks\0\0"
+static mut k_pin: [u8; 16] = "ctx.pin_taskbar\0"
+static mut k_unpin: [u8; 18] = "ctx.unpin_taskbar\0"
+static mut k_end: [u8; 13] = "ctx.end_task\0"
+static mut k_close: [u8; 17] = "ctx.close_window\0"
+static mut p_apps: [u8; 7] = "/apps/\0"
+static mut p_info: [u8; 11] = ".osp/INFO\0\0"
+static mut p_start: [u8; 11] = ".osp/start\0"
+static mut info_buf: [u8; 1500] = [0 as u8; 1500]
+static mut info_path: [u8; 64] = [0 as u8; 64]
+static mut start_path: [u8; 64] = [0 as u8; 64]
+static mut app_label: [u8; 32] = [0 as u8; 32]
+static mut task_label: [u8; 96] = [0 as u8; 96]
+static mut task_arg: [u8; 144] = [0 as u8; 144]
+static mut n_tasks: u64 = 0
+static mut path_tmp: [u8; 96] = [0 as u8; 96]
+
+fn task_count() -> u64 {
+    return n_tasks
+}
+
+fn bundle_path(app: u64, out: u64, tail: u64) {
+    let _a: u64 = ulib.strcpy(out, (&p_apps[0 as usize]) as u64)
+    let _b: u64 = ulib.strcat(out, app)
+    let _c: u64 = ulib.strcat(out, tail)
+}
+
+fn copy_range(src: u64, len: u64, dst: u64, max: u64) {
+    var n: u64 = len
+    if n >= max {
+        n = max - 1
+    }
+    var k: u64 = 0
+    while k < n {
+        __mmio_write8((dst + k) as *mut u8, regio.read8(src + k) as u8)
+        k = k + 1
+    }
+    __mmio_write8((dst + n) as *mut u8, 0 as u8)
+}
+
+fn find_char(p: u64, len: u64, c: u64) -> u64 {
+    var k: u64 = 0
+    while k < len && regio.read8(p + k) != c {
+        k = k + 1
+    }
+    return k
+}
+
+fn starts_with_key(p: u64, len: u64, key: u64) -> bool {
+    let kl: u64 = text.length(key)
+    if len <= kl {
+        return false
+    }
+    var k: u64 = 0
+    while k < kl {
+        if regio.read8(p + k) != regio.read8(key + k) {
+            return false
+        }
+        k = k + 1
+    }
+    return regio.read8(p + kl) == EQUALS
+}
+
+fn parse_task(value: u64, len: u64) {
+    if n_tasks >= MAX_TASKS {
+        return
+    }
+    let split: u64 = find_char(value, len, BAR)
+    if split == 0 || split >= len {
+        return
+    }
+    copy_range(value, split, (&task_label[0 as usize]) as u64 + n_tasks * LABEL_MAX, LABEL_MAX)
+    copy_range(value + split + 1, len - split - 1, (&task_arg[0 as usize]) as u64 + n_tasks * ARG_MAX, ARG_MAX)
+    n_tasks = n_tasks + 1
+}
+
+fn parse_line(p: u64, len: u64) {
+    if len == 0 || regio.read8(p) == 35 {
+        return
+    }
+    let eq: u64 = find_char(p, len, EQUALS)
+    if eq >= len {
+        return
+    }
+    if starts_with_key(p, len, (&k_name_key[0 as usize]) as u64) {
+        copy_range(p + 5, len - 5, (&app_label[0 as usize]) as u64, LABEL_MAX)
+        return
+    }
+    if len > 6 && regio.read8(p) == 116 && regio.read8(p + 1) == 97 && regio.read8(p + 2) == 115
+        && regio.read8(p + 3) == 107 && regio.read8(p + 5) == EQUALS {
+        parse_task(p + 6, len - 6)
+    }
+}
+
+static mut k_name_key: [u8; 5] = "name\0"
+
+fn load_info(app: u64) {
+    n_tasks = 0
+    app_label[0 as usize] = 0 as u8
+    bundle_path(app, (&info_path[0 as usize]) as u64, (&p_info[0 as usize]) as u64)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&info_path[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let b: u64 = (&info_buf[0 as usize]) as u64
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, b, INFO_BYTES - 1)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) {
+        return
+    }
+    var at: u64 = 0
+    while at < n {
+        let len: u64 = find_char(b + at, n - at, NEWLINE)
+        parse_line(b + at, len)
+        at = at + len + 1
+    }
+}
+
+fn base_name(path: u64) -> u64 {
+    var at: u64 = 0
+    var k: u64 = 0
+    while regio.read8(path + k) != 0 {
+        if regio.read8(path + k) == SLASH {
+            at = k + 1
+        }
+        k = k + 1
+    }
+    return path + at
+}
+
+fn push_recent(app: u64) {
+    var n: u64 = recentfiles.count_of(app)
+    if n > MAX_RECENT_ROWS {
+        n = MAX_RECENT_ROWS
+    }
+    if n == 0 {
+        return
+    }
+    ctxreg.push(msg.get((&k_recent[0 as usize]) as u64), ACT_HEADER)
+    var i: u64 = 0
+    while i < n {
+        if recentfiles.path_at(app, i, (&path_tmp[0 as usize]) as u64) {
+            ctxreg.push(base_name((&path_tmp[0 as usize]) as u64), ACT_RECENT0 + i)
+        }
+        i = i + 1
+    }
+}
+
+fn push_tasks() {
+    if n_tasks == 0 {
+        return
+    }
+    ctxreg.push(msg.get((&k_tasks[0 as usize]) as u64), ACT_HEADER)
+    var i: u64 = 0
+    while i < n_tasks {
+        ctxreg.push(msg.get((&task_label[0 as usize]) as u64 + i * LABEL_MAX), ACT_TASK0 + i)
+        i = i + 1
+    }
+}
+
+fn fill(app: u64, pinned: bool, running: bool) -> u64 {
+    load_info(app)
+    ctxreg.begin()
+    push_recent(app)
+    push_tasks()
+    var shown: u64 = app
+    if app_label[0 as usize] != 0 as u8 {
+        shown = (&app_label[0 as usize]) as u64
+    }
+    ctxreg.push(shown, ACT_LAUNCH)
+    if pinned {
+        ctxreg.push(msg.get((&k_unpin[0 as usize]) as u64), ACT_UNPIN)
+    } else {
+        ctxreg.push(msg.get((&k_pin[0 as usize]) as u64), ACT_PIN)
+    }
+    if running {
+        ctxreg.push(msg.get((&k_end[0 as usize]) as u64), ACT_END_TASK)
+        ctxreg.push(msg.get((&k_close[0 as usize]) as u64), ACT_CLOSE_WINDOW)
+    }
+    return ctxreg.finish()
+}
+
+fn is_entry(act: u64) -> bool {
+    return (act >= ACT_RECENT0 && act < ACT_RECENT0 + recentfiles.MAX_FILES)
+        || (act >= ACT_TASK0 && act < ACT_TASK0 + MAX_TASKS)
+}
+
+fn run_with_arg(app: u64, arg: u64) -> u64 {
+    bundle_path(app, (&start_path[0 as usize]) as u64, (&p_start[0 as usize]) as u64)
+    var argv: [u64; 2] = [0 as u64; 2]
+    argv[0 as usize] = app
+    argv[1 as usize] = arg
+    return appreg.launch((&start_path[0 as usize]) as u64, (&argv[0 as usize]) as u64, 2)
+}
+
+fn run_entry(app: u64, act: u64) -> u64 {
+    if act >= ACT_RECENT0 && act < ACT_RECENT0 + recentfiles.MAX_FILES {
+        if !recentfiles.path_at(app, act - ACT_RECENT0, (&path_tmp[0 as usize]) as u64) {
+            return 0
+        }
+        return run_with_arg(app, (&path_tmp[0 as usize]) as u64)
+    }
+    if act >= ACT_TASK0 && act < ACT_TASK0 + MAX_TASKS && act - ACT_TASK0 < n_tasks {
+        return run_with_arg(app, (&task_arg[0 as usize]) as u64 + (act - ACT_TASK0) * ARG_MAX)
+    }
+    return 0
+}

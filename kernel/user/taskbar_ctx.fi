@@ -16,10 +16,11 @@ import ulib
 import uikit.uipopmenu
 import msg
 import ctxreg
+import jumplist
 
 export {
-    ACT_NEW_WINDOW, ACT_MINIMISE, ACT_PIN, ACT_TASKMGR, ACT_SETTINGS, ACT_DISPLAY, NONE, DISMISSED,
-    init, open_pin, open_button, open_empty, is_open, rows, step, picked_ctx, picked_arg, run_common
+    ACT_NEW_WINDOW, ACT_MINIMISE, ACT_PIN, ACT_TASKMGR, ACT_SETTINGS, ACT_DISPLAY, ACT_TASKBAR_SETTINGS, NONE, DISMISSED,
+    init, open_pin, open_button, open_empty, is_open, rows, step, picked_ctx, picked_arg, picked_app, run_common
 }
 
 // Action ids: the first three equal the row numbers the menu had before the registry (the bar's log lines print them).
@@ -29,6 +30,7 @@ const ACT_PIN: u64 = 2
 const ACT_TASKMGR: u64 = 10
 const ACT_SETTINGS: u64 = 11
 const ACT_DISPLAY: u64 = 12
+const ACT_TASKBAR_SETTINGS: u64 = 13
 const NONE: u64 = 0xFFFFFFFFFFFFFFFF
 const DISMISSED: u64 = 0xFFFFFFFFFFFFFFFE
 
@@ -37,6 +39,7 @@ static mut c_ctx: u64 = 0
 static mut c_arg: u64 = 0
 static mut c_inited: u64 = 0
 static mut c_rows: u64 = 0
+static mut c_app: [u8; 24] = [0 as u8; 24]
 
 // catalogue keys of the rows
 static mut k_new: [u8; 15] = "ctx.new_window\0"
@@ -44,11 +47,13 @@ static mut k_min: [u8; 13] = "ctx.minimise\0"
 static mut k_pin: [u8; 8] = "ctx.pin\0"
 static mut k_tm: [u8; 17] = "ctx.task_manager\0"
 static mut k_disp: [u8; 12] = "ctx.display\0"
+static mut k_tbset: [u8; 21] = "ctx.taskbar_settings\0"
 static mut k_set: [u8; 13] = "ctx.settings\0"
 
 static mut p_settings: [u8; 14] = "/bin/settings\0"
 static mut a_settings: [u8; 9] = "settings\0"
 static mut a_page1: [u8; 7] = "page=1\0"
+static mut a_page20: [u8; 8] = "page=20\0"
 static mut p_taskmgr: [u8; 14] = "/bin/taskmgr\0\0"
 
 // Register the bar's rows once (the registry would ignore a second call anyway).
@@ -62,8 +67,7 @@ fn init() {
     ctxreg.add(ctxreg.CTX_WINDOW_BTN, (&k_min[0 as usize]) as u64, ACT_MINIMISE, 0)
     ctxreg.add(ctxreg.CTX_WINDOW_BTN, (&k_pin[0 as usize]) as u64, ACT_PIN, 0)
     ctxreg.add(ctxreg.CTX_TASKBAR, (&k_tm[0 as usize]) as u64, ACT_TASKMGR, 0)
-    ctxreg.add(ctxreg.CTX_TASKBAR, (&k_disp[0 as usize]) as u64, ACT_DISPLAY, 0)
-    ctxreg.add(ctxreg.CTX_TASKBAR, (&k_set[0 as usize]) as u64, ACT_SETTINGS, 0)
+    ctxreg.add(ctxreg.CTX_TASKBAR, (&k_tbset[0 as usize]) as u64, ACT_TASKBAR_SETTINGS, 0)
 }
 
 fn open_ctx(ctx: u64, arg: u64) -> bool {
@@ -85,14 +89,39 @@ fn open_ctx(ctx: u64, arg: u64) -> bool {
     return true
 }
 
+fn open_jump(ctx: u64, arg: u64, app: u64, pinned: bool, running: bool) -> bool {
+    init()
+    if c_open != 0 {
+        let _d: u64 = step()
+    }
+    let _s: u64 = ulib.strncpy((&c_app[0 as usize]) as u64, app, 23)
+    c_app[23 as usize] = 0 as u8
+    let n: u64 = jumplist.fill((&c_app[0 as usize]) as u64, pinned, running)
+    if n == 0 {
+        return false
+    }
+    if !uipopmenu.open(hosthead.mouse_x(), hosthead.mouse_y(), ctxreg.text_nul(), n) {
+        return false
+    }
+    c_ctx = ctx
+    c_arg = arg
+    c_open = 1
+    c_rows = n
+    return true
+}
+
 // pg = 0-based index of the pin
-fn open_pin(pg: u64) -> bool {
-    return open_ctx(ctxreg.CTX_TASKBAR_PIN, pg)
+fn open_pin(pg: u64, app: u64, running: bool) -> bool {
+    return open_jump(ctxreg.CTX_TASKBAR_PIN, pg, app, true, running)
 }
 
 // m = 1-based index of the window button
-fn open_button(m: u64) -> bool {
-    return open_ctx(ctxreg.CTX_WINDOW_BTN, m)
+fn open_button(m: u64, app: u64, pinned: bool) -> bool {
+    return open_jump(ctxreg.CTX_WINDOW_BTN, m, app, pinned, true)
+}
+
+fn picked_app() -> u64 {
+    return (&c_app[0 as usize]) as u64
 }
 
 // right click on the empty part of the bar
@@ -136,12 +165,12 @@ fn step() -> u64 {
     return a
 }
 
-fn open_settings(page1: bool) {
+fn open_settings(page_arg: u64) {
     var argv: [u64; 4] = [0 as u64; 4]
     argv[0 as usize] = (&a_settings[0 as usize]) as u64
     var argc: u64 = 1
-    if page1 {
-        argv[1 as usize] = (&a_page1[0 as usize]) as u64
+    if page_arg != 0 {
+        argv[1 as usize] = page_arg
         argc = 2
     }
     let _pid: u64 = ulib.sys(ulib.SYS_EXEC, (&p_settings[0 as usize]) as u64, (&argv[0 as usize]) as u64, argc)
@@ -155,11 +184,15 @@ fn run_common(act: u64) -> bool {
         return true
     }
     if act == ACT_SETTINGS {
-        open_settings(false)
+        open_settings(0)
         return true
     }
     if act == ACT_DISPLAY {
-        open_settings(true)
+        open_settings((&a_page1[0 as usize]) as u64)
+        return true
+    }
+    if act == ACT_TASKBAR_SETTINGS {
+        open_settings((&a_page20[0 as usize]) as u64)
         return true
     }
     if ctxreg.is_ext(act) {

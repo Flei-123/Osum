@@ -14,7 +14,8 @@ LAUNCHER_LIMIT = 1023
 LAUNCHER_KEYS = ["name", "info", "keys", "revision", "fassung", "net", "exec", "icon", "menu", "hideif"]
 KEYS_V1 = ["name", "info", "exec", "icon", "keys", "revision", "fassung", "net", "menu", "hideif"]
 KEYS_V2 = ["manifest", "id", "version", "author", "license", "min_os", "perm", "service", "actions",
-           "opens", "needs", "sandbox", "kind", "outputs", "web.entry", "web.font", "web.memory"]
+           "opens", "needs", "sandbox", "kind", "outputs", "web.entry", "web.font", "web.memory",
+           "task1", "task2", "task3"]
 REQUIRED = ["name", "info", "manifest", "id", "version"]
 STRICT_REQUIRED = ["kind", "outputs", "author", "license", "revision"]
 
@@ -260,6 +261,15 @@ def check_strict(f, rep):
         rep.err(f["fassung"][1], "strict: legacy key 'fassung', use 'revision'")
 
 
+def check_tasks(f, rep):
+    for key in ("task1", "task2", "task3"):
+        if key not in f:
+            continue
+        label, sep, arg = f[key][0].partition("|")
+        if not sep or not 1 <= len(label) <= 31 or not 1 <= len(arg) <= 47:
+            rep.err(f[key][1], "%s: '<label 1..31>|<argument 1..47>'" % key)
+
+
 def lint(info_path, project=None, strict=False, system=False):
     rep = Report()
     try:
@@ -289,6 +299,7 @@ def lint(info_path, project=None, strict=False, system=False):
     check_perms(f, rep)
     check_kind_outputs(f, rep, project)
     check_lists(f, rep, short, project)
+    check_tasks(f, rep)
     if strict:
         check_strict(f, rep)
     return rep, {k: v[0] for k, v in f.items()}

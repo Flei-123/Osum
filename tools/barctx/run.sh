@@ -6,10 +6,10 @@
 #   bash tools/barctx/run.sh
 #
 # Machine of the stick (tools/design/eh6.sh, 1280x800, bar at the bottom). The image carries a manifest with ONE extra entry.
-#   1. rklick on the empty bar: `taskbar: context empty x= y= w= h= n=4` (3 built-in rows + the manifest row), the picture differs
+#   1. rklick on the empty bar: `taskbar: context empty x= y= w= h= n=3` (2 built-in rows + the manifest row), the picture differs
 #      inside the menu rectangle
-#   2. row 0 (task manager): `context empty w=10`; row 2 (settings): `context empty w=11` and `settings: ready`
-#   3. row 3 (the manifest entry): `context empty w=4096` (EXT_BASE) -- an app registered itself WITHOUT a change of shell code
+#   2. row 0 (task manager): `context empty w=10`; row 1 (taskbar settings): `context empty w=13` and `settings: ready`
+#   3. row 2 (the manifest entry): `context empty w=4096` (EXT_BASE) -- an app registered itself WITHOUT a change of shell code
 #   4. rklick, Escape: the menu closes without a `w=` line
 # COUNTER-PROOF: this tree with `taskbar_ctx.open_empty` switched off (mutant) has no menu on the empty bar: no `context empty x=`, the
 # picture after the right click equals the one before.
@@ -40,12 +40,12 @@ klickauf bmenue0
 warte 4
 rklick 700,$BARY
 warte 3
-klickauf bmenue2
+klickauf bmenue1
 warte 10
 foto 02-settings
 rklick 700,$BARY
 warte 3
-klickauf bmenue3
+klickauf bmenue2
 warte 4
 rklick 700,$BARY
 warte 3
@@ -107,15 +107,15 @@ else
     mw=$(echo "$ml" | sed -E 's/.* w=([0-9]+) h.*/\1/'); mh=$(echo "$ml" | sed -E 's/.* h=([0-9]+) n.*/\1/')
     nr=$(echo "$ml" | sed -E 's/.* n=([0-9]+).*/\1/')
     ok "the menu stood at $mx,$my ${mw}x$mh"
-    [ "$nr" = 4 ] && ok "4 rows: 3 built-in + the manifest entry" || bad "expected 4 rows, found $nr"
+    [ "$nr" = 3 ] && ok "3 rows: 2 built-in + the manifest entry" || bad "expected 3 rows, found $nr"
 fi
 d=$(diffpix "$TMPD/new/o/00-before.ppm" "$TMPD/new/o/01-menu.ppm" "$mx" "$my" "$mw" "$mh")
 [ "$d" -gt $((mw * mh / 3)) ] && ok "the picture differs from the one before in $d of $((mw * mh)) pixels of the menu rectangle" \
     || bad "only $d of $((mw * mh)) pixels differ -- no menu in the picture"
 grep -aq 'taskbar: context empty w=10' "$S" && ok "row 0 (task manager) was picked" || bad "no 'context empty w=10'"
-grep -aq 'taskbar: context empty w=11' "$S" && grep -aq 'settings: ready' "$S" && ok "row 2 (settings) picked, /bin/settings started" \
-    || bad "settings row: no 'w=11' or no 'settings: ready'"
-grep -aq 'taskbar: context empty w=4096' "$S" && ok "row 3 (manifest entry) picked: action EXT_BASE" || bad "no 'context empty w=4096'"
+grep -aq 'taskbar: context empty w=13' "$S" && grep -aq 'settings: ready' "$S" && ok "row 1 (taskbar settings) picked, /bin/settings started" \
+    || bad "settings row: no 'w=13' or no 'settings: ready'"
+grep -aq 'taskbar: context empty w=4096' "$S" && ok "row 2 (manifest entry) picked: action EXT_BASE" || bad "no 'context empty w=4096'"
 n=$(grep -ac 'taskbar: context empty w=' "$S")
 [ "$n" = 3 ] && ok "Escape closed the last menu without a pick (3 picks in total)" || bad "expected 3 picks, found $n"
 d=$(diffpix "$TMPD/new/o/03-menu2.ppm" "$TMPD/new/o/04-esc.ppm" "$mx" "$my" "$mw" "$mh")
