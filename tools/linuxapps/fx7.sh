@@ -82,7 +82,7 @@ mon() { printf '%s\n' "$1" | socat - "UNIX-CONNECT:$SOCK" > /dev/null 2>&1; }
     mon "mouse_move 60 40"; sleep 1; click_page_until "nav=[1-9]"; wait_nav_paint
     mon "screendump $OUT/nav.ppm"; sleep 3
     mon "mouse_button 2"; sleep 1; mon "mouse_button 0"; sleep 3
-    if [ -n "${FX7_POINTER:-}" ]; then
+    if [ "${FX7_POINTER:-1}" != 0 ]; then
         drag_select
         double_click_word
         resize_window

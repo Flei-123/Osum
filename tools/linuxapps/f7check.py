@@ -27,13 +27,17 @@ POINTER_NEEDED = (
 SIZE = re.compile(rb"^FX(?:SIZE|RESIZE) (\d+)x(\d+)")
 
 
+def pointer_enabled():
+    return os.environ.get("FX7_POINTER", "1") != "0"
+
+
 def grew(lines):
     sizes = [int(m.group(1)) for m in (SIZE.match(l) for l in lines) if m]
     return len(sizes) >= 2 and max(sizes[1:]) > sizes[0]
 
 
 def resize_note(lines):
-    if not os.environ.get("FX7_POINTER"):
+    if not pointer_enabled():
         return ""
     return "; window resize " + ("followed" if grew(lines) else "NOT followed")
 
@@ -44,10 +48,12 @@ def verdict(path):
         for marker in BAD_MARKERS:
             if marker in line:
                 return "red", "crash marker: " + marker.decode()
-    needed = NEEDED + (POINTER_NEEDED if os.environ.get("FX7_POINTER") else ())
+    needed = NEEDED + (POINTER_NEEDED if pointer_enabled() else ())
     missing = [name for name, pat in needed if not any(pat.match(l) for l in lines)]
     if missing:
         return "red", "page never saw: " + ", ".join(missing) + resize_note(lines)
+    if pointer_enabled() and not grew(lines):
+        return "red", "window resize not followed"
     return "green", "load, typing, shifted key, backspace, cursor edit, key, wheel, scroll, click, right click, link navigation and url bar navigation all reached the page" + resize_note(lines)
 
 

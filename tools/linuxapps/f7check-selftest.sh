@@ -15,15 +15,15 @@ full > "$D/log"; expect "all events present" green
 for name in FXLOAD FXINPUT FXKEY FXWHEEL FXSCROLL FXCLICK FXNAV FXURL FXCTX; do
     full | grep -v "^$name " > "$D/log"; expect "missing $name" red
 done
-full | grep -v "^FX\(DRAG\|DBL\|SIZE\|RESIZE\) " > "$D/log"; expect "pointer probes absent by default" green
-export FX7_POINTER=1
-full | grep -v "^FX\(DRAG\|DBL\|SIZE\|RESIZE\) " > "$D/log"; expect "pointer probes absent when requested" red
+export FX7_POINTER=0
+full | grep -v "^FX\(DRAG\|DBL\|SIZE\|RESIZE\) " > "$D/log"; expect "pointer probes absent when disabled" green
+unset FX7_POINTER
+full | grep -v "^FX\(DRAG\|DBL\|SIZE\|RESIZE\) " > "$D/log"; expect "pointer probes absent by default" red
 for name in FXDRAG FXDBL; do
     full | grep -v "^$name " > "$D/log"; expect "pointer: missing $name" red
 done
-full | sed 's/^FXRESIZE 1900x1000/FXRESIZE 1256x824/' > "$D/log"; expect "pointer: window did not grow" green
+full | sed 's/^FXRESIZE 1900x1000/FXRESIZE 1256x824/' > "$D/log"; expect "pointer: window did not grow" red
 full | sed 's/^FXDRAG alpha be/FXDRAG alpha/' > "$D/log"; expect "pointer: drag selected one word" red
-unset FX7_POINTER
 full | grep -v "^FXKEY D" > "$D/log"; expect "missing shifted key" red
 full | grep -v "^FXINPUT abxc" > "$D/log"; expect "missing cursor edit" red
 full | grep -v "^FXKEY Backspace" > "$D/log"; expect "missing backspace" red
