@@ -1,0 +1,151 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import libc.io
+import libc.regio
+import libc.text
+import ulib
+
+export { MAX_FILES, PATH_MAX, note, path_at, count_of }
+
+const MAX_FILES: u64 = 5
+const PATH_MAX: u64 = 96
+const LIST_BYTES: u64 = 512
+const NEWLINE: u64 = 10
+
+static mut dir_path: [u8; 12] = "/var/recent\0"
+static mut tail_text: [u8; 6] = ".list\0"
+static mut slash: [u8; 2] = "/\0"
+static mut list: [u8; 512] = [0 as u8; 512]
+static mut file_path: [u8; 64] = [0 as u8; 64]
+
+fn list_file(app: u64) -> u64 {
+    let _a: u64 = ulib.strcpy((&file_path[0 as usize]) as u64, (&dir_path[0 as usize]) as u64)
+    let _b: u64 = ulib.strcat((&file_path[0 as usize]) as u64, (&slash[0 as usize]) as u64)
+    let _c: u64 = ulib.strcat((&file_path[0 as usize]) as u64, app)
+    let _d: u64 = ulib.strcat((&file_path[0 as usize]) as u64, (&tail_text[0 as usize]) as u64)
+    return (&file_path[0 as usize]) as u64
+}
+
+fn load(app: u64) -> u64 {
+    let b: u64 = (&list[0 as usize]) as u64
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, list_file(app), 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, b, LIST_BYTES - 1)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) {
+        return 0
+    }
+    __mmio_write8((b + n) as *mut u8, 0 as u8)
+    return n
+}
+
+fn line_start(n: u64, idx: u64) -> u64 {
+    var at: u64 = 0
+    var seen: u64 = 0
+    while seen < idx && at < n {
+        if regio.read8((&list[0 as usize]) as u64 + at) == NEWLINE {
+            seen = seen + 1
+        }
+        at = at + 1
+    }
+    if seen < idx {
+        return n
+    }
+    return at
+}
+
+fn line_len(at: u64, n: u64) -> u64 {
+    var len: u64 = 0
+    while at + len < n && regio.read8((&list[0 as usize]) as u64 + at + len) != NEWLINE {
+        len = len + 1
+    }
+    return len
+}
+
+fn count_of(app: u64) -> u64 {
+    let n: u64 = load(app)
+    var found: u64 = 0
+    var at: u64 = 0
+    while at < n && found < MAX_FILES {
+        let len: u64 = line_len(at, n)
+        if len > 0 {
+            found = found + 1
+        }
+        at = at + len + 1
+    }
+    return found
+}
+
+fn path_at(app: u64, idx: u64, out: u64) -> bool {
+    let n: u64 = load(app)
+    let at: u64 = line_start(n, idx)
+    if at >= n {
+        return false
+    }
+    var len: u64 = line_len(at, n)
+    if len == 0 {
+        return false
+    }
+    if len >= PATH_MAX {
+        len = PATH_MAX - 1
+    }
+    var k: u64 = 0
+    while k < len {
+        __mmio_write8((out + k) as *mut u8, regio.read8((&list[0 as usize]) as u64 + at + k) as u8)
+        k = k + 1
+    }
+    __mmio_write8((out + len) as *mut u8, 0 as u8)
+    return true
+}
+
+fn same_line(at: u64, len: u64, path: u64) -> bool {
+    var k: u64 = 0
+    while k < len {
+        if regio.read8((&list[0 as usize]) as u64 + at + k) != regio.read8(path + k) {
+            return false
+        }
+        k = k + 1
+    }
+    return regio.read8(path + len) == 0
+}
+
+fn append_line(out: u64, at: u64, src: u64, len: u64) -> u64 {
+    var k: u64 = 0
+    while k < len {
+        __mmio_write8((out + at + k) as *mut u8, regio.read8(src + k) as u8)
+        k = k + 1
+    }
+    __mmio_write8((out + at + len) as *mut u8, NEWLINE as u8)
+    return at + len + 1
+}
+
+fn note(app: u64, path: u64) {
+    let plen: u64 = text.length(path)
+    if plen == 0 || plen >= PATH_MAX {
+        return
+    }
+    let _m: u64 = ulib.sys(ulib.SYS_MKDIR, (&dir_path[0 as usize]) as u64, 493, 0)
+    let n: u64 = load(app)
+    var out: [u8; 512] = [0 as u8; 512]
+    let o: u64 = (&out[0 as usize]) as u64
+    var w: u64 = append_line(o, 0, path, plen)
+    var kept: u64 = 1
+    var at: u64 = 0
+    while at < n && kept < MAX_FILES {
+        let len: u64 = line_len(at, n)
+        if len > 0 && !same_line(at, len, path) && w + len + 1 < LIST_BYTES {
+            w = append_line(o, w, (&list[0 as usize]) as u64 + at, len)
+            kept = kept + 1
+        }
+        at = at + len + 1
+    }
+    let fd: u64 = io.create(list_file(app))
+    if ulib.bad(fd) {
+        return
+    }
+    let _g: u64 = io.write_all(fd, o, w)
+    io.close(fd)
+}

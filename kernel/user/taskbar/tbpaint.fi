@@ -837,6 +837,77 @@ fn pin_target(mx: u64) -> u64 {
     return tbbase.npin - 1
 }
 
+const PIN_LIMIT: u64 = 10
+const PIN_NAME_BYTES: u64 = 24
+
+fn name_equals(a: u64, b: u64) -> bool {
+    var k: u64 = 0
+    while k < PIN_NAME_BYTES {
+        let x: u8 = __mmio_read8((a + k) as *mut u8)
+        if x != __mmio_read8((b + k) as *mut u8) {
+            return false
+        }
+        if x == (0 as u8) {
+            return true
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn pin_index_of(app: u64) -> u64 {
+    var k: u64 = 0
+    while k < tbbase.npin {
+        if name_equals((&tbbase.pinname[0 as usize]) as u64 + k * PIN_NAME_BYTES, app) {
+            return k
+        }
+        k = k + 1
+    }
+    return tbbase.npin
+}
+
+fn pin_commit() {
+    let _w: bool = tbstatus.conf_write()
+    let _l: bool = tblayout.list_read()
+    tblayout.layout()
+    paint(true)
+}
+
+fn pin_add(app: u64) {
+    if tbbase.npin >= PIN_LIMIT || pin_index_of(app) < tbbase.npin {
+        return
+    }
+    let dst: u64 = (&tbbase.pinname[0 as usize]) as u64 + tbbase.npin * PIN_NAME_BYTES
+    var k: u64 = 0
+    while k < PIN_NAME_BYTES {
+        __mmio_write8((dst + k) as *mut u8, __mmio_read8((app + k) as *mut u8))
+        k = k + 1
+    }
+    __mmio_write8((dst + PIN_NAME_BYTES - 1) as *mut u8, 0 as u8)
+    tbbase.npin = tbbase.npin + 1
+    pin_commit()
+}
+
+fn pin_remove(app: u64) {
+    let idx: u64 = pin_index_of(app)
+    if idx >= tbbase.npin {
+        return
+    }
+    var i: u64 = idx
+    while i + 1 < tbbase.npin {
+        let a: u64 = (&tbbase.pinname[0 as usize]) as u64 + i * PIN_NAME_BYTES
+        var k: u64 = 0
+        while k < PIN_NAME_BYTES {
+            __mmio_write8((a + k) as *mut u8, __mmio_read8((a + PIN_NAME_BYTES + k) as *mut u8))
+            k = k + 1
+        }
+        i = i + 1
+    }
+    tbbase.npin = tbbase.npin - 1
+    __mmio_write8(((&tbbase.pinname[0 as usize]) as u64 + tbbase.npin * PIN_NAME_BYTES) as *mut u8, 0 as u8)
+    pin_commit()
+}
+
 fn pin_umhaengen(von: u64, move_to: u64) {
     if von == move_to || von >= tbbase.npin || move_to >= tbbase.npin {
         return
@@ -982,11 +1053,13 @@ static mut s_ch: [u8; 4] = " h=\0"
 static mut s_cn: [u8; 4] = " n=\0"
 
 fn rechtsklick(x: u64, y: u64) {
+    taskview.preview_shut()
 
     let pg: u64 = pin_under(x, y)
     if pg < tbbase.npin {
         tbhover.tip_close()
-        let _mp: bool = taskbar_ctx.open_pin(pg)
+        let running: bool = tbbase.pinwin[(pg) as usize] < tbbase.MAXK
+        let _mp: bool = taskbar_ctx.open_pin(pg, (&tbbase.pinname[0 as usize]) as u64 + pg * PIN_NAME_BYTES, running)
         return
     }
     let m: u64 = tbhover.hover_brand(x, y)
@@ -1013,7 +1086,8 @@ fn rechtsklick(x: u64, y: u64) {
         }
         return
     }
-    if taskbar_ctx.open_button(m) {
+    let app: u64 = (&tbbase.kapp[0 as usize]) as u64 + (m - 1) * PIN_NAME_BYTES
+    if taskbar_ctx.open_button(m, app, pin_index_of(app) < tbbase.npin) {
         tbmetrics.say((&s_ctxauf[0 as usize]) as u64)
         tbmetrics.sayn(m)
         tbmetrics.nl()

@@ -1,0 +1,60 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ui.wm.wmbase
+import ui.wm.wmlayout
+
+const THUMB_MAX_W: u64 = 480
+const THUMB_MAX_H: u64 = 320
+const CHANNEL_MASK: u64 = 0xFF
+const RED_SHIFT: u64 = 16
+const GREEN_SHIFT: u64 = 8
+const OPAQUE: u64 = 0xFF000000
+
+fn dims_ok(tw: u64, th: u64) -> bool {
+    return tw > 0 && th > 0 && tw <= THUMB_MAX_W && th <= THUMB_MAX_H
+}
+
+fn has_pixels(state: u64, w: u64) -> bool {
+    return wmbase.valid(state, w) && wmlayout.wg(state, w, wmlayout.W_BUF) != 0
+        && wmlayout.wg(state, w, wmlayout.W_W) > 0 && wmlayout.wg(state, w, wmlayout.W_H) > 0
+}
+
+fn pixel(state: u64, w: u64, x: u64, y: u64) -> u64 {
+    let bw: u64 = wmlayout.wg(state, w, wmlayout.W_W)
+    return __mmio_read32((wmlayout.wg(state, w, wmlayout.W_BUF) +% y *% bw *% 4 +% x *% 4) as *mut u32) as u64
+}
+
+fn average4(a: u64, b: u64, c: u64, d: u64, shift: u64) -> u64 {
+    return ((((a >> shift) & CHANNEL_MASK) + ((b >> shift) & CHANNEL_MASK)
+        + ((c >> shift) & CHANNEL_MASK) + ((d >> shift) & CHANNEL_MASK)) / 4) << shift
+}
+
+fn sample(state: u64, w: u64, tx: u64, ty: u64, tw: u64, th: u64) -> u64 {
+    let bw: u64 = wmlayout.wg(state, w, wmlayout.W_W)
+    let bh: u64 = wmlayout.wg(state, w, wmlayout.W_H)
+    let x0: u64 = tx * bw / tw
+    let y0: u64 = ty * bh / th
+    var x1: u64 = (tx * bw + bw / 2) / tw
+    var y1: u64 = (ty * bh + bh / 2) / th
+    if x1 >= bw {
+        x1 = bw - 1
+    }
+    if y1 >= bh {
+        y1 = bh - 1
+    }
+    let p00: u64 = pixel(state, w, x0, y0)
+    let p10: u64 = pixel(state, w, x1, y0)
+    let p01: u64 = pixel(state, w, x0, y1)
+    let p11: u64 = pixel(state, w, x1, y1)
+    return average4(p00, p10, p01, p11, RED_SHIFT) | average4(p00, p10, p01, p11, GREEN_SHIFT)
+        | average4(p00, p10, p01, p11, 0) | OPAQUE
+}
+
+fn fill_row(state: u64, w: u64, ty: u64, tw: u64, th: u64, dst: u64) {
+    var tx: u64 = 0
+    while tx < tw {
+        __mmio_write32((dst + tx * 4) as *mut u32, sample(state, w, tx, ty, tw, th) as u32)
+        tx = tx + 1
+    }
+}

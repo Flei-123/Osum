@@ -6,17 +6,19 @@ import libc.io
 import msg
 import search.learn
 
-export { record, bonus, pinned, suggest, token_at, reset_all, set_enabled, is_enabled, now_hours }
+export { record, bonus, pinned, suggest, token_at, reset_all, set_enabled, is_enabled, now_hours, sync }
 
 const SYS_CLOCK_GETTIME: u64 = 228
 const CLOCK_REALTIME: u64 = 0
 const SECONDS_PER_HOUR: u64 = 3600
+const STAMP_MIX: u64 = 1000003
 
 static mut file_name: [u8; 11] = "startlearn\0"
 static mut path_buf: [u8; 128] = [0 as u8; 128]
 static mut file_buf: [u8; 4096] = [0 as u8; 4096]
 static mut loaded: bool = false
 static mut path_ok: bool = false
+static mut file_stamp: u64 = 0
 
 fn now_hours() -> u64 {
     var ts: [u64; 2] = [0 as u64; 2]
@@ -25,6 +27,30 @@ fn now_hours() -> u64 {
         return 0
     }
     return ts[0 as usize] / SECONDS_PER_HOUR
+}
+
+fn stamp_now() -> u64 {
+    var st: [u8; 144] = [0 as u8; 144]
+    if ulib.bad(io.stat_into((&path_buf[0 as usize]) as u64, (&st[0 as usize]) as u64)) {
+        return 0
+    }
+    return io.stat_mtime((&st[0 as usize]) as u64) * STAMP_MIX + io.stat_size((&st[0 as usize]) as u64)
+}
+
+fn load_file() {
+    learn.reset()
+    file_stamp = 0
+    let fd: u64 = io.open((&path_buf[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let got: u64 = io.read(fd, (&file_buf[0 as usize]) as u64, learn.MAX_FILE)
+    io.close(fd)
+    file_stamp = stamp_now()
+    if ulib.bad(got) {
+        return
+    }
+    learn.parse((&file_buf[0 as usize]) as u64, got)
 }
 
 fn ensure_loaded() {
@@ -37,16 +63,17 @@ fn ensure_loaded() {
     if !path_ok {
         return
     }
-    let fd: u64 = io.open((&path_buf[0 as usize]) as u64, 0)
-    if ulib.bad(fd) {
+    load_file()
+}
+
+fn sync() {
+    ensure_loaded()
+    if !path_ok {
         return
     }
-    let got: u64 = io.read(fd, (&file_buf[0 as usize]) as u64, learn.MAX_FILE)
-    io.close(fd)
-    if ulib.bad(got) {
-        return
+    if stamp_now() != file_stamp {
+        load_file()
     }
-    learn.parse((&file_buf[0 as usize]) as u64, got)
 }
 
 fn save() {
@@ -60,10 +87,11 @@ fn save() {
     }
     let _w: u64 = io.write_all(fd, (&file_buf[0 as usize]) as u64, n)
     io.close(fd)
+    file_stamp = stamp_now()
 }
 
 fn record(query: u64, token: u64) {
-    ensure_loaded()
+    sync()
     learn.record(query, token, now_hours())
     save()
 }
@@ -79,7 +107,7 @@ fn pinned(query: u64, token: u64) -> bool {
 }
 
 fn suggest(out: u64, max: u64) -> u64 {
-    ensure_loaded()
+    sync()
     return learn.top_usage(out, max, now_hours())
 }
 
@@ -88,18 +116,18 @@ fn token_at(i: u64) -> u64 {
 }
 
 fn is_enabled() -> bool {
-    ensure_loaded()
+    sync()
     return learn.enabled()
 }
 
 fn set_enabled(on: bool) {
-    ensure_loaded()
+    sync()
     learn.set_enabled(on)
     save()
 }
 
 fn reset_all() {
-    ensure_loaded()
+    sync()
     learn.reset()
     save()
 }
