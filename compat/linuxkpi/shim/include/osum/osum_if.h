@@ -22,7 +22,8 @@
 #define OSUM_KERNEL_SYMBOLS \
 	k_abi k_puts \
 	k_pcicfg_read k_pcicfg_write k_pcibar \
-	k_ioremap k_frames k_frames_free
+	k_ioremap k_frames k_frames_free \
+	k_kms_register k_kms_unregister
 
 unsigned long long k_abi(void);
 void k_puts(const char *text);
@@ -32,6 +33,19 @@ unsigned long long k_pcibar(unsigned long long index, unsigned long long *out);
 unsigned long long k_ioremap(unsigned long long phys, unsigned long long size);
 unsigned long long k_frames(unsigned long long count);
 void k_frames_free(unsigned long long addr, unsigned long long count);
+
+struct osum_kms_ops {
+	unsigned long long ready;
+	unsigned long long width;
+	unsigned long long height;
+	unsigned long long refresh;
+	unsigned long long scanout;
+	unsigned long long release;
+	unsigned long long tag;
+};
+
+unsigned long long k_kms_register(const struct osum_kms_ops *ops);
+void k_kms_unregister(unsigned long long tag);
 
 static inline unsigned long long osum_ctx_read(unsigned long long state,
 					       unsigned long long offset)
