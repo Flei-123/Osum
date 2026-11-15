@@ -24,6 +24,7 @@
 #define CHURN_SYNC_EVERY 10
 #define PARENT_COLOUR 0xFFF2F2F2u
 #define POPUP_COLOUR 0xFFE00000u
+#define RING_DELAY_MS 12000L
 #define RING_CLEAR 6
 #define RING_SHADE 4
 #define RING_SHADE_PIXEL 0x80000000u
@@ -318,7 +319,7 @@ int main(int argc, char **argv)
     const char *sock = argc > 1 ? argv[1] : "/tmp/wayland-0";
     int secs = argc > 2 ? atoi(argv[2]) : 60;
     int do_churn = 0, do_popup = 0, do_ring = 0, i;
-    long end;
+    long end, ring_at = 0;
 
     if (argc > 3)
         name = argv[3];
@@ -355,16 +356,19 @@ int main(int argc, char **argv)
     end = now_ms() + secs * 1000L;
     while (now_ms() < end) {
         pump_ms(100);
+        if (ring_at && now_ms() >= ring_at) {
+            ring_at = 0;
+            do_ring = 0;
+            open_popup(1);
+        }
         if (popup_gone && popup_surface) {
             xdg_popup_destroy(popup_obj);
             xdg_surface_destroy(popup_xdg);
             wl_surface_destroy(popup_surface);
             popup_surface = NULL;
             say("popup surface destroyed");
-            if (do_ring) {
-                do_ring = 0;
-                open_popup(1);
-            }
+            if (do_ring)
+                ring_at = now_ms() + RING_DELAY_MS;
         }
     }
     say("end");
