@@ -18,7 +18,10 @@ NEEDED = (
     ("link navigation", re.compile(rb"^FXNAV \?nav")),
     ("url bar navigation", re.compile(rb"^FXURL \?u")),
 )
-POPUP_NEEDED = (("select popup choice", re.compile(rb"^FXSEL [b-f]\d$")),)
+POPUP_NEEDED = (
+    ("select keyboard choice", re.compile(rb"^FXSEL c2$")),
+    ("select click choice", re.compile(rb"^FXSEL b1$")),
+)
 POINTER_NEEDED = (
     ("drag selection", re.compile(rb"^FXDRAG \w+ \w+")),
     ("double click word", re.compile(rb"^FXDBL \w+$")),
@@ -29,7 +32,7 @@ SIZE = re.compile(rb"^FX(?:SIZE|RESIZE) (\d+)x(\d+)")
 
 
 def popup_enabled():
-    return os.environ.get("FX7_POPUP", "0") != "0"
+    return os.environ.get("FX7_POPUP", "1") != "0"
 
 
 def pointer_enabled():
