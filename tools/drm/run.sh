@@ -46,7 +46,7 @@ runvm shown ""
 runvm noset noset
 
 for t in stat_card0 stat_render readdir_dri open_card0 version cap_dumb getresources getconnector create_dumb map_dumb mmap \
-    mmap_bad_offset_refused addfb2 setcrtc getcrtc render_setcrtc_refused closed_fd_reaps_handles; do
+    mmap_bad_offset_refused addfb2 fstat_rdev getresources_fbs setcrtc getcrtc fstat_rdev_render render_setcrtc_refused closed_fd_reaps_handles; do
     line=$(grep -a "^T t_drm\.$t " "$D/shown.ser" | tail -1)
     case "$line" in *" PASS"*) ok "$t" ;; *) bad "$t: ${line:-no line}" ;; esac
 done

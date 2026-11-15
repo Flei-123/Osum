@@ -75,6 +75,11 @@ static void show(int fd, int skip_set)
     struct fb_cmd2 f = { .width = cd.width, .height = cd.height, .format = 0x34325258 };
     f.handles[0] = cd.handle; f.pitches[0] = cd.pitch;
     CHECKC("addfb2", ioctl(fd, IOWR(0xB8, sizeof f), &f) == 0 && f.fb_id, "x");
+    struct stat fst = {0};
+    CHECKC("fstat_rdev", fstat(fd, &fst) == 0 && S_ISCHR(fst.st_mode) && major(fst.st_rdev) == 226 && minor(fst.st_rdev) == 0, "rdev=%lx", (long)fst.st_rdev);
+    uint32_t fbs[4] = {0};
+    struct card_res r2 = { .fb = (uintptr_t)fbs, .nfb = 4, .ncrtc = 0, .nconn = 0, .nenc = 0 };
+    CHECKC("getresources_fbs", ioctl(fd, IOWR(0xA0, sizeof r2), &r2) == 0 && r2.nfb == 1 && fbs[0] == f.fb_id, "nfb=%u fb=%u", r2.nfb, fbs[0]);
     struct mode_crtc sc = { .conn_ptr = (uintptr_t)&conn, .nconn = 1, .crtc_id = crtc, .fb_id = f.fb_id, .mode_valid = 1, .mode = m };
     if (!skip_set)
         CHECKC("setcrtc", ioctl(fd, IOWR(0xA2, sizeof sc), &sc) == 0, "x");
@@ -86,6 +91,8 @@ static void check_render_and_reap(void)
 {
     int rfd = open_card("/dev/dri/renderD128");
     struct mode_crtc sc = { .crtc_id = 0x32 };
+    struct stat rst = {0};
+    CHECK("fstat_rdev_render", rfd >= 0 && fstat(rfd, &rst) == 0 && major(rst.st_rdev) == 226 && minor(rst.st_rdev) == 128, "rdev=%lx", (long)rst.st_rdev);
     CHECK("render_setcrtc_refused", rfd >= 0 && ioctl(rfd, IOWR(0xA2, sizeof sc), &sc) < 0 && errno == EACCES, "errno=%d", errno);
     close(rfd);
     int fd = open_card("/dev/dri/card0");

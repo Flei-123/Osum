@@ -84,7 +84,7 @@ runvm native "gfx" -vga std
 runvm tier "gfx" -vga std
 runvm nobackend "" -vga none -device bochs-display
 
-T="open_card0 version cap_dumb getresources getconnector create_dumb map_dumb mmap addfb2 setcrtc getcrtc"
+T="open_card0 version cap_dumb getresources getconnector create_dumb map_dumb mmap addfb2 fstat_rdev getresources_fbs setcrtc getcrtc"
 for v in linux native tier; do
     for t in $T; do
         line=$(grep -a "^T t_drm\.$t " "$D/$v.klar" | tail -1)
