@@ -8,6 +8,7 @@ import tls.tls
 import tls.x509
 import jarvisd.jdbase
 import jarvisd.jdcmd
+import jarvisd.jdheal
 import jarvisd.jdinput
 import jarvisd.jddev
 import jarvisd.jdrecon
@@ -42,10 +43,12 @@ fn jsig_rufen(a1: u64, a2: u64, aus: *mut rt.Buf) -> bool {
     let target: i64 = jdcmd.sys_open((&jdbase.k_arbeit[0]) as u64,
         jdbase.O_WRONLY | jdbase.O_CREAT | jdbase.O_TRUNC, 384)
     if target < 0 {
+        jdheal.note_why(jdheal.WHY_OPEN_WORK_FILE, (0 - target) as u64)
         return false
     }
     let kind: i64 = syscall(jdbase.S_FORK, 0, 0, 0, 0, 0, 0)
     if kind < 0 {
+        jdheal.note_why(jdheal.WHY_FORK, (0 - kind) as u64)
         jdcmd.sys_close(target)
         return false
     }
@@ -58,13 +61,20 @@ fn jsig_rufen(a1: u64, a2: u64, aus: *mut rt.Buf) -> bool {
     jdcmd.sys_close(target)
     var status: i32 = 0
     if jdcmd.wait_child(kind, &status) {
+        jdheal.note_why(jdheal.WHY_TIMEOUT, 0)
         return false
     }
-    if (status & 127) != 0 || ((status >> 8) & 255) != 0 {
+    if (status & 127) != 0 {
+        jdheal.note_why(jdheal.WHY_SIGNAL, (status & 127) as u64)
+        return false
+    }
+    if ((status >> 8) & 255) != 0 {
+        jdheal.note_why(jdheal.WHY_EXIT_STATUS, ((status >> 8) & 255) as u64)
         return false
     }
     rt.buf_clear(aus)
     if !rt.read_file((&jdbase.k_arbeit[0]) as u64, aus) {
+        jdheal.note_why(jdheal.WHY_READ_RESULT, 0)
         return false
     }
     return true
@@ -84,6 +94,7 @@ fn sign_in(d: *mut jdbase.Wire) -> u64 {
     if !jsig_rufen((&w_aus[0]) as u64, 0, &id) {
         rt.buf_free(&id)
         jdcmd.say("jarvisd: /bin/jsig returned no key (run `jsig init`)\n")
+        jdheal.signing_failed()
         return 1
     }
     var pv: usize = 0
@@ -137,6 +148,7 @@ fn sign_in(d: *mut jdbase.Wire) -> u64 {
             if !jsig_rufen((&w_sig[0]) as u64, (&nonce[0]) as u64, &sigb) {
                 rt.buf_free(&sigb)
                 jdcmd.say("jarvisd: /bin/jsig did not sign\n")
+                jdheal.signing_failed()
                 ergebnis = 1
                 break
             }
@@ -433,6 +445,7 @@ fn eine_runde_https() -> u64 {
     var erg: u64 = 2
     let an: u64 = sign_in(&d)
     if an == 0 {
+        jdheal.signing_ok()
         jdcmd.say("jarvisd: signed in\n")
         var a: [u8; 8] = "session\0"
         jdcmd.notiere((&a[0]) as u64, 7, "signed-in", 0, 0 as usize)
@@ -509,6 +522,7 @@ fn eine_runde() -> u64 {
     var erg: u64 = 2
     let an: u64 = sign_in(&d)
     if an == 0 {
+        jdheal.signing_ok()
         jdcmd.say("jarvisd: signed in\n")
         var a: [u8; 8] = "session\0"
         jdcmd.notiere((&a[0]) as u64, 7, "signed-in", 0, 0 as usize)
