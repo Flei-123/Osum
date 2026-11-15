@@ -92,10 +92,10 @@ const O_C: u64 = 4
 const O_D: u64 = 5
 const O_E: u64 = 6
 const O_F: u64 = 7
-const O_G: u64 = 8
-const O_FIELDS: u64 = 9
+const O_FIELDS: u64 = 8
 
-static mut objs: [u64; 4608] = [0 as u64; 4608]
+static mut objs: [u64; 4096] = [0 as u64; 4096]
+static mut aux: [u64; 512] = [0 as u64; 512]
 
 static mut c_used: [u64; 4] = [0 as u64; 4]
 static mut c_fd: [u64; 4] = [0 as u64; 4]
@@ -125,6 +125,7 @@ static mut paint_client: u64 = 0
 static mut paint_upto: u64 = 0
 static mut paint_ax: i64 = 0
 static mut paint_ay: i64 = 0
+static mut paint_win: u64 = 0
 
 fn out_base(c: u64) -> u64 {
     return (&outbuf[(c * OUT_CAP) as usize]) as u64
@@ -165,12 +166,27 @@ fn obj_new(c: u64, id: u64, iface: u64) -> u64 {
             objs[(b + O_D) as usize] = 0
             objs[(b + O_E) as usize] = 0
             objs[(b + O_F) as usize] = 0
-            objs[(b + O_G) as usize] = 0
+            aux[(c * MAX_OBJ + i) as usize] = 0
             return i
         }
         i = i + 1
     }
     return MAX_OBJ
+}
+
+fn aux_get(c: u64, id: u64) -> u64 {
+    let i: u64 = obj_find(c, id)
+    if i >= MAX_OBJ {
+        return 0
+    }
+    return aux[(c * MAX_OBJ + i) as usize]
+}
+
+fn aux_set(c: u64, id: u64, v: u64) {
+    let i: u64 = obj_find(c, id)
+    if i < MAX_OBJ {
+        aux[(c * MAX_OBJ + i) as usize] = v
+    }
 }
 
 fn obj_iface(c: u64, id: u64) -> u64 {
@@ -624,7 +640,7 @@ fn on_shm_pool(c: u64, id: u64, op: u64, argp: u64) {
         obj_set(c, bid, O_D, stride)
         obj_set(c, bid, O_E, base)
         obj_set(c, bid, O_F, size)
-        obj_set(c, bid, O_G, format)
+        aux_set(c, bid, format)
         return
     }
     if op == wlproto.RQ_WL_SHM_POOL_DESTROY {
@@ -909,9 +925,9 @@ fn surface_commit(c: u64, sid: u64) {
             ulib.sys(WM_APP, win, ap, al)
         }
     }
-    paint_begin(c, win, sid, pop != 0 && obj_get(c, bid, O_G) == SHM_FORMAT_ARGB8888)
+    paint_begin(c, win, sid, pop != 0 && aux_get(c, bid) == SHM_FORMAT_ARGB8888)
     paint_main(win, src + gy * stride + gx * 4, stride, gw, gh)
-    obj_set(c, sid, O_G, bid)
+    aux_set(c, sid, bid)
     sub_paint_all(c, sid, win)
     ulib.sys(WM_FLUSH, win, 0, 0)
     n_commits = n_commits + 1
@@ -942,15 +958,14 @@ fn paint_begin(c: u64, win: u64, upto: u64, blend: bool) {
     paint_client = c
     paint_upto = upto
     paint_layers_ready = false
-    paint_ax = (ulib.sys(WM_INFO, win, WI_X, 0) as i64) + (ulib.sys(WM_INFO, win, WI_INX, 0) as i64)
-    paint_ay = (ulib.sys(WM_INFO, win, WI_Y, 0) as i64) + (ulib.sys(WM_INFO, win, WI_INY, 0) as i64)
+    paint_win = win
 }
 
 fn held_buffer(c: u64, sid: u64) -> u64 {
     if obj_get(c, sid, O_E) != 0 {
         return obj_get(c, sid, O_F)
     }
-    return obj_get(c, sid, O_G)
+    return aux_get(c, sid)
 }
 
 fn layer_add(c: u64, sid: u64, x: i64, y: i64) {
@@ -958,7 +973,7 @@ fn layer_add(c: u64, sid: u64, x: i64, y: i64) {
     if bid == 0 || obj_iface(c, bid) != wlproto.IF_WL_BUFFER || obj_get(c, bid, O_E) == 0 {
         return
     }
-    let _added: bool = wl_backdrop.push(obj_get(c, bid, O_A), obj_get(c, bid, O_B), obj_get(c, bid, O_C), obj_get(c, bid, O_D), x, y, obj_get(c, bid, O_G) != SHM_FORMAT_ARGB8888)
+    let _added: bool = wl_backdrop.push(obj_get(c, bid, O_A), obj_get(c, bid, O_B), obj_get(c, bid, O_C), obj_get(c, bid, O_D), x, y, aux_get(c, bid) != SHM_FORMAT_ARGB8888)
 }
 
 fn layer_children(c: u64, par: u64, bx: i64, by: i64, upto: u64) -> bool {
@@ -996,6 +1011,8 @@ fn layers_prepare() {
     let c: u64 = paint_client
     wl_backdrop.reset()
     paint_layers_ready = true
+    paint_ax = (ulib.sys(WM_INFO, paint_win, WI_X, 0) as i64) + (ulib.sys(WM_INFO, paint_win, WI_INX, 0) as i64)
+    paint_ay = (ulib.sys(WM_INFO, paint_win, WI_Y, 0) as i64) + (ulib.sys(WM_INFO, paint_win, WI_INY, 0) as i64)
     let root: u64 = root_surface(c, paint_upto)
     let pop: u64 = popup_of(c, root)
     if pop != 0 {
@@ -1139,7 +1156,7 @@ fn sub_paint(c: u64, child: u64, win: u64) {
     let root: u64 = root_surface(c, child)
     let ox: i64 = sub_abs(c, child, 0) - (geom_origin(c, root, 0) as i64)
     let oy: i64 = sub_abs(c, child, 1) - (geom_origin(c, root, 1) as i64)
-    paint_begin(c, win, child, obj_get(c, bid, O_G) == SHM_FORMAT_ARGB8888)
+    paint_begin(c, win, child, aux_get(c, bid) == SHM_FORMAT_ARGB8888)
     blit_sub(win, src, w, h, stride, ox, oy, cw, ch)
 }
 
