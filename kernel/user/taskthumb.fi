@@ -1,25 +1,57 @@
 // SPDX-License-Identifier: GPL-2.0-only
 profile app
 
+import fuiapp.hosthead
 import fuiapp.hostwin
 import fuiscene
 import uikit.uiscale
 import uitheme
 import ulib
 
-export { MAX_SLOTS, THUMB_W, THUMB_H, prepare, refresh, paint, ready }
+export { MAX_SLOTS, THUMB_W, THUMB_H, prepare, refresh, paint, ready, acquire, release }
 
 const MAX_SLOTS: u64 = 5
 const THUMB_W: u64 = 184
 const THUMB_H: u64 = 116
 const MAX_PIXEL_SCALE: u64 = 2
-const SLOT_PIXELS: u64 = 85376
+const SLOT_BYTES: u64 = 341504
+const POOL_BYTES: u64 = 1707520
+const SYS_MUNMAP: u64 = 11
 
-static mut pixels: [u32; 426880] = [0 as u32; 426880]
+static mut pool: u64 = 0
 static mut win_id: [u64; 5] = [0 as u64; 5]
 static mut px_w: [u64; 5] = [0 as u64; 5]
 static mut px_h: [u64; 5] = [0 as u64; 5]
 static mut got: [u64; 5] = [0 as u64; 5]
+
+fn slot_ptr(i: u64) -> u64 {
+    return pool + i * SLOT_BYTES
+}
+
+fn acquire() -> bool {
+    if pool != 0 {
+        return true
+    }
+    let p: u64 = hosthead.map_surface(POOL_BYTES)
+    if ulib.bad(p) {
+        return false
+    }
+    pool = p
+    return true
+}
+
+fn release() {
+    if pool == 0 {
+        return
+    }
+    let _u: u64 = ulib.sys(SYS_MUNMAP, pool, POOL_BYTES, 0)
+    pool = 0
+    var i: u64 = 0
+    while i < MAX_SLOTS {
+        got[i as usize] = 0
+        i = i + 1
+    }
+}
 
 fn pixel_scale() -> u64 {
     let s: u64 = uiscale.ui_scale()
@@ -56,7 +88,10 @@ fn fit(i: u64, ww: u64, wh: u64) {
 }
 
 fn capture(i: u64) {
-    let rc: u64 = hostwin.win_thumb(win_id[i as usize], (&pixels[(i * SLOT_PIXELS) as usize]) as u64,
+    if pool == 0 {
+        return
+    }
+    let rc: u64 = hostwin.win_thumb(win_id[i as usize], slot_ptr(i),
         px_w[i as usize], px_h[i as usize])
     got[i as usize] = 0
     if !ulib.bad(rc) {
@@ -82,7 +117,7 @@ fn refresh(n: u64) {
 }
 
 fn ready(i: u64) -> bool {
-    return i < MAX_SLOTS && got[i as usize] != 0
+    return pool != 0 && i < MAX_SLOTS && got[i as usize] != 0
 }
 
 fn paint(i: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
@@ -98,5 +133,5 @@ fn paint(i: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
     }
     let tw: u64 = px_w[i as usize]
     let th: u64 = px_h[i as usize]
-    fuiscene.cv_image((&pixels[(i * SLOT_PIXELS) as usize]) as u64, tw, th, x + (w - tw) / 2, y + (h - th) / 2, tw, th)
+    fuiscene.cv_image(slot_ptr(i), tw, th, x + (w - tw) / 2, y + (h - th) / 2, tw, th)
 }

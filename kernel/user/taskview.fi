@@ -55,6 +55,8 @@ const KEYC0: u64 = 300
 const APP_LEN: u64 = 24
 const HEAD_ROW_H: u64 = 24
 const REFRESH_TICKS: u64 = 25
+const FADE_TICKS: u64 = 10
+const OPAC_FULL: u64 = 255
 
 static mut tv_win: u64 = 0xFFFFFFFFFFFFFFFF
 static mut tv_h: u64 = 0
@@ -67,6 +69,8 @@ static mut row_id: [u64; 12] = [0 as u64; 12]
 static mut row_w: [u64; 12] = [0 as u64; 12]
 static mut row_h: [u64; 12] = [0 as u64; 12]
 static mut thumbs_at: u64 = 0
+static mut fade_at: u64 = 0
+static mut fading: u64 = 0
 static mut row_tit: [u8; 480] = [0 as u8; 480] // TV_MAXR x 40
 static mut rec: [u8; 128] = [0 as u8; 128]
 static mut px_: u64 = 0
@@ -92,6 +96,7 @@ static mut s_ti: [u8; 8] = " title=\0"
 static mut s_ra: [u8; 20] = "taskview: raise id=\0"
 static mut s_rc: [u8; 5] = " rc=\0"
 static mut s_shut: [u8; 16] = "taskview: shut \0"
+static mut s_fade: [u8; 19] = "taskview: fade ms=\0"
 static mut s_esc: [u8; 4] = "esc\0"
 static mut s_out: [u8; 8] = "outside\0"
 static mut s_pick: [u8; 5] = "pick\0"
@@ -308,6 +313,7 @@ fn preview_open(app: u64, cx: u64, bar_top: u64, bar_bot: u64) -> bool {
     if open_ != 0 || tv_win == 0xFFFFFFFFFFFFFFFF {
         return false
     }
+    fade_finish()
     mode_ = MODE_PREVIEW
     copy_app(app)
     read_windows()
@@ -323,7 +329,7 @@ fn preview_open(app: u64, cx: u64, bar_top: u64, bar_bot: u64) -> bool {
 
 fn prepare_thumbs() {
     thumbs_at = clockapi.ticks()
-    if !thumbs_mode() {
+    if !thumbs_mode() || !taskthumb.acquire() {
         return
     }
     var i: u64 = 0
@@ -375,6 +381,7 @@ fn open_now() {
     if open_ != 0 || tv_win == 0xFFFFFFFFFFFFFFFF {
         return
     }
+    fade_finish()
     mode_ = MODE_CARD
     read_windows()
     let w: u64 = CARD_W * uiscale.ui_scale()
@@ -446,12 +453,39 @@ fn show_card() {
     }
 }
 
+fn fade_start() {
+    fading = 1
+    fade_at = clockapi.ticks()
+}
+
+fn fade_finish() {
+    if fading == 0 {
+        return
+    }
+    fading = 0
+    say((&s_fade[0 as usize]) as u64)
+    lineout.add_num((clockapi.ticks() - fade_at) * 10)
+    lineout.end_line()
+    let _v: u64 = hostwin.win_state(tv_h, hostwinp.WS_HIDDEN, 1)
+    let _o: u64 = hostwin.win_set_opac(tv_h, OPAC_FULL)
+    taskthumb.release()
+}
+
+fn fade_step() {
+    let now: u64 = clockapi.ticks()
+    if now < fade_at || now - fade_at >= FADE_TICKS {
+        fade_finish()
+        return
+    }
+    let _o: u64 = hostwin.win_set_opac(tv_h, OPAC_FULL * (FADE_TICKS - (now - fade_at)) / FADE_TICKS)
+}
+
 fn shut(why: u64) {
     if open_ == 0 {
         return
     }
     open_ = 0
-    let _v: u64 = hostwin.win_state(tv_h, hostwinp.WS_HIDDEN, 1)
+    fade_start()
     say((&s_shut[0 as usize]) as u64)
     say(why)
     lineout.end_line()
@@ -466,8 +500,11 @@ fn toggle() {
 }
 
 fn step() -> bool {
+    if fading != 0 {
+        fade_step()
+    }
     if open_ == 0 {
-        return false
+        return fading != 0
     }
     // the events of the window ring go to the canvas of the tree
     let _st: u64 = apphost.step()
