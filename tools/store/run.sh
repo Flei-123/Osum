@@ -408,7 +408,7 @@ part "$C" C-DENY C-MANUAL > "$TMPD/p.txt"
 has "$TMPD/p.txt" "not_allowed" "uid 1001 may not switch (the right to install is needed)"
 has "$TMPD/p.txt" "autoapps=1" "... and the switch stayed on"
 part "$C" C-MANUAL FERTIG > "$TMPD/p.txt"
-has "$TMPD/p.txt" "msg=installiert" "manual update works while the program's automatic switch is off"
+has "$TMPD/p.txt" "phase=done" "manual update works while the program's automatic switch is off (job done)"
 has "$TMPD/p.txt" "|aktuell|0" "hallo is current, its switch stayed off"
 
 echo "== 4c. automatic updates: it really installs when on =="
