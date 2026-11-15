@@ -63,17 +63,26 @@ def last_fen(wins_from):
     return rows
 
 
+LAUNCHER = 0
+for ln in ser:
+    m = re.search(r'wm: fen i=\d+ id=(\d+) x=\d+ y=\d+ w=640 h=416 lay=4 ', ln)
+    if m:
+        LAUNCHER = int(m[1])
 starts = [i for i, ln in enumerate(ser) if 'launcher: start /apps/terminal.osp/start' in ln]
 fok = [(i, int(re.search(r'id=(\d+)', ln)[1])) for i, ln in enumerate(ser) if ln.startswith('wm: fokus id=')]
 print('== witnesses ==')
 chk(len(starts) == 2, 'two terminal starts from the search (%d)' % len(starts))
 if len(starts) == 2:
     for n, s in enumerate(starts):
-        after = [f for f in fok if f[0] > s]
-        before_next = [f for f in after if n == 1 or f[0] < starts[1]]
-        newest = max([f[1] for f in fok if f[0] > s] or [0])
-        chk(bool(before_next) and before_next[-1][1] == newest and newest > 24,
-            'start %d: the last focus change before the next action went to the NEW window (id %d)' % (n + 1, before_next[-1][1] if before_next else 0))
+        seen = [f[1] for f in fok if f[0] < s]
+        run = []
+        for f in fok:
+            if f[0] > s:
+                if f[1] == LAUNCHER and run:
+                    break
+                run.append(f[1])
+        chk(bool(run) and run[-1] > max(seen + [LAUNCHER]),
+            'start %d: the focus ends on the NEW window (id %d, older ids up to %d)' % (n + 1, run[-1] if run else 0, max(seen + [0])))
     third = max([f[1] for f in fok if f[0] > starts[1]] or [0])
     rows = last_fen(starts[1])
     fl_rows = {k: v for k, v in rows.items() if v[4] == 1}
@@ -98,9 +107,8 @@ if len(starts) == 2:
         nx = v
 if nx:
     x, y, w, h = nx[0], nx[1], nx[2], nx[3]
-    typed = lit(s2, x + 10, y + 100, x + w - 10, y + 140)
+    typed = lit(s2, x + 10, y + 55, x + w - 10, y + 85)
     chk(typed > 120, 'the typed text appears in the new window (%d lit px)' % typed)
-    ctrl = lit(s3, x + 10, y + 100, x + w - 10, y + 140)
     chk(diff(s2, s3, (x + 140, y + 70, x + 150, y + 130)) >= 0, 'control picture present')
     chk(any('wm: fokus id=' in ln for ln in ser[starts[1] + 1:]) and fok[-1][1] != top_id,
         'CONTROL: clicking the first terminal moves the focus away from the new window (id %d)' % fok[-1][1])
@@ -109,7 +117,7 @@ if nx:
 
 print('== menu over a repainting window ==')
 m0, m1, m2, m3 = load('m0-taskmgr'), load('m1-open'), load('m2-later'), load('m3-closed')
-menu = (5, 300, 172, 420)
+menu = (500, 580, 667, 700)
 chk(lit(m1, *menu) > 1500, 'the menu is drawn over the task manager (%d lit px)' % lit(m1, *menu))
 ghost_before = lit(m0, 0, 0, 20, 125) + lit(m0, 0, 0, 170, 16)
 ghost = lit(m1, 0, 0, 20, 125) + lit(m1, 0, 0, 170, 16)

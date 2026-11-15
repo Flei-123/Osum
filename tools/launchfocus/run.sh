@@ -8,7 +8,7 @@
 #   A. Win + "terminal" + Enter twice while a terminal is already open: each start opens a NEW window that takes the focus
 #      (`wm: fokus`), has the active title colour while all older ones are inactive, the task bar button marks it, typed keys land in it.
 #      CONTROL: a click on the first terminal takes the focus away again (the title colour really measures the focus).
-#   B. Right click on the desktop strip beside the task manager: the menu (167x120) lies over the repainting window, no stale picture of
+#   B. Right click on the desktop below the task manager: the menu (167x120, flipped up) lies over the repainting window, no stale picture of
 #      the menu stays at the top left (0,0) while it is open, the menu is unchanged after 6 s of repaints, Esc closes it.
 # COUNTER-PROOF: the tree before the fix (BASE, default origin/main) leaves the menu picture at 0,0 on the first open.
 set -uo pipefail
