@@ -297,6 +297,12 @@ QEMU stays for quick regression and parallel runs; features are tried on the HP 
 4. Health: `ota boot` (started by the desktop) confirms after 60 s when `desktop` AND `taskbar` run (or `glogin`). Confirm promotes slot B to slot A and resets the counter.
 5. Failure: hang (NMI detector resets after 10 s), panic (trial boots set `crashrestart`, reset after 20 s), reset loop, dead desktop (`ota boot` reboots after 120 s): all end on slot 1 without a person at the boot menu. `ota boot` there writes `/var/log/ota-rollback.log` and the Updates state `failed`.
 
+### 9.1a Helper reachability is part of the trial (15.11.2026)
+- `/bin/jarvisd` logs WHY `/bin/jsig` failed (`jarvisd: heal: signing failed, reason <1 work file, 2 fork, 3 timeout, 4 exit status, 5 signal, 6 result> detail <errno/code>`) and writes `/var/jarvis/signfail`.
+- `ota boot` treats a trial start as NOT healthy while `/var/jarvis/signfail` exists: restart, the kernel counts, third start boots slot 1, `su_finish` restores the overlay.
+- The worker ends after 4 failed sign-ins (the old watchdog never fired: `alive` is also written by the greeting answer). The supervisor counts strikes in `/var/jarvis/heal-strikes`; at 2 strikes it reboots (`/var/jarvis/heal-reboots`, max 2); a good sign-in clears all three files. Network outages write no marker and never reboot.
+- Gate `tools/jsigheal/run.sh`.
+
 ### 9.2 What does NOT rescue the HP
 - Slot 1 itself broken, or osboot / ESP broken: the recover stick (`tools/recover`) is the way back.
 - A trial kernel that boots, passes the health check and is wrong in a way only the Boss sees: `ota rollback`.

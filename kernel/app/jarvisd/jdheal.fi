@@ -1,0 +1,138 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.io
+import std.rt
+
+const REBOOT_AFTER_STRIKES: u64 = 2
+const MAX_HEAL_REBOOTS: u64 = 2
+const WORKER_EXIT_AFTER_FAILS: u64 = 4
+const S_UNLINK: i64 = 87
+const S_SYNC: i64 = 162
+const S_REBOOT: i64 = 169
+const REBOOT_MAGIC: i64 = 0x01234567
+
+const WHY_OPEN_WORK_FILE: u64 = 1
+const WHY_FORK: u64 = 2
+const WHY_TIMEOUT: u64 = 3
+const WHY_EXIT_STATUS: u64 = 4
+const WHY_SIGNAL: u64 = 5
+const WHY_READ_RESULT: u64 = 6
+
+static mut z_why: u64 = 0
+static mut z_detail: u64 = 0
+static mut z_fail_rounds: u64 = 0
+static mut z_supervised: bool = false
+
+static mut P_SIGNFAIL: [u8; 21] = "/var/jarvis/signfail\0"
+static mut P_STRIKES: [u8; 25] = "/var/jarvis/heal-strikes\0"
+static mut P_REBOOTS: [u8; 25] = "/var/jarvis/heal-reboots\0"
+
+fn note_why(why: u64, detail: u64) {
+    z_why = why
+    z_detail = detail
+}
+
+fn print_num(v: u64) {
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&b, v)
+    rt.write_everything(1, b.ptr, b.len)
+    rt.buf_free(&b)
+}
+
+fn file_exists(path: u64) -> bool {
+    var b: rt.Buf = rt.buf_new()
+    let found: bool = rt.read_file(path, &b)
+    rt.buf_free(&b)
+    return found
+}
+
+fn count_read(path: u64) -> u64 {
+    var b: rt.Buf = rt.buf_new()
+    var v: u64 = 0
+    if rt.read_file(path, &b) {
+        var i: usize = 0
+        while i < b.len {
+            let c: u64 = rt.ld8(b.ptr, i) as u64
+            if c < 48 || c > 57 {
+                break
+            }
+            v = v * 10 + (c - 48)
+            i = i + 1
+        }
+    }
+    rt.buf_free(&b)
+    return v
+}
+
+fn count_write(path: u64, v: u64) {
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&b, v)
+    rt.buf_push(&b, 10 as u8)
+    let _w: bool = rt.write_file(path, b.ptr, b.len)
+    rt.buf_free(&b)
+}
+
+fn file_drop(path: u64) {
+    syscall(S_UNLINK, path as i64, 0, 0, 0, 0, 0)
+}
+
+fn signing_failed() {
+    z_fail_rounds = z_fail_rounds + 1
+    io.print("jarvisd: heal: signing failed, reason ")
+    print_num(z_why)
+    io.print(" detail ")
+    print_num(z_detail)
+    io.print("\n")
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&b, z_why)
+    rt.buf_push(&b, 32 as u8)
+    rt.buf_push_dec_u64(&b, z_detail)
+    rt.buf_push(&b, 10 as u8)
+    let _w: bool = rt.write_file((&P_SIGNFAIL[0]) as u64, b.ptr, b.len)
+    rt.buf_free(&b)
+}
+
+fn signing_ok() {
+    z_fail_rounds = 0
+    file_drop((&P_SIGNFAIL[0]) as u64)
+    file_drop((&P_STRIKES[0]) as u64)
+    file_drop((&P_REBOOTS[0]) as u64)
+}
+
+fn set_supervised() {
+    z_supervised = true
+}
+
+fn worker_should_exit() -> bool {
+    if !z_supervised || z_fail_rounds < WORKER_EXIT_AFTER_FAILS {
+        return false
+    }
+    io.print("jarvisd: heal: repeated sign-in failures, ending the worker\n")
+    return true
+}
+
+fn boot_reset() {
+    file_drop((&P_SIGNFAIL[0]) as u64)
+}
+
+fn supervisor_strike() {
+    if !file_exists((&P_SIGNFAIL[0]) as u64) {
+        return
+    }
+    let strikes: u64 = count_read((&P_STRIKES[0]) as u64) + 1
+    count_write((&P_STRIKES[0]) as u64, strikes)
+    io.print("jarvisd: heal: strike ")
+    print_num(strikes)
+    io.print("\n")
+    if strikes < REBOOT_AFTER_STRIKES {
+        return
+    }
+    let reboots: u64 = count_read((&P_REBOOTS[0]) as u64)
+    if reboots >= MAX_HEAL_REBOOTS {
+        io.print("jarvisd: heal: reboot limit reached, staying up\n")
+        return
+    }
+    count_write((&P_REBOOTS[0]) as u64, reboots + 1)
+    io.print("jarvisd: heal: rebooting\n")
+    syscall(S_SYNC, 0, 0, 0, 0, 0, 0)
+    syscall(S_REBOOT, REBOOT_MAGIC, 0, 0, 0, 0, 0)
+}
