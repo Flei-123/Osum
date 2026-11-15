@@ -9,6 +9,7 @@ LICENSE_DIR = "/usr/share/licenses"
 NOTICES_NAME = "THIRD-PARTY-NOTICES"
 FILE_MODE = "@0644"
 COPYLEFT_MARKERS = ("GPL", "MPL")
+DEVICE_DATA = ("/etc/jarvis/",)
 OFFER = ("The components marked [source] are distributed under licences that require the corresponding source to be "
          "available. The source of each is available at the URL given for it. The source of OrientOS itself is "
          "available at https://github.com/Flei-123 and on request from the author for three years after distribution.")
@@ -44,7 +45,7 @@ def check_specs(components, profile, specs, own_roots):
             continue
         if registry.looks_foreign(dest):
             errors.append("%s: foreign-looking file without licence entry" % dest)
-        elif source and not inside(source, own_roots):
+        elif source and not inside(source, own_roots) and not dest.startswith(DEVICE_DATA):
             errors.append("%s: source %s is outside the repository and has no licence entry" % (dest, source))
     return present, errors
 

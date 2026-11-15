@@ -1,6 +1,6 @@
 # LINUXKPI-PLAN: open Linux DRM drivers on Osum (04.11.2026)
 
-Tier rules and the native-only switch: `DRIVER-TIERS.md`. Compat code lives in `compat/linuxkpi/`.
+Wi-Fi (mac80211 drivers on lib/wlan): `LINUXKPI-80211.md`. Tier rules and the native-only switch: `DRIVER-TIERS.md`. Compat code lives in `compat/linuxkpi/`.
 
 Status: **plan + measurements + store packaging path. No shim code exists yet** (prototype S0 not built, see section 9).
 

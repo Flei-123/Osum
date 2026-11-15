@@ -146,4 +146,5 @@ def main():
         json.dump(result, fh, indent=1, sort_keys=True)
 
 
-main()
+if __name__ == "__main__":
+    main()
