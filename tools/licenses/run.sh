@@ -49,6 +49,7 @@ DESC="counter: unknown .ttf rejected"; refuse try_extra "/lib/evil.ttf=assets/os
 DESC="counter: unknown .so rejected"; refuse try_extra "/usr/lib/libfoo.so.1=assets/osum-sans.ttf"
 DESC="counter: unknown firmware rejected"; refuse try_extra "/lib/firmware/x/blob.bin=assets/osum-sans.ttf"
 DESC="counter: foreign source outside repo rejected"; refuse try_extra "/bin/mystery=/etc/hostname"
+DESC="device identity from outside the repo accepted"; check try_extra "/etc/jarvis/device.key=/etc/hostname"
 DESC="counter: personal-only busybox rejected in public"; refuse try_extra "/bin/busybox=/etc/hostname"
 DESC="personal profile accepts busybox"; check bash -c "{ cat '$WORK/public.in'; echo '/bin/busybox=/etc/hostname'; } > '$WORK/p.in'; $NOTICES image personal '$WORK/out/pers' '$WORK/p.in'"
 mktree() {
