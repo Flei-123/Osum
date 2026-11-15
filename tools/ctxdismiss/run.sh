@@ -11,7 +11,7 @@
 #   4. bare task bar: rklick -> menu, click outside -> gone, rklick again -> menu again (`taskbar: context empty` twice)
 #   5. start menu: open, click outside -> closed (no regression of the existing dismissal)
 #   6. Esc closes the menu, no ghost at 0,0; a focus change (start menu by the Windows key) closes the menu
-# COUNTER-PROOF: this tree with `wminput.popup_outside`, `uipopmenu.pressed_outside` and `uipopmenu.lost_focus` switched off (mutant): the menu survives the outside click, no second menu ever opens.
+# COUNTER-PROOF: this tree with `wminput.popup_outside`, `uipopmenu.pressed_outside` and `uipopmenu.lost_focus` and `uipopmenu.step` switched off (mutant): the menu survives the outside click, no second menu ever opens.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/mutant.sh
@@ -121,7 +121,8 @@ PY
 mkdir -p "$TMPD/new" "$TMPD/old"
 mutant_tree "$BT" kernel/ui/wm/wminput.fi popup_outside "return" &&
     mutant_apply "$BT" kernel/user/uikit/uipopmenu.fi pressed_outside "return false" &&
-    mutant_apply "$BT" kernel/user/uikit/uipopmenu.fi lost_focus "return false" \
+    mutant_apply "$BT" kernel/user/uikit/uipopmenu.fi lost_focus "return false" &&
+    mutant_apply "$BT" kernel/user/uikit/uipopmenu.fi step "return NONE" \
     || { echo "mutant tree failed"; exit 1; }
 run_tree "$ROOT" "$TMPD/new" &
 run_tree "$BT" "$TMPD/old" &
