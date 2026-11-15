@@ -1,6 +1,7 @@
 import sys
 
 COLORS = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255)]
+ALT_COLORS = [(0, 0, 255), (255, 255, 255), (255, 0, 0), (0, 255, 0)]
 MIN_SHARE = 0.9
 
 
@@ -31,7 +32,8 @@ def share(pixels, w, h, qx, qy, color):
 
 def main():
     w, h, pixels = read_ppm(sys.argv[1])
-    shares = [share(pixels, w, h, q % 2, q // 2, COLORS[q]) for q in range(4)]
+    colors = ALT_COLORS if len(sys.argv) > 2 and sys.argv[2] == "alt" else COLORS
+    shares = [share(pixels, w, h, q % 2, q // 2, colors[q]) for q in range(4)]
     text = " ".join("%.3f" % s for s in shares)
     if min(shares) >= MIN_SHARE:
         print("quadrants ok %dx%d %s" % (w, h, text))

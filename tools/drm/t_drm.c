@@ -22,7 +22,8 @@ struct create_dumb { uint32_t height, width, bpp, flags, handle, pitch; uint64_t
 struct map_dumb { uint32_t handle, pad; uint64_t offset; };
 struct fb_cmd2 { uint32_t fb_id, width, height, format, flags, handles[4], pitches[4], offsets[4]; uint64_t modifier[4]; };
 
-static const uint32_t colors[4] = { 0x00FF0000, 0x0000FF00, 0x000000FF, 0x00FFFFFF };
+static uint32_t colors[4] = { 0x00FF0000, 0x0000FF00, 0x000000FF, 0x00FFFFFF };
+static const uint32_t alt_colors[4] = { 0x000000FF, 0x00FFFFFF, 0x00FF0000, 0x0000FF00 };
 
 static void paint(uint32_t *px, uint32_t w, uint32_t h, uint32_t pitch)
 {
@@ -101,6 +102,8 @@ static void check_render_and_reap(void)
 int main(int argc, char **argv)
 {
     int skip_set = argc > 1 && !strcmp(argv[1], "noset");
+    if (argc > 1 && !strcmp(argv[1], "alt"))
+        memcpy(colors, alt_colors, sizeof colors);
     check_nodes();
     int fd = open_card("/dev/dri/card0");
     CHECKC("open_card0", fd >= 0, "x");
