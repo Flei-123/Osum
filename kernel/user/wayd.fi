@@ -57,6 +57,9 @@ const WI_INX: u64 = 16
 const WI_INY: u64 = 17
 const WO_FRAMELESS: u64 = 2
 const WM_MOVE: u64 = 2106
+const WM_STATE: u64 = 2109
+const WS_LAYER: u64 = 0
+const L_POPUP: u64 = 5
 const POPUP_BOTTOM_RESERVE: u64 = 48
 const WM_RETRY_TOPLEVEL: u64 = 600
 const WM_RETRY_POPUP: u64 = 40
@@ -851,7 +854,7 @@ fn surface_commit(c: u64, sid: u64) {
         var opts: u64 = 0
         var tries: u64 = WM_RETRY_TOPLEVEL
         if pop != 0 {
-            xy = popup_window_xy(c, pop, gx, gy)
+            xy = popup_window_xy(c, pop)
             opts = WO_FRAMELESS
             tries = WM_RETRY_POPUP
         } else {
@@ -881,6 +884,7 @@ fn surface_commit(c: u64, sid: u64) {
         obj_set(c, sid, O_A, win)
         n_wins = n_wins + 1
         if pop != 0 {
+            ulib.sys(WM_STATE, win, WS_LAYER, L_POPUP)
             dbg_popup(c, win)
         } else {
             dbg_win(c, win)
@@ -977,18 +981,26 @@ fn sub_obj_of(c: u64, child: u64) -> u64 {
     return 0
 }
 
-fn root_window(c: u64, sid: u64) -> u64 {
+fn root_surface(c: u64, sid: u64) -> u64 {
     var cur: u64 = sid
     var hops: u64 = 0
     while hops < 8 {
         let par: u64 = obj_get(c, cur, O_E)
         if par == 0 {
-            return obj_get(c, cur, O_A)
+            return cur
         }
         cur = par
         hops = hops + 1
     }
     return 0
+}
+
+fn root_window(c: u64, sid: u64) -> u64 {
+    let root: u64 = root_surface(c, sid)
+    if root == 0 {
+        return 0
+    }
+    return obj_get(c, root, O_A)
 }
 
 fn sub_abs(c: u64, sid: u64, want_y: u64) -> i64 {
@@ -1025,7 +1037,10 @@ fn sub_paint(c: u64, child: u64, win: u64) {
     }
     let cw: u64 = ulib.sys(WM_INFO, win, 0, 0)
     let ch: u64 = ulib.sys(WM_INFO, win, 1, 0)
-    blit_sub(win, src, w, h, stride, sub_abs(c, child, 0), sub_abs(c, child, 1), cw, ch)
+    let root: u64 = root_surface(c, child)
+    let ox: i64 = sub_abs(c, child, 0) - (geom_origin(c, root, 0) as i64)
+    let oy: i64 = sub_abs(c, child, 1) - (geom_origin(c, root, 1) as i64)
+    blit_sub(win, src, w, h, stride, ox, oy, cw, ch)
 }
 
 fn sub_paint_all(c: u64, par: u64, win: u64) {
@@ -1402,18 +1417,13 @@ fn parent_window(c: u64, pop: u64) -> u64 {
 fn popup_abs(c: u64, pop: u64) -> u64 {
     var ox: i64 = 0
     var oy: i64 = 0
-    var gx: i64 = 0
-    var gy: i64 = 0
     let pwin: u64 = parent_window(c, pop)
     if pwin != 0 {
         ox = (ulib.sys(WM_INFO, pwin, WI_X, 0) as i64) + (ulib.sys(WM_INFO, pwin, WI_INX, 0) as i64)
         oy = (ulib.sys(WM_INFO, pwin, WI_Y, 0) as i64) + (ulib.sys(WM_INFO, pwin, WI_INY, 0) as i64)
-        let pxs: u64 = obj_get(c, pop, O_B)
-        gx = wl_popup.field(obj_get(c, pxs, O_E), 0)
-        gy = wl_popup.field(obj_get(c, pxs, O_E), 1)
     }
     let rel: u64 = obj_get(c, pop, O_C)
-    return wl_popup.pack4(ox + gx + wl_popup.field(rel, 0), oy + gy + wl_popup.field(rel, 1), 0, 0)
+    return wl_popup.pack4(ox + wl_popup.field(rel, 0), oy + wl_popup.field(rel, 1), 0, 0)
 }
 
 fn popup_place(c: u64, pop: u64, pos: u64) {
@@ -1472,10 +1482,10 @@ fn popup_create(c: u64, xs: u64, argp: u64) {
     popup_configure(c, pid)
 }
 
-fn popup_window_xy(c: u64, pop: u64, gx: u64, gy: u64) -> u64 {
+fn popup_window_xy(c: u64, pop: u64) -> u64 {
     let abs: u64 = popup_abs(c, pop)
-    var x: i64 = wl_popup.field(abs, 0) - (gx as i64)
-    var y: i64 = wl_popup.field(abs, 1) - (gy as i64)
+    var x: i64 = wl_popup.field(abs, 0)
+    var y: i64 = wl_popup.field(abs, 1)
     if x < 0 {
         x = 0
     }
@@ -1581,8 +1591,7 @@ fn on_xdg_popup(c: u64, id: u64, op: u64, argp: u64) {
         popup_configure(c, id)
         let win: u64 = window_of_surface(c, surface_of_xdg(c, obj_get(c, id, O_A)))
         if win != 0 {
-            let sid: u64 = surface_of_xdg(c, obj_get(c, id, O_A))
-            ulib.sys(WM_MOVE, win, popup_window_xy(c, id, geom_origin(c, sid, 0), geom_origin(c, sid, 1)), 0)
+            ulib.sys(WM_MOVE, win, popup_window_xy(c, id), 0)
         }
     }
 }
@@ -1857,10 +1866,17 @@ fn pump_input() {
                             c_outlen[c as usize] = wl_input.on_axis(c, sid, typ == 10, ea + geom_origin(c, sid, 0), eb + geom_origin(c, sid, 1), ec, ob, ol)
                             n_ptr = n_ptr + 1
                         } else if typ == 6 {
-                            c_outlen[c as usize] = wl_input.on_focus(c, sid, ec == 1, ob, ol)
+                            if popup_of(c, sid) == 0 {
+                                c_outlen[c as usize] = wl_input.on_focus(c, sid, ec == 1, ob, ol)
+                            }
                         } else if typ == 5 {
                             let xs: u64 = obj_get(c, sid, O_C)
-                            if xs != 0 {
+                            let closing: u64 = popup_of(c, sid)
+                            if closing != 0 {
+                                if obj_get(c, closing, O_D) == 1 && obj_get(c, closing, O_F) == 0 {
+                                    popup_done(c, closing)
+                                }
+                            } else if xs != 0 {
                                 let tl: u64 = obj_get(c, xs, O_B)
                                 if tl != 0 {
                                     let p: u64 = ev_begin(c, tl, 1)

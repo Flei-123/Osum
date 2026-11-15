@@ -8,13 +8,13 @@ echo 'user_pref("gfx.webrender.software", true);' > /tmp/p/user.js
 echo 'user_pref("browser.shell.checkDefaultBrowser", false);' >> /tmp/p/user.js
 echo 'user_pref("browser.dom.window.dump.enabled", true);' >> /tmp/p/user.js
 cat > /tmp/in.html <<'HTML'
-<html><body style="margin:0"><input id="i" autofocus style="font-size:30px;width:400px"><p id="t" style="position:absolute;top:60px;left:0;margin:0;font-size:30px;white-space:nowrap">alpha beta gamma delta</p><a id="l" href="in.html?nav" style="display:block;height:2000px;background:#eee">link</a><div id="b" style="position:fixed;right:0;bottom:0;width:600px;height:300px;display:none"></div><select id="s" style="display:none;position:absolute;left:560px;top:240px;font-size:30px;z-index:5"><option>a0</option><option>b1</option><option>c2</option><option>d3</option><option>e4</option><option>f5</option></select><div style="height:6000px;background:linear-gradient(#fff,#06c)">tall</div>
+<html><body style="margin:0"><input id="i" autofocus style="font-size:30px;width:400px"><p id="t" style="position:absolute;top:60px;left:0;margin:0;font-size:30px;white-space:nowrap">alpha beta gamma delta</p><a id="l" href="in.html?nav&0,0" style="display:block;height:2000px;background:#eee">link</a><div id="b" style="position:fixed;right:0;bottom:0;width:600px;height:300px;display:none"></div><select id="s" style="display:none;position:absolute;left:560px;top:240px;font-size:30px;z-index:5"><option>a0</option><option>b1</option><option>c2</option><option>d3</option><option>e4</option><option>f5</option></select><div style="height:6000px;background:linear-gradient(#fff,#06c)">tall</div>
 <script>
 addEventListener('keydown', function (e) { dump('FXKEY ' + e.key + ' shift=' + e.shiftKey + '\n'); });
 addEventListener('contextmenu', function (e) { e.preventDefault(); dump('FXCTX ' + e.clientX + ',' + e.clientY + '\n'); });
 addEventListener('mousedown', function (e) { dump('FXDOWN ' + e.button + '\n'); });
 addEventListener('wheel', function (e) { dump('FXWHEEL ' + e.deltaY + ' mode=' + e.deltaMode + '\n'); });
-addEventListener('mousemove', function (e) { dump('FXMOVE ' + e.clientX + ',' + e.clientY + '\n'); });
+addEventListener('mousemove', function (e) { dump('FXMOVE ' + e.clientX + ',' + e.clientY + '\n'); document.getElementById('l').href = 'in.html?nav&' + e.clientX + ',' + e.clientY; });
 addEventListener('scroll', function () { dump('FXSCROLL ' + scrollY + '\n'); });
 addEventListener('click', function (e) { dump('FXCLICK ' + e.clientX + ',' + e.clientY + '\n'); });
 document.getElementById('s').addEventListener('change', function (e) { dump('FXSEL ' + e.target.value + '\n'); });
@@ -23,11 +23,19 @@ document.addEventListener('mousedown', function (e) { dump('FXDOWN ' + e.clientX
 document.addEventListener('mouseup', function () { setTimeout(function () { var s = String(getSelection()); if (s) dump('FXDRAG ' + s + '\n'); }, 50); });
 addEventListener('dblclick', function () { dump('FXDBL ' + getSelection() + '\n'); });
 addEventListener('resize', function () { dump('FXRESIZE ' + innerWidth + 'x' + innerHeight + '\n'); });
-var query = location.search;
+var query = location.search.split('&')[0];
+var anchor = location.search.split('&')[1];
 var marks = { '?nav': ['FXNAV', '#0000c8'], '?u': ['FXURL', '#00c800'] };
 dump('FXLOAD ' + document.getElementsByTagName('div').length + ' h=' + document.body.scrollHeight + '\n');
 dump('FXSIZE ' + innerWidth + 'x' + innerHeight + '\n');
-if (query == '?nav') document.getElementById('s').style.display = 'block';
+if (query == '?nav') {
+    var sel = document.getElementById('s');
+    sel.style.display = 'block';
+    if (anchor) {
+        sel.style.left = (Number(anchor.split(',')[0]) - 10) + 'px';
+        sel.style.top = (Number(anchor.split(',')[1]) - 10) + 'px';
+    }
+}
 if (marks[query]) {
     document.getElementById('b').style.cssText += ';display:block;background:' + marks[query][1];
     dump(marks[query][0] + ' ' + query + '\n');
