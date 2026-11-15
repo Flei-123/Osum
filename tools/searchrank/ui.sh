@@ -83,6 +83,7 @@ run_tree "$TMPD/nol" nol &
 P3=$!
 wait $P1 $P2 $P3
 
+if [ -n "${SEARCHRANKUI_SHOTS:-}" ]; then mkdir -p "$SEARCHRANKUI_SHOTS"; cp "$TMPD"/new/1*.ppm "$TMPD"/new/2*.ppm "$SEARCHRANKUI_SHOTS/" 2>/dev/null; fi
 val() { sed -n "s/^$2=//p" "$1" | head -1; }
 for n in new old nol; do
     S="$TMPD/$n/serial.txt"
