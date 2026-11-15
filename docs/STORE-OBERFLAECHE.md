@@ -68,6 +68,28 @@ Dialog → Ja → „Arbeitet …" → „Fertig: installiert"; Neue Fassung; En
   „aktuell" — die Zeile wurde Buchstabe für Buchstabe ausgewertet, der **letzte** passende Buchstabe gewann. Jetzt
   entscheidet der erste.
 
+## Automatische Updates (Schalter wie bei Google Play)
+
+* **Was `stored` tut** [Quelle + gemessen in `tools/store/run.sh` 4b/4c]: `stored serve` startet alle `autointervall=` Sekunden
+  (Standard 21600, erster Lauf nach höchstens 180 s) `stored work autoupdate`. Das holt den signierten Katalog und
+  **installiert** jedes installierte Programm mit neuerer Version selbst (max. 16 je Runde) — es meldet nicht nur.
+* **Getrennt vom System-Update:** bisher las `stored` den Schalter `auto=` aus `/etc/ota.conf` — denselben, den `ota`
+  für Pakete und System benutzt. Jetzt hat der Store eigene Schlüssel in `/etc/store.conf`:
+
+```
+autoapps=ja|nein       global, Standard ja (fehlt der Schlüssel: an)
+autooff=name1,name2    Programme, die NICHT automatisch aktualisiert werden
+autointervall=21600    Sekunden zwischen zwei Runden (min. 10)
+```
+* **Schalten:** Aktion `store.autoset value=on|off [name=<programm>]` (Stufe `write`, Recht = `installieren=` wie bei
+  `store.install`; `--dry` geht). Ohne `name` der globale Schalter. Der globale Schalter ist auch das Schema-Key
+  `update.apps.auto` (`settings.set`, Datei `/etc/store.conf` Feld `autoapps`).
+* **Anzeigen:** `store.list` liefert `autoapps=0|1` und je Programm ein fünftes Feld (`item=name|ver|größe|state|1`; 0 = aus).
+* **Fenster:** Seite „Updates": Schalter „Apps automatisch aktualisieren" (global). Detailseite eines installierten
+  Programms: Schalter „Automatisch aktualisieren". Einstellungen → Updates: Zeile „Apps automatisch aktualisieren"
+  und eigene Taste, getrennt von „Automatisch laden" (System-Update, `ota.conf`).
+* **Manuell** (`store.update`, „Neue Fassung", „Alle aktualisieren") geht immer, auch bei ausgeschaltetem Schalter.
+
 ## Grenzen (ehrlich)
 
 * **Keine Beschreibung und keine Suche:** das Fenster zeigt Name, Version, Größe, Status; ein Suchfeld gibt es nicht.
