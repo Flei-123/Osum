@@ -39,9 +39,9 @@ open(p, "w").write(s)
 PY
 
 run_tree() { # run_tree <tree> <name> <script> [seed]
-    local extra="/data/"
-    [ -n "${4:-}" ] && extra="$extra /users/justin/config/startlearn=$4@0644"
-    ( cd "$1" && APPS_DIR="$TMPD/apps" EH_ETC_EXTRA="/etc/startuse.conf=$TMPD/startuse.conf@0644" EH_MKFS_EXTRA="$extra" \
+    local home=""
+    [ -n "${4:-}" ] && home="/users/justin/config/startlearn=$4@0644"
+    ( cd "$1" && APPS_DIR="$TMPD/apps" EH_ETC_EXTRA="/etc/startuse.conf=$TMPD/startuse.conf@0644" EH_HOME_EXTRA="$home" \
         DESIGNBUILD="$TMPD/build-$2" bash tools/design/eh6.sh "$TMPD/$2" res=1920x1080 accel=kvm tafel=nein \
         drehbuch="$ROOT/tools/settingssearch/$3" > "$TMPD/$2.log" 2>&1 )
 }
@@ -56,7 +56,7 @@ run_tree "$ROOT" seedoff seed.txt "$TMPD/learn.off" &
 P4=$!
 wait $P1 $P2 $P3 $P4
 
-if [ -n "${SETTINGSSEARCH_SHOTS:-}" ]; then mkdir -p "$SETTINGSSEARCH_SHOTS"; cp "$TMPD"/new/*.ppm "$SETTINGSSEARCH_SHOTS/" 2>/dev/null; fi
+if [ -n "${SETTINGSSEARCH_SHOTS:-}" ]; then mkdir -p "$SETTINGSSEARCH_SHOTS"; cp "$TMPD"/new/*.ppm "$SETTINGSSEARCH_SHOTS/" 2>/dev/null; for n in new old seedon seedoff; do cp "$TMPD/$n/serial.txt" "$SETTINGSSEARCH_SHOTS/$n.serial.txt" 2>/dev/null; done; fi
 best() { # best <run> <marker> <nth> <query>
     python3 -I tools/settingssearch/check.py "$TMPD/$1/serial.txt" "$2" "$3" "$4" | sed -n 's/^best=//p'
 }
