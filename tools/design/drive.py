@@ -9,7 +9,7 @@
     key <name>                sendkey
     photo <name>                 screendump nach <output>/<name>.ppm
     tbbtn<N>        Fensterknopf N         (taskbar: btn i=N ...)
-    jmenue<N>       Zeile N der Sprungliste (taskbar: jumplist n= x= y= w= h=)
+    jmenue<N>       row N of the jump list  (taskbar: jumplist n= x= y= w= h=)
     calrect<N>      button N des Kalenders  (calpop: rect name=N ..., Bildschirmpixel)
     trayrect<NAME>  element NAME of the tray flyout (traypop: rect name=, screen pixels)
     oskrect<NAME>   key NAME of the on-screen keyboard (osk: rect name=), osktrect<NAME> element of the witness window
