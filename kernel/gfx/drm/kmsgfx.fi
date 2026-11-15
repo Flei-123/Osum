@@ -1,0 +1,108 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import arch.arch
+import fs.unixsock
+import gfx.gfx
+import gfx.drm.kmsreg
+
+export { TAG, attach, copy_rows }
+
+const TAG: u64 = 0x67667862
+const CPP: u64 = 4
+const BPP: u64 = 32
+const PAGE: u64 = 4096
+const REFRESH_HZ: u64 = 60
+
+static mut echo_saved: u64 = 0
+static mut owning: u64 = 0
+
+fn k_ready(state: u64) -> bool {
+    return gfx.fb_ready(state) && gfx.fb_bpp(state) == BPP
+}
+
+fn k_width(state: u64) -> u64 {
+    return gfx.width(state)
+}
+
+fn k_height(state: u64) -> u64 {
+    return gfx.height(state)
+}
+
+fn k_refresh(state: u64) -> u64 {
+    return REFRESH_HZ
+}
+
+fn copy_span(state: u64, shm: u64, src_off: u64, dst: u64, n: u64) {
+    var done: u64 = 0
+    while done < n {
+        let off: u64 = src_off + done
+        let in_page: u64 = off % PAGE
+        var chunk: u64 = PAGE - in_page
+        if chunk > n - done {
+            chunk = n - done
+        }
+        let frame: u64 = unixsock.shm_frame(state, shm, off / PAGE)
+        if frame == 0 {
+            return
+        }
+        arch.copy_octets(dst + done, frame + in_page, chunk)
+        done = done + chunk
+    }
+}
+
+fn copy_rows(state: u64, shm: u64, w: u64, h: u64, pitch: u64) {
+    var cols: u64 = w
+    if cols > gfx.width(state) {
+        cols = gfx.width(state)
+    }
+    var rows: u64 = h
+    if rows > gfx.height(state) {
+        rows = gfx.height(state)
+    }
+    let fb_pitch: u64 = gfx.fb_pitch(state)
+    let base: u64 = gfx.fb_draw_at(state)
+    var y: u64 = 0
+    while y < rows {
+        copy_span(state, shm, y * pitch, base + y * fb_pitch, cols * CPP)
+        y = y + 1
+    }
+}
+
+fn k_scanout(state: u64, shm: u64, w: u64, h: u64, pitch: u64) -> bool {
+    if !k_ready(state) {
+        return false
+    }
+    if owning == 0 {
+        owning = 1
+        echo_saved = 0
+        if gfx.console_echo_on(state) {
+            echo_saved = 1
+        }
+        gfx.console_echo(state, false)
+    }
+    copy_rows(state, shm, w, h, pitch)
+    gfx.dirty_all(state)
+    gfx.flush(state)
+    return true
+}
+
+fn k_release(state: u64) {
+    if owning == 0 {
+        return
+    }
+    owning = 0
+    gfx.console_echo(state, echo_saved != 0)
+}
+
+fn attach(state: u64) -> bool {
+    return kmsreg.register(kmsreg.KmsOps {
+        ready: k_ready,
+        width: k_width,
+        height: k_height,
+        refresh: k_refresh,
+        scanout: k_scanout,
+        release: k_release,
+        tag: TAG
+    })
+}

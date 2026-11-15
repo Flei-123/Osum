@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+export { KmsOps, MAX_BACKENDS, NONE, register, unregister, active, ready, width, height, refresh, scanout, release, tag }
+
+const MAX_BACKENDS: u64 = 4
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+
+struct KmsOps {
+    ready: fn(u64) -> bool,
+    width: fn(u64) -> u64,
+    height: fn(u64) -> u64,
+    refresh: fn(u64) -> u64,
+    scanout: fn(u64, u64, u64, u64, u64) -> bool,
+    release: fn(u64),
+    tag: u64
+}
+
+static mut f_ready: [u64; 4] = [0 as u64; 4]
+static mut f_width: [u64; 4] = [0 as u64; 4]
+static mut f_height: [u64; 4] = [0 as u64; 4]
+static mut f_refresh: [u64; 4] = [0 as u64; 4]
+static mut f_scanout: [u64; 4] = [0 as u64; 4]
+static mut f_release: [u64; 4] = [0 as u64; 4]
+static mut f_tag: [u64; 4] = [0 as u64; 4]
+
+fn slot_of(tag: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_BACKENDS {
+        if f_ready[i as usize] != 0 && f_tag[i as usize] == tag {
+            return i
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn register(ops: KmsOps) -> bool {
+    var i: u64 = slot_of(ops.tag)
+    if i == NONE {
+        i = 0
+        while i < MAX_BACKENDS && f_ready[i as usize] != 0 {
+            i = i + 1
+        }
+        if i == MAX_BACKENDS {
+            return false
+        }
+    }
+    f_width[i as usize] = ops.width as u64
+    f_height[i as usize] = ops.height as u64
+    f_refresh[i as usize] = ops.refresh as u64
+    f_scanout[i as usize] = ops.scanout as u64
+    f_release[i as usize] = ops.release as u64
+    f_tag[i as usize] = ops.tag
+    f_ready[i as usize] = ops.ready as u64
+    return true
+}
+
+fn unregister(tag: u64) {
+    let i: u64 = slot_of(tag)
+    if i != NONE {
+        f_ready[i as usize] = 0
+        f_tag[i as usize] = 0
+    }
+}
+
+fn slot_ready(state: u64, i: u64) -> bool {
+    if f_ready[i as usize] == 0 {
+        return false
+    }
+    let call: fn(u64) -> bool = f_ready[i as usize] as fn(u64) -> bool
+    return call(state)
+}
+
+fn active(state: u64) -> u64 {
+    var i: u64 = MAX_BACKENDS
+    while i > 0 {
+        i = i - 1
+        if slot_ready(state, i) {
+            return i
+        }
+    }
+    return NONE
+}
+
+fn ready(state: u64) -> bool {
+    return active(state) != NONE
+}
+
+fn call_u(state: u64, table_value: u64) -> u64 {
+    let call: fn(u64) -> u64 = table_value as fn(u64) -> u64
+    return call(state)
+}
+
+fn width(state: u64) -> u64 {
+    let i: u64 = active(state)
+    if i == NONE {
+        return 0
+    }
+    return call_u(state, f_width[i as usize])
+}
+
+fn height(state: u64) -> u64 {
+    let i: u64 = active(state)
+    if i == NONE {
+        return 0
+    }
+    return call_u(state, f_height[i as usize])
+}
+
+fn refresh(state: u64) -> u64 {
+    let i: u64 = active(state)
+    if i == NONE {
+        return 0
+    }
+    return call_u(state, f_refresh[i as usize])
+}
+
+fn tag(state: u64) -> u64 {
+    let i: u64 = active(state)
+    if i == NONE {
+        return 0
+    }
+    return f_tag[i as usize]
+}
+
+fn scanout(state: u64, shm: u64, w: u64, h: u64, pitch: u64) -> bool {
+    let i: u64 = active(state)
+    if i == NONE {
+        return false
+    }
+    let call: fn(u64, u64, u64, u64, u64) -> bool = f_scanout[i as usize] as fn(u64, u64, u64, u64, u64) -> bool
+    return call(state, shm, w, h, pitch)
+}
+
+fn release(state: u64) {
+    let i: u64 = active(state)
+    if i == NONE {
+        return
+    }
+    let call: fn(u64) = f_release[i as usize] as fn(u64)
+    call(state)
+}

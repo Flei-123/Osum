@@ -31,6 +31,10 @@ import fs.vfscreate
 import fs.mnt
 import fs.vfsops
 import fs.devfs
+import fs.devdri
+import sync.fslock
+import gfx.drm.drmclient
+import gfx.drm.drmgone
 import block.blk
 import fs.jsync
 import fs.wbscope
@@ -692,6 +696,30 @@ fn open_devfb(state: u64, me: u64, flags: u64) -> u64 {
     return fd
 }
 
+fn open_devdri(state: u64, me: u64, flags: u64, render: bool) -> u64 {
+    if (flags & O_DIRECTORY) != 0 {
+        return sysuser.neg(errno.E_NOTDIR)
+    }
+    let fl: u64 = fslock.enter(state)
+    let client: u64 = drmclient.open(state, render)
+    fslock.leave(state, fl)
+    if client == 0 {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let of: u64 = file.open_alloc(state, file.K_DRM, client, flags)
+    if of >= file.MAX_OPEN {
+        drmgone.mark(client)
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    return fd
+}
+
 fn fb_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if !writable(state, of) {
         return sysuser.neg(errno.E_BADF)
@@ -928,6 +956,9 @@ fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64, mode: u64, known
     if vfs.type_of(state, m) == vfsops.FS_DEV {
         if devfs.is_fb(node) {
             return open_devfb(state, me, flags)
+        }
+        if devdri.is_node(node) {
+            return open_devdri(state, me, flags, devdri.is_render(node))
         }
         if devfs.is_tty(node) {
             return open_devtty(state, me, flags)

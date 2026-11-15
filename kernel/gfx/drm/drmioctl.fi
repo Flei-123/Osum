@@ -1,0 +1,164 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.errno
+import sync.fslock
+import sys.sysuser
+import gfx.drm.drmuapi
+import gfx.drm.drmclient
+import gfx.drm.drmcore
+import gfx.drm.drmgem
+import gfx.drm.drmfb
+import gfx.drm.kmsobj
+import gfx.drm.kmscrtc
+
+export { dispatch }
+
+const DIR_WRITE: u64 = 1
+const DIR_READ: u64 = 2
+
+static mut arg_buf: [u8; 128] = [0 as u8; 128]
+
+fn needs_master(nr: u64) -> bool {
+    return nr == drmuapi.NR_SETCRTC || nr == drmuapi.NR_PAGE_FLIP || nr == drmuapi.NR_DIRTYFB
+}
+
+fn render_ok(nr: u64) -> bool {
+    return nr == drmuapi.NR_VERSION || nr == drmuapi.NR_GET_CAP || nr == drmuapi.NR_GEM_CLOSE
+        || nr == drmuapi.NR_SET_CLIENT_CAP
+}
+
+fn handle_core(state: u64, me: u64, c: u64, nr: u64, a: u64) -> u64 {
+    if nr == drmuapi.NR_VERSION {
+        return drmcore.version(state, me, a)
+    }
+    if nr == drmuapi.NR_GET_UNIQUE {
+        return drmcore.get_unique(state, me, a)
+    }
+    if nr == drmuapi.NR_GET_CAP {
+        return drmcore.get_cap(state, a)
+    }
+    if nr == drmuapi.NR_SET_CLIENT_CAP {
+        return drmcore.set_client_cap(state, a)
+    }
+    if nr == drmuapi.NR_SET_MASTER {
+        if drmclient.set_master(c) {
+            return 0
+        }
+        return errno.E_BUSY
+    }
+    if nr == drmuapi.NR_DROP_MASTER {
+        if drmclient.drop_master(c) {
+            return 0
+        }
+        return errno.E_INVAL
+    }
+    if nr == drmuapi.NR_GEM_CLOSE {
+        return drmgem.close(state, c, drmuapi.r32(a))
+    }
+    return errno.E_NOTTY
+}
+
+fn handle_mode(state: u64, me: u64, c: u64, nr: u64, a: u64) -> u64 {
+    if nr == drmuapi.NR_GETRESOURCES {
+        return kmsobj.get_resources(state, me, a)
+    }
+    if nr == drmuapi.NR_GETCONNECTOR {
+        return kmsobj.get_connector(state, me, a)
+    }
+    if nr == drmuapi.NR_GETENCODER {
+        return kmsobj.get_encoder(state, me, a)
+    }
+    if nr == drmuapi.NR_GETCRTC {
+        return kmscrtc.get_crtc(state, a)
+    }
+    if nr == drmuapi.NR_SETCRTC {
+        return kmscrtc.set_crtc(state, a)
+    }
+    if nr == drmuapi.NR_PAGE_FLIP {
+        return kmscrtc.page_flip(state, a)
+    }
+    if nr == drmuapi.NR_DIRTYFB {
+        return kmscrtc.dirty(state, a)
+    }
+    return handle_buffer(state, c, nr, a)
+}
+
+fn handle_buffer(state: u64, c: u64, nr: u64, a: u64) -> u64 {
+    if nr == drmuapi.NR_CREATE_DUMB {
+        return drmgem.create_dumb(state, c, a)
+    }
+    if nr == drmuapi.NR_MAP_DUMB {
+        return drmgem.map_dumb(state, c, a)
+    }
+    if nr == drmuapi.NR_DESTROY_DUMB {
+        return drmgem.close(state, c, drmuapi.r32(a))
+    }
+    if nr == drmuapi.NR_ADDFB {
+        return drmfb.add(state, c, a)
+    }
+    if nr == drmuapi.NR_ADDFB2 {
+        return drmfb.add2(state, c, a)
+    }
+    if nr == drmuapi.NR_RMFB {
+        let id: u64 = drmuapi.r32(a)
+        let r: u64 = drmfb.remove(state, c, id)
+        if r == 0 {
+            kmscrtc.fb_gone(state, id)
+        }
+        return r
+    }
+    return errno.E_NOTTY
+}
+
+fn handle(state: u64, me: u64, c: u64, nr: u64, a: u64) -> u64 {
+    if drmclient.is_render(c) && !render_ok(nr) {
+        return errno.E_ACCES
+    }
+    if needs_master(nr) && !drmclient.is_master(c) {
+        return errno.E_ACCES
+    }
+    if nr < drmuapi.NR_GETRESOURCES {
+        return handle_core(state, me, c, nr, a)
+    }
+    return handle_mode(state, me, c, nr, a)
+}
+
+fn run(state: u64, me: u64, c: u64, req: u64, arg: u64) -> u64 {
+    let size: u64 = (req >> 16) & 0x3FFF
+    let dir: u64 = req >> 30
+    if size > drmuapi.ARG_MAX {
+        return errno.E_INVAL
+    }
+    let a: u64 = (&arg_buf[0]) as u64
+    var i: u64 = 0
+    while i < drmuapi.ARG_MAX {
+        *((a + i) as *mut u8) = 0 as u8
+        i = i + 1
+    }
+    if (dir & DIR_WRITE) != 0 && size != 0 && !sysuser.copy_in(state, me, a, arg, size) {
+        return errno.E_FAULT
+    }
+    let r: u64 = handle(state, me, c, req & 0xFF, a)
+    if r == 0 && (dir & DIR_READ) != 0 && size != 0 && !sysuser.copy_out(state, me, arg, a, size) {
+        return errno.E_FAULT
+    }
+    return r
+}
+
+fn dispatch(state: u64, me: u64, client: u64, req: u64, arg: u64) -> u64 {
+    if ((req >> 8) & 0xFF) != drmuapi.IOC_TYPE {
+        return sysuser.neg(errno.E_NOTTY)
+    }
+    let fl: u64 = fslock.enter(state)
+    drmclient.reap(state)
+    var r: u64 = errno.E_BADF
+    if drmclient.live(client) {
+        r = run(state, me, client, req, arg)
+    }
+    fslock.leave(state, fl)
+    if r == 0 {
+        return 0
+    }
+    return sysuser.neg(r)
+}

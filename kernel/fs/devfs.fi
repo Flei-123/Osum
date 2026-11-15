@@ -19,6 +19,7 @@ import block.wlock
 import bus.drvctlnode
 import fs.procbt
 import diag.tpmdev
+import fs.devdri
 
 export { ops, node_root, D_TTY, D_FB, D_CONSOLE, is_tty, is_fb, rdev_of, is_ptmx, pts_slot, shm_slot, full_path_in_shm, is_sink, zero_fill, D_NULL, D_ZERO }
 
@@ -284,6 +285,10 @@ fn d_lookup(state: u64, m: u64, path: u64) -> u64 {
     if kstate.get8(p) == 0 {
         return D_ROOT
     }
+    let dri: u64 = devdri.lookup(p)
+    if dri != 0 {
+        return dri
+    }
     if kstate.get8(p) == 112 && kstate.get8(p + 1) == 116 && kstate.get8(p + 2) == 115 && kstate.get8(p + 3) == 47 {
         var q: u64 = p + 4
         if kstate.get8(q) == 0 {
@@ -430,6 +435,9 @@ fn d_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
     if dir == D_SHM {
         return shm_readdir(state, index, out)
     }
+    if dir == devdri.D_DRI {
+        return devdri.readdir(index, out)
+    }
     if dir != D_ROOT {
         return 0
     }
@@ -450,7 +458,7 @@ fn d_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
     if node >= D_WLOCK {
         node = D_FULL + node - D_WLOCK
         if node > D_KMSG {
-            return 0
+            return devdri.root_entry(node - D_KMSG - 1, out)
         }
     }
     if !da(state, node) {
@@ -465,7 +473,7 @@ fn d_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
 fn d_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
     tick(state)
     if what == vfsops.A_TYPE {
-        if node == D_ROOT || node == D_PTS || node == D_SHM {
+        if node == D_ROOT || node == D_PTS || node == D_SHM || node == devdri.D_DRI {
             return vfsops.N_DIR
         }
         if shm_slot(node) < unixsock.USHM_PAGED {
@@ -477,7 +485,7 @@ fn d_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
         if is_block(node) {
             return vfsops.N_BLK
         }
-        if node >= 1 && node <= D_LAST {
+        if devdri.is_node(node) || (node >= 1 && node <= D_LAST) {
             return vfsops.N_CHR
         }
         return vfsops.N_NONE
@@ -492,6 +500,9 @@ fn d_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
         return 0
     }
     if what == vfsops.A_MODE {
+        if devdri.owns(node) {
+            return devdri.mode(node)
+        }
         if node == D_SHM {
             return 1023
         }
@@ -519,6 +530,9 @@ fn d_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
     if what == vfsops.A_RDEV {
         if node == D_ROOT {
             return 0
+        }
+        if devdri.owns(node) {
+            return devdri.rdev(node)
         }
         return rdev_of(node)
     }

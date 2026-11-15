@@ -1,0 +1,132 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.errno
+import fs.unixsock
+import gfx.drm.drmuapi
+import gfx.drm.drmgem
+
+export { MAX_FB, NONE, add, add2, remove, find, shm_of, width_of, height_of, pitch_of, drop_client }
+
+const MAX_FB: u64 = 32
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const CPP: u64 = 4
+
+static mut owner: [u64; 32] = [0 as u64; 32]
+static mut shm: [u64; 32] = [0 as u64; 32]
+static mut width: [u64; 32] = [0 as u64; 32]
+static mut height: [u64; 32] = [0 as u64; 32]
+static mut pitch: [u64; 32] = [0 as u64; 32]
+
+fn free_slot() -> u64 {
+    var i: u64 = 0
+    while i < MAX_FB {
+        if owner[i as usize] == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn create(state: u64, client: u64, w: u64, h: u64, p: u64, handle: u64) -> u64 {
+    let g: u64 = drmgem.lookup(client, handle)
+    if g == NONE {
+        return errno.E_NOENT
+    }
+    if w == 0 || h == 0 || p < w * CPP || p * h > drmgem.size_of(g) {
+        return errno.E_INVAL
+    }
+    let slot: u64 = free_slot()
+    if slot == NONE {
+        return errno.E_NOSPC
+    }
+    let s: u64 = drmgem.shm_of(g)
+    unixsock.shm_ref(state, s)
+    owner[slot as usize] = client
+    shm[slot as usize] = s
+    width[slot as usize] = w
+    height[slot as usize] = h
+    pitch[slot as usize] = p
+    return drmuapi.FB_ID_BASE + slot
+}
+
+fn store_id(a: u64, r: u64) -> u64 {
+    if r < drmuapi.FB_ID_BASE {
+        return r
+    }
+    drmuapi.w32(a, r)
+    return 0
+}
+
+fn add(state: u64, client: u64, a: u64) -> u64 {
+    let bpp: u64 = drmuapi.r32(a + 16)
+    if bpp != 32 {
+        return errno.E_INVAL
+    }
+    let r: u64 = create(state, client, drmuapi.r32(a + 4), drmuapi.r32(a + 8), drmuapi.r32(a + 12), drmuapi.r32(a + 24))
+    return store_id(a, r)
+}
+
+fn add2(state: u64, client: u64, a: u64) -> u64 {
+    let fmt: u64 = drmuapi.r32(a + 12)
+    if fmt != drmuapi.FORMAT_XRGB8888 && fmt != drmuapi.FORMAT_ARGB8888 {
+        return errno.E_INVAL
+    }
+    if drmuapi.r32(a + 52) != 0 {
+        return errno.E_INVAL
+    }
+    let r: u64 = create(state, client, drmuapi.r32(a + 4), drmuapi.r32(a + 8), drmuapi.r32(a + 36), drmuapi.r32(a + 20))
+    return store_id(a, r)
+}
+
+fn find(id: u64) -> u64 {
+    if id < drmuapi.FB_ID_BASE || id >= drmuapi.FB_ID_BASE + MAX_FB {
+        return NONE
+    }
+    if owner[(id - drmuapi.FB_ID_BASE) as usize] == 0 {
+        return NONE
+    }
+    return id - drmuapi.FB_ID_BASE
+}
+
+fn release(state: u64, slot: u64) {
+    unixsock.shm_unref(state, shm[slot as usize])
+    owner[slot as usize] = 0
+    shm[slot as usize] = 0
+}
+
+fn remove(state: u64, client: u64, id: u64) -> u64 {
+    let slot: u64 = find(id)
+    if slot == NONE || owner[slot as usize] != client {
+        return errno.E_NOENT
+    }
+    release(state, slot)
+    return 0
+}
+
+fn drop_client(state: u64, client: u64) {
+    var i: u64 = 0
+    while i < MAX_FB {
+        if owner[i as usize] == client {
+            release(state, i)
+        }
+        i = i + 1
+    }
+}
+
+fn shm_of(slot: u64) -> u64 {
+    return shm[slot as usize]
+}
+
+fn width_of(slot: u64) -> u64 {
+    return width[slot as usize]
+}
+
+fn height_of(slot: u64) -> u64 {
+    return height[slot as usize]
+}
+
+fn pitch_of(slot: u64) -> u64 {
+    return pitch[slot as usize]
+}

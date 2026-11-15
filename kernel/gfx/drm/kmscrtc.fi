@@ -1,0 +1,91 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.errno
+import gfx.drm.drmuapi
+import gfx.drm.drmfb
+import gfx.drm.kmsmode
+import gfx.drm.kmsreg
+
+export { get_crtc, set_crtc, page_flip, dirty, fb_gone, current_fb }
+
+const FLIP_EVENT: u64 = 1
+
+static mut crtc_fb: u64 = 0
+
+fn current_fb() -> u64 {
+    return crtc_fb
+}
+
+fn show(state: u64, id: u64) -> u64 {
+    let slot: u64 = drmfb.find(id)
+    if slot == drmfb.NONE {
+        return errno.E_NOENT
+    }
+    if !kmsreg.scanout(state, drmfb.shm_of(slot), drmfb.width_of(slot), drmfb.height_of(slot), drmfb.pitch_of(slot)) {
+        return errno.E_NODEV
+    }
+    crtc_fb = id
+    return 0
+}
+
+fn get_crtc(state: u64, a: u64) -> u64 {
+    if !kmsreg.ready(state) || drmuapi.r32(a + 12) != drmuapi.CRTC_ID {
+        return errno.E_NOENT
+    }
+    drmuapi.w32(a + 16, crtc_fb)
+    drmuapi.w32(a + 20, 0)
+    drmuapi.w32(a + 24, 0)
+    drmuapi.w32(a + 28, 0)
+    if crtc_fb == 0 {
+        drmuapi.w32(a + 32, 0)
+        return 0
+    }
+    drmuapi.w32(a + 32, 1)
+    kmsmode.fill(state, a + 36)
+    return 0
+}
+
+fn set_crtc(state: u64, a: u64) -> u64 {
+    if !kmsreg.ready(state) || drmuapi.r32(a + 12) != drmuapi.CRTC_ID {
+        return errno.E_NOENT
+    }
+    let id: u64 = drmuapi.r32(a + 16)
+    if id == 0 {
+        crtc_fb = 0
+        kmsreg.release(state)
+        return 0
+    }
+    if drmuapi.r32(a + 20) != 0 || drmuapi.r32(a + 24) != 0 {
+        return errno.E_INVAL
+    }
+    return show(state, id)
+}
+
+fn page_flip(state: u64, a: u64) -> u64 {
+    if drmuapi.r32(a) != drmuapi.CRTC_ID || crtc_fb == 0 {
+        return errno.E_INVAL
+    }
+    if (drmuapi.r32(a + 8) & FLIP_EVENT) != 0 {
+        return errno.E_OPNOTSUPP
+    }
+    return show(state, drmuapi.r32(a + 4))
+}
+
+fn dirty(state: u64, a: u64) -> u64 {
+    let id: u64 = drmuapi.r32(a)
+    if drmfb.find(id) == drmfb.NONE {
+        return errno.E_NOENT
+    }
+    if id != crtc_fb {
+        return 0
+    }
+    return show(state, id)
+}
+
+fn fb_gone(state: u64, id: u64) {
+    if crtc_fb == id {
+        crtc_fb = 0
+        kmsreg.release(state)
+    }
+}

@@ -1,0 +1,134 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.errno
+import fs.unixsock
+import gfx.drm.drmuapi
+
+export { MAX_GEM, NONE, create_dumb, map_dumb, close, lookup, shm_of, size_of, drop_client, shm_for_mmap }
+
+const MAX_GEM: u64 = 64
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const PAGE: u64 = 4096
+const PITCH_ALIGN: u64 = 64
+const MAX_SIDE: u64 = 8192
+const MMAP_SHIFT: u64 = 32
+
+static mut owner: [u64; 64] = [0 as u64; 64]
+static mut shm: [u64; 64] = [0 as u64; 64]
+static mut size: [u64; 64] = [0 as u64; 64]
+
+fn align_up(v: u64, a: u64) -> u64 {
+    return (v + a - 1) / a * a
+}
+
+fn free_slot() -> u64 {
+    var i: u64 = 0
+    while i < MAX_GEM {
+        if owner[i as usize] == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn new_object(state: u64, bytes: u64) -> u64 {
+    let s: u64 = unixsock.shm_new_any(state)
+    if s >= unixsock.USHM_MAX {
+        return unixsock.USHM_MAX
+    }
+    if unixsock.shm_grow(state, s, bytes / PAGE) != 0 {
+        unixsock.shm_unref(state, s)
+        return unixsock.USHM_MAX
+    }
+    unixsock.shm_set_size(state, s, bytes)
+    return s
+}
+
+fn create_dumb(state: u64, client: u64, a: u64) -> u64 {
+    let h: u64 = drmuapi.r32(a)
+    let w: u64 = drmuapi.r32(a + 4)
+    let bpp: u64 = drmuapi.r32(a + 8)
+    if w == 0 || h == 0 || w > MAX_SIDE || h > MAX_SIDE || bpp == 0 || bpp > 32 || (bpp & 7) != 0 {
+        return errno.E_INVAL
+    }
+    let slot: u64 = free_slot()
+    if slot == NONE {
+        return errno.E_NOSPC
+    }
+    let pitch: u64 = align_up(w * (bpp / 8), PITCH_ALIGN)
+    let bytes: u64 = align_up(pitch * h, PAGE)
+    let s: u64 = new_object(state, bytes)
+    if s >= unixsock.USHM_MAX {
+        return errno.E_NOMEM
+    }
+    owner[slot as usize] = client
+    shm[slot as usize] = s
+    size[slot as usize] = bytes
+    drmuapi.w32(a + 16, slot + 1)
+    drmuapi.w32(a + 20, pitch)
+    drmuapi.w64(a + 24, bytes)
+    return 0
+}
+
+fn lookup(client: u64, handle: u64) -> u64 {
+    if handle == 0 || handle > MAX_GEM {
+        return NONE
+    }
+    if owner[(handle - 1) as usize] != client {
+        return NONE
+    }
+    return handle - 1
+}
+
+fn shm_of(slot: u64) -> u64 {
+    return shm[slot as usize]
+}
+
+fn size_of(slot: u64) -> u64 {
+    return size[slot as usize]
+}
+
+fn map_dumb(state: u64, client: u64, a: u64) -> u64 {
+    let slot: u64 = lookup(client, drmuapi.r32(a))
+    if slot == NONE {
+        return errno.E_NOENT
+    }
+    drmuapi.w64(a + 8, (slot + 1) << MMAP_SHIFT)
+    return 0
+}
+
+fn release(state: u64, slot: u64) {
+    unixsock.shm_unref(state, shm[slot as usize])
+    owner[slot as usize] = 0
+    shm[slot as usize] = 0
+    size[slot as usize] = 0
+}
+
+fn close(state: u64, client: u64, handle: u64) -> u64 {
+    let slot: u64 = lookup(client, handle)
+    if slot == NONE {
+        return errno.E_NOENT
+    }
+    release(state, slot)
+    return 0
+}
+
+fn drop_client(state: u64, client: u64) {
+    var i: u64 = 0
+    while i < MAX_GEM {
+        if owner[i as usize] == client {
+            release(state, i)
+        }
+        i = i + 1
+    }
+}
+
+fn shm_for_mmap(client: u64, off: u64, len: u64) -> u64 {
+    let slot: u64 = lookup(client, off >> MMAP_SHIFT)
+    if slot == NONE || (off & ((1 << MMAP_SHIFT) - 1)) != 0 || len > size[slot as usize] {
+        return unixsock.USHM_MAX
+    }
+    return shm[slot as usize]
+}

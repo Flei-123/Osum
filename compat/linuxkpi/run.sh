@@ -87,7 +87,7 @@ runvm() {
             kill -0 $pid 2>/dev/null || break
             sleep 0.25; i=$((i+1))
         done
-        $SCREEN dump "$D/$name.sock" "$D/$name.ppm" quit
+        $SCREEN dump "$D/$name.sock" "$D/$name.ppm"
     fi
     wait $pid
     tr -cd '\11\12\15\40-\176' < "$D/o-$name.txt" > "$D/$name.klar"
