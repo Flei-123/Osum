@@ -1,4 +1,4 @@
-# DRM: one GPU interface for Osum (state 15.11.2026, w-drm41)
+# DRM: one GPU interface for Osum (state 15.11.2026, w-drm43)
 
 Goal: one Linux-DRM-uAPI-compatible kernel DRM layer (`kernel/gfx/drm/`). Native Osum drivers AND the linuxkpi shim
 (`compat/linuxkpi/`) register as backends of the same layer; libdrm/Mesa talk to `/dev/dri/card0` + `/dev/dri/renderD128`
@@ -24,7 +24,7 @@ with the standard ioctls. No second DRM implementation.
 - **locking:** run handlers under `sync.fslock.enter/leave` (nestable L_FS) until the fd/handle SMP race fix (r3684, `kernel/sync/fdlock.fi`) lands.
 
 ## 3. Stage 1 cut (one layer, backends registered)
-Module layout `kernel/gfx/drm/` (MIT, small files):
+Module layout `kernel/gfx/drm/` (built, repo licence GPL-2.0-only until the Boss decides):
 | File | Job |
 |---|---|
 | `drmuapi.fi` | ioctl numbers ('d' = 0x64, nr), caps, struct offsets (below) |
@@ -33,9 +33,11 @@ Module layout `kernel/gfx/drm/` (MIT, small files):
 | `drmclient.fi` + `drmgone.fi` | client ids, minor, reap |
 | `drmgem.fi` | handle table -> shm object, size, fake mmap offset, CREATE/MAP/DESTROY_DUMB, GEM_CLOSE |
 | `drmfb.fi` | ADDFB, ADDFB2 (XR24/AR24), RMFB, DIRTYFB |
-| `kmsobj.fi` | crtc/plane/connector/encoder ids, GETRESOURCES, GETCONNECTOR, GETENCODER, GETCRTC, SETCRTC, PAGE_FLIP (+ vblank event via read()) |
-| `kmsreg.fi` | `KmsOps` registry: `ready, width, height, refresh, scanout(fb), flip_done, tag`; one active backend |
-| `kmsgfx.fi` | backend for every display `gfx` drives today (vmode/bochs, virtio-gpu, vmsvga): scanout = copy GEM rows into `gfx.fb_write_bytes` + `gfx.flush` |
+| `kmsobj.fi` | GETRESOURCES, GETCONNECTOR, GETENCODER |
+| `kmscrtc.fi` | GETCRTC, SETCRTC, PAGE_FLIP (no event yet: flag 1 -> EOPNOTSUPP), DIRTYFB, fb_gone |
+| `kmsmode.fi` | modeinfo of the active backend (fake blanking, 60 Hz) |
+| `kmsreg.fi` | `KmsOps` registry (`ready, width, height, refresh, scanout(shm, w, h, pitch), release, tag`), 4 slots, last ready backend wins |
+| `kmsgfx.fi` | backend for every display `gfx` drives (vmode/bochs, virtio-gpu, vmsvga): scanout = copy GEM rows into `gfx.fb_draw_at` + `dirty_all` + `flush`; first scanout turns the console echo off, `release` restores it. Registered lazily at the first DRM open |
 | later: `prime.fi`, `syncobj.fi`, `syncfile.fi` | PRIME fd<->handle (dma-buf as shm fd), syncobj binary + timeline, sync_file |
 
 Shim reuse (no second DRM): add kernel exports `k_kms_register(ops)` / `k_kms_unregister` to `osum_if.h` + `kernel/lib/ksym.fi`. The shim's `drm_dev_register` registers its `drm_device` as a `KmsOps` backend whose dumb_create/fb_create/atomic_commit are the existing `drm_vram.c`/`drm_kms.c` functions; `drm_fbdev.c` stays the boot client only when no userspace master exists. Native backends (`kmsgfx`, later true per-driver KMS for vgpu/vmsvga/intel) register the same struct.
@@ -60,5 +62,6 @@ Shim reuse (no second DRM): add kernel exports `k_kms_register(ops)` / `k_kms_un
 - Stage 2 with the shim backend: `compat/linuxkpi/run.sh` extended: same C test against lkpi-bochs (compat tier) and the native backend (no package).
 
 ## 5. Status
-- Stage 2 groundwork: existing and measured (section 1, `compat/linuxkpi/run.sh`).
-- Stage 1: design + seams above; **no kernel DRM code written yet** (w-drm41 spent the round reading the existing tree after the Boss' note that the shim already exists).
+- Stage 1 built (w-drm43, branch staff/orientos-mwi6u6t9): modules above + `kernel/fs/devdri.fi`; seams: `file.K_DRM` (29) + teardown -> `drmgone.mark`, devfs lookup/readdir/attr (`/dev/dri` dir, rdev 226:0 / 226:128), `sysfd.open_devdri`, `sys.fi` ioctl route by file kind, `sysmem.map_drm` -> `map_shm_obj`. Handlers run under `fslock`.
+- Gate `tools/drm/run.sh` (static musl `t_drm.c`, `-append gfx`, screendump quadrants): 25/0 incl. counter-proofs (no SETCRTC = no picture, render node refused, closed fd reaps handles, bad mmap offset refused).
+- Not yet: fstat of the DRM fd has no rdev (libdrm checks it), no fb listing in GETRESOURCES, no vblank/flip events, no planes/properties/atomic, the kernel desktop is not paused when a master scans out (only the console echo), shim not registered (r3726: Firn fn values vs C function pointers need a C-ABI trampoline in ksym).
