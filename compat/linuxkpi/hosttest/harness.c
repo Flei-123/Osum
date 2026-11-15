@@ -298,6 +298,117 @@ static u32 expected_pixel(u32 x, u32 y, u32 w, u32 h)
 	return x < w / 2 ? COLOR_BL : COLOR_BR;
 }
 
+#define KMS_W 1024
+#define KMS_H 768
+#define KMS_SMALL_W 640
+#define KMS_SMALL_H 480
+
+static struct osum_kms_ops kms_ops;
+static int kms_registered;
+static u32 kms_source[KMS_W * KMS_H] __attribute__((aligned(4096)));
+static u64 kms_source_pitch;
+static u64 kms_source_bytes;
+
+u64 k_kms_register(const struct osum_kms_ops *ops)
+{
+	kms_ops = *ops;
+	kms_registered = 1;
+	return 1;
+}
+
+void k_kms_unregister(u64 tag)
+{
+	if (kms_registered && tag == kms_ops.tag)
+		kms_registered = 0;
+}
+
+u64 k_shm_frame(u64 state, u64 shm, u64 index)
+{
+	(void)state;
+	(void)shm;
+	if (index * PAGE >= kms_source_bytes)
+		return 0;
+	return (u64)kms_source + index * PAGE;
+}
+
+static u64 kms_call1(u64 fn, u64 a)
+{
+	return ((u64 (*)(u64))fn)(a);
+}
+
+static u32 kms_pattern(u32 x, u32 y, u32 salt)
+{
+	return (x * 7 + y * 13 + salt) & 0x00FFFFFF;
+}
+
+static void kms_fill(u32 w, u32 h, u32 salt)
+{
+	u32 x;
+	u32 y;
+
+	kms_source_pitch = (u64)w * 4;
+	kms_source_bytes = kms_source_pitch * h;
+	for (y = 0; y < h; y++) {
+		for (x = 0; x < w; x++)
+			kms_source[y * w + x] = kms_pattern(x, y, salt);
+	}
+}
+
+static s64 kms_mismatches(u32 w, u32 h, u32 salt)
+{
+	u32 vw = reg_read(REG_VIRT_WIDTH);
+	u64 first = ((u64)reg_read(REG_Y_OFFSET) * vw + reg_read(REG_X_OFFSET)) * 4;
+	s64 bad = 0;
+	u32 x;
+	u32 y;
+
+	for (y = 0; y < h; y++) {
+		for (x = 0; x < w; x++) {
+			u32 got = *(volatile u32 *)(vram_area + first + ((u64)y * vw + x) * 4);
+
+			if (got != kms_pattern(x, y, salt))
+				bad++;
+		}
+	}
+	return bad;
+}
+
+static void kms_report(u64 state)
+{
+	u64 ready = 0;
+	u64 width = 0;
+	u64 height = 0;
+	u64 full = 0;
+	u64 small = 0;
+	s64 fullbad = -1;
+	s64 smallbad = -1;
+	u64 (*scan)(u64, u64, u64, u64, u64);
+
+	if (kms_registered) {
+		scan = (u64 (*)(u64, u64, u64, u64, u64))kms_ops.scanout;
+		ready = kms_call1(kms_ops.ready, state);
+		width = kms_call1(kms_ops.width, state);
+		height = kms_call1(kms_ops.height, state);
+		kms_fill(KMS_W, KMS_H, 5);
+		full = scan(state, 1, KMS_W, KMS_H, kms_source_pitch);
+		fullbad = kms_mismatches(KMS_W, KMS_H, 5);
+		kms_fill(KMS_SMALL_W, KMS_SMALL_H, 9);
+		small = scan(state, 1, KMS_SMALL_W, KMS_SMALL_H, kms_source_pitch);
+		smallbad = kms_mismatches(KMS_SMALL_W, KMS_SMALL_H, 9);
+	}
+	out("harness: kms ");
+	out(cur->name);
+	kv("registered", kms_registered);
+	kv("ready", (s64)ready);
+	kv("w", (s64)width);
+	kv("h", (s64)height);
+	kv("full", (s64)full);
+	kv("fullbad", fullbad);
+	kv("small", (s64)small);
+	kv("smallbad", smallbad);
+	out("\n");
+}
+
 static s64 pixel_mismatches(void)
 {
 	u32 w = reg_read(REG_XRES);
@@ -395,7 +506,12 @@ static void run_variant(const struct variant *v)
 	kv("modeset", log_has("lkpi: modeset 1024x768 ok"));
 	kv("denied", (s64)ioremap_denied);
 	out("\n");
+	kms_report(state);
 	driver_module_exit(state);
+	out("harness: kms-exit ");
+	out(v->name);
+	kv("registered", kms_registered);
+	out("\n");
 	shim_module_exit(state);
 	out("harness: exit ");
 	out(v->name);

@@ -23,6 +23,7 @@ int drm_dev_register(struct drm_device *dev, unsigned long flags)
 	if (dev->registered)
 		return -EINVAL;
 	dev->registered = true;
+	lkpi_backend_register(dev);
 	return 0;
 }
 
@@ -74,6 +75,7 @@ void drm_dev_put(struct drm_device *dev)
 
 	if (!dev || --dev->refcount > 0)
 		return;
+	lkpi_backend_unregister(dev);
 	lkpi_fbdev_release(dev);
 	lkpi_kms_release(dev);
 	lkpi_vram_release(dev);

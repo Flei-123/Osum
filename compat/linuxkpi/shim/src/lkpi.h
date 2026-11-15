@@ -19,5 +19,8 @@ void lkpi_vram_destroy_object(struct drm_gem_vram_object *gbo);
 void lkpi_vram_release(struct drm_device *dev);
 void lkpi_kms_release(struct drm_device *dev);
 void lkpi_fbdev_release(struct drm_device *dev);
+bool lkpi_fbdev_target(u8 **base, u32 *width, u32 *height, u32 *pitch);
+void lkpi_backend_register(struct drm_device *dev);
+void lkpi_backend_unregister(struct drm_device *dev);
 
 #endif

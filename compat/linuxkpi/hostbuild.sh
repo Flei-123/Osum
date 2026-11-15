@@ -8,7 +8,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 has() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 . tools/lib/tmpdir.sh
 D=$(mktemp -d); osum_tmp_guard "" "$D"
-fin() { echo "LINUXKPI-HOST: $pass passed, $fail failed"; [ "$fail" -eq 0 ]; exit $?; }
+fin() { [ -n "${LKPI_KEEP:-}" ] && cp "$D"/r-*.txt "$LKPI_KEEP"/ 2>/dev/null; echo "LINUXKPI-HOST: $pass passed, $fail failed"; [ "$fail" -eq 0 ]; exit $?; }
 . compat/linuxkpi/flags.sh
 CC="$LKPI_CC"
 INC=compat/linuxkpi/shim/include
@@ -34,6 +34,10 @@ has "$D/r-bar0min.txt" "xres=800 yres=600 bpp=32 enable=65" "bar0min: 4 MiB BAR 
 has "$D/r-bar0min.txt" "pixbad=0 guard=0 found=1 modeset=0" "bar0min: pixels right, nothing written beyond the BAR"
 has "$D/r-badvendor.txt" "harness: result badvendor shim_rc=0 drv_rc=-19 $NONE" "badvendor: no matching device, no mode set"
 has "$D/r-abi2.txt" "harness: result abi2 shim_rc=-38 drv_rc=-38 $NONE" "abi2: both modules refuse a foreign kernel ABI"
+has "$D/r-ok.txt" "harness: kms ok registered=1 ready=1 w=1024 h=768 full=1 fullbad=0 small=1 smallbad=0" "ok: kms backend registered, scanout copies shm rows into VRAM (full + clipped)"
+has "$D/r-ok.txt" "harness: kms-exit ok registered=0" "ok: kms backend unregistered on driver exit"
+has "$D/r-ok.txt" "lkpi: kms op stack aligned=1" "ok: kms ops entered with a 16-byte aligned stack"
+has "$D/r-badid.txt" "harness: kms badid registered=0" "badid: no kms backend without a device"
 for v in badid bar0small badvendor abi2; do has "$D/r-$v.txt" "open=0 freedenied=0" "$v: no frame left after exit"; done
 cl() { python3 -I compat/linuxkpi/closure.py --header "${3:-$HDR}" --ksym kernel/lib/ksym.fi "${1:-$B/linuxkpi.o}" "${2:-$B/bochs_drv.o}" > "$D/c.txt" 2>&1; }
 mutant() { local rc=$? name=$1 want=$2; if [ "$rc" -ne 0 ] && grep -qF -- "$want" "$D/c.txt"; then ok "closure mutant $name rejected"; else bad "closure mutant $name not rejected"; fi; }
@@ -61,6 +65,9 @@ shim_mutant() {
     grep -qF -- "$good" "$m/r.txt" && bad "shim mutant $name still passes the harness" || ok "shim mutant $name caught by the harness"
 }
 shim_mutant broken-paint drm_fbdev.c 's/color = x < fb->width \/ 2 ? COLOR_TL : COLOR_TR;/color = x < fb->width \/ 2 ? COLOR_TR : COLOR_TL;/' ok "pixbad=0 guard=0 found=1 modeset=1"
+shim_mutant broken-scanout-copy drm_backend.c 's/cols \* BYTES_PER_PIXEL))/cols))/' ok "fullbad=0 small=1 smallbad=0"
+shim_mutant backend-not-registered drm_core.c 's/^\tlkpi_backend_register(dev);//' ok "harness: kms ok registered=1"
+shim_mutant backend-left-registered drm_core.c 's/^\tlkpi_backend_unregister(dev);//' ok "harness: kms-exit ok registered=0"
 shim_mutant removed-abi-check-init shim_main.c 's/k_abi() != OSUM_ABI/0/' abi2 "shim_rc=-38"
 shim_mutant removed-abi-check-probe pci.c 's/k_abi() != OSUM_ABI/0/' abi2 "drv_rc=-38"
 shim_mutant heap-release-leak heap.c 's/^\t\tk_frames_free(arenas\[i\].base, arenas\[i\].frames);/\t\t(void)i;/' ok "harness: exit ok open=0 freedenied=0"

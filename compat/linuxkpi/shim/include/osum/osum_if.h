@@ -23,7 +23,7 @@
 	k_abi k_puts \
 	k_pcicfg_read k_pcicfg_write k_pcibar \
 	k_ioremap k_frames k_frames_free \
-	k_kms_register k_kms_unregister
+	k_kms_register k_kms_unregister k_shm_frame
 
 unsigned long long k_abi(void);
 void k_puts(const char *text);
@@ -46,6 +46,8 @@ struct osum_kms_ops {
 
 unsigned long long k_kms_register(const struct osum_kms_ops *ops);
 void k_kms_unregister(unsigned long long tag);
+unsigned long long k_shm_frame(unsigned long long state, unsigned long long shm,
+			       unsigned long long index);
 
 static inline unsigned long long osum_ctx_read(unsigned long long state,
 					       unsigned long long offset)

@@ -104,6 +104,17 @@ void drm_fbdev_ttm_setup(struct drm_device *dev, unsigned int preferred_bpp)
 		(unsigned int)mode->vdisplay);
 }
 
+bool lkpi_fbdev_target(u8 **base, u32 *width, u32 *height, u32 *pitch)
+{
+	if (!client_fb || !client_gbo)
+		return false;
+	*base = (u8 *)lkpi_vram_map() + client_gbo->offset + client_fb->offsets[0];
+	*width = client_fb->width;
+	*height = client_fb->height;
+	*pitch = client_fb->pitches[0];
+	return true;
+}
+
 void lkpi_fbdev_release(struct drm_device *dev)
 {
 	(void)dev;
