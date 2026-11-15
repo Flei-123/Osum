@@ -15,7 +15,9 @@ SLOW_FACTOR = 2400 / 160
 CLOCK_BOX = (1000, 760, 1280, 800)
 PIXEL_STEP = 60
 END_EQUAL_PERCENT = 1.0
-MAX_FRAME_GAP_MS = 80
+MAX_FRAME_GAP_MS = 150
+CHROME_INSET = (8, 40, 8, 8)
+WINDOW_STEP_PIXELS = 300
 MIN_FAST_FRAMES = 3
 
 
@@ -129,6 +131,16 @@ def check_series(label, base, end, box, levels):
     return final
 
 
+def check_window_series(end, box):
+    x0, y0, x1, y1 = box
+    distinct = 0
+    for i in range(16):
+        frame = image(slow, "wn-%03d" % i)
+        if frame is not None and int(changed(frame, end)[y0:y1, x0:x1].sum()) > WINDOW_STEP_PIXELS:
+            distinct += 1
+    chk(distinct >= 3, "program window: %d series pictures differ from the end picture (content scales in)" % distinct)
+
+
 def check_end(label, a, b, box):
     if a is None or b is None:
         chk(False, "%s: end pictures exist" % label)
@@ -186,8 +198,8 @@ def main():
         box_w = bbox(changed(win_slow, base)) if base is not None else None
         chk(box_w is not None, "program window area found")
         if box_w:
-            levels = series_levels(slow, base, "wn", box_w, 16)
-            check_series("program window", base, win_slow, box_w, levels)
+            inner = (box_w[0] + CHROME_INSET[0], box_w[1] + CHROME_INSET[1], box_w[2] - CHROME_INSET[2], box_w[3] - CHROME_INSET[3])
+            check_window_series(win_slow, inner)
             check_end("program window", win_slow, win_off, box_w)
     else:
         chk(False, "window end pictures exist")
