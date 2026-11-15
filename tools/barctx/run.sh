@@ -3,7 +3,7 @@
 # tools/barctx/run.sh -- right click on the EMPTY task bar opens a context menu (kernel/user/taskbar_ctx.fi, rows from the registry
 # kernel/user/ctxreg.fi): task manager, display settings, settings, plus every `taskbar|label|program` line of /etc/ctxmenu.conf.
 #
-#   [BASE=<rev>] bash tools/barctx/run.sh
+#   bash tools/barctx/run.sh
 #
 # Machine of the stick (tools/design/eh6.sh, 1280x800, bar at the bottom). The image carries a manifest with ONE extra entry.
 #   1. rklick on the empty bar: `taskbar: context empty x= y= w= h= n=4` (3 built-in rows + the manifest row), the picture differs
@@ -11,11 +11,11 @@
 #   2. row 0 (task manager): `context empty w=10`; row 2 (settings): `context empty w=11` and `settings: ready`
 #   3. row 3 (the manifest entry): `context empty w=4096` (EXT_BASE) -- an app registered itself WITHOUT a change of shell code
 #   4. rklick, Escape: the menu closes without a `w=` line
-# COUNTER-PROOF: the tree before the feature (BASE, default fc893814~1 = before the registry) has no menu on the empty bar: no `context empty`, the
+# COUNTER-PROOF: this tree with `taskbar_ctx.open_empty` switched off (mutant) has no menu on the empty bar: no `context empty x=`, the
 # picture after the right click equals the one before.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-. tools/lib/firnenv.sh
+. tools/lib/mutant.sh
 ROOT=$(pwd)
 TMPD=$(mktemp -d)
 BT=$TMPD/base
@@ -56,8 +56,7 @@ foto 04-esc
 EOT
 
 run_tree() { # <tree> <out>
-    ( cd "$1" && firnenv_prepare_old_tree . >/dev/null 2>&1
-      DESIGNBUILD="$2/build" bash tools/design/eh6.sh "$2/o" res=1280x800 accel=kvm progs="$PROGS" \
+    ( cd "$1" && DESIGNBUILD="$2/build" bash tools/design/eh6.sh "$2/o" res=1280x800 accel=kvm progs="$PROGS" \
         drehbuch="$TMPD/dreh.txt" > "$2/o.log" 2>&1 )
 }
 diffpix() { # <a.ppm> <b.ppm> <x> <y> <w> <h>
@@ -85,11 +84,7 @@ PY
 }
 
 mkdir -p "$TMPD/new" "$TMPD/old"
-git worktree add --detach "$BT" "${BASE:-fc893814~1}" >/dev/null 2>&1 || { echo "base worktree failed"; exit 1; }
-# the old tree needs this tree's drive.py (the `bmenue` name) and eh6.sh (EH_ETC_EXTRA); the pictures and trace lines are what differ
-cp -f tools/design/drive.py "$BT/tools/design/drive.py"; cp -f tools/design/eh6.sh "$BT/tools/design/eh6.sh"
-mkdir -p "$BT/tools/mkfsfi"
-printf '#!/usr/bin/env bash\nexec bash %s/tools/mkfsfi/mkfs.sh "$@"\n' "$ROOT" > "$BT/tools/mkfsfi/mkfs.sh"
+mutant_tree "$BT" kernel/user/taskbar_ctx.fi open_empty "return false" || { echo "mutant tree failed"; exit 1; }
 run_tree "$ROOT" "$TMPD/new" &
 run_tree "$BT" "$TMPD/old" &
 wait
@@ -127,12 +122,12 @@ d=$(diffpix "$TMPD/new/o/03-menu2.ppm" "$TMPD/new/o/04-esc.ppm" "$mx" "$my" "$mw
 [ "$d" -gt $((mw * mh / 3)) ] && ok "the second menu is gone after Escape ($d pixels changed)" || bad "the menu survived Escape ($d pixels changed)"
 # COUNTER-PROOF: the tree before has no menu on the empty bar
 if [ ! -s "$TMPD/old/o/01-menu.ppm" ]; then
-    bad "COUNTER-PROOF: no picture of the old tree"
+    bad "COUNTER-PROOF: no picture of the mutant"
 else
-    grep -aq 'taskbar: context empty' "$SO" && bad "COUNTER-PROOF: the old tree has the menu" || ok "COUNTER-PROOF old tree: no 'context empty'"
+    grep -aq 'taskbar: context empty x=' "$SO" && bad "COUNTER-PROOF: the mutant opens the menu" || ok "COUNTER-PROOF mutant: no 'context empty x='"
     d=$(diffpix "$TMPD/old/o/00-before.ppm" "$TMPD/old/o/01-menu.ppm" "$mx" "$my" "$mw" "$mh")
-    [ "$d" -le $((mw * mh / 8)) ] && ok "COUNTER-PROOF old tree: the picture does not change ($d pixels differ)" \
-        || bad "COUNTER-PROOF: the old tree changed $d pixels at the right click"
+    [ "$d" -le $((mw * mh / 8)) ] && ok "COUNTER-PROOF mutant: the picture does not change ($d pixels differ)" \
+        || bad "COUNTER-PROOF: the mutant changed $d pixels at the right click"
 fi
 echo; echo "BARCTX: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

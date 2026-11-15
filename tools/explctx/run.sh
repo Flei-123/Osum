@@ -3,7 +3,7 @@
 # tools/explctx/run.sh -- the file manager's ITEM context menu (right click on a table row) comes from the context registry
 # (kernel/user/ctxreg.fi, context CTX_EXPLORER_ITEM): 15 built-in rows + every `explorer|label|program` line of /etc/ctxmenu.conf.
 #
-#   [BASE=<rev>] bash tools/explctx/run.sh
+#   bash tools/explctx/run.sh
 #
 # Machine of the stick (tools/design/eh6.sh). The image carries a manifest with ONE extra entry (`explorer|Probe entry|/bin/true`).
 #   1. right click on the first table row: `explorer: ctxreg n=16` (15 built-in + the manifest row), `explorer: menurect`
@@ -12,11 +12,10 @@
 #   3. the manifest row (row 15): `explorer: ctx ext start 4096` (EXT_BASE) -- an app registered itself WITHOUT a change of shell code
 #   4. right click, Escape: the menu closes without a further pick
 #   5. right click, row 13 (Properties): `explorer: props` -- a built-in action still runs through ctx_wahl
-# COUNTER-PROOF: the tree before (BASE, default 8760f1af = main before r1352; it only serves this proof, not the pixel compare) has no registry menu: no `ctxreg n=`, the menu is one row (28 px) shorter,
-# and clicking where the probe row would be starts nothing.
+# COUNTER-PROOF: the mutant (this tree with `ctxreg.load_ext` switched off) lists no manifest row (`ctxreg n=15`) and the probe row starts nothing.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-. tools/lib/firnenv.sh
+. tools/lib/mutant.sh
 ROOT=$(pwd)
 TMPD=$(mktemp -d)
 BT=$TMPD/base
@@ -66,8 +65,7 @@ foto 04-props
 EOT
 
 run_tree() { # <tree> <out> [nomanifest]
-    ( cd "$1" && firnenv_prepare_old_tree . >/dev/null 2>&1
-      if [ "${3:-}" = nomanifest ]; then unset EH_ETC_EXTRA; fi
+    ( cd "$1" && if [ "${3:-}" = nomanifest ]; then unset EH_ETC_EXTRA; fi
       DESIGNBUILD="$2/build" bash tools/design/eh6.sh "$2/o" accel=kvm progs="$PROGS" \
         drehbuch="$TMPD/dreh.txt" > "$2/o.log" 2>&1 )
 }
@@ -99,9 +97,7 @@ PY
 }
 
 mkdir -p "$TMPD/new" "$TMPD/old" "$TMPD/ref"
-git worktree add --detach "$BT" "${BASE:-8760f1af}" >/dev/null 2>&1 || { echo "base worktree failed"; exit 1; }
-# the old tree needs this tree's drive.py / eh6.sh (EH_ETC_EXTRA); the pictures and trace lines are what differ
-cp -f tools/design/drive.py "$BT/tools/design/drive.py"; cp -f tools/design/eh6.sh "$BT/tools/design/eh6.sh"
+mutant_tree "$BT" kernel/user/ctxreg.fi load_ext "return" || { echo "mutant tree failed"; exit 1; }
 run_tree "$ROOT" "$TMPD/new" &
 run_tree "$BT" "$TMPD/old" &
 run_tree "$ROOT" "$TMPD/ref" nomanifest &
@@ -149,12 +145,12 @@ n=$(grep -ac '^explorer: ctx ext start' "$S")
 d=$(diffpix "$TMPD/new/o/02-menu2.ppm" "$TMPD/new/o/03-esc.ppm" "$mx" "$my" 150 "$mh")
 [ "$d" -gt $((150 * mh / 3)) ] && ok "the second menu is gone after Escape ($d pixels changed)" || bad "the menu survived Escape ($d pixels changed)"
 grep -aq 'explorer: props ' "$S" && ok "row 13 (Properties) still runs its built-in action" || bad "no 'explorer: props'"
-# COUNTER-PROOF: the old tree has no registry menu and the probe row does nothing
+# COUNTER-PROOF: the mutant (this tree with `ctxreg.load_ext` switched off) lists no manifest row and the probe row does nothing
 if [ ! -s "$TMPD/old/o/01-menu.ppm" ]; then
     bad "COUNTER-PROOF: no picture of the old tree"
 else
-    grep -aq 'explorer: ctxreg' "$SO" && bad "COUNTER-PROOF: the old tree has the registry menu" || ok "COUNTER-PROOF old tree: no 'ctxreg' line"
-    grep -aq 'explorer: ctx ext start' "$SO" && bad "COUNTER-PROOF: the old tree started the probe" || ok "COUNTER-PROOF old tree: the probe row starts nothing"
+    grep -aq 'explorer: ctxreg n=16' "$SO" && bad "COUNTER-PROOF: the mutant still lists the manifest row" || ok "COUNTER-PROOF mutant: no 'ctxreg n=16' (the manifest row is missing)"
+    grep -aq 'explorer: ctx ext start' "$SO" && bad "COUNTER-PROOF: the mutant started the probe" || ok "COUNTER-PROOF mutant: the probe row starts nothing"
 fi
 echo; echo "EXPLCTX: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
