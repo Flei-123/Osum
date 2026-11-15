@@ -110,7 +110,8 @@ check(changed(a6, a7, (640, 640, 900, 780)) > 500, "empty bar menu closed on Esc
 frames = {}
 for ln in lines(r"wm: animf id=\d+ kind=4 layer="):
     m = re.search(r"id=(\d+) kind=4 .* p=(\d+) t=(\d+)", ln)
-    frames.setdefault(m[1], []).append((int(m[2]), int(m[3])))
+    if m:
+        frames.setdefault(m[1], []).append((int(m[2]), int(m[3])))
 gaps = []
 for seq in frames.values():
     gaps += [b[1] - a[1] for a, b in zip(seq, seq[1:]) if b[0] > a[0]]

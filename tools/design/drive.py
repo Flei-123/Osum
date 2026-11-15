@@ -9,6 +9,7 @@
     key <name>                sendkey
     photo <name>                 screendump nach <output>/<name>.ppm
     tbbtn<N>        Fensterknopf N         (taskbar: btn i=N ...)
+    jmenue<N>       Zeile N der Sprungliste (taskbar: jumplist n= x= y= w= h=)
     calrect<N>      button N des Kalenders  (calpop: rect name=N ..., Bildschirmpixel)
     trayrect<NAME>  element NAME of the tray flyout (traypop: rect name=, screen pixels)
     oskrect<NAME>   key NAME of the on-screen keyboard (osk: rect name=), osktrect<NAME> element of the witness window
@@ -666,6 +667,13 @@ class Fahrer:
                 return None
             zh = (int(m.group(4)) - 4) // int(m.group(5))
             return (int(m.group(1)) + 6, int(m.group(2)) + 2 + n * zh, max(8, int(m.group(3)) - 12), zh)
+        if name.startswith("jmenue"):
+            n = int(name[6:])
+            m = last_2(r"taskbar: jumplist n=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            if m is None:
+                return None
+            zh = (int(m.group(5)) - 4) // int(m.group(1))
+            return (int(m.group(2)) + 6, int(m.group(3)) + 2 + n * zh, max(8, int(m.group(4)) - 12), zh)
         if name.startswith("emenue"):
             n = int(name[6:])
             m = last_2(r"explorer: menurect wx=(\d+) wy=(\d+) wh=(\d+)(?: zh=(\d+))?")
