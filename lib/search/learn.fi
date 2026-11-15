@@ -1,0 +1,480 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import search.fold
+
+export {
+    reset, set_enabled, enabled, record, usage_bonus, query_score, is_pinned,
+    top_usage, usage_token, usage_count, parse, serialize,
+    STEP, PIN_SCORE, BONUS_CAP, MAX_FILE,
+}
+
+const MAX_USAGE: u64 = 32
+const MAX_QUERY: u64 = 32
+const TOKEN_BYTES: u64 = 24
+const TOKEN_MAX: u64 = 23
+const PREFIX_BYTES: u64 = 16
+const PREFIX_MAX: u64 = 15
+const STEP: u64 = 1000
+const SCORE_CAP: u64 = 1000000
+const PIN_SCORE: u64 = 1800
+const BONUS_CAP: u64 = 255
+const BONUS_DIVISOR: u64 = 25
+const HALF_LIFE_HOURS: u64 = 168
+const MAX_HALVINGS: u64 = 40
+const MAX_FILE: u64 = 4096
+const HOUR_LIMIT: u64 = 100000000
+const SPACE: u64 = 32
+const NEWLINE: u64 = 10
+
+static mut u_tok: [u8; 768] = [0 as u8; 768]
+static mut u_score: [u64; 32] = [0 as u64; 32]
+static mut u_hour: [u64; 32] = [0 as u64; 32]
+static mut u_n: u64 = 0
+static mut q_pre: [u8; 512] = [0 as u8; 512]
+static mut q_tok: [u8; 768] = [0 as u8; 768]
+static mut q_score: [u64; 32] = [0 as u64; 32]
+static mut q_hour: [u64; 32] = [0 as u64; 32]
+static mut q_n: u64 = 0
+static mut is_on: bool = true
+static mut cursor: u64 = 0
+static mut word: [u8; 32] = [0 as u8; 32]
+static mut folded: [u8; 65] = [0 as u8; 65]
+static mut starts: [u8; 65] = [0 as u8; 65]
+
+fn at(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn u_slot(i: u64) -> u64 {
+    return (&u_tok[0 as usize]) as u64 + i * TOKEN_BYTES
+}
+
+fn qt_slot(i: u64) -> u64 {
+    return (&q_tok[0 as usize]) as u64 + i * TOKEN_BYTES
+}
+
+fn qp_slot(i: u64) -> u64 {
+    return (&q_pre[0 as usize]) as u64 + i * PREFIX_BYTES
+}
+
+fn reset() {
+    u_n = 0
+    q_n = 0
+}
+
+fn set_enabled(on: bool) {
+    is_on = on
+    if !on {
+        reset()
+    }
+}
+
+fn enabled() -> bool {
+    return is_on
+}
+
+fn str_eq(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while at(a, i) == at(b, i) {
+        if at(a, i) == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn copy_limited(dst: u64, src: u64, max: u64) {
+    var n: u64 = 0
+    while n < max && at(src, n) != 0 {
+        *((dst + n) as *mut u8) = at(src, n) as u8
+        n = n + 1
+    }
+    *((dst + n) as *mut u8) = 0 as u8
+}
+
+fn starts_with(text: u64, prefix: u64) -> bool {
+    var i: u64 = 0
+    while at(prefix, i) != 0 {
+        if at(text, i) != at(prefix, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn decayed(score: u64, hour: u64, now: u64) -> u64 {
+    var dh: u64 = 0
+    if now > hour {
+        dh = now - hour
+    }
+    let halvings: u64 = dh / HALF_LIFE_HOURS
+    if halvings >= MAX_HALVINGS {
+        return 0
+    }
+    let rem: u64 = dh % HALF_LIFE_HOURS
+    let base: u64 = score >> halvings
+    return base * (2 * HALF_LIFE_HOURS - rem) / (2 * HALF_LIFE_HOURS)
+}
+
+fn raise(score: u64, hour: u64, now: u64) -> u64 {
+    let v: u64 = decayed(score, hour, now) + STEP
+    if v > SCORE_CAP {
+        return SCORE_CAP
+    }
+    return v
+}
+
+fn weakest_usage(now: u64) -> u64 {
+    var best: u64 = 0
+    var k: u64 = 1
+    while k < u_n {
+        if decayed(u_score[(k) as usize], u_hour[(k) as usize], now)
+            < decayed(u_score[(best) as usize], u_hour[(best) as usize], now) {
+            best = k
+        }
+        k = k + 1
+    }
+    return best
+}
+
+fn bump_usage(token: u64, now: u64) {
+    var k: u64 = 0
+    while k < u_n && !str_eq(u_slot(k), token) {
+        k = k + 1
+    }
+    if k == u_n {
+        if u_n < MAX_USAGE {
+            u_n = u_n + 1
+        } else {
+            k = weakest_usage(now)
+        }
+        copy_limited(u_slot(k), token, TOKEN_MAX)
+        u_score[(k) as usize] = 0
+        u_hour[(k) as usize] = now
+    }
+    u_score[(k) as usize] = raise(u_score[(k) as usize], u_hour[(k) as usize], now)
+    u_hour[(k) as usize] = now
+}
+
+fn weakest_query(now: u64) -> u64 {
+    var best: u64 = 0
+    var k: u64 = 1
+    while k < q_n {
+        if decayed(q_score[(k) as usize], q_hour[(k) as usize], now)
+            < decayed(q_score[(best) as usize], q_hour[(best) as usize], now) {
+            best = k
+        }
+        k = k + 1
+    }
+    return best
+}
+
+fn bump_query(prefix: u64, token: u64, now: u64) {
+    var k: u64 = 0
+    while k < q_n && !(str_eq(qp_slot(k), prefix) && str_eq(qt_slot(k), token)) {
+        k = k + 1
+    }
+    if k == q_n {
+        if q_n < MAX_QUERY {
+            q_n = q_n + 1
+        } else {
+            k = weakest_query(now)
+        }
+        copy_limited(qp_slot(k), prefix, PREFIX_MAX)
+        copy_limited(qt_slot(k), token, TOKEN_MAX)
+        q_score[(k) as usize] = 0
+        q_hour[(k) as usize] = now
+    }
+    q_score[(k) as usize] = raise(q_score[(k) as usize], q_hour[(k) as usize], now)
+    q_hour[(k) as usize] = now
+}
+
+fn record(query: u64, token: u64, now: u64) {
+    if !is_on || at(token, 0) == 0 {
+        return
+    }
+    bump_usage(token, now)
+    let n: u64 = fold.fold(query, (&folded[0 as usize]) as u64, (&starts[0 as usize]) as u64, PREFIX_MAX)
+    if n > 0 {
+        bump_query((&folded[0 as usize]) as u64, token, now)
+    }
+}
+
+fn usage_bonus(token: u64, now: u64) -> u64 {
+    if !is_on {
+        return 0
+    }
+    var k: u64 = 0
+    while k < u_n {
+        if str_eq(u_slot(k), token) {
+            let b: u64 = decayed(u_score[(k) as usize], u_hour[(k) as usize], now) / BONUS_DIVISOR
+            if b > BONUS_CAP {
+                return BONUS_CAP
+            }
+            return b
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+fn query_score(query: u64, token: u64, now: u64) -> u64 {
+    if !is_on {
+        return 0
+    }
+    let n: u64 = fold.fold(query, (&folded[0 as usize]) as u64, (&starts[0 as usize]) as u64, PREFIX_MAX)
+    if n == 0 {
+        return 0
+    }
+    let q: u64 = (&folded[0 as usize]) as u64
+    var best: u64 = 0
+    var k: u64 = 0
+    while k < q_n {
+        if str_eq(qt_slot(k), token) && starts_with(q, qp_slot(k)) {
+            let v: u64 = decayed(q_score[(k) as usize], q_hour[(k) as usize], now)
+            if v > best {
+                best = v
+            }
+        }
+        k = k + 1
+    }
+    return best
+}
+
+fn is_pinned(query: u64, token: u64, now: u64) -> bool {
+    return query_score(query, token, now) >= PIN_SCORE
+}
+
+fn usage_count() -> u64 {
+    return u_n
+}
+
+fn usage_token(i: u64) -> u64 {
+    return u_slot(i)
+}
+
+fn top_usage(out: u64, max: u64, now: u64) -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < u_n && is_on {
+        if decayed(u_score[(k) as usize], u_hour[(k) as usize], now) > 0 {
+            var j: u64 = n
+            while j > 0 && decayed(u_score[(*((out + (j - 1) * 8) as *mut u64)) as usize],
+                u_hour[(*((out + (j - 1) * 8) as *mut u64)) as usize], now)
+                < decayed(u_score[(k) as usize], u_hour[(k) as usize], now) {
+                if j < max {
+                    *((out + j * 8) as *mut u64) = *((out + (j - 1) * 8) as *mut u64)
+                }
+                j = j - 1
+            }
+            if j < max {
+                *((out + j * 8) as *mut u64) = k
+                if n < max {
+                    n = n + 1
+                }
+            }
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn put_num(dst: u64, v: u64) -> u64 {
+    var digits: [u8; 12] = [0 as u8; 12]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        digits[0 as usize] = 48 as u8
+        n = 1
+    }
+    while x > 0 && n < 12 {
+        digits[(n) as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var k: u64 = 0
+    while k < n {
+        *((dst + k) as *mut u8) = digits[(n - 1 - k) as usize]
+        k = k + 1
+    }
+    return n
+}
+
+fn put_str(dst: u64, src: u64) -> u64 {
+    var n: u64 = 0
+    while at(src, n) != 0 {
+        *((dst + n) as *mut u8) = at(src, n) as u8
+        n = n + 1
+    }
+    return n
+}
+
+fn put_char(dst: u64, c: u64) -> u64 {
+    *(dst as *mut u8) = c as u8
+    return 1
+}
+
+fn serialize(buf: u64, cap: u64) -> u64 {
+    var n: u64 = 0
+    if !is_on {
+        n = n + put_char(buf + n, 111)
+        n = n + put_char(buf + n, 102)
+        n = n + put_char(buf + n, 102)
+        n = n + put_char(buf + n, NEWLINE)
+        return n
+    }
+    var k: u64 = 0
+    while k < u_n && n + 80 < cap {
+        n = n + put_char(buf + n, 117)
+        n = n + put_char(buf + n, SPACE)
+        n = n + put_str(buf + n, u_slot(k))
+        n = n + put_char(buf + n, SPACE)
+        n = n + put_num(buf + n, u_score[(k) as usize])
+        n = n + put_char(buf + n, SPACE)
+        n = n + put_num(buf + n, u_hour[(k) as usize])
+        n = n + put_char(buf + n, NEWLINE)
+        k = k + 1
+    }
+    k = 0
+    while k < q_n && n + 80 < cap {
+        n = n + put_char(buf + n, 113)
+        n = n + put_char(buf + n, SPACE)
+        n = n + put_str(buf + n, qp_slot(k))
+        n = n + put_char(buf + n, SPACE)
+        n = n + put_str(buf + n, qt_slot(k))
+        n = n + put_char(buf + n, SPACE)
+        n = n + put_num(buf + n, q_score[(k) as usize])
+        n = n + put_char(buf + n, SPACE)
+        n = n + put_num(buf + n, q_hour[(k) as usize])
+        n = n + put_char(buf + n, NEWLINE)
+        k = k + 1
+    }
+    return n
+}
+
+fn is_token_char(c: u64) -> bool {
+    return (c >= 48 && c <= 57) || (c >= 97 && c <= 122) || c == 45 || c == 46 || c == 95
+}
+
+fn read_word(buf: u64, n: u64) -> u64 {
+    while cursor < n && at(buf, cursor) == SPACE {
+        cursor = cursor + 1
+    }
+    var len: u64 = 0
+    while cursor < n && at(buf, cursor) != SPACE && at(buf, cursor) != NEWLINE {
+        if len < 31 {
+            word[(len) as usize] = at(buf, cursor) as u8
+            len = len + 1
+        }
+        cursor = cursor + 1
+    }
+    word[(len) as usize] = 0 as u8
+    return len
+}
+
+fn read_num(buf: u64, n: u64) -> u64 {
+    let len: u64 = read_word(buf, n)
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < len {
+        let c: u64 = at((&word[0 as usize]) as u64, i)
+        if c < 48 || c > 57 {
+            return 0
+        }
+        if v < HOUR_LIMIT * 100 {
+            v = v * 10 + (c - 48)
+        }
+        i = i + 1
+    }
+    return v
+}
+
+fn word_ok(len: u64) -> bool {
+    if len == 0 {
+        return false
+    }
+    var i: u64 = 0
+    while i < len {
+        if !is_token_char(at((&word[0 as usize]) as u64, i)) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn skip_line(buf: u64, n: u64) {
+    while cursor < n && at(buf, cursor) != NEWLINE {
+        cursor = cursor + 1
+    }
+    if cursor < n {
+        cursor = cursor + 1
+    }
+}
+
+fn clamp_score(v: u64) -> u64 {
+    if v > SCORE_CAP {
+        return SCORE_CAP
+    }
+    return v
+}
+
+fn parse_usage(buf: u64, n: u64) {
+    var tok: [u8; 32] = [0 as u8; 32]
+    let tl: u64 = read_word(buf, n)
+    if !word_ok(tl) || tl > TOKEN_MAX || u_n >= MAX_USAGE {
+        return
+    }
+    copy_limited((&tok[0 as usize]) as u64, (&word[0 as usize]) as u64, TOKEN_MAX)
+    let score: u64 = read_num(buf, n)
+    let hour: u64 = read_num(buf, n)
+    copy_limited(u_slot(u_n), (&tok[0 as usize]) as u64, TOKEN_MAX)
+    u_score[(u_n) as usize] = clamp_score(score)
+    u_hour[(u_n) as usize] = hour
+    u_n = u_n + 1
+}
+
+fn parse_query(buf: u64, n: u64) {
+    var pre: [u8; 32] = [0 as u8; 32]
+    var tok: [u8; 32] = [0 as u8; 32]
+    let pl: u64 = read_word(buf, n)
+    if !word_ok(pl) || pl > PREFIX_MAX {
+        return
+    }
+    copy_limited((&pre[0 as usize]) as u64, (&word[0 as usize]) as u64, PREFIX_MAX)
+    let tl: u64 = read_word(buf, n)
+    if !word_ok(tl) || tl > TOKEN_MAX || q_n >= MAX_QUERY {
+        return
+    }
+    copy_limited((&tok[0 as usize]) as u64, (&word[0 as usize]) as u64, TOKEN_MAX)
+    let score: u64 = read_num(buf, n)
+    let hour: u64 = read_num(buf, n)
+    copy_limited(qp_slot(q_n), (&pre[0 as usize]) as u64, PREFIX_MAX)
+    copy_limited(qt_slot(q_n), (&tok[0 as usize]) as u64, TOKEN_MAX)
+    q_score[(q_n) as usize] = clamp_score(score)
+    q_hour[(q_n) as usize] = hour
+    q_n = q_n + 1
+}
+
+fn parse(buf: u64, n: u64) {
+    reset()
+    is_on = true
+    cursor = 0
+    var limit: u64 = n
+    if limit > MAX_FILE {
+        limit = MAX_FILE
+    }
+    while cursor < limit {
+        let kind_len: u64 = read_word(buf, limit)
+        let kind: u64 = at((&word[0 as usize]) as u64, 0)
+        if kind_len == 1 && kind == 117 {
+            parse_usage(buf, limit)
+        } else if kind_len == 1 && kind == 113 {
+            parse_query(buf, limit)
+        } else if kind_len == 3 && kind == 111 {
+            is_on = false
+        }
+        skip_line(buf, limit)
+    }
+}
