@@ -1,43 +1,39 @@
 #include <linux/skbuff.h>
 #include <osum/lkpi80211.h>
 
-#define SKB_POOL_COUNT 64
+#define SKB_LIVE_MAX 64
 #define SKB_DATA_BYTES 2048
+#define SKB_MAGIC_LIVE 0x5b6b0001u
+#define SKB_MAGIC_FREED 0x5b6bdead
+#define SKB_HEAD_ALIGN 16
 
-static struct sk_buff pool[SKB_POOL_COUNT];
-static u8 pool_data[SKB_POOL_COUNT][SKB_DATA_BYTES] __attribute__((aligned(16)));
-static u32 pool_free = SKB_POOL_COUNT;
+static u32 live;
 static u32 errors;
 
 struct sk_buff *alloc_skb(unsigned int size, gfp_t priority)
 {
-	u32 i;
+	struct sk_buff *skb;
+	u8 *base;
 
 	(void)priority;
-	if (size > SKB_DATA_BYTES) {
+	if (size > SKB_DATA_BYTES || live >= SKB_LIVE_MAX) {
 		errors++;
 		return NULL;
 	}
-	for (i = 0; i < SKB_POOL_COUNT; i++) {
-		struct sk_buff *skb = &pool[i];
-
-		if (skb->in_use)
-			continue;
-		skb->next = NULL;
-		skb->head = pool_data[i];
-		skb->data = skb->head;
-		skb->tail = skb->head;
-		skb->end = skb->head + size;
-		skb->len = 0;
-		skb->queue_mapping = 0;
-		skb->in_use = 1;
-		for (u32 c = 0; c < SKB_CB_SIZE; c++)
-			skb->cb[c] = 0;
-		pool_free--;
-		return skb;
+	skb = kzalloc(sizeof(*skb) + SKB_HEAD_ALIGN + size, GFP_KERNEL);
+	if (!skb) {
+		errors++;
+		return NULL;
 	}
-	errors++;
-	return NULL;
+	base = (u8 *)ALIGN((u64)(skb + 1), SKB_HEAD_ALIGN);
+	skb->head = base;
+	skb->data = base;
+	skb->tail = base;
+	skb->end = base + size;
+	skb->in_use = 1;
+	skb->magic = SKB_MAGIC_LIVE;
+	live++;
+	return skb;
 }
 
 struct sk_buff *dev_alloc_skb(unsigned int length)
@@ -49,12 +45,14 @@ void kfree_skb(struct sk_buff *skb)
 {
 	if (!skb)
 		return;
-	if (!skb->in_use) {
+	if (!skb->in_use || skb->magic != SKB_MAGIC_LIVE) {
 		errors++;
 		return;
 	}
 	skb->in_use = 0;
-	pool_free++;
+	skb->magic = SKB_MAGIC_FREED;
+	live--;
+	kfree(skb);
 }
 
 void dev_kfree_skb(struct sk_buff *skb)
@@ -156,12 +154,12 @@ u32 skb_queue_len(const struct sk_buff_head *list)
 
 u32 lkpi_skb_free_count(void)
 {
-	return pool_free;
+	return SKB_LIVE_MAX - live;
 }
 
 u32 lkpi_skb_pool_size(void)
 {
-	return SKB_POOL_COUNT;
+	return SKB_LIVE_MAX;
 }
 
 u32 lkpi_skb_error_count(void)

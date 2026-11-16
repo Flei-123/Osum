@@ -23,7 +23,8 @@
 	k_abi k_puts \
 	k_pcicfg_read k_pcicfg_write k_pcibar \
 	k_ioremap k_frames k_frames_free \
-	k_kms_register k_kms_unregister k_shm_frame
+	k_kms_register k_kms_unregister k_shm_frame \
+	k_wifi_register k_wifi_unregister k_wifi_hw
 
 unsigned long long k_abi(void);
 void k_puts(const char *text);
@@ -48,6 +49,31 @@ unsigned long long k_kms_register(const struct osum_kms_ops *ops);
 void k_kms_unregister(unsigned long long tag);
 unsigned long long k_shm_frame(unsigned long long state, unsigned long long shm,
 			       unsigned long long index);
+
+#define OSUM_WIFI_HW_RESET 1ULL
+#define OSUM_WIFI_HW_TX 2ULL
+#define OSUM_WIFI_HW_RESP 3ULL
+#define OSUM_WIFI_HW_NETS 4ULL
+#define OSUM_WIFI_HW_BEACON 5ULL
+
+struct osum_wifi_ops {
+	unsigned long long ready;
+	unsigned long long tx;
+	unsigned long long rx_take;
+	unsigned long long set_channel;
+	unsigned long long op;
+	unsigned long long bssid_set;
+	unsigned long long addr_set;
+	unsigned long long aid_set;
+	unsigned long long scan_state;
+	unsigned long long rssi;
+	unsigned long long tag;
+};
+
+unsigned long long k_wifi_register(const struct osum_wifi_ops *ops);
+void k_wifi_unregister(unsigned long long tag);
+unsigned long long k_wifi_hw(unsigned long long op, unsigned long long a, unsigned long long b,
+			     unsigned long long c);
 
 static inline unsigned long long osum_ctx_read(unsigned long long state,
 					       unsigned long long offset)

@@ -70,9 +70,9 @@ wmutant keymap wifi_dispatch.c "arg == MACPLAN_KEY_SET_PAIRWISE || arg == MACPLA
 wmutant qosmap wifi_dispatch.c "changed = BSS_CHANGED_QOS;" "changed = BSS_CHANGED_BSSID;"
 wmutant assocflag wifi_dispatch.c "bss_conf.assoc = w->state.sta_state >= IEEE80211_STA_ASSOC;" "bss_conf.assoc = 1;"
 wmutant acdrop wifi_dispatch.c "0, arg, &params);" "0, 0, &params);"
-wmutant skbleak wifi_skb.c "	skb->in_use = 0;
-	pool_free++;" "	skb->in_use = 0;"
-wmutant doublefree wifi_skb.c "if (!skb->in_use) {" "if (0) {"
+wmutant skbleak wifi_skb.c "	live--;
+	kfree(skb);" "	kfree(skb);"
+wmutant doublefree wifi_skb.c "if (!skb->in_use || skb->magic != SKB_MAGIC_LIVE) {" "if (0) {"
 wmutant scanguard wifi_upcall.c "if (!w->state.scanning)
 		return;" "if (0)
 		return;"

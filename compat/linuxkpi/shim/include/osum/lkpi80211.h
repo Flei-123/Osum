@@ -31,6 +31,8 @@ void lkpi80211_set_upcalls(struct ieee80211_hw *hw, const struct lkpi80211_upcal
 int lkpi80211_apply(struct ieee80211_hw *hw, const u64 *ops, u32 count);
 int lkpi80211_tx(struct ieee80211_hw *hw, struct sk_buff *skb);
 void lkpi80211_state_get(const struct ieee80211_hw *hw, struct lkpi80211_state *out);
+int lkpi_wifi_glue_attach(struct ieee80211_hw *hw, void (*poll)(struct ieee80211_hw *hw));
+void lkpi_wifi_glue_detach(void);
 u32 lkpi_skb_free_count(void);
 u32 lkpi_skb_pool_size(void);
 u32 lkpi_skb_error_count(void);

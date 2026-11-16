@@ -15,6 +15,7 @@ struct sk_buff {
 	u32 len;
 	u16 queue_mapping;
 	u8 in_use;
+	u32 magic;
 	char cb[SKB_CB_SIZE] __attribute__((aligned(8)));
 };
 
