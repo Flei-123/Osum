@@ -76,7 +76,7 @@ mkimg() {
 runvm() {
     local name=$1
     timeout 300 qemu-system-x86_64 -accel "$ACC" -smp 1 -kernel "$D/k0.img" -m 512 \
-        -append "osum vfs script=sh /t/s.sh;exit" \
+        -append "osum vfs nic script=sh /t/s.sh;exit" \
         -serial "file:$D/o-$name.txt" -display none -no-reboot -nic none -device edu \
         -drive "file=$D/d-$name.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
