@@ -1038,24 +1038,91 @@ fn ways(state: u64) -> u64 {
 
 // LA-9: STREAM BUFFER. File data read by `fs.read_at` goes through ONE read-ahead buffer of S_SECTORS sectors (one DMA command per 16 KiB instead of one
 // per 4 KiB way). Allocated lazily; any write drops it (`cache_drop`/`cache_invalidate`). ATA and AHCI only, everything else reads as before.
-const S_DATA: u64 = 0x268 // address of the buffer, 0 = not (yet) there
 const S_TRIED: u64 = 0x270
-const S_VALID: u64 = 0x278
-const S_LBA: u64 = 0x280
-const S_N: u64 = 0x288
-const S_DEV: u64 = 0x290
 const S_SECTORS: u64 = 32
 const S_SECTORS_WIDE: u64 = 128
+const S_SLOTS: u64 = 4
+const SL_BASE: u64 = 0x300
+const SL_STRIDE: u64 = 0x30
+const SL_DATA: u64 = 0x00
+const SL_VALID: u64 = 0x08
+const SL_LBA: u64 = 0x10
+const SL_N: u64 = 0x18
+const SL_DEV: u64 = 0x20
+const SL_USED: u64 = 0x28
+const SL_CLOCK: u64 = 0x2E0
+
+#[inline]
+fn sg(state: u64, slot: u64, off: u64) -> u64 {
+    return cg(state, SL_BASE + slot * SL_STRIDE + off)
+}
+
+#[inline]
+fn ss(state: u64, slot: u64, off: u64, v: u64) {
+    cs(state, SL_BASE + slot * SL_STRIDE + off, v)
+}
 
 fn stream_grow(state: u64) {
     if cg(state, S_TRIED) != 0 || kstate.get(state, kstate.BITMAP) == 0 {
         return
     }
     cs(state, S_TRIED, 1)
-    let b: u64 = mmframe.frame_run(state, S_SECTORS_WIDE * BLOCK_SIZE / 4096)
-    if b != 0 {
-        cs(state, S_DATA, b)
+    var i: u64 = 0
+    while i < S_SLOTS {
+        let b: u64 = mmframe.frame_run(state, S_SECTORS_WIDE * BLOCK_SIZE / 4096)
+        if b != 0 {
+            ss(state, i, SL_DATA, b)
+        }
+        i = i + 1
     }
+}
+
+fn stream_drop(state: u64) {
+    var i: u64 = 0
+    while i < S_SLOTS {
+        ss(state, i, SL_VALID, 0)
+        i = i + 1
+    }
+}
+
+fn stream_find(state: u64, dev: u64, abs: u64) -> u64 {
+    var i: u64 = 0
+    while i < S_SLOTS {
+        if sg(state, i, SL_VALID) == 1 && sg(state, i, SL_DEV) == dev {
+            let c0: u64 = sg(state, i, SL_LBA)
+            if abs >= c0 && abs < c0 + sg(state, i, SL_N) {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return S_SLOTS
+}
+
+fn stream_victim(state: u64, dev: u64, abs: u64) -> u64 {
+    var best: u64 = S_SLOTS
+    var best_used: u64 = 0
+    var i: u64 = 0
+    while i < S_SLOTS {
+        if sg(state, i, SL_DATA) != 0 {
+            if sg(state, i, SL_VALID) == 1 && sg(state, i, SL_DEV) == dev && sg(state, i, SL_LBA) + sg(state, i, SL_N) == abs {
+                return i
+            }
+            let used: u64 = sg(state, i, SL_USED)
+            if best == S_SLOTS || used < best_used {
+                best = i
+                best_used = used
+            }
+        }
+        i = i + 1
+    }
+    return best
+}
+
+fn stream_touch(state: u64, slot: u64) {
+    let c: u64 = cg(state, SL_CLOCK) + 1
+    cs(state, SL_CLOCK, c)
+    ss(state, slot, SL_USED, c)
 }
 
 fn read_stream(state: u64, lba: u64, dst: u64) -> bool {
@@ -1078,18 +1145,18 @@ fn read_stream_held(state: u64, lba: u64, dst: u64, span: u64) -> bool {
         return read(state, lba, dst)
     }
     let abs: u64 = lba + kstate.get(state, kstate.DISK_FIRST)
-    if cg(state, S_VALID) == 1 && cg(state, S_DEV) == dv {
-        let c0: u64 = cg(state, S_LBA)
-        if abs >= c0 && abs < c0 + cg(state, S_N) {
-            copy(cg(state, S_DATA) + (abs - c0) * BLOCK_SIZE, dst)
-            return true
-        }
+    let hit: u64 = stream_find(state, dv, abs)
+    if hit != S_SLOTS {
+        copy(sg(state, hit, SL_DATA) + (abs - sg(state, hit, SL_LBA)) * BLOCK_SIZE, dst)
+        stream_touch(state, hit)
+        return true
     }
     stream_grow(state)
-    let buf: u64 = cg(state, S_DATA)
-    if buf == 0 {
+    let slot: u64 = stream_victim(state, dv, abs)
+    if slot == S_SLOTS {
         return read(state, lba, dst)
     }
+    let buf: u64 = sg(state, slot, SL_DATA)
     dma_up(state)
     let dirty: bool = cg(state, W_DIRTY) != 0
     if dirty && cg(state, W_DEPTH) != 0 {
@@ -1100,17 +1167,18 @@ fn read_stream_held(state: u64, lba: u64, dst: u64, span: u64) -> bool {
     if ende > abs && ende - abs < n {
         n = ende - abs
     }
-    cs(state, S_VALID, 0)
+    ss(state, slot, SL_VALID, 0)
     if !dev_read_run(state, dv, abs, n, buf) {
         return read(state, lba, dst)
     }
     if dirty {
         wb_overlay(state, dv, abs, n, buf)
     }
-    cs(state, S_LBA, abs)
-    cs(state, S_N, n)
-    cs(state, S_DEV, dv)
-    cs(state, S_VALID, 1)
+    ss(state, slot, SL_LBA, abs)
+    ss(state, slot, SL_N, n)
+    ss(state, slot, SL_DEV, dv)
+    ss(state, slot, SL_VALID, 1)
+    stream_touch(state, slot)
     copy(buf, dst)
     return true
 }
@@ -1134,7 +1202,7 @@ fn cache_grow(state: u64) {
 }
 
 fn cache_invalidate(state: u64) {
-    cs(state, S_VALID, 0)
+    stream_drop(state)
     blkindex.reset_devs()
     let total: u64 = ways(state)
     let xb: u64 = cg(state, C_XDATA)
@@ -1166,7 +1234,7 @@ fn drop_foreign_ways(state: u64, dev: u64) {
 }
 
 fn cache_drop(state: u64, dev: u64, lba: u64) {
-    cs(state, S_VALID, 0)
+    stream_drop(state)
     if blkindex.foreign(dev) {
         drop_foreign_ways(state, dev)
     }
@@ -1182,11 +1250,15 @@ fn cache_drop(state: u64, dev: u64, lba: u64) {
 }
 
 fn cache_put(state: u64, dev: u64, lba: u64, src: u64) {
-    if cg(state, S_VALID) != 0 {
-        let s0: u64 = cg(state, S_LBA)
-        if cg(state, S_DEV) == dev && lba >= s0 && lba < s0 + cg(state, S_N) {
-            copy(src, cg(state, S_DATA) + (lba - s0) * BLOCK_SIZE)
+    var si: u64 = 0
+    while si < S_SLOTS {
+        if sg(state, si, SL_VALID) != 0 && sg(state, si, SL_DEV) == dev {
+            let s0: u64 = sg(state, si, SL_LBA)
+            if lba >= s0 && lba < s0 + sg(state, si, SL_N) {
+                copy(src, sg(state, si, SL_DATA) + (lba - s0) * BLOCK_SIZE)
+            }
         }
+        si = si + 1
     }
     if blkindex.foreign(dev) {
         drop_foreign_ways(state, dev)
@@ -1223,20 +1295,24 @@ fn cache_put_overlap(state: u64, xb: u64, w: u64, dev: u64, lba: u64, src: u64, 
 }
 
 fn cache_put_span(state: u64, dev: u64, lba: u64, src: u64, n: u64) {
-    if cg(state, S_VALID) != 0 && cg(state, S_DEV) == dev {
-        let s0: u64 = cg(state, S_LBA)
-        let s1: u64 = s0 + cg(state, S_N)
-        var lo: u64 = lba
-        var hi: u64 = lba + n
-        if s0 > lo {
-            lo = s0
+    var si: u64 = 0
+    while si < S_SLOTS {
+        if sg(state, si, SL_VALID) != 0 && sg(state, si, SL_DEV) == dev {
+            let s0: u64 = sg(state, si, SL_LBA)
+            let s1: u64 = s0 + sg(state, si, SL_N)
+            var lo: u64 = lba
+            var hi: u64 = lba + n
+            if s0 > lo {
+                lo = s0
+            }
+            if s1 < hi {
+                hi = s1
+            }
+            if lo < hi {
+                arch.copy_words(sg(state, si, SL_DATA) + (lo - s0) * BLOCK_SIZE, src + (lo - lba) * BLOCK_SIZE, (hi - lo) * (BLOCK_SIZE / 8))
+            }
         }
-        if s1 < hi {
-            hi = s1
-        }
-        if lo < hi {
-            arch.copy_words(cg(state, S_DATA) + (lo - s0) * BLOCK_SIZE, src + (lo - lba) * BLOCK_SIZE, (hi - lo) * (BLOCK_SIZE / 8))
-        }
+        si = si + 1
     }
     if blkindex.foreign(dev) {
         drop_foreign_ways(state, dev)
