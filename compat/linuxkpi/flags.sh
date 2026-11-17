@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0-only
 LKPI_SHIM_SOURCES="heap string printk resource pci drm_core drm_kms drm_vram drm_fbdev drm_backend shim_main"
 LKPI_WIFI_SOURCES="wifi_skb wifi_hw wifi_dispatch wifi_upcall"
+LKPI_WIFI_MODULE_SOURCES="heap string printk wifi_skb wifi_hw wifi_dispatch wifi_upcall wifi_glue shim_main"
+LKPI_WIFI_DRIVER_SOURCES="wifi_fake wifi_drvmain"
 LKPI_CC="${CC:-gcc-12}"
 command -v "$LKPI_CC" >/dev/null 2>&1 || LKPI_CC=gcc
 

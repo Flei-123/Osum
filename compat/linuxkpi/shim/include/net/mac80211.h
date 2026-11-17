@@ -46,6 +46,7 @@ struct ieee80211_bss_conf {
 	u8 bssid[ETH_ALEN];
 	bool qos;
 	bool assoc;
+	u16 aid;
 };
 
 struct ieee80211_vif {

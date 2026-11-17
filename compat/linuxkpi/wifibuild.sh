@@ -7,5 +7,6 @@ build_wifi() {
         objs+=("$out.$n.o")
     done
     "$LKPI_CC" "${LKPI_CFLAGS[@]}" -I"$shim/src" -c compat/linuxkpi/hosttest/wifi_harness.c -o "$out.harness.o" || return 1
-    ld -static -nostdlib -e _start -o "$out" "$out.harness.o" "${objs[@]}"
+    "$LKPI_CC" "${LKPI_CFLAGS[@]}" -c compat/linuxkpi/hosttest/wifi_heap_stub.c -o "$out.heap.o" || return 1
+    ld -static -nostdlib -e _start -o "$out" "$out.harness.o" "$out.heap.o" "${objs[@]}"
 }

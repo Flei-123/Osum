@@ -1,45 +1,30 @@
 #include "wifi.h"
 
-static struct lkpi_wifi_hw slots[LKPI_WIFI_HW_SLOTS];
-
 struct lkpi_wifi_hw *lkpi_wifi_of(const struct ieee80211_hw *hw)
 {
 	return (struct lkpi_wifi_hw *)hw;
 }
 
-static void zero(void *ptr, size_t size)
-{
-	u8 *p = ptr;
-
-	while (size--)
-		*p++ = 0;
-}
-
 struct ieee80211_hw *ieee80211_alloc_hw(size_t priv_data_len, const struct ieee80211_ops *ops)
 {
-	u32 i;
+	struct lkpi_wifi_hw *w;
 
 	if (!ops || priv_data_len > LKPI_WIFI_PRIV_MAX)
 		return NULL;
-	for (i = 0; i < LKPI_WIFI_HW_SLOTS; i++) {
-		struct lkpi_wifi_hw *w = &slots[i];
-
-		if (w->used)
-			continue;
-		zero(w, sizeof(*w));
-		w->used = 1;
-		w->hw.ops = ops;
-		w->hw.priv = w->priv;
-		w->hw.queues = 1;
-		return &w->hw;
-	}
-	return NULL;
+	w = kzalloc(sizeof(*w), GFP_KERNEL);
+	if (!w)
+		return NULL;
+	w->used = 1;
+	w->hw.ops = ops;
+	w->hw.priv = w->priv;
+	w->hw.queues = 1;
+	return &w->hw;
 }
 
 void ieee80211_free_hw(struct ieee80211_hw *hw)
 {
 	if (hw)
-		lkpi_wifi_of(hw)->used = 0;
+		kfree(lkpi_wifi_of(hw));
 }
 
 int ieee80211_register_hw(struct ieee80211_hw *hw)
