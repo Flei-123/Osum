@@ -2,23 +2,117 @@
 profile kernel
 
 import lib.errno
+import sys.sysuser
 import gfx.drm.drmuapi
+import gfx.drm.drmprop
+import gfx.drm.kmsplane
+import gfx.drm.kmscrtc
 
-export { get_plane_resources, get_object_properties }
+export { get_plane_resources, get_object_properties, value_of }
 
-fn get_plane_resources(a: u64) -> u64 {
-    drmuapi.w32(a + 8, 0)
+const TYPE_CRTC: u64 = 0xCCCCCCCC
+const TYPE_CONNECTOR: u64 = 0xC0C0C0C0
+const TYPE_ENCODER: u64 = 0xE0E0E0E0
+const TYPE_PLANE: u64 = 0xEEEEEEEE
+
+fn get_plane_resources(state: u64, me: u64, client: u64, a: u64) -> u64 {
+    return kmsplane.get_resources(state, me, client, a)
+}
+
+fn type_code(kind: u64) -> u64 {
+    if kind == drmprop.KIND_PLANE {
+        return TYPE_PLANE
+    }
+    if kind == drmprop.KIND_CRTC {
+        return TYPE_CRTC
+    }
+    if kind == drmprop.KIND_CONN {
+        return TYPE_CONNECTOR
+    }
+    return TYPE_ENCODER
+}
+
+fn plane_value(i: u64, idx: u64) -> u64 {
+    if idx == drmprop.P_TYPE {
+        return kmsplane.kind_of(i)
+    }
+    if idx == drmprop.P_FB_ID {
+        return kmsplane.fb_of(i)
+    }
+    if idx == drmprop.P_PLANE_CRTC_ID {
+        return kmsplane.crtc_of(i)
+    }
+    if idx == drmprop.P_SRC_W {
+        return kmsplane.src_w_of(i)
+    }
+    if idx == drmprop.P_SRC_H {
+        return kmsplane.src_h_of(i)
+    }
+    if idx == drmprop.P_CRTC_X {
+        return kmsplane.pos_x_of(i)
+    }
+    if idx == drmprop.P_CRTC_Y {
+        return kmsplane.pos_y_of(i)
+    }
+    if idx == drmprop.P_CRTC_W {
+        return kmsplane.dst_w_of(i)
+    }
+    if idx == drmprop.P_CRTC_H {
+        return kmsplane.dst_h_of(i)
+    }
     return 0
 }
 
-fn known_object(id: u64) -> bool {
-    return id == drmuapi.CONNECTOR_ID || id == drmuapi.ENCODER_ID || id == drmuapi.CRTC_ID || id == drmuapi.PLANE_ID
+fn active_now() -> u64 {
+    if kmscrtc.current_fb() != 0 {
+        return 1
+    }
+    return 0
 }
 
-fn get_object_properties(a: u64) -> u64 {
-    if !known_object(drmuapi.r32(a + 20)) {
+fn value_of(obj: u64, idx: u64) -> u64 {
+    let kind: u64 = drmprop.kind_of(obj)
+    if kind == drmprop.KIND_PLANE {
+        return plane_value(kmsplane.index_of(obj), idx)
+    }
+    if idx == drmprop.P_ACTIVE {
+        return active_now()
+    }
+    if idx == drmprop.P_MODE_ID && active_now() != 0 {
+        return drmuapi.MODE_BLOB_ID
+    }
+    if idx == drmprop.P_CONN_CRTC_ID && active_now() != 0 {
+        return drmuapi.CRTC_ID
+    }
+    return 0
+}
+
+fn put_pair(state: u64, me: u64, a: u64, obj: u64, kind: u64, i: u64) -> bool {
+    let prop: u64 = drmprop.prop_at(kind, i)
+    return sysuser.put32(state, me, drmuapi.r64(a) + i * 4, prop)
+        && sysuser.put64(state, me, drmuapi.r64(a + 8) + i * 8, value_of(obj, prop - drmprop.ID_BASE))
+}
+
+fn get_object_properties(state: u64, me: u64, a: u64) -> u64 {
+    let obj: u64 = drmuapi.r32(a + 20)
+    let kind: u64 = drmprop.kind_of(obj)
+    if kind == 0 {
         return errno.E_NOENT
     }
-    drmuapi.w32(a + 16, 0)
+    let code: u64 = drmuapi.r32(a + 24)
+    if code != 0 && code != type_code(kind) {
+        return errno.E_NOENT
+    }
+    let n: u64 = drmprop.count_of(kind)
+    if drmuapi.r64(a) != 0 && drmuapi.r64(a + 8) != 0 && drmuapi.r32(a + 16) >= n {
+        var i: u64 = 0
+        while i < n {
+            if !put_pair(state, me, a, obj, kind, i) {
+                return errno.E_FAULT
+            }
+            i = i + 1
+        }
+    }
+    drmuapi.w32(a + 16, n)
     return 0
 }

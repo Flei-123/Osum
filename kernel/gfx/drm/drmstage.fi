@@ -1,0 +1,245 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.errno
+import gfx.drm.drmuapi
+import gfx.drm.drmprop
+import gfx.drm.drmprops
+import gfx.drm.drmblob
+import gfx.drm.drmfb
+import gfx.drm.drmevent
+import gfx.drm.drmvblank
+import gfx.drm.kmsplane
+import gfx.drm.kmsreg
+import gfx.drm.kmscrtc
+import gfx.drm.kmscursor
+
+export { load, stage_plane, set_prop, check, commit }
+
+const FIXED_ONE_SHIFT: u64 = 16
+const MAX_DPMS: u64 = 3
+const MODE_BLOB_BYTES: u64 = 68
+const SIGN_BIT: u64 = 0x80000000
+const SIGN_FILL: u64 = 0xFFFFFFFF00000000
+const LOW_MASK: u64 = 0xFFFFFFFF
+
+static mut s_fb: [u64; 2] = [0 as u64; 2]
+static mut s_crtc: [u64; 2] = [0 as u64; 2]
+static mut s_sx: [u64; 2] = [0 as u64; 2]
+static mut s_sy: [u64; 2] = [0 as u64; 2]
+static mut s_sw: [u64; 2] = [0 as u64; 2]
+static mut s_sh: [u64; 2] = [0 as u64; 2]
+static mut s_dx: [u64; 2] = [0 as u64; 2]
+static mut s_dy: [u64; 2] = [0 as u64; 2]
+static mut s_dw: [u64; 2] = [0 as u64; 2]
+static mut s_dh: [u64; 2] = [0 as u64; 2]
+static mut s_active: u64 = 0
+static mut s_mode: u64 = 0
+static mut s_conn: u64 = 0
+
+fn load(state: u64) {
+    var i: u64 = 0
+    while i < kmsplane.COUNT {
+        let k: usize = i as usize
+        s_fb[k] = kmsplane.fb_of(i)
+        s_crtc[k] = kmsplane.crtc_of(i)
+        s_sx[k] = 0
+        s_sy[k] = 0
+        s_sw[k] = kmsplane.src_w_of(i)
+        s_sh[k] = kmsplane.src_h_of(i)
+        s_dx[k] = kmsplane.pos_x_of(i)
+        s_dy[k] = kmsplane.pos_y_of(i)
+        s_dw[k] = kmsplane.dst_w_of(i)
+        s_dh[k] = kmsplane.dst_h_of(i)
+        i = i + 1
+    }
+    s_active = drmprops.value_of(drmuapi.CRTC_ID, drmprop.P_ACTIVE)
+    s_mode = drmprops.value_of(drmuapi.CRTC_ID, drmprop.P_MODE_ID)
+    s_conn = drmprops.value_of(drmuapi.CONNECTOR_ID, drmprop.P_CONN_CRTC_ID)
+}
+
+fn signed32(v: u64) -> u64 {
+    if (v & SIGN_BIT) != 0 {
+        return (v & LOW_MASK) | SIGN_FILL
+    }
+    return v & LOW_MASK
+}
+
+fn stage_plane(i: u64, fb: u64, crtc: u64, sx: u64, sy: u64, sw: u64, sh: u64, dx: u64, dy: u64, dw: u64, dh: u64) {
+    let k: usize = i as usize
+    s_fb[k] = fb
+    s_crtc[k] = crtc
+    s_sx[k] = sx
+    s_sy[k] = sy
+    s_sw[k] = sw
+    s_sh[k] = sh
+    s_dx[k] = signed32(dx)
+    s_dy[k] = signed32(dy)
+    s_dw[k] = dw
+    s_dh[k] = dh
+}
+
+fn set_plane_prop(i: u64, idx: u64, v: u64) -> u64 {
+    let k: usize = i as usize
+    if idx == drmprop.P_TYPE {
+        return errno.E_INVAL
+    }
+    if idx == drmprop.P_CRTC_X {
+        s_dx[k] = v
+    } else if idx == drmprop.P_CRTC_Y {
+        s_dy[k] = v
+    } else if v > LOW_MASK {
+        return errno.E_INVAL
+    } else if idx == drmprop.P_FB_ID {
+        s_fb[k] = v
+    } else if idx == drmprop.P_PLANE_CRTC_ID {
+        s_crtc[k] = v
+    } else if idx == drmprop.P_SRC_X {
+        s_sx[k] = v
+    } else if idx == drmprop.P_SRC_Y {
+        s_sy[k] = v
+    } else if idx == drmprop.P_SRC_W {
+        s_sw[k] = v
+    } else if idx == drmprop.P_SRC_H {
+        s_sh[k] = v
+    } else if idx == drmprop.P_CRTC_W {
+        s_dw[k] = v
+    } else {
+        s_dh[k] = v
+    }
+    return 0
+}
+
+fn set_prop(state: u64, obj: u64, prop: u64, v: u64) -> u64 {
+    let kind: u64 = drmprop.kind_of(obj)
+    let idx: u64 = drmprop.index_of(prop)
+    if kind == 0 || idx >= drmprop.COUNT {
+        return errno.E_NOENT
+    }
+    if !drmprop.belongs(kind, idx) {
+        return errno.E_INVAL
+    }
+    if kind == drmprop.KIND_PLANE {
+        return set_plane_prop(kmsplane.index_of(obj), idx, v)
+    }
+    if idx == drmprop.P_ACTIVE && v <= 1 {
+        s_active = v
+        return 0
+    }
+    if idx == drmprop.P_MODE_ID && v <= LOW_MASK {
+        s_mode = v
+        return 0
+    }
+    if idx == drmprop.P_CONN_CRTC_ID && v <= LOW_MASK {
+        s_conn = v
+        return 0
+    }
+    if idx == drmprop.P_DPMS && v <= MAX_DPMS {
+        return 0
+    }
+    return errno.E_INVAL
+}
+
+fn check_plane(i: u64) -> u64 {
+    let k: usize = i as usize
+    if s_fb[k] == 0 {
+        if s_crtc[k] != 0 {
+            return errno.E_INVAL
+        }
+        return 0
+    }
+    if s_crtc[k] != drmuapi.CRTC_ID {
+        return errno.E_INVAL
+    }
+    let slot: u64 = drmfb.find(s_fb[k])
+    if slot == drmfb.NONE {
+        return errno.E_NOENT
+    }
+    let w: u64 = drmfb.width_of(slot)
+    let h: u64 = drmfb.height_of(slot)
+    if s_sx[k] != 0 || s_sy[k] != 0 || s_sw[k] != (w << FIXED_ONE_SHIFT) || s_sh[k] != (h << FIXED_ONE_SHIFT) {
+        return errno.E_INVAL
+    }
+    if s_dw[k] != w || s_dh[k] != h {
+        return errno.E_INVAL
+    }
+    if i == kmsplane.PRIMARY && (s_dx[k] != 0 || s_dy[k] != 0) {
+        return errno.E_INVAL
+    }
+    if i == kmsplane.CURSOR && (w > drmuapi.MAX_CURSOR_SIDE || h > drmuapi.MAX_CURSOR_SIDE) {
+        return errno.E_INVAL
+    }
+    return 0
+}
+
+fn check_mode(state: u64) -> u64 {
+    if s_mode == 0 {
+        return errno.E_INVAL
+    }
+    let p: u64 = drmblob.data_ptr(state, s_mode)
+    if p == 0 {
+        return errno.E_NOENT
+    }
+    if drmblob.len_of(s_mode) != MODE_BLOB_BYTES {
+        return errno.E_INVAL
+    }
+    if drmuapi.r16(p + 4) != kmsreg.width(state) || drmuapi.r16(p + 14) != kmsreg.height(state) {
+        return errno.E_INVAL
+    }
+    return 0
+}
+
+fn check_crtc(state: u64, allow_modeset: bool) -> u64 {
+    var was: u64 = 0
+    if kmscrtc.current_fb() != 0 {
+        was = 1
+    }
+    if s_active == 1 {
+        if s_fb[0] == 0 || s_conn != drmuapi.CRTC_ID {
+            return errno.E_INVAL
+        }
+        let r: u64 = check_mode(state)
+        if r != 0 {
+            return r
+        }
+    } else if s_fb[0] != 0 || s_fb[1] != 0 || s_conn != 0 {
+        return errno.E_INVAL
+    }
+    if s_active != was && !allow_modeset {
+        return errno.E_INVAL
+    }
+    return 0
+}
+
+fn check(state: u64, allow_modeset: bool) -> u64 {
+    if !kmsreg.ready(state) {
+        return errno.E_NODEV
+    }
+    var i: u64 = 0
+    while i < kmsplane.COUNT {
+        let r: u64 = check_plane(i)
+        if r != 0 {
+            return r
+        }
+        i = i + 1
+    }
+    return check_crtc(state, allow_modeset)
+}
+
+fn commit(state: u64, client: u64, with_event: bool, user: u64) -> u64 {
+    if with_event && !drmevent.room(client) {
+        return errno.E_BUSY
+    }
+    kmscursor.set(s_fb[1], s_crtc[1], s_dx[1], s_dy[1])
+    if s_active == 0 {
+        kmscrtc.disable(state)
+        return 0
+    }
+    let r: u64 = kmscrtc.show(state, s_fb[0])
+    if r != 0 || !with_event {
+        return r
+    }
+    let target: u64 = drmvblank.seq_now(state) + 1
+    let _queued: bool = drmevent.push(client, drmevent.TYPE_FLIP, user, target)
+    return 0
+}

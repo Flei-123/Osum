@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.errno
+import fs.evfd
+import fs.file
+import sched.sched
+import sys.sysuser
+import gfx.drm.drmuapi
+import gfx.drm.drmsync
+
+export { eventfd, pump, drop_client }
+
+const SLOTS: u64 = 16
+const FLAG_WAIT_AVAILABLE: u64 = 4
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const SIGNALED_COUNT: u64 = 1
+
+static mut e_client: [u64; 16] = [0 as u64; 16]
+static mut e_obj: [u64; 16] = [0 as u64; 16]
+static mut e_point: [u64; 16] = [0 as u64; 16]
+static mut e_of: [u64; 16] = [0 as u64; 16]
+
+fn free_slot() -> u64 {
+    var i: u64 = 0
+    while i < SLOTS {
+        if e_client[i as usize] == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn release_slot(state: u64, i: u64) {
+    drmsync.obj_unref(e_obj[i as usize])
+    file.open_unref(state, e_of[i as usize])
+    e_client[i as usize] = 0
+}
+
+fn eventfd(state: u64, me: u64, client: u64, a: u64) -> u64 {
+    if (drmuapi.r32(a + 4) & ~FLAG_WAIT_AVAILABLE) != 0 {
+        return errno.E_INVAL
+    }
+    let obj: u64 = drmsync.lookup(client, drmuapi.r32(a))
+    if obj == drmsync.NONE {
+        return errno.E_NOENT
+    }
+    let of: u64 = sysuser.of_of(state, me, drmuapi.r32(a + 12))
+    if of >= file.MAX_OPEN {
+        return errno.E_BADF
+    }
+    if file.open_kind(state, of) != file.K_EVENT {
+        return errno.E_INVAL
+    }
+    let point: u64 = drmuapi.r64(a + 8)
+    if drmsync.ready(obj, point) {
+        let _added: u64 = evfd.efd_add(state, of, SIGNALED_COUNT)
+        return 0
+    }
+    let slot: u64 = free_slot()
+    if slot == NONE {
+        return errno.E_NOSPC
+    }
+    drmsync.obj_ref(obj)
+    file.open_ref(state, of)
+    e_client[slot as usize] = client
+    e_obj[slot as usize] = obj
+    e_point[slot as usize] = point
+    e_of[slot as usize] = of
+    return 0
+}
+
+fn pump(state: u64) {
+    var i: u64 = 0
+    while i < SLOTS {
+        if e_client[i as usize] != 0 && drmsync.ready(e_obj[i as usize], e_point[i as usize]) {
+            let _added: u64 = evfd.efd_add(state, e_of[i as usize], SIGNALED_COUNT)
+            release_slot(state, i)
+        }
+        i = i + 1
+    }
+    drmsync.kick(state)
+}
+
+fn drop_client(state: u64, client: u64) {
+    var i: u64 = 0
+    while i < SLOTS {
+        if e_client[i as usize] == client {
+            release_slot(state, i)
+        }
+        i = i + 1
+    }
+}

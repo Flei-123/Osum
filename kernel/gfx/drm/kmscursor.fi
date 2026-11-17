@@ -1,0 +1,103 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import fs.unixsock
+import gfx.drm.drmfb
+
+export { fb, crtc, pos_x, pos_y, set, clear, fb_gone, blend }
+
+const PAGE: u64 = 4096
+const CPP: u64 = 4
+const CHANNEL_MAX: u64 = 255
+const ALPHA_SHIFT: u64 = 24
+const COLOR_MASK: u64 = 0xFFFFFF
+
+static mut c_fb: u64 = 0
+static mut c_crtc: u64 = 0
+static mut c_x: u64 = 0
+static mut c_y: u64 = 0
+
+fn fb() -> u64 {
+    return c_fb
+}
+
+fn crtc() -> u64 {
+    return c_crtc
+}
+
+fn pos_x() -> u64 {
+    return c_x
+}
+
+fn pos_y() -> u64 {
+    return c_y
+}
+
+fn set(fb_id: u64, crtc_id: u64, x: u64, y: u64) {
+    c_fb = fb_id
+    c_crtc = crtc_id
+    c_x = x
+    c_y = y
+}
+
+fn clear() {
+    set(0, 0, 0, 0)
+}
+
+fn fb_gone(id: u64) {
+    if c_fb == id {
+        clear()
+    }
+}
+
+fn channel(src: u64, dst: u64, alpha: u64, shift: u64) -> u64 {
+    let s: u64 = (src >> shift) & CHANNEL_MAX
+    let d: u64 = (dst >> shift) & CHANNEL_MAX
+    var v: u64 = s + d * (CHANNEL_MAX - alpha) / CHANNEL_MAX
+    if v > CHANNEL_MAX {
+        v = CHANNEL_MAX
+    }
+    return v << shift
+}
+
+fn blend_pixel(state: u64, shm: u64, src_off: u64, dst: u64) {
+    let frame: u64 = unixsock.shm_frame(state, shm, src_off / PAGE)
+    if frame == 0 {
+        return
+    }
+    let src: u64 = (*((frame + src_off % PAGE) as *mut u32)) as u64
+    let alpha: u64 = src >> ALPHA_SHIFT
+    if alpha == 0 {
+        return
+    }
+    let cur: u64 = (*(dst as *mut u32)) as u64
+    var out: u64 = src & COLOR_MASK
+    if alpha != CHANNEL_MAX {
+        out = channel(src, cur, alpha, 0) | channel(src, cur, alpha, 8) | channel(src, cur, alpha, 16)
+    }
+    *(dst as *mut u32) = out as u32
+}
+
+fn blend(state: u64, base: u64, pitch: u64, w: u64, h: u64) {
+    let slot: u64 = drmfb.find(c_fb)
+    if c_fb == 0 || slot == drmfb.NONE {
+        return
+    }
+    let shm: u64 = drmfb.shm_of(slot)
+    let cw: u64 = drmfb.width_of(slot)
+    let ch: u64 = drmfb.height_of(slot)
+    let src_pitch: u64 = drmfb.pitch_of(slot)
+    var cy: u64 = 0
+    while cy < ch {
+        let y: u64 = c_y +% cy
+        var cx: u64 = 0
+        while y < h && cx < cw {
+            let x: u64 = c_x +% cx
+            if x < w {
+                blend_pixel(state, shm, cy * src_pitch + cx * CPP, base + y * pitch + x * CPP)
+            }
+            cx = cx + 1
+        }
+        cy = cy + 1
+    }
+}

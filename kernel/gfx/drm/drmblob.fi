@@ -1,0 +1,124 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.errno
+import sys.sysuser
+import gfx.drm.drmuapi
+import gfx.drm.kmsmode
+
+export { NONE, create, destroy, get, data_ptr, len_of, drop_client }
+
+const SLOTS: u64 = 8
+const SLOT_BYTES: u64 = 128
+const ID_BASE: u64 = 0x301
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+
+static mut b_owner: [u64; 8] = [0 as u64; 8]
+static mut b_len: [u64; 8] = [0 as u64; 8]
+static mut b_data: [u8; 1024] = [0 as u8; 1024]
+static mut mode_data: [u8; 128] = [0 as u8; 128]
+
+fn slot_addr(slot: u64) -> u64 {
+    return ((&b_data[0]) as u64) + slot * SLOT_BYTES
+}
+
+fn slot_of(id: u64) -> u64 {
+    if id < ID_BASE || id >= ID_BASE + SLOTS {
+        return NONE
+    }
+    let slot: u64 = id - ID_BASE
+    if b_owner[slot as usize] == 0 {
+        return NONE
+    }
+    return slot
+}
+
+fn free_slot() -> u64 {
+    var i: u64 = 0
+    while i < SLOTS {
+        if b_owner[i as usize] == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn create(state: u64, me: u64, client: u64, a: u64) -> u64 {
+    let len: u64 = drmuapi.r32(a + 8)
+    if len == 0 || len > SLOT_BYTES {
+        return errno.E_INVAL
+    }
+    let slot: u64 = free_slot()
+    if slot == NONE {
+        return errno.E_NOSPC
+    }
+    if !sysuser.copy_in(state, me, slot_addr(slot), drmuapi.r64(a), len) {
+        return errno.E_FAULT
+    }
+    b_owner[slot as usize] = client
+    b_len[slot as usize] = len
+    drmuapi.w32(a + 12, ID_BASE + slot)
+    return 0
+}
+
+fn destroy(client: u64, a: u64) -> u64 {
+    let slot: u64 = slot_of(drmuapi.r32(a))
+    if slot == NONE || b_owner[slot as usize] != client {
+        return errno.E_NOENT
+    }
+    b_owner[slot as usize] = 0
+    b_len[slot as usize] = 0
+    return 0
+}
+
+fn data_ptr(state: u64, id: u64) -> u64 {
+    if id == drmuapi.MODE_BLOB_ID {
+        let p: u64 = (&mode_data[0]) as u64
+        kmsmode.fill(state, p)
+        return p
+    }
+    let slot: u64 = slot_of(id)
+    if slot == NONE {
+        return 0
+    }
+    return slot_addr(slot)
+}
+
+fn len_of(id: u64) -> u64 {
+    if id == drmuapi.MODE_BLOB_ID {
+        return kmsmode.SIZE
+    }
+    let slot: u64 = slot_of(id)
+    if slot == NONE {
+        return 0
+    }
+    return b_len[slot as usize]
+}
+
+fn get(state: u64, me: u64, a: u64) -> u64 {
+    let id: u64 = drmuapi.r32(a)
+    let p: u64 = data_ptr(state, id)
+    if p == 0 {
+        return errno.E_NOENT
+    }
+    let len: u64 = len_of(id)
+    let room: u64 = drmuapi.r32(a + 4)
+    let dst: u64 = drmuapi.r64(a + 8)
+    drmuapi.w32(a + 4, len)
+    if dst != 0 && room >= len && !sysuser.copy_out(state, me, dst, p, len) {
+        return errno.E_FAULT
+    }
+    return 0
+}
+
+fn drop_client(client: u64) {
+    var i: u64 = 0
+    while i < SLOTS {
+        if b_owner[i as usize] == client {
+            b_owner[i as usize] = 0
+            b_len[i as usize] = 0
+        }
+        i = i + 1
+    }
+}

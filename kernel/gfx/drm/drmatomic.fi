@@ -1,0 +1,123 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.errno
+import sys.sysuser
+import gfx.drm.drmuapi
+import gfx.drm.drmcaps
+import gfx.drm.drmstage
+import gfx.drm.kmsplane
+import gfx.drm.kmsreg
+
+export { atomic, set_plane }
+
+const FLAG_EVENT: u64 = 1
+const FLAG_TEST_ONLY: u64 = 0x100
+const FLAG_NONBLOCK: u64 = 0x200
+const FLAG_ALLOW_MODESET: u64 = 0x400
+const FLAGS_KNOWN: u64 = 0x701
+const MAX_OBJS: u64 = 8
+const MAX_PROPS: u64 = 48
+
+static mut obj_buf: [u8; 32] = [0 as u8; 32]
+static mut count_buf: [u8; 32] = [0 as u8; 32]
+static mut prop_buf: [u8; 192] = [0 as u8; 192]
+static mut value_buf: [u8; 384] = [0 as u8; 384]
+
+fn fetch(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
+    return len == 0 || sysuser.copy_in(state, me, dst, src, len)
+}
+
+fn total_props(n: u64) -> u64 {
+    var total: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        total = total + drmuapi.r32(((&count_buf[0]) as u64) + i * 4)
+        i = i + 1
+    }
+    return total
+}
+
+fn apply(state: u64, n: u64) -> u64 {
+    var at: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let obj: u64 = drmuapi.r32(((&obj_buf[0]) as u64) + i * 4)
+        let count: u64 = drmuapi.r32(((&count_buf[0]) as u64) + i * 4)
+        var j: u64 = 0
+        while j < count {
+            let prop: u64 = drmuapi.r32(((&prop_buf[0]) as u64) + at * 4)
+            let value: u64 = drmuapi.r64(((&value_buf[0]) as u64) + at * 8)
+            let r: u64 = drmstage.set_prop(state, obj, prop, value)
+            if r != 0 {
+                return r
+            }
+            at = at + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn fetch_all(state: u64, me: u64, a: u64, n: u64, total: u64) -> bool {
+    return fetch(state, me, (&prop_buf[0]) as u64, drmuapi.r64(a + 24), total * 4)
+        && fetch(state, me, (&value_buf[0]) as u64, drmuapi.r64(a + 32), total * 8)
+}
+
+fn atomic(state: u64, me: u64, client: u64, a: u64) -> u64 {
+    let flags: u64 = drmuapi.r32(a)
+    let n: u64 = drmuapi.r32(a + 4)
+    if !drmcaps.atomic(client) || (flags & ~FLAGS_KNOWN) != 0 || n > MAX_OBJS {
+        return errno.E_INVAL
+    }
+    if (flags & FLAG_TEST_ONLY) != 0 && (flags & FLAG_EVENT) != 0 {
+        return errno.E_INVAL
+    }
+    if !kmsreg.ready(state) {
+        return errno.E_NODEV
+    }
+    if !fetch(state, me, (&obj_buf[0]) as u64, drmuapi.r64(a + 8), n * 4)
+        || !fetch(state, me, (&count_buf[0]) as u64, drmuapi.r64(a + 16), n * 4) {
+        return errno.E_FAULT
+    }
+    let total: u64 = total_props(n)
+    if total > MAX_PROPS {
+        return errno.E_INVAL
+    }
+    if !fetch_all(state, me, a, n, total) {
+        return errno.E_FAULT
+    }
+    drmstage.load(state)
+    var r: u64 = apply(state, n)
+    if r == 0 {
+        r = drmstage.check(state, (flags & FLAG_ALLOW_MODESET) != 0)
+    }
+    if r != 0 || (flags & FLAG_TEST_ONLY) != 0 {
+        return r
+    }
+    return drmstage.commit(state, client, (flags & FLAG_EVENT) != 0, drmuapi.r64(a + 48))
+}
+
+fn set_plane(state: u64, client: u64, a: u64) -> u64 {
+    let i: u64 = kmsplane.index_of(drmuapi.r32(a))
+    if i == kmsplane.NONE {
+        return errno.E_NOENT
+    }
+    if !kmsreg.ready(state) {
+        return errno.E_NODEV
+    }
+    var fb: u64 = drmuapi.r32(a + 8)
+    var crtc: u64 = drmuapi.r32(a + 4)
+    if fb == 0 {
+        crtc = 0
+    }
+    drmstage.load(state)
+    drmstage.stage_plane(i, fb, crtc, drmuapi.r32(a + 32), drmuapi.r32(a + 36), drmuapi.r32(a + 44), drmuapi.r32(a + 40),
+        drmuapi.r32(a + 16), drmuapi.r32(a + 20), drmuapi.r32(a + 24), drmuapi.r32(a + 28))
+    let r: u64 = drmstage.check(state, false)
+    if r != 0 {
+        return r
+    }
+    return drmstage.commit(state, client, false, 0)
+}

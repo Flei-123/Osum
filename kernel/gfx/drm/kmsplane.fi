@@ -1,0 +1,157 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.errno
+import sys.sysuser
+import gfx.drm.drmuapi
+import gfx.drm.drmcaps
+import gfx.drm.drmfb
+import gfx.drm.kmscrtc
+import gfx.drm.kmscursor
+
+export {
+    COUNT, PRIMARY, CURSOR, NONE, id_at, index_of, kind_of, fb_of, crtc_of, src_w_of, src_h_of, dst_w_of, dst_h_of,
+    pos_x_of, pos_y_of, get_resources, get_plane
+}
+
+const COUNT: u64 = 2
+const PRIMARY: u64 = 0
+const CURSOR: u64 = 1
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const KIND_PRIMARY: u64 = 1
+const KIND_CURSOR: u64 = 2
+const FIXED_POINT_SHIFT: u64 = 16
+const POSSIBLE_CRTCS: u64 = 1
+
+fn id_at(i: u64) -> u64 {
+    if i == PRIMARY {
+        return drmuapi.PLANE_ID
+    }
+    return drmuapi.CURSOR_PLANE_ID
+}
+
+fn index_of(id: u64) -> u64 {
+    if id == drmuapi.PLANE_ID {
+        return PRIMARY
+    }
+    if id == drmuapi.CURSOR_PLANE_ID {
+        return CURSOR
+    }
+    return NONE
+}
+
+fn kind_of(i: u64) -> u64 {
+    if i == PRIMARY {
+        return KIND_PRIMARY
+    }
+    return KIND_CURSOR
+}
+
+fn fb_of(i: u64) -> u64 {
+    if i == PRIMARY {
+        return kmscrtc.current_fb()
+    }
+    if drmfb.find(kmscursor.fb()) == drmfb.NONE {
+        return 0
+    }
+    return kmscursor.fb()
+}
+
+fn crtc_of(i: u64) -> u64 {
+    if fb_of(i) == 0 {
+        return 0
+    }
+    return drmuapi.CRTC_ID
+}
+
+fn fb_dim(i: u64, height: bool) -> u64 {
+    let slot: u64 = drmfb.find(fb_of(i))
+    if slot == drmfb.NONE {
+        return 0
+    }
+    if height {
+        return drmfb.height_of(slot)
+    }
+    return drmfb.width_of(slot)
+}
+
+fn src_w_of(i: u64) -> u64 {
+    return fb_dim(i, false) << FIXED_POINT_SHIFT
+}
+
+fn src_h_of(i: u64) -> u64 {
+    return fb_dim(i, true) << FIXED_POINT_SHIFT
+}
+
+fn dst_w_of(i: u64) -> u64 {
+    return fb_dim(i, false)
+}
+
+fn dst_h_of(i: u64) -> u64 {
+    return fb_dim(i, true)
+}
+
+fn pos_x_of(i: u64) -> u64 {
+    if i == CURSOR {
+        return kmscursor.pos_x()
+    }
+    return 0
+}
+
+fn pos_y_of(i: u64) -> u64 {
+    if i == CURSOR {
+        return kmscursor.pos_y()
+    }
+    return 0
+}
+
+fn get_resources(state: u64, me: u64, client: u64, a: u64) -> u64 {
+    var n: u64 = 0
+    if drmcaps.universal(client) {
+        n = COUNT
+    }
+    let ptr: u64 = drmuapi.r64(a)
+    var i: u64 = 0
+    while ptr != 0 && i < n && i < drmuapi.r32(a + 8) {
+        if !sysuser.put32(state, me, ptr + i * 4, id_at(i)) {
+            return errno.E_FAULT
+        }
+        i = i + 1
+    }
+    drmuapi.w32(a + 8, n)
+    return 0
+}
+
+fn put_format(state: u64, me: u64, ptr: u64, at: u64, format: u64) -> bool {
+    return sysuser.put32(state, me, ptr + at * 4, format)
+}
+
+fn get_plane(state: u64, me: u64, a: u64) -> u64 {
+    let i: u64 = index_of(drmuapi.r32(a))
+    if i == NONE {
+        return errno.E_NOENT
+    }
+    var n: u64 = 2
+    if i == CURSOR {
+        n = 1
+    }
+    let ptr: u64 = drmuapi.r64(a + 24)
+    if ptr != 0 && drmuapi.r32(a + 20) >= n {
+        var ok: bool = true
+        if i == PRIMARY {
+            ok = put_format(state, me, ptr, 0, drmuapi.FORMAT_XRGB8888)
+                && put_format(state, me, ptr, 1, drmuapi.FORMAT_ARGB8888)
+        } else {
+            ok = put_format(state, me, ptr, 0, drmuapi.FORMAT_ARGB8888)
+        }
+        if !ok {
+            return errno.E_FAULT
+        }
+    }
+    drmuapi.w32(a + 4, crtc_of(i))
+    drmuapi.w32(a + 8, fb_of(i))
+    drmuapi.w32(a + 12, POSSIBLE_CRTCS)
+    drmuapi.w32(a + 16, 0)
+    drmuapi.w32(a + 20, n)
+    return 0
+}
