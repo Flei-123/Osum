@@ -1,0 +1,116 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import sync.atomic
+import sched.sched
+
+export { PERIOD_NS, report, seq_now, seq_ns, live }
+
+const PERIOD_NS: u64 = 16666667
+const MIN_PERIOD_NS: u64 = 1000000
+const MAX_PERIOD_NS: u64 = 100000000
+const STALL_FACTOR: u64 = 4
+
+static mut ver: u64 = 0
+static mut count: u64 = 0
+static mut last_ns: u64 = 0
+static mut period_ns: u64 = 0
+static mut reports: u64 = 0
+
+fn live() -> bool {
+    return atomic.load((&last_ns) as u64) != 0
+}
+
+fn begin() -> bool {
+    let p: u64 = (&ver) as u64
+    let v: u64 = atomic.load(p)
+    if (v & 1) != 0 {
+        return false
+    }
+    return atomic.cas(p, v, v + 1) == v
+}
+
+fn end() {
+    atomic.fetch_add((&ver) as u64, 1)
+}
+
+fn next_period(old: u64, delta: u64, n: u64) -> u64 {
+    if delta < MIN_PERIOD_NS || delta > MAX_PERIOD_NS {
+        return old
+    }
+    if n <= 2 {
+        return delta
+    }
+    if delta > old * STALL_FACTOR {
+        return old
+    }
+    return (old * 3 + delta) / 4
+}
+
+fn report(state: u64, now: u64) {
+    if !begin() {
+        return
+    }
+    if last_ns == 0 {
+        count = now / PERIOD_NS
+        period_ns = PERIOD_NS
+        reports = 1
+    } else if now > last_ns {
+        let delta: u64 = now - last_ns
+        reports = reports + 1
+        period_ns = next_period(period_ns, delta, reports)
+        var next: u64 = count + 1
+        let seen: u64 = count + delta / period_ns
+        if seen > next {
+            next = seen
+        }
+        count = next
+    }
+    last_ns = now
+    end()
+    sched.poll_kick(state)
+}
+
+fn seq_now(now: u64) -> u64 {
+    while true {
+        let v: u64 = atomic.load((&ver) as u64)
+        let c: u64 = count
+        let l: u64 = last_ns
+        let p: u64 = period_ns
+        if (v & 1) != 0 || atomic.load((&ver) as u64) != v {
+            continue
+        }
+        if l == 0 {
+            return now / PERIOD_NS
+        }
+        if now <= l {
+            return c
+        }
+        return c + (now - l) / p
+    }
+    return 0
+}
+
+fn seq_ns(seq: u64) -> u64 {
+    while true {
+        let v: u64 = atomic.load((&ver) as u64)
+        let c: u64 = count
+        let l: u64 = last_ns
+        let p: u64 = period_ns
+        if (v & 1) != 0 || atomic.load((&ver) as u64) != v {
+            continue
+        }
+        if l == 0 {
+            return seq * PERIOD_NS
+        }
+        if seq >= c {
+            return l + (seq - c) * p
+        }
+        let back: u64 = (c - seq) * p
+        if back >= l {
+            return 0
+        }
+        return l - back
+    }
+    return 0
+}

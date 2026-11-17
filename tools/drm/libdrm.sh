@@ -70,4 +70,8 @@ grep -qa "EXCEPTION" "$D/lib.ser" && bad "kernel exception" || ok "no kernel exc
 runvm modetest "MODETEST_END" "/bin/modetest -M osum -c;echo MODETEST_END"
 grep -qa "modetest -> 0" "$D/modetest.ser" && ok "modetest -c exits 0" || bad "modetest -c exit status"
 if grep -qa "Connectors:" "$D/modetest.ser" && grep -qa "1280x800" "$D/modetest.ser"; then ok "modetest -c lists the connector and its 1280x800 mode"; else bad "modetest -c output"; grep -a -i "modetest\|failed\|Connectors" "$D/modetest.ser" | head -5; fi
+runvm modetestp "MODETEST_END" "/bin/modetest -M osum -p;echo MODETEST_END"
+grep -qa "modetest -> 0" "$D/modetestp.ser" && ok "modetest -p exits 0" || bad "modetest -p exit status"
+if grep -qa "Planes:" "$D/modetestp.ser" && [ "$(grep -ac "type:" "$D/modetestp.ser")" -ge 2 ]; then ok "modetest -p lists the primary and cursor planes"; else bad "modetest -p output"; grep -a -i "modetest\|Planes\|type" "$D/modetestp.ser" | head -8; fi
+if grep -aqE "XR24|XRGB8888" "$D/modetestp.ser"; then ok "modetest -p lists plane formats"; else bad "modetest -p formats"; grep -a -A12 "Planes:" "$D/modetestp.ser" | head -20; fi
 fin

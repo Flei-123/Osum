@@ -72,6 +72,13 @@ Shim reuse (no second DRM): add kernel exports `k_kms_register(ops)` / `k_kms_un
 - Blocking ioctls (WAIT_VBLANK, SYNCOBJ_WAIT/TIMELINE_WAIT) return `drmwait.RETRY`; `drmioctl.dispatch` drops L_FS, sleeps in `sched.poll_sleep` and runs the handler again (no blocking under the lock).
 - syncobj (`drmsync.fi` objects + handles, `drmsyncops.fi`, `drmsyncwait.fi`, `drmsyncfd.fi`): binary + timeline in one object (signaled flag + point), CREATE/DESTROY/WAIT/TIMELINE_WAIT/RESET/SIGNAL/TIMELINE_SIGNAL/QUERY/TRANSFER/HANDLE_TO_FD/FD_TO_HANDLE incl. sync_file import/export. fds are `file.K_SYNC` (30), closed fds reaped via `drmgone.mark_sync`. A syncobj without a fence behaves like Linux: wait without WAIT_FOR_SUBMIT is EINVAL.
 - PRIME (`drmprime.fi`): handle -> `K_SHM` fd (same shm object as the GEM buffer, mmap works), fd -> handle dedups per client. Render nodes may use PRIME and syncobj.
-- Props stubs (`drmprops.fi`): GETPLANERESOURCES count 0, OBJ_GETPROPERTIES count 0 (enough for `modetest -c`).
 - Gates: `tools/drm/ext.sh` (68 checks, counter-proof old kernel via KERNEL_OLD, `DRMX_SMP=4 DRMX_KARGS=smpfrueh`), `tools/drm/libdrm.sh` (pinned libdrm 2.4.124 built with musl: modetest -c + libdrm API test).
-- Not yet: atomic, planes/properties (real), GPU fences from drivers (syncobj is CPU-signalled only), real vblank irq per backend.
+- Not yet: GPU fences from drivers (syncobj is CPU-signalled only), per-backend hardware vblank irq (see section 7).
+
+## 7. Planes, properties, atomic, eventfd, vblank source (w-drm56, 17.11.2026)
+- Planes: primary (0x33) + cursor (0x34) in `kmsplane.fi`/`kmscursor.fi`; client caps UNIVERSAL_PLANES + ATOMIC (`drmclient.fi`), CAP_CURSOR_WIDTH/HEIGHT (`drmcaps.fi`), legacy SETPLANE.
+- Properties: registry `drmprop.fi` (type, FB_ID, CRTC_ID, SRC_*, CRTC_*, ACTIVE, MODE_ID, connector CRTC_ID), GETPROPERTY with enum/range/object/blob, OBJ_GETPROPERTIES with live values, blobs in `drmblob.fi` (CREATE/DESTROY/GET, mode blob).
+- Atomic: `drmstage.fi` stages property writes, `drmatomic.fi` validates then commits; TEST_ONLY, PAGE_FLIP_EVENT, ALLOW_MODESET, no partial state on failure.
+- SYNCOBJ_EVENTFD (0xCF): `drmsyncevent.fi`, fires when the point is signaled (immediately if already signaled).
+- Vblank source: `kmsvbl.fi` keeps a sequence anchored to reported vblank timestamps (`kmsvbl.report(state, now_ns)` from a backend irq handler); without reports it is the 60 Hz `mono_ns` clock. Boot word `drmvblsim` feeds it a simulated 30 Hz source (`drmvblsim.fi`) for the gate. Backends still to call `report`: bochs (no vblank in QEMU), vmsvga, intel (PIPE_FRMCOUNT + DE irq), linuxkpi shim (`drm_crtc_handle_vblank` hook).
+- Gates: `tools/drm/atom.sh` (74 checks incl. counter-proof old kernel and vblank rate 60/s vs 25/s with `drmvblsim`), `tools/drm/libdrm.sh` now also runs `modetest -p`.

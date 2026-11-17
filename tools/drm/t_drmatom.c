@@ -5,6 +5,7 @@
 #include <poll.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <time.h>
 #include <sys/eventfd.h>
 #include <sys/ioctl.h>
 
@@ -266,6 +267,24 @@ static void check_syncobj_eventfd(void)
     close(nul); close(efd); close(again);
 }
 
+struct crtc_seq { uint32_t crtc_id, active; uint64_t sequence; int64_t sequence_ns; };
+
+static uint64_t crtc_sequence(void)
+{
+    struct crtc_seq cs = { .crtc_id = CRTC };
+    return DIO(card, 0x3B, &cs) == 0 ? cs.sequence : 0;
+}
+
+static void check_vblank_rate(void)
+{
+    uint64_t a = crtc_sequence();
+    struct timespec ts = { 1, 0 };
+    nanosleep(&ts, NULL);
+    uint64_t b = crtc_sequence();
+    printf("VBLRATE %llu\n", (unsigned long long)(b - a));
+    CHECK("vblank_rate_measured", b > a, "a=%llu b=%llu", (unsigned long long)a, (unsigned long long)b);
+}
+
 int main(void)
 {
     card = open("/dev/dri/card0", O_RDWR);
@@ -277,6 +296,7 @@ int main(void)
     check_atomic();
     check_cursor();
     check_syncobj_eventfd();
+    check_vblank_rate();
     printf("\nDRMA_DONE\n");
     fflush(stdout);
     return 0;
