@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.errno
+import gfx.drm.drmuapi
+import gfx.drm.drmevent
+import gfx.drm.drmvblank
+import gfx.drm.drmwait
+
+export { wait_vblank, get_sequence, queue_sequence }
+
+const TYPE_RELATIVE: u64 = 1
+const TYPE_EVENT: u64 = 0x04000000
+const TYPE_KNOWN: u64 = 0x04000001
+const SEQ_RELATIVE: u64 = 1
+const SEQ_NEXT_ON_MISS: u64 = 2
+const SEQ_FLAGS: u64 = 3
+const MASK32: u64 = 0xFFFFFFFF
+
+fn target_of(state: u64, kind: u64, requested: u64) -> u64 {
+    let now: u64 = drmvblank.seq_now(state)
+    if (kind & TYPE_RELATIVE) != 0 {
+        return now + requested
+    }
+    return (now & ~MASK32) | requested
+}
+
+fn reply(state: u64, a: u64, seq: u64) {
+    let ns: u64 = drmvblank.seq_ns(seq)
+    drmuapi.w32(a + 4, seq)
+    drmuapi.w64(a + 8, ns / 1000000000)
+    drmuapi.w64(a + 16, (ns % 1000000000) / 1000)
+}
+
+fn wait_vblank(state: u64, c: u64, a: u64) -> u64 {
+    let kind: u64 = drmuapi.r32(a)
+    if (kind & ~TYPE_KNOWN) != 0 {
+        return errno.E_INVAL
+    }
+    var target: u64 = drmwait.resume()
+    if target == 0 {
+        target = target_of(state, kind, drmuapi.r32(a + 4))
+    }
+    if (kind & TYPE_EVENT) != 0 {
+        if !drmevent.push(c, drmevent.TYPE_VBLANK, drmuapi.r64(a + 8), target) {
+            return errno.E_BUSY
+        }
+        drmuapi.w32(a + 4, target)
+        return 0
+    }
+    let now: u64 = drmvblank.seq_now(state)
+    if now >= target {
+        reply(state, a, now)
+        return 0
+    }
+    return drmwait.retry(drmvblank.seq_ns(target), target)
+}
+
+fn get_sequence(state: u64, a: u64) -> u64 {
+    if drmuapi.r32(a) != drmuapi.CRTC_ID {
+        return errno.E_NOENT
+    }
+    let seq: u64 = drmvblank.seq_now(state)
+    drmuapi.w32(a + 4, 1)
+    drmuapi.w64(a + 8, seq)
+    drmuapi.w64(a + 16, drmvblank.seq_ns(seq))
+    return 0
+}
+
+fn queue_sequence(state: u64, c: u64, a: u64) -> u64 {
+    let flags: u64 = drmuapi.r32(a + 4)
+    if drmuapi.r32(a) != drmuapi.CRTC_ID {
+        return errno.E_NOENT
+    }
+    if (flags & ~SEQ_FLAGS) != 0 {
+        return errno.E_INVAL
+    }
+    let now: u64 = drmvblank.seq_now(state)
+    var target: u64 = drmuapi.r64(a + 8)
+    if (flags & SEQ_RELATIVE) != 0 {
+        target = now + target
+    }
+    if target <= now {
+        if (flags & SEQ_NEXT_ON_MISS) == 0 {
+            return errno.E_INVAL
+        }
+        target = now + 1
+    }
+    if !drmevent.push(c, drmevent.TYPE_SEQUENCE, drmuapi.r64(a + 16), target) {
+        return errno.E_BUSY
+    }
+    drmuapi.w64(a + 8, target)
+    return 0
+}

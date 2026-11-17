@@ -1,0 +1,104 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import gfx.drm.drmuapi
+import gfx.drm.drmvblank
+import gfx.drm.drmtick
+
+export {
+    EVENT_BYTES, TYPE_VBLANK, TYPE_FLIP, TYPE_SEQUENCE,
+    room, push, ready, next_due_ns, take, out_addr, drop_client
+}
+
+const SLOTS: u64 = 8
+const MAX_CLIENTS: u64 = 16
+const EVENT_BYTES: u64 = 32
+const TYPE_VBLANK: u64 = 1
+const TYPE_FLIP: u64 = 2
+const TYPE_SEQUENCE: u64 = 3
+const NS_PER_USEC: u64 = 1000
+
+static mut ev_type: [u64; 128] = [0 as u64; 128]
+static mut ev_user: [u64; 128] = [0 as u64; 128]
+static mut ev_seq: [u64; 128] = [0 as u64; 128]
+static mut ev_head: [u64; 16] = [0 as u64; 16]
+static mut ev_count: [u64; 16] = [0 as u64; 16]
+static mut out_buf: [u8; 256] = [0 as u8; 256]
+
+fn valid(client: u64) -> bool {
+    return client >= 1 && client <= MAX_CLIENTS
+}
+
+fn slot_of(client: u64, k: u64) -> u64 {
+    return (client - 1) * SLOTS + (ev_head[(client - 1) as usize] + k) % SLOTS
+}
+
+fn room(client: u64) -> bool {
+    return valid(client) && ev_count[(client - 1) as usize] < SLOTS
+}
+
+fn push(client: u64, kind: u64, user: u64, seq: u64) -> bool {
+    if !room(client) {
+        return false
+    }
+    let c: usize = (client - 1) as usize
+    let s: u64 = slot_of(client, ev_count[c])
+    ev_type[s as usize] = kind
+    ev_user[s as usize] = user
+    ev_seq[s as usize] = seq
+    ev_count[c] = ev_count[c] + 1
+    drmtick.arm(drmvblank.seq_ns(seq))
+    return true
+}
+
+fn next_due_ns(client: u64) -> u64 {
+    if !valid(client) || ev_count[(client - 1) as usize] == 0 {
+        return 0
+    }
+    return drmvblank.seq_ns(ev_seq[slot_of(client, 0) as usize])
+}
+
+fn ready(state: u64, client: u64) -> bool {
+    let due: u64 = next_due_ns(client)
+    return due != 0 && drmvblank.now_ns(state) >= due
+}
+
+fn out_addr() -> u64 {
+    return (&out_buf[0]) as u64
+}
+
+fn write_event(at: u64, s: u64) {
+    let seq: u64 = ev_seq[s as usize]
+    let ns: u64 = drmvblank.seq_ns(seq)
+    drmuapi.w32(at, ev_type[s as usize])
+    drmuapi.w32(at + 4, EVENT_BYTES)
+    drmuapi.w64(at + 8, ev_user[s as usize])
+    if ev_type[s as usize] == TYPE_SEQUENCE {
+        drmuapi.w64(at + 16, ns)
+        drmuapi.w64(at + 24, seq)
+        return
+    }
+    drmuapi.w32(at + 16, ns / 1000000000)
+    drmuapi.w32(at + 20, (ns % 1000000000) / NS_PER_USEC)
+    drmuapi.w32(at + 24, seq)
+    drmuapi.w32(at + 28, drmuapi.CRTC_ID)
+}
+
+fn take(state: u64, client: u64, max_bytes: u64) -> u64 {
+    var n: u64 = 0
+    while (n + 1) * EVENT_BYTES <= max_bytes && n < 8 && ready(state, client) {
+        let c: usize = (client - 1) as usize
+        write_event(out_addr() + n * EVENT_BYTES, slot_of(client, 0))
+        ev_head[c] = (ev_head[c] + 1) % SLOTS
+        ev_count[c] = ev_count[c] - 1
+        n = n + 1
+    }
+    return n * EVENT_BYTES
+}
+
+fn drop_client(client: u64) {
+    if valid(client) {
+        ev_head[(client - 1) as usize] = 0
+        ev_count[(client - 1) as usize] = 0
+    }
+}

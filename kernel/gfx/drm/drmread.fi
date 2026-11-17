@@ -1,0 +1,86 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.errno
+import lib.kstate
+import sched.sched
+import sched.signal
+import sched.taskconst
+import sched.proc.procfault
+import fs.file
+import sync.fslock
+import sys.sysconst
+import sys.sysuser
+import gfx.drm.drmclient
+import gfx.drm.drmevent
+import gfx.drm.drmvblank
+import gfx.drm.drmtick
+
+export { read, poll_bits }
+
+const POLLIN: u64 = 1
+
+fn wake_for(state: u64, due: u64) -> u64 {
+    if due == 0 {
+        return taskconst.POLL_FOREVER
+    }
+    return drmvblank.wake_tick(state, due)
+}
+
+fn try_take(state: u64, me: u64, client: u64, buf: u64, len: u64, wake: *mut u64) -> u64 {
+    let fl: u64 = fslock.enter(state)
+    var r: u64 = 0
+    if !drmclient.live(client) {
+        r = sysuser.neg(errno.E_NODEV)
+    } else {
+        let n: u64 = drmevent.take(state, client, len)
+        if n != 0 {
+            if sysuser.copy_out(state, me, buf, drmevent.out_addr(), n) {
+                r = n
+            } else {
+                r = sysuser.neg(errno.E_FAULT)
+            }
+        }
+        *wake = wake_for(state, drmevent.next_due_ns(client))
+    }
+    fslock.leave(state, fl)
+    return r
+}
+
+fn read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    if len < drmevent.EVENT_BYTES {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !procfault.user_ok(state, me, buf, len) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let client: u64 = file.open_ino(state, of)
+    var wake: u64 = taskconst.POLL_FOREVER
+    while true {
+        let seen: u64 = sched.poll_seq(state)
+        let r: u64 = try_take(state, me, client, buf, len, &wake)
+        if r != 0 {
+            return r
+        }
+        if (file.open_flags(state, of) & sysconst.UB_O_NONBLOCK) != 0 {
+            return sysuser.neg(errno.E_AGAIN)
+        }
+        if signal.interrupted(state, me) {
+            return sysuser.neg(errno.E_INTR)
+        }
+        sched.poll_sleep(state, seen, wake)
+    }
+    return sysuser.neg(errno.E_AGAIN)
+}
+
+fn poll_bits(state: u64, of: u64) -> u64 {
+    let client: u64 = file.open_ino(state, of)
+    if drmevent.ready(state, client) {
+        return POLLIN
+    }
+    let due: u64 = drmevent.next_due_ns(client)
+    if due != 0 {
+        drmtick.arm(due)
+    }
+    return 0
+}

@@ -6,10 +6,16 @@ import gfx.drm.drmuapi
 import gfx.drm.drmfb
 import gfx.drm.kmsmode
 import gfx.drm.kmsreg
+import gfx.drm.drmevent
+import gfx.drm.drmvblank
 
 export { get_crtc, set_crtc, page_flip, dirty, fb_gone, current_fb }
 
 const FLIP_EVENT: u64 = 1
+const FLIP_ASYNC: u64 = 2
+const FLIP_TARGET_ABSOLUTE: u64 = 4
+const FLIP_TARGET_RELATIVE: u64 = 8
+const FLIP_KNOWN: u64 = 15
 
 static mut crtc_fb: u64 = 0
 
@@ -62,14 +68,35 @@ fn set_crtc(state: u64, a: u64) -> u64 {
     return show(state, id)
 }
 
-fn page_flip(state: u64, a: u64) -> u64 {
-    if drmuapi.r32(a) != drmuapi.CRTC_ID || crtc_fb == 0 {
+fn flip_target(state: u64, flags: u64, requested: u64) -> u64 {
+    let now: u64 = drmvblank.seq_now(state)
+    if (flags & FLIP_TARGET_ABSOLUTE) != 0 {
+        return requested
+    }
+    if (flags & FLIP_TARGET_RELATIVE) != 0 {
+        return now + requested
+    }
+    return now + 1
+}
+
+fn page_flip(state: u64, c: u64, a: u64) -> u64 {
+    let flags: u64 = drmuapi.r32(a + 8)
+    if drmuapi.r32(a) != drmuapi.CRTC_ID || crtc_fb == 0 || (flags & ~FLIP_KNOWN) != 0 {
         return errno.E_INVAL
     }
-    if (drmuapi.r32(a + 8) & FLIP_EVENT) != 0 {
-        return errno.E_OPNOTSUPP
+    if (flags & FLIP_TARGET_ABSOLUTE) != 0 && (flags & FLIP_TARGET_RELATIVE) != 0 {
+        return errno.E_INVAL
     }
-    return show(state, drmuapi.r32(a + 4))
+    if (flags & FLIP_EVENT) != 0 && !drmevent.room(c) {
+        return errno.E_BUSY
+    }
+    let r: u64 = show(state, drmuapi.r32(a + 4))
+    if r != 0 || (flags & FLIP_EVENT) == 0 {
+        return r
+    }
+    let target: u64 = flip_target(state, flags, drmuapi.r32(a + 12))
+    let _queued: bool = drmevent.push(c, drmevent.TYPE_FLIP, drmuapi.r64(a + 16), target)
+    return 0
 }
 
 fn dirty(state: u64, a: u64) -> u64 {

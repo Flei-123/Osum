@@ -1,0 +1,198 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.errno
+import sched.sched
+import sys.sysuser
+import gfx.drm.drmuapi
+import gfx.drm.drmgone
+
+export {
+    MAX_ARRAY, NONE, obj_new, obj_ref, obj_unref, handle_new, lookup, ready, point_of, set_signaled,
+    set_point, clear, drop_client, reap_fds, kick, collect_handles, collect_points, obj_at, point_at,
+    create, destroy
+}
+
+const MAX_OBJ: u64 = 64
+const MAX_HANDLE: u64 = 128
+const MAX_ARRAY: u64 = 32
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const FLAG_SIGNALED: u64 = 1
+
+static mut obj_refs: [u64; 64] = [0 as u64; 64]
+static mut obj_signaled: [u64; 64] = [0 as u64; 64]
+static mut obj_point: [u64; 64] = [0 as u64; 64]
+static mut handle_client: [u64; 128] = [0 as u64; 128]
+static mut handle_obj: [u64; 128] = [0 as u64; 128]
+static mut tmp_obj: [u64; 32] = [0 as u64; 32]
+static mut tmp_point: [u64; 32] = [0 as u64; 32]
+
+fn obj_new(signaled: bool) -> u64 {
+    var i: u64 = 0
+    while i < MAX_OBJ {
+        if obj_refs[i as usize] == 0 {
+            obj_refs[i as usize] = 1
+            obj_signaled[i as usize] = 0
+            if signaled {
+                obj_signaled[i as usize] = 1
+            }
+            obj_point[i as usize] = 0
+            return i
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn obj_ref(obj: u64) {
+    obj_refs[obj as usize] = obj_refs[obj as usize] + 1
+}
+
+fn obj_unref(obj: u64) {
+    if obj_refs[obj as usize] == 0 {
+        return
+    }
+    obj_refs[obj as usize] = obj_refs[obj as usize] - 1
+    if obj_refs[obj as usize] == 0 {
+        obj_signaled[obj as usize] = 0
+        obj_point[obj as usize] = 0
+    }
+}
+
+fn handle_new(client: u64, obj: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_HANDLE {
+        if handle_client[i as usize] == 0 {
+            handle_client[i as usize] = client
+            handle_obj[i as usize] = obj
+            return i + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn lookup(client: u64, handle: u64) -> u64 {
+    if handle == 0 || handle > MAX_HANDLE || handle_client[(handle - 1) as usize] != client {
+        return NONE
+    }
+    return handle_obj[(handle - 1) as usize]
+}
+
+fn ready(obj: u64, point: u64) -> bool {
+    if point == 0 {
+        return obj_signaled[obj as usize] != 0
+    }
+    return obj_point[obj as usize] >= point
+}
+
+fn point_of(obj: u64) -> u64 {
+    return obj_point[obj as usize]
+}
+
+fn set_signaled(obj: u64, on: bool) {
+    obj_signaled[obj as usize] = 0
+    if on {
+        obj_signaled[obj as usize] = 1
+    }
+}
+
+fn set_point(obj: u64, point: u64) {
+    if point > obj_point[obj as usize] {
+        obj_point[obj as usize] = point
+    }
+}
+
+fn kick(state: u64) {
+    sched.poll_kick(state)
+}
+
+fn drop_client(client: u64) {
+    var i: u64 = 0
+    while i < MAX_HANDLE {
+        if handle_client[i as usize] == client {
+            handle_client[i as usize] = 0
+            obj_unref(handle_obj[i as usize])
+        }
+        i = i + 1
+    }
+}
+
+fn reap_fds() {
+    var o: u64 = 0
+    while o < MAX_OBJ {
+        var n: u64 = drmgone.take_sync(o)
+        while n != 0 {
+            obj_unref(o)
+            n = n - 1
+        }
+        o = o + 1
+    }
+}
+
+fn clear(client: u64, handle: u64) -> u64 {
+    let obj: u64 = lookup(client, handle)
+    if obj == NONE {
+        return errno.E_NOENT
+    }
+    handle_client[(handle - 1) as usize] = 0
+    obj_unref(obj)
+    return 0
+}
+
+fn collect_handles(state: u64, me: u64, client: u64, ptr: u64, count: u64) -> u64 {
+    if count == 0 || count > MAX_ARRAY {
+        return errno.E_INVAL
+    }
+    var i: u64 = 0
+    while i < count {
+        let obj: u64 = lookup(client, sysuser.get32(state, me, ptr + i * 4))
+        if obj == NONE {
+            return errno.E_NOENT
+        }
+        tmp_obj[i as usize] = obj
+        i = i + 1
+    }
+    return 0
+}
+
+fn collect_points(state: u64, me: u64, ptr: u64, count: u64) {
+    var i: u64 = 0
+    while i < count {
+        tmp_point[i as usize] = 0
+        if ptr != 0 {
+            tmp_point[i as usize] = sysuser.get64u(state, me, ptr + i * 8)
+        }
+        i = i + 1
+    }
+}
+
+fn obj_at(i: u64) -> u64 {
+    return tmp_obj[i as usize]
+}
+
+fn point_at(i: u64) -> u64 {
+    return tmp_point[i as usize]
+}
+
+fn create(client: u64, a: u64) -> u64 {
+    let flags: u64 = drmuapi.r32(a + 4)
+    if (flags & ~FLAG_SIGNALED) != 0 {
+        return errno.E_INVAL
+    }
+    let obj: u64 = obj_new((flags & FLAG_SIGNALED) != 0)
+    if obj == NONE {
+        return errno.E_NOSPC
+    }
+    let handle: u64 = handle_new(client, obj)
+    if handle == 0 {
+        obj_unref(obj)
+        return errno.E_NOSPC
+    }
+    drmuapi.w32(a, handle)
+    return 0
+}
+
+fn destroy(client: u64, a: u64) -> u64 {
+    return clear(client, drmuapi.r32(a))
+}

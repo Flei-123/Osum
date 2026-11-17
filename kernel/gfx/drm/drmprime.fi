@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.errno
+import fs.file
+import fs.unixsock
+import sys.sysuser
+import sys.sysconst
+import gfx.drm.drmuapi
+import gfx.drm.drmgem
+import gfx.drm.drmfd
+
+export { handle_to_fd, fd_to_handle }
+
+fn handle_to_fd(state: u64, me: u64, c: u64, a: u64) -> u64 {
+    let slot: u64 = drmgem.lookup(c, drmuapi.r32(a))
+    if slot == drmgem.NONE {
+        return errno.E_NOENT
+    }
+    let shm: u64 = drmgem.shm_of(slot)
+    unixsock.shm_ref(state, shm)
+    let fd: u64 = drmfd.install(state, me, file.K_SHM, shm, sysconst.O_RDWR)
+    if fd >= drmfd.FAIL {
+        unixsock.shm_unref(state, shm)
+        return fd & 0xFFFF
+    }
+    drmuapi.w32(a + 8, fd)
+    return 0
+}
+
+fn fd_to_handle(state: u64, me: u64, c: u64, a: u64) -> u64 {
+    let of: u64 = sysuser.of_of(state, me, drmuapi.r32(a + 8))
+    if of >= file.MAX_OPEN {
+        return errno.E_BADF
+    }
+    if file.open_kind(state, of) != file.K_SHM {
+        return errno.E_INVAL
+    }
+    let shm: u64 = file.open_ino(state, of)
+    var handle: u64 = drmgem.find_shm(c, shm)
+    if handle == 0 {
+        handle = drmgem.import_shm(state, c, shm)
+    }
+    if handle == 0 {
+        return errno.E_NOSPC
+    }
+    drmuapi.w32(a, handle)
+    return 0
+}

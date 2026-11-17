@@ -1,0 +1,108 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.errno
+import fs.file
+import sys.sysuser
+import sys.sysconst
+import gfx.drm.drmuapi
+import gfx.drm.drmsync
+import gfx.drm.drmfd
+
+export { handle_to_fd, fd_to_handle }
+
+const FLAG_SYNC_FILE: u64 = 1
+const FLAG_TIMELINE: u64 = 2
+const FLAGS_KNOWN: u64 = 3
+
+fn export_target(obj: u64, flags: u64, point: u64) -> u64 {
+    if (flags & FLAG_SYNC_FILE) == 0 {
+        drmsync.obj_ref(obj)
+        return obj
+    }
+    var at: u64 = 0
+    if (flags & FLAG_TIMELINE) != 0 {
+        at = point
+    }
+    if !drmsync.ready(obj, at) {
+        return drmsync.NONE
+    }
+    return drmsync.obj_new(true)
+}
+
+fn handle_to_fd(state: u64, me: u64, c: u64, a: u64) -> u64 {
+    let flags: u64 = drmuapi.r32(a + 4)
+    if (flags & ~FLAGS_KNOWN) != 0 {
+        return errno.E_INVAL
+    }
+    let obj: u64 = drmsync.lookup(c, drmuapi.r32(a))
+    if obj == drmsync.NONE {
+        return errno.E_NOENT
+    }
+    let target: u64 = export_target(obj, flags, drmuapi.r64(a + 16))
+    if target == drmsync.NONE {
+        return errno.E_INVAL
+    }
+    let fd: u64 = drmfd.install(state, me, file.K_SYNC, target, sysconst.O_RDWR)
+    if fd >= drmfd.FAIL {
+        drmsync.obj_unref(target)
+        return fd & 0xFFFF
+    }
+    drmuapi.w32(a + 8, fd)
+    return 0
+}
+
+fn import_into(c: u64, a: u64, flags: u64, src: u64) -> u64 {
+    var handle: u64 = drmuapi.r32(a)
+    var dst: u64 = drmsync.lookup(c, handle)
+    if handle != 0 && dst == drmsync.NONE {
+        return errno.E_NOENT
+    }
+    if handle == 0 {
+        dst = drmsync.obj_new(false)
+        if dst == drmsync.NONE {
+            return errno.E_NOSPC
+        }
+        handle = drmsync.handle_new(c, dst)
+        if handle == 0 {
+            drmsync.obj_unref(dst)
+            return errno.E_NOSPC
+        }
+    }
+    if (flags & FLAG_TIMELINE) != 0 && drmuapi.r64(a + 16) != 0 {
+        drmsync.set_point(dst, drmuapi.r64(a + 16))
+    } else {
+        drmsync.set_signaled(dst, drmsync.ready(src, 0))
+    }
+    drmuapi.w32(a, handle)
+    return 0
+}
+
+fn share(c: u64, a: u64, src: u64) -> u64 {
+    let handle: u64 = drmsync.handle_new(c, src)
+    if handle == 0 {
+        return errno.E_NOSPC
+    }
+    drmsync.obj_ref(src)
+    drmuapi.w32(a, handle)
+    return 0
+}
+
+fn fd_to_handle(state: u64, me: u64, c: u64, a: u64) -> u64 {
+    let flags: u64 = drmuapi.r32(a + 4)
+    if (flags & ~FLAGS_KNOWN) != 0 {
+        return errno.E_INVAL
+    }
+    let of: u64 = sysuser.of_of(state, me, drmuapi.r32(a + 8))
+    if of >= file.MAX_OPEN {
+        return errno.E_BADF
+    }
+    if file.open_kind(state, of) != file.K_SYNC {
+        return errno.E_INVAL
+    }
+    let src: u64 = file.open_ino(state, of)
+    if (flags & FLAG_SYNC_FILE) != 0 {
+        return import_into(c, a, flags, src)
+    }
+    return share(c, a, src)
+}

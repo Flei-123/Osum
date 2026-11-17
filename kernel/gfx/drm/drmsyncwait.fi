@@ -1,0 +1,85 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.errno
+import gfx.drm.drmuapi
+import gfx.drm.drmsync
+import gfx.drm.drmvblank
+import gfx.drm.drmwait
+
+export { wait, timeline_wait }
+
+const FLAG_ALL: u64 = 1
+const FLAG_FOR_SUBMIT: u64 = 2
+const FLAG_KNOWN: u64 = 15
+const TIMEOUT_INFINITE: u64 = 0x7FFFFFFFFFFFFFFF
+
+fn scan(count: u64, all: bool) -> u64 {
+    var n: u64 = 0
+    var first: u64 = drmsync.NONE
+    var i: u64 = 0
+    while i < count {
+        if drmsync.ready(drmsync.obj_at(i), drmsync.point_at(i)) {
+            n = n + 1
+            if first == drmsync.NONE {
+                first = i
+            }
+        }
+        i = i + 1
+    }
+    if all && n == count {
+        return 0
+    }
+    if !all && n != 0 {
+        return first
+    }
+    return drmsync.NONE
+}
+
+fn core(state: u64, me: u64, c: u64, a: u64, timeline: bool) -> u64 {
+    var o_timeout: u64 = 8
+    var o_count: u64 = 16
+    var points: u64 = 0
+    if timeline {
+        points = drmuapi.r64(a + 8)
+        o_timeout = 16
+        o_count = 24
+    }
+    let count: u64 = drmuapi.r32(a + o_count)
+    let flags: u64 = drmuapi.r32(a + o_count + 4)
+    let timeout: u64 = drmuapi.r64(a + o_timeout)
+    if (flags & ~FLAG_KNOWN) != 0 {
+        return errno.E_INVAL
+    }
+    let e: u64 = drmsync.collect_handles(state, me, c, drmuapi.r64(a), count)
+    if e != 0 {
+        return e
+    }
+    drmsync.collect_points(state, me, points, count)
+    let first: u64 = scan(count, (flags & FLAG_ALL) != 0)
+    if first != drmsync.NONE {
+        drmuapi.w32(a + o_count + 8, first)
+        return 0
+    }
+    if (flags & FLAG_FOR_SUBMIT) == 0 {
+        return errno.E_INVAL
+    }
+    if timeout > TIMEOUT_INFINITE {
+        return errno.E_TIME
+    }
+    if timeout == TIMEOUT_INFINITE {
+        return drmwait.retry(0, 0)
+    }
+    if drmvblank.now_ns(state) >= timeout {
+        return errno.E_TIME
+    }
+    return drmwait.retry(timeout, 0)
+}
+
+fn wait(state: u64, me: u64, c: u64, a: u64) -> u64 {
+    return core(state, me, c, a, false)
+}
+
+fn timeline_wait(state: u64, me: u64, c: u64, a: u64) -> u64 {
+    return core(state, me, c, a, true)
+}

@@ -3,6 +3,9 @@ profile kernel
 
 import lib.errno
 import sync.fslock
+import sched.sched
+import sched.signal
+import sched.taskconst
 import sys.sysuser
 import gfx.drm.drmuapi
 import gfx.drm.drmclient
@@ -11,6 +14,9 @@ import gfx.drm.drmgem
 import gfx.drm.drmfb
 import gfx.drm.kmsobj
 import gfx.drm.kmscrtc
+import gfx.drm.drmext
+import gfx.drm.drmwait
+import gfx.drm.drmvblank
 
 export { dispatch }
 
@@ -24,7 +30,7 @@ fn needs_master(nr: u64) -> bool {
 }
 
 fn render_ok(nr: u64) -> bool {
-    return nr == drmuapi.NR_VERSION || nr == drmuapi.NR_GET_CAP || nr == drmuapi.NR_GEM_CLOSE
+    return drmext.render_ok(nr) || nr == drmuapi.NR_VERSION || nr == drmuapi.NR_GET_CAP || nr == drmuapi.NR_GEM_CLOSE
         || nr == drmuapi.NR_SET_CLIENT_CAP
 }
 
@@ -76,7 +82,7 @@ fn handle_mode(state: u64, me: u64, c: u64, nr: u64, a: u64) -> u64 {
         return kmscrtc.set_crtc(state, a)
     }
     if nr == drmuapi.NR_PAGE_FLIP {
-        return kmscrtc.page_flip(state, a)
+        return kmscrtc.page_flip(state, c, a)
     }
     if nr == drmuapi.NR_DIRTYFB {
         return kmscrtc.dirty(state, a)
@@ -118,6 +124,9 @@ fn handle(state: u64, me: u64, c: u64, nr: u64, a: u64) -> u64 {
     if needs_master(nr) && !drmclient.is_master(c) {
         return errno.E_ACCES
     }
+    if drmext.owns(nr) {
+        return drmext.run(state, me, c, nr, a)
+    }
     if nr < drmuapi.NR_GETRESOURCES {
         return handle_core(state, me, c, nr, a)
     }
@@ -146,17 +155,49 @@ fn run(state: u64, me: u64, c: u64, req: u64, arg: u64) -> u64 {
     return r
 }
 
-fn dispatch(state: u64, me: u64, client: u64, req: u64, arg: u64) -> u64 {
-    if ((req >> 8) & 0xFF) != drmuapi.IOC_TYPE {
-        return sysuser.neg(errno.E_NOTTY)
-    }
+fn attempt(state: u64, me: u64, client: u64, req: u64, arg: u64, resume: u64, wake: *mut u64, next: *mut u64) -> u64 {
     let fl: u64 = fslock.enter(state)
     drmclient.reap(state)
     var r: u64 = errno.E_BADF
     if drmclient.live(client) {
+        drmwait.begin(resume)
         r = run(state, me, client, req, arg)
+        *wake = drmwait.wake_ns()
+        *next = drmwait.next_resume()
     }
     fslock.leave(state, fl)
+    return r
+}
+
+fn sleep_until(state: u64, seen: u64, wake_ns: u64) {
+    if wake_ns == 0 {
+        sched.poll_sleep(state, seen, taskconst.POLL_FOREVER)
+        return
+    }
+    sched.poll_sleep(state, seen, drmvblank.wake_tick(state, wake_ns))
+}
+
+fn dispatch(state: u64, me: u64, client: u64, req: u64, arg: u64) -> u64 {
+    if ((req >> 8) & 0xFF) != drmuapi.IOC_TYPE {
+        return sysuser.neg(errno.E_NOTTY)
+    }
+    var resume: u64 = 0
+    var wake: u64 = 0
+    var next: u64 = 0
+    var r: u64 = 0
+    while true {
+        let seen: u64 = sched.poll_seq(state)
+        r = attempt(state, me, client, req, arg, resume, &wake, &next)
+        if r != drmwait.RETRY {
+            break
+        }
+        resume = next
+        if signal.interrupted(state, me) {
+            r = errno.E_INTR
+            break
+        }
+        sleep_until(state, seen, wake)
+    }
     if r == 0 {
         return 0
     }

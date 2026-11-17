@@ -1,0 +1,113 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.errno
+import sys.sysuser
+import gfx.drm.drmuapi
+import gfx.drm.drmsync
+
+export { reset, signal, timeline_signal, query, transfer }
+
+fn reset(state: u64, me: u64, c: u64, a: u64) -> u64 {
+    let count: u64 = drmuapi.r32(a + 8)
+    let e: u64 = drmsync.collect_handles(state, me, c, drmuapi.r64(a), count)
+    if e != 0 {
+        return e
+    }
+    var i: u64 = 0
+    while i < count {
+        drmsync.set_signaled(drmsync.obj_at(i), false)
+        i = i + 1
+    }
+    return 0
+}
+
+fn signal(state: u64, me: u64, c: u64, a: u64) -> u64 {
+    let count: u64 = drmuapi.r32(a + 8)
+    let e: u64 = drmsync.collect_handles(state, me, c, drmuapi.r64(a), count)
+    if e != 0 {
+        return e
+    }
+    var i: u64 = 0
+    while i < count {
+        drmsync.set_signaled(drmsync.obj_at(i), true)
+        i = i + 1
+    }
+    drmsync.kick(state)
+    return 0
+}
+
+fn timeline_signal(state: u64, me: u64, c: u64, a: u64) -> u64 {
+    let count: u64 = drmuapi.r32(a + 16)
+    if drmuapi.r32(a + 20) != 0 {
+        return errno.E_INVAL
+    }
+    let e: u64 = drmsync.collect_handles(state, me, c, drmuapi.r64(a), count)
+    if e != 0 {
+        return e
+    }
+    drmsync.collect_points(state, me, drmuapi.r64(a + 8), count)
+    var i: u64 = 0
+    while i < count {
+        let p: u64 = drmsync.point_at(i)
+        if p != 0 && p <= drmsync.point_of(drmsync.obj_at(i)) {
+            return errno.E_INVAL
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < count {
+        if drmsync.point_at(i) == 0 {
+            drmsync.set_signaled(drmsync.obj_at(i), true)
+        } else {
+            drmsync.set_point(drmsync.obj_at(i), drmsync.point_at(i))
+        }
+        i = i + 1
+    }
+    drmsync.kick(state)
+    return 0
+}
+
+fn query(state: u64, me: u64, c: u64, a: u64) -> u64 {
+    let count: u64 = drmuapi.r32(a + 16)
+    let e: u64 = drmsync.collect_handles(state, me, c, drmuapi.r64(a), count)
+    if e != 0 {
+        return e
+    }
+    var i: u64 = 0
+    while i < count {
+        if !sysuser.put64(state, me, drmuapi.r64(a + 8) + i * 8, drmsync.point_of(drmsync.obj_at(i))) {
+            return errno.E_FAULT
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn transfer(state: u64, me: u64, c: u64, a: u64) -> u64 {
+    let src: u64 = drmsync.lookup(c, drmuapi.r32(a))
+    let dst: u64 = drmsync.lookup(c, drmuapi.r32(a + 4))
+    let src_point: u64 = drmuapi.r64(a + 8)
+    let dst_point: u64 = drmuapi.r64(a + 16)
+    if src == drmsync.NONE || dst == drmsync.NONE {
+        return errno.E_NOENT
+    }
+    if drmuapi.r32(a + 24) != 0 {
+        return errno.E_INVAL
+    }
+    if src_point == 0 && dst_point == 0 {
+        drmsync.set_signaled(dst, drmsync.ready(src, 0))
+        drmsync.kick(state)
+        return 0
+    }
+    if !drmsync.ready(src, src_point) {
+        return errno.E_INVAL
+    }
+    if dst_point == 0 {
+        drmsync.set_signaled(dst, true)
+    } else {
+        drmsync.set_point(dst, dst_point)
+    }
+    drmsync.kick(state)
+    return 0
+}
