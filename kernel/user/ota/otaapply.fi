@@ -50,6 +50,14 @@ static mut P_TASKBAR: [u8; 13] = "/bin/taskbar\0"
 
 static mut P_SIGNFAIL: [u8; 21] = "/var/jarvis/signfail\0"
 
+static mut P_PAIRED: [u8; 18] = "/var/jarvis/state\0"
+
+static mut P_BRIDGE_OK: [u8; 22] = "/var/jarvis/bridge-ok\0"
+
+static mut W_PAIRED_OK: [u8; 12] = "pairing: ok\0"
+
+const BRIDGE_GRACE_S: u64 = 240
+
 static mut S_BGUT: [u8; 43] = "ota: start healthy, trial confirmed after \0"
 
 static mut S_BNEU: [u8; 77] = "ota: start NOT healthy within the grace period -- restart, the kernel counts\0"
@@ -85,8 +93,30 @@ fn cmd_bestaetigen() -> u64 {
 
 const SYS_CHMOD: u64 = 90
 
+fn bridge_required() -> bool {
+    var b: [u8; 16] = [0 as u8; 16]
+    let n: u64 = otacmd.file_read((&P_PAIRED[0 as usize]) as u64, (&b[0 as usize]) as u64, 15)
+    if n == 0xFFFFFFFFFFFFFFFF || n < 11 {
+        return false
+    }
+    return text.equal_n((&b[0 as usize]) as u64, (&W_PAIRED_OK[0 as usize]) as u64, 11)
+}
+
+fn bridge_answered() -> bool {
+    var b: [u8; 24] = [0 as u8; 24]
+    let n: u64 = otacmd.file_read((&P_BRIDGE_OK[0 as usize]) as u64, (&b[0 as usize]) as u64, 23)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 {
+        return false
+    }
+    let stamp: u64 = text.number((&b[0 as usize]) as u64)
+    return stamp != 0 && stamp <= clockapi.uptime_sec()
+}
+
 fn boot_healthy(extra: u64) -> bool {
     if su_exists((&P_SIGNFAIL[0 as usize]) as u64) {
+        return false
+    }
+    if bridge_required() && !bridge_answered() {
         return false
     }
     if extra != 0 && otacmd.name_laeuft(extra) {
@@ -112,6 +142,9 @@ fn cmd_boot(extra: u64) -> u64 {
         var timeout: u64 = otacmd.conf_num((&otabase.K_TIMEOUT[0 as usize]) as u64, 120)
         if timeout <= gesund {
             timeout = gesund + 60
+        }
+        if bridge_required() && timeout < BRIDGE_GRACE_S {
+            timeout = BRIDGE_GRACE_S
         }
         var s: u64 = 0
         var gut: bool = false

@@ -707,6 +707,15 @@ rc=$(lauf kan13 "ota apply;exit")
 rc=$(lauf kan14 "opk rebuild;ota set gesund 2;ota set frist 6;ota boot nirgends;exit" 300)
 hat "$OUT/kan14.txt" "start NOT healthy" "(g) GEGENPROBE: ohne laufenden Schreibtisch gilt der Start NICHT als gesund"
 hatnicht "$OUT/kan14.txt" "trial confirmed" "(g) GEGENPROBE: und es wird nichts bestaetigt"
+cp -f "$OUT/basis.img" "$OUT/ziel.img"
+rc=$(lauf kan16a "ota apply;exit")
+rc=$(lauf kan16 "opk rebuild;mkdir /var/jarvis;echo pairing: ok > /var/jarvis/state;ota set healthy 2;ota set frist 6;ota boot sh;exit" 480)
+hat "$OUT/kan16.txt" "start NOT healthy" "(g2) paired device whose bridge never answered: trial start NOT healthy"
+hatnicht "$OUT/kan16.txt" "trial confirmed" "(g2) and nothing is confirmed"
+cp -f "$OUT/basis.img" "$OUT/ziel.img"
+rc=$(lauf kan17a "ota apply;exit")
+rc=$(lauf kan17 "opk rebuild;mkdir /var/jarvis;echo pairing: ok > /var/jarvis/state;echo 1 > /var/jarvis/bridge-ok;ota set healthy 2;ota set frist 6;ota boot sh;exit" 480)
+hat "$OUT/kan17.txt" "ota: start healthy, trial confirmed" "(g2) control: bridge answered in this boot -> trial confirmed"
 
 # (h) der Hintergrund-Dienst
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
