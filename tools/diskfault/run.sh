@@ -63,13 +63,18 @@ echo "== ahci budget =="
 if python3 -I tools/diskfault/check.py "$D/ahci.txt"; then pass=$((pass+1)); else fail=$((fail+1)); fi
 
 if [ -z "${NOMUTANT:-}" ] && [ -z "${KERNEL:-}" ]; then
-    echo "== counter-probe: ahci limited to 32 KiB per command =="
-    cp kernel/drv/blk/ahci/ahci_defs.fi "$D/ahci_defs.fi.keep"
-    sed -i 's/^const MAX_TRANSFER: u64 = 1048576$/const MAX_TRANSFER: u64 = 28672/' kernel/drv/blk/ahci/ahci_defs.fi
-    bash tools/build-kernel.sh "$D/mutant.mb" --stufe 1 > "$D/mk.log" 2>&1
-    cp "$D/ahci_defs.fi.keep" kernel/drv/blk/ahci/ahci_defs.fi
-    run_drive ahci "$D/mutant.mb" mutant
-    if python3 -I tools/diskfault/check.py "$D/mutant.txt"; then fail=$((fail+1)); echo "  FAIL  counter-probe passes"; else pass=$((pass+1)); echo "  OK    counter-probe is rejected"; fi
+    run_mutant() {
+        local label=$1 file=$2 from=$3 to=$4 tag=$5
+        echo "== counter-probe: $label =="
+        cp "$file" "$D/mutated.keep"
+        sed -i "s/^$from\$/$to/" "$file"
+        bash tools/build-kernel.sh "$D/$tag.mb" --stufe 1 > "$D/$tag.log" 2>&1
+        cp "$D/mutated.keep" "$file"
+        run_drive ahci "$D/$tag.mb" "$tag"
+        if python3 -I tools/diskfault/check.py "$D/$tag.txt"; then fail=$((fail+1)); echo "  FAIL  counter-probe passes"; else pass=$((pass+1)); echo "  OK    counter-probe is rejected"; fi
+    }
+    run_mutant "ahci limited to 32 KiB per command" kernel/drv/blk/ahci/ahci_defs.fi "const MAX_TRANSFER: u64 = 1048576" "const MAX_TRANSFER: u64 = 28672" mutant
+    run_mutant "stream window growth off" kernel/block/blk.fi "const S_SECTORS_SEQ: u64 = 512" "const S_SECTORS_SEQ: u64 = 128" nogrow
 fi
 echo "load: $(cut -d' ' -f1-3 /proc/loadavg)"
 echo "DISKFAULT: $pass passed, $fail failed"
