@@ -478,6 +478,12 @@ fn file_shm_flush(state: u64, i: u64) {
 // msync / munmap / exit: write back every file object that a mapping record of this task overlaps with [addr, addr + len)
 // (len == 0xFFFFFFFFFFFFFFFF = all of the task's records, for the end of the process). `exact` = munmap: only the record that starts at addr.
 fn file_shm_flush_maps(state: u64, me: u64, addr: u64, len: u64, exact: bool) {
+    let fl: u64 = fslock.enter(state)
+    file_shm_flush_maps_locked(state, me, addr, len, exact)
+    fslock.leave(state, fl)
+}
+
+fn file_shm_flush_maps_locked(state: u64, me: u64, addr: u64, len: u64, exact: bool) {
     let owner: u64 = mem_owner(state, me)
     var k: u64 = 0
     while k < unixsock.UMAP_MAX {
@@ -504,6 +510,15 @@ fn file_shm_flush_maps(state: u64, me: u64, addr: u64, len: u64, exact: bool) {
 }
 
 fn map_file_shared(state: u64, me: u64, len: u64, flags: u64, fd: u64, off: u64, prot: u64) -> u64 {
+    mmlock.vm_lock(state, me)
+    let fl: u64 = fslock.enter(state)
+    let r: u64 = map_file_shared_locked(state, me, len, flags, fd, off, prot)
+    fslock.leave(state, fl)
+    mmlock.vm_unlock(state, me)
+    return r
+}
+
+fn map_file_shared_locked(state: u64, me: u64, len: u64, flags: u64, fd: u64, off: u64, prot: u64) -> u64 {
     let of: u64 = sysuser.of_of(state, me, fd)
     if of >= file.MAX_OPEN || !sysfd.readable(state, of) || !sysfd.writable(state, of) {
         return sysuser.neg(errno.E_ACCES)
@@ -517,7 +532,7 @@ fn map_file_shared(state: u64, me: u64, len: u64, flags: u64, fd: u64, off: u64,
     }
     let first_pg: u64 = off / sysconst.PAGE
     let npages: u64 = sysfd.page_up(len) / sysconst.PAGE
-    var i: u64 = unixsock.shm_file_find(state, ino, first_pg)
+    var i: u64 = unixsock.shm_file_find_ref(state, ino, first_pg)
     var made: bool = false
     if i >= unixsock.USHM_MAX {
         i = unixsock.shm_new(state)
@@ -532,32 +547,23 @@ fn map_file_shared(state: u64, me: u64, len: u64, flags: u64, fd: u64, off: u64,
     let have: u64 = unixsock.shm_pages(state, i)
     if npages > have {
         let g: u64 = unixsock.shm_grow(state, i, npages)
-        // the pages that exist now are filled in any case: a zero page inside the file that stays unfilled would be written over it later
         let ok: bool = file_shm_fill(state, i, ino, first_pg, have, unixsock.shm_pages(state, i))
         if g != 0 || !ok {
-            if made {
-                unixsock.shm_unref(state, i)
-            }
+            unixsock.shm_unref(state, i)
             return sysuser.neg(errno.E_NOMEM)
         }
     }
     if !unixsock.shm_wmap_take(state, i) {
-        if made {
-            unixsock.shm_unref(state, i)
-        }
+        unixsock.shm_unref(state, i)
         return sysuser.neg(errno.E_PERM)
     }
     let r: u64 = map_shm_obj(state, me, i, true, len, prot)
     if r >= 0xFFFFFFFFFFFFF000 {
         unixsock.shm_wmap_drop(state, i)
+    } else if made {
+        unixsock.shm_file_mark(state, i, ino, first_pg)
     }
-    if made {
-        if r < 0xFFFFFFFFFFFFF000 {
-            unixsock.shm_file_mark(state, i, ino, first_pg)
-        }
-        // the reference of the creation goes: from here on only the mappings hold the object
-        unixsock.shm_unref(state, i)
-    }
+    unixsock.shm_unref(state, i)
     return r
 }
 
