@@ -11,6 +11,7 @@ import sched.taskconst
 import sched.taskslot
 import sync.atomic
 import sync.fdlock
+import sync.fqlock
 import arch.cpu
 import ipc.handle
 import mm.mmframe
@@ -907,23 +908,28 @@ fn pipe_readers(state: u64, i: u64) -> u64 {
 }
 
 fn pipe_put(state: u64, i: u64, v: u64) -> bool {
-    if pipe_room(state, i) == 0 {
-        return false
+    let lf: u64 = fqlock.enter(state)
+    var done: bool = false
+    if pipe_room(state, i) != 0 {
+        let w: u64 = kstate.get(state, ph_at(i) + PH_WRITE)
+        let at: u64 = state + kstate.PIPEBUF_OFF + pipe_base(i) + (w % pipe_cap(i))
+        kstate.set8(at, v as u8)
+        kstate.set(state, ph_at(i) + PH_WRITE, w + 1)
+        done = true
     }
-    let w: u64 = kstate.get(state, ph_at(i) + PH_WRITE)
-    let at: u64 = state + kstate.PIPEBUF_OFF + pipe_base(i) + (w % pipe_cap(i))
-    kstate.set8(at, v as u8)
-    kstate.set(state, ph_at(i) + PH_WRITE, w + 1)
-    return true
+    fqlock.leave(state, lf)
+    return done
 }
 
 fn pipe_get(state: u64, i: u64) -> u64 {
-    if pipe_bytes(state, i) == 0 {
-        return 256
+    let lf: u64 = fqlock.enter(state)
+    var v: u64 = 256
+    if pipe_bytes(state, i) != 0 {
+        let r: u64 = kstate.get(state, ph_at(i) + PH_READ)
+        let at: u64 = state + kstate.PIPEBUF_OFF + pipe_base(i) + (r % pipe_cap(i))
+        v = kstate.get8(at)
+        kstate.set(state, ph_at(i) + PH_READ, r + 1)
     }
-    let r: u64 = kstate.get(state, ph_at(i) + PH_READ)
-    let at: u64 = state + kstate.PIPEBUF_OFF + pipe_base(i) + (r % pipe_cap(i))
-    let v: u64 = kstate.get8(at)
-    kstate.set(state, ph_at(i) + PH_READ, r + 1)
+    fqlock.leave(state, lf)
     return v
 }

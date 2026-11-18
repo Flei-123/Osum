@@ -7,6 +7,9 @@
 #include <sys/wait.h>
 #include <time.h>
 
+#ifndef SOCKTYPE
+#define SOCKTYPE SOCK_STREAM
+#endif
 #define PAIRS 3
 #define SECONDS 5
 #define MAX_FDS 8
@@ -148,7 +151,7 @@ int main(void)
     int results[PAIRS];
     for (int i = 0; i < PAIRS; i++) {
         int sv[2], rp[2];
-        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0 || pipe(rp) != 0) { FAIL("setup", "errno=%d", errno); return 0; }
+        if (socketpair(AF_UNIX, SOCKTYPE, 0, sv) != 0 || pipe(rp) != 0) { FAIL("setup", "errno=%d", errno); return 0; }
         if (fork() == 0) { close(sv[0]); close(rp[0]); sender(sv[1]); _exit(0); }
         if (fork() == 0) { close(sv[1]); close(rp[0]); receiver(sv[0], rp[1]); _exit(0); }
         close(sv[0]);
@@ -160,7 +163,8 @@ int main(void)
     int missing = 0;
     for (int i = 0; i < PAIRS; i++) {
         struct result r;
-        if (read(results[i], &r, sizeof r) != sizeof r) { missing++; continue; }
+        ssize_t got = read(results[i], &r, sizeof r);
+        if (got != sizeof r) { dprintf(2, "DBG pair=%d got=%zd errno=%d\n", i, got, errno); missing++; continue; }
         total.msgs += r.msgs;
         total.bad_stream += r.bad_stream;
         total.bad_fd += r.bad_fd;
