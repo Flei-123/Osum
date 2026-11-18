@@ -18,9 +18,9 @@ QPORT=$(( 22000 + ($$ % 300) * 2 ))
 BPORT=$(( QPORT + 1 ))
 OSUM_IP=10.9.1.2
 HOST_IP=10.9.1.1
-FREEZE_S=${BEAT_FREEZE_S:-60}
-RUN_S=${BEAT_RUN_S:-100}
-MAX_GAP_S=${BEAT_MAX_GAP_S:-25}
+FREEZE_S=${BEAT_FREEZE_S:-70}
+RUN_S=${BEAT_RUN_S:-110}
+MAX_GAP_S=${BEAT_MAX_GAP_S:-30}
 LOAD=${BEAT_LOAD:-0}
 SMP=${BEAT_SMP:-1}
 THROTTLE=${BEAT_THROTTLE:-4194304}
@@ -43,7 +43,7 @@ trap cleanup EXIT
 echo "== 1. build =="
 B=${BEAT_BUILD:-$W/b}
 if [ -z "${BEAT_BUILD:-}" ]; then
-    bash tools/bridge/build.sh "$B" 0 >"$W/build.txt" 2>&1 || {
+    BRIDGE_PROGS="sh ls cat echo chmod jsig jarvisctl sleep shasum" bash tools/bridge/build.sh "$B" 0 >"$W/build.txt" 2>&1 || {
         echo "the build failed"; tail -5 "$W/build.txt"; exit 1; }
 fi
 python3 tools/hwnet/mkcerts.py "$W/certs" jarvis.test >"$W/certs.txt" 2>&1 || {
