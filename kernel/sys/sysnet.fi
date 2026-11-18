@@ -1901,76 +1901,74 @@ fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
         }
         waited = waited + sysfd.net_wait(state, seen)
     }
+    let avail: u64 = unixsock.waiting(state, si)
     var ctlout: u64 = 0
+    var rflags: u64 = 0
     let ctl: u64 = sysuser.get64u(state, me, mh + MH_CONTROL)
     let ctllen: u64 = sysuser.get64u(state, me, mh + sysconst.MH_CONTROLLEN)
-    if ctl != 0 && ctllen >= 20 && unixsock.fd_waiting(state, si) != 0 {
-        if !procfault.user_ok(state, me, ctl, ctllen) {
-            return sysuser.neg(errno.E_FAULT)
+    if ctl != 0 && ctllen != 0 && !procfault.user_ok(state, me, ctl, ctllen) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    var room: u64 = 0
+    if ctl != 0 && ctllen >= 20 {
+        room = (ctllen - 16) / 4
+    }
+    var n: u64 = 0
+    while unixsock.fd_deliverable(state, si) {
+        let sof: u64 = unixsock.pop_fd(state, si)
+        if sof >= file.MAX_OPEN {
+            break
         }
-        var room: u64 = (ctllen - 16) / 4
-        if room > unixsock.FDQ_MAX {
-            room = unixsock.FDQ_MAX
-        }
-        var n: u64 = 0
-        while n < room && unixsock.fd_waiting(state, si) != 0 {
-            let sof: u64 = unixsock.pop_fd(state, si)
-            if sof >= file.MAX_OPEN {
-                n = room
-            } else {
-                let nfd: u64 = file.fd_alloc(state, me, 0)
-                if nfd >= file.MAX_FD {
-                    file.open_unref(state, sof)
-                    n = room
-                } else {
-                    file.fd_set(state, me, nfd, sof)
-                    if (flags & MSG_CMSG_CLOEXEC) != 0 {
-                        sysfd.cx_put(state, me, nfd, true)
-                    }
-                    if !sysuser.put32(state, me, ctl + 16 + n * 4, nfd) {
-                        return sysuser.neg(errno.E_FAULT)
-                    }
+        var kept: bool = false
+        if n < room {
+            let nfd: u64 = file.fd_alloc(state, me, 0)
+            if nfd < file.MAX_FD {
+                file.fd_set(state, me, nfd, sof)
+                if (flags & MSG_CMSG_CLOEXEC) != 0 {
+                    sysfd.cx_put(state, me, nfd, true)
+                }
+                if sysuser.put32(state, me, ctl + 16 + n * 4, nfd) {
                     n = n + 1
+                    kept = true
                 }
             }
         }
-        if n != 0 {
-            ctlout = 16 + n * 4
-            if !sysuser.put64(state, me, ctl, ctlout) {
-                return sysuser.neg(errno.E_FAULT)
+        if !kept {
+            file.open_unref(state, sof)
+            if ctl != 0 {
+                rflags = MSG_CTRUNC_FLAG
             }
-            if !sysuser.put32(state, me, ctl + 8, sysconst.SOL_SOCKET) {
-                return sysuser.neg(errno.E_FAULT)
-            }
-            if !sysuser.put32(state, me, ctl + 12, SCM_RIGHTS) {
-                return sysuser.neg(errno.E_FAULT)
-            }
+        }
+    }
+    if n != 0 {
+        ctlout = 16 + n * 4
+        if !sysuser.put64(state, me, ctl, ctlout) || !sysuser.put32(state, me, ctl + 8, sysconst.SOL_SOCKET) || !sysuser.put32(state, me, ctl + 12, SCM_RIGHTS) {
+            return sysuser.neg(errno.E_FAULT)
         }
     }
     if !sysuser.put64(state, me, mh + sysconst.MH_CONTROLLEN, ctlout) {
         return sysuser.neg(errno.E_FAULT)
     }
-    // MSG_CTRUNC (8): descriptors are still queued because the control buffer was too small.
-    var rflags: u64 = 0
-    if ctl != 0 && unixsock.fd_waiting(state, si) != 0 {
-        rflags = 8
-    }
     if !sysuser.put32(state, me, mh + sysconst.MH_FLAGS, rflags) {
         return sysuser.neg(errno.E_FAULT)
     }
+    let limit: u64 = unixsock.fd_limit(state, si, avail)
     var got: u64 = 0
     var v: u64 = 0
-    while v < iovlen && unixsock.waiting(state, si) != 0 {
+    while v < iovlen && got < limit {
         if !procfault.user_ok(state, me, iov + v * 16, 16) {
             return sysuser.neg(errno.E_FAULT)
         }
         let base: u64 = sysuser.get64u(state, me, iov + v * 16)
         let blen: u64 = sysuser.get64u(state, me, iov + v * 16 + 8)
         var off: u64 = 0
-        while off < blen && unixsock.waiting(state, si) != 0 {
+        while off < blen && got < limit {
             var chunk: u64 = blen - off
             if chunk > sysconst.MSG_MAX {
                 chunk = sysconst.MSG_MAX
+            }
+            if chunk > limit - got {
+                chunk = limit - got
             }
             let r: u64 = sysfd.wl_recv(state, me, si, base + off, chunk, false)
             if r == sysuser.neg(errno.E_FAULT) {
