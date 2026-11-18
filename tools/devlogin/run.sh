@@ -9,6 +9,8 @@
 #   C  counter-proofs: root refused, emergency stop refuses, a hand-written request without the
 #      dev-mode marker is ignored, an unknown account is ignored; none of them signs in
 #   D  old main image: the same call is refused (unknown input kind) and nothing signs in
+#   E  locked screen: `jarvisd -i login <owner>` unlocks it in dev mode (lock: dev unlock as ...)
+#   F  locked screen without a fresh dev-mode marker: a hand-written request does not unlock it
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -67,16 +69,51 @@ scenario_positive() {
     ex "$d" "/bin/ps" > "$d/ps.txt"
 }
 
+wait_line() {
+    local d=$1 pattern=$2 limit=$3 i=0
+    while [ $i -lt "$limit" ] && ! grep -aq "$pattern" "$d/com1.log"; do sleep 1; i=$((i+1)); done
+}
+
+start_lock() {
+    local d=$1 i=0
+    ex "$d" "/bin/jarvisd -i login justin" > "$d/login.txt"
+    wait_line "$d" 'glogin: signed in as' 90
+    sleep 8
+    ex "$d" "/bin/sh -c '/bin/lock > /tmp/lock.out &'" > "$d/lockstart.txt"
+    wait_line "$d" 'lock: ready' 60
+    sleep 3
+}
+
+scenario_lock_dev() {
+    local d="$TMPD/lkp"
+    start_lock "$d"
+    ex "$d" "/bin/jarvisd -i login justin" > "$d/unlock.txt"
+    wait_line "$d" 'lock: dev unlock as justin' 40
+    sleep 5
+    ex "$d" "/bin/ps" > "$d/ps.txt"
+}
+
+scenario_lock_nomarker() {
+    local d="$TMPD/lkn"
+    start_lock "$d"
+    ex "$d" "/bin/sh -c 'echo > /var/jarvis/dev-off'" > "$d/stop.txt"
+    ex "$d" "/bin/sh -c 'echo justin > /var/jarvis/devlogin'" > "$d/hand.txt"
+    sleep 45
+    ex "$d" "/bin/ps" > "$d/ps.txt"
+}
+
 scenario_old() {
     local d="$TMPD/old"
     ex "$d" "/bin/jarvisd -i login justin" > "$d/login.txt"
     sleep 20
 }
 
-boot main "$BUILD" && boot pos "$BUILD" || { bad "boot"; tail -5 "$TMPD"/*/start.txt; }
+boot main "$BUILD" && boot pos "$BUILD" && boot lkp "$BUILD" && boot lkn "$BUILD" || { bad "boot"; tail -5 "$TMPD"/*/start.txt; }
 [ -n "$OLD" ] && boot old "$OLD"
 scenario_main &
 scenario_positive &
+scenario_lock_dev &
+scenario_lock_nomarker &
 [ -n "$OLD" ] && scenario_old &
 wait
 
@@ -91,6 +128,16 @@ d="$TMPD/main"
 [ "$(cat "$d/C2" 2>/dev/null)" = nouser_out ] && ok "C: unknown account is not signed in" || bad "C: unknown account signed in"
 grep -aq 'login needs dev mode' "$d/stoplogin.txt" && ok "C: emergency stop refuses the login job" || bad "C: stop did not refuse ($(tail -2 "$d/stoplogin.txt" | tr '\n' ' '))"
 [ "$(cat "$d/C3" 2>/dev/null)" = stop_out ] && ok "C: hand-written request without the dev marker is ignored" || bad "C: request without marker signed in"
+
+d="$TMPD/lkp"
+grep -aq 'lock: ready' "$d/com1.log" && ok "E: the lock screen is up" || bad "E: the lock screen did not start"
+grep -aq 'lock: dev unlock as justin' "$d/com1.log" && ok "E: dev-mode login unlocks the locked screen" || bad "E: no 'lock: dev unlock as' line ($(tail -2 "$d/unlock.txt" | tr '\n' ' '))"
+grep -aqE '(^|[ /])lock( |$)' "$d/ps.txt" && bad "E: the lock process is still running after the dev unlock" || ok "E: the lock process is gone after the dev unlock"
+
+d="$TMPD/lkn"
+grep -aq 'lock: ready' "$d/com1.log" && ok "F: the lock screen is up" || bad "F: the lock screen did not start"
+grep -aq 'lock: dev unlock as' "$d/com1.log" && bad "F: a request without a fresh marker unlocked the screen" || ok "F: a hand-written request without the dev marker does not unlock"
+grep -aqE '(^|[ /])lock( |$)' "$d/ps.txt" && ok "F: the lock process is still running" || bad "F: the lock process is gone"
 
 if [ -n "$OLD" ]; then
     d="$TMPD/old"
