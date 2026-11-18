@@ -1,0 +1,75 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+profile kernel
+
+import ulib
+import pw
+import libc.clockapi
+
+export { take, NAME_MAX }
+
+const NAME_MAX: u64 = 64
+const FIRST_REGULAR_UID: u64 = 1000
+const MARKER_MAX_AGE_S: u64 = 30
+const MS_PER_S: u64 = 1000
+const FILE_MAX: u64 = 96
+const SHADOW_FIELD_MAX: u64 = 180
+
+static mut P_REQUEST: [u8; 22] = "/var/jarvis/devlogin\0\0"
+static mut P_MARKER: [u8; 27] = "/var/jarvis/devmode-active\0"
+
+fn marker_fresh() -> bool {
+    var buf: [u8; 96] = [0 as u8; 96]
+    let n: u64 = pw.read_all((&P_MARKER[0]) as u64, (&buf[0]) as u64, FILE_MAX)
+    if n == ulib.EOF || n == 0 {
+        return false
+    }
+    let stamp: u64 = ulib.to_num((&buf[0]) as u64)
+    let now: u64 = clockapi.uptime_sec() / MS_PER_S
+    if stamp > now {
+        return stamp - now <= MARKER_MAX_AGE_S
+    }
+    return now - stamp <= MARKER_MAX_AGE_S
+}
+
+fn first_word(src: u64, dst: u64) {
+    var i: u64 = 0
+    while i < NAME_MAX - 1 {
+        let c: u8 = __mmio_read8((src + i) as *mut u8)
+        if c <= 32 as u8 {
+            break
+        }
+        __mmio_write8((dst + i) as *mut u8, c)
+        i = i + 1
+    }
+    __mmio_write8((dst + i) as *mut u8, 0 as u8)
+}
+
+fn regular_account(name: u64) -> bool {
+    var hash: [u8; 192] = [0 as u8; 192]
+    let uid: u64 = pw.uid_of_name(name)
+    if uid == ulib.EOF || uid < FIRST_REGULAR_UID {
+        return false
+    }
+    return pw.shadow_of(name, (&hash[0]) as u64, SHADOW_FIELD_MAX)
+}
+
+fn take(name_out: u64, fallback: u64) -> bool {
+    var buf: [u8; 96] = [0 as u8; 96]
+    let n: u64 = pw.read_all((&P_REQUEST[0]) as u64, (&buf[0]) as u64, FILE_MAX)
+    if n == ulib.EOF {
+        return false
+    }
+    ulib.sys(ulib.SYS_UNLINK, (&P_REQUEST[0]) as u64, 0, 0)
+    if !marker_fresh() {
+        return false
+    }
+    first_word((&buf[0]) as u64, name_out)
+    if __mmio_read8(name_out as *mut u8) == 0 as u8 {
+        first_word(fallback, name_out)
+    }
+    if __mmio_read8(name_out as *mut u8) == 0 as u8 {
+        return false
+    }
+    return regular_account(name_out)
+}

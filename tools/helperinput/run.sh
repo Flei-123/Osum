@@ -38,6 +38,7 @@ jarvisd -i "tap 100 100 9 1"
 jarvisd -i "tap 100 100 1 7"
 jarvisd -i bogus
 jarvisd -i type
+jarvisd -i login justin
 echo ==E==
 jarvisctl input off
 jarvisd -i type "x"
@@ -67,6 +68,7 @@ n=$(echo "$c" | grep -ac '^input: OK')
 [ "$n" -eq 7 ] && ok "tap (double + right), drag, scroll down/left, scan, mouse: 7 of 7 accepted" || bad "C: $n of 7 accepted"
 echo "$d" | grep -aq 'invalid' && ok "bad mask / bad click count are refused as invalid" || bad "D: invalid arguments not refused"
 echo "$d" | grep -aq 'unknown input kind' && ok "unknown kind refused" || bad "D: unknown kind"
+echo "$d" | grep -aq 'login needs dev mode' && ok "login without dev mode refused" || bad "D: login without dev mode"
 echo "$d" | grep -aq 'type needs the text' && ok "type without payload refused" || bad "D: empty type"
 echo "$e" | grep -aq 'emergency stop engaged' && ok "COUNTER-PROOF: emergency stop refuses type" || bad "E: type not refused after the stop"
 echo "$e" | grep -aqx '1280 800' && ok "size is read-only: still answers during the stop" || bad "E: size during the stop"
