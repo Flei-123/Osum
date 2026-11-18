@@ -1,0 +1,101 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import std.rt
+import jarvisd.jdbase
+import jarvisd.jdcmd
+
+const S_NANOSLEEP: i64 = 35
+
+const S_GETPID: i64 = 39
+
+const S_WAIT4: i64 = 61
+
+const S_KILL: i64 = 62
+
+const S_GETPPID: i64 = 110
+
+const SIGKILL: i64 = 9
+
+const WNOHANG: i64 = 1
+
+const BEAT_PERIOD_MS: u64 = 15000
+
+const NAP_MS: u64 = 500
+
+const REAP_WAIT_MS: u64 = 2000
+
+fn nap_ms(ms: u64) {
+    var ts: [i64; 2] = [0; 2]
+    ts[0] = (ms / 1000) as i64
+    ts[1] = ((ms % 1000) * 1000000) as i64
+    syscall(S_NANOSLEEP, (&ts[0]) as i64, 0, 0, 0, 0, 0)
+}
+
+fn parent_gone(parent: i64) -> bool {
+    return syscall(S_GETPPID, 0, 0, 0, 0, 0, 0) != parent
+}
+
+fn beat_loop(d: *mut jdbase.Wire, parent: i64) {
+    jdbase.k_in_beat = true
+    var waited: u64 = 0
+    while true {
+        nap_ms(NAP_MS)
+        if parent_gone(parent) {
+            return
+        }
+        waited = waited + NAP_MS
+        if waited < BEAT_PERIOD_MS {
+            continue
+        }
+        waited = 0
+        (*d).tot = false
+        rt.buf_clear(&(*d).puf)
+        (*d).at = 0
+        let _sent: bool = jdcmd.word_send(d, "alive", 0, 0 as usize)
+    }
+}
+
+fn start(d: *mut jdbase.Wire) {
+    if !(*d).https || jdbase.k_beat_off || jdbase.k_beat_pid != 0 {
+        return
+    }
+    let parent: i64 = syscall(S_GETPID, 0, 0, 0, 0, 0, 0)
+    let kind: i64 = syscall(jdbase.S_FORK, 0, 0, 0, 0, 0, 0)
+    if kind < 0 {
+        jdcmd.say("jarvisd: heartbeat process did not start\n")
+        return
+    }
+    if kind == 0 {
+        beat_loop(d, parent)
+        rt.finish(0)
+    }
+    jdbase.k_beat_pid = kind
+}
+
+fn stop() {
+    if jdbase.k_beat_pid == 0 {
+        return
+    }
+    let kind: i64 = jdbase.k_beat_pid
+    jdbase.k_beat_pid = 0
+    syscall(S_KILL, kind, SIGKILL, 0, 0, 0, 0)
+    var status: i32 = 0
+    var waited: u64 = 0
+    while waited < REAP_WAIT_MS {
+        let r: i64 = syscall(S_WAIT4, kind, (&status) as i64, WNOHANG, 0, 0, 0)
+        if r == kind || r < 0 {
+            return
+        }
+        nap_ms(50)
+        waited = waited + 50
+    }
+}
+
+fn freeze_for_test() {
+    if jdbase.k_freeze_s == 0 {
+        return
+    }
+    let seconds: u64 = jdbase.k_freeze_s
+    jdbase.k_freeze_s = 0
+    nap_ms(seconds * 1000)
+}
