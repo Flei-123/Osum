@@ -34,6 +34,46 @@ def root_from_usb(path, work):
     return out
 
 
+def devparts(kind):
+    out = []
+    with open(os.path.join(HERE, 'devparts.conf')) as handle:
+        for line in handle:
+            key, _, value = line.rstrip('\n').partition(' ')
+            if key == kind and value:
+                out.append(value)
+    return out
+
+
+def listed_paths(img):
+    lst = subprocess.run([sys.executable, os.path.join(HERE, '..', 'osum', 'mkfs.py'),
+                          'list', img], capture_output=True, text=True).stdout
+    return {l.split()[0] for l in lst.splitlines() if l.strip()}
+
+
+def menu_from_usb(path, work):
+    out = os.path.join(work, 'limine.conf')
+    subprocess.run(['mcopy', '-o', '-i', '%s@@1M' % path, '::/limine.conf', out],
+                   capture_output=True)
+    if not os.path.exists(out):
+        return None
+    with open(out) as handle:
+        return handle.read()
+
+
+def dev_findings(paths, menu):
+    bad = ['dev file %s is in the image' % f for f in devparts('file') if f in paths]
+    if menu is None:
+        return bad
+    for line in menu.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('/'):
+            bad.extend('dev boot entry %r' % stripped for p in devparts('entry') if p in stripped)
+        if stripped.startswith('cmdline:'):
+            words = set(stripped[len('cmdline:'):].split())
+            bad.extend('dev boot word %r' % w for w in devparts('word') if w in words)
+    return bad
+
+
 def read(fs, p):
     try:
         ino = fs.resolve(p)
@@ -54,7 +94,9 @@ def main(argv):
     img = argv[1]
     live = argv[2] if len(argv) > 2 else 'live'
     with tempfile.TemporaryDirectory() as work:
+        menu = None
         if open(img, 'rb').read(4096)[510:512] == b'\x55\xaa':
+            menu = menu_from_usb(img, work)
             img = root_from_usb(img, work)
         fs = mkfs.load(img)
         bad = []
@@ -99,6 +141,7 @@ def main(argv):
                     bad.append('permissions.conf sets %s' % k)
                 if k in ('commands', 'screenshot', 'sysinfo', 'input') and v != 'no':
                     bad.append('permissions.conf: %s = %s' % (k, v))
+        bad.extend(dev_findings(listed_paths(img), menu))
         for b in bad:
             print('pubcheck: NOT FIT --', b)
         if not bad:

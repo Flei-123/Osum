@@ -63,9 +63,14 @@ done
 # /etc/shadow or /users/ name anyone but root and live.
 IMAGE_PROFILE=${IMAGE_PROFILE:-personal}
 case "$IMAGE_PROFILE" in
-    personal|public) ;;
-    *) fehler "IMAGE_PROFILE=$IMAGE_PROFILE (personal oder public)" ;;
+    dev) IMAGE_PROFILE=personal ;;
+    release) IMAGE_PROFILE=public ;;
 esac
+case "$IMAGE_PROFILE" in
+    personal|public) ;;
+    *) fehler "IMAGE_PROFILE=$IMAGE_PROFILE (dev/personal or release/public)" ;;
+esac
+. tools/usbimg/devparts.sh
 . tools/unterbau/devstones.sh
 DEVSTONES_DEFAULT=${DEVSTONES_DEFAULT:-/root/stones}
 if [ -z "${STONES+set}" ] && [ "$IMAGE_PROFILE" = personal ] && [ -r "$DEVSTONES_DEFAULT/python3" ]; then STONES=$DEVSTONES_DEFAULT; fi
@@ -138,6 +143,10 @@ orientbus act settingsd axd sntp accountcli pdfview open certus store stored med
 [ "${ODB:-0}" = 1 ] && PROGS="$PROGS odbd"
 # the public image has no chat server to reach: no JARVIS Mini binary there
 [ "$IMAGE_PROFILE" = personal ] || PROGS=${PROGS// jarvismini/}
+if [ "$IMAGE_PROFILE" = public ]; then
+    for dev_prog_ in $(devparts prog); do PROGS=" $PROGS "; PROGS=${PROGS// $dev_prog_ / }; done
+    PROGS=$(echo $PROGS)
+fi
 # W-MINI2: the Mini's screenshot key runs /bin/snip (personal stick only)
 if [ "$IMAGE_PROFILE" = personal ]; then case " $PROGS " in *" snip "*) ;; *) PROGS="$PROGS snip" ;; esac; case " $PROGS " in *" snipt "*) ;; *) PROGS="$PROGS snipt" ;; esac; fi
 case " $PROGS " in *" xfx "*) case " $PROGS " in *" wayd "*) ;; *) PROGS="$PROGS wayd" ;; esac ;; esac
@@ -958,7 +967,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages /usr/share/
 /etc/module.conf \
 /etc/theme.conf /etc/shapes/osum /etc/shapes/classic \
 /etc/schemas/day /etc/schemas/night /etc/themes/tageslicht \
-/bin/desktop /bin/taskbar /bin/netview /bin/explorer /bin/bench /boot/osum.mb \
+/bin/desktop /bin/taskbar /bin/netview /bin/explorer /boot/osum.mb \
 /bin/ota /bin/fetch /bin/host /bin/dhcp /bin/log /bin/jarvisd /bin/jsig /bin/ipprint \
 /bin/jarvisctl /bin/pollbr /etc/ota.conf /etc/jarvis/permissions.conf \
 /system/FASSUNG /system/SCHLUESSELGEN \
@@ -966,7 +975,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages /usr/share/
 /bin/nedit /apps/editor.osp/INFO \
 /bin/trashbin /apps/trashbin.osp/start /apps/trashbin.osp/INFO \
 /apps/trashbin.osp/symbol /etc/trash.conf \
-/usr/share/appreg/top/symbol /usr/share/appreg/top/console /usr/share/appreg/edit/alias /apps/launcher.osp/start /apps/widgets.osp/start /apps/settings.osp/start \
+/usr/share/appreg/top/symbol /usr/share/appreg/top/console /usr/share/appreg/edit/alias /apps/launcher.osp/start /apps/settings.osp/start \
 /apps/settings.osp/INFO /apps/settings.osp/symbol \
 /bin/taskmgr /apps/taskmgr.osp/start /apps/taskmgr.osp/INFO \
 /apps/taskmgr.osp/symbol \
@@ -985,6 +994,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages /usr/share/
 /users/$KONTO/ /users/$KONTO/config/"
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
 PFLICHT="$PFLICHT /bin/dialogd /bin/xremoted /bin/vaultd /bin/vaultctl /bin/vaultprompt /bin/vaultui /apps/vault.osp/start /apps/vault.osp/INFO /apps/vault.osp/symbol /bin/wlanpersist /bin/wmplug /bin/hotkeyd /etc/wmplug.conf /etc/wmplug.autostart /etc/hotkeys.conf /etc/apprights.conf /bin/apprights"
+[ "$IMAGE_PROFILE" = personal ] && PFLICHT="$PFLICHT /bin/bench /apps/widgets.osp/start"
 [ "$IMAGE_PROFILE" = personal ] && PFLICHT="$PFLICHT /bin/jarvismini /apps/jarvismini.osp/start /apps/jarvismini.osp/INFO /etc/jarvismini.conf /etc/actions.d/jarvismini.actions /bin/jmlink /bin/snip /bin/snipt"
 [ "${ROOT_SLIM:-0}" = 1 ] || [ "${BOOT_KERNEL_COPY:-0}" != 1 ] && PFLICHT=${PFLICHT//\/boot\/osum.mb/}
 bash tools/mkfsfi/mkfs.sh list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
@@ -1265,6 +1275,9 @@ open(path, 'w').write('\n'.join(lines))
 PYLIVE
     grep -q "^/Install $MARKE_PRODUKT\$" "$OUT/limine.conf" \
         || fehler "der Menueeintrag 'Install $MARKE_PRODUKT' fehlt"
+fi
+if [ "$IMAGE_PROFILE" = public ]; then
+    python3 -I tools/usbimg/limine_release.py "$OUT/limine.conf" || fehler "the release boot menu could not be filtered"
 fi
 BOOTREG_EFI=""
 if [ -z "${OSUM_NO_BOOTREG:-}" ] && [ -f tools/bootreg/build.sh ]; then
