@@ -172,6 +172,29 @@ else
 fi
 kill $QPID 2>/dev/null; wait $QPID 2>/dev/null
 
+kill "$PEER" 2>/dev/null; PEER=""; sleep 0.5
+
+echo "== 6. current jarvisd: server absent at boot, then appears =="
+: > "$W/peer.log"
+start_guest "$W/s-down.txt" "" 150000
+sleep 45
+if grep -aq ' net dns ' "$W/s-down.txt"; then
+    ok "failed name lookups are logged"
+    grep -a ' net ' "$W/s-down.txt" | head -4 | sed 's/^/        /'
+else
+    bad "no log line for failed name lookups"
+fi
+if grep -aq 'service stopped' "$W/s-down.txt"; then bad "jarvisd ended while the server was absent"; else ok "jarvisd keeps retrying while the server is absent"; fi
+start_peer || { echo "fake bridge did not start"; exit 1; }
+if wait_welcome 1 $RECOVER_S; then
+    ok "device signed in once the server appeared"
+else
+    bad "device did not sign in after the server appeared"
+fi
+sleep 2
+grep -aq ' net recovered ' "$W/s-down.txt" && ok "recovery after the outage is logged" || bad "no recovery log line"
+kill $QPID 2>/dev/null; wait $QPID 2>/dev/null
+
 echo
 echo "BRIDGERECON: $pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1
