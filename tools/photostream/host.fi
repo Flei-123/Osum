@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import imgfit.framehash
+import imgfit.framehdr
+
+struct T {
+    fails: i32,
+    checks: i32,
+}
+
+const BUF_BYTES: usize = 4099
+const LARGE_HASH: u64 = 18446744073709551615
+
+fn check(t: *mut T, ok: bool, what: str) {
+    (*t).checks = (*t).checks + 1
+    if ok {
+        io.fmt_print(f"ok   {what}\n")
+    } else {
+        io.fmt_print(f"FAIL {what}\n")
+        (*t).fails = (*t).fails + 1
+    }
+}
+
+fn fill(p: u64, n: usize, seed: u64) {
+    var i: usize = 0
+    while i < n {
+        rt.st8(p, i, ((i as u64 * 31 + seed) % 251) as u8)
+        i = i + 1
+    }
+}
+
+fn header_roundtrip(t: *mut T, hash: u64) {
+    io.fmt_print(f"header case {hash}\n")
+    var out: rt.Buf = rt.buf_new()
+    framehdr.push(&out, framehdr.TAG_JPEG, hash)
+    check(t, out.len == framehdr.LEN, "header length fixed")
+    check(t, rt.ld8(out.ptr as u64, 0) == framehdr.TAG_JPEG, "header tag")
+    check(t, rt.ld8(out.ptr as u64, framehdr.LEN - 1) == (10 as u8), "header newline")
+    check(t, framehdr.parse_hash(out.ptr as u64, out.len) == hash, "header hash roundtrip")
+    rt.buf_free(&out)
+}
+
+fn main() -> i32 {
+    var t: T = T { fails: 0, checks: 0 }
+    var a: rt.Buf = rt.buf_new()
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_reserve(&a, BUF_BYTES)
+    rt.buf_reserve(&b, BUF_BYTES)
+    fill(a.ptr as u64, BUF_BYTES, 7)
+    fill(b.ptr as u64, BUF_BYTES, 7)
+    let ha: u64 = framehash.fnv64(a.ptr as u64, BUF_BYTES)
+    check(&t, ha == framehash.fnv64(b.ptr as u64, BUF_BYTES), "equal frames hash equal")
+    check(&t, ha != 0, "hash of a frame is not zero")
+    rt.st8(b.ptr as u64, 0, (rt.ld8(b.ptr as u64, 0) as u32 + 1) as u8)
+    check(&t, ha != framehash.fnv64(b.ptr as u64, BUF_BYTES), "first byte change changes the hash")
+    rt.st8(b.ptr as u64, 0, rt.ld8(a.ptr as u64, 0))
+    let last: usize = BUF_BYTES - 1
+    rt.st8(b.ptr as u64, last, (rt.ld8(b.ptr as u64, last) as u32 + 1) as u8)
+    check(&t, ha != framehash.fnv64(b.ptr as u64, BUF_BYTES), "tail byte change changes the hash")
+    rt.st8(b.ptr as u64, last, rt.ld8(a.ptr as u64, last))
+    let mid: usize = BUF_BYTES / 2
+    rt.st8(b.ptr as u64, mid, (rt.ld8(b.ptr as u64, mid) as u32 + 1) as u8)
+    check(&t, ha != framehash.fnv64(b.ptr as u64, BUF_BYTES), "middle byte change changes the hash")
+    check(&t, framehash.fnv64(a.ptr as u64, 0) == framehash.fnv64(b.ptr as u64, 0), "empty input hashes equal")
+    header_roundtrip(&t, 0)
+    header_roundtrip(&t, ha)
+    header_roundtrip(&t, LARGE_HASH)
+    rt.buf_free(&a)
+    rt.buf_free(&b)
+    io.fmt_print(f"checks={t.checks} fails={t.fails}\n")
+    if t.fails != 0 {
+        return 1
+    }
+    return 0
+}

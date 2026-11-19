@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import std.rt
 import imgfit.xrgb
+import imgfit.framehash
+import imgfit.framehdr
 import jpegenc.jenc
 import jarvisd.jdbase
 import jarvisd.jdcmd
@@ -13,6 +15,12 @@ const MIN_QUALITY: u64 = 20
 const JPEG_HEADROOM: usize = 4096
 const BYTES_PER_PIXEL_RGB: usize = 3
 const BYTES_PER_PIXEL_XRGB: usize = 4
+const DEFAULT_POLL_MS: u64 = 60
+const MIN_POLL_MS: u64 = 20
+const MAX_WAIT_MS: u64 = 25000
+const GRAB_FAILED: i32 = 0
+const GRAB_CHANGED: i32 = 1
+const GRAB_UNCHANGED: i32 = 2
 
 fn option_value(p: u64, n: usize, key: str, fallback: u64) -> u64 {
     var i: usize = 0
@@ -32,6 +40,10 @@ fn option_value(p: u64, n: usize, key: str, fallback: u64) -> u64 {
         i = i + 1
     }
     return fallback
+}
+
+fn has_option(p: u64, n: usize, key: str) -> bool {
+    return option_value(p, n, key, 1) != option_value(p, n, key, 2)
 }
 
 fn clamp_quality(q: u64) -> u64 {
@@ -74,7 +86,7 @@ fn grab_rows(raw: *mut rt.Buf, width: *mut usize, height: *mut usize) -> bool {
     return jdcmd.grab_image(raw, h as usize, rb as usize, rows_per_chunk) == jdcmd.GRAB_OK
 }
 
-fn log_stages(grab_ms: u64, scale_ms: u64, encode_ms: u64, bytes: usize, w: usize, h: usize) {
+fn log_stages(grab_ms: u64, scale_ms: u64, encode_ms: u64, bytes: usize, w: usize, h: usize, hash: u64) {
     jdcmd.say("jarvisd: photo grab=")
     jdcmd.say_num(grab_ms)
     jdcmd.say("ms scale=")
@@ -87,7 +99,44 @@ fn log_stages(grab_ms: u64, scale_ms: u64, encode_ms: u64, bytes: usize, w: usiz
     jdcmd.say_num(w as u64)
     jdcmd.say("x")
     jdcmd.say_num(h as u64)
+    jdcmd.say(" hash=")
+    jdcmd.say_num(hash)
     jdcmd.say("\n")
+}
+
+fn grab_until_changed(raw: *mut rt.Buf, width: *mut usize, height: *mut usize, start_hash: u64, baseline: bool, wait_ms: u64, poll_ms: u64, hash: *mut u64) -> i32 {
+    var last_hash: u64 = start_hash
+    let deadline: u64 = jdcmd.now_ms() + wait_ms
+    while true {
+        if !grab_rows(raw, width, height) {
+            return GRAB_FAILED
+        }
+        *hash = framehash.fnv64((*raw).ptr as u64, (*raw).len)
+        if baseline && last_hash == 0 {
+            last_hash = *hash
+        }
+        if last_hash == 0 || *hash != last_hash {
+            return GRAB_CHANGED
+        }
+        if jdcmd.now_ms() >= deadline {
+            return GRAB_UNCHANGED
+        }
+        jdcmd.schlafe_ms(poll_ms)
+    }
+    return GRAB_FAILED
+}
+
+fn encode_frame(pix: *mut rt.Buf, out_w: usize, out_h: usize, quality: u64, prefix: usize, aus: *mut rt.Buf) -> u64 {
+    let cap: usize = out_w * out_h * BYTES_PER_PIXEL_RGB + JPEG_HEADROOM
+    if !rt.buf_reserve(aus, prefix + cap) {
+        return 0
+    }
+    let n: u64 = jenc.encode((*pix).ptr as u64, out_w as u64, out_h as u64, quality, ((*aus).ptr as u64) + prefix as u64, cap as u64)
+    if n == 0 {
+        return 0
+    }
+    rt.buf_set_len(aus, prefix + n as usize)
+    return n
 }
 
 fn do_photo_jpeg(opts: u64, opts_n: usize, aus: *mut rt.Buf) -> bool {
@@ -96,14 +145,36 @@ fn do_photo_jpeg(opts: u64, opts_n: usize, aus: *mut rt.Buf) -> bool {
     }
     let quality: u64 = clamp_quality(option_value(opts, opts_n, "q=", DEFAULT_QUALITY))
     let max_width: usize = option_value(opts, opts_n, "w=", DEFAULT_MAX_WIDTH) as usize
+    let stream: bool = has_option(opts, opts_n, "h=") || has_option(opts, opts_n, "t=") || has_option(opts, opts_n, "b=")
+    var wait_ms: u64 = option_value(opts, opts_n, "t=", 0)
+    if wait_ms > MAX_WAIT_MS {
+        wait_ms = MAX_WAIT_MS
+    }
+    var poll_ms: u64 = option_value(opts, opts_n, "p=", DEFAULT_POLL_MS)
+    if poll_ms < MIN_POLL_MS {
+        poll_ms = MIN_POLL_MS
+    }
+    let last_hash: u64 = option_value(opts, opts_n, "h=", 0)
+    let baseline: bool = option_value(opts, opts_n, "b=", 0) == 1
     let t0: u64 = jdcmd.now_ms()
     var raw: rt.Buf = rt.buf_new()
     var width: usize = 0
     var height: usize = 0
-    if !grab_rows(&raw, &width, &height) {
+    var hash: u64 = 0
+    let state: i32 = grab_until_changed(&raw, &width, &height, last_hash, baseline, wait_ms, poll_ms, &hash)
+    if state == GRAB_FAILED {
         rt.buf_free(&raw)
         syscall(jdbase.S_SHOT, jdbase.SH_DROP, 0, 0, 0, 0, 0)
         return jdcmd.ablehnen(aus, "cannot grab the screen")
+    }
+    rt.buf_clear(aus)
+    if state == GRAB_UNCHANGED {
+        rt.buf_free(&raw)
+        framehdr.push(aus, framehdr.TAG_SAME, hash)
+        jdcmd.say("jarvisd: photo unchanged hash=")
+        jdcmd.say_num(hash)
+        jdcmd.say("\n")
+        return true
     }
     let t1: u64 = jdcmd.now_ms()
     let out_w: usize = xrgb.fit_width(width, max_width)
@@ -116,19 +187,17 @@ fn do_photo_jpeg(opts: u64, opts_n: usize, aus: *mut rt.Buf) -> bool {
         return jdcmd.ablehnen(aus, "out of memory for the scaled image")
     }
     let t2: u64 = jdcmd.now_ms()
-    let cap: usize = out_w * out_h * BYTES_PER_PIXEL_RGB + JPEG_HEADROOM
-    rt.buf_clear(aus)
-    if !rt.buf_reserve(aus, cap) {
-        rt.buf_free(&pix)
-        return jdcmd.ablehnen(aus, "out of memory for the JPEG")
+    var prefix: usize = 0
+    if stream {
+        framehdr.push(aus, framehdr.TAG_JPEG, hash)
+        prefix = framehdr.LEN
     }
-    let n: u64 = jenc.encode((pix.ptr) as u64, out_w as u64, out_h as u64, quality, (*aus).ptr as u64, cap as u64)
+    let n: u64 = encode_frame(&pix, out_w, out_h, quality, prefix, aus)
     rt.buf_free(&pix)
     if n == 0 {
         return jdcmd.ablehnen(aus, "JPEG encoding failed")
     }
-    rt.buf_set_len(aus, n as usize)
-    log_stages(t1 - t0, t2 - t1, jdcmd.now_ms() - t2, n as usize, out_w, out_h)
+    log_stages(t1 - t0, t2 - t1, jdcmd.now_ms() - t2, n as usize, out_w, out_h, hash)
     return true
 }
 
