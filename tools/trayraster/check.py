@@ -106,7 +106,11 @@ else:
     say(tb[0] >= bt[0] + cw - 2 * sc, "battery text starts behind the symbol (%d)" % tb[0])
     th = tb[3] - tb[1] + 1
     cl = rects["clock"]
-    cb = inkbox(cl[0] + 2, cl[1] + 2, cl[0] + cl[2] - 1, cl[1] + cl[3] // 2 - 1, at_px(cl[0] + 1, cl[1] + cl[3] // 2))
+    badge = last(r"taskbar: badge txt=\d+ n=\d+ x=(\d+) y=(\d+) w=\d+ h=\d+")
+    clock_right = cl[0] + cl[2] - 1
+    if badge is not None:
+        clock_right = min(clock_right, badge[0] - 1)
+    cb = inkbox(cl[0] + 2, cl[1] + 2, clock_right, cl[1] + cl[3] // 2 - 1, at_px(cl[0] + 1, cl[1] + cl[3] // 2))
     lg = rects["lang"]
     lb = inkbox(lg[0] + 2, lg[1] + 2, lg[0] + lg[2] - 1, lg[1] + lg[3] - 2, at_px(lg[0] + 1, lg[1] + lg[3] // 2))
     if cb and lb:
