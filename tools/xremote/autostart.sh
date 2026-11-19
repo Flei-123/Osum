@@ -56,7 +56,7 @@ if [ -f "$S" ]; then
 fi
 if [ -f "$S" ]; then
     COUNT=$(grep -ac "glogin: xremoted pid=" "$S")
-    [ "$COUNT" -eq 1 ] && ok "started exactly once" || bad "started $COUNT times"
+    [ "$COUNT" -eq 1 ] && ok "started exactly once" || { bad "started $COUNT times"; grep -a "xremoted" "$S" | head -20; }
 fi
 
 BASE_REF=${XRAUTOSTART_BASE:-04b121db7^}
