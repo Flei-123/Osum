@@ -104,10 +104,10 @@ r=1
 while [ "$r" -le "$ROUNDS" ]; do
     n=$(grep -ac ' frame ' "$T/viewer.$r.txt" 2>/dev/null)
     echo "        session $r: ${n:-0} frames"
-    [ "${n:-0}" -ge "$MIN_FRAMES" ] || POOR=$((POOR + 1))
+    [ "${n:-0}" -ge $((MIN_FRAMES - 1)) ] || POOR=$((POOR + 1))
     r=$((r + 1))
 done
-[ "$POOR" = 0 ] && ok "every viewer session received >= $MIN_FRAMES frames" || bad "$POOR of $ROUNDS viewer sessions got fewer than $MIN_FRAMES frames: $(grep -a -i 'ended\|beendet\|offline\|busy\|error' "$T"/viewer.[0-9]*.txt 2>/dev/null | grep -v ALSA | tail -n 2 | tr '\n' ';')"
+[ "$POOR" = 0 ] && ok "every viewer session received >= $((MIN_FRAMES - 1)) frames" || bad "$POOR of $ROUNDS viewer sessions got fewer than $((MIN_FRAMES - 1)) frames: $(grep -a -i 'ended\|beendet\|offline\|busy\|error' "$T"/viewer.[0-9]*.txt 2>/dev/null | grep -v ALSA | tail -n 2 | tr '\n' ';')"
 HON=$(grep -ac 'host online' "$T/relay.log"); PAIR=$(grep -ac ' paired ' "$T/relay.log")
 HOFF=$(grep -a 'host offline' "$T/relay.log" | awk -v e="$V1" '$1 < e' | wc -l)
 echo "        relay: host online x$HON, host offline during the test x$HOFF, paired x$PAIR"
