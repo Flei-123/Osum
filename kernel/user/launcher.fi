@@ -31,6 +31,7 @@ import startuse
 import startlearn
 import namelist
 import startnav
+import startsettings
 import pw
 import nv
 import icons
@@ -140,6 +141,16 @@ static mut k_resl: [u8; 17] = "launcher.results\0"
 static mut k_best: [u8; 14] = "launcher.best\0"
 static mut g_best: bool = false
 static mut k_nonerec: [u8; 17] = "launcher.nonerec\0"
+static mut g_cat: u64 = 0
+static mut sreffer: [u64; 4] = [0 as u64; 4]
+static mut nset: u64 = 0
+static mut chip_buf: [u8; 120] = [0 as u8; 120]
+static mut k_cat_all: [u8; 17] = "launcher.cat.all\0"
+static mut k_cat_apps: [u8; 18] = "launcher.cat.apps\0"
+static mut k_cat_docs: [u8; 18] = "launcher.cat.docs\0"
+static mut k_cat_set: [u8; 22] = "launcher.cat.settings\0"
+static mut k_cat_dirs: [u8; 21] = "launcher.cat.folders\0"
+static mut s_setopen: [u8; 25] = "launcher: settings page=\0"
 const W11_W: u64 = 640
 const W11_IN: u64 = 600
 const K_ALL: u64 = 5
@@ -150,6 +161,17 @@ const BEST_CARD_H: u64 = 56
 const BEST_BLOCK_H: u64 = 88
 const BEST_MIN_LIST_H: u64 = 104
 const K_PIN: u64 = 100
+const K_CHIP: u64 = 160
+const CHIPS: u64 = 5
+const CHIP_STRIDE: u64 = 24
+const CAT_ALL: u64 = 0
+const CAT_APPS: u64 = 1
+const CAT_DOCS: u64 = 2
+const CAT_SETTINGS: u64 = 3
+const CAT_FOLDERS: u64 = 4
+const MAX_SETTING_HITS: u64 = 4
+const MAX_ROWS: u64 = 32
+const CHIP_ROW_H: u64 = 38
 const K_REC: u64 = 130
 static mut path: [u8; 256] = [0 as u8; 256]
 
@@ -216,10 +238,17 @@ fn new_find() {
     let rank_t0: u64 = nidx.mono_us()
     napp = startrank.rank_apps((&suchfeld[0 as usize]) as u64,
         (&treffer[0 as usize]) as u64, 24)
-    ntreffer = napp
+    nset = 0
+    if g_cat == CAT_ALL || g_cat == CAT_SETTINGS {
+        nset = startsettings.query((&suchfeld[0 as usize]) as u64, (&sreffer[0 as usize]) as u64, MAX_SETTING_HITS)
+    }
+    if g_cat != CAT_ALL && g_cat != CAT_APPS {
+        napp = 0
+    }
+    ntreffer = napp + nset
     // r402: the home view of the Windows 11 window (no query, not "All apps")
     g_home = g_w11 && text.length((&suchfeld[0 as usize]) as u64) == 0 && !g_all
-    g_best = g_w11 && !g_all && napp > 0 && text.length((&suchfeld[0 as usize]) as u64) != 0
+    g_best = g_w11 && !g_all && napp > 0 && g_cat == CAT_ALL && text.length((&suchfeld[0 as usize]) as u64) != 0
     if g_w11 {
         home_prepare()
         // the list's rectangle is reported after the pump that builds it
@@ -227,7 +256,7 @@ fn new_find() {
     }
     var lp: u64 = 0
     var k: u64 = 0
-    while k < ntreffer && k < 24 {
+    while k < napp && k < 24 {
         let a: u64 = treffer[(k) as usize]
         farben[(k) as usize] = appdir.icon_load(a)
         let nm: u64 = appdir.name_of(a)
@@ -254,20 +283,33 @@ fn new_find() {
         lp = lp + 1
         k = k + 1
     }
+    var sr: u64 = 0
+    while sr < nset && lp < 3800 {
+        let sp: u64 = sreffer[(sr) as usize]
+        farben[((napp + sr)) as usize] = uitheme.theme(uitheme.C_TEXT_MUTED)
+        lp = append_text(lp, startsettings.title_at(sp))
+        items[(lp) as usize] = 9 as u8
+        lp = append_text(lp + 1, msg.get((&k_cat_set[0 as usize]) as u64))
+        items[(lp) as usize] = 10 as u8
+        lp = lp + 1
+        sr = sr + 1
+    }
     ndatei = 0
     dgesamt = 0
-    if !without_index && text.length((&suchfeld[0 as usize]) as u64) != 0 {
+    if !without_index && text.length((&suchfeld[0 as usize]) as u64) != 0
+        && g_cat != CAT_APPS && g_cat != CAT_SETTINGS {
         dgesamt = startrank.rank_files((&suchfeld[0 as usize]) as u64,
             (&dtreffer[0 as usize]) as u64, DMAX)
+        dgesamt = filter_files(dgesamt)
         ndatei = dgesamt
-        if napp + ndatei > 32 {
-            ndatei = 32 - napp
+        if napp + nset + ndatei > MAX_ROWS {
+            ndatei = MAX_ROWS - napp - nset
         }
         var d: u64 = 0
         while d < ndatei && lp < 3800 {
             let t: u64 = dtreffer[(d) as usize]
             nidx.path_of(t, (&path[0 as usize]) as u64, 250)
-            farben[((napp + d)) as usize] =
+            farben[((napp + nset + d)) as usize] =
                 uitheme.theme(uitheme.C_TEXT_MUTED)
             let dnm: u64 = nidx.name_at(t)
             var j2: u64 = 0
@@ -304,7 +346,7 @@ fn new_find() {
             lp = lp + 1
             d = d + 1
         }
-        ntreffer = napp + ndatei
+        ntreffer = napp + nset + ndatei
     }
     let rank_us: u64 = nidx.mono_us() -% rank_t0
     items[(lp) as usize] = 0 as u8
@@ -319,10 +361,14 @@ fn new_find() {
     var s_da: [u8; 12] = "  dateien=\0\0"
     kv((&s_ap[0 as usize]) as u64, napp)
     kv((&s_da[0 as usize]) as u64, ndatei)
+    var s_se: [u8; 12] = "  settings=\0"
+    kv((&s_se[0 as usize]) as u64, nset)
+    var s_ct: [u8; 6] = " cat=\0"
+    kv((&s_ct[0 as usize]) as u64, g_cat)
     var s_us: [u8; 6] = " us=\0\0"
     kv((&s_us[0 as usize]) as u64, rank_us)
     nl()
-    if napp > 0 {
+    if napp > 0 && g_cat == CAT_ALL {
         var s_bs: [u8; 22] = "launcher: best name=[\0"
         var s_bz: [u8; 4] = "]\0\0\0"
         say((&s_bs[0 as usize]) as u64)
@@ -330,13 +376,23 @@ fn new_find() {
         say((&s_bz[0 as usize]) as u64)
         nl()
     }
+    var s_sh: [u8; 20] = "launcher: setting [\0"
+    var s_sz: [u8; 3] = "]\0\0"
+    var q2: u64 = 0
+    while q2 < nset {
+        say((&s_sh[0 as usize]) as u64)
+        say(startsettings.title_at(sreffer[(q2) as usize]))
+        say((&s_sz[0 as usize]) as u64)
+        nl()
+        q2 = q2 + 1
+    }
     var d2: u64 = 0
     while d2 < ndatei {
         var s_df: [u8; 20] = "launcher: file \0\0\0\0\0"
         nidx.path_of(dtreffer[(d2) as usize], (&path[0 as usize]) as u64,
             250)
         say((&s_df[0 as usize]) as u64)
-        kv((&si[0 as usize]) as u64, napp + d2)
+        kv((&si[0 as usize]) as u64, napp + nset + d2)
         say((&sn[0 as usize]) as u64)
         say((&path[0 as usize]) as u64)
         say((&sz[0 as usize]) as u64)
@@ -368,17 +424,21 @@ fn starten(line: u64) {
     if line >= ntreffer {
         return
     }
+    if line >= napp && line < napp + nset {
+        open_setting(sreffer[(line - napp) as usize])
+        return
+    }
     if line >= napp {
         var s_df: [u8; 25] = "launcher: oeffne datei [\0"
         var s_zu2: [u8; 4] = "]\0\0\0"
         var s_op: [u8; 8] = " pid=\0\0\0"
         var argv0: [u64; 4] = [0; 4]
-        nidx.path_of(dtreffer[((line - napp)) as usize],
+        nidx.path_of(dtreffer[((line - napp - nset)) as usize],
             (&path[0 as usize]) as u64, 250)
         let fpid: u64 = ulib.sys(SYS_FOPEN, (&path[0 as usize]) as u64,
             (&argv0[0 as usize]) as u64, 0)
         var file_tok: [u8; 24] = [0 as u8; 24]
-        startrank.file_token(nidx.name_at(dtreffer[((line - napp)) as usize]), (&file_tok[0 as usize]) as u64)
+        startrank.file_token(nidx.name_at(dtreffer[((line - napp - nset)) as usize]), (&file_tok[0 as usize]) as u64)
         startlearn.record((&suchfeld[0 as usize]) as u64, (&file_tok[0 as usize]) as u64)
         say((&s_df[0 as usize]) as u64)
         say((&path[0 as usize]) as u64)
@@ -389,6 +449,47 @@ fn starten(line: u64) {
         return
     }
     starten_app(treffer[(line) as usize])
+}
+
+fn append_text(at: u64, src: u64) -> u64 {
+    var w: u64 = at
+    var j: u64 = 0
+    while (*((src + j) as *mut u8)) != 0 as u8 && w < 3880 {
+        items[(w) as usize] = *((src + j) as *mut u8)
+        w = w + 1
+        j = j + 1
+    }
+    return w
+}
+
+fn filter_files(n: u64) -> u64 {
+    if g_cat != CAT_DOCS && g_cat != CAT_FOLDERS {
+        return n
+    }
+    var kept: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let f: u64 = dtreffer[(i) as usize]
+        if nidx.is_dir_at(f) == (g_cat == CAT_FOLDERS) {
+            dtreffer[(kept) as usize] = f
+            kept = kept + 1
+        }
+        i = i + 1
+    }
+    return kept
+}
+
+fn open_setting(page: u64) {
+    let pid: u64 = startsettings.open_page(page)
+    say((&s_setopen[0 as usize]) as u64)
+    sayn(page)
+    var s_pid: [u8; 6] = " pid=\0"
+    say((&s_pid[0 as usize]) as u64)
+    sayn(pid)
+    nl()
+    if !errno.is_error(pid) {
+        zumachen()
+    }
 }
 
 // r402: a PROGRAMME (index into the directory) is started -- from a hit row, a pinned tile or a
@@ -1660,7 +1761,7 @@ fn u_start(args: u64) -> u64 {
             say_rects_w11()
         }
         if key == K_ENTRY {
-            if !g_home && napp > 0 {
+            if !g_home && napp + nset > 0 {
                 starten(fuiscene.table_sel(K_LIST))
             }
         } else if g_w11 && key >= K_PIN && key < K_PIN + 18 {
@@ -1677,6 +1778,10 @@ fn u_start(args: u64) -> u64 {
             if napp > 0 {
                 starten_app(treffer[0 as usize])
             }
+        } else if g_w11 && key >= K_CHIP && key < K_CHIP + CHIPS {
+            g_cat = key - K_CHIP
+            new_find()
+            fuiscene.focus(K_ENTRY)
         } else if g_w11 && key == K_ALL {
             g_all = true
             new_find()
@@ -1771,6 +1876,7 @@ fn u_start(args: u64) -> u64 {
         if g_clear {
             g_clear = false
             g_all = false
+            g_cat = CAT_ALL
             suchfeld[0 as usize] = 0 as u8
             fuiscene.entry_set(K_ENTRY, (&suchfeld[0 as usize]) as u64)
             vorher = 0
@@ -2158,6 +2264,14 @@ fn build_w11_recommended(col: usize) {
     }
 }
 
+fn chips_fill() {
+    ulib.strncpy((&chip_buf[0 as usize]) as u64, msg.get((&k_cat_all[0 as usize]) as u64), CHIP_STRIDE)
+    ulib.strncpy(((&chip_buf[0 as usize]) as u64) + CHIP_STRIDE, msg.get((&k_cat_apps[0 as usize]) as u64), CHIP_STRIDE)
+    ulib.strncpy(((&chip_buf[0 as usize]) as u64) + 2 * CHIP_STRIDE, msg.get((&k_cat_docs[0 as usize]) as u64), CHIP_STRIDE)
+    ulib.strncpy(((&chip_buf[0 as usize]) as u64) + 3 * CHIP_STRIDE, msg.get((&k_cat_set[0 as usize]) as u64), CHIP_STRIDE)
+    ulib.strncpy(((&chip_buf[0 as usize]) as u64) + 4 * CHIP_STRIDE, msg.get((&k_cat_dirs[0 as usize]) as u64), CHIP_STRIDE)
+}
+
 fn build_w11_results(col: usize) {
     let hr2: usize = fuiscene.row(col)
     fuiscene.set_gap(hr2, 0)
@@ -2168,7 +2282,9 @@ fn build_w11_results(col: usize) {
         let bb: usize = fuiscene.button(hr2, msg.get((&k_backb[0 as usize]) as u64), K_BACK)
         fuiscene.set_size(bb, 90, 28)
     }
-    var lh: u64 = g_hd - W11_FIXED_COMPACT
+    chips_fill()
+    let _chips: usize = fuiscene.segmented(col, K_CHIP, (&chip_buf[0 as usize]) as u64, CHIP_STRIDE, CHIPS, g_cat, 112)
+    var lh: u64 = g_hd - W11_FIXED_COMPACT - CHIP_ROW_H
     if g_best && lh >= BEST_MIN_LIST_H + BEST_BLOCK_H {
         let _hb: usize = fuiscene.canvas(col, 0, 400, 32, w11_hdr_best)
         let _bc: usize = fuiscene.ftile(col, K_BEST, appdir.name_of(treffer[0 as usize]), W11_IN, BEST_CARD_H,
