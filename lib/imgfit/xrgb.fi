@@ -1,0 +1,81 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+
+export { fit_width, fit_height, from_png_rows }
+
+const FILTER_BYTES: usize = 1
+const BYTES_PER_PIXEL_IN: usize = 3
+const BYTES_PER_PIXEL_OUT: usize = 4
+
+fn fit_width(width: usize, max_width: usize) -> usize {
+    if max_width == 0 || width <= max_width {
+        return width
+    }
+    return max_width
+}
+
+fn fit_height(width: usize, height: usize, fitted_width: usize) -> usize {
+    let h: usize = (height * fitted_width + width / 2) / width
+    if h == 0 {
+        return 1
+    }
+    return h
+}
+
+fn average_box(src: u64, stride: usize, x0: usize, x1: usize, y0: usize, y1: usize, channel: usize) -> u32 {
+    var sum: u32 = 0
+    var count: u32 = 0
+    var y: usize = y0
+    while y < y1 {
+        var x: usize = x0
+        while x < x1 {
+            sum = sum + (rt.ld8(src, y * stride + FILTER_BYTES + x * BYTES_PER_PIXEL_IN + channel) as u32)
+            count = count + 1
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return sum / count
+}
+
+fn store_pixel(dst: u64, at: usize, r: u32, g: u32, b: u32) {
+    rt.st8(dst, at, b as u8)
+    rt.st8(dst, at + 1, g as u8)
+    rt.st8(dst, at + 2, r as u8)
+    rt.st8(dst, at + 3, 0 as u8)
+}
+
+fn from_png_rows(raw: *mut rt.Buf, width: usize, height: usize, out_w: usize, out_h: usize, out: *mut rt.Buf) -> bool {
+    let need: usize = out_w * out_h * BYTES_PER_PIXEL_OUT
+    rt.buf_clear(out)
+    if !rt.buf_reserve(out, need) {
+        return false
+    }
+    rt.buf_set_len(out, need)
+    let src: u64 = (*raw).ptr as u64
+    let dst: u64 = (*out).ptr as u64
+    let stride: usize = FILTER_BYTES + width * BYTES_PER_PIXEL_IN
+    var dy: usize = 0
+    while dy < out_h {
+        let y0: usize = dy * height / out_h
+        var y1: usize = (dy + 1) * height / out_h
+        if y1 <= y0 {
+            y1 = y0 + 1
+        }
+        var dx: usize = 0
+        while dx < out_w {
+            let x0: usize = dx * width / out_w
+            var x1: usize = (dx + 1) * width / out_w
+            if x1 <= x0 {
+                x1 = x0 + 1
+            }
+            let r: u32 = average_box(src, stride, x0, x1, y0, y1, 0)
+            let g: u32 = average_box(src, stride, x0, x1, y0, y1, 1)
+            let b: u32 = average_box(src, stride, x0, x1, y0, y1, 2)
+            store_pixel(dst, (dy * out_w + dx) * BYTES_PER_PIXEL_OUT, r, g, b)
+            dx = dx + 1
+        }
+        dy = dy + 1
+    }
+    return true
+}

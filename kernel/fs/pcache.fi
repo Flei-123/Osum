@@ -10,6 +10,7 @@ export {
     drop_node, drop_ino, drop_mount, drop_all, take_frame,
     hits, misses, inserts, evictions, drops, resident, shrunk, bypassed,
     note_bypass, MISS, PAGE_BYTES, pin, unpin, valid_of,
+    drop_pages, stat, H_SCANS, H_WALKED, H_DROP_CALLS, H_DROP_NODE, H_DROP_INO, H_DROP_MOUNT, H_DROP_ALL, H_DROP_RANGE, H_SETS, H_EVICTS, H_SHRUNK,
     base_of, find_way, slot_at, pin_slot, unpin_slot, pin_page, frame_at, set_of, run_slot, run_frame, pin_page_run
 }
 
@@ -20,9 +21,13 @@ const MIN_SETS: u64 = 32
 const MAX_SETS: u64 = 4096
 const FRAMES_PER_SLOT: u64 = 8
 const SLOT_BYTES: u64 = 64
-const FILTER_BUCKETS: u64 = 1024
-const FILTER_AT: u64 = 4096
-const SLOTS_AT: u64 = 12288
+const CHAIN_BUCKETS: u64 = 16384
+const CHAIN_AT: u64 = 4096
+const SLOTS_AT: u64 = 135168
+const SLOT_SHIFT: u64 = 6
+const LINK_MASK: u64 = 0xFFFFFFFF
+const LINK_SHIFT: u64 = 32
+const PARTIAL_ONE: u64 = 0x100000000
 const GOLDEN: u64 = 0x9E3779B97F4A7C15
 const H_EPOCH: u64 = 8
 const H_CLOCK: u64 = 16
@@ -36,6 +41,15 @@ const H_SHRUNK: u64 = 72
 const H_BYPASS: u64 = 80
 const H_SETS: u64 = 88
 const H_MNT_LIVE: u64 = 96
+const H_DROP_CALLS: u64 = 104
+const H_SCANS: u64 = 112
+const H_WALKED: u64 = 120
+const H_DROP_NODE: u64 = 128
+const H_DROP_INO: u64 = 136
+const H_DROP_MOUNT: u64 = 144
+const H_DROP_ALL: u64 = 152
+const H_DROP_RANGE: u64 = 168
+const PROBE_MAX_PAGES: u64 = 32
 const S_NODE: u64 = 0
 const S_KEY: u64 = 8
 const S_VALID: u64 = 16
@@ -43,6 +57,7 @@ const S_STAMP: u64 = 24
 const S_FRAME: u64 = 32
 const S_BUSY: u64 = 40
 const S_PIN: u64 = 48
+const S_LINK: u64 = 56
 
 fn sets_for(total_frames: u64) -> u64 {
     var sets: u64 = MIN_SETS
@@ -80,23 +95,63 @@ fn set_of(b: u64, node: u64, m: u64, idx: u64) -> u64 {
     return (h + idx) & (kstate.get(b, H_SETS) - 1)
 }
 
-fn filter_at(node: u64) -> u64 {
-    return FILTER_AT + (((node *% GOLDEN) >> 40) % FILTER_BUCKETS) * 8
+fn chain_at(node: u64) -> u64 {
+    return CHAIN_AT + (((node *% GOLDEN) >> 40) % CHAIN_BUCKETS) * 8
 }
 
-fn filter_count(b: u64, node: u64) -> u64 {
-    return kstate.get(b, filter_at(node))
+fn slot_ref(b: u64, s: u64) -> u64 {
+    return ((s - b - SLOTS_AT) >> SLOT_SHIFT) + 1
 }
 
-fn filter_up(b: u64, node: u64) {
-    kstate.set(b, filter_at(node), kstate.get(b, filter_at(node)) + 1)
+fn slot_from_ref(b: u64, ref: u64) -> u64 {
+    return slot_of(b, ref - 1)
 }
 
-fn filter_down(b: u64, node: u64) {
-    let n: u64 = kstate.get(b, filter_at(node))
-    if n > 0 {
-        kstate.set(b, filter_at(node), n - 1)
+fn chain_head(b: u64, node: u64) -> u64 {
+    return kstate.get(b, chain_at(node)) & LINK_MASK
+}
+
+fn chain_partials(b: u64, node: u64) -> u64 {
+    return kstate.get(b, chain_at(node)) >> LINK_SHIFT
+}
+
+fn chain_set_head(b: u64, node: u64, ref: u64) {
+    kstate.set(b, chain_at(node), (kstate.get(b, chain_at(node)) & (LINK_MASK << LINK_SHIFT)) | ref)
+}
+
+fn chain_add(b: u64, s: u64, node: u64) {
+    let head: u64 = chain_head(b, node)
+    let ref: u64 = slot_ref(b, s)
+    kstate.set(s, S_LINK, head)
+    if head != 0 {
+        let hs: u64 = slot_from_ref(b, head)
+        kstate.set(hs, S_LINK, (kstate.get(hs, S_LINK) & LINK_MASK) | (ref << LINK_SHIFT))
     }
+    chain_set_head(b, node, ref)
+    if kstate.get(s, S_VALID) < PAGE_BYTES {
+        kstate.set(b, chain_at(node), kstate.get(b, chain_at(node)) + PARTIAL_ONE)
+    }
+}
+
+fn chain_del(b: u64, s: u64) {
+    let link: u64 = kstate.get(s, S_LINK)
+    let next: u64 = link & LINK_MASK
+    let prev: u64 = link >> LINK_SHIFT
+    let node: u64 = kstate.get(s, S_NODE)
+    if prev == 0 {
+        chain_set_head(b, node, next)
+    } else {
+        let ps: u64 = slot_from_ref(b, prev)
+        kstate.set(ps, S_LINK, (kstate.get(ps, S_LINK) & (LINK_MASK << LINK_SHIFT)) | next)
+    }
+    if next != 0 {
+        let ns: u64 = slot_from_ref(b, next)
+        kstate.set(ns, S_LINK, (kstate.get(ns, S_LINK) & LINK_MASK) | (prev << LINK_SHIFT))
+    }
+    if kstate.get(s, S_VALID) < PAGE_BYTES {
+        kstate.set(b, chain_at(node), kstate.get(b, chain_at(node)) - PARTIAL_ONE)
+    }
+    kstate.set(s, S_LINK, 0)
 }
 
 fn slot_count(b: u64) -> u64 {
@@ -293,7 +348,7 @@ fn begin_fill(state: u64, m: u64, node: u64, idx: u64) -> u64 {
     }
     if kstate.get(victim, S_KEY) != 0 {
         kstate.set(b, H_EVICTS, kstate.get(b, H_EVICTS) + 1)
-        filter_down(b, kstate.get(victim, S_NODE))
+        chain_del(b, victim)
     }
     kstate.set(victim, S_KEY, 0)
     kstate.set(victim, S_BUSY, kstate.get(b, H_EPOCH) + 1)
@@ -321,7 +376,8 @@ fn finish_fill(state: u64, slot: u64, m: u64, node: u64, idx: u64, valid: u64) {
         kstate.set(slot, S_VALID, valid)
         kstate.set(slot, S_STAMP, clock)
         kstate.set(slot, S_KEY, key_of(m, idx))
-        filter_up(b, node)
+        kstate.set(b, H_MNT_LIVE, kstate.get(b, H_MNT_LIVE) | (1 << (m & 63)))
+        chain_add(b, slot, node)
         kstate.set(b, H_INSERTS, kstate.get(b, H_INSERTS) + 1)
     }
     kstate.set(slot, S_BUSY, 0)
@@ -330,6 +386,60 @@ fn finish_fill(state: u64, slot: u64, m: u64, node: u64, idx: u64, valid: u64) {
 
 fn abort_fill(state: u64, slot: u64) {
     kstate.set(slot, S_BUSY, 0)
+}
+
+fn invalidate(b: u64, s: u64) {
+    chain_del(b, s)
+    kstate.set(s, S_KEY, 0)
+    kstate.set(b, H_DROPS, kstate.get(b, H_DROPS) + 1)
+}
+
+fn drop_chain(b: u64, mode: u64, m: u64, node: u64) {
+    var ref: u64 = chain_head(b, node)
+    var walked: u64 = 0
+    var dropped: u64 = 0
+    while ref != 0 {
+        let s: u64 = slot_from_ref(b, ref)
+        ref = kstate.get(s, S_LINK) & LINK_MASK
+        walked = walked + 1
+        if kstate.get(s, S_NODE) == node && (mode == 2 || (kstate.get(s, S_KEY) & 255) == m + 1) {
+            invalidate(b, s)
+            dropped = dropped + 1
+        }
+    }
+    kstate.set(b, H_WALKED, kstate.get(b, H_WALKED) + walked)
+    if mode == 1 {
+        kstate.set(b, H_DROP_NODE, kstate.get(b, H_DROP_NODE) + dropped)
+    } else {
+        kstate.set(b, H_DROP_INO, kstate.get(b, H_DROP_INO) + dropped)
+    }
+}
+
+fn drop_scan(b: u64, mode: u64, m: u64) {
+    var live: u64 = 0
+    var dropped: u64 = 0
+    let slots: u64 = slot_count(b)
+    var i: u64 = 0
+    while i < slots {
+        let s: u64 = slot_of(b, i)
+        let key: u64 = kstate.get(s, S_KEY)
+        if key != 0 {
+            if mode == 0 || (key & 255) == m + 1 {
+                invalidate(b, s)
+                dropped = dropped + 1
+            } else {
+                live = live | (1 << (((key & 255) - 1) & 63))
+            }
+        }
+        i = i + 1
+    }
+    kstate.set(b, H_MNT_LIVE, live)
+    kstate.set(b, H_SCANS, kstate.get(b, H_SCANS) + 1)
+    if mode == 0 {
+        kstate.set(b, H_DROP_ALL, kstate.get(b, H_DROP_ALL) + dropped)
+    } else {
+        kstate.set(b, H_DROP_MOUNT, kstate.get(b, H_DROP_MOUNT) + dropped)
+    }
 }
 
 fn drop_where(state: u64, mode: u64, m: u64, node: u64) {
@@ -345,36 +455,107 @@ fn drop_where(state: u64, mode: u64, m: u64, node: u64) {
     }
     let flags: u64 = cachelock.take(b)
     kstate.set(b, H_EPOCH, kstate.get(b, H_EPOCH) + 1)
-    var live: u64 = 0
-    if (mode == 1 || mode == 2) && filter_count(b, node) == 0 {
-        cachelock.give(b, flags)
-        return
+    kstate.set(b, H_DROP_CALLS, kstate.get(b, H_DROP_CALLS) + 1)
+    if mode == 1 || mode == 2 {
+        drop_chain(b, mode, m, node)
+    } else {
+        drop_scan(b, mode, m)
     }
-    let slots: u64 = slot_count(b)
-    var i: u64 = 0
-    while i < slots {
-        let s: u64 = slot_of(b, i)
-        let key: u64 = kstate.get(s, S_KEY)
-        if key != 0 {
-            var hit: bool = mode == 0
-            if mode == 1 {
-                hit = kstate.get(s, S_NODE) == node && (key & 255) == m + 1
-            } else if mode == 2 {
-                hit = kstate.get(s, S_NODE) == node
-            } else if mode == 3 {
-                hit = (key & 255) == m + 1
-            }
-            if hit {
-                kstate.set(s, S_KEY, 0)
-                filter_down(b, kstate.get(s, S_NODE))
-                kstate.set(b, H_DROPS, kstate.get(b, H_DROPS) + 1)
-            } else {
-                live = live | (1 << (((key & 255) - 1) & 63))
+    cachelock.give(b, flags)
+}
+
+fn probe_drop(b: u64, m: u64, node: u64, idx: u64) -> u64 {
+    let key: u64 = key_of(m, idx)
+    let set: u64 = set_of(b, node, m, idx)
+    var dropped: u64 = 0
+    var way: u64 = 0
+    while way < WAYS {
+        let s: u64 = slot_of(b, set * WAYS + way)
+        if kstate.get(s, S_KEY) == key && kstate.get(s, S_NODE) == node {
+            invalidate(b, s)
+            dropped = dropped + 1
+        }
+        way = way + 1
+    }
+    return dropped
+}
+
+fn drop_range_probe(b: u64, node: u64, first: u64, last: u64) -> u64 {
+    var mask: u64 = kstate.get(b, H_MNT_LIVE)
+    var dropped: u64 = 0
+    var m: u64 = 0
+    while mask != 0 {
+        if (mask & 1) != 0 {
+            var idx: u64 = first
+            while idx <= last {
+                dropped = dropped + probe_drop(b, m, node, idx)
+                idx = idx + 1
             }
         }
-        i = i + 1
+        mask = mask >> 1
+        m = m + 1
     }
-    kstate.set(b, H_MNT_LIVE, live)
+    return dropped
+}
+
+fn drop_range_chain(b: u64, node: u64, first: u64, last: u64) -> u64 {
+    var ref: u64 = chain_head(b, node)
+    var walked: u64 = 0
+    var dropped: u64 = 0
+    while ref != 0 {
+        let s: u64 = slot_from_ref(b, ref)
+        ref = kstate.get(s, S_LINK) & LINK_MASK
+        walked = walked + 1
+        let idx: u64 = kstate.get(s, S_KEY) >> 8
+        if kstate.get(s, S_NODE) == node && idx >= first && idx <= last {
+            invalidate(b, s)
+            dropped = dropped + 1
+        }
+    }
+    kstate.set(b, H_WALKED, kstate.get(b, H_WALKED) + walked)
+    return dropped
+}
+
+fn drop_partial_before(b: u64, node: u64, first: u64) -> u64 {
+    var ref: u64 = chain_head(b, node)
+    var dropped: u64 = 0
+    while ref != 0 {
+        let s: u64 = slot_from_ref(b, ref)
+        ref = kstate.get(s, S_LINK) & LINK_MASK
+        if kstate.get(s, S_NODE) == node && (kstate.get(s, S_KEY) >> 8) < first && kstate.get(s, S_VALID) < PAGE_BYTES {
+            invalidate(b, s)
+            dropped = dropped + 1
+        }
+    }
+    return dropped
+}
+
+fn drop_pages(state: u64, node: u64, off: u64, len: u64) {
+    if len == 0 || kstate.mode_on(state, kstate.M_PCNOINVAL) {
+        return
+    }
+    let b: u64 = kstate.get(state, kstate.PCACHE_BASE)
+    if b == 0 {
+        return
+    }
+    let first: u64 = off >> 12
+    var last: u64 = (off + len - 1) >> 12
+    if last < first {
+        last = first
+    }
+    let flags: u64 = cachelock.take(b)
+    kstate.set(b, H_EPOCH, kstate.get(b, H_EPOCH) + 1)
+    kstate.set(b, H_DROP_CALLS, kstate.get(b, H_DROP_CALLS) + 1)
+    var dropped: u64 = 0
+    if last - first < PROBE_MAX_PAGES {
+        dropped = drop_range_probe(b, node, first, last)
+    } else {
+        dropped = drop_range_chain(b, node, first, last)
+    }
+    if chain_partials(b, node) != 0 {
+        dropped = dropped + drop_partial_before(b, node, first)
+    }
+    kstate.set(b, H_DROP_RANGE, kstate.get(b, H_DROP_RANGE) + dropped)
     cachelock.give(b, flags)
 }
 
@@ -408,7 +589,7 @@ fn take_frame(state: u64) -> u64 {
         if kstate.get(s, S_BUSY) == 0 && kstate.get(s, S_PIN) == 0 && kstate.get(s, S_FRAME) != 0 {
             f = kstate.get(s, S_FRAME)
             if kstate.get(s, S_KEY) != 0 {
-                filter_down(b, kstate.get(s, S_NODE))
+                chain_del(b, s)
             }
             kstate.set(s, S_KEY, 0)
             kstate.set(s, S_FRAME, 0)
@@ -460,3 +641,8 @@ fn shrunk(state: u64) -> u64 {
 fn bypassed(state: u64) -> u64 {
     return cachelock.field(state, kstate.PCACHE_BASE, H_BYPASS)
 }
+
+fn stat(state: u64, off: u64) -> u64 {
+    return cachelock.field(state, kstate.PCACHE_BASE, off)
+}
+
