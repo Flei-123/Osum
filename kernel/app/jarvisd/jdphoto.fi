@@ -1,0 +1,167 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import imgfit.xrgb
+import jpegenc.jenc
+import jarvisd.jdbase
+import jarvisd.jdcmd
+import jarvisd.jddev
+
+const DEFAULT_QUALITY: u64 = 60
+const DEFAULT_MAX_WIDTH: u64 = 1280
+const MAX_QUALITY: u64 = 95
+const MIN_QUALITY: u64 = 20
+const JPEG_HEADROOM: usize = 4096
+const BYTES_PER_PIXEL_RGB: usize = 3
+const BYTES_PER_PIXEL_XRGB: usize = 4
+
+fn option_value(p: u64, n: usize, key: str, fallback: u64) -> u64 {
+    var i: usize = 0
+    while i + key.n < n {
+        var match_here: bool = true
+        var k: usize = 0
+        while k < key.n {
+            if rt.ld8(p, i + k) != rt.ld8(key.p as u64, k) {
+                match_here = false
+                break
+            }
+            k = k + 1
+        }
+        if match_here {
+            return jdcmd.num_from(p + (i + key.n) as u64, n - i - key.n)
+        }
+        i = i + 1
+    }
+    return fallback
+}
+
+fn clamp_quality(q: u64) -> u64 {
+    if q < MIN_QUALITY {
+        return MIN_QUALITY
+    }
+    if q > MAX_QUALITY {
+        return MAX_QUALITY
+    }
+    return q
+}
+
+fn permitted(aus: *mut rt.Buf) -> bool {
+    if !jdbase.k_photo {
+        return jdcmd.ablehnen(aus, "`screenshot = no` in /etc/jarvis/permissions.conf")
+    }
+    if !jddev.always_shot() && !jdcmd.cert_check(aus) {
+        return false
+    }
+    let ready: i64 = syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_READY, 0, 0, 0, 0)
+    if ready == 0 {
+        return jdcmd.ablehnen(aus, "the kernel has the screenshot call but no image")
+    }
+    return true
+}
+
+fn grab_rows(raw: *mut rt.Buf, width: *mut usize, height: *mut usize) -> bool {
+    let w: i64 = syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_WIDTH, 0, 0, 0, 0)
+    let h: i64 = syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_HEIGHT, 0, 0, 0, 0)
+    let rb: i64 = syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_ROWBYTES, 0, 0, 0, 0)
+    var rows_per_chunk: i64 = syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_CHUNKROWS, 0, 0, 0, 0)
+    if w <= 0 || h <= 0 || rb != w * (BYTES_PER_PIXEL_RGB as i64) {
+        return false
+    }
+    if rows_per_chunk <= 0 {
+        rows_per_chunk = 1
+    }
+    *width = w as usize
+    *height = h as usize
+    return jdcmd.grab_image(raw, h as usize, rb as usize, rows_per_chunk) == jdcmd.GRAB_OK
+}
+
+fn log_stages(grab_ms: u64, scale_ms: u64, encode_ms: u64, bytes: usize, w: usize, h: usize) {
+    jdcmd.say("jarvisd: photo grab=")
+    jdcmd.say_num(grab_ms)
+    jdcmd.say("ms scale=")
+    jdcmd.say_num(scale_ms)
+    jdcmd.say("ms encode=")
+    jdcmd.say_num(encode_ms)
+    jdcmd.say("ms bytes=")
+    jdcmd.say_num(bytes as u64)
+    jdcmd.say(" size=")
+    jdcmd.say_num(w as u64)
+    jdcmd.say("x")
+    jdcmd.say_num(h as u64)
+    jdcmd.say("\n")
+}
+
+fn do_photo_jpeg(opts: u64, opts_n: usize, aus: *mut rt.Buf) -> bool {
+    if !permitted(aus) {
+        return false
+    }
+    let quality: u64 = clamp_quality(option_value(opts, opts_n, "q=", DEFAULT_QUALITY))
+    let max_width: usize = option_value(opts, opts_n, "w=", DEFAULT_MAX_WIDTH) as usize
+    let t0: u64 = jdcmd.now_ms()
+    var raw: rt.Buf = rt.buf_new()
+    var width: usize = 0
+    var height: usize = 0
+    if !grab_rows(&raw, &width, &height) {
+        rt.buf_free(&raw)
+        syscall(jdbase.S_SHOT, jdbase.SH_DROP, 0, 0, 0, 0, 0)
+        return jdcmd.ablehnen(aus, "cannot grab the screen")
+    }
+    let t1: u64 = jdcmd.now_ms()
+    let out_w: usize = xrgb.fit_width(width, max_width)
+    let out_h: usize = xrgb.fit_height(width, height, out_w)
+    var pix: rt.Buf = rt.buf_new()
+    let scaled: bool = xrgb.from_png_rows(&raw, width, height, out_w, out_h, &pix)
+    rt.buf_free(&raw)
+    if !scaled {
+        rt.buf_free(&pix)
+        return jdcmd.ablehnen(aus, "out of memory for the scaled image")
+    }
+    let t2: u64 = jdcmd.now_ms()
+    let cap: usize = out_w * out_h * BYTES_PER_PIXEL_RGB + JPEG_HEADROOM
+    rt.buf_clear(aus)
+    if !rt.buf_reserve(aus, cap) {
+        rt.buf_free(&pix)
+        return jdcmd.ablehnen(aus, "out of memory for the JPEG")
+    }
+    let n: u64 = jenc.encode((pix.ptr) as u64, out_w as u64, out_h as u64, quality, (*aus).ptr as u64, cap as u64)
+    rt.buf_free(&pix)
+    if n == 0 {
+        return jdcmd.ablehnen(aus, "JPEG encoding failed")
+    }
+    rt.buf_set_len(aus, n as usize)
+    log_stages(t1 - t0, t2 - t1, jdcmd.now_ms() - t2, n as usize, out_w, out_h)
+    return true
+}
+
+fn cstr_len(p: u64) -> usize {
+    var n: usize = 0
+    while rt.ld8(p, n) != 0 as u8 {
+        n = n + 1
+    }
+    return n
+}
+
+fn photo_file(path: u64, opts: u64) -> i32 {
+    jdcmd.conf_read()
+    var out: rt.Buf = rt.buf_new()
+    var opts_n: usize = 0
+    if opts != 0 {
+        opts_n = cstr_len(opts)
+    }
+    let ok: bool = do_photo_jpeg(opts, opts_n, &out)
+    if !ok {
+        jdcmd.say("jarvisd: ")
+        jdcmd.say_octets(out.ptr, out.len)
+        jdcmd.say("\n")
+        rt.buf_free(&out)
+        return 1
+    }
+    let fd: i64 = jdcmd.sys_open(path, jdbase.O_WRONLY | jdbase.O_CREAT | jdbase.O_TRUNC, 420)
+    if fd < 0 {
+        rt.buf_free(&out)
+        return 2
+    }
+    jdcmd.sys_write(fd, out.ptr, out.len)
+    jdcmd.sys_close(fd)
+    rt.buf_free(&out)
+    return 0
+}
