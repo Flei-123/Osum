@@ -131,7 +131,7 @@ stage_build() {
         && ld -T kernel/user/user.ld -o "$crtd/mail.elf" "$crtd/mail.o" 2>> "$crtd/c.err" \
         && ok "mail.fi builds + links (ring-3 app)" || { bad "mail.fi build"; head -10 "$crtd/c.err"; return; }
     python3 tools/sdk/osdk.py check pakete/mail/INFO --strict > "$crtd/l.txt" 2>&1 && ok "INFO lint (manifest v2, strict)" || { bad "INFO lint"; cat "$crtd/l.txt"; }
-    python3 tools/k15/icon.py pakete/mail/symbol.txt "$crtd/symbol" > /dev/null 2>&1 && ok "symbol.txt -> OSYM" || bad "symbol.txt"
+    python3 tools/k15/mksymbol.py pakete/mail "$crtd/symbol" > /dev/null 2>&1 && ok "symbol.osym -> package symbol" || bad "package symbol"
     grep -q 'pakete/mail' pakete/bauen.sh && grep -q 'kernel/user/mail.fi' pakete/bauen.sh && ok "pakete/bauen.sh builds the mail package" || bad "pakete/bauen.sh does not know mail"
     if OPK=$(python3 tools/lib/opkpfad.py 2>/dev/null) && [ -f "$OPK" ]; then
         bash pakete/bauen.sh "$crtd/pk" > "$crtd/bauen.log" 2>&1

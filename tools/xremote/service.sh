@@ -58,7 +58,7 @@ cp pakete/xremote/INFO pakete/xremote/rezept "$PKGSRC/"
 cp "$HOSTBIN" "$PKGSRC/bau/freeviewer-host"
 cp "$LDMUSL" "$PKGSRC/bau/ld-musl-x86_64.so.1"
 cp "$LIBGCC" "$PKGSRC/bau/libgcc_s.so.1"
-python3 tools/k15/icon.py pakete/xremote/symbol.txt "$PKGSRC/bau/symbol" > /dev/null
+python3 tools/k15/mksymbol.py pakete/xremote "$PKGSRC/bau/symbol" > /dev/null
 (cd "$PKGSRC" && python3 "$OPKPY" bauen rezept -o "$T/xremote.opk") > "$T/opkbuild.log" 2>&1 || { echo "XRSERVICE: opk build failed"; cat "$T/opkbuild.log"; exit 1; }
 python3 "$OPKPY" installieren --wurzel "$PKGROOT" "$T/xremote.opk" > "$T/opkinstall.log" 2>&1 || { echo "XRSERVICE: opk install failed"; cat "$T/opkinstall.log"; exit 1; }
 APPDIR="$PKGROOT/apps/xremote.osp"
