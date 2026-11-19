@@ -14,8 +14,8 @@
 #      among 24 px icons
 #   3. tools/svg/apps.tsv knows every bundle (else the next icon run
 #      leaves it out)
-#   4. every installable GUI package (pakete/*/rezept with `datei=start`) ships
-#      `datei=symbol` and has its symbol.txt source
+#   4. every package (pakete/*/rezept with `datei=symbol`) has a vector symbol.osym baked from its symbol.svg
+#      and is listed in tools/svg/apps.tsv
 #   5. the programs pinned by the image's taskbar.conf have a bundle with an icon
 #   5b. every GUI program of a bundle calls set_app (WM_APP), else its taskbar button has no icon
 #   6. COUNTER-PROOF: a copy of the tree with one symbol removed / one flat
@@ -74,9 +74,12 @@ for a in apps:
 for r in sorted(glob.glob(os.path.join(root, "pakete/*/rezept"))):
     t = open(r, errors="replace").read()
     n = os.path.basename(os.path.dirname(r))
-    if re.search(r"^datei=start\s", t, re.M):
-        say(re.search(r"^datei=symbol\s", t, re.M) is not None, "package %s: ships datei=symbol" % n)
-        say(os.path.isfile(os.path.join(os.path.dirname(r), "symbol.txt")), "package %s: symbol.txt source" % n)
+    if re.search(r"^datei=symbol\s", t, re.M):
+        pdir = os.path.dirname(r)
+        sym = os.path.join(pdir, "symbol.osym")
+        res = osym_check(sym) if os.path.isfile(sym) else "no vector symbol.osym (a 16x16 symbol.txt is not enough)"
+        say(res == "", "package %s: vector symbol.osym%s" % (n, "" if res == "" else " (" + res + ")"))
+        say(n in known, "package %s: listed in tools/svg/apps.tsv" % n)
 # 7. A window only gets its icon in the taskbar when the program itself says which bundle it belongs
 #    to (WM_APP = fuiscene.set_app). welcome.fi never did: its button was an empty plate (W2c, laptop).
 for a in apps:
@@ -140,7 +143,7 @@ for y in range(72):
 sys.stdout.buffer.write(bytes(b))" > "$D/t/assets/apps/store.osp/symbol.osym"; expect_red "icon on a filled tile (the old look)"
 mkcopy; mkdir -p "$D/t/assets/apps/newapp.osp"; echo "name=New" > "$D/t/assets/apps/newapp.osp/INFO"; echo /bin/new > "$D/t/assets/apps/newapp.osp/start.txt"; expect_red "new program without icon"
 mkcopy; sed -i '/^welcome\t/d' "$D/t/tools/svg/apps.tsv"; expect_red "program not in apps.tsv"
-mkcopy; sed -i 's/^datei=symbol .*//' "$D/t/pakete/mail/rezept"; expect_red "package without symbol"
+mkcopy; rm "$D/t/pakete/mail/symbol.osym"; expect_red "package without vector symbol"
 mkcopy; sed -i '/set_app(/d' "$D/t/kernel/user/welcome.fi"; expect_red "program without set_app (empty taskbar plate)"
 mkcopy; sed -i 's/^const SYM_N: u64 = .*/const SYM_N: u64 = 10/' "$D/t/kernel/user/taskbar/tblayout.fi"; expect_red "symbol cache smaller than pins + window buttons (grey charmap button)"
 

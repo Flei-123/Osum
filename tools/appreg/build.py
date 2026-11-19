@@ -29,16 +29,32 @@ def alias_target(root, app):
     return name if name != app else None
 
 
+def bundle_title(path):
+    info = os.path.join(path, "INFO")
+    if not os.path.isfile(info):
+        return ""
+    for line in open(info, encoding="utf-8", errors="replace").read().splitlines():
+        if line.startswith("name="):
+            return line[5:].strip()
+    return ""
+
+
 def entries(root):
     aliases = dict(read_rows(os.path.join(root, "tools/appreg/alias.tsv"), "\t"))
+    seen = set()
     for row in read_rows(os.path.join(root, "tools/loader/apps.tab"), "|"):
-        yield row[0], row[6], icon_dir(root, row[0], aliases)
+        seen.add(row[0])
+        yield row[0], row[6], icon_dir(root, row[0], aliases), row[3]
+    for app in aliases:
+        if app not in seen:
+            d = icon_dir(root, app, aliases)
+            yield app, "fenster", d, bundle_title(os.path.join(root, aliases[app]))
 
 
 def main(argv):
     root, out = argv[0], argv[1]
     bad = 0
-    for app, kind, d in entries(root):
+    for app, kind, d, title in entries(root):
         if d is None:
             print("no icon source for %s" % app)
             bad += 1
@@ -47,6 +63,9 @@ def main(argv):
         os.makedirs(target, exist_ok=True)
         with open(os.path.join(target, "symbol"), "wb") as f:
             f.write(symjoin.joined(d))
+        if title:
+            with open(os.path.join(target, "title"), "w", encoding="utf-8") as f:
+                f.write(title[:46] + "\n")
         canon = alias_target(root, app)
         if canon:
             with open(os.path.join(target, "alias"), "w") as f:
