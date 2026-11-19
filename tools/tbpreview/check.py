@@ -5,6 +5,10 @@ import sys
 
 PAD_POINTS = 8
 ROW_POINTS = 36
+THUMB_W_POINTS = 184
+THUMB_H_POINTS = 116
+HEAD_ROW_POINTS = 24
+GAP_POINTS = 4
 PREVIEW = r"taskview: preview n=(\d+) app=(\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)"
 passed = 0
 failed = 0
@@ -121,7 +125,7 @@ def check_all(folder, folder_close, sc):
           "a plate overlaps the bar: %d/%d > %d" % (y1 + h1, y2 + h2, bar_y))
     check(abs(x1 + w1 // 2 - (bx + bw // 2)) <= 2, "button preview centred on the button (%d vs %d)" % (x1 + w1 // 2, bx + bw // 2),
           "button preview off centre: %d vs %d" % (x1 + w1 // 2, bx + bw // 2))
-    check(w1 == 300 * sc and h1 == (2 * PAD_POINTS + ROW_POINTS + 4) * sc, "plate size %dx%d = design size x scale" % (w1, h1),
+    check(w1 == (2 * PAD_POINTS + THUMB_W_POINTS) * sc and h1 == (2 * PAD_POINTS + HEAD_ROW_POINTS + GAP_POINTS + THUMB_H_POINTS) * sc, "plate size %dx%d = design size x scale" % (w1, h1),
           "plate size %dx%d unexpected" % (w1, h1))
     shown = differing(im["02-preview-button"], im["00-rest"], (x1, y1, w1, h1))
     check(shown >= 0.5, "button preview visible: %.0f%% of the plate differs from the rest picture" % (100 * shown),
