@@ -90,5 +90,33 @@ hat "$OUT/badacct.txt" "alice" "alice still exists after the refused reset"
 nicht "$OUT/badacct.txt" "resetsys: step" "no step ran"
 
 echo
+echo "== 6. password from a file (the settings page): file used and wiped =="
+lauf pfile iso "$SETUP;resetsys system --name bob --confirm RESET --ja --pass-file /pw;echo PASSWD-AFTER;cat /etc/passwd;echo FILE-AFTER;ls /pw;exit" 300
+hat "$OUT/pfile.txt" "resetsys: ok" "reset with --pass-file ok"
+python3 -I - "$OUT/pfile.txt" <<'PY' && ok "owner bob exists from the file password and the file is gone" || bad "pass-file result"
+import sys
+t = open(sys.argv[1], errors="replace").read()
+passwd, rest = t.rsplit("PASSWD-AFTER", 1)[1].split("FILE-AFTER", 1)
+assert "bob:x:1000" in passwd and "alice" not in passwd
+assert "/pw" not in rest.split("exit")[0].replace("ls /pw", "") or "not" in rest.lower() or "error" in rest.lower() or "no such" in rest.lower()
+PY
+lauf nofile iso "$SETUP;resetsys system --name bob --confirm RESET --ja --pass-file /missing;ls /users;exit" 300
+nicht "$OUT/nofile.txt" "resetsys: step" "missing pass file runs no step"
+hat "$OUT/nofile.txt" "alice" "alice survives a missing pass file"
+
+echo
+echo "== 7. empty system: no account left (setup assistant case) =="
+lauf empty iso "$SETUP;resetsys system --empty --confirm RESET --ja;echo PASSWD-AFTER;cat /etc/passwd;echo END-AFTER;exit" 300
+hat "$OUT/empty.txt" "resetsys: ok" "empty reset ok"
+python3 -I - "$OUT/empty.txt" <<'PY' && ok "only root remains in /etc/passwd" || bad "passwd after empty reset"
+import sys
+t = open(sys.argv[1], errors="replace").read()
+after = t.rsplit("PASSWD-AFTER", 1)[1].split("END-AFTER", 1)[0]
+assert "root:x:0" in after and "alice" not in after and ":1000:" not in after
+PY
+lauf emptynoja iso "$SETUP;resetsys system --empty --confirm RESET;ls /users;exit" 300
+hat "$OUT/emptynoja.txt" "alice" "--empty without --ja changes nothing"
+
+echo
 echo "$pass green, $fail red"
 [ "$fail" -eq 0 ] || exit 1
