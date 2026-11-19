@@ -48,6 +48,35 @@ print(n)
 PY
 )
 [ "$ink" -ge 40 ] && ok "icon column carries glyph ink ($ink pixels)" || bad "icon column empty ($ink pixels)"
+bl=$(grep -a -m1 'taskbar: context empty x=' "$S")
+bx=$(echo "$bl" | sed -E 's/.* x=([0-9]+) .*/\1/'); by=$(echo "$bl" | sed -E 's/.* y=([0-9]+) .*/\1/')
+bw=$(echo "$bl" | sed -E 's/.* w=([0-9]+) .*/\1/'); bh=$(echo "$bl" | sed -E 's/.* h=([0-9]+) .*/\1/')
+cmp_rect() {
+    python3 -I - "$1" "$2" "$3" "$4" "$5" "$6" <<'PY'
+import sys
+def load(p):
+    d = open(p, "rb").read(); f = []; at = 2
+    while len(f) < 3:
+        while d[at:at+1].isspace(): at += 1
+        s = at
+        while not d[at:at+1].isspace(): at += 1
+        f.append(int(d[s:at]))
+    return f[0], d[at+1:]
+W, a = load(sys.argv[1]); _, b = load(sys.argv[2])
+x0, y0, w, h = (int(v) for v in sys.argv[3:7])
+n = 0
+for y in range(y0, y0 + h):
+    for x in range(x0, x0 + w):
+        o = (y * W + x) * 3
+        if a[o:o+3] != b[o:o+3]:
+            n += 1
+print(n)
+PY
+}
+dk=$(cmp_rect "$OUT/02-bar-menu.ppm" "$OUT/02a-bar-keys.ppm" "$bx" "$by" "$bw" "$bh")
+[ "$dk" -ge $((bw * 20)) ] && ok "Down key highlights the first row ($dk pixels changed in the card)" || bad "Down key changed only $dk pixels"
+dw=$(cmp_rect "$OUT/02a-bar-keys.ppm" "$OUT/02a2-bar-keys-wrap.ppm" "$bx" "$by" "$bw" "$bh")
+[ "$dw" -ge $((bw * 20)) ] && ok "Up key moves the highlight to the last row ($dw pixels changed)" || bad "Up key changed only $dw pixels"
 OLD_H=$((n * 28 + 8))
 [ "$OLD_H" -ge $((n * MIN_PITCH)) ] && bad "counter-proof: the old 28 px pitch would pass" || ok "counter-proof: the old 28 px pitch ($OLD_H px) fails the pitch check"
 echo; echo "MENULOOK: $pass passed, $fail failed"

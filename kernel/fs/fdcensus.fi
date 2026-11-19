@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import lib.kstate
+import sched.taskconst
+import sched.taskslot
+import serial
+
+export { report }
+
+const TOP_HOLDERS: u64 = 3
+const DENSE_REPORTS: u64 = 8
+const SPARSE_EVERY: u64 = 256
+const COMM_OCTETS: u64 = 8
+
+static mut failures: u64 = 0
+static mut s_head: [u8; 34] = "fdtab: open-file table full, top:\0"
+static mut s_pid: [u8; 6] = " pid=\0"
+static mut s_comm: [u8; 7] = " comm=\0"
+static mut s_held: [u8; 7] = " held=\0"
+
+fn due() -> bool {
+    failures = failures + 1
+    if failures <= DENSE_REPORTS {
+        return true
+    }
+    return failures % SPARSE_EVERY == 0
+}
+
+fn held_by(state: u64, task: u64, max_fd: u64) -> u64 {
+    var count: u64 = 0
+    var fd: u64 = 0
+    while fd < max_fd {
+        if kstate.get(state, kstate.FDTAB_OFF + (task * max_fd + fd) * 8) != 0 {
+            count = count + 1
+        }
+        fd = fd + 1
+    }
+    return count
+}
+
+fn put_comm(state: u64, task: u64) {
+    var word: u64 = taskslot.tget(state, task, taskconst.T_COMMA)
+    var i: u64 = 0
+    while i < COMM_OCTETS {
+        let c: u8 = (word & 255) as u8
+        if c != 0 as u8 {
+            serial.put(c)
+        }
+        word = word >> 8
+        i = i + 1
+    }
+}
+
+fn print_holder(state: u64, task: u64, held: u64) {
+    serial.puts((&s_pid[0]) as u64)
+    serial.dec(taskslot.tget(state, task, taskconst.T_PID))
+    serial.puts((&s_comm[0]) as u64)
+    put_comm(state, task)
+    serial.puts((&s_held[0]) as u64)
+    serial.dec(held)
+}
+
+fn report(state: u64, max_fd: u64) {
+    if !due() {
+        return
+    }
+    var used: [u64; 3] = [0 as u64; 3]
+    var counts: [u64; 3] = [0 as u64; 3]
+    var task: u64 = 0
+    while task < kstate.MAX_TASKS {
+        let n: u64 = held_by(state, task, max_fd)
+        var slot: u64 = 0
+        while slot < TOP_HOLDERS {
+            if n > counts[slot as usize] {
+                var shift: u64 = TOP_HOLDERS - 1
+                while shift > slot {
+                    counts[shift as usize] = counts[(shift - 1) as usize]
+                    used[shift as usize] = used[(shift - 1) as usize]
+                    shift = shift - 1
+                }
+                counts[slot as usize] = n
+                used[slot as usize] = task
+                slot = TOP_HOLDERS
+            } else {
+                slot = slot + 1
+            }
+        }
+        task = task + 1
+    }
+    serial.puts((&s_head[0]) as u64)
+    var k: u64 = 0
+    while k < TOP_HOLDERS {
+        if counts[k as usize] > 0 {
+            print_holder(state, used[k as usize], counts[k as usize])
+        }
+        k = k + 1
+    }
+    serial.nl()
+}

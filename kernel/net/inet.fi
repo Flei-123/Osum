@@ -20,6 +20,7 @@ import net.ebpfhook
 import net.sharebind
 import net.wg
 import net.kodb
+import net.tcporphan
 
 export { arp_flush, arp_ask, echoes, EPHEMERAL_BASE, EPHEMERAL_MASK,
     init, ready, pump, netd_body, wake, configure, readdr, us, set_task,
@@ -528,6 +529,9 @@ fn say_epoch(ep: u64, rebound: u64, stale: u64) {
 }
 
 fn h_store(state: u64, i: u64, h: u64, ep: u64) {
+    if sock_kind(state, i) == SK_TCP {
+        tcporphan.forget(h)
+    }
     kstate.set(state, so_at(i) + SO_H, (h & H_MASK) | (ep << 32))
 }
 
@@ -604,6 +608,7 @@ fn pump(state: u64) -> u64 {
     }
 
     stack.net_poll(s, now)
+    tcporphan.sweep(state, s, now)
 
     let out: u64 = kstate.get(state, sc(S_SCRATCH))
     n = 0
@@ -1263,6 +1268,24 @@ fn sock_ka_set(state: u64, i: u64, which: u64, v: u64) -> u64 {
     return 0
 }
 
+fn connect_slot(state: u64, addr: u64, port: u64) -> i32 {
+    let flags: u64 = hold(state)
+    let h: i32 = stack.net_connect(st(state), (addr & 0xFFFFFFFF) as u32,
+        (port & 0xFFFF) as u16, now_us(state))
+    drop_lock(state, flags)
+    return h
+}
+
+fn make_room(state: u64) -> bool {
+    let flags: u64 = hold(state)
+    let evicted: bool = tcporphan.evict_oldest(state, st(state))
+    drop_lock(state, flags)
+    if evicted {
+        let _work: u64 = pump(state)
+    }
+    return evicted
+}
+
 fn sock_connect(state: u64, i: u64, addr: u64, port: u64) -> u64 {
     let k: u64 = sock_kind(state, i)
     if k == SK_FREE {
@@ -1285,11 +1308,11 @@ fn sock_connect(state: u64, i: u64, addr: u64, port: u64) -> u64 {
     if kstate.get(state, so_at(i) + SO_H) != NOHANDLE {
         return errno.neg(errno.E_ISCONN)
     }
-    let flags: u64 = hold(state)
-    let h: i32 = stack.net_connect(st(state), (addr & 0xFFFFFFFF) as u32,
-        (port & 0xFFFF) as u16, now_us(state))
+    var h: i32 = connect_slot(state, addr, port)
+    if h < 0 && make_room(state) {
+        h = connect_slot(state, addr, port)
+    }
     let ep: u64 = in_epoch
-    drop_lock(state, flags)
     if h < 0 {
         return errno.neg(errno.E_NFILE)
     }
@@ -1683,6 +1706,7 @@ fn sock_close(state: u64, i: u64) {
         let flags: u64 = hold(state)
         if k == SK_TCP {
             stack.net_close(st(state), h as i32)
+            tcporphan.add(h & H_MASK, now_us(state))
         } else if k == SK_UDP {
             stack.udp_close(st(state), h as i32)
         }

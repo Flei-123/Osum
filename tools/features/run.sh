@@ -7,9 +7,9 @@
 # 1. NOTIFICATION CENTRE (kernel/user/notify/notifc.fi), on the machine of the stick (tools/design/eh6.sh):
 #      two `notify` posts in the terminal -> the bell (`taskbar: field noti`) -> a click on it opens
 #      the card with both rows, newest first (`notifc: open n>=2`, `row 0 ... second message`)
-#      -> Tab + Enter on "Clear all" empties it (`notifc: clear n>=2`, `open n=0`) -> Escape closes
+#      -> a click on "Clear all" empties it (`notifc: clear n>=2`, `open n=0`) -> Escape closes
 #      -> a third post -> the bell comes back, its card lists ONLY the third (the base line works,
-#      `open n=1`) -> a click on the bell closes it (`notifc: shut bell`).
+#      `open n=1`) -> a click on the bell closes it (`notifc: shut toggle`).
 #      The pictures 01-open / 02-cleared / 03-open2 differ from the bare desktop inside the card.
 #
 # Pictures go to $FEATURES_OUT when it is set.
@@ -43,9 +43,7 @@ warte 4
 klickauf glocke
 warte 4
 foto 01-open
-taste tab
-warte 1
-taste ret
+klickauf calrectnclear
 warte 3
 foto 02-cleared
 taste esc
@@ -99,7 +97,6 @@ PY
 }
 
 echo "== notification centre =="
-grep -qaF "taskbar: no notifc host" "$S" && bad "the bar had no room for the card" || ok "the card has its window (no 'no notifc host')"
 grep -qaE 'taskbar: field noti ' "$S" && ok "the bell is on the bar once there is something unread" || bad "no bell field"
 o1=$(grep -a 'notifc: open n=' "$S" | head -1)
 n1=$(echo "$o1" | sed -nE 's/.*open n=([0-9]+).*/\1/p')
@@ -118,13 +115,13 @@ else
     bad "no card rectangle in '$o1'"
 fi
 cn=$(grep -a 'notifc: clear n=' "$S" | head -1 | sed -nE 's/.*clear n=([0-9]+).*/\1/p')
-[ "${cn:-0}" -ge 2 ] 2>/dev/null && ok "Tab + Enter on 'Clear all' marked ${cn} entries read" || bad "no 'notifc: clear n=' with at least 2 entries"
+[ "${cn:-0}" -ge 2 ] 2>/dev/null && ok "a click on 'Clear all' marked ${cn} entries read" || bad "no 'notifc: clear n=' with at least 2 entries"
 grep -aq 'notifc: open n=0' "$S" && ok "after clearing the list is empty" || bad "no empty list after clearing"
 grep -qaE "notifc: shut .*esc" "$S" && ok "Escape closes the card" || bad "no 'notifc: shut esc'"
 o3=$(grep -a 'notifc: open n=1' "$S" | tail -1)
 [ -n "$o3" ] && ok "the card after the third post shows ONE row (the cleared two stay gone)" || bad "no 'open n=1' after the third post"
 grep -a 'notifc: row 0 ' "$S" | tail -1 | grep -qaF "third message" && ok "that row is the third message" || bad "the last row 0 is not the third message"
-grep -qaE "notifc: shut (bell|outside)" "$S" && ok "a click on the bell closes the card again" || bad "no 'notifc: shut bell' or 'shut outside'"
+grep -qaE "notifc: shut (bell|outside|toggle)" "$S" && ok "a click on the bell closes the flyout again" || bad "no notifc shut line after the bell click"
 if [ -n "${FEATURES_ONLY:-}" ]; then # FEATURES_ONLY=notifc: skip part 2 (do not disturb)
     grep -a -E "notifc:|taskbar: field noti" "$S" | head -40
     echo "FEATURES: $pass passed, $fail failed"; [ "$fail" -eq 0 ]; exit

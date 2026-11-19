@@ -40,3 +40,12 @@ HDA driver (kernel/hda.fi, syscalls 1850-1854) --report--> audio service (thin p
 * Existing bar today (`docs/WIN11BAR.md`): fields F_NET/F_SND/F_BAT/F_CLK/F_NOTI/F_LANG, `tray_chevron=1`, `tray_group=1` capsule, quick settings in `kernel/user/qs.fi`
   (1706 lines), sound via `SYS_AUDGET/AUDSET` (volume + mute only). There is no Wi-Fi glyph (no Wi-Fi driver, r21), no vector glyph set per network state.
 * No before/after screenshots (no VM run was started in this slot).
+
+## Combined clock flyout (19.11.2026)
+
+* Clock field, bell and Win+N open ONE scene window (`kernel/user/calpop.fi`, opened by `tbpaint.flyout_toggle`): notification cards on top, month calendar below.
+* Notifications: `kernel/user/notify/notifc.fi` is the list model (no window of its own): rows newest first, equal neighbours grouped with a count, per-row dismiss, secondary buttons (eject, view report), "Clear all", do-not-disturb switch (`qs.toggle_dnd`, same flag as the quick-settings tile). The list is capped to the room above the bar.
+* Close: Esc, press outside (the clock and the bell are exempt, they toggle), row action that opens something.
+* Quick settings (network / sound / battery group) stay a separate panel (`kernel/user/qs.fi`).
+* Open: grouping is by identical text only (the bus ring carries no app name); no screen-snip preview row, no focus timer.
+
