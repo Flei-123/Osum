@@ -28,6 +28,12 @@ else
 fi
 python3 tools/usbimg/pubcheck.py "$REL" 2>&1 | grep -q 'dev ' && bad "dev findings in release" || ok "no dev findings in release"
 
+mcopy -o -i "$REL@@1M" ::/root.img "$WORK/release-root.img" > /dev/null 2>&1
+python3 tools/osum/mkfs.py list "$WORK/release-root.img" > "$WORK/release-files.txt" 2>&1
+for kept in /bin/resetsys /system/factory/mouse.conf /bin/settings /bin/installer; do
+    grep -q "^$kept " "$WORK/release-files.txt" && ok "release keeps $kept" || bad "release lost $kept"
+done
+
 echo "== 3. counter-proof: the dev image is rejected for dev parts =="
 python3 tools/usbimg/pubcheck.py "$DEV" > "$WORK/dev.txt" 2>&1 && bad "dev image passes the check" || ok "dev image is rejected"
 for needle in "dev file /bin/widgetdemo" "dev file /bin/bench" "dev boot entry" "dev boot word"; do
