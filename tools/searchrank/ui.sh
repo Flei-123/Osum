@@ -31,9 +31,10 @@ make_bundle firefox "Firefox" "Web browser" "firefox,browser,web,internet,www,mo
 make_bundle terminal "Terminal" "A command prompt with a shell" "terminal,konsole,shell,sh,eingabe,befehl,kommando,prompt" /bin/edit
 make_bundle teamlist "Teamlist" "Lists teams" "team" /bin/edit
 printf 'use=notes-two:3\n' > "$TMPD/startuse.conf"
-for f in certus-notes.txt zzqq-file.txt spinatus.txt tattoo.txt x-remote-notes.txt; do printf 'x\n' > "$TMPD/files/$f"; done
+LONG=a-very-long-file-name-for-the-index-test.txt
+for f in certus-notes.txt zzqq-file.txt spinatus.txt tattoo.txt x-remote-notes.txt $LONG; do printf 'x\n' > "$TMPD/files/$f"; done
 MKFS_EXTRA="/data/"
-for f in certus-notes.txt zzqq-file.txt spinatus.txt tattoo.txt x-remote-notes.txt; do MKFS_EXTRA="$MKFS_EXTRA /data/$f=$TMPD/files/$f@0644"; done
+for f in certus-notes.txt zzqq-file.txt spinatus.txt tattoo.txt x-remote-notes.txt $LONG; do MKFS_EXTRA="$MKFS_EXTRA /data/$f=$TMPD/files/$f@0644"; done
 
 echo "== mutant tree: the old ranking =="
 git worktree add --detach "$TMPD/mut" HEAD > /dev/null 2>&1 || { bad "mutant worktree"; echo "SEARCHRANKUI: $pass passed, $fail failed"; exit 1; }
@@ -47,7 +48,7 @@ s += "\nfn rank_apps(term: u64, out: u64, max: u64) -> u64 {\n    return appdir.
 open(p, "w").write(s)
 q = root + "/kernel/user/launcher.fi"
 b = open(q, "rb").read()
-old = b"if !g_home && napp > 0 {"
+old = b"if !g_home && napp + nset > 0 {"
 assert b.count(old) == 1
 open(q, "wb").write(b.replace(old, b"if !g_home {"))
 PY
@@ -91,7 +92,7 @@ for n in new old nol; do
     python3 -I tools/searchrank/check.py "$S" certus > "$TMPD/$n.certus" 2>&1
     python3 -I tools/searchrank/check.py "$S" zzqq > "$TMPD/$n.zzqq" 2>&1
     python3 -I tools/searchrank/check.py "$S" notes > "$TMPD/$n.notes" 2>&1
-    for q in xremote x-remote "X Remote" fernst firfox fire term einst te; do
+    for q in xremote x-remote "X Remote" fernst firfox fire term einst te bluetooth long-file; do
         python3 -I tools/searchrank/check.py "$S" "$q" > "$TMPD/$n.q_${q// /_}" 2>&1
     done
 done
@@ -147,6 +148,14 @@ echo "== learning: after picks, the prefix goes to the learned app =="
     || bad "'te': best match is '$(val $D.q_te best)'"
 [ "$(grep -a 'launcher: rec k=0 ' "$D/serial.txt" | tail -1 | sed -n 's/.*name=\[\(.*\)\].*/\1/p')" = "Teamlist" ] \
     && ok "empty field suggests the most used app first" || bad "empty field suggestion k=0 is '$(grep -a 'launcher: rec k=0 ' "$D/serial.txt" | tail -1)'"
+
+echo "== settings results and long names =="
+case "$(val $D.q_bluetooth settings)" in *Bluetooth*) ok "'bluetooth': a Settings page is listed" ;; *) bad "'bluetooth': settings are '$(val $D.q_bluetooth settings)'" ;; esac
+grep -q 'apps=0 ' "$D.q_bluetooth" && ok "'bluetooth': no app hit, Enter goes to the Settings page" || bad "'bluetooth': unexpected apps: $(val $D.q_bluetooth apps)"
+grep -aq 'launcher: settings page=[0-9]* pid=' "$D/serial.txt" && ok "Enter on a Settings hit starts Settings on that page" || bad "no 'launcher: settings page=' line"
+[ "$(val $D.q_long-file files)" = "/data/a-very-long-file-name-fo" ] && ok "a name longer than the slot is cut and terminated" \
+    || bad "long name listed as '$(val $D.q_long-file files)'"
+grep -aq 'launcher: .*[Pp]anic\|#PF\|program died' "$D/serial.txt" && bad "launcher died during the run" || ok "launcher survived all queries"
 
 echo "== counter-proof: old ranking =="
 O="$TMPD/old"

@@ -26,7 +26,8 @@ for p in $PROGS; do
 done
 printf 'alpha\n' > "$TMPD/alpha.txt"
 printf 'aaa\n' > "$TMPD/f.txt"
-SPEC="$SPEC /etc/alpha.txt=$TMPD/alpha.txt /etc/f.txt=$TMPD/f.txt"
+python3 -I -c "print(''.join('row %05d\\n' % i for i in range(1500)), end='')" > "$TMPD/big.txt"
+SPEC="$SPEC /etc/alpha.txt=$TMPD/alpha.txt /etc/f.txt=$TMPD/f.txt /etc/big.txt=$TMPD/big.txt"
 bash tools/mkfsfi/mkfs.sh build "$TMPD/base.img" 8192 --v3 $SPEC > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs"; exit 1; }
 qboot() {
     local t=$1 words=$2 script=$3
@@ -81,6 +82,16 @@ hi_after_gone() { awk '/^\[gone\]/{f=1;next} f' "$TMPD/$1.txt" | grep -ac '^hi$'
 [ "$(lines_of f hi)" = 2 ] && [ "$(hi_after_gone f)" = 0 ] && ok "F created file visible after a negative entry, gone after rm" || bad "F hi lines $(lines_of f hi), after rm $(hi_after_gone f)"
 [ "$(stat_of f dcache.name)" -gt 0 ] && [ "$(stat_of f dcache.node)" -gt 0 ] && ok "F targeted invalidation by name and by node" || bad "F name=$(stat_of f dcache.name) node=$(stat_of f dcache.node)"
 [ "$(stat_of f dcache.full)" -le 10 ] && ok "F no full flush for create and unlink ($(stat_of f dcache.full))" || bad "F full flushes $(stat_of f dcache.full)"
+echo "== G. append invalidates only the touched page, not the whole file =="
+SCRIPT_G="cat /etc/big.txt;echo appended >> /etc/big.txt;cat /etc/big.txt;cat /proc/vfscache"
+qboot g "" "$SCRIPT_G"
+done_ok g G
+[ "$(lines_of g appended)" = 1 ] && ok "G appended line visible through the page cache" || bad "G appended lines $(lines_of g appended)"
+[ "$(stat_of g pcache.drop.range)" -ge 1 ] && [ "$(stat_of g pcache.drop.ino)" = 0 ] && ok "G range drop $(stat_of g pcache.drop.range), no whole-file drop" || bad "G range=$(stat_of g pcache.drop.range) ino=$(stat_of g pcache.drop.ino)"
+[ "$(stat_of g pcache.miss)" -le 5 ] && ok "G untouched pages stayed cached (misses $(stat_of g pcache.miss))" || bad "G misses $(stat_of g pcache.miss)"
+qboot gn "pcnoinval" "$SCRIPT_G"
+done_ok gn Gc
+[ "$(lines_of gn appended)" -lt 1 ] && ok "Gc counter-proof pcnoinval hides the appended line" || bad "Gc counter-proof inactive"
 echo
 if [ -n "${VFSCACHE_OUT:-}" ]; then mkdir -p "$VFSCACHE_OUT"; cp "$TMPD"/*.ser "$VFSCACHE_OUT/" 2>/dev/null; fi
 echo "VFSCACHE: $pass passed, $fail failed"

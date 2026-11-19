@@ -39,7 +39,8 @@ bash tools/mkfsfi/mkfs.sh build "$W/probe.img" 16384 $SPEC > "$W/mkfs.txt" 2>&1 
 
 SKRIPT=${FOTOPROBE_SKRIPT:-"jarvisd -s;jarvisctl screenshot 600;jarvisd -f /var/jarvis/schuss.png;ls /var/jarvis;exit"}
 cp "$W/probe.img" "$W/live.img"
-timeout 180 qemu-system-x86_64 -kernel "$K" -m 256 \
+[ -w /dev/kvm ] && ACC=(-accel kvm -cpu host) || ACC=()
+timeout 180 qemu-system-x86_64 "${ACC[@]}" -kernel "$K" -m 256 \
     -append "osum nokbd nosched noproc nofs noring3 gfx $* script=$SKRIPT" \
     -serial "file:$W/seriell.txt" -display none -no-reboot \
     -drive "file=$W/live.img,format=raw,if=ide,index=0" \
