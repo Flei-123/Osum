@@ -163,6 +163,7 @@ L=$(line 'SV-BUS-CONFIRM true'); chk "$(has "$L" 'use_dialog')" "bus: the window
 NK=$(grep -c '^setting ' etc/settings.schema)
 grep -aq "settingsd: schema ok keys=$NK" "$C" && ok "settingsd loads the shipped schema with the remote.* keys (keys=$NK)" || bad "settingsd schema check: $(grep -a 'settingsd:' "$C" | head -1)"
 grep -aq 'xremoted: started' "$C" && ok "xremoted started in the guest" || bad "xremoted did not start"
+grep -aq 'xremoted: identity synced' "$C" && ok "the identity file is flushed to disk once the host has created it" || bad "identity file never flushed"
 L=$(line 'SV-A ')
 chk "$(has "$L" 'service=disabled password= pw=0 state=0 log=0')" "phase A: disabled -> status disabled, no password, no host state, no host log ($L)"
 L=$(line 'SV-B ')

@@ -1,0 +1,66 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import gfx.fb
+import lib.kstate
+import gfx.fb.fbdraw
+import arch.cpu
+import mm.mmframe
+import sync.atomic
+import ui.shot
+import ui.wm.wmframe
+
+export { take }
+
+const WORD_BYTES: u64 = 8
+
+fn bytes_needed(state: u64) -> u64 {
+    let raw: u64 = fb.pitch(state) *% fb.height(state)
+    return (raw + mmframe.FRAME_SIZE - 1) / mmframe.FRAME_SIZE * mmframe.FRAME_SIZE
+}
+
+fn release_old(state: u64) {
+    let addr: u64 = shot.snap_addr(state)
+    if addr != 0 {
+        mmframe.frame_free_run(state, addr, shot.snap_bytes(state) / mmframe.FRAME_SIZE)
+    }
+    shot.snap_set(state, 0, 0)
+}
+
+fn ensure(state: u64, bytes: u64) -> bool {
+    if bytes == 0 {
+        return false
+    }
+    if shot.snap_bytes(state) == bytes {
+        return true
+    }
+    release_old(state)
+    let addr: u64 = mmframe.frame_run(state, bytes / mmframe.FRAME_SIZE)
+    if addr == 0 {
+        return false
+    }
+    shot.snap_set(state, addr, bytes)
+    return true
+}
+
+fn take(state: u64) {
+    shot.snap_live(state, false)
+    if kstate.mode_on(state, kstate.M_NOSHOTSNAP) {
+        return
+    }
+    if !ensure(state, bytes_needed(state)) {
+        shot.snap_failed(state)
+        return
+    }
+    atomic.lock_take(state, atomic.L_GUI, cpu.here(state))
+    if !wmframe.cp_lock(state) {
+        atomic.lock_give(state, atomic.L_GUI)
+        shot.snap_failed(state)
+        return
+    }
+    fbdraw.copy_words(shot.snap_addr(state), fb.draw_at(state), fb.pitch(state) *% fb.height(state) / WORD_BYTES)
+    wmframe.cp_unlock(state)
+    atomic.lock_give(state, atomic.L_GUI)
+    shot.snap_live(state, true)
+    shot.snap_taken(state)
+}

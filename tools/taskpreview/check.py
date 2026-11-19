@@ -108,6 +108,12 @@ check(changed(a3, a4, (x, y, max(jx - 2, x), y + h)) < 1500, "no preview card op
 check(changed(a4, a5, (0, 0, 1280, 700)) > 2000, "the explorer window vanished after Minimise")
 a6, a7 = load("a6-empty"), load("a7-closed")
 check(changed(a6, a7, (640, 640, 900, 780)) > 500, "empty bar menu closed on Escape")
+settings_cards = lines(r"taskview: preview n=\d+ app=settings")
+check(len(settings_cards) >= 1, "hovering the Settings symbol after Explorer shows the Settings card")
+two = [ln for ln in previews if "app=explorer" in ln and num(ln, "n") == 2]
+check(len(two) >= 1, "the Explorer card lists both windows after a new window was opened")
+d0, d1 = load("d0-away"), load("d1-minimised-card")
+check(changed(d0, d1, (40, 592, 428, 752)) > 500, "a minimised window button shows its card on hover")
 frames = {}
 for ln in lines(r"wm: animf id=\d+ kind=4 layer="):
     m = re.search(r"id=(\d+) kind=4 .* p=(\d+) t=(\d+)", ln)

@@ -1,0 +1,97 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.fileops
+import libc.text
+import instaccount
+import reset.resetfs
+import reset.resetsettings
+
+export {
+    run_settings, run_system,
+    OK, E_NOT_CONFIRMED, E_NOT_ROOT, E_WIPE, E_ACCOUNT, E_SETTINGS
+}
+
+const OK: u64 = 0
+const E_NOT_CONFIRMED: u64 = 3
+const E_NOT_ROOT: u64 = 4
+const E_WIPE: u64 = 5
+const E_ACCOUNT: u64 = 10
+const E_SETTINGS: u64 = 6
+const SYS_GETEUID: u64 = 107
+const SYS_SYNC: u64 = 162
+const STATE_MAX: u64 = 96
+const SYSTEM_STEPS: u64 = 5
+
+static mut p_state: [u8; 18] = "/run/reset.state\0\0"
+static mut p_logdir: [u8; 10] = "/var/log/\0"
+static mut s_prefix: [u8; 16] = "resetsys: step \0"
+static mut s_of: [u8; 2] = "/\0"
+static mut s_sp: [u8; 2] = " \0"
+static mut t_settings: [u8; 9] = "settings\0"
+static mut t_homes: [u8; 10] = "user data\0"
+static mut t_logs: [u8; 5] = "logs\0"
+static mut t_account: [u8; 8] = "account\0"
+static mut t_sync: [u8; 5] = "sync\0"
+static mut t_done: [u8; 5] = "done\0"
+static mut state_line: [u8; 96] = [0 as u8; 96]
+
+fn is_root() -> bool {
+    return ulib.sys(SYS_GETEUID, 0, 0, 0) == 0
+}
+
+fn report(step: u64, total: u64, label: u64) {
+    ulib.say((&s_prefix[0]) as u64)
+    ulib.sayu(step)
+    ulib.say((&s_of[0]) as u64)
+    ulib.sayu(total)
+    ulib.say((&s_sp[0]) as u64)
+    ulib.say(label)
+    ulib.nl()
+    let at: u64 = ulib.strcpy((&state_line[0]) as u64, label)
+    ulib.strcpy((&state_line[0]) as u64 + at, (&s_sp[0]) as u64)
+    fileops.write_file((&p_state[0]) as u64, (&state_line[0]) as u64, at + 1)
+}
+
+fn run_settings() -> u64 {
+    if !is_root() {
+        return E_NOT_ROOT
+    }
+    report(1, 1, (&t_settings[0]) as u64)
+    resetsettings.reset_user_configs()
+    resetsettings.restore_factory()
+    resetsettings.drop_overrides()
+    ulib.sys(SYS_SYNC, 0, 0, 0)
+    return OK
+}
+
+fn run_system(name: u64, pass: u64) -> u64 {
+    if !is_root() {
+        return E_NOT_ROOT
+    }
+    if !instaccount.name_ok(name) {
+        return E_ACCOUNT + instaccount.F_NAME
+    }
+    if !instaccount.pass_ok(pass) {
+        return E_ACCOUNT + instaccount.F_PASS
+    }
+    report(1, SYSTEM_STEPS, (&t_settings[0]) as u64)
+    resetsettings.reset_user_configs()
+    resetsettings.restore_factory()
+    resetsettings.drop_overrides()
+    report(2, SYSTEM_STEPS, (&t_homes[0]) as u64)
+    if !resetsettings.remove_other_homes() {
+        return E_WIPE
+    }
+    report(3, SYSTEM_STEPS, (&t_logs[0]) as u64)
+    resetfs.remove_children((&p_logdir[0]) as u64, 0)
+    report(4, SYSTEM_STEPS, (&t_account[0]) as u64)
+    if !instaccount.create(name, name, pass) {
+        return E_ACCOUNT + instaccount.fail_reason()
+    }
+    report(5, SYSTEM_STEPS, (&t_sync[0]) as u64)
+    ulib.sys(SYS_SYNC, 0, 0, 0)
+    report(SYSTEM_STEPS, SYSTEM_STEPS, (&t_done[0]) as u64)
+    return OK
+}
