@@ -28,7 +28,7 @@ export {
     S_HISTNEXT, S_PRIMSETS, S_SEGIO, S_ADOPTED, S_FREED, S_MIMES,
     A_ANY, A_SAMEUID, A_ROOT,
     E_OK, E_FULL, E_NOENT, E_DENIED, E_INVAL, E_EMPTY, E_AGAIN,
-    S_REGS, S_SENDS, S_RECVS, S_DENIED, S_PUBS, S_DELIVERS, S_DROPS,
+    op_begin, S_REGS, S_SENDS, S_RECVS, S_DENIED, S_PUBS, S_DELIVERS, S_DROPS,
     S_SEGS, S_SEGPAGES, S_STOLEN, S_CLIPSETS, S_CLIPGETS, S_OFFERS, S_FILLS,
     S_DRAGS, S_NOTIS, S_LOCKED, S_HISTLEN, S_SEQ,
     NAME_MAX, SVC_MAX, MSG_MAX, SEG_MAX, HIST_MAX, NOTI_MAX,
@@ -99,7 +99,6 @@ const S_STEALOWN: u64 = 0xF0
 const S_LEAKED: u64 = 0xF8
 
 const SPIN_CHECK: u64 = 20000
-const SPIN_STEAL_LIMIT: u64 = 20000000
 const SPIN_GIVE_UP: u64 = 200000000
 const LEAK_AFTER_SENDS: u64 = 50
 
@@ -218,12 +217,33 @@ fn hist_addr(state: u64, i: u64) -> u64 {
     return state + kstate.BUS_OFF + HIST + i * HIST_BYTES
 }
 
+static mut op_epoch: [u64; 8] = [0 as u64; 8]
+static mut held_epoch: u64 = 0
+static mut reentry_said: u64 = 0
+
+const EPOCH_CPUS: u64 = 8
+
+fn epoch_of(cpu_id: u64) -> u64 {
+    if cpu_id >= EPOCH_CPUS {
+        return 0
+    }
+    return op_epoch[cpu_id as usize]
+}
+
+fn op_begin(state: u64) {
+    let me: u64 = cpu.here(state)
+    if me < EPOCH_CPUS {
+        op_epoch[me as usize] = op_epoch[me as usize] + 1
+    }
+}
+
 fn take(state: u64) {
     let me: u64 = cpu.here(state)
     var gen: u64 = b(state, S_LOCKED)
     var spins: u64 = 0
     var waited: u64 = 0
-    while !atomic.lock_try(state, atomic.L_BUS, me) {
+    var held: bool = atomic.lock_try(state, atomic.L_BUS, me)
+    while !held {
         atomic.pause()
         spins = spins + 1
         waited = waited + 1
@@ -233,15 +253,19 @@ fn take(state: u64) {
             if now != gen {
                 gen = now
                 waited = 0
-            } else if heal(state, me, waited) {
-                waited = 0
+            } else if heal(state, me, gen, waited) {
+                held = true
             }
         }
-        if waited > SPIN_GIVE_UP {
+        if !held {
+            held = atomic.lock_try(state, atomic.L_BUS, me)
+        }
+        if !held && waited > SPIN_GIVE_UP {
             say_stuck(state)
             return
         }
     }
+    held_epoch = epoch_of(me)
     bump(state, S_LOCKED)
     if waited > 0 {
         kstate.add(state, kstate.BUS_OFF + S_SPINS, waited)
@@ -254,20 +278,24 @@ fn give(state: u64) {
 
 fn owner_is_orphan(state: u64, owner: u64, me: u64) -> bool {
     if owner == me {
+        if held_epoch == epoch_of(me) {
+            say_reentry(state, me)
+            return false
+        }
         return true
     }
     return cpu.get(state, owner, cpu.C_CUR) == cpu.get(state, owner, cpu.C_IDLE)
 }
 
-fn heal(state: u64, me: u64, waited: u64) -> bool {
+fn heal(state: u64, me: u64, gen: u64, waited: u64) -> bool {
     if kstate.mode_on(state, kstate.M_NOBUSHEAL) {
         return false
     }
     let token: u64 = atomic.lock_owner(state, atomic.L_BUS)
-    if token == 0 {
+    if token == 0 || !owner_is_orphan(state, token - 1, me) {
         return false
     }
-    if waited < SPIN_STEAL_LIMIT && !owner_is_orphan(state, token - 1, me) {
+    if b(state, S_LOCKED) != gen {
         return false
     }
     if !atomic.lock_steal(state, atomic.L_BUS, token, me) {
@@ -275,7 +303,7 @@ fn heal(state: u64, me: u64, waited: u64) -> bool {
     }
     bump(state, S_STOLEN)
     sb(state, S_STEALOWN, token)
-    say_taken_over(token - 1, me, waited)
+    say_taken_over(token - 1, me, waited, b(state, S_SENDS))
     return true
 }
 
@@ -290,7 +318,7 @@ fn leak_now(state: u64) -> bool {
     return true
 }
 
-fn say_taken_over(owner: u64, me: u64, waited: u64) {
+fn say_taken_over(owner: u64, me: u64, waited: u64, sends: u64) {
     var s1: [u8; 39] = "bus: orphan lock taken over owner-cpu=\0"
     var s2: [u8; 5] = " me=\0"
     var s3: [u8; 9] = " waited=\0"
@@ -300,6 +328,25 @@ fn say_taken_over(owner: u64, me: u64, waited: u64) {
     serial.dec(me)
     serial.puts((&s3[0]) as u64)
     serial.dec(waited)
+    var s4: [u8; 8] = " sends=\0"
+    serial.puts((&s4[0]) as u64)
+    serial.dec(sends)
+    serial.nl()
+}
+
+fn say_reentry(state: u64, me: u64) {
+    if reentry_said != 0 {
+        return
+    }
+    reentry_said = 1
+    var s: [u8; 38] = "bus: lock re-entered on the same cpu \0"
+    serial.puts((&s[0]) as u64)
+    var s2: [u8; 5] = "cpu=\0"
+    serial.puts((&s2[0]) as u64)
+    serial.dec(me)
+    var s3: [u8; 8] = " sends=\0"
+    serial.puts((&s3[0]) as u64)
+    serial.dec(b(state, S_SENDS))
     serial.nl()
 }
 
