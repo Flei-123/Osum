@@ -47,11 +47,16 @@ echo "== sign-in on an image whose inittab has no xremote line =="
 sign_in "$ROOT" new
 S=$OUT/new/serial.txt
 has "$S" "glogin: signed in as justin" "signed in"
-has "$S" "glogin: xremoted pid=" "glogin starts xremoted at sign-in"
+has "$S" "glogin: xremoted pid=" "glogin starts xremoted"
 has "$S" "xremoted: started" "xremoted is running"
 if [ -f "$S" ]; then
+    FIRST=$(grep -an "glogin: xremoted pid=" "$S" | head -1 | cut -d: -f1)
+    SIGNED=$(grep -an "glogin: signed in as" "$S" | head -1 | cut -d: -f1)
+    [ -n "$FIRST" ] && [ -n "$SIGNED" ] && [ "$FIRST" -lt "$SIGNED" ] && ok "xremoted starts at the sign-in screen, before the sign-in" || bad "xremoted start (line ${FIRST:-none}) not before sign-in (line ${SIGNED:-none})"
+fi
+if [ -f "$S" ]; then
     COUNT=$(grep -ac "glogin: xremoted pid=" "$S")
-    [ "$COUNT" -eq 1 ] && ok "started exactly once" || bad "started $COUNT times"
+    [ "$COUNT" -eq 1 ] && ok "started exactly once" || { bad "started $COUNT times"; grep -a "xremoted" "$S" | head -20; }
 fi
 
 BASE_REF=${XRAUTOSTART_BASE:-04b121db7^}
