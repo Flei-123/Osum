@@ -12,8 +12,11 @@ serial = open(os.path.join(out, "serial.txt"), "rb").read().decode("latin1").spl
 ok = bad = 0
 
 
-def check(cond, message):
+def check(cond, message, final=False):
     global ok, bad
+    if layer_mutant and not final:
+        print("  INFO  baseline %s: %s" % ("ok" if cond else "fail", message))
+        return
     if cond:
         ok += 1
         print("  OK    " + message)
@@ -95,11 +98,6 @@ def start_menu_case():
     return percent
 
 
-if layer_mutant:
-    percent = start_menu_case()
-    check(percent < COVER_MIN_PERCENT, "mutant card stays behind the start menu: %d %% of the card area differs" % percent)
-    print("RESULT %d %d" % (ok, bad))
-    sys.exit(0)
 previews = lines(r"taskview: preview n=")
 check(len(previews) >= 2, "preview card opened for explorer and terminal: %d" % len(previews))
 first = previews[0] if previews else ""
@@ -153,5 +151,8 @@ median = gaps[len(gaps) // 2] if gaps else -1
 print("  INFO  pop animation frame gaps: median %d ms, max %d ms (%d gaps)" % (median, gaps[-1] if gaps else -1, len(gaps)))
 check(0 < median <= 17, "frame time of the card animation <= 16 ms (median %d)" % median)
 cover = start_menu_case()
-check(cover >= COVER_MIN_PERCENT, "the preview card is in front of the open start menu: %d %% of the card area differs" % cover)
+if layer_mutant:
+    check(cover < COVER_MIN_PERCENT, "mutant card stays behind the start menu: %d %% of the card area differs" % cover, final=True)
+else:
+    check(cover >= COVER_MIN_PERCENT, "the preview card is in front of the open start menu: %d %% of the card area differs" % cover)
 print("RESULT %d %d" % (ok, bad))

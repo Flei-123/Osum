@@ -22,7 +22,7 @@ if [ -n "${TASKMOTION_OUT:-}" ]; then
     cp "$TMPD/off/o/serial.txt" "$TASKMOTION_OUT/off-serial.txt" 2>/dev/null
 fi
 echo "== new tree =="
-python3 -I tools/taskmotion/check.py "$TMPD/new/o" | tee "$TMPD/new.txt"
+python3 -I tools/taskmotion/check.py "$TMPD/new/o" "$TMPD/off/o" | tee "$TMPD/new.txt"
 echo "== control: motion=0 =="
 python3 -I tools/taskmotion/check.py "$TMPD/off/o" off | tee "$TMPD/off.txt"
 f1=$(grep -c '^  FAIL' "$TMPD/new.txt"); o1=$(grep -c '^  OK' "$TMPD/new.txt")

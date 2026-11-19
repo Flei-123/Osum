@@ -8,9 +8,14 @@ import uikit.uiscale
 import uitheme
 import ulib
 
+const SYS_CLOCK_GETTIME: u64 = 228
+const CLOCK_MONOTONIC: u64 = 1
+const NS_PER_US: u64 = 1000
+const US_PER_SEC: u64 = 1000000
+
 export { SLOTS, K_NONE, K_HOLD, K_REBOUND, K_POP, K_WAIT, K_GHOST, select, deselect, note_press, cur_scale,
     cur_lift, launch, appear, vanish, is_waiting, wait_phase, step, moving, kind_at, name_at, ghost_x, ghost_y,
-    ghost_w, ghost_h, ghost_pm }
+    ghost_w, ghost_h, ghost_pm, clock_us, note_paint }
 
 const SLOTS: u64 = 12
 const NAME_BYTES: u64 = 24
@@ -46,6 +51,9 @@ static mut gh_: [u64; 12] = [0 as u64; 12]
 static mut name_: [u8; 288] = [0 as u8; 288]
 static mut sel_name: u64 = 0
 static mut cur_: u64 = 12
+static mut paint_sum_us: u64 = 0
+static mut paint_count: u64 = 0
+static mut paint_max_us: u64 = 0
 static mut moving_: u64 = 0
 static mut s_start: [u8; 22] = "taskbar: motion start\0"
 static mut s_done: [u8; 21] = "taskbar: motion done\0"
@@ -55,7 +63,25 @@ static mut s_pm: [u8; 5] = " pm=\0"
 static mut s_frames: [u8; 9] = " frames=\0"
 static mut s_ms: [u8; 5] = " ms=\0"
 static mut s_gap: [u8; 6] = " gap=\0"
+static mut s_pavg: [u8; 14] = " paint_avg_us=\0"
+static mut s_pmax: [u8; 14] = " paint_max_us=\0"
 static mut s_base: [u8; 7] = " base=\0"
+
+fn clock_us() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    if ulib.bad(ulib.sys(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC, (&ts[0 as usize]) as u64, 0)) {
+        return 0
+    }
+    return ts[0 as usize] * US_PER_SEC + ts[1 as usize] / NS_PER_US
+}
+
+fn note_paint(us: u64) {
+    paint_sum_us = paint_sum_us + us
+    paint_count = paint_count + 1
+    if us > paint_max_us {
+        paint_max_us = us
+    }
+}
 
 fn motion_base() -> u64 {
     return uitheme.motion(uitheme.MO_NORMAL)
@@ -163,7 +189,7 @@ fn pm_now(s: u64, now: u64) -> u64 {
     if k == K_HOLD {
         return lerp(from_[s as usize], PRESS_PM, tokens.ease_out(progress(s, now, press_ticks())))
     }
-    if k == K_REBOUND {
+    if k == K_REBOUND || k == K_WAIT {
         return lerp(from_[s as usize], FULL_PM, tokens.ease_out(progress(s, now, press_ticks())))
     }
     if k == K_POP {
@@ -247,9 +273,14 @@ fn launch(name: u64) {
         return
     }
     let s: u64 = alloc(name)
-    if s < SLOTS {
-        begin(s, K_WAIT, FULL_PM)
+    if s >= SLOTS {
+        return
     }
+    var from: u64 = FULL_PM
+    if kind_[s as usize] != K_NONE {
+        from = pm_now(s, clockapi.ticks())
+    }
+    begin(s, K_WAIT, from)
 }
 
 fn appear(name: u64) {
@@ -353,7 +384,14 @@ fn finish(s: u64, now: u64) {
     lineout.add_num(elapsed(s, now) * TICK_MS)
     let _g: u64 = lineout.add_text((&s_gap[0 as usize]) as u64)
     lineout.add_num(gap_[s as usize] * TICK_MS)
+    let _pa: u64 = lineout.add_text((&s_pavg[0 as usize]) as u64)
+    lineout.add_num(paint_sum_us / (paint_count + 1))
+    let _pm: u64 = lineout.add_text((&s_pmax[0 as usize]) as u64)
+    lineout.add_num(paint_max_us)
     lineout.end_line()
+    paint_sum_us = 0
+    paint_count = 0
+    paint_max_us = 0
     kind_[s as usize] = K_NONE
 }
 
