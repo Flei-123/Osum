@@ -24,7 +24,7 @@ cp pakete/xremote/INFO pakete/xremote/rezept "$T/"
 cp "$HOSTBIN" "$T/bau/freeviewer-host"
 cp "$LIBS/lib/ld-musl-x86_64.so.1" "$T/bau/ld-musl-x86_64.so.1"
 cp "$LIBS/usr/lib/libgcc_s.so.1" "$T/bau/libgcc_s.so.1"
-python3 tools/k15/icon.py pakete/xremote/symbol.txt "$T/bau/symbol" > /dev/null
+python3 tools/k15/mksymbol.py pakete/xremote "$T/bau/symbol" > /dev/null
 (cd "$T" && python3 "$OPK" bauen rezept -o "$OUT/xremote.opk")
 python3 tools/ota/keyring.py "$BUND" signieren "$OUT/xremote.opk" -o "$OUT/xremote.opk.sig"
 ls -l "$OUT/xremote.opk" "$OUT/xremote.opk.sig"

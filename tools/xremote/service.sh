@@ -58,7 +58,7 @@ cp pakete/xremote/INFO pakete/xremote/rezept "$PKGSRC/"
 cp "$HOSTBIN" "$PKGSRC/bau/freeviewer-host"
 cp "$LDMUSL" "$PKGSRC/bau/ld-musl-x86_64.so.1"
 cp "$LIBGCC" "$PKGSRC/bau/libgcc_s.so.1"
-python3 tools/k15/icon.py pakete/xremote/symbol.txt "$PKGSRC/bau/symbol" > /dev/null
+python3 tools/k15/mksymbol.py pakete/xremote "$PKGSRC/bau/symbol" > /dev/null
 (cd "$PKGSRC" && python3 "$OPKPY" bauen rezept -o "$T/xremote.opk") > "$T/opkbuild.log" 2>&1 || { echo "XRSERVICE: opk build failed"; cat "$T/opkbuild.log"; exit 1; }
 python3 "$OPKPY" installieren --wurzel "$PKGROOT" "$T/xremote.opk" > "$T/opkinstall.log" 2>&1 || { echo "XRSERVICE: opk install failed"; cat "$T/opkinstall.log"; exit 1; }
 APPDIR="$PKGROOT/apps/xremote.osp"
@@ -163,6 +163,7 @@ L=$(line 'SV-BUS-CONFIRM true'); chk "$(has "$L" 'use_dialog')" "bus: the window
 NK=$(grep -c '^setting ' etc/settings.schema)
 grep -aq "settingsd: schema ok keys=$NK" "$C" && ok "settingsd loads the shipped schema with the remote.* keys (keys=$NK)" || bad "settingsd schema check: $(grep -a 'settingsd:' "$C" | head -1)"
 grep -aq 'xremoted: started' "$C" && ok "xremoted started in the guest" || bad "xremoted did not start"
+grep -aq 'xremoted: identity synced' "$C" && ok "the identity file is flushed to disk once the host has created it" || bad "identity file never flushed"
 L=$(line 'SV-A ')
 chk "$(has "$L" 'service=disabled password= pw=0 state=0 log=0')" "phase A: disabled -> status disabled, no password, no host state, no host log ($L)"
 L=$(line 'SV-B ')

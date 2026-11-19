@@ -25,7 +25,7 @@ stage() {
     cp "$HOSTBIN" "$dir/bau/freeviewer-host"
     cp "$LIBS/lib/ld-musl-x86_64.so.1" "$dir/bau/ld-musl-x86_64.so.1"
     cp "$LIBS/usr/lib/libgcc_s.so.1" "$dir/bau/libgcc_s.so.1"
-    python3 tools/k15/icon.py pakete/xremote/symbol.txt "$dir/bau/symbol" > /dev/null
+    python3 tools/k15/mksymbol.py pakete/xremote "$dir/bau/symbol" > /dev/null
 }
 
 echo "== 1. metadata =="
@@ -34,7 +34,7 @@ chk $([ $? = 0 ] && echo 1 || echo 0) "INFO passes osdk --strict"
 net_declared() { grep -qx 'perm=net' "$1" && grep -qx 'net=real' "$1"; }
 net_declared pakete/xremote/INFO && ok "INFO declares perm=net and net=real" || bad "INFO misses the net declaration"
 grep -qx 'id=com.fleitec.xremote' pakete/xremote/INFO && ok "INFO id is com.fleitec.xremote" || bad "INFO id differs"
-[ -s pakete/xremote/symbol.txt ] && ok "the Store icon source exists" || bad "no symbol.txt"
+[ -s pakete/xremote/symbol.osym ] && ok "the Store icon source exists" || bad "no symbol.osym"
 
 echo "== 2. package build and install layout =="
 stage "$T/pkg"

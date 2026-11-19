@@ -84,8 +84,7 @@ def write_info(path, version):
 
 
 def build_symbol(path):
-    run([sys.executable, "-I", os.path.join(ROOT, "tools", "k15", "icon.py"),
-         os.path.join(PKG_DIR, "symbol.txt"), path])
+    run([sys.executable, "-I", os.path.join(ROOT, "tools", "k15", "mksymbol.py"), PKG_DIR, path])
 
 
 def run(cmd):
