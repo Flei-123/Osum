@@ -15,6 +15,8 @@ import devmark
 import libc.kcall
 import uitheme
 import taskbar.tbbase
+import fui.trayslots
+import traymic
 import taskbar.tbmetrics
 import taskbar.tblog
 import notify.notecard
@@ -160,6 +162,8 @@ static mut k_tv: [u8; 9] = "taskview\0"
 static mut k_chev: [u8; 13] = "tray_chevron\0"
 
 static mut k_group: [u8; 11] = "tray_group\0"
+static mut k_tray_order: [u8; 11] = "tray_order\0"
+static mut k_tray_hidden: [u8; 12] = "tray_hidden\0"
 
 static mut k_demo: [u8; 11] = "tray_demo\0\0"
 
@@ -312,6 +316,14 @@ fn conf_read() -> bool {
                 if digits > 0 {
                     tbbase.cf_group = v & 1
                 }
+            } else if tbmetrics.key_is(b + ks, kl, (&k_tray_order[0 as usize]) as u64) {
+                if digits > 0 && tbbase.tdrag != 2 {
+                    trayslots.slots_load(v, trayslots.hidden_mask())
+                }
+            } else if tbmetrics.key_is(b + ks, kl, (&k_tray_hidden[0 as usize]) as u64) {
+                if digits > 0 && tbbase.tdrag != 2 {
+                    trayslots.slots_load(trayslots.order_code(), v)
+                }
             } else if tbmetrics.key_is(b + ks, kl, (&k_demo[0 as usize]) as u64) {
                 if digits > 0 {
                     cf_demo = tbmetrics.clamp(v, 0, 101)
@@ -369,6 +381,8 @@ fn conf_write() -> bool {
     at = tbmetrics.wk_num(b, at, (&k_chev[0 as usize]) as u64, tbbase.cf_chev)
     at = tbmetrics.wk_num(b, at, (&k_group[0 as usize]) as u64, tbbase.cf_group)
     at = tbmetrics.wk_num(b, at, (&k_badge[0 as usize]) as u64, tbbase.cf_badge)
+    at = tbmetrics.wk_num(b, at, (&k_tray_order[0 as usize]) as u64, trayslots.order_code())
+    at = tbmetrics.wk_num(b, at, (&k_tray_hidden[0 as usize]) as u64, trayslots.hidden_mask())
     if tbbase.npin > 0 {
         at = tbmetrics.text_at_p(b, at + 1, (&k_pins[0 as usize]) as u64)
         __mmio_write8((b + at) as *mut u8, 61 as u8)
@@ -853,6 +867,8 @@ fn days_in_month(y: u64, m: u64) -> u64 {
 }
 
 static mut noti_fresh: u64 = 0
+static mut s_micuse: [u8; 4] = "mic\0"
+static mut s_micmuted: [u8; 5] = "mic!\0"
 
 
 static mut snd_gen: u64 = 0
@@ -1040,12 +1056,16 @@ fn status_build() -> bool {
         at = tbmetrics.num_at(ne, at, ip & 255)
     }
 
-    let nb: u64 = tbmetrics.full_of(tbbase.F_NOTI)
     noti_fresh = svcnoti.noti_new()
-    if noti_fresh == 0 {
-        __mmio_write8((nb) as *mut u8, 0 as u8)
+    tbbase.noti_count = noti_fresh
+    traymic.refresh()
+    let mb: u64 = tbmetrics.full_of(tbbase.F_MIC)
+    if !traymic.visible() {
+        __mmio_write8((mb) as *mut u8, 0 as u8)
+    } else if traymic.muted() {
+        let _mt: u64 = tbmetrics.text_at_p(mb, 0, (&s_micmuted[0 as usize]) as u64)
     } else {
-        let _nat: u64 = tbmetrics.num_at(nb, 0, noti_fresh)
+        let _mt2: u64 = tbmetrics.text_at_p(mb, 0, (&s_micuse[0 as usize]) as u64)
     }
 
     let lg: u64 = tbmetrics.full_of(tbbase.F_LANG)
@@ -1104,6 +1124,8 @@ fn status_build() -> bool {
     sum = sum ^ ((tbbase.nv_faking * 3 + tbbase.nv_fall) *% 40503)
 
     sum = sum ^ ((tbbase.bat_ac * 5 + tbbase.bat_chg * 11) *% 69069)
+    sum = sum ^ (tbbase.noti_count *% 7919)
+    sum = sum ^ ((trayslots.order_code() * 16 + trayslots.hidden_mask()) *% 104729)
     var q: u64 = 0
     while q < tbbase.F_N {
         let p: u64 = tbmetrics.full_of(q)
@@ -1220,7 +1242,7 @@ static mut t_snn: [u8; 7] = "Volume\0"
 
 static mut t_btn: [u8; 8] = "Battery\0"
 
-static mut t_nin: [u8; 14] = "Notifications\0"
+static mut t_nin: [u8; 11] = "Microphone\0"
 
 fn field_name(f: u64) -> u64 {
     let t: u64 = tbmetrics.full_of(f)
@@ -1236,7 +1258,7 @@ fn field_name(f: u64) -> u64 {
     if f == tbbase.F_BAT {
         return (&t_btn[0 as usize]) as u64
     }
-    if f == tbbase.F_NOTI {
+    if f == tbbase.F_MIC {
         return (&t_nin[0 as usize]) as u64
     }
     return t

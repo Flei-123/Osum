@@ -29,7 +29,7 @@ geom = last(r"taskbar: geom edge=0 x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 F = {}
 for n in ("lang", "net", "snd", "battery", "clock"):
     F[n] = last(r"taskbar: field %s x=(\d+) y=(\d+) w=(\d+) h=(\d+) lines=(\d+)" % n)
-F["noti"] = last(r"taskbar: field noti x=(\d+) y=(\d+) w=(\d+) h=(\d+) lines=(\d+)")
+F["mic"] = last(r"taskbar: field mic x=(\d+) y=(\d+) w=(\d+) h=(\d+) lines=(\d+)")
 F["chevron"] = last(r"taskbar: chevron x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 start = last(r"taskbar: start x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 btn = last(r"taskbar: btn i=0 id=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
@@ -59,7 +59,7 @@ def inkbox(x0, y0, x1, y1, bg=None, thr=70):
             o += 3
     return None if r < 0 else (l, t, r, b)
 
-order = ["chevron"] + (["noti"] if F["noti"] else []) + ["lang", "net", "snd", "battery", "clock"]
+order = ["chevron", "lang"] + (["mic"] if F["mic"] else []) + ["net", "snd", "battery", "clock"]
 rects = {n: (F[n][0], F[n][1] + by, F[n][2], F[n][3]) for n in order}
 rects_x = [rects[n] for n in order]
 NF = len(order) - 1

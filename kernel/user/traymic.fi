@@ -1,0 +1,147 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import msg
+import ulib
+
+export { refresh, set_stub, visible, available, users, muted, tip_text, toggle_mute }
+
+const SYS_AUDGET: u64 = 1850
+const SYS_AUDSET: u64 = 1851
+const A_CAPREADY: u64 = 54
+const A_CAPUSERS: u64 = 55
+const A_CAPMUTE: u64 = 56
+const A_CAPWHO0: u64 = 60
+const AS_CAPMUTE: u64 = 16
+const TIP_CAP: u64 = 100
+
+static mut mic_users: u64 = 0
+static mut mic_muted: u64 = 0
+static mut mic_who: u64 = 0
+static mut mic_da: u64 = 0
+static mut mic_stub: u64 = 0
+static mut tip: [u8; 120] = [0 as u8; 120]
+static mut k_use: [u8; 13] = "tray.mic.use\0"
+static mut k_muted: [u8; 15] = "tray.mic.muted\0"
+
+fn set_stub(n_users: u64, is_muted: u64) {
+    mic_stub = 1
+    mic_users = n_users
+    mic_muted = is_muted
+}
+
+fn refresh() {
+    if mic_stub != 0 {
+        return
+    }
+    mic_da = 0
+    if ulib.sys(SYS_AUDGET, A_CAPREADY, 0, 0) != 1 {
+        mic_users = 0
+        mic_muted = 0
+        return
+    }
+    mic_da = 1
+    mic_users = ulib.sys(SYS_AUDGET, A_CAPUSERS, 0, 0)
+    mic_muted = ulib.sys(SYS_AUDGET, A_CAPMUTE, 0, 0)
+    mic_who = ulib.sys(SYS_AUDGET, A_CAPWHO0, 0, 0)
+    if ulib.bad(mic_who) {
+        mic_who = 0
+    }
+}
+
+fn available() -> bool {
+    return mic_da != 0 || mic_stub != 0
+}
+
+fn visible() -> bool {
+    return mic_users != 0 || mic_muted != 0
+}
+
+fn users() -> u64 {
+    return mic_users
+}
+
+fn muted() -> bool {
+    return mic_muted != 0
+}
+
+fn put(at: u64, c: u64) -> u64 {
+    if at >= TIP_CAP {
+        return at
+    }
+    __mmio_write8(((&tip[0 as usize]) as u64 + at) as *mut u8, c as u8)
+    return at + 1
+}
+
+fn put_num(at: u64, v: u64) -> u64 {
+    var digits: [u8; 20] = [0 as u8; 20]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        digits[0] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        digits[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var out: u64 = at
+    while n > 0 {
+        n = n - 1
+        out = put(out, digits[n as usize] as u64)
+    }
+    return out
+}
+
+fn put_who(at: u64) -> u64 {
+    if mic_users != 1 || mic_who == 0 || mic_stub != 0 {
+        return at
+    }
+    let n0: u64 = ulib.sys(ulib.SYS_PSTAT, mic_who, ulib.P_NAME0, 0)
+    let n1: u64 = ulib.sys(ulib.SYS_PSTAT, mic_who, ulib.P_NAME1, 0)
+    if ulib.bad(n0) || (n0 & 255) == 0 {
+        return at
+    }
+    var out: u64 = put(put(at, 32), 40)
+    var k: u64 = 0
+    while k < 16 {
+        var c: u64 = n1 >> ((k - 8) * 8)
+        if k < 8 {
+            c = n0 >> (k * 8)
+        }
+        c = c & 255
+        if c == 0 {
+            break
+        }
+        out = put(out, c)
+        k = k + 1
+    }
+    return put(out, 41)
+}
+
+fn tip_text() -> u64 {
+    var at: u64 = 0
+    if mic_muted != 0 {
+        at = ulib.strncpy((&tip[0 as usize]) as u64, msg.get((&k_muted[0 as usize]) as u64), 90)
+    } else {
+        at = ulib.strncpy((&tip[0 as usize]) as u64, msg.get((&k_use[0 as usize]) as u64), 70)
+        at = put(at, 32)
+        at = put_num(at, mic_users)
+        at = put_who(at)
+    }
+    __mmio_write8(((&tip[0 as usize]) as u64 + at) as *mut u8, 0 as u8)
+    return (&tip[0 as usize]) as u64
+}
+
+fn toggle_mute() -> u64 {
+    var next: u64 = 1
+    if mic_muted != 0 {
+        next = 0
+    }
+    let rc: u64 = ulib.sys(SYS_AUDSET, AS_CAPMUTE, next, 0)
+    if !ulib.bad(rc) {
+        mic_muted = next
+    }
+    return rc
+}

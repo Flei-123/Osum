@@ -624,7 +624,7 @@ class Fahrer:
                 return None
             return (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
         if name == "glocke":
-            m = last_2(r"taskbar: field noti x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            m = last_2(r"taskbar: field clock x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
                 return None
             return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
