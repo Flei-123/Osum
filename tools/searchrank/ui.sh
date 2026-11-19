@@ -92,7 +92,7 @@ for n in new old nol; do
     python3 -I tools/searchrank/check.py "$S" certus > "$TMPD/$n.certus" 2>&1
     python3 -I tools/searchrank/check.py "$S" zzqq > "$TMPD/$n.zzqq" 2>&1
     python3 -I tools/searchrank/check.py "$S" notes > "$TMPD/$n.notes" 2>&1
-    for q in xremote x-remote "X Remote" fernst firfox fire term einst te pointer long-file; do
+    for q in xremote x-remote "X Remote" fernst firfox fire term einst te bluetooth long-file; do
         python3 -I tools/searchrank/check.py "$S" "$q" > "$TMPD/$n.q_${q// /_}" 2>&1
     done
 done
@@ -150,10 +150,10 @@ echo "== learning: after picks, the prefix goes to the learned app =="
     && ok "empty field suggests the most used app first" || bad "empty field suggestion k=0 is '$(grep -a 'launcher: rec k=0 ' "$D/serial.txt" | tail -1)'"
 
 echo "== settings results and long names =="
-case "$(val $D.q_pointer settings)" in *Pointer*) ok "'pointer': a Settings page is listed" ;; *) bad "'pointer': settings are '$(val $D.q_pointer settings)'" ;; esac
-grep -q 'apps=0 ' "$D.q_pointer" && ok "'pointer': no app hit, Enter goes to the Settings page" || bad "'pointer': unexpected apps: $(val $D.q_pointer apps)"
+case "$(val $D.q_bluetooth settings)" in *Bluetooth*) ok "'bluetooth': a Settings page is listed" ;; *) bad "'bluetooth': settings are '$(val $D.q_bluetooth settings)'" ;; esac
+grep -q 'apps=0 ' "$D.q_bluetooth" && ok "'bluetooth': no app hit, Enter goes to the Settings page" || bad "'bluetooth': unexpected apps: $(val $D.q_bluetooth apps)"
 grep -aq 'launcher: settings page=[0-9]* pid=' "$D/serial.txt" && ok "Enter on a Settings hit starts Settings on that page" || bad "no 'launcher: settings page=' line"
-[ "$(val $D.q_long-file files)" = "a-very-long-file-name-fo" ] && ok "a name longer than the slot is cut and terminated" \
+[ "$(val $D.q_long-file files)" = "/data/a-very-long-file-name-fo" ] && ok "a name longer than the slot is cut and terminated" \
     || bad "long name listed as '$(val $D.q_long-file files)'"
 grep -aq 'launcher: .*[Pp]anic\|#PF\|program died' "$D/serial.txt" && bad "launcher died during the run" || ok "launcher survived all queries"
 
