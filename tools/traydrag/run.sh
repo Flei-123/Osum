@@ -4,11 +4,11 @@
 #
 #   bash tools/traydrag/run.sh            TRAYDRAG_OUT=<dir> keeps pictures + serial logs
 #
-# Boot A (tray_hidden=14: battery, sound, network start in the popup, popup tile 0 = battery):
-#   1. drag popup tile 0 onto the clock: serial `traydrag: begin`, `move ... to=0`, `end ... saved=1`, hidden mask 14 -> 6
-#   2. drag the battery field back onto popup tile 0: hidden mask 6 -> 14
-# Boot B (restart): the order/hidden values saved by step 1 are the preset; the bar lays out the fields in the same order.
-# Boot C (counter-proof): same preset, no drag: no `traydrag:` line, the order stays the default.
+# Boot A (tray_hidden=14: battery, sound, network start in the popup, popup tile 2 = network):
+#   1. drag popup tile 2 onto the clock: serial `traydrag: begin`, `move slot=1 to=0`, `end ... saved=1`, hidden mask 14 -> 12
+#   2. drag the network field (left of the clock) back onto popup tile 0: hidden mask 12 -> 14
+# Boot B (restart): the order/hidden values saved by step 1 are the preset: popup with 2 tiles, network in the bar.
+# Boot C (counter-proof): same preset, no drag: no `traydrag:` line, popup with 3 tiles, no network in the bar.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 TMPD=$(mktemp -d)
@@ -27,12 +27,12 @@ klickauf chevron
 warteauf 'traypop: open' || 25
 warte 3
 foto 01-popup
-ziehvon traytile0 uhr
-warteauf 'traydrag: end slot=3 saved=1 order=[0-9]+ hidden=6' || 25
+ziehvon traytile2 uhr
+warteauf 'traydrag: end slot=1 saved=1 order=[0-9]+ hidden=12' || 25
 warte 4
 foto 02-in-bar
-ziehvon akku traytile0
-warteauf 'traydrag: end slot=3 saved=1 order=[0-9]+ hidden=14' || 25
+ziehvon linksuhr traytile0
+warteauf 'traydrag: end slot=1 saved=1 order=[0-9]+ hidden=14' || 25
 warte 4
 foto 03-back
 SCRIPT
@@ -50,7 +50,10 @@ foto 00-control
 SCRIPT
 cat > "$TMPD/dreh_b.txt" <<'SCRIPT'
 warteauf 'taskbar: steht|taskbar: geom' || 120
-warte 8
+warte 6
+klickauf chevron
+warteauf 'traypop: open' || 25
+warte 3
 foto 00-restart
 SCRIPT
 
@@ -70,12 +73,11 @@ if [ ! -s "$SA" ]; then bad "A: no serial log: $(tail -n 3 "$TMPD/o-a.log" | tr 
 
 nb=$(python3 -I $ORDER count "$SA")
 [ "$nb" -ge 2 ] && ok "A: $nb drags started" || bad "A: only $nb drag(s) started"
-grep -aq 'traydrag: move slot=3 to=0' "$SA" && ok "A: battery moved from the popup to the bar" || bad "A: no 'move slot=3 to=0'"
-grep -aq 'traydrag: move slot=3 to=1' "$SA" && ok "A: battery moved back to the popup" || bad "A: no 'move slot=3 to=1'"
+grep -aq 'traydrag: move slot=1 to=0' "$SA" && ok "A: network moved from the popup to the bar" || bad "A: no 'move slot=1 to=0'"
 mapfile -t ENDS < <(python3 -I $ORDER ends "$SA")
 set -- ${ENDS[0]:-}; first_hidden=${4:-}; first_order=${3:-}; first_saved=${2:-}
 set -- ${ENDS[1]:-}; second_hidden=${4:-}; second_saved=${2:-}
-[ "$first_hidden" = 6 ] && [ "$first_saved" = 1 ] && ok "A: first drop saved, hidden mask 14 -> 6, order $first_order" || bad "A: first end '${ENDS[0]:-}'"
+[ "$first_hidden" = 12 ] && [ "$first_saved" = 1 ] && ok "A: first drop saved, hidden mask 14 -> 12, order $first_order" || bad "A: first end '${ENDS[0]:-}'"
 [ "$second_hidden" = 14 ] && [ "$second_saved" = 1 ] && ok "A: second drop saved, hidden mask back to 14" || bad "A: second end '${ENDS[1]:-}'"
 for f in 00-before 01-popup 02-in-bar 03-back; do [ -s "$TMPD/o-a/$f.ppm" ] || bad "A: picture $f missing"; done
 cmp -s "$TMPD/o-a/01-popup.ppm" "$TMPD/o-a/02-in-bar.ppm" && bad "A: the picture did not change after the drag" || ok "A: the picture changed after the first drag"
@@ -85,6 +87,8 @@ if [ -n "$first_order" ]; then
     boot b "$TMPD/dreh_b.txt" "tray_chevron=1;tray_order=$first_order;tray_hidden=$first_hidden"
     order_b=$(python3 -I $ORDER final "$TMPD/o-b/serial.txt")
     [ -n "$order_b" ] && [ "$order_a" = "$order_b" ] && ok "B: after the restart the bar order is the dragged one ($order_b)" || bad "B: order after restart '$order_b', after the drag '$order_a'"
+    tb=$(grep -a -m1 'traypop: open n=' "$TMPD/o-b/serial.txt" | sed -E 's/.* n=([0-9]+).*/\1/')
+    [ "$tb" = 2 ] && ok "B: the popup holds 2 tiles after the restart" || bad "B: popup tiles after the restart: '$tb'"
 else
     bad "B: no saved order to restart with"
 fi
@@ -93,7 +97,9 @@ fi
     nc=$(python3 -I $ORDER count "$SC")
     [ "$nc" = 0 ] && ok "C: counter-proof: no drag without a pointer move ($nc begin lines)" || bad "C: $nc drag begin lines without a drag"
     order_c=$(python3 -I $ORDER final "$SC")
-    [ -n "$order_c" ] && [ "$order_c" != "$order_a" ] && ok "C: counter-proof: the bar order differs from the dragged one ($order_c vs $order_a)" || bad "C: order '$order_c' equals the dragged order '$order_a'"
+    [ "$order_c" != "$order_a" ] && ok "C: counter-proof: the bar order differs from the dragged one ('$order_c' vs '$order_a')" || bad "C: order '$order_c' equals the dragged order '$order_a'"
+    tc=$(grep -a -m1 'traypop: open n=' "$SC" | sed -E 's/.* n=([0-9]+).*/\1/')
+    [ "$tc" = 3 ] && ok "C: counter-proof: the popup holds 3 tiles without a drag" || bad "C: popup tiles without a drag: '$tc'"
 }
 echo; echo "TRAYDRAG: $pass passed, $fail failed"
 [ "$fail" = 0 ]

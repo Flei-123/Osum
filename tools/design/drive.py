@@ -644,6 +644,12 @@ class Fahrer:
                 return None
             return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
+        if name == "linksuhr":
+            m = last_2(r"taskbar: field clock x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            if m is None:
+                return None
+            return (tb[0] + int(m.group(1)) - 20, tb[1] + int(m.group(2)),
+                    16, int(m.group(4)))
         if name.startswith("fmbar"):
             n = int(name[5:])
             m = last_2(r"explorer: rect id=%d kind=7 "
