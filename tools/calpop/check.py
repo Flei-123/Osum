@@ -117,7 +117,7 @@ def ink(name, y0, y1):
             o = (yy * wa + xx) * 3
             if max(abs(da[o + c] - base[c]) for c in range(3)) > 90: n += 1
     return n
-sk_ = max(pw // 296, 1)
+sk_ = max(pw // 394, 1)
 pad, gap, add_h, ct_h, ev_h = 10 * sk_, 4 * sk_, 36 * sk_, 26 * sk_, 26 * sk_
 ct_y1 = py + ph - pad - add_h - gap
 ct_y0 = ct_y1 - ct_h
