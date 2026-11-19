@@ -126,7 +126,7 @@ run_wlan() { # name words
 }
 
 echo "== W: WLAN uplink (wlanfirst), kernel lease DNS lands in resolv.conf =="
-run_wlan w wlanfirst; W="$T/w.klar"
+run_wlan w "wlanfirst wlanforce"; W="$T/w.klar"
 has "$W" 'stack wired=1 uplink=1' "W: WLAN card is the uplink"
 has "$W" 'dhcp: wlan lease adopted' "W: dhcp adopts the kernel WLAN lease"
 grep -aq 'nameserver 192\.168\.77\.' "$T/w_res.txt" && ok "W: resolv.conf names the WLAN lease DNS" || bad "W: resolv.conf has no WLAN DNS"

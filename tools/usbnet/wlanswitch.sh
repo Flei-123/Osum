@@ -109,9 +109,9 @@ run() {
 section() { awk -v a="$2" -v b="$3" '$0 ~ a {f=1} $0 ~ b {f=0} f' "$1"; }
 if [ "${USBWLAN_LATE_ONLY:-0}" != 1 ]; then
 run m
-run o "nethotwait nethotlate wlanfirst nohotkeep"
+run o "nethotwait nethotlate wlanfirst wlanforce nohotkeep"
 run d "nethotwait nethotlate iwlfhdrop"
-run k "nethotwait nethotlate" dk
+run k "nethotwait nethotlate wlanforce" dk
 fi
 check() {
     local f=$1 tag=$2

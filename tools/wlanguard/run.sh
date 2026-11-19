@@ -91,9 +91,11 @@ first_mark_with() {
     echo 0
 }
 
-run g "wlanfirst fakenogw"
-run h "wlanfirst"
-run n "wlanfirst fakenogw wfnoguard"
+run g "wlanfirst wlanforce fakenogw"
+run h "wlanfirst wlanforce"
+run n "wlanfirst wlanforce fakenogw wfnoguard"
+run s "wlanfirst"
+run t "wlanfirst fakenogw"
 
 echo "== WLAN joined, gateway silent, guard on =="
 has "$T/g.klar" '==END==' "guard: system keeps running"
@@ -138,5 +140,20 @@ section "$T/n.klar" '==NET0==' '==PING0==' > "$T/n.net"
 has "$T/n.net" 'stack wired=1 uplink=1 kind=6' "control: stack stays on the WLAN"
 section "$T/n.klar" '==PING0==' '==WGET0==' > "$T/n.ping"
 hasnot "$T/n.ping" 'octets from 192.168.77.1' "control: no ping gets through"
+echo "== wlanfirst alone (HP knob file), wired USB alive: WLAN stays standby =="
+for k in s t; do
+    has "$T/$k.klar" '==END==' "$k: system keeps running"
+    hasnot "$T/$k.klar" 'nethot: uplink card=1 kind=wlan' "$k: WLAN never takes the uplink"
+    hasnot "$T/$k.klar" 'wlanfirst: probation' "$k: no probation, the wired address is never touched"
+    section "$T/$k.klar" '==T0==' '==NET0==' > "$T/$k.watch"
+    hasnot "$T/$k.watch" 'inet: readdr epoch' "$k: no readdress after the WLAN join, established connections survive"
+    hasnot "$T/$k.watch" 'nethot: uplink card=' "$k: uplink never changes during the watch"
+    section "$T/$k.klar" '==NET0==' '==PING0==' > "$T/$k.net"
+    has "$T/$k.net" 'stack wired=1 uplink=0 kind=5 ip=192.168.77.15 gw=192.168.77.1' "$k: stack stays on USB with its lease and gateway"
+    section "$T/$k.klar" '==PING0==' '==WGET0==' > "$T/$k.ping"
+    has "$T/$k.ping" 'octets from 192.168.77.1' "$k: ping over USB"
+    section "$T/$k.klar" '==WGET0==' '==END==' > "$T/$k.wget"
+    has "$T/$k.wget" 'octets 131072' "$k: wget over USB"
+done
 echo "WLANGUARD: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

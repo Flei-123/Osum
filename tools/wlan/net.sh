@@ -104,7 +104,7 @@ has "$C" '==END==' "system keeps running"
 
 ETH="-netdev user,id=n0,net=10.0.2.0/24 -device e1000,netdev=n0"
 echo "-- E: e1000 + wlan0: the WLAN link becomes the uplink, ping goes over WLAN"
-run e "iwlfhtest iwlfhbind nic wlanfirst" "$ETH"
+run e "iwlfhtest iwlfhbind nic wlanfirst wlanforce" "$ETH"
 E="$T/e.klar"
 has "$E" 'auto=up rc=0' "two cards: autostart up"
 has "$E" 'stack wired=1 uplink=1' "two cards: uplink is the WLAN card"

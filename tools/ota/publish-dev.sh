@@ -48,12 +48,12 @@ cat <<MSG
 
 publish-dev: stand $STAND is live and verified (signature, hashes, https).
 HP side (device HP-ORIENTOS, via bridge/terminal), in this order:
-  1. /bin/grep wlanfirst /etc/wlan.knobs      remove the word wlanfirst (the guard is in the feed since main ed6458c91; NOT applied until step 3)
+  1. /bin/grep wlanfirst /etc/wlan.knobs      optional: wlanfirst is inert while a wired or USB card is alive (only wlanforce overrides, boot word)
   2. /bin/ota system status                   shows the running stand
   3. /bin/ota system apply bg                 downloads + applies the overlay (owner's decision)
   4. /bin/reboot
   5. /bin/ota system status                   must show stand $STAND
   6. /bin/cat /proc/wlan                      link must be up
   7. /bin/ota confirm
-Note: before ANY HP reboot remove wlanfirst from /etc/wlan.knobs unless the guard feed is already applied.
+Note: without wlanforce the WLAN never takes the uplink from a living wired or USB card.
 MSG
