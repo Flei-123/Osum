@@ -16,7 +16,8 @@
 #   6. (W-MERGEB2) tile RASTER (tools/traypop/raster.py): one tile size, even pitch, inside the flyout; icon centre within 1 px of
 #      the tile centre; hover on tile 0 changes tile 0 and not tile 1; right click on tile 0 -> `traypop: menu id=` (item 0) + a
 #      menu in the picture; Esc leaves the menu (back to the list), a second Esc shuts (`traypop: shut esc`, rectangle as before).
-#      Counter-proofs inside raster.py (a moved tile / a shifted icon is caught).
+#      Counter-proofs inside raster.py (a moved tile / a shifted icon is caught). With more than 5 tiles the grid has 5
+#      columns and a full first row (counter-proof: a 4-column grid is rejected).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 TMPD=$(mktemp -d)
@@ -29,7 +30,7 @@ MODES=${TRAYPOP_MODES:-"light dark"}
 PROGS="desktop taskbar settings launcher explorer netview taskmgr edit sh echo ls cat ps uname date df mkdir rm cp mv grep head tail wc find du chmod id whoami touch true false sleep kill sort uniq rmdir theme locate dhcp host ping netstat notify"
 
 printf 'pairing: waiting 4821 95\n' > "$TMPD/state"
-printf 'backup|7|Backup is running\nchat|8|Chat: 2 unread\nsync|9|Sync paused\nmic|1|0\n' > "$TMPD/tray.items"
+printf 'backup|7|Backup is running\nchat|8|Chat: 2 unread\nsync|9|Sync paused\nmail|10|Mail: 3 new\ncal|11|Calendar\nmic|1|0\n' > "$TMPD/tray.items"
 cat > "$TMPD/dreh.txt" <<'EOF'
 warteauf 'taskbar: steht|taskbar: geom' || 120
 warte 6
