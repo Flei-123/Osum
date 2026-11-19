@@ -48,7 +48,7 @@ s += "\nfn rank_apps(term: u64, out: u64, max: u64) -> u64 {\n    return appdir.
 open(p, "w").write(s)
 q = root + "/kernel/user/launcher.fi"
 b = open(q, "rb").read()
-old = b"if !g_home && napp > 0 {"
+old = b"if !g_home && napp + nset > 0 {"
 assert b.count(old) == 1
 open(q, "wb").write(b.replace(old, b"if !g_home {"))
 PY
