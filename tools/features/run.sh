@@ -97,7 +97,7 @@ PY
 }
 
 echo "== notification centre =="
-grep -qaE 'taskbar: field noti ' "$S" && ok "the bell is on the bar once there is something unread" || bad "no bell field"
+grep -qaE 'taskbar: badge txt=' "$S" && ok "the unread count is a badge on the clock once there is something unread" || bad "no clock badge"
 o1=$(grep -a 'notifc: open n=' "$S" | head -1)
 n1=$(echo "$o1" | sed -nE 's/.*open n=([0-9]+).*/\1/p')
 [ "${n1:-0}" -ge 2 ] 2>/dev/null && ok "the click on the bell opens the card with our 2 rows (plus $((n1 - 2)) device notices)" || bad "first open has fewer than 2 rows: '$o1'"

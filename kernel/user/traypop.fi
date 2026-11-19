@@ -3,9 +3,8 @@
 //
 // One scene window of the bar's scene host (window 6, like barpop / taskview; NOT code in
 // taskbar.fi, which sits at its size limit). It is opened by the tray chevron when the tray has
-// icons in the overflow, and shows two things, top down:
+// icons in the overflow, and shows the hidden bar icons as a tile grid:
 //
-//   microphone  glyph + "in use by N programs" / "muted" + mute button -- real numbers (SYS_AUDGET A_CAPUSERS/A_CAPMUTE)
 //   overflow    one row per item of lib/fui/tray.fi (PLACE_OVERFLOW): glyph, name, a "..." button
 //               that opens the item's context menu (its entries + "Move up" + "Hide")
 //
@@ -50,13 +49,19 @@ import fui.render
 import fui.painter
 import fui.icon
 import fui.tray
+import fui.trayslots
+import traymic
+import icons
+import taskbar.tbmetrics
+import taskbar.tbstatus
 import osktray
+import qs
 import pairshow
 import uikit.uiflyout
 import uikit.uisys
 
 export { init, toggle, step, is_open, hit, shut_now, net_glyph, wlan_glyph, speaker_glyph, mic_glyph,
-    chevron_glyph }
+    chevron_glyph, tile_at, tile_slot, tile_count, hold, suppress_click, refresh_tiles, overflow_index_at }
 
 const NONE: u64 = 0xFFFFFFFFFFFFFFFF
 const CARD_W: u64 = 380 // design points (r1015: 300 cut 'Kein Verbindungstraeger -- nichts eingesteckt' at the card edge)
@@ -64,7 +69,8 @@ const PADP: u64 = 10
 const GAPP: u64 = 6
 const ROW_H: u64 = 34
 const MAXROWS: u64 = 8
-const GRID_COLS: u64 = 6
+const GRID_COLS: u64 = 5
+const SLOT_TAG: u64 = 0x100000000
 const CELL: u64 = 52
 const CELL_ICON: u64 = 28
 const MAXH: u64 = 560
@@ -76,7 +82,6 @@ const K_ENT: u64 = 360
 const K_UP: u64 = 380
 const K_HIDE: u64 = 381
 const K_BACK: u64 = 382
-const CK_MIC: u64 = 402
 const CK_ITEM: u64 = 410
 const CK_SHEET: u64 = 440
 
@@ -84,16 +89,9 @@ const M_LIST: u64 = 0
 const M_MENU: u64 = 1
 
 const SYS_AUDGET: u64 = 1850
-const SYS_AUDSET: u64 = 1851
 const A_READY: u64 = 0
 const A_VOLUME: u64 = 4
 const A_MUTED: u64 = 21
-const A_CAPREADY: u64 = 54 // microphone: a path exists
-const A_CAPUSERS: u64 = 55 // programs reading it within 2 s
-const A_CAPMUTE: u64 = 56
-const A_CAPWHO0: u64 = 60 // task index of the 1st program reading the microphone
-const AS_CAPMUTE: u64 = 16
-const K_MICMUTE: u64 = 304
 const CK_PAIR: u64 = 403
 const PAIR_POLL_MS: u64 = 1000
 
@@ -121,11 +119,6 @@ static mut net_st: u64 = 0
 static mut net_da: u64 = 0
 static mut snd_vol: u64 = 0
 static mut snd_mute: u64 = 0
-static mut mic_users: u64 = 0 // STUB source (see the header)
-static mut mic_muted: u64 = 0
-static mut mic_who: u64 = 0 // task index of the first program reading the microphone (0 = none/unknown)
-static mut mic_da: u64 = 0 // 1 = the kernel has a microphone path (SYS_AUDREAD works)
-static mut mic_stub: u64 = 0 // 1 = /etc/tray.items has a `mic|` line (test aid): it overrides the kernel's numbers
 static mut want_sheet: u64 = 0
 static mut pair_mode: u64 = 0
 static mut pair_left: u64 = 0
@@ -136,9 +129,14 @@ static mut osk_on: u64 = 0
 static mut tile_say: u64 = 0
 static mut n_rows: u64 = 0
 static mut row_id: [u64; 8] = [0 as u64; 8]
+static mut tile_x: [u64; 8] = [0 as u64; 8]
+static mut tile_y: [u64; 8] = [0 as u64; 8]
+static mut tile_w: [u64; 8] = [0 as u64; 8]
+static mut tile_h: [u64; 8] = [0 as u64; 8]
+static mut hold_: u64 = 0
+static mut swallow_click: u64 = 0
 static mut conf: [u8; 1024] = [0 as u8; 1024]
 static mut tr: tray.Tray = tray.Tray { blk: 0 }
-static mut txt: [u8; 120] = [0 as u8; 120]
 static mut owner_b: [u8; 24] = [0 as u8; 24]
 static mut tip_b: [u8; 64] = [0 as u8; 64]
 
@@ -153,8 +151,6 @@ static mut t_net3w: [u8; 24] = "taskbar.tip.online_wlan\0"
 static mut t_net3u: [u8; 23] = "taskbar.tip.online_usb\0"
 static mut k_net: [u8; 9] = "tray.net\0"
 static mut k_snd: [u8; 11] = "tray.sound\0"
-static mut k_mute: [u8; 10] = "tray.mute\0"
-static mut k_unmute: [u8; 12] = "tray.unmute\0"
 static mut k_osk: [u8; 9] = "tray.osk\0"
 static mut k_oskgo: [u8; 14] = "tray.osk.open\0"
 static mut s_oskpid: [u8; 18] = "traypop: osk pid=\0"
@@ -183,11 +179,11 @@ static mut s_id: [u8; 5] = " id=\0"
 static mut s_ow: [u8; 8] = " owner=\0"
 static mut s_tip: [u8; 6] = " tip=\0"
 static mut s_click: [u8; 19] = "traypop: click id=\0"
+static mut s_slot: [u8; 21] = "traypop: click slot=\0"
 static mut s_menu: [u8; 18] = "traypop: menu id=\0"
 static mut s_pick: [u8; 18] = "traypop: pick id=\0"
 static mut s_act: [u8; 9] = " action=\0"
 static mut s_rc: [u8; 5] = " rc=\0"
-static mut s_micmute: [u8; 18] = "traypop: micmute \0"
 static mut s_shut: [u8; 15] = "traypop: shut \0"
 static mut s_esc: [u8; 4] = "esc\0"
 static mut s_out: [u8; 8] = "outside\0"
@@ -443,6 +439,20 @@ fn paint_net(x: u64, y: u64, size: u64) {
     net_glyph(x, y, size, net_st, uitheme.theme(uitheme.T_FG), warn_rgb(), uitheme.theme(uitheme.T_MENU))
 }
 
+fn slot_glyph(slot: u64, x: u64, y: u64, size: u64, fg: u64) {
+    if slot == trayslots.SLOT_NET {
+        paint_net(x, y, size)
+    } else if slot == trayslots.SLOT_SND {
+        speaker_glyph(x, y, size, speaker_level(), snd_mute, fg)
+    } else if slot == trayslots.SLOT_BAT {
+        fuiscene.cv_glyph(tbmetrics.bat_icon(), x, y, size, tbmetrics.bat_colour())
+    } else if traymic.muted() {
+        fuiscene.cv_glyph(icons.TRAY_MIC_OFF, x, y, size, warn_rgb())
+    } else {
+        fuiscene.cv_glyph(icons.TRAY_MIC, x, y, size, fg)
+    }
+}
+
 // one function for every canvas of the window: the node's key says which glyph
 fn draw_cv(key: u64, x: u64, y: u64, w: u64, h: u64) {
     var size: u64 = w
@@ -452,10 +462,12 @@ fn draw_cv(key: u64, x: u64, y: u64, w: u64, h: u64) {
     let ox: u64 = x + (w - size) / 2
     let oy: u64 = y + (h - size) / 2
     let fg: u64 = uitheme.theme(uitheme.T_FG)
-    if key == CK_MIC {
-        mic_glyph(ox, oy, size, mic_muted, fg, warn_rgb())
-    } else if key >= CK_ITEM && key < CK_ITEM + MAXROWS {
+    if key >= CK_ITEM && key < CK_ITEM + MAXROWS {
         let id: u64 = row_id[(key - CK_ITEM) as usize]
+        if id >= SLOT_TAG {
+            slot_glyph(id - SLOT_TAG, ox, oy, size, fg)
+            return
+        }
         let ic: u64 = tray.tray_icon(&tr, id)
         let ow: u64 = tray.tray_owner(&tr, id)
         if ic == 1 {
@@ -463,7 +475,7 @@ fn draw_cv(key: u64, x: u64, y: u64, w: u64, h: u64) {
         } else if ic == 2 {
             speaker_glyph(ox, oy, size, speaker_level(), snd_mute, fg)
         } else if ic == 3 {
-            mic_glyph(ox, oy, size, mic_muted, fg, warn_rgb())
+            mic_glyph(ox, oy, size, 0, fg, warn_rgb())
         } else {
             letter_glyph(ox, oy, size, ow)
         }
@@ -566,11 +578,11 @@ fn read_items() {
             want_sheet = 1 // "sheet"
         } else if l0 == 3 && __mmio_read8((b + i) as *mut u8) == 109 as u8 && f1 < e {
             // mic|users|muted
-            mic_stub = 1
-            mic_users = to_num(b + f1 + 1, f2 - f1 - 1)
+            var stub_muted: u64 = 0
             if f2 < e {
-                mic_muted = to_num(b + f2 + 1, e - f2 - 1)
+                stub_muted = to_num(b + f2 + 1, e - f2 - 1)
             }
+            traymic.set_stub(to_num(b + f1 + 1, f2 - f1 - 1), stub_muted)
         } else if l0 > 0 && l0 < 23 && f1 < e && f2 <= e {
             var k: u64 = 0
             while k < l0 {
@@ -614,78 +626,7 @@ fn read_audio() {
             snd_vol = 100
         }
     }
-    // the microphone: real numbers from the kernel capture path (SYS_OSUM_AUDREAD, W-TRAY6)
-    mic_da = 0
-    if mic_stub == 0 && ulib.sys(SYS_AUDGET, A_CAPREADY, 0, 0) == 1 {
-        mic_da = 1
-        mic_users = ulib.sys(SYS_AUDGET, A_CAPUSERS, 0, 0)
-        mic_muted = ulib.sys(SYS_AUDGET, A_CAPMUTE, 0, 0)
-        mic_who = ulib.sys(SYS_AUDGET, A_CAPWHO0, 0, 0)
-        if ulib.bad(mic_who) {
-            mic_who = 0
-        }
-    }
-}
-
-fn num_into(at: u64, v: u64) -> u64 {
-    var tmp: [u8; 24] = [0 as u8; 24]
-    var n: u64 = 0
-    var x: u64 = v
-    if x == 0 {
-        tmp[0] = 48 as u8
-        n = 1
-    }
-    while x > 0 {
-        tmp[n as usize] = (48 + x % 10) as u8
-        x = x / 10
-        n = n + 1
-    }
-    var k: u64 = 0
-    while k < n {
-        __mmio_write8(((&txt[0 as usize]) as u64 + at + k) as *mut u8, tmp[(n - 1 - k) as usize])
-        k = k + 1
-    }
-    __mmio_write8(((&txt[0 as usize]) as u64 + at + n) as *mut u8, 0 as u8)
-    return at + n
-}
-
-fn mic_text() {
-    if mic_muted != 0 {
-        let _a: u64 = ulib.strncpy((&txt[0 as usize]) as u64, msg.get((&k_micmuted[0 as usize]) as u64), 100)
-        return
-    }
-    var at: u64 = ulib.strncpy((&txt[0 as usize]) as u64, msg.get((&k_micuse[0 as usize]) as u64), 90)
-    __mmio_write8(((&txt[0 as usize]) as u64 + at) as *mut u8, 32 as u8)
-    at = at + 1
-    at = num_into(at, mic_users)
-    // one reader: say WHO (a camera/mic light that does not name the program is not worth much)
-    if mic_users == 1 && mic_who != 0 && mic_stub == 0 {
-        let n0: u64 = ulib.sys(ulib.SYS_PSTAT, mic_who, ulib.P_NAME0, 0)
-        let n1: u64 = ulib.sys(ulib.SYS_PSTAT, mic_who, ulib.P_NAME1, 0)
-        if !ulib.bad(n0) && (n0 & 255) != 0 && at < 90 {
-            __mmio_write8(((&txt[0 as usize]) as u64 + at) as *mut u8, 32 as u8)
-            __mmio_write8(((&txt[0 as usize]) as u64 + at + 1) as *mut u8, 40 as u8)
-            at = at + 2
-            var k: u64 = 0
-            while k < 16 {
-                var c: u64 = 0
-                if k < 8 {
-                    c = (n0 >> (k * 8)) & 255
-                } else {
-                    c = (n1 >> ((k - 8) * 8)) & 255
-                }
-                if c != 0 {
-                    __mmio_write8(((&txt[0 as usize]) as u64 + at) as *mut u8, c as u8)
-                    at = at + 1
-                    k = k + 1
-                } else {
-                    k = 16
-                }
-            }
-            __mmio_write8(((&txt[0 as usize]) as u64 + at) as *mut u8, 41 as u8)
-            __mmio_write8(((&txt[0 as usize]) as u64 + at + 1) as *mut u8, 0 as u8)
-        }
-    }
+    traymic.refresh()
 }
 
 fn pair_shown() -> bool {
@@ -764,8 +705,24 @@ fn pair_text() -> u64 {
     return (&pair_b[0 as usize]) as u64
 }
 
+fn slot_present(slot: u64) -> bool {
+    return slot != trayslots.SLOT_MIC || traymic.visible()
+}
+
+fn slot_tiles() -> u64 {
+    var n: u64 = 0
+    var i: usize = 0
+    while i < trayslots.over_count() {
+        if slot_present(trayslots.over_slot_at(i)) {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
 fn rows_count() -> u64 {
-    var n: u64 = tray.tray_count(&tr, tray.PLACE_OVERFLOW) as u64
+    var n: u64 = slot_tiles() + tray.tray_count(&tr, tray.PLACE_OVERFLOW) as u64
     if n > MAXROWS {
         n = MAXROWS
     }
@@ -786,6 +743,12 @@ fn tile_cb(ud: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
         size = h
     }
     draw_cv(ud, x + (w - size) / 2, y + (h - size) / 2, size, size)
+    if ud >= CK_ITEM && ud < CK_ITEM + MAXROWS {
+        tile_x[(ud - CK_ITEM) as usize] = x
+        tile_y[(ud - CK_ITEM) as usize] = y
+        tile_w[(ud - CK_ITEM) as usize] = w
+        tile_h[(ud - CK_ITEM) as usize] = h
+    }
     if tile_say != 0 && ud >= CK_ITEM && ud < CK_ITEM + MAXROWS {
         say((&s_tile[0 as usize]) as u64)
         lineout.add_num(ud - CK_ITEM)
@@ -801,17 +764,99 @@ fn tile_cb(ud: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
     }
 }
 
-fn mic_shown() -> bool {
-    return mic_da != 0 || mic_users != 0 || mic_muted != 0
-}
-
 fn read_rows() {
     n_rows = rows_count()
     var i: u64 = 0
+    var k: usize = 0
+    while i < n_rows && k < trayslots.over_count() {
+        let slot: u64 = trayslots.over_slot_at(k)
+        if slot_present(slot) {
+            row_id[i as usize] = SLOT_TAG + slot
+            i = i + 1
+        }
+        k = k + 1
+    }
+    var j: usize = 0
     while i < n_rows {
-        row_id[i as usize] = tray.tray_at(&tr, tray.PLACE_OVERFLOW, i as usize)
+        row_id[i as usize] = tray.tray_at(&tr, tray.PLACE_OVERFLOW, j)
+        j = j + 1
         i = i + 1
     }
+}
+
+static mut s_system_owner: [u8; 7] = "system\0"
+
+fn row_tip(id: u64) -> u64 {
+    if id >= SLOT_TAG {
+        return tbstatus.field_name(tbmetrics.slot_field(id - SLOT_TAG))
+    }
+    return tray.tray_tooltip(&tr, id)
+}
+
+fn row_owner(id: u64) -> u64 {
+    if id >= SLOT_TAG {
+        return (&s_system_owner[0 as usize]) as u64
+    }
+    return tray.tray_owner(&tr, id)
+}
+
+fn tile_count() -> u64 {
+    return n_rows
+}
+
+fn tile_slot(i: u64) -> u64 {
+    if i >= n_rows || row_id[i as usize] < SLOT_TAG {
+        return 0
+    }
+    return row_id[i as usize] - SLOT_TAG
+}
+
+fn tile_at(mx: u64, my: u64) -> u64 {
+    if open_ == 0 {
+        return NONE
+    }
+    var i: u64 = 0
+    while i < n_rows {
+        let x0: u64 = px_ + tile_x[i as usize]
+        let y0: u64 = py_ + tile_y[i as usize]
+        if mx >= x0 && mx < x0 + tile_w[i as usize] && my >= y0 && my < y0 + tile_h[i as usize] {
+            return i
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn overflow_index_at(mx: u64, my: u64, moved: u64) -> usize {
+    let t: u64 = tile_at(mx, my)
+    var n: usize = 0
+    var p: usize = 0
+    while p < trayslots.SLOT_COUNT {
+        let s: u64 = trayslots.slot_at(p)
+        if s != moved && trayslots.slot_is_hidden(s) {
+            if t != NONE && tile_slot(t) == s {
+                return n
+            }
+            n = n + 1
+        }
+        p = p + 1
+    }
+    return n
+}
+
+fn hold(on: u64) {
+    hold_ = on
+}
+
+fn suppress_click() {
+    swallow_click = 1
+}
+
+fn refresh_tiles() {
+    if open_ == 0 {
+        return
+    }
+    relayout()
 }
 
 // the height of the card in design points (what `build` lays out)
@@ -821,9 +866,6 @@ fn card_h() -> u64 {
         let id: u64 = menu_item
         let m: u64 = tray.tray_menu_count(&tr, id) as u64
         return h + (m + 4) * (ROW_H + GAPP)
-    }
-    if mic_shown() {
-        h = h + ROW_H + GAPP
     }
     if pair_shown() {
         h = h + ROW_H + GAPP
@@ -871,21 +913,6 @@ fn build() {
         build_menu(r)
         return
     }
-    // microphone (STUB source)
-    if mic_shown() {
-        let rm: usize = fuiscene.row(r)
-        fuiscene.set_gap(rm, GAPP + 2)
-        let _gm: usize = fuiscene.canvas2(rm, CK_MIC, ROW_H - 4, ROW_H - 4, draw_cv)
-        mic_text()
-        let _lm: usize = fuiscene.label(rm, (&txt[0 as usize]) as u64)
-        if mic_da != 0 {
-            var mmk: u64 = (&k_mute[0 as usize]) as u64
-            if mic_muted != 0 {
-                mmk = (&k_unmute[0 as usize]) as u64
-            }
-            let _bmm: usize = fuiscene.button(rm, msg.get(mmk), K_MICMUTE)
-        }
-    }
     if pair_shown() {
         let rp: usize = fuiscene.row(r)
         fuiscene.set_gap(rp, GAPP + 2)
@@ -909,7 +936,7 @@ fn build() {
         var c: u64 = 0
         while c < GRID_COLS && i < n_rows {
             let id: u64 = row_id[i as usize]
-            let _t: usize = fuiscene.tile(ri, K_ITEM + i, tray.tray_tooltip(&tr, id), CELL, CELL, false, CK_ITEM + i, tile_cb)
+            let _t: usize = fuiscene.tile(ri, K_ITEM + i, row_tip(id), CELL, CELL, false, CK_ITEM + i, tile_cb)
             i = i + 1
             c = c + 1
         }
@@ -1055,9 +1082,9 @@ fn open_now() {
         say((&s_id[0 as usize]) as u64)
         lineout.add_num(id)
         say((&s_ow[0 as usize]) as u64)
-        say(tray.tray_owner(&tr, id))
+        say(row_owner(id))
         say((&s_tip[0 as usize]) as u64)
-        say(tray.tray_tooltip(&tr, id))
+        say(row_tip(id))
         lineout.end_line()
         i = i + 1
     }
@@ -1144,6 +1171,21 @@ fn pos_of(id: u64) -> u64 {
     return 0
 }
 
+fn click_slot(slot: u64) {
+    say((&s_slot[0 as usize]) as u64)
+    lineout.add_num(slot)
+    lineout.end_line()
+    if slot == trayslots.SLOT_MIC {
+        let _t: u64 = traymic.toggle_mute()
+        relayout()
+        return
+    }
+    shut((&s_clk[0 as usize]) as u64)
+    if slot == trayslots.SLOT_NET || slot == trayslots.SLOT_SND || slot == trayslots.SLOT_BAT {
+        qs.toggle()
+    }
+}
+
 fn on_key(key: u64) -> bool {
     if key == K_OSK {
         let pid: u64 = osktray.launch()
@@ -1153,23 +1195,16 @@ fn on_key(key: u64) -> bool {
         shut((&s_oskwhy[0 as usize]) as u64)
         return true
     }
-    if key == K_MICMUTE {
-        var nm: u64 = 1
-        if mic_muted != 0 {
-            nm = 0
-        }
-        let rcm: u64 = ulib.sys(SYS_AUDSET, AS_CAPMUTE, nm, 0)
-        say((&s_micmute[0 as usize]) as u64)
-        lineout.add_num(nm)
-        say((&s_rc[0 as usize]) as u64)
-        lineout.add_num(rcm)
-        lineout.end_line()
-        read_audio()
-        relayout()
-        return true
-    }
     if key >= K_ITEM && key < K_ITEM + n_rows {
+        if swallow_click != 0 {
+            swallow_click = 0
+            return true
+        }
         let id: u64 = row_id[(key - K_ITEM) as usize]
+        if id >= SLOT_TAG {
+            click_slot(id - SLOT_TAG)
+            return true
+        }
         let _c: bool = tray.tray_click(&tr, id, tray.BTN_LEFT)
         say((&s_click[0 as usize]) as u64)
         lineout.add_num(id)
@@ -1183,7 +1218,7 @@ fn on_key(key: u64) -> bool {
         let _s: bool = fuiscene.win_select(tp_win)
         let rk: u64 = fuiscene.key_at(fuiscene.right_x(), fuiscene.right_y())
         let _u: bool = fuiscene.win_select(0)
-        if rk >= K_ITEM && rk < K_ITEM + n_rows {
+        if rk >= K_ITEM && rk < K_ITEM + n_rows && row_id[(rk - K_ITEM) as usize] < SLOT_TAG {
             open_menu(row_id[(rk - K_ITEM) as usize])
             return true
         }
@@ -1257,6 +1292,10 @@ fn step() -> bool {
         }
     }
     // a press outside the card closes it -- except on the chevron, which is the bar's own toggle
+    if hold_ != 0 {
+        btn_last = hosthead.mouse_btn() & 7
+        return false
+    }
     if has_focus() {
         focus_seen = 1
     } else if focus_seen != 0 {
@@ -1265,6 +1304,7 @@ fn step() -> bool {
     }
     let btn: u64 = hosthead.mouse_btn() & 7
     if (btn & ~btn_last) != 0 {
+        swallow_click = 0
         let mx: u64 = hosthead.mouse_x()
         let my: u64 = hosthead.mouse_y()
         let on_anchor: bool = mx >= ax_ && mx < ax_ + aw_ && my >= ay_ && my < ay_ + ah_
