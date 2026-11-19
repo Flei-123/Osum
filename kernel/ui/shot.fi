@@ -12,6 +12,7 @@ export {
     arm, armed, arm_pid, arm_deadline, next_row, drop, may_grab,
     advance, shots, denied, deny, arms, last_pid, keyseq, set_keyseq,
     pack_run, pixel_rgb, say,
+    snap_addr, snap_bytes, snap_set, snap_live, snap_failed, snap_taken, snaps, snap_fails,
     KEY, KEY_UPPER, GRACE_NS, TICKET_NS, MAX_CHUNK
 }
 
@@ -35,6 +36,11 @@ const S_DENIED: u64 = 0x28
 const S_ARMS: u64 = 0x30
 const S_LASTPID: u64 = 0x38
 const S_KEYSEQ: u64 = 0x40
+const S_SNAP: u64 = 0x48
+const S_SNAPBYTES: u64 = 0x50
+const S_SNAPLIVE: u64 = 0x58
+const S_SNAPS: u64 = 0x60
+const S_SNAPFAILS: u64 = 0x68
 
 const FBS_RSHIFT: u64 = 0x0A8
 const FBS_GSHIFT: u64 = 0x0B0
@@ -58,6 +64,11 @@ fn init(state: u64) {
     ss(state, S_ARMS, 0)
     ss(state, S_LASTPID, 0)
     ss(state, S_KEYSEQ, 0xFFFFFFFFFFFFFFFF)
+    ss(state, S_SNAP, 0)
+    ss(state, S_SNAPBYTES, 0)
+    ss(state, S_SNAPLIVE, 0)
+    ss(state, S_SNAPS, 0)
+    ss(state, S_SNAPFAILS, 0)
 }
 
 
@@ -99,7 +110,7 @@ fn pack_run(state: u64, y: u64, x0: u64, count: u64, dst: u64) {
     let rs: u64 = kstate.get(state, fb.FB_OFF + FBS_RSHIFT)
     let gs: u64 = kstate.get(state, fb.FB_OFF + FBS_GSHIFT)
     let bs: u64 = kstate.get(state, fb.FB_OFF + FBS_BSHIFT)
-    var src: u64 = fb.draw_at(state) +% y *% fb.pitch(state) +% x0 *% 4
+    var src: u64 = source(state) +% y *% fb.pitch(state) +% x0 *% 4
     var out: u64 = dst
     var left: u64 = count
     while left > 1 {
@@ -118,8 +129,53 @@ fn pack_run(state: u64, y: u64, x0: u64, count: u64, dst: u64) {
     }
 }
 
+fn source(state: u64) -> u64 {
+    if gs(state, S_SNAPLIVE) != 0 {
+        return gs(state, S_SNAP)
+    }
+    return fb.draw_at(state)
+}
+
+fn snap_addr(state: u64) -> u64 {
+    return gs(state, S_SNAP)
+}
+
+fn snap_bytes(state: u64) -> u64 {
+    return gs(state, S_SNAPBYTES)
+}
+
+fn snap_set(state: u64, addr: u64, bytes: u64) {
+    ss(state, S_SNAP, addr)
+    ss(state, S_SNAPBYTES, bytes)
+    ss(state, S_SNAPLIVE, 0)
+}
+
+fn snap_live(state: u64, on: bool) {
+    var v: u64 = 0
+    if on {
+        v = 1
+    }
+    ss(state, S_SNAPLIVE, v)
+}
+
+fn snap_taken(state: u64) {
+    kstate.add(state, kstate.SHOT_OFF + S_SNAPS, 1)
+}
+
+fn snap_failed(state: u64) {
+    kstate.add(state, kstate.SHOT_OFF + S_SNAPFAILS, 1)
+}
+
+fn snaps(state: u64) -> u64 {
+    return gs(state, S_SNAPS)
+}
+
+fn snap_fails(state: u64) -> u64 {
+    return gs(state, S_SNAPFAILS)
+}
+
 fn pixel_rgb(state: u64, x: u64, y: u64) -> u64 {
-    let v: u64 = fb.get_pixel(state, x, y)
+    let v: u64 = __mmio_read32((source(state) +% y *% fb.pitch(state) +% x *% 4) as *mut u32) as u64
     let r: u64 = (v >> kstate.get(state, fb.FB_OFF + FBS_RSHIFT)) & 0xFF
     let g: u64 = (v >> kstate.get(state, fb.FB_OFF + FBS_GSHIFT)) & 0xFF
     let b: u64 = (v >> kstate.get(state, fb.FB_OFF + FBS_BSHIFT)) & 0xFF
@@ -160,6 +216,7 @@ fn arm(state: u64, pid: u64) {
 }
 
 fn drop(state: u64) {
+    ss(state, S_SNAPLIVE, 0)
     ss(state, S_ARMED, 0)
     ss(state, S_APID, 0)
     ss(state, S_DEADLINE, 0)
