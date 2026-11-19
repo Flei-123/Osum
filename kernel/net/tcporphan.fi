@@ -1,0 +1,135 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import lib.kstate
+import net.stack
+import net.tcp
+import serial
+
+export { add, forget, sweep, evict_oldest }
+
+const MAX_ORPHANS: u64 = 8
+const LIFE_US: u64 = 20000000
+const SAY_MAX: u64 = 20
+
+static mut handles: [u64; 8] = [0 as u64; 8]
+static mut closed_at: [u64; 8] = [0 as u64; 8]
+static mut said: u64 = 0
+
+fn slot_of(handle: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_ORPHANS {
+        if handles[i as usize] == handle + 1 {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_ORPHANS
+}
+
+fn free_or_oldest() -> u64 {
+    var best: u64 = 0
+    var i: u64 = 0
+    while i < MAX_ORPHANS {
+        if handles[i as usize] == 0 {
+            return i
+        }
+        if closed_at[i as usize] < closed_at[best as usize] {
+            best = i
+        }
+        i = i + 1
+    }
+    return best
+}
+
+fn add(handle: u64, now: u64) {
+    var i: u64 = slot_of(handle)
+    if i >= MAX_ORPHANS {
+        i = free_or_oldest()
+    }
+    handles[i as usize] = handle + 1
+    closed_at[i as usize] = now
+}
+
+fn forget(handle: u64) {
+    let i: u64 = slot_of(handle)
+    if i < MAX_ORPHANS {
+        handles[i as usize] = 0
+    }
+}
+
+fn closing(conn_state: u32) -> bool {
+    return conn_state == tcp.S_FIN_WAIT_1 || conn_state == tcp.S_FIN_WAIT_2
+        || conn_state == tcp.S_CLOSING || conn_state == tcp.S_LAST_ACK
+}
+
+fn alive(conn_state: u32) -> bool {
+    return conn_state == tcp.S_ESTABLISHED || closing(conn_state)
+}
+
+fn say(handle: u64, conn_state: u32, evicted: bool) {
+    if said >= SAY_MAX {
+        return
+    }
+    said = said + 1
+    var s_head: [u8; 21] = "inet: tcp orphan h=\0\0"
+    var s_state: [u8; 8] = " state=\0"
+    var s_why: [u8; 10] = " evicted\0\0"
+    var s_aged: [u8; 8] = " aged\0\0\0"
+    serial.puts((&s_head[0]) as u64)
+    serial.dec(handle)
+    serial.puts((&s_state[0]) as u64)
+    serial.dec(conn_state as u64)
+    if evicted {
+        serial.puts((&s_why[0]) as u64)
+    } else {
+        serial.puts((&s_aged[0]) as u64)
+    }
+    serial.nl()
+}
+
+fn sweep(state: u64, s: *mut stack.Stack, now: u64) {
+    if kstate.mode_on(state, kstate.M_NOORPHANREAP) {
+        return
+    }
+    var i: u64 = 0
+    while i < MAX_ORPHANS {
+        let h: u64 = handles[i as usize]
+        if h != 0 {
+            let conn_state: u32 = stack.net_state(s, (h - 1) as i32)
+            if !alive(conn_state) {
+                handles[i as usize] = 0
+            } else if closing(conn_state) && now > closed_at[i as usize]
+                && now - closed_at[i as usize] > LIFE_US {
+                say(h - 1, conn_state, false)
+                stack.net_abort(s, (h - 1) as i32)
+                handles[i as usize] = 0
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn evict_oldest(state: u64, s: *mut stack.Stack) -> bool {
+    if kstate.mode_on(state, kstate.M_NOORPHANREAP) {
+        return false
+    }
+    var found: bool = false
+    var oldest: u64 = 0
+    var i: u64 = 0
+    while i < MAX_ORPHANS {
+        let h: u64 = handles[i as usize]
+        if h != 0 && alive(stack.net_state(s, (h - 1) as i32))
+            && (!found || closed_at[i as usize] < closed_at[oldest as usize]) {
+            found = true
+            oldest = i
+        }
+        i = i + 1
+    }
+    if !found {
+        return false
+    }
+    let h: u64 = handles[oldest as usize] - 1
+    say(h, stack.net_state(s, h as i32), true)
+    stack.net_abort(s, h as i32)
+    handles[oldest as usize] = 0
+    return true
+}
