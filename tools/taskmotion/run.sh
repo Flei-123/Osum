@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/taskmotion/run.sh -- task bar icon motion: press scale + rebound, launch indicator + pop, close shrink.
-#   new   shipping motion: serial `taskbar: motion start|done` lines + pixel check of the pressed icon
-#   off   control: theme motion=0 (motion switched off): no motion lines, the icon keeps its size
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)

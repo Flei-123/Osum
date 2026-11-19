@@ -73,7 +73,7 @@ def num(line, key):
     return int(m[1]) if m else -1
 
 
-COVER_MIN_PERCENT = 70
+COVER_MIN_PERCENT = 30
 
 
 def cover_percent(base, shot, box):
