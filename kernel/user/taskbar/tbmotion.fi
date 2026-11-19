@@ -1,0 +1,387 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import fui.tokens
+import libc.clockapi
+import lineout
+import uikit.uiscale
+import uitheme
+import ulib
+
+export { SLOTS, K_NONE, K_HOLD, K_REBOUND, K_POP, K_WAIT, K_GHOST, select, deselect, note_press, cur_scale,
+    cur_lift, launch, appear, vanish, is_waiting, wait_phase, step, moving, kind_at, name_at, ghost_x, ghost_y,
+    ghost_w, ghost_h, ghost_pm }
+
+const SLOTS: u64 = 12
+const NAME_BYTES: u64 = 24
+const K_NONE: u64 = 0
+const K_HOLD: u64 = 1
+const K_REBOUND: u64 = 2
+const K_POP: u64 = 3
+const K_WAIT: u64 = 4
+const K_GHOST: u64 = 5
+const TICK_MS: u64 = 10
+const MOTION_REF_MS: u64 = 160
+const FULL_PM: u64 = 1000
+const PRESS_PM: u64 = 880
+const POP_FROM_PM: u64 = 700
+const POP_OVERSHOOT_PM: u64 = 90
+const GHOST_MS: u64 = 120
+const HOP_PX: u64 = 5
+const HOP_TICKS: u64 = 30
+const HOP_PERIOD_TICKS: u64 = 50
+const WAIT_TIMEOUT_TICKS: u64 = 500
+const PARABOLA_MAX: u64 = 1000000
+
+static mut kind_: [u64; 12] = [0 as u64; 12]
+static mut t0_: [u64; 12] = [0 as u64; 12]
+static mut from_: [u64; 12] = [0 as u64; 12]
+static mut frames_: [u64; 12] = [0 as u64; 12]
+static mut last_: [u64; 12] = [0 as u64; 12]
+static mut gap_: [u64; 12] = [0 as u64; 12]
+static mut gx_: [u64; 12] = [0 as u64; 12]
+static mut gy_: [u64; 12] = [0 as u64; 12]
+static mut gw_: [u64; 12] = [0 as u64; 12]
+static mut gh_: [u64; 12] = [0 as u64; 12]
+static mut name_: [u8; 288] = [0 as u8; 288]
+static mut sel_name: u64 = 0
+static mut cur_: u64 = 12
+static mut moving_: u64 = 0
+static mut s_start: [u8; 22] = "taskbar: motion start\0"
+static mut s_done: [u8; 21] = "taskbar: motion done\0"
+static mut s_kind: [u8; 7] = " kind=\0"
+static mut s_app: [u8; 6] = " app=\0"
+static mut s_pm: [u8; 5] = " pm=\0"
+static mut s_frames: [u8; 9] = " frames=\0"
+static mut s_ms: [u8; 5] = " ms=\0"
+static mut s_gap: [u8; 6] = " gap=\0"
+static mut s_base: [u8; 7] = " base=\0"
+
+fn motion_base() -> u64 {
+    return uitheme.motion(uitheme.MO_NORMAL)
+}
+
+fn motion_on() -> bool {
+    return motion_base() != 0
+}
+
+fn ticks_for(base_ms: u64) -> u64 {
+    var t: u64 = base_ms * motion_base() / MOTION_REF_MS / TICK_MS
+    if t == 0 {
+        t = 1
+    }
+    return t
+}
+
+fn slot_name(s: u64) -> u64 {
+    return (&name_[0 as usize]) as u64 + s * NAME_BYTES
+}
+
+fn find(name: u64) -> u64 {
+    var s: u64 = 0
+    while s < SLOTS {
+        if kind_[s as usize] != K_NONE && ulib.streq(slot_name(s), name) {
+            return s
+        }
+        s = s + 1
+    }
+    return SLOTS
+}
+
+fn alloc(name: u64) -> u64 {
+    let found: u64 = find(name)
+    if found < SLOTS {
+        return found
+    }
+    var s: u64 = 0
+    while s < SLOTS {
+        if kind_[s as usize] == K_NONE {
+            let _c: u64 = ulib.strncpy(slot_name(s), name, NAME_BYTES - 1)
+            return s
+        }
+        s = s + 1
+    }
+    return SLOTS
+}
+
+fn say_head(head: u64, s: u64) {
+    let _h: u64 = lineout.add_text(head)
+    let _k: u64 = lineout.add_text((&s_kind[0 as usize]) as u64)
+    lineout.add_num(kind_[s as usize])
+    let _a: u64 = lineout.add_text((&s_app[0 as usize]) as u64)
+    let _n: u64 = lineout.add_text(slot_name(s))
+}
+
+fn begin(s: u64, kind: u64, from: u64) {
+    let now: u64 = clockapi.ticks()
+    kind_[s as usize] = kind
+    t0_[s as usize] = now
+    from_[s as usize] = from
+    frames_[s as usize] = 0
+    last_[s as usize] = now
+    gap_[s as usize] = 0
+    say_head((&s_start[0 as usize]) as u64, s)
+    let _p: u64 = lineout.add_text((&s_pm[0 as usize]) as u64)
+    lineout.add_num(from)
+    let _b: u64 = lineout.add_text((&s_base[0 as usize]) as u64)
+    lineout.add_num(motion_base())
+    lineout.end_line()
+}
+
+fn elapsed(s: u64, now: u64) -> u64 {
+    if now <= t0_[s as usize] {
+        return 0
+    }
+    return now - t0_[s as usize]
+}
+
+fn progress(s: u64, now: u64, ticks: u64) -> u64 {
+    let el: u64 = elapsed(s, now)
+    if el >= ticks {
+        return 1000
+    }
+    return el * 1000 / ticks
+}
+
+fn lerp(a: u64, b: u64, e: u64) -> u64 {
+    if a >= b {
+        return a - (a - b) * e / 1000
+    }
+    return a + (b - a) * e / 1000
+}
+
+fn pop_ticks() -> u64 {
+    return ticks_for(tokens.dur(tokens.D_SLOW))
+}
+
+fn press_ticks() -> u64 {
+    return ticks_for(tokens.dur(tokens.D_FAST))
+}
+
+fn pm_now(s: u64, now: u64) -> u64 {
+    let k: u64 = kind_[s as usize]
+    if k == K_HOLD {
+        return lerp(from_[s as usize], PRESS_PM, tokens.ease_out(progress(s, now, press_ticks())))
+    }
+    if k == K_REBOUND {
+        return lerp(from_[s as usize], FULL_PM, tokens.ease_out(progress(s, now, press_ticks())))
+    }
+    if k == K_POP {
+        let t: u64 = progress(s, now, pop_ticks())
+        let base: u64 = lerp(POP_FROM_PM, FULL_PM, tokens.ease_out(t))
+        return base + POP_OVERSHOOT_PM * (4 * t * (1000 - t)) / PARABOLA_MAX
+    }
+    return FULL_PM
+}
+
+fn hop_px(par: u64) -> u64 {
+    return HOP_PX * uiscale.ui_scale() * par / PARABOLA_MAX
+}
+
+fn cur_scale() -> u64 {
+    if cur_ >= SLOTS {
+        return FULL_PM
+    }
+    return pm_now(cur_, clockapi.ticks())
+}
+
+fn cur_lift() -> u64 {
+    if cur_ >= SLOTS {
+        return 0
+    }
+    let now: u64 = clockapi.ticks()
+    let k: u64 = kind_[cur_ as usize]
+    if k == K_POP {
+        let t: u64 = progress(cur_, now, pop_ticks())
+        return hop_px(4 * t * (1000 - t))
+    }
+    if k == K_WAIT {
+        let phase: u64 = elapsed(cur_, now) % HOP_PERIOD_TICKS
+        if phase < HOP_TICKS {
+            let t: u64 = phase * 1000 / HOP_TICKS
+            return hop_px(4 * t * (1000 - t))
+        }
+    }
+    return 0
+}
+
+fn select(name: u64) {
+    sel_name = name
+    cur_ = find(name)
+}
+
+fn deselect() {
+    sel_name = 0
+    cur_ = SLOTS
+}
+
+fn note_press(down: bool) {
+    if !motion_on() || sel_name == 0 {
+        return
+    }
+    let now: u64 = clockapi.ticks()
+    let s: u64 = find(sel_name)
+    if s < SLOTS && (kind_[s as usize] == K_WAIT || kind_[s as usize] == K_GHOST) {
+        return
+    }
+    if down {
+        if s < SLOTS && kind_[s as usize] == K_HOLD {
+            return
+        }
+        var from: u64 = FULL_PM
+        if s < SLOTS {
+            from = pm_now(s, now)
+        }
+        let t: u64 = alloc(sel_name)
+        if t < SLOTS {
+            begin(t, K_HOLD, from)
+        }
+    } else if s < SLOTS && kind_[s as usize] == K_HOLD {
+        begin(s, K_REBOUND, pm_now(s, now))
+    }
+    cur_ = find(sel_name)
+}
+
+fn launch(name: u64) {
+    if !motion_on() {
+        return
+    }
+    let s: u64 = alloc(name)
+    if s < SLOTS {
+        begin(s, K_WAIT, FULL_PM)
+    }
+}
+
+fn appear(name: u64) {
+    if !motion_on() {
+        return
+    }
+    let s: u64 = alloc(name)
+    if s < SLOTS {
+        begin(s, K_POP, POP_FROM_PM)
+    }
+}
+
+fn vanish(name: u64, x: u64, y: u64, w: u64, h: u64) {
+    if !motion_on() {
+        return
+    }
+    let s: u64 = alloc(name)
+    if s >= SLOTS {
+        return
+    }
+    begin(s, K_GHOST, FULL_PM)
+    gx_[s as usize] = x
+    gy_[s as usize] = y
+    gw_[s as usize] = w
+    gh_[s as usize] = h
+}
+
+fn is_waiting(name: u64) -> bool {
+    let s: u64 = find(name)
+    return s < SLOTS && kind_[s as usize] == K_WAIT
+}
+
+fn wait_phase(name: u64) -> u64 {
+    let s: u64 = find(name)
+    if s >= SLOTS {
+        return 0
+    }
+    let t: u64 = elapsed(s, clockapi.ticks()) % HOP_PERIOD_TICKS * 2000 / HOP_PERIOD_TICKS
+    if t > 1000 {
+        return 2000 - t
+    }
+    return t
+}
+
+fn kind_at(s: u64) -> u64 {
+    return kind_[s as usize]
+}
+
+fn name_at(s: u64) -> u64 {
+    return slot_name(s)
+}
+
+fn ghost_x(s: u64) -> u64 {
+    return gx_[s as usize]
+}
+
+fn ghost_y(s: u64) -> u64 {
+    return gy_[s as usize]
+}
+
+fn ghost_w(s: u64) -> u64 {
+    return gw_[s as usize]
+}
+
+fn ghost_h(s: u64) -> u64 {
+    return gh_[s as usize]
+}
+
+fn ghost_pm(s: u64) -> u64 {
+    let p: u64 = progress(s, clockapi.ticks(), ticks_for(GHOST_MS))
+    return FULL_PM - tokens.ease_out(p)
+}
+
+fn limit_ticks(k: u64) -> u64 {
+    if k == K_POP {
+        return pop_ticks()
+    }
+    if k == K_GHOST {
+        return ticks_for(GHOST_MS)
+    }
+    if k == K_WAIT {
+        return WAIT_TIMEOUT_TICKS
+    }
+    return press_ticks()
+}
+
+fn count_frame(s: u64, now: u64) {
+    frames_[s as usize] = frames_[s as usize] + 1
+    let gap: u64 = now - last_[s as usize]
+    if gap > gap_[s as usize] {
+        gap_[s as usize] = gap
+    }
+    last_[s as usize] = now
+}
+
+fn finish(s: u64, now: u64) {
+    say_head((&s_done[0 as usize]) as u64, s)
+    let _f: u64 = lineout.add_text((&s_frames[0 as usize]) as u64)
+    lineout.add_num(frames_[s as usize])
+    let _m: u64 = lineout.add_text((&s_ms[0 as usize]) as u64)
+    lineout.add_num(elapsed(s, now) * TICK_MS)
+    let _g: u64 = lineout.add_text((&s_gap[0 as usize]) as u64)
+    lineout.add_num(gap_[s as usize] * TICK_MS)
+    lineout.end_line()
+    kind_[s as usize] = K_NONE
+}
+
+fn step() -> bool {
+    let now: u64 = clockapi.ticks()
+    var active: bool = false
+    var s: u64 = 0
+    while s < SLOTS {
+        let k: u64 = kind_[s as usize]
+        if k != K_NONE {
+            let running: bool = elapsed(s, now) < limit_ticks(k)
+            if k != K_HOLD || running {
+                active = true
+                count_frame(s, now)
+            }
+            if k != K_HOLD && !running {
+                finish(s, now)
+            }
+        }
+        s = s + 1
+    }
+    moving_ = 0
+    if active {
+        moving_ = 1
+    }
+    return active
+}
+
+fn moving() -> bool {
+    return moving_ != 0
+}
