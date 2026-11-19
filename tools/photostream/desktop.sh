@@ -48,20 +48,19 @@ png_bytes=$("${ODBC[@]}" exec "/bin/ls -l /tmp/p.png" 2>/dev/null | tr -s ' ' | 
 ok "PNG path wall time incl. exec overhead: $(python3 -c "print(round(float('$t1')-float('$t0'),2))") s ($png_bytes)"
 for w in 1280 960 800 640; do
     out=$(photo "$w" "q=55,w=$w"); l=$(logline "$out")
-    t2=$(date +%s.%N)
     [ -n "$l" ] && ok "w=$w: size $(field size "$l"), $(field bytes "$l") bytes, grab $(field grab "$l") ms, scale $(field scale "$l") ms, encode $(field encode "$l") ms" || bad "w=$w: no photo line ($out)"
 done
 "${ODBC[@]}" input key Tab > /dev/null 2>&1
 sleep 3
 settled=""
-( sleep 3; "${ODBC[@]}" input mouse 150 718 --button left --action click > /dev/null 2>&1 ) &
+for attempt in 1 2 3 4 5 6; do
     out=$(photo base "b=1,t=1200,w=800")
     grep -a 'photo' <<< "$out" | head -1 | sed "s/^/  attempt $attempt: /"
     if grep -aq 'unchanged' <<< "$out"; then settled=$attempt; break; fi
     sleep 5
 done
 [ -n "$settled" ] && ok "idle desktop: dirty check answers unchanged (attempt $settled)" || bad "idle desktop never settled"
-( sleep 3; "${ODBC[@]}" input key Tab --mods shift > /dev/null 2>&1 ) &
+( sleep 3; "${ODBC[@]}" input mouse 150 718 --button left --action click > /dev/null 2>&1 ) &
 out=$(photo chg "b=1,t=9000,w=800"); wait
 grep -aq 'unchanged' <<< "$out" && bad "screen change not noticed (click on a button)" || ok "screen change noticed within 9 s"
 echo "PHOTOSTREAM-DESKTOP: $pass passed, $fail failed"
