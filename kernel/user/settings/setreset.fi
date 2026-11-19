@@ -1,0 +1,337 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import actcli
+import fuiscene
+import instaccount
+import libc.text
+import msg
+import ulib
+import settings.setbase
+import settings.setcore
+
+export { load, tick, page, rects, owns, reset_settings, reset_system, confirm }
+
+const TEXT_CAP: u64 = 96
+const REPLY_WAIT_TICKS: u64 = 300
+const POLL_TICKS: u64 = 50
+const PENDING_NONE: u64 = 0
+const WORD_LEN: u64 = 5
+const SYS_CHMOD: u64 = 90
+const OPEN_WRITE_NEW: u64 = 577
+const MODE_PRIVATE: u64 = 384
+const STEPS_TOTAL: u64 = 5
+const NOT_FOUND: u64 = 0xFFFFFFFFFFFFFFFF
+
+static mut call_status: [u8; 27] = "call settings.reset.status\0"
+static mut call_settings: [u8; 29] = "call settings.reset.settings\0"
+static mut call_system: [u8; 27] = "call settings.reset.system\0"
+static mut arg_name: [u8; 5] = "name\0"
+static mut field_state: [u8; 6] = "state\0"
+static mut field_busy: [u8; 5] = "busy\0"
+static mut p_secret: [u8; 18] = "/run/reset.secret\0"
+static mut word_reset: [u8; 6] = "RESET\0"
+static mut word_dialog: [u8; 11] = "use_dialog\0"
+static mut word_one: [u8; 2] = "1\0"
+static mut key_words: [u8; 41] = "settings\0userdata\0logs\0account\0sync\0done\0"
+static mut step_words: [u8; 53] = "settings\0user data\0logs\0account\0sync\0done\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut m_note: [u8; 20] = "settings.reset.note\0"
+static mut m_settings: [u8; 22] = "settings.reset.button\0"
+static mut m_hint: [u8; 20] = "settings.reset.hint\0"
+static mut m_title: [u8; 24] = "settings.reset.sys.head\0"
+static mut m_warn: [u8; 20] = "settings.reset.warn\0"
+static mut m_name: [u8; 20] = "settings.reset.name\0"
+static mut m_pass: [u8; 20] = "settings.reset.pass\0"
+static mut m_word: [u8; 20] = "settings.reset.word\0"
+static mut m_system: [u8; 22] = "settings.reset.system\0"
+static mut m_confirm: [u8; 23] = "settings.reset.confirm\0"
+static mut m_ask: [u8; 19] = "settings.reset.ask\0"
+static mut m_denied: [u8; 22] = "settings.reset.denied\0"
+static mut m_nobus: [u8; 21] = "settings.reset.nobus\0"
+static mut m_badword: [u8; 23] = "settings.reset.badword\0"
+static mut m_badname: [u8; 23] = "settings.reset.badname\0"
+static mut m_badpass: [u8; 23] = "settings.reset.badpass\0"
+static mut m_busy: [u8; 20] = "settings.reset.busy\0"
+static mut m_started: [u8; 23] = "settings.reset.started\0"
+static mut m_progress: [u8; 24] = "settings.reset.progress\0"
+static mut m_step: [u8; 21] = "settings.reset.step.\0"
+static mut r_settings: [u8; 5] = "rsst\0"
+static mut r_name: [u8; 5] = "rsnm\0"
+static mut r_pass: [u8; 5] = "rspw\0"
+static mut r_word: [u8; 5] = "rswd\0"
+static mut r_system: [u8; 5] = "rssy\0"
+static mut r_confirm: [u8; 5] = "rscf\0"
+static mut s_state: [u8; 23] = "settings: reset state=\0"
+static mut s_end: [u8; 2] = "\n\0"
+static mut s_colon: [u8; 3] = ": \0"
+static mut s_slash: [u8; 2] = "/\0"
+static mut s_sp: [u8; 2] = " \0"
+static mut s_open: [u8; 2] = "(\0"
+static mut s_close: [u8; 2] = ")\0"
+
+static mut e_name: [u8; 40] = [0 as u8; 40]
+static mut e_pass: [u8; 40] = [0 as u8; 40]
+static mut e_word: [u8; 40] = [0 as u8; 40]
+static mut state_text: [u8; 96] = [0 as u8; 96]
+static mut line_text: [u8; 160] = [0 as u8; 160]
+static mut step_key: [u8; 48] = [0 as u8; 48]
+static mut notice_key: u64 = 0
+static mut pending_no: u64 = 0
+static mut busy_on: bool = false
+static mut started: bool = false
+static mut last_poll: u64 = 0
+
+fn owns(id: u64) -> bool {
+    return id == setbase.K_RS_SETTINGS || id == setbase.K_RS_SYSTEM || id == setbase.K_RS_CONFIRM
+}
+
+fn hash_text(p: u64) -> u64 {
+    var h: u64 = 5381
+    var i: u64 = 0
+    while __mmio_read8((p + i) as *mut u8) != 0 as u8 {
+        h = (h * 33 + (__mmio_read8((p + i) as *mut u8) as u64)) % 1000000007
+        i = i + 1
+    }
+    return h
+}
+
+fn signature() -> u64 {
+    var sig: u64 = 3
+    if busy_on {
+        sig = 7
+    }
+    return sig * 31 + hash_text((&state_text[0]) as u64)
+}
+
+fn fetch() {
+    __mmio_write8((&state_text[0]) as u64 as *mut u8, 0 as u8)
+    busy_on = false
+    if !actcli.open() {
+        return
+    }
+    actcli.req((&call_status[0]) as u64)
+    if actcli.send(REPLY_WAIT_TICKS) != actcli.R_OK {
+        return
+    }
+    let _s: bool = actcli.field((&field_state[0]) as u64, (&state_text[0]) as u64, TEXT_CAP)
+    var flag: [u8; 8] = [0 as u8; 8]
+    let _b: bool = actcli.field((&field_busy[0]) as u64, (&flag[0]) as u64, 8)
+    busy_on = ulib.streq((&flag[0]) as u64, (&word_one[0]) as u64)
+}
+
+fn trace() {
+    setcore.say((&s_state[0]) as u64)
+    setcore.say((&state_text[0]) as u64)
+    setcore.say((&s_end[0]) as u64)
+}
+
+fn load() {
+    fetch()
+    trace()
+}
+
+fn tick(now: u64) -> bool {
+    if !busy_on || now < last_poll + POLL_TICKS {
+        return false
+    }
+    last_poll = now
+    let before: u64 = signature()
+    fetch()
+    if signature() == before {
+        return false
+    }
+    trace()
+    return true
+}
+
+fn step_index() -> u64 {
+    var i: u64 = 0
+    var at: u64 = 0
+    while i < 6 {
+        let word: u64 = (&step_words[0]) as u64 + at
+        if ulib.find((&state_text[0]) as u64, word) != NOT_FOUND {
+            return i
+        }
+        at = at + text.length(word) + 1
+        i = i + 1
+    }
+    return NOT_FOUND
+}
+
+fn step_label(index: u64) -> u64 {
+    var at: u64 = 0
+    var i: u64 = 0
+    while i < index {
+        at = at + text.length((&key_words[0]) as u64 + at) + 1
+        i = i + 1
+    }
+    let key: u64 = (&step_key[0]) as u64
+    let n: u64 = setcore.text_an(key, 0, (&m_step[0]) as u64)
+    let _z: u64 = setcore.text_an(key, n, (&key_words[0]) as u64 + at)
+    return msg.get(key)
+}
+
+fn progress_line(index: u64) -> u64 {
+    let line: u64 = (&line_text[0]) as u64
+    var at: u64 = setcore.text_an(line, 0, msg.get((&m_progress[0]) as u64))
+    at = setcore.text_an(line, at, (&s_colon[0]) as u64)
+    at = setcore.text_an(line, at, step_label(index))
+    at = setcore.text_an(line, at, (&s_sp[0]) as u64)
+    at = setcore.text_an(line, at, (&s_open[0]) as u64)
+    at = setcore.num_at(line, at, index + 1)
+    at = setcore.text_an(line, at, (&s_slash[0]) as u64)
+    at = setcore.num_at(line, at, STEPS_TOTAL)
+    let _z: u64 = setcore.text_an(line, at, (&s_close[0]) as u64)
+    return line
+}
+
+fn page(left: usize, right: usize) {
+    let _note: usize = fuiscene.label_wrap(left, msg.get((&m_note[0]) as u64), 2)
+    let _bs: usize = fuiscene.button(left, msg.get((&m_settings[0]) as u64), setbase.K_RS_SETTINGS)
+    let _hint: usize = fuiscene.label_muted(left, msg.get((&m_hint[0]) as u64))
+    let _sep: usize = fuiscene.separator(left)
+    let _head: usize = fuiscene.label(left, msg.get((&m_title[0]) as u64))
+    let _warn: usize = fuiscene.label_wrap(left, msg.get((&m_warn[0]) as u64), 3)
+    let _ln: usize = fuiscene.label(left, msg.get((&m_name[0]) as u64))
+    let _en: usize = fuiscene.entry(left, setbase.K_RS_NAME, 0, (&e_name[0]) as u64)
+    let _lp: usize = fuiscene.label(left, msg.get((&m_pass[0]) as u64))
+    let _ep: usize = fuiscene.entry(left, setbase.K_RS_PASS, 0, (&e_pass[0]) as u64)
+    fuiscene.entry_secret(setbase.K_RS_PASS, true)
+    let _lw: usize = fuiscene.label(left, msg.get((&m_word[0]) as u64))
+    let _ew: usize = fuiscene.entry(left, setbase.K_RS_WORD, 0, (&e_word[0]) as u64)
+    let _bsys: usize = fuiscene.button(left, msg.get((&m_system[0]) as u64), setbase.K_RS_SYSTEM)
+    if pending_no != PENDING_NONE {
+        let _cf: usize = fuiscene.button(left, msg.get((&m_confirm[0]) as u64), setbase.K_RS_CONFIRM)
+    }
+    if notice_key != 0 {
+        let _nt: usize = fuiscene.label_muted(left, msg.get(notice_key))
+    }
+    let index: u64 = step_index()
+    if busy_on && index != NOT_FOUND {
+        let _pg: usize = fuiscene.label(left, progress_line(index))
+    }
+}
+
+fn rects() {
+    setcore.rect_say((&r_settings[0]) as u64, setbase.K_RS_SETTINGS)
+    setcore.rect_say((&r_name[0]) as u64, setbase.K_RS_NAME)
+    setcore.rect_say((&r_pass[0]) as u64, setbase.K_RS_PASS)
+    setcore.rect_say((&r_word[0]) as u64, setbase.K_RS_WORD)
+    setcore.rect_say((&r_system[0]) as u64, setbase.K_RS_SYSTEM)
+    setcore.rect_say((&r_confirm[0]) as u64, setbase.K_RS_CONFIRM)
+}
+
+fn drop_secret() {
+    let _u: u64 = ulib.sys(ulib.SYS_UNLINK, (&p_secret[0]) as u64, 0, 0)
+}
+
+fn store_secret(pass: u64) -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_secret[0]) as u64, OPEN_WRITE_NEW, MODE_PRIVATE)
+    if ulib.bad(fd) {
+        return false
+    }
+    let _c: u64 = ulib.sys(SYS_CHMOD, (&p_secret[0]) as u64, MODE_PRIVATE, 0)
+    let n: u64 = text.length(pass)
+    let wrote: u64 = ulib.sys(ulib.SYS_WRITE, fd, pass, n)
+    let _x: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return wrote == n
+}
+
+fn read_error_line() -> bool {
+    let lp: u64 = (&line_text[0]) as u64
+    let _l: bool = actcli.line(0, lp, 160)
+    return ulib.find(lp, (&word_dialog[0]) as u64) != NOT_FOUND
+}
+
+fn answer(rc: u64) {
+    notice_key = 0
+    pending_no = PENDING_NONE
+    if rc == actcli.R_CONFIRM {
+        let lp: u64 = (&line_text[0]) as u64
+        let _l: bool = actcli.line(0, lp, 160)
+        pending_no = setcore.num_from(lp + 8)
+        notice_key = (&m_ask[0]) as u64
+    } else if rc == actcli.R_NOBUS {
+        notice_key = (&m_nobus[0]) as u64
+    } else if rc != actcli.R_OK {
+        if read_error_line() {
+            notice_key = (&m_ask[0]) as u64
+        } else {
+            notice_key = (&m_denied[0]) as u64
+        }
+    } else {
+        notice_key = (&m_started[0]) as u64
+        started = true
+    }
+}
+
+fn finish_request(rc: u64) {
+    answer(rc)
+    if rc != actcli.R_CONFIRM && rc != actcli.R_OK {
+        drop_secret()
+    }
+    fetch()
+    fuiscene.refresh()
+}
+
+fn reset_settings() {
+    if !actcli.open() {
+        answer(actcli.R_NOBUS)
+        fuiscene.refresh()
+        return
+    }
+    actcli.req((&call_settings[0]) as u64)
+    finish_request(actcli.send(REPLY_WAIT_TICKS))
+}
+
+fn input_error(name: u64, pass: u64, word: u64) -> u64 {
+    if word == 0 || !ulib.streq(word, (&word_reset[0]) as u64) {
+        return (&m_badword[0]) as u64
+    }
+    if name == 0 || !instaccount.name_ok(name) {
+        return (&m_badname[0]) as u64
+    }
+    if pass == 0 || !instaccount.pass_ok(pass) {
+        return (&m_badpass[0]) as u64
+    }
+    return 0
+}
+
+fn reset_system() {
+    let name: u64 = fuiscene.entry_text(setbase.K_RS_NAME)
+    let pass: u64 = fuiscene.entry_text(setbase.K_RS_PASS)
+    let word: u64 = fuiscene.entry_text(setbase.K_RS_WORD)
+    notice_key = input_error(name, pass, word)
+    if notice_key != 0 {
+        fuiscene.refresh()
+        return
+    }
+    if !actcli.open() {
+        answer(actcli.R_NOBUS)
+        fuiscene.refresh()
+        return
+    }
+    if !store_secret(pass) {
+        notice_key = (&m_badpass[0]) as u64
+        fuiscene.refresh()
+        return
+    }
+    actcli.req((&call_system[0]) as u64)
+    actcli.arg((&arg_name[0]) as u64, name)
+    finish_request(actcli.send(REPLY_WAIT_TICKS))
+}
+
+fn confirm() {
+    if pending_no == PENDING_NONE {
+        return
+    }
+    var cf: [u8; 32] = [0 as u8; 32]
+    let cp: u64 = (&cf[0]) as u64
+    var s_c: [u8; 9] = "confirm \0"
+    let at: u64 = setcore.text_an(cp, 0, (&s_c[0]) as u64)
+    let _n: u64 = setcore.num_at(cp, at, pending_no)
+    actcli.req(cp)
+    pending_no = PENDING_NONE
+    let rc: u64 = actcli.send(REPLY_WAIT_TICKS)
+    finish_request(rc)
+}

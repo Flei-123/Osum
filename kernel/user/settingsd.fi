@@ -43,6 +43,7 @@ import secretput
 import libc.octets
 import libc.clockapi
 import netdiag.dnsguard
+import resetbus
 
 export { u_start }
 
@@ -883,6 +884,100 @@ fn do_sys_run(install: bool, dry: bool) {
     r_ch(10)
 }
 
+fn reset_started(what: u64) {
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_start: [u8; 9] = "started=\0"
+    r_reset()
+    r_str((&s_ok[0 as usize]) as u64)
+    r_str((&s_start[0 as usize]) as u64)
+    r_str(what)
+    r_ch(10)
+}
+
+fn reset_fail(rc: u64) {
+    var e_busy: [u8; 5] = "busy\0"
+    var e_name: [u8; 9] = "bad_name\0"
+    var e_secret: [u8; 10] = "no_secret\0"
+    var e_exec: [u8; 12] = "exec_failed\0"
+    if rc == resetbus.E_BUSY {
+        r_err((&e_busy[0 as usize]) as u64, 0)
+    } else if rc == resetbus.E_NAME {
+        r_err((&e_name[0 as usize]) as u64, 0)
+    } else if rc == resetbus.E_SECRET {
+        r_err((&e_secret[0 as usize]) as u64, 0)
+    } else {
+        r_err((&e_exec[0 as usize]) as u64, 0)
+    }
+}
+
+fn reset_would(what: u64) {
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_would: [u8; 7] = "would=\0"
+    r_reset()
+    r_str((&s_ok[0 as usize]) as u64)
+    r_str((&s_would[0 as usize]) as u64)
+    r_str(what)
+    r_ch(10)
+}
+
+fn do_reset_settings(dry: bool) {
+    var w_set: [u8; 15] = "reset-settings\0"
+    if dry {
+        reset_would((&w_set[0 as usize]) as u64)
+        return
+    }
+    let rc: u64 = resetbus.start_settings()
+    if rc != resetbus.OK {
+        reset_fail(rc)
+        return
+    }
+    reset_started((&w_set[0 as usize]) as u64)
+}
+
+fn do_reset_system(msg: u64, dry: bool) {
+    var k_name: [u8; 5] = "name\0"
+    var w_sys: [u8; 13] = "reset-system\0"
+    var e_bad: [u8; 10] = "bad_value\0"
+    var nm: [u8; 40] = [0 as u8; 40]
+    let np: u64 = (&nm[0 as usize]) as u64
+    actwire.kv_find(msg, (&k_name[0 as usize]) as u64, np, 40)
+    if dry {
+        reset_would((&w_sys[0 as usize]) as u64)
+        return
+    }
+    if octets.ld8(np, 0) == 0 {
+        r_err((&e_bad[0 as usize]) as u64, (&k_name[0 as usize]) as u64)
+        return
+    }
+    let rc: u64 = resetbus.start_system(np)
+    if rc != resetbus.OK {
+        reset_fail(rc)
+        return
+    }
+    reset_started((&w_sys[0 as usize]) as u64)
+}
+
+fn do_reset_status() {
+    var s_ok: [u8; 4] = "ok\n\0"
+    var k_state: [u8; 7] = "state=\0"
+    var k_busy: [u8; 6] = "busy=\0"
+    var st: [u8; 96] = [0 as u8; 96]
+    let sp: u64 = (&st[0 as usize]) as u64
+    let _s: bool = resetbus.read_state(sp, 96)
+    r_reset()
+    r_str((&s_ok[0 as usize]) as u64)
+    r_str((&k_state[0 as usize]) as u64)
+    r_str(sp)
+    r_ch(10)
+    r_str((&k_busy[0 as usize]) as u64)
+    if resetbus.alive() {
+        r_ch(49)
+    } else {
+        r_ch(48)
+    }
+    r_ch(10)
+}
+
 fn oconf_get(field: u64, field_old: u64, out: u64) -> bool {
     if actwire.kvfile_get((&P_OCONF[0 as usize]) as u64, field, out, 64) {
         return true
@@ -1246,6 +1341,21 @@ fn handle(msg: u64) -> bool {
     var a_nfx: [u8; 19] = "settings.net.fixed\0"
     if actwire.str_eq(np, (&a_nfx[0 as usize]) as u64) {
         do_net_fixed(msg, dry)
+        return false
+    }
+    var a_rst: [u8; 24] = "settings.reset.settings\0"
+    var a_rsy: [u8; 22] = "settings.reset.system\0"
+    var a_rss: [u8; 22] = "settings.reset.status\0"
+    if actwire.str_eq(np, (&a_rst[0 as usize]) as u64) {
+        do_reset_settings(dry)
+        return false
+    }
+    if actwire.str_eq(np, (&a_rsy[0 as usize]) as u64) {
+        do_reset_system(msg, dry)
+        return false
+    }
+    if actwire.str_eq(np, (&a_rss[0 as usize]) as u64) {
+        do_reset_status()
         return false
     }
     var a_ust: [u8; 23] = "settings.update.status\0"

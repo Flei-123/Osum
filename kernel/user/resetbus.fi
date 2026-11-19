@@ -1,0 +1,111 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import instaccount
+import libc.errno
+import libc.fileops
+
+export { alive, start_settings, start_system, read_state, secret_path, OK, E_BUSY, E_EXEC, E_NAME, E_SECRET }
+
+const OK: u64 = 0
+const E_BUSY: u64 = 1
+const E_EXEC: u64 = 2
+const E_NAME: u64 = 3
+const E_SECRET: u64 = 4
+const SLOTS: u64 = 32
+const STATE_DONE: u64 = 5
+
+static mut child_pid: u64 = 0
+static mut name_buf: [u8; 40] = [0 as u8; 40]
+static mut argv: [u64; 12] = [0 as u64; 12]
+static mut p_resetsys: [u8; 14] = "/bin/resetsys\0"
+static mut w_resetsys: [u8; 9] = "resetsys\0"
+static mut w_settings: [u8; 9] = "settings\0"
+static mut w_system: [u8; 7] = "system\0"
+static mut w_name: [u8; 7] = "--name\0"
+static mut w_confirm: [u8; 10] = "--confirm\0"
+static mut w_word: [u8; 6] = "RESET\0"
+static mut w_ja: [u8; 5] = "--ja\0"
+static mut w_passfile: [u8; 12] = "--pass-file\0"
+static mut w_reboot: [u8; 9] = "--reboot\0"
+static mut p_secret: [u8; 18] = "/run/reset.secret\0"
+static mut p_state: [u8; 17] = "/run/reset.state\0"
+
+fn secret_path() -> u64 {
+    return (&p_secret[0]) as u64
+}
+
+fn alive() -> bool {
+    if child_pid == 0 {
+        return false
+    }
+    var i: u64 = 0
+    while i < SLOTS {
+        let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if !ulib.bad(st) && st != 0 && ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PID, 0) == child_pid {
+            if st == STATE_DONE {
+                ulib.wait_code(child_pid)
+                child_pid = 0
+                return false
+            }
+            return true
+        }
+        i = i + 1
+    }
+    child_pid = 0
+    return false
+}
+
+fn spawn(argc: u64) -> u64 {
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&p_resetsys[0]) as u64, (&argv[0]) as u64, argc)
+    if ulib.bad(pid) {
+        return E_EXEC
+    }
+    child_pid = pid
+    return OK
+}
+
+fn start_settings() -> u64 {
+    if alive() {
+        return E_BUSY
+    }
+    argv[0] = (&w_resetsys[0]) as u64
+    argv[1] = (&w_settings[0]) as u64
+    argv[2] = (&w_ja[0]) as u64
+    return spawn(3)
+}
+
+fn start_system(name: u64) -> u64 {
+    if alive() {
+        return E_BUSY
+    }
+    if !instaccount.name_ok(name) {
+        return E_NAME
+    }
+    if !fileops.exists((&p_secret[0]) as u64) {
+        return E_SECRET
+    }
+    argv[0] = (&w_resetsys[0]) as u64
+    argv[1] = (&w_system[0]) as u64
+    argv[2] = (&w_name[0]) as u64
+    ulib.strcpy((&name_buf[0]) as u64, name)
+    argv[3] = (&name_buf[0]) as u64
+    argv[4] = (&w_confirm[0]) as u64
+    argv[5] = (&w_word[0]) as u64
+    argv[6] = (&w_ja[0]) as u64
+    argv[7] = (&w_passfile[0]) as u64
+    argv[8] = (&p_secret[0]) as u64
+    argv[9] = (&w_reboot[0]) as u64
+    return spawn(10)
+}
+
+fn read_state(out: u64, cap: u64) -> bool {
+    __mmio_write8(out as *mut u8, 0 as u8)
+    let n: u64 = fileops.read_all((&p_state[0]) as u64, out, cap - 1)
+    if errno.failed(n) {
+        return false
+    }
+    __mmio_write8((out + n) as *mut u8, 0 as u8)
+    return n > 0
+}
