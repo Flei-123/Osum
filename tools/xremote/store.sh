@@ -54,7 +54,7 @@ stage() {
     cp "$HOSTBIN" "$dir/bau/freeviewer-host"
     cp "$LIBS/lib/ld-musl-x86_64.so.1" "$dir/bau/ld-musl-x86_64.so.1"
     cp "$LIBS/usr/lib/libgcc_s.so.1" "$dir/bau/libgcc_s.so.1"
-    python3 tools/k15/icon.py pakete/xremote/symbol.txt "$dir/bau/symbol" > /dev/null
+    python3 tools/k15/mksymbol.py pakete/xremote "$dir/bau/symbol" > /dev/null
     (cd "$dir" && python3 "$OPK" bauen rezept -o "$dir/xremote-$version.opk") > "$dir/build.log" 2>&1
     [ -s "$dir/xremote-$version.opk" ]
 }

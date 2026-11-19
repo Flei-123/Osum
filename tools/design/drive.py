@@ -653,11 +653,22 @@ class Fahrer:
                 return None
             return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
+        def row_rect(n, x, y, w):
+            r = last_2(r"menu: rows zh=(\d+) ys=([0-9,]+)")
+            if r is None:
+                return None
+            ys = [int(v) for v in r.group(2).split(",")]
+            if n >= len(ys):
+                return None
+            return (x + 6, y + ys[n], max(8, w - 12), int(r.group(1)))
         if name.startswith("dmenue"):
             n = int(name[6:])
             m = last_2(r"desktop: context open x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
                 return None
+            rr = row_rect(n, int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            if rr:
+                return rr
             zh = (int(m.group(4)) - 4) // 4
             return (int(m.group(1)) + 6, int(m.group(2)) + 2 + n * zh, max(8, int(m.group(3)) - 12), zh)
         if name.startswith("bmenue"):
@@ -665,6 +676,9 @@ class Fahrer:
             m = last_2(r"taskbar: context empty x=(\d+) y=(\d+) w=(\d+) h=(\d+) n=(\d+)")
             if m is None:
                 return None
+            rr = row_rect(n, int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            if rr:
+                return rr
             zh = (int(m.group(4)) - 4) // int(m.group(5))
             return (int(m.group(1)) + 6, int(m.group(2)) + 2 + n * zh, max(8, int(m.group(3)) - 12), zh)
         if name.startswith("jmenue"):
@@ -672,6 +686,9 @@ class Fahrer:
             m = last_2(r"taskbar: jumplist n=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
                 return None
+            rr = row_rect(n, int(m.group(2)), int(m.group(3)), int(m.group(4)))
+            if rr:
+                return rr
             zh = (int(m.group(5)) - 4) // int(m.group(1))
             return (int(m.group(2)) + 6, int(m.group(3)) + 2 + n * zh, max(8, int(m.group(4)) - 12), zh)
         if name.startswith("emenue"):
@@ -679,6 +696,9 @@ class Fahrer:
             m = last_2(r"explorer: menurect wx=(\d+) wy=(\d+) wh=(\d+)(?: zh=(\d+))?")
             if m is None:
                 return None
+            rr = row_rect(n, int(m.group(1)) + 2, int(m.group(2)), 100)
+            if rr:
+                return rr
             zh = int(m.group(4)) if m.group(4) else 20
             return (int(m.group(1)) + 8, int(m.group(2)) + 4 + n * zh, 90, zh)
         if name == "qsalle":

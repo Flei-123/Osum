@@ -1,0 +1,386 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import fui.painter
+import fui.render
+import fui.style
+import fui.theme
+import fuiapp
+import fuiapp.hostkey
+import libc.text
+import lineout
+import uikit.menuicons
+import uikit.uiscale
+import fuiscene.fsbase
+import fuiscene.fscore
+
+const ROW_PT: u64 = 36
+const ROW_COMPACT_PT: u64 = 28
+const SEPARATOR_PT: u64 = 9
+const PAD_PT: u64 = 4
+const HEAD_PT: u64 = 48
+const HEAD_ICON_PT: u64 = 40
+const ICON_PT: u64 = 16
+const ICON_X_PT: u64 = 16
+const TEXT_X_ICON_PT: u64 = 44
+const TEXT_X_BARE_PT: u64 = 16
+const TEXT_PAD_RIGHT_PT: u64 = 20
+const MIN_W_PT: u64 = 200
+const SHADOW_PT: u64 = 10
+const LABEL_H_PT: u64 = 24
+
+static mut t_rows: [u8; 16] = "menu: rows zh=\0\0"
+static mut t_ys: [u8; 5] = " ys=\0"
+static mut t_comma: [u8; 2] = ",\0"
+static mut head_text: u64 = 0
+static mut head_word: u64 = 0
+static mut row_compact: u64 = 0
+static mut parsed_sep: u64 = 0
+static mut parsed_icon: u64 = 0
+
+fn shadow() -> u64 {
+    return fscore.sp(SHADOW_PT)
+}
+
+fn set_head(label: u64, word: u64) {
+    head_text = label
+    head_word = word
+}
+
+fn row_h() -> u64 {
+    if row_compact != 0 {
+        return fscore.sp(ROW_COMPACT_PT)
+    }
+    return fscore.sp(ROW_PT)
+}
+
+fn head_h() -> u64 {
+    if head_text == 0 {
+        return 0
+    }
+    return fscore.sp(HEAD_PT)
+}
+
+fn parse(i: u64) -> u64 {
+    var p: u64 = fsbase.S.s_pop_items
+    var k: u64 = 0
+    while k < i {
+        p = p + text.length(p) + 1
+        k = k + 1
+    }
+    parsed_sep = 0
+    parsed_icon = 0
+    var more: bool = true
+    while more {
+        let c: u64 = __mmio_read8(p as *mut u8) as u64
+        if c == menuicons.MARK_SEPARATOR {
+            parsed_sep = 1
+            p = p + 1
+        } else if c == menuicons.MARK_ICON {
+            parsed_icon = (__mmio_read8((p + 1) as *mut u8) as u64) - menuicons.ICON_ID_BASE
+            p = p + 2
+        } else {
+            more = false
+        }
+    }
+    return p
+}
+
+fn has_icons() -> bool {
+    var k: u64 = 0
+    while k < fsbase.S.s_pop_n {
+        let _p: u64 = parse(k)
+        if parsed_icon != 0 {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+fn text_x() -> u64 {
+    if has_icons() {
+        return fscore.sp(TEXT_X_ICON_PT)
+    }
+    return fscore.sp(TEXT_X_BARE_PT)
+}
+
+fn card_h() -> u64 {
+    var total: u64 = fscore.sp(PAD_PT) * 2 + head_h() + fsbase.S.s_pop_n * row_h()
+    var k: u64 = 0
+    while k < fsbase.S.s_pop_n {
+        let _p: u64 = parse(k)
+        if parsed_sep != 0 && k > 0 {
+            total = total + fscore.sp(SEPARATOR_PT)
+        }
+        k = k + 1
+    }
+    return total
+}
+
+fn row_top(i: u64) -> u64 {
+    var top: u64 = fscore.sp(PAD_PT) + head_h()
+    var k: u64 = 0
+    while k <= i {
+        let _p: u64 = parse(k)
+        if parsed_sep != 0 && k > 0 {
+            top = top + fscore.sp(SEPARATOR_PT)
+        }
+        if k < i {
+            top = top + row_h()
+        }
+        k = k + 1
+    }
+    return top
+}
+
+fn fit_w(given: u64) -> u64 {
+    var best: u64 = fscore.sp(MIN_W_PT)
+    if given > best {
+        best = given
+    }
+    let tx: u64 = text_x()
+    var k: u64 = 0
+    while k < fsbase.S.s_pop_n {
+        let label: u64 = parse(k)
+        let tw: u64 = fscore.text_width(label, uiscale.px_ui()) + tx + fscore.sp(TEXT_PAD_RIGHT_PT)
+        if tw > best {
+            best = tw
+        }
+        k = k + 1
+    }
+    if head_text != 0 {
+        let hw: u64 = fscore.text_width(head_text, uiscale.px_ui()) + fscore.sp(HEAD_ICON_PT + 32)
+        if hw > best {
+            best = hw
+        }
+    }
+    return best
+}
+
+fn menu_is_open() -> bool {
+    return fsbase.S.s_pop_open
+}
+
+fn menu_open(x: u64, y: u64, w: u64, items: u64, n: u64) {
+    fsbase.S.s_pop_open = true
+    fsbase.S.s_pop_items = items
+    fsbase.S.s_pop_n = n
+    row_compact = 0
+    if card_h() + fscore.sp(PAD_PT) * 2 > fuiapp.height() {
+        row_compact = 1
+    }
+    let width: u64 = fit_w(w)
+    let ph: u64 = card_h()
+    var px: u64 = x
+    var py: u64 = y
+    if px + width > fuiapp.width() {
+        if fuiapp.width() > width {
+            px = fuiapp.width() - width
+        } else {
+            px = 0
+        }
+    }
+    if py + ph > fuiapp.height() {
+        if fuiapp.height() > ph {
+            py = fuiapp.height() - ph
+        } else {
+            py = 0
+        }
+    }
+    fsbase.S.s_pop_x = px
+    fsbase.S.s_pop_y = py
+    fsbase.S.s_pop_w = width
+    fsbase.S.s_pop_hot = fsbase.NO_SLOT
+    fsbase.S.s_pop_pick = 0
+    say_rows()
+    fscore.touch()
+}
+
+fn say_rows() {
+    let _a: u64 = lineout.add_text((&t_rows[0 as usize]) as u64)
+    lineout.add_num(row_h())
+    let _b: u64 = lineout.add_text((&t_ys[0 as usize]) as u64)
+    var k: u64 = 0
+    while k < fsbase.S.s_pop_n {
+        if k > 0 {
+            let _c: u64 = lineout.add_text((&t_comma[0 as usize]) as u64)
+        }
+        lineout.add_num(row_top(k))
+        k = k + 1
+    }
+    lineout.end_line()
+}
+
+fn menu_x() -> u64 {
+    return fsbase.S.s_pop_x
+}
+
+fn menu_y() -> u64 {
+    return fsbase.S.s_pop_y
+}
+
+fn menu_w() -> u64 {
+    return fsbase.S.s_pop_w
+}
+
+fn menu_h() -> u64 {
+    return card_h()
+}
+
+fn menu_close() {
+    head_text = 0
+    head_word = 0
+    if fsbase.S.s_pop_open {
+        fsbase.S.s_pop_open = false
+        fscore.touch()
+    }
+}
+
+fn menu_pick() -> u64 {
+    let p: u64 = fsbase.S.s_pop_pick
+    fsbase.S.s_pop_pick = 0
+    return p
+}
+
+fn row_at(x: u64, y: u64) -> u64 {
+    let side: u64 = fscore.sp(PAD_PT)
+    if x < fsbase.S.s_pop_x + side || x >= fsbase.S.s_pop_x + fsbase.S.s_pop_w - side {
+        return fsbase.NO_SLOT
+    }
+    var k: u64 = 0
+    while k < fsbase.S.s_pop_n {
+        let top: u64 = fsbase.S.s_pop_y + row_top(k)
+        if y >= top && y < top + row_h() {
+            return k
+        }
+        k = k + 1
+    }
+    return fsbase.NO_SLOT
+}
+
+fn draw_separator(x: u64, y: u64, w: u64) {
+    let z: *mut painter.Painter = render.ctx_painter(fuiapp.ctx())
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    painter.round_rect(z, (x + fscore.sp(12)) as f64, y as f64, (w - fscore.sp(24)) as f64,
+        fscore.spf(1.0), 0.0, (*t).separator | 4278190080 as u32)
+}
+
+fn draw_head() {
+    if head_text == 0 {
+        return
+    }
+    let x: u64 = fsbase.S.s_pop_x
+    let y: u64 = fsbase.S.s_pop_y + fscore.sp(PAD_PT)
+    let hh: u64 = head_h()
+    if head_word != 0 {
+        fscore.row_icon(head_word, x + fscore.sp(ICON_X_PT - 4), y + (hh - fscore.sp(HEAD_ICON_PT)) / 2,
+            fscore.sp(HEAD_ICON_PT), 0, false)
+    }
+    fscore.text_tok(x + fscore.sp(TEXT_X_ICON_PT + 4), y + (hh - fscore.sp(LABEL_H_PT)) / 2 - fscore.sp(1),
+        fsbase.S.s_pop_w - fscore.sp(TEXT_X_ICON_PT + 12), head_text, style.TOK_TEXT)
+    draw_separator(x, y + hh - fscore.sp(1), fsbase.S.s_pop_w)
+}
+
+fn draw_row(k: u64, tx: u64) {
+    let z: *mut painter.Painter = render.ctx_painter(fuiapp.ctx())
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    let label: u64 = parse(k)
+    let top: u64 = fsbase.S.s_pop_y + row_top(k)
+    let side: u64 = fscore.sp(PAD_PT)
+    let x: u64 = fsbase.S.s_pop_x
+    if parsed_sep != 0 && k > 0 {
+        draw_separator(x, top - fscore.sp(SEPARATOR_PT) / 2, fsbase.S.s_pop_w)
+    }
+    if k == fsbase.S.s_pop_hot {
+        painter.round_rect(z, (x + side) as f64, top as f64, (fsbase.S.s_pop_w - side * 2) as f64,
+            row_h() as f64, fscore.spf(4.0), (*t).button_hover | 4278190080 as u32)
+    }
+    if parsed_icon != 0 {
+        fuiapp.glyph(menuicons.codepoint(parsed_icon), x + fscore.sp(ICON_X_PT),
+            top + (row_h() - fscore.sp(ICON_PT)) / 2, fscore.sp(ICON_PT), (*t).text | 4278190080 as u32)
+    }
+    fscore.text_tok(x + tx, top + (row_h() - fscore.sp(LABEL_H_PT)) / 2 - fscore.sp(1),
+        fsbase.S.s_pop_w - tx - fscore.sp(8), label, style.TOK_TEXT)
+}
+
+fn pop_paint() {
+    fuiapp.panel(fsbase.S.s_pop_x, fsbase.S.s_pop_y, fsbase.S.s_pop_w, card_h())
+    draw_head()
+    let tx: u64 = text_x()
+    var k: u64 = 0
+    while k < fsbase.S.s_pop_n {
+        draw_row(k, tx)
+        k = k + 1
+    }
+}
+
+fn move_hot(to: u64) {
+    if to != fsbase.S.s_pop_hot {
+        fsbase.S.s_pop_hot = to
+        fscore.touch()
+    }
+}
+
+fn step_hot(down: bool) {
+    let n: u64 = fsbase.S.s_pop_n
+    let hot: u64 = fsbase.S.s_pop_hot
+    if hot == fsbase.NO_SLOT {
+        if down {
+            move_hot(0)
+        } else {
+            move_hot(n - 1)
+        }
+        return
+    }
+    if down {
+        move_hot((hot + 1) % n)
+    } else {
+        move_hot((hot + n - 1) % n)
+    }
+}
+
+fn finish(pick: u64) -> u64 {
+    fsbase.S.s_pop_open = false
+    fscore.touch()
+    if pick == fsbase.NO_SLOT {
+        return 0
+    }
+    fsbase.S.s_pop_pick = pick + 1
+    return fscore.KEY_POPUP
+}
+
+fn pop_key(key: u64) -> u64 {
+    if key == hostkey.KEY_ESC {
+        return finish(fsbase.NO_SLOT)
+    }
+    if key == hostkey.KEY_DOWN {
+        step_hot(true)
+    } else if key == hostkey.KEY_UP {
+        step_hot(false)
+    } else if key == hostkey.KEY_HOME {
+        move_hot(0)
+    } else if key == hostkey.KEY_END {
+        move_hot(fsbase.S.s_pop_n - 1)
+    } else if key == hostkey.KEY_ENTER {
+        return finish(fsbase.S.s_pop_hot)
+    }
+    return 0
+}
+
+fn pop_event(e: *mut fuiapp.Ev) -> u64 {
+    let ev: fuiapp.Ev = *e
+    if ev.kind == fuiapp.EV_MOVE {
+        let r: u64 = row_at(ev.x, ev.y)
+        if r != fsbase.NO_SLOT {
+            move_hot(r)
+        }
+        return 0
+    }
+    if ev.kind == fuiapp.EV_DOWN {
+        return finish(row_at(ev.x, ev.y))
+    }
+    if ev.kind == fuiapp.EV_KEY {
+        return pop_key(ev.key)
+    }
+    return 0
+}

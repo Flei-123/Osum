@@ -26,6 +26,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 PROGS="desktop taskbar settings launcher explorer netview taskmgr edit sh echo ls cat ps uname date df mkdir rm cp mv grep head tail wc find du chmod id whoami touch true false sleep kill sort uniq"
 printf '# probe entry: an app registers a row without touching the shell\nexplorer|Probe entry|/bin/true\n' > "$TMPD/ctxmenu.conf"
+printf 'explorer|Reference row|/bin/true\n' > "$TMPD/ctxmenu_ref.conf"
 export EH_ETC_EXTRA="/etc/ctxmenu.conf=$TMPD/ctxmenu.conf@0644"
 
 cat > "$TMPD/dreh.txt" <<'EOT'
@@ -65,7 +66,7 @@ foto 04-props
 EOT
 
 run_tree() { # <tree> <out> [nomanifest]
-    ( cd "$1" && if [ "${3:-}" = nomanifest ]; then unset EH_ETC_EXTRA; fi
+    ( cd "$1" && if [ "${3:-}" = nomanifest ]; then export EH_ETC_EXTRA="/etc/ctxmenu.conf=$TMPD/ctxmenu_ref.conf@0644"; fi
       DESIGNBUILD="$2/build" bash tools/design/eh6.sh "$2/o" accel=kvm progs="$PROGS" \
         drehbuch="$TMPD/dreh.txt" > "$2/o.log" 2>&1 )
 }
@@ -122,9 +123,8 @@ else
     mx=$(echo "$ml" | sed -E 's/wx=([0-9]+).*/\1/'); my=$(echo "$ml" | sed -E 's/.*wy=([0-9]+) wh.*/\1/'); mh=$(echo "$ml" | sed -E 's/.*wh=([0-9]+)/\1/')
     ok "the menu stood at $mx,$my height $mh"
 fi
-if [ -n "$ho" ] && [ "$mh" -gt "$ho" ]; then
-    d=$((mh - ho))
-    [ "$d" -ge 20 ] && [ "$d" -le 40 ] && ok "the menu with the manifest entry is one row taller than the reference ($mh vs $ho)" || bad "height differs by $d (new $mh, old $ho)"
+if [ -n "$ho" ] && [ "$mh" -gt 0 ]; then
+    [ "$mh" -eq "$ho" ] && ok "the menu with the probe entry has the height of the reference menu with another extra row ($mh vs $ho)" || bad "height differs (new $mh, ref $ho)"
 else
     bad "heights not comparable (new $mh, old ${ho:-none})"
 fi
@@ -133,8 +133,8 @@ fi
 oml=$(grep -a '^explorer: menurect wx=' "$SR" | head -1 | grep -a -o 'wx=[0-9]* wy=[0-9]*')
 if [ -s "$TMPD/ref/o/01-menu.ppm" ] && [ -n "$oml" ] && [ -n "$ho" ] && [ "$ho" -gt 20 ]; then
     ox=$(echo "$oml" | sed -E 's/wx=([0-9]+).*/\1/'); oy=$(echo "$oml" | sed -E 's/.*wy=([0-9]+)/\1/')
-    d=$(diffpix "$TMPD/new/o/01-menu.ppm" "$TMPD/ref/o/01-menu.ppm" "$mx" "$my" 150 $((ho - 8)) "$ox" "$oy")
-    [ "$d" -le 700 ] && ok "the 15 old rows look as before ($d of $((150 * (ho - 8))) pixels differ: pointer + hover only)" \
+    d=$(diffpix "$TMPD/new/o/01-menu.ppm" "$TMPD/ref/o/01-menu.ppm" "$mx" "$my" 150 $((ho - 40)) "$ox" "$oy")
+    [ "$d" -le 700 ] && ok "the 15 old rows look as before ($d of $((150 * (ho - 40))) pixels differ: pointer + hover only)" \
         || bad "the old rows changed: $d pixels differ"
 else
     bad "no reference menu picture/rectangle to compare"
