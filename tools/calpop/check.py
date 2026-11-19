@@ -78,7 +78,7 @@ try:
     b0, b1 = blue("00-bar"), blue("01-open")
     say(b1 >= 300 and b0 < 50, "the open picture shows the accent plate of today inside the card (%d blue px, %d before)" % (b1, b0))
     say(blue("06-closed") < 50, "after the closes the accent plate is gone (%d blue px)" % blue("06-closed"))
-    cal_top = py + ph - 450 * max(pw // 394, 1)
+    cal_top = py + ph - 450 * max(pw // 376, 1)
     say(region_diff("01-open", "02-next", cal_top) >= 3, "next month repaints the grid (%d %% differs)" % region_diff("01-open", "02-next", cal_top))
     wa, ha, da = load_ppm(os.path.join(out, "01-open.ppm"))
     say(wa == W and ha == H, "picture size %dx%d" % (wa, ha))
@@ -118,7 +118,7 @@ def ink(name, y0, y1):
             o = (yy * wa + xx) * 3
             if max(abs(da[o + c] - base[c]) for c in range(3)) > 90: n += 1
     return n
-sk_ = max(pw // 394, 1)
+sk_ = max(pw // 376, 1)
 pad, gap, add_h, ct_h, ev_h = 10 * sk_, 4 * sk_, 36 * sk_, 26 * sk_, 26 * sk_
 ct_y1 = py + ph - pad - add_h - gap
 ct_y0 = ct_y1 - ct_h
