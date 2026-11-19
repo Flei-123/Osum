@@ -6,6 +6,8 @@ import libc.io
 export { log_mark, wayd_ready }
 
 const READ_MAX: u64 = 4000
+const READ_STEP: u64 = 3900
+const SCAN_WINDOWS: u64 = 64
 
 fn log_mark(log: u64) -> u64 {
     let size: u64 = io.size_of(log)
@@ -15,19 +17,41 @@ fn log_mark(log: u64) -> u64 {
     return size
 }
 
+fn window_has(fd: u64, at: u64, needle: u64) -> u64 {
+    var buf: [u8; 4096] = [0 as u8; 4096]
+    ulib.sys(ulib.SYS_SEEK, fd, at, 0)
+    let got: u64 = ulib.sys(ulib.SYS_READ, fd, (&buf[0 as usize]) as u64, READ_MAX)
+    if ulib.bad(got) || got == 0 {
+        return 0
+    }
+    buf[got as usize] = 0 as u8
+    if ulib.find((&buf[0 as usize]) as u64, needle) != ulib.EOF {
+        return 1
+    }
+    if got < READ_MAX {
+        return 0
+    }
+    return 2
+}
+
 fn wayd_ready(log: u64, mark: u64) -> bool {
     var needle: [u8; 16] = "wayd: ready on \0"
-    var buf: [u8; 4096] = [0 as u8; 4096]
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, log, 0, 0)
     if ulib.bad(fd) {
         return false
     }
-    ulib.sys(ulib.SYS_SEEK, fd, mark, 0)
-    var got: u64 = ulib.sys(ulib.SYS_READ, fd, (&buf[0 as usize]) as u64, READ_MAX)
-    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
-    if ulib.bad(got) || got == 0 {
-        return false
+    var found: bool = false
+    var w: u64 = 0
+    while w < SCAN_WINDOWS {
+        let r: u64 = window_has(fd, mark + w * READ_STEP, (&needle[0 as usize]) as u64)
+        if r == 1 {
+            found = true
+        }
+        if r != 2 {
+            w = SCAN_WINDOWS
+        }
+        w = w + 1
     }
-    buf[got as usize] = 0 as u8
-    return ulib.find((&buf[0 as usize]) as u64, (&needle[0 as usize]) as u64) != ulib.EOF
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return found
 }
