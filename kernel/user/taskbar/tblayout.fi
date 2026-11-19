@@ -14,6 +14,7 @@ import uikit.uitext
 import ulib
 import uitheme
 import taskbar.tbbase
+import fui.trayslots
 import taskbar.tbmetrics
 import taskbar.tbstatus
 import taskbar.tblog
@@ -137,6 +138,24 @@ fn shorten_title(i: u64, width: u64) {
     tbstatus.copy_n(z, q, n)
 }
 
+fn next_field(f: u64) -> u64 {
+    if f == tbbase.F_CLK {
+        return tbmetrics.slot_field(trayslots.slot_at(0))
+    }
+    let slot: u64 = tbmetrics.field_slot(f)
+    if slot != 0 {
+        let pos: usize = trayslots.slot_pos(slot) + 1
+        if pos < trayslots.SLOT_COUNT {
+            return tbmetrics.slot_field(trayslots.slot_at(pos))
+        }
+        return tbbase.F_LANG
+    }
+    if f == tbbase.F_LANG {
+        return tbbase.F_REM
+    }
+    return tbbase.F_N
+}
+
 fn layout() {
     var i: u64 = 0
     tbbase.tv_w = 0
@@ -164,18 +183,27 @@ fn layout() {
             } else if f == tbbase.F_NET && tbmetrics.glyphs_ok() {
                 vroom = tbmetrics.tr_icx()
             }
-            if (f == tbbase.F_BAT || f == tbbase.F_SND || f == tbbase.F_NOTI) && tbmetrics.glyphs_ok() {
+            if (f == tbbase.F_BAT || f == tbbase.F_SND || f == tbbase.F_MIC) && tbmetrics.glyphs_ok() {
                 vroom = tbmetrics.tr_icx()
             }
             if f == tbbase.F_NET && tbmetrics.sys_icon() != 0 {
                 vroom = vroom + tbmetrics.mk_w() + 2
             }
-            if tbmetrics.tlen(tbmetrics.full_of(f)) == 0 {
+            if tbmetrics.field_none(f) {
                 tbbase.f_x[(f) as usize] = tbmetrics.pad()
                 tbbase.f_y[(f) as usize] = y
                 tbbase.f_w[(f) as usize] = 0
                 tbbase.f_h[(f) as usize] = 0
                 tbbase.f_lines[(f) as usize] = 0
+            } else if f == tbbase.F_MIC {
+                let cell: u64 = tbmetrics.tr_cell()
+                y = y - tbmetrics.btn_h()
+                tbbase.f_x[(f) as usize] = tbmetrics.pad() + (inner - cell) / 2
+                tbbase.f_y[(f) as usize] = y
+                tbbase.f_w[(f) as usize] = cell
+                tbbase.f_h[(f) as usize] = tbmetrics.btn_h()
+                tbbase.f_lines[(f) as usize] = 0
+                y = y - tbmetrics.gap()
             } else {
             fit_field(f, inner - 8 - vroom)
             let hh: u64 = tbbase.f_lines[(f) as usize] * tbmetrics.line_h() + 4
@@ -187,21 +215,7 @@ fn layout() {
             y = y - tbmetrics.gap()
             }
 
-            if f == tbbase.F_CLK {
-                f = tbbase.F_BAT
-            } else if f == tbbase.F_BAT {
-                f = tbbase.F_SND
-            } else if f == tbbase.F_SND {
-                f = tbbase.F_NET
-            } else if f == tbbase.F_NET {
-                f = tbbase.F_LANG
-            } else if f == tbbase.F_LANG {
-                f = tbbase.F_NOTI
-            } else if f == tbbase.F_NOTI {
-                f = tbbase.F_REM
-            } else {
-                f = tbbase.F_N
-            }
+            f = next_field(f)
         }
 
         let top: u64 = tbbase.st_y + tbbase.st_h + tbmetrics.gap()
@@ -265,7 +279,7 @@ fn layout() {
 
             room = tbmetrics.tr_icx()
         }
-        if (f == tbbase.F_BAT || f == tbbase.F_SND || f == tbbase.F_NOTI) && tbmetrics.glyphs_ok() {
+        if (f == tbbase.F_BAT || f == tbbase.F_SND || f == tbbase.F_MIC) && tbmetrics.glyphs_ok() {
 
             room = tbmetrics.tr_icx()
         }
@@ -279,8 +293,8 @@ fn layout() {
 
         }
 
-        if tbmetrics.tlen(tbmetrics.full_of(f)) != 0 && tbstatus.compact() && (f == tbbase.F_NET || f == tbbase.F_SND)
-            && (room != 0 || (f == tbbase.F_SND && tbmetrics.glyphs_ok())) {
+        if !tbmetrics.field_none(f) && ((tbstatus.compact() && (f == tbbase.F_NET || f == tbbase.F_SND)) || f == tbbase.F_MIC)
+            && (room != 0 || (f == tbbase.F_SND && tbmetrics.glyphs_ok()) || f == tbbase.F_MIC) {
 
             let w3: u64 = tbmetrics.tr_cell()
             x = x - w3
@@ -290,7 +304,7 @@ fn layout() {
             tbbase.f_h[(f) as usize] = tbmetrics.btn_h()
             tbbase.f_lines[(f) as usize] = 0
             x = x - gg
-        } else if tbmetrics.tlen(tbmetrics.full_of(f)) == 0 {
+        } else if tbmetrics.field_none(f) {
             tbbase.f_x[(f) as usize] = x
             tbbase.f_y[(f) as usize] = tbbase.st_y
             tbbase.f_w[(f) as usize] = 0
@@ -303,9 +317,13 @@ fn layout() {
         if f == tbbase.F_CLK || f == tbbase.F_LANG {
             padx = 2 * tbmetrics.fld_pad()
         }
-        var ww: u64 = tbmetrics.width_of(tbmetrics.line_of(f, 0)) + padx + room
+        var extra: u64 = 0
+        if f == tbbase.F_CLK {
+            extra = tbmetrics.clk_badge_w()
+        }
+        var ww: u64 = tbmetrics.width_of(tbmetrics.line_of(f, 0)) + padx + room + extra
         if tbbase.f_lines[(f) as usize] > 1 {
-            let w1: u64 = tbmetrics.width_of(tbmetrics.line_of(f, 1)) + padx + room
+            let w1: u64 = tbmetrics.width_of(tbmetrics.line_of(f, 1)) + padx + room + extra
             if w1 > ww {
                 ww = w1
             }
@@ -318,21 +336,7 @@ fn layout() {
         tbbase.f_h[(f) as usize] = tbmetrics.btn_h()
         x = x - gg
         }
-        if f == tbbase.F_CLK {
-            f = tbbase.F_BAT
-        } else if f == tbbase.F_BAT {
-            f = tbbase.F_SND
-        } else if f == tbbase.F_SND {
-            f = tbbase.F_NET
-        } else if f == tbbase.F_NET {
-            f = tbbase.F_LANG
-        } else if f == tbbase.F_LANG {
-            f = tbbase.F_NOTI
-        } else if f == tbbase.F_NOTI {
-            f = tbbase.F_REM
-        } else {
-            f = tbbase.F_N
-        }
+        f = next_field(f)
     }
 
     if tbbase.cf_group != 0 {
@@ -392,7 +396,7 @@ fn layout() {
         pw = pw + 1
     }
 
-    if tbbase.cf_chev != 0 {
+    if tbbase.cf_chev != 0 || trayslots.over_count() != 0 {
 
         var cw: u64 = tbmetrics.tr_cell()
         if cw > tbmetrics.btn_h() {

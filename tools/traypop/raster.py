@@ -44,6 +44,18 @@ def raster_ok(tiles, ow, oh):
     return True, "%d tiles %dx%d, rows y=%s, x=%s" % (len(tiles), sz[0], sz[1], ys, sorted(xs0))
 
 
+GRID_COLUMNS = 5
+
+
+def columns_ok(tiles, cols):
+    rows = {}
+    for t in tiles.values():
+        rows.setdefault(t[1], []).append(t[0])
+    widest = max(len(r) for r in rows.values())
+    first = len(rows[min(rows)])
+    return widest == cols and first == cols
+
+
 def ink_box(W, px, x, y, w, h):
     cnt = {}
     for yy in range(y, y + h):
@@ -111,6 +123,9 @@ def main():
             say(not okb, "COUNTER: a tile moved by 2 px is caught")
         else:
             say(True, "COUNTER skipped (2 tiles have no pitch to break)")
+    if ok and len(tiles) > GRID_COLUMNS:
+        say(columns_ok(tiles, GRID_COLUMNS), "%d tiles: %d columns, the first row is full" % (len(tiles), GRID_COLUMNS))
+        say(not columns_ok(tiles, GRID_COLUMNS - 1), "COUNTER: a %d-column grid does not fit these tiles" % (GRID_COLUMNS - 1))
     if len(tiles) < 2:
         return
     W, H, op = load(p_open)

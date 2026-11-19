@@ -19,7 +19,7 @@ if FIRNLIB="$PWD/lib" "$FIRNC" --profile=kernel -c tools/tray/kcheck.fi -o "$T/k
 else
     echo "FAIL  fui.tray does not compile in profile kernel"; grep -v '^warning' "$T/kcheck.build" | head -20; rc=1
 fi
-for p in hub_host host; do
+for p in hub_host host slots_host; do
     FIRNLIB="$PWD/lib" "$FIRNC" --profile=app tools/tray/$p.fi -o "$T/$p" > "$T/$p.build" 2>&1 \
         || { echo "FAIL  build $p"; grep -v '^warning' "$T/$p.build" | head -20; rc=1; continue; }
     "$T/$p" > "$T/$p.out"; prc=$?

@@ -5,13 +5,18 @@ import re
 import sys
 
 out = sys.argv[1]
-mutant = len(sys.argv) > 2 and sys.argv[2] == "mutant"
+mode = sys.argv[2] if len(sys.argv) > 2 else ""
+mutant = mode == "mutant"
+layer_mutant = mode == "layer"
 serial = open(os.path.join(out, "serial.txt"), "rb").read().decode("latin1").split("\n")
 ok = bad = 0
 
 
-def check(cond, message):
+def check(cond, message, final=False):
     global ok, bad
+    if layer_mutant and not final:
+        print("  INFO  baseline %s: %s" % ("ok" if cond else "fail", message))
+        return
     if cond:
         ok += 1
         print("  OK    " + message)
@@ -66,6 +71,31 @@ def lines(pattern):
 def num(line, key):
     m = re.search(key + r"=(\d+)", line)
     return int(m[1]) if m else -1
+
+
+COVER_MIN_PERCENT = 30
+
+
+def cover_percent(base, shot, box):
+    if base is None or shot is None:
+        return -1
+    width = base[0]
+    total = diff = 0
+    for y in range(box[1], box[3], 2):
+        for x in range(box[0], box[2], 2):
+            o = (y * width + x) * 3
+            total += 1
+            if base[2][o:o + 3] != shot[2][o:o + 3]:
+                diff += 1
+    return diff * 100 // max(total, 1)
+
+
+def start_menu_case():
+    cards = lines(r"taskview: preview n=")
+    last = cards[-1] if cards else ""
+    cx, cy, cw, ch = (num(last, k) for k in ("x", "y", "w", "h"))
+    percent = cover_percent(load("b0-start"), load("b1-over-start"), (cx, cy, cx + cw, cy + ch)) if cx >= 0 else -1
+    return percent
 
 
 previews = lines(r"taskview: preview n=")
@@ -126,4 +156,9 @@ gaps.sort()
 median = gaps[len(gaps) // 2] if gaps else -1
 print("  INFO  pop animation frame gaps: median %d ms, max %d ms (%d gaps)" % (median, gaps[-1] if gaps else -1, len(gaps)))
 check(0 < median <= 17, "frame time of the card animation <= 16 ms (median %d)" % median)
+cover = start_menu_case()
+if layer_mutant:
+    check(cover < COVER_MIN_PERCENT, "mutant card stays behind the start menu: %d %% of the card area differs" % cover, final=True)
+else:
+    check(cover >= COVER_MIN_PERCENT, "the preview card is in front of the open start menu: %d %% of the card area differs" % cover)
 print("RESULT %d %d" % (ok, bad))

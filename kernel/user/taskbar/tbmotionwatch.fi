@@ -1,0 +1,118 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import libc.clockapi
+import taskbar.tbbase
+import taskbar.tbmotion
+import ulib
+
+export { observe }
+
+const NAME_BYTES: u64 = 24
+const QUIET_TICKS: u64 = 300
+
+static mut snap_name: [u8; 384] = [0 as u8; 384]
+static mut snap_x: [u64; 16] = [0 as u64; 16]
+static mut snap_y: [u64; 16] = [0 as u64; 16]
+static mut snap_w: [u64; 16] = [0 as u64; 16]
+static mut snap_h: [u64; 16] = [0 as u64; 16]
+static mut snap_n: u64 = 0
+static mut first_seen: u64 = 0
+
+fn running_name(i: u64) -> u64 {
+    return (&tbbase.kapp[0 as usize]) as u64 + i * NAME_BYTES
+}
+
+fn snap_at(j: u64) -> u64 {
+    return (&snap_name[0 as usize]) as u64 + j * NAME_BYTES
+}
+
+fn pin_of(name: u64) -> u64 {
+    var k: u64 = 0
+    while k < tbbase.npin {
+        if ulib.streq((&tbbase.pinname[0 as usize]) as u64 + k * NAME_BYTES, name) {
+            return k
+        }
+        k = k + 1
+    }
+    return tbbase.npin
+}
+
+fn in_snapshot(name: u64) -> bool {
+    var j: u64 = 0
+    while j < snap_n {
+        if ulib.streq(snap_at(j), name) {
+            return true
+        }
+        j = j + 1
+    }
+    return false
+}
+
+fn is_running(name: u64) -> bool {
+    var i: u64 = 0
+    while i < tbbase.nk {
+        if ulib.streq(running_name(i), name) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn named(i: u64) -> bool {
+    return (*(running_name(i) as *mut u8)) != 0 as u8
+}
+
+fn store(j: u64, i: u64) {
+    let name: u64 = running_name(i)
+    let _c: u64 = ulib.strncpy(snap_at(j), name, NAME_BYTES - 1)
+    let pk: u64 = pin_of(name)
+    if pk < tbbase.npin {
+        snap_x[j as usize] = tbbase.px_[pk as usize]
+        snap_y[j as usize] = tbbase.py_[pk as usize]
+        snap_w[j as usize] = tbbase.pw_[pk as usize]
+        snap_h[j as usize] = tbbase.ph_[pk as usize]
+        return
+    }
+    snap_x[j as usize] = tbbase.kx[i as usize]
+    snap_y[j as usize] = tbbase.ky[i as usize]
+    snap_w[j as usize] = tbbase.kw[i as usize]
+    snap_h[j as usize] = tbbase.kh[i as usize]
+}
+
+fn refresh() {
+    snap_n = 0
+    var i: u64 = 0
+    while i < tbbase.nk && snap_n < tbbase.MAXK {
+        if named(i) {
+            store(snap_n, i)
+            snap_n = snap_n + 1
+        }
+        i = i + 1
+    }
+}
+
+fn observe() {
+    let now: u64 = clockapi.ticks()
+    if first_seen == 0 {
+        first_seen = now
+    }
+    let settled: bool = now - first_seen >= QUIET_TICKS
+    var i: u64 = 0
+    while i < tbbase.nk {
+        if named(i) && !in_snapshot(running_name(i)) && settled {
+            tbmotion.appear(running_name(i))
+        }
+        i = i + 1
+    }
+    var j: u64 = 0
+    while j < snap_n {
+        let name: u64 = snap_at(j)
+        if settled && !is_running(name) && pin_of(name) >= tbbase.npin && snap_w[j as usize] != 0 {
+            tbmotion.vanish(name, snap_x[j as usize], snap_y[j as usize], snap_w[j as usize], snap_h[j as usize])
+        }
+        j = j + 1
+    }
+    refresh()
+}
