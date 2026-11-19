@@ -1,0 +1,125 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+import libc.fileops
+import reset.resetfs
+
+export { reset_user_configs, restore_factory, remove_other_homes, drop_overrides }
+
+const LIST_BUF: u64 = 2048
+const MODE_0644: u64 = 420
+const SYS_CHMOD: u64 = 90
+const PATH_MAX: u64 = 256
+
+static mut users_dir: [u8; 8] = "/users/\0"
+static mut config_name: [u8; 7] = "config\0"
+static mut root_name: [u8; 5] = "root\0"
+static mut factory_dir: [u8; 16] = "/system/factory\0"
+static mut etc_dir: [u8; 6] = "/etc/\0"
+static mut override_db: [u8; 17] = "/etc/settings.db\0"
+static mut override_modes: [u8; 16] = "/etc/modes.conf\0"
+
+fn is_root_home(name: u64) -> bool {
+    return ulib.streq(name, (&root_name[0]) as u64)
+}
+
+fn config_path(out: u64, home: u64) -> bool {
+    var home_path: [u8; 256] = [0 as u8; 256]
+    if !resetfs.join_path((&home_path[0]) as u64, (&users_dir[0]) as u64, home) {
+        return false
+    }
+    return resetfs.join_path(out, (&home_path[0]) as u64, (&config_name[0]) as u64)
+}
+
+fn reset_user_configs() -> u64 {
+    var listing: [u8; 2048] = [0 as u8; 2048]
+    var config: [u8; 256] = [0 as u8; 256]
+    let fd: u64 = io.dir_open((&users_dir[0]) as u64)
+    if errno.failed(fd) {
+        return 0
+    }
+    let got: u64 = io.dir_read(fd, (&listing[0]) as u64, LIST_BUF)
+    io.close(fd)
+    if errno.failed(got) {
+        return 0
+    }
+    var cleared: u64 = 0
+    var at: u64 = 0
+    while at < got {
+        let rec: u64 = (&listing[0]) as u64 + at
+        let name: u64 = io.dir_name(rec)
+        if !resetfs.is_dot_name(name) && io.dir_kind(rec) == io.DT_DIR
+            && config_path((&config[0]) as u64, name)
+            && resetfs.remove_children((&config[0]) as u64, 0) {
+            cleared = cleared + 1
+        }
+        at = at + io.dir_reclen(rec)
+    }
+    return cleared
+}
+
+fn remove_other_homes() -> bool {
+    var listing: [u8; 2048] = [0 as u8; 2048]
+    var home: [u8; 256] = [0 as u8; 256]
+    let fd: u64 = io.dir_open((&users_dir[0]) as u64)
+    if errno.failed(fd) {
+        return true
+    }
+    let got: u64 = io.dir_read(fd, (&listing[0]) as u64, LIST_BUF)
+    io.close(fd)
+    if errno.failed(got) {
+        return false
+    }
+    var clean: bool = true
+    var at: u64 = 0
+    while at < got {
+        let rec: u64 = (&listing[0]) as u64 + at
+        let name: u64 = io.dir_name(rec)
+        if !resetfs.is_dot_name(name) && !is_root_home(name) && io.dir_kind(rec) == io.DT_DIR {
+            if !resetfs.join_path((&home[0]) as u64, (&users_dir[0]) as u64, name)
+                || !resetfs.remove_tree((&home[0]) as u64) {
+                clean = false
+            }
+        }
+        at = at + io.dir_reclen(rec)
+    }
+    return clean
+}
+
+fn restore_factory() -> u64 {
+    var listing: [u8; 2048] = [0 as u8; 2048]
+    var source: [u8; 256] = [0 as u8; 256]
+    var target: [u8; 256] = [0 as u8; 256]
+    let fd: u64 = io.dir_open((&factory_dir[0]) as u64)
+    if errno.failed(fd) {
+        return 0
+    }
+    let got: u64 = io.dir_read(fd, (&listing[0]) as u64, LIST_BUF)
+    io.close(fd)
+    if errno.failed(got) {
+        return 0
+    }
+    var restored: u64 = 0
+    var at: u64 = 0
+    while at < got {
+        let rec: u64 = (&listing[0]) as u64 + at
+        let name: u64 = io.dir_name(rec)
+        if !resetfs.is_dot_name(name) && io.dir_kind(rec) != io.DT_DIR
+            && resetfs.join_path((&source[0]) as u64, (&factory_dir[0]) as u64, name)
+            && resetfs.join_path((&target[0]) as u64, (&etc_dir[0]) as u64, name)
+            && !errno.failed(fileops.copy_file((&source[0]) as u64, (&target[0]) as u64)) {
+            ulib.sys(SYS_CHMOD, (&target[0]) as u64, MODE_0644, 0)
+            restored = restored + 1
+        }
+        at = at + io.dir_reclen(rec)
+    }
+    return restored
+}
+
+fn drop_overrides() {
+    io.unlink((&override_db[0]) as u64)
+    io.unlink((&override_modes[0]) as u64)
+}
