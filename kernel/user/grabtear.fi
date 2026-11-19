@@ -1,0 +1,164 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.clockapi
+import lineout
+
+export { u_start }
+
+const WM_CREATE: u64 = 2100
+const WM_FILL: u64 = 2101
+const WM_FLUSH: u64 = 2105
+const SYS_SHOT: u64 = 1841
+const SH_INFO: u64 = 0
+const SH_ARM: u64 = 1
+const SH_GRAB: u64 = 2
+const SI_WIDTH: u64 = 1
+const SI_HEIGHT: u64 = 2
+const SI_ROWBYTES: u64 = 3
+const SI_CHUNKROWS: u64 = 5
+const CHUNK_BYTES: u64 = 65536
+const WIN_POS: u64 = (100 << 16) | 100
+const WIN_SIZE: u64 = (200 << 16) | 200
+const PAINT_ITERATIONS: u64 = 60000
+const SETTLE_MS: u64 = 800
+const SEEN_MIN: u64 = 64
+const COLOR_A: u64 = 0x00FF0000
+const COLOR_B: u64 = 0x000000FF
+
+static mut CHUNK: [u8; 65536] = [0 as u8; 65536]
+static mut P_SELF: [u8; 14] = "/bin/grabtear\0"
+static mut ARG_SELF: [u8; 10] = "grabtear\0\0"
+static mut ARG_PAINT: [u8; 6] = "paint\0"
+static mut COUNT_A: u64 = 0
+static mut COUNT_B: u64 = 0
+static mut ARGV: [u64; 2] = [0 as u64; 2]
+static mut TITLE: [u8; 6] = "tear\0\0"
+static mut W_PAINT: [u8; 6] = "paint\0"
+static mut T_RESULT: [u8; 17] = "grabtear: grabs=\0"
+static mut T_MIXED: [u8; 8] = " mixed=\0"
+static mut T_A: [u8; 4] = " a=\0"
+static mut T_B: [u8; 4] = " b=\0"
+static mut T_NONE: [u8; 7] = " none=\0"
+static mut T_FAIL: [u8; 20] = "grabtear: grab fail\0"
+
+fn paint() -> u64 {
+    let h: u64 = kcall.sys4(WM_CREATE, WIN_POS, WIN_SIZE, (&TITLE[0]) as u64, 0)
+    if ulib.bad(h) {
+        return 1
+    }
+    var i: u64 = 0
+    while i < PAINT_ITERATIONS {
+        var color: u64 = COLOR_A
+        if (i & 1) == 1 {
+            color = COLOR_B
+        }
+        kcall.sys4(WM_FILL, h, 0, WIN_SIZE, color)
+        ulib.sys(WM_FLUSH, h, 0, 0)
+        i = i + 1
+    }
+    return 0
+}
+
+fn count_pixels(bytes: u64) {
+    var at: u64 = 0
+    while at + 3 <= bytes {
+        let r: u64 = CHUNK[at as usize] as u64
+        let g: u64 = CHUNK[(at + 1) as usize] as u64
+        let b: u64 = CHUNK[(at + 2) as usize] as u64
+        if r == 255 && g == 0 && b == 0 {
+            COUNT_A = COUNT_A + 1
+        } else if r == 0 && g == 0 && b == 255 {
+            COUNT_B = COUNT_B + 1
+        }
+        at = at + 3
+    }
+}
+
+fn grab_frame() -> bool {
+    let height: u64 = ulib.sys(SYS_SHOT, SH_INFO, SI_HEIGHT, 0)
+    let row_bytes: u64 = ulib.sys(SYS_SHOT, SH_INFO, SI_ROWBYTES, 0)
+    let chunk_rows: u64 = ulib.sys(SYS_SHOT, SH_INFO, SI_CHUNKROWS, 0)
+    if ulib.bad(ulib.sys(SYS_SHOT, SH_ARM, 0, 0)) || row_bytes == 0 || chunk_rows == 0 {
+        return false
+    }
+    var y: u64 = 0
+    while y < height {
+        let got: u64 = ulib.sys(SYS_SHOT, SH_GRAB, (&CHUNK[0]) as u64, chunk_rows * row_bytes)
+        if ulib.bad(got) || got == 0 {
+            return false
+        }
+        count_pixels(got)
+        y = y + got / row_bytes
+    }
+    return true
+}
+
+fn report(grabs: u64, mixed: u64, only_a: u64, only_b: u64, none: u64) {
+    lineout.add_text((&T_RESULT[0]) as u64)
+    lineout.add_num(grabs)
+    lineout.add_text((&T_MIXED[0]) as u64)
+    lineout.add_num(mixed)
+    lineout.add_text((&T_A[0]) as u64)
+    lineout.add_num(only_a)
+    lineout.add_text((&T_B[0]) as u64)
+    lineout.add_num(only_b)
+    lineout.add_text((&T_NONE[0]) as u64)
+    lineout.add_num(none)
+    lineout.end_line()
+}
+
+fn probe(grabs: u64) -> u64 {
+    ARGV[0] = (&ARG_SELF[0]) as u64
+    ARGV[1] = (&ARG_PAINT[0]) as u64
+    ulib.sys(ulib.SYS_EXEC, (&P_SELF[0]) as u64, (&ARGV[0]) as u64, 2)
+    clockapi.sleep_ms(SETTLE_MS)
+    var mixed: u64 = 0
+    var only_a: u64 = 0
+    var only_b: u64 = 0
+    var none: u64 = 0
+    var n: u64 = 0
+    while n < grabs {
+        COUNT_A = 0
+        COUNT_B = 0
+        if !grab_frame() {
+            lineout.add_text((&T_FAIL[0]) as u64)
+            lineout.end_line()
+            return 1
+        }
+        let seen_a: bool = COUNT_A >= SEEN_MIN
+        let seen_b: bool = COUNT_B >= SEEN_MIN
+        if seen_a && seen_b {
+            mixed = mixed + 1
+        } else if seen_a {
+            only_a = only_a + 1
+        } else if seen_b {
+            only_b = only_b + 1
+        } else {
+            none = none + 1
+        }
+        n = n + 1
+    }
+    report(grabs, mixed, only_a, only_b, none)
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    if ulib.arg_count(args) < 2 {
+        return 2
+    }
+    if ulib.streq(ulib.arg_at(args, 1), (&W_PAINT[0]) as u64) {
+        return paint()
+    }
+    var grabs: u64 = 40
+    if ulib.arg_count(args) >= 3 {
+        grabs = ulib.to_num(ulib.arg_at(args, 2))
+    }
+    return probe(grabs)
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}

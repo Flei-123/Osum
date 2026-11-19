@@ -36,14 +36,17 @@ import msg
 import calev
 import contactdb
 import uikit.uisys
+import notify.notifc
+import notify.notecard
+import qs
 
-export { init, toggle, step, is_open, hit, shut_now, days_in_month, weekday_mon0, leap }
+export { init, toggle, step, is_open, hit, shut_now, set_bell, days_in_month, weekday_mon0, leap }
 
 const NONE: u64 = 0xFFFFFFFFFFFFFFFF
-const CARD_W: u64 = 296 // design points: 7 cells + the card padding
+const CARD_W: u64 = 376 // design points: the notification card (360) + the card padding
 const PADP: u64 = 10
 const GAPP: u64 = 4
-const CELL: u64 = 38 // one day cell, design points
+const CELL: u64 = 51 // one day cell, design points
 const CELL_H: u64 = 34
 const HEAD_H: u64 = 34
 const WD_H: u64 = 26
@@ -58,6 +61,16 @@ const EV_H: u64 = 26
 const ADD_H: u64 = 36
 const CT_H: u64 = 26
 const CT_SHOW: u64 = 3
+const K_NCLEAR: u64 = 610
+const K_DND: u64 = 611
+const K_NROW: u64 = 612
+const NHEAD_H: u64 = 30
+const NEMPTY_H: u64 = 28
+const NOTI_MAX_PT: u64 = 300
+const NOTI_MIN_PT: u64 = 100
+const SCREEN_MARGIN_PT: u64 = 16
+const DND_W: u64 = 112
+const CLEAR_W: u64 = 92
 const CK_WD: u64 = 620 // 620..626 weekday header cells
 const CK_DAY: u64 = 640 // 640..681 the 42 day cells
 
@@ -74,6 +87,10 @@ static mut ay_: u64 = 0
 static mut aw_: u64 = 0
 static mut ah_: u64 = 0
 static mut btn_last: u64 = 0
+static mut bx_: u64 = 0
+static mut by_: u64 = 0
+static mut bw_: u64 = 0
+static mut bh_: u64 = 0
 static mut key_last: u64 = 0
 static mut t_y: u64 = 0 // today
 static mut t_m: u64 = 0
@@ -135,6 +152,11 @@ static mut s_evtxt: [u8; 7] = " text=\0"
 static mut s_colon: [u8; 3] = ": \0"
 static mut s_more: [u8; 3] = " +\0"
 static mut s_dot: [u8; 2] = ".\0"
+static mut s_nopen: [u8; 21] = "calpop: notifs rows=\0"
+static mut s_dndk: [u8; 7] = "qs.dnd\0"
+static mut s_nrow: [u8; 5] = "nrow\0"
+static mut n_nclear: [u8; 7] = "nclear\0"
+static mut n_dnd: [u8; 4] = "dnd\0"
 
 fn say(p: u64) {
     let _s: u64 = lineout.add_text(p)
@@ -303,6 +325,10 @@ fn build_head() {
 // ------------------------------------------------------------------ the scene
 
 fn draw_cv(key: u64, x: u64, y: u64, w: u64, h: u64) {
+    if key >= K_NROW && key < K_NROW + notifc.NC_MAXR {
+        notecard.draw_card(x, y, w, h, key - K_NROW + 1)
+        return
+    }
     let px: u64 = uiscale.px_ui()
     let base: u64 = y + (h + uitext.ascent_of(uitext.F_UI, px)) / 2
     if key >= CK_WD && key < CK_WD + 7 {
@@ -427,9 +453,31 @@ fn build_ct_line() {
     }
 }
 
+fn build_notis(r: usize) {
+    let rn: usize = fuiscene.row(r)
+    fuiscene.set_gap(rn, GAPP)
+    let lt: usize = fuiscene.label(rn, notecard.center_title())
+    fuiscene.set_size(lt, 7 * CELL - DND_W - CLEAR_W - 2 * GAPP, NHEAD_H)
+    let td: usize = fuiscene.toggle(rn, msg.get((&s_dndk[0 as usize]) as u64), K_DND, qs.dnd_on())
+    fuiscene.set_size(td, DND_W, NHEAD_H)
+    let bc: usize = fuiscene.button(rn, notecard.center_clear(), K_NCLEAR)
+    fuiscene.set_size(bc, CLEAR_W, NHEAD_H)
+    if notifc.rows() == 0 {
+        let ne: usize = fuiscene.label_muted(r, notecard.center_empty())
+        fuiscene.set_size(ne, 7 * CELL, NEMPTY_H)
+        return
+    }
+    var i: u64 = 0
+    while i < notifc.rows() {
+        let _c: usize = fuiscene.canvas2(r, K_NROW + i, notecard.CARD_W, notecard.card_h_pt(i + 1), draw_cv)
+        i = i + 1
+    }
+}
+
 fn build() {
     let r: usize = fuiscene.root()
     fuiscene.set_gap(r, GAPP)
+    build_notis(r)
     build_head()
     let rh: usize = fuiscene.row(r)
     fuiscene.set_gap(rh, GAPP)
@@ -503,8 +551,43 @@ fn hit(x: u64, y: u64) -> bool {
     return x >= px_ && x < px_ + pw_ && y >= py_ && y < py_ + ph_
 }
 
-fn card_h() -> u64 {
+fn cal_h() -> u64 {
     return 2 * PADP + HEAD_H + WD_H + 6 * CELL_H + FOOT_H + EV_H + CT_H + ADD_H + 11 * GAPP
+}
+
+fn noti_cap_pt() -> u64 {
+    var screen_pt: u64 = hosthead.head_bh() / uiscale.ui_scale()
+    if ay_ != 0 {
+        screen_pt = ay_ / uiscale.ui_scale()
+    }
+    let used: u64 = cal_h() + NHEAD_H + 3 * GAPP + SCREEN_MARGIN_PT
+    var cap: u64 = NOTI_MIN_PT
+    if screen_pt > used + NOTI_MIN_PT {
+        cap = screen_pt - used
+    }
+    if cap > NOTI_MAX_PT {
+        cap = NOTI_MAX_PT
+    }
+    return cap
+}
+
+fn noti_body_h() -> u64 {
+    if notifc.rows() == 0 {
+        return NEMPTY_H + GAPP
+    }
+    return notifc.list_h_pt()
+}
+
+fn card_h() -> u64 {
+    return cal_h() + NHEAD_H + GAPP + noti_body_h()
+}
+
+fn load_notis() {
+    let n: u64 = notifc.load(noti_cap_pt())
+    say((&s_nopen[0 as usize]) as u64)
+    lineout.add_num(n)
+    lineout.end_line()
+    notifc.report()
 }
 
 fn paint_now() {
@@ -538,7 +621,25 @@ fn say_rect(name: u64, key: u64) {
     lineout.end_line()
 }
 
+fn say_notis() {
+    notifc.report_open(px_, py_, pw_, ph_)
+    var i: u64 = 0
+    while i < notifc.rows() {
+        let _s: bool = fuiscene.win_select(cp_win)
+        let g: u64 = fuiscene.key_geom(K_NROW + i)
+        let _u: bool = fuiscene.win_select(0)
+        if g != 0 {
+            notifc.report_card(i, px_ + (g >> 48), py_ + ((g >> 32) & 65535))
+        }
+        i = i + 1
+    }
+}
+
 fn say_rects() {
+    say_notis()
+    say_rect((&n_nclear[0 as usize]) as u64, K_NCLEAR)
+    say_rect((&n_dnd[0 as usize]) as u64, K_DND)
+    say_rect((&s_nrow[0 as usize]) as u64, K_NROW)
     say_rect((&n_prev[0 as usize]) as u64, K_PREV)
     say_rect((&n_next[0 as usize]) as u64, K_NEXT)
     say_rect((&n_tod[0 as usize]) as u64, K_TODAY)
@@ -608,6 +709,7 @@ fn open_now() {
     read_today()
     calev.load()
     contactdb.load()
+    load_notis()
     v_y = t_y
     v_m = t_m
     s_y = 0
@@ -653,6 +755,7 @@ fn shut(why: u64) {
     say((&s_shut[0 as usize]) as u64)
     say(why)
     lineout.end_line()
+    notifc.report_shut(why)
 }
 
 fn shut_now() {
@@ -747,7 +850,52 @@ fn del_event() {
     redraw()
 }
 
+fn rebuild_notis() {
+    load_notis()
+    relayout()
+}
+
+fn click_noti_row(i: u64) {
+    let _s: bool = fuiscene.win_select(cp_win)
+    let g: u64 = fuiscene.key_geom(K_NROW + i)
+    let _u: bool = fuiscene.win_select(0)
+    let ox: u64 = px_ + (g >> 48)
+    let oy: u64 = py_ + ((g >> 32) & 65535)
+    let mx: u64 = hosthead.mouse_x()
+    let my: u64 = hosthead.mouse_y()
+    var lx: u64 = 0
+    var ly: u64 = 0
+    if mx > ox {
+        lx = mx - ox
+    }
+    if my > oy {
+        ly = my - oy
+    }
+    let r: u64 = notifc.click(i, lx, ly)
+    if r == notifc.CLICK_CLOSE {
+        shut((&s_nrow[0 as usize]) as u64)
+        return
+    }
+    if r == notifc.CLICK_CHANGED {
+        rebuild_notis()
+    }
+}
+
 fn on_key(key: u64) -> bool {
+    if key == K_NCLEAR {
+        notifc.clear_all()
+        rebuild_notis()
+        return true
+    }
+    if key == K_DND {
+        qs.toggle_dnd()
+        redraw()
+        return true
+    }
+    if key >= K_NROW && key < K_NROW + notifc.NC_MAXR {
+        click_noti_row(key - K_NROW)
+        return true
+    }
     if key == K_PREV {
         prev_month()
         return true
@@ -826,7 +974,9 @@ fn step() -> bool {
     if btn != 0 && btn_last == 0 {
         let mx: u64 = hosthead.mouse_x()
         let my: u64 = hosthead.mouse_y()
-        let on_anchor: bool = mx >= ax_ && mx < ax_ + aw_ && my >= ay_ && my < ay_ + ah_
+        let on_clock: bool = mx >= ax_ && mx < ax_ + aw_ && my >= ay_ && my < ay_ + ah_
+        let on_bell: bool = bw_ != 0 && mx >= bx_ && mx < bx_ + bw_ && my >= by_ && my < by_ + bh_
+        let on_anchor: bool = on_clock || on_bell
         if !hit(mx, my) && !on_anchor {
             shut((&s_out[0 as usize]) as u64)
             btn_last = btn
@@ -834,5 +984,16 @@ fn step() -> bool {
         }
     }
     btn_last = btn
+    if notifc.changed() {
+        rebuild_notis()
+        return true
+    }
     return false
+}
+
+fn set_bell(x: u64, y: u64, w: u64, h: u64) {
+    bx_ = x
+    by_ = y
+    bw_ = w
+    bh_ = h
 }
