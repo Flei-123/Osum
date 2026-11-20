@@ -13,5 +13,5 @@ timeout 900 chroot "$WD/root" /sbin/apk add --no-cache $PKGS > "$WD/apk.log" 2>&
 python3 -I "$HERE/mkroot.py" "$WD/root" "$WD/run/spec.txt" --base \
     --tree /usr/lib --tree /usr/libexec --tree /usr/share/terminfo --tree /usr/share/vim --tree /usr/share/misc \
     --tree /usr/share/mime --tree /usr/share/icu --tree /usr/share/fonts --tree /usr/share/X11 --tree /usr/share/git-core \
-    --tree /usr/share/zoneinfo --tree /usr/share/foot --tree /usr/include --tree /etc/ssl \
+    --tree /usr/share/zoneinfo --tree /usr/share/foot --tree /usr/include --tree /etc/ssl $(for t in ${APP_TREES:-}; do printf -- '--tree %s ' "$t"; done) \
     --skip /usr/lib/libc.a
