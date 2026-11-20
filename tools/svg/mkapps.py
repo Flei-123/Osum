@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
+import io
 import os
 import re
 import subprocess
@@ -28,6 +29,26 @@ def compose(inner, top, bottom, tint):
     ) % (SIZE, SIZE, lo, lo, span, span, lo, 24 + PAD, top, bottom, fill, STROKE, inner)
 
 
+def raster_osym(svg, size, out):
+    import cairosvg
+    from PIL import Image
+    png = cairosvg.svg2png(url=svg, output_width=size, output_height=size)
+    img = Image.open(io.BytesIO(png)).convert("RGBA")
+    with open(out, "wb") as f:
+        f.write(b"OSYM" + size.to_bytes(4, "little") * 2 + img.tobytes("raw", "BGRA"))
+
+
+def bake_brand(root, name, d):
+    src = os.path.join(root, "assets/icons/brand", name + ".svg")
+    svg = os.path.join(d, "symbol.svg")
+    with open(src, encoding="utf-8") as f, open(svg, "w", encoding="utf-8") as g:
+        g.write(f.read())
+    raster_osym(svg, SIZE, os.path.join(d, "symbol.osym"))
+    for rs in ROW_SIZES:
+        raster_osym(svg, rs, os.path.join(d, "symbol%d.osym" % rs))
+    print("%s: brand symbol rasterized %dx%d + rows %s" % (name, SIZE, SIZE, ROW_SIZES))
+
+
 def rows(table):
     for line in open(table, encoding="ascii").read().splitlines():
         if line.strip():
@@ -43,6 +64,9 @@ def main(argv):
         d = os.path.join(root, folder)
         if not os.path.isdir(d):
             print("skip", app)
+            continue
+        if glyph.startswith("@"):
+            bake_brand(root, glyph[1:], d)
             continue
         inner = glyph_inner(open(os.path.join(root, "assets/icons/svg", glyph + ".svg"), encoding="utf-8").read())
         svg = os.path.join(d, "symbol.svg")

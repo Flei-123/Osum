@@ -64,6 +64,8 @@ def main(root):
         img = {size: osym_image(blob) for size, blob in blobs.items()}
         for size in (44, 64):
             worst_native = max(worst_native, float(np.abs(alpha(img[size]) - reference(svg, size)).mean()))
+        if os.path.isfile(os.path.join(root, "assets/icons/brand", os.path.basename(d)[:-4] + ".svg")):
+            continue
         for size, src in ((22, 44), (32, 64), (44, 44), (64, 64)):
             ref = reference(svg, size)
             errs[size].append(float(np.abs(alpha(img[src].resize((size, size), Image.BOX)) - ref).mean()))
