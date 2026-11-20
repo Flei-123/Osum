@@ -12,6 +12,8 @@ mkdir -p "$OUT"
     --setenv PATH /usr/bin:/bin:/usr/sbin:/sbin \
     sh -c '/usr/bin/wine64 wineboot --init; /usr/bin/wineserver -w') > "$WD/prefix.log" 2>&1 || exit 1
 [ -f "$OUT/drive_c/windows/system32/ws2_32.dll" ] || { echo "MKPREFIX: prefix incomplete"; exit 1; }
+SERVICES_TIMEOUT_MS_HEX=${SERVICES_TIMEOUT_MS_HEX:-000493e0}
+printf '\n[System\\\\ControlSet001\\\\Control] %s\n"ServicesPipeTimeout"=dword:%s\n"WaitToKillServiceTimeout"="120000"\n' "$(date +%s)" "$SERVICES_TIMEOUT_MS_HEX" >> "$OUT/system.reg"
 linked=0
 for arch in x86_64-windows i386-windows; do
     for dir in system32 syswow64; do
