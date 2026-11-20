@@ -15,6 +15,8 @@
 #define MARK1 (BLOCK0 + 0x2000UL)
 #define MAGIC0 0x11223344u
 #define MAGIC1 0x55667788u
+#define MAGIC2 0x99aabbccu
+#define MAGIC3 0x0badf00du
 
 static void wait_byte(int fd)
 {
@@ -27,16 +29,28 @@ static void send_byte(int fd)
     (void)!write(fd, "x", 1);
 }
 
-static int spawn_reader(int fd, unsigned long first, unsigned long len, unsigned long mark, unsigned magic, int ready[2], int go[2])
+static int spawn_view(int fd, unsigned long first, unsigned long len, unsigned long mark, unsigned magic, int ready[2], int go[2], int private_view)
 {
     pid_t pid = fork();
     if (pid != 0) return pid;
-    volatile unsigned char *m = mmap(NULL, len, PROT_READ, MAP_SHARED, fd, first);
-    if (m == MAP_FAILED) _exit(2);
+    volatile unsigned char *m;
+    if (private_view) {
+        m = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, first);
+        if (m == MAP_FAILED) _exit(2);
+        if (mprotect((void *)m, len, PROT_READ) != 0) _exit(4);
+    } else {
+        m = mmap(NULL, len, PROT_READ, MAP_SHARED, fd, first);
+        if (m == MAP_FAILED) _exit(2);
+    }
     send_byte(ready[1]);
     wait_byte(go[0]);
     unsigned v = *(volatile unsigned *)(m + (mark - first));
     _exit(v == magic ? 0 : 3);
+}
+
+static int spawn_reader(int fd, unsigned long first, unsigned long len, unsigned long mark, unsigned magic, int ready[2], int go[2])
+{
+    return spawn_view(fd, first, len, mark, magic, ready, go, 0);
 }
 
 static int reader_status(pid_t pid)
@@ -92,5 +106,21 @@ int main(void)
     *(volatile unsigned *)(b0 + MARK0) = MAGIC0;
     send_byte(go[1]);
     CHECK("first_sees_block0_write", reader_status(first) == 0, "status");
+
+    pipe(ready);
+    pipe(go);
+    pid_t priv_whole = spawn_view(fd, 0, TOTAL, MARK1 + 8, MAGIC2, ready, go, 1);
+    wait_byte(ready[0]);
+    *(volatile unsigned *)(b1 + (MARK1 + 8 - BLOCK0)) = MAGIC2;
+    send_byte(go[1]);
+    CHECK("private_whole_follows_block1_write", reader_status(priv_whole) == 0, "status");
+
+    pipe(ready);
+    pipe(go);
+    pid_t priv_first = spawn_view(fd, 0, BLOCK0, MARK0 + 8, MAGIC3, ready, go, 1);
+    wait_byte(ready[0]);
+    *(volatile unsigned *)(b0 + MARK0 + 8) = MAGIC3;
+    send_byte(go[1]);
+    CHECK("private_first_follows_block0_write", reader_status(priv_first) == 0, "status");
     return 0;
 }

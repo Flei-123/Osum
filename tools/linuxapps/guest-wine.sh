@@ -12,4 +12,5 @@ t() {
 t version wine-11 /usr/bin/wine --version
 t server-version "Wine 11.0" /usr/bin/wineserver --version
 t console-echo hello-from-wine env WINEDEBUG=err+all,warn+virtual,warn+winstation,warn+section,warn+server /usr/bin/wine64 cmd /c echo hello-from-wine
+t mingw-hello hello-from-mingw env WINEDEBUG=err+all /usr/bin/wine64 /usr/share/wine/hello.exe
 echo FX-END
