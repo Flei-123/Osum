@@ -133,6 +133,21 @@ def verknuepfen(source, target):
         shutil.copy2(source, target)
 
 
+CATALOG_VIEW_FILES = ("apps.tsv", "apps.tsv.sig")
+
+
+def link_catalog_view(aus, ak):
+    root = os.path.dirname(os.path.abspath(aus))
+    for name in CATALOG_VIEW_FILES:
+        source = os.path.join(root, name)
+        if not os.path.isfile(source):
+            continue
+        target = os.path.join(ak, name)
+        if os.path.lexists(target):
+            os.remove(target)
+        os.symlink(os.path.relpath(source, ak), target)
+
+
 def current_set(aus, register, locked):
     kandidaten = [n for n in register["vergeben"] if n not in locked
                   and os.path.isdir(os.path.join(aus, "v", str(n)))]
@@ -145,6 +160,7 @@ def current_set(aus, register, locked):
     os.makedirs(ak)
     for d in sorted(os.listdir(os.path.join(aus, "v", str(n)))):
         verknuepfen(os.path.join(aus, "v", str(n), d), os.path.join(ak, d))
+    link_catalog_view(aus, ak)
     return n
 
 
