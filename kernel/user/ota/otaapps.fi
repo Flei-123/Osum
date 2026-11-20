@@ -1,0 +1,212 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import sha
+import ulib
+import libc.regio
+import ota.otabase
+import ota.otacmd
+
+const ABI_BASELINE: u64 = 1
+const MAX_APPS: u64 = 64
+const NOT_FOUND: u64 = 0xFFFFFFFFFFFFFFFF
+const REV_FILE_MAX: u64 = 4000
+
+static mut L_APP: [u8; 8] = "sysapp\t\0"
+static mut P_PROCVER: [u8; 14] = "/proc/version\0"
+static mut W_ABI: [u8; 6] = " abi \0"
+static mut P_REVS: [u8; 17] = "/system/apps.rev\0"
+static mut P_BIN: [u8; 6] = "/bin/\0"
+static mut W_NL: [u8; 2] = "\n\0"
+static mut W_SP: [u8; 2] = " \0"
+static mut S_BLOCKED: [u8; 25] = "ota: app not installed: \0"
+static mut S_NEEDS: [u8; 22] = " needs kernel ABI \0\0\0\0"
+static mut S_HAVE: [u8; 14] = " (this one: \0\0"
+static mut S_CLOSE: [u8; 2] = ")\0"
+
+static mut APP_NAME: [u8; 64] = [0 as u8; 64]
+static mut APP_HEX: [u8; 72] = [0 as u8; 72]
+static mut APP_SRV: [u8; 128] = [0 as u8; 128]
+static mut APP_PROBE: [u8; 8] = [0 as u8; 8]
+static mut APP_BUF: [u8; 256] = [0 as u8; 256]
+static mut APP_PATH: [u8; 96] = [0 as u8; 96]
+static mut REVS: [u8; 4096] = [0 as u8; 4096]
+static mut SELECTED: [u8; 64] = [0 as u8; 64]
+static mut app_rev: u64 = 0
+static mut app_abi: u64 = 0
+static mut app_len: u64 = 0
+static mut app_blocked: u64 = 0
+static mut app_total: u64 = 0
+
+fn abi_here() -> u64 {
+    let a: u64 = (&APP_BUF[0 as usize]) as u64
+    let n: u64 = otacmd.file_read((&P_PROCVER[0 as usize]) as u64, a, 250)
+    if n == NOT_FOUND || n == 0 {
+        return ABI_BASELINE
+    }
+    regio.write8(a + n, 0)
+    let i: u64 = ulib.find(a, (&W_ABI[0 as usize]) as u64)
+    if i == NOT_FOUND {
+        return ABI_BASELINE
+    }
+    return ulib.to_num(a + i + 5)
+}
+
+fn app_read(k: u64) -> bool {
+    let f: u64 = otacmd.line_from((&L_APP[0 as usize]) as u64, 7, k)
+    if f == 0 {
+        return false
+    }
+    let e: u64 = (&otabase.VZ[0 as usize]) as u64 + otabase.vz_len
+    let tmp: u64 = (&otabase.SU_TMP[0 as usize]) as u64
+    regio.write8((&APP_NAME[0 as usize]) as u64, 0)
+    regio.write8((&APP_HEX[0 as usize]) as u64, 0)
+    regio.write8((&APP_SRV[0 as usize]) as u64, 0)
+    regio.write8((&APP_PROBE[0 as usize]) as u64, 0)
+    otacmd.field(f, e, 0, (&APP_NAME[0 as usize]) as u64, 60)
+    otacmd.field(f, e, 1, tmp, 20)
+    app_rev = ulib.to_num(tmp)
+    otacmd.field(f, e, 2, tmp, 20)
+    app_abi = ulib.to_num(tmp)
+    otacmd.field(f, e, 3, (&APP_HEX[0 as usize]) as u64, 70)
+    otacmd.field(f, e, 4, tmp, 20)
+    app_len = ulib.to_num(tmp)
+    otacmd.field(f, e, 5, (&APP_SRV[0 as usize]) as u64, 120)
+    otacmd.field(f, e, 6, (&APP_PROBE[0 as usize]) as u64, 6)
+    return true
+}
+
+fn bin_path() {
+    ulib.strcpy((&APP_PATH[0 as usize]) as u64, (&P_BIN[0 as usize]) as u64)
+    ulib.strcat((&APP_PATH[0 as usize]) as u64, (&APP_NAME[0 as usize]) as u64)
+}
+
+fn installed_is_current() -> bool {
+    bin_path()
+    if otacmd.size((&APP_PATH[0 as usize]) as u64) != app_len {
+        return false
+    }
+    if !otacmd.hash_file((&APP_PATH[0 as usize]) as u64, (&otabase.HASH[0 as usize]) as u64) {
+        return false
+    }
+    sha.hex_out((&otabase.HASH[0 as usize]) as u64, 32, (&otabase.HEX[0 as usize]) as u64)
+    return ulib.strneq((&otabase.HEX[0 as usize]) as u64, (&APP_HEX[0 as usize]) as u64, 64)
+}
+
+fn revs_load() -> u64 {
+    let n: u64 = otacmd.file_read((&P_REVS[0 as usize]) as u64, (&REVS[0 as usize]) as u64, REV_FILE_MAX)
+    if n == NOT_FOUND {
+        regio.write8((&REVS[0 as usize]) as u64, 0)
+        return 0
+    }
+    regio.write8((&REVS[0 as usize]) as u64 + n, 0)
+    return n
+}
+
+fn rev_get(name: u64) -> u64 {
+    let n: u64 = revs_load()
+    let base: u64 = (&REVS[0 as usize]) as u64
+    let nl: u64 = otacmd.len(name)
+    var i: u64 = 0
+    while i < n {
+        if (i == 0 || otacmd.g8(base + i - 1) == 10) && ulib.strneq(base + i, name, nl)
+            && otacmd.g8(base + i + nl) == 32 {
+            return ulib.to_num(base + i + nl + 1)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn rev_set(name: u64, rev: u64) -> bool {
+    let n: u64 = revs_load()
+    let base: u64 = (&REVS[0 as usize]) as u64
+    let nl: u64 = otacmd.len(name)
+    let out: u64 = (&otabase.SYSB3[0 as usize]) as u64
+    regio.write8(out, 0)
+    var i: u64 = 0
+    while i < n {
+        var e: u64 = i
+        while e < n && otacmd.g8(base + e) != 10 {
+            e = e + 1
+        }
+        let own: bool = ulib.strneq(base + i, name, nl) && otacmd.g8(base + i + nl) == 32
+        if !own && e > i && otacmd.len(out) + (e - i) + 1 < 4000 {
+            let at: u64 = otacmd.len(out)
+            var j: u64 = 0
+            while j < e - i {
+                regio.write8(out + at + j, otacmd.g8(base + i + j))
+                j = j + 1
+            }
+            regio.write8(out + at + j, 10)
+            regio.write8(out + at + j + 1, 0)
+        }
+        i = e + 1
+    }
+    ulib.strcat(out, name)
+    ulib.strcat(out, (&W_SP[0 as usize]) as u64)
+    otacmd.num_at(out, rev)
+    ulib.strcat(out, (&W_NL[0 as usize]) as u64)
+    return otacmd.file_write((&P_REVS[0 as usize]) as u64, out, otacmd.len(out))
+}
+
+fn report_blocked() {
+    let m: u64 = (&otabase.SYSB3[0 as usize]) as u64
+    regio.write8(m, 0)
+    ulib.strcat(m, (&S_BLOCKED[0 as usize]) as u64)
+    ulib.strcat(m, (&APP_NAME[0 as usize]) as u64)
+    ulib.strcat(m, (&S_NEEDS[0 as usize]) as u64)
+    otacmd.num_at(m, app_abi)
+    ulib.strcat(m, (&S_HAVE[0 as usize]) as u64)
+    otacmd.num_at(m, abi_here())
+    ulib.strcat(m, (&S_CLOSE[0 as usize]) as u64)
+    ulib.say(m)
+    ulib.nl()
+}
+
+fn plan() -> u64 {
+    let here: u64 = abi_here()
+    var picked: u64 = 0
+    var k: u64 = 0
+    app_blocked = 0
+    app_total = 0
+    while k < MAX_APPS && app_read(k) {
+        var take: u8 = 0 as u8
+        if app_abi > here {
+            app_blocked = app_blocked + 1
+            report_blocked()
+        } else if installed_is_current() {
+            rev_set((&APP_NAME[0 as usize]) as u64, app_rev)
+        } else if app_rev > rev_get((&APP_NAME[0 as usize]) as u64) {
+            take = 1 as u8
+            picked = picked + 1
+        }
+        regio.write8((&SELECTED[0 as usize]) as u64 + k, take as u64)
+        k = k + 1
+    }
+    app_total = k
+    return picked
+}
+
+fn nth_selected(n: u64) -> bool {
+    var seen: u64 = 0
+    var k: u64 = 0
+    while k < app_total {
+        if otacmd.g8((&SELECTED[0 as usize]) as u64 + k) == 1 {
+            if seen == n {
+                return app_read(k)
+            }
+            seen = seen + 1
+        }
+        k = k + 1
+    }
+    return false
+}
+
+fn commit_revs() {
+    var n: u64 = 0
+    while nth_selected(n) {
+        rev_set((&APP_NAME[0 as usize]) as u64, app_rev)
+        n = n + 1
+    }
+}

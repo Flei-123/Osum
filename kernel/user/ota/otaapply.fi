@@ -11,6 +11,7 @@ import libc.kcall
 import libc.clockapi
 import ota.otabase
 import ota.otacmd
+import ota.otaapps
 import ota.otajoin
 import ota.otaloader
 import ota.otatrial
@@ -344,6 +345,20 @@ static mut S_SU_STAGED: [u8; 45] = "system: staged in slot B, restart to install
 
 static mut S_SU_PROMO: [u8; 52] = "system: new kernel confirmed and promoted to slot A\0"
 
+static mut E_APP_PROBE: [u8; 52] = "ota: app self-check failed, previous files restored\0"
+
+static mut E_APP_ABI: [u8; 52] = "ota: no app could be installed (kernel ABI too old)\0"
+
+static mut S_APP_STAGED: [u8; 24] = "ota: app files staged: \0"
+
+static mut S_APP_DONE: [u8; 69] = "system: apps updated; open windows keep the old version until closed\0"
+
+static mut S_APP_SHELL: [u8; 59] = "ota: app update: shell program did not come back, restored\0"
+
+static mut A_APPCHECK: [u8; 11] = "--appcheck\0"
+
+static mut K_APPAUTO: [u8; 9] = "appauto=\0"
+
 static mut S_SU_LIVE: [u8; 49] = "system: applied, no restart needed (same kernel)\0"
 
 static mut S_SU_SHREST: [u8; 34] = "system: shell program restarted: \0"
@@ -500,6 +515,12 @@ static mut su_glen: u64 = 0
 
 static mut su_olen: u64 = 0
 
+static mut su_apps_mode: bool = false
+
+static mut su_shell_hit: u64 = 0
+
+const APP_SHELL_WAIT_MS: u64 = 4000
+
 static mut P_ROOTSCTL: [u8; 14] = "/bin/rootsctl\0"
 
 static mut P_ROOTS_NEW: [u8; 22] = "/system/new/roots.pem\0"
@@ -533,6 +554,9 @@ fn su_auto_check() -> u64 {
     }
     otabase.su_quiet = true
     let r: u64 = otacmd.su_check(false)
+    if r == 1 && otacmd.conf_num((&K_APPAUTO[0 as usize]) as u64, 1) != 0 {
+        su_apps_apply()
+    }
     if r == 0 {
         otacmd.su_notes_show()
         otacmd.su_stand_write((&W_SU_AVAIL[0 as usize]) as u64)
@@ -908,6 +932,9 @@ fn su_link_ok(dst: u64, tgt: u64) -> bool {
 }
 
 fn su_link_line(k: u64) -> u64 {
+    if su_apps_mode {
+        return 0
+    }
     let f: u64 = otacmd.line_from((&SU_L_LINK[0 as usize]) as u64, 8, k)
     if f == 0 {
         return 0
@@ -1022,7 +1049,21 @@ fn su_fetch_item(key: u64, srv: u64, olen: u64, ohex: u64, dst: u64) -> bool {
 }
 
 // Fills SU_OHEX / su_olen / SU_OSRV / SU_ONAME from the k-th `sysfile file` line; false = no more.
+fn su_ovl_line_app(k: u64) -> u64 {
+    if !otaapps.nth_selected(k) {
+        return 0
+    }
+    ulib.strcpy((&SU_OHEX[0 as usize]) as u64, (&otaapps.APP_HEX[0 as usize]) as u64)
+    ulib.strcpy((&SU_OSRV[0 as usize]) as u64, (&otaapps.APP_SRV[0 as usize]) as u64)
+    ulib.strcpy((&SU_ONAME[0 as usize]) as u64, (&otaapps.APP_NAME[0 as usize]) as u64)
+    su_olen = otaapps.app_len
+    return 1
+}
+
 fn su_ovl_line(k: u64) -> u64 {
+    if su_apps_mode {
+        return su_ovl_line_app(k)
+    }
     let f: u64 = otacmd.line_from((&SU_L_OFILE[0 as usize]) as u64, 13, k)
     if f == 0 {
         return 0
@@ -1325,11 +1366,13 @@ fn su_ovl_restart_shell() {
         var hit: u64 = 0
         if ulib.streq((&SU_ONAME[0 as usize]) as u64, (&N_SH_TASKBAR[0 as usize]) as u64) {
             hit = su_kill_named((&N_SH_TASKBAR[0 as usize]) as u64)
+            su_shell_hit = su_shell_hit + hit
             if hit > 0 {
                 otacmd.sagt((&S_SU_SHREST[0 as usize]) as u64, (&N_SH_TASKBAR[0 as usize]) as u64)
             }
         } else if ulib.streq((&SU_ONAME[0 as usize]) as u64, (&N_SH_LAUNCHER[0 as usize]) as u64) {
             hit = su_kill_named((&N_SH_LAUNCHER[0 as usize]) as u64)
+            su_shell_hit = su_shell_hit + hit
             if hit > 0 {
                 otacmd.sagt((&S_SU_SHREST[0 as usize]) as u64, (&N_SH_LAUNCHER[0 as usize]) as u64)
             }
@@ -1396,6 +1439,82 @@ fn su_roots_apply() {
     }
 }
 
+
+fn su_app_probe_one() -> bool {
+    otaapps.bin_path()
+    otabase.ARGV[0 as usize] = (&otaapps.APP_PATH[0 as usize]) as u64
+    otabase.ARGV[1 as usize] = (&A_APPCHECK[0 as usize]) as u64
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&otaapps.APP_PATH[0 as usize]) as u64,
+        (&otabase.ARGV[0 as usize]) as u64, 2)
+    return !ulib.bad(pid) && ulib.wait_code(pid) == 0
+}
+
+fn su_app_shell_back() -> bool {
+    if su_shell_hit == 0 {
+        return true
+    }
+    clockapi.sleep_ms(APP_SHELL_WAIT_MS)
+    return otacmd.name_laeuft((&N_SH_TASKBAR[0 as usize]) as u64)
+}
+
+fn su_apps_probe() -> bool {
+    var k: u64 = 0
+    while su_ovl_line(k) != 0 {
+        if otaapps.APP_PROBE[0 as usize] == 49 as u8 && !su_app_probe_one() {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn su_apps_rollback(msg: u64) -> u64 {
+    su_ovl_restore()
+    su_shell_hit = 0
+    su_ovl_restart_shell()
+    su_apps_mode = false
+    return otacmd.err(msg, 0)
+}
+
+fn su_apps_install(picked: u64) -> u64 {
+    su_apps_mode = true
+    su_shell_hit = 0
+    if !su_ovl_stage() {
+        su_apps_mode = false
+        return 1
+    }
+    otacmd.sagn((&S_APP_STAGED[0 as usize]) as u64, picked)
+    if !su_ovl_swap() {
+        return su_apps_rollback((&E_SU_OVLSW[0 as usize]) as u64)
+    }
+    otajoin.join_all()
+    su_ovl_restart_shell()
+    if !su_apps_probe() {
+        return su_apps_rollback((&E_APP_PROBE[0 as usize]) as u64)
+    }
+    if !su_app_shell_back() {
+        return su_apps_rollback((&S_APP_SHELL[0 as usize]) as u64)
+    }
+    otaapps.commit_revs()
+    su_ovl_drop()
+    su_apps_mode = false
+    ulib.say((&S_APP_DONE[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
+// Signed `sysapp` lines: per app, independent of the stand count; apps whose kernel ABI is too new are refused.
+fn su_apps_apply() -> u64 {
+    let picked: u64 = otaapps.plan()
+    if picked == 0 {
+        if otaapps.app_blocked > 0 {
+            return otacmd.err((&E_APP_ABI[0 as usize]) as u64, 0)
+        }
+        return 1
+    }
+    return su_apps_install(picked)
+}
+
 // ------------------------------------------------ apply
 fn cmd_sys_apply(restart: bool) -> u64 {
     otabase.last_err[0 as usize] = 0 as u8
@@ -1411,6 +1530,9 @@ fn sys_apply_steps(restart: bool) -> u64 {
         return otacmd.err((&E_SU_TRIAL[0 as usize]) as u64, 0)
     }
     let r: u64 = otacmd.su_check(true)
+    if r == 1 {
+        return su_apps_apply()
+    }
     if r != 0 {
         return r
     }
@@ -1421,7 +1543,12 @@ fn sys_apply_steps(restart: bool) -> u64 {
     otacmd.su_notes_show()
     su_roots_apply()
     if su_running_is((&otabase.SU_COMMIT[0 as usize]) as u64) {
-        return su_apply_live()
+        let live: u64 = su_apply_live()
+        if live != 0 {
+            return live
+        }
+        su_apps_apply()
+        return 0
     }
     if !su_esp_open() {
         return otacmd.err((&E_SU_ESP[0 as usize]) as u64, 0)
