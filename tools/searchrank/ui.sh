@@ -20,7 +20,7 @@ make_bundle() { # make_bundle <dir> <name> <info> <keys> <start>
 mkdir -p "$TMPD/apps" "$TMPD/files"
 printf '#apps\t2\t2\nA\tcom.fleitec.certus\tCertus\tCertus\tinternet\tFleitec\tGPL\tKurz\tShort\tD\tD\t\t\t\nV\tcom.fleitec.certus\tsystem\tosum-any\t1.0.0\t0\t\t\t\t1\t1\t1\tuntested\nA\tcom.test.zebranotes\tZebra Notizen\tZebra Notes\ttools\tTest\tMIT\tKurz\tShort\tD\tD\t\t\t\nV\tcom.test.zebranotes\tsystem\tosum-any\t1.0.0\t0\t\t\t\t1\t1\t1\tpartial\n' > "$TMPD/catalog.tsv"
 for keep in explorer settings taskmgr; do cp -a assets/apps/$keep.osp "$TMPD/apps/"; done
-for n in $(seq -w 1 30); do make_bundle "a-pad$n" "Zq Pad $n" "Filler" "zqpad" /bin/edit; done
+for n in $(seq -w 1 30); do make_bundle "a-gorp$n" "Gorp $n" "Filler" "gorpfill" /bin/edit; done
 cp -a assets/apps/certus.osp "$TMPD/apps/"
 printf '/bin/echo\n' > "$TMPD/apps/certus.osp/start.txt"
 make_bundle aa-reader "Aa Reader" "Reads certus files" "reader" /bin/edit
@@ -155,8 +155,9 @@ python3 -I tools/searchrank/check.py "$D/serial.txt" zebra > "$D.q_zebra" 2>&1
 grep -q 'apps=0 ' "$D.q_zebra" && ok "'zebra': no installed app hit" || bad "'zebra': unexpected installed hit"
 grep -aq 'launcher: store open \[zebranotes\] pid=' "$D/serial.txt" && ok "Enter on a store hit opens the Store page for it" || bad "Enter on the store hit did nothing"
 zebra_from=$(grep -an 'launcher: suche \[zebra\]' "$D/serial.txt" | tail -1 | cut -d: -f1)
+tail -n +"${zebra_from:-1}" "$D/serial.txt" > "$D/zebra_tail.txt"
 for id in 7 8 9; do
-    tail -n +"${zebra_from:-1}" "$D/serial.txt" | grep -aq "launcher: rect id=$id " && ok "'zebra': detail card element id=$id is reported" || bad "'zebra': no detail card element id=$id"
+    grep -aq "launcher: rect id=$id " "$D/zebra_tail.txt" && ok "'zebra': detail card element id=$id is reported" || bad "'zebra': no detail card element id=$id"
 done
 maxus=$(grep -a '^launcher: suche \[' "$D/serial.txt" | sed -n 's/.* us=\([0-9]*\).*/\1/p' | sort -n | tail -1)
 [ "${maxus:-999999}" -le 16000 ] && ok "slowest search took ${maxus} us (<= 16 ms)" || bad "slowest search took ${maxus:-?} us"
