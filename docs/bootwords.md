@@ -407,6 +407,7 @@ Total: 665
 | `nonvmemany` | bootwords_store.fi | nvmemany | NVMe reads go through the read-ahead cache and stream with up to 8 sectors per command by default; counter-proof = same kernel with word nonvmemany (one command |
 | `nooom` | bootargs.fi |  |  |
 | `noorphanreap` | bootwords_store.fi | tcporphan | 8 guest connections fill the 8-slot TCP table, network removed, programs end: orphans (FIN_WAIT_1) are evicted under pressure / aged out after 20 s so new conne |
+| `nobridgeslot` | bootwords_store.fi | tcpreserve | counter-proof: no TCP slot is kept for jarvisd, so 8 connections of other programs lock the bridge out (tools/bridgeheal) |
 | `nopart` | bootargs.fi |  |  |
 | `nopci` | hw.fi |  |  |
 | `noperm` | bootargs.fi |  |  |

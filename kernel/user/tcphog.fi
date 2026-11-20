@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const SYS_NANOSLEEP: u64 = 35
+const SYS_FORK: u64 = 57
+const SYS_SOCKET: u64 = 41
+const SYS_CONNECT: u64 = 42
+const AF_INET: u64 = 2
+const SOCK_STREAM: u64 = 1
+const SOCKADDR_LEN: u64 = 16
+const ERROR_FLOOR: u64 = 0xFFFFFFFFFFFFF000
+const PARENT_WAIT_S: u64 = 3
+const HOLD_WAIT_S: u64 = 3600
+
+fn nap(seconds: u64) {
+    var ts: [u64; 2] = [0 as u64; 2]
+    ts[0 as usize] = seconds
+    ulib.sys(SYS_NANOSLEEP, (&ts[0 as usize]) as u64, 0, 0)
+}
+
+fn parse_ip(p: u64, out: *mut [u8; 16]) -> bool {
+    var i: u64 = 0
+    var octet: u64 = 0
+    var at: usize = 4
+    var seen: u64 = 0
+    while true {
+        let c: u64 = (*((p + i) as *mut u8)) as u64
+        if c >= 48 && c <= 57 {
+            octet = octet * 10 + (c - 48)
+        } else {
+            if seen >= 4 || octet > 255 {
+                return false
+            }
+            (*out)[at] = octet as u8
+            at = at + 1
+            seen = seen + 1
+            octet = 0
+            if c == 0 {
+                break
+            }
+        }
+        i = i + 1
+    }
+    return seen == 4
+}
+
+fn say_held(held: u64, wanted: u64) {
+    var head: [u8; 13] = "TCPHOG held=\0"
+    var mid: [u8; 5] = " of \0"
+    ulib.say((&head[0 as usize]) as u64)
+    ulib.sayu(held)
+    ulib.say((&mid[0 as usize]) as u64)
+    ulib.sayu(wanted)
+    ulib.nl()
+}
+
+fn hold_all(addr: *mut [u8; 16], wanted: u64) {
+    var held: u64 = 0
+    var n: u64 = 0
+    while n < wanted {
+        let fd: u64 = ulib.sys(SYS_SOCKET, AF_INET, SOCK_STREAM, 0)
+        if fd < ERROR_FLOOR {
+            let rc: u64 = ulib.sys(SYS_CONNECT, fd, (&(*addr)[0 as usize]) as u64, SOCKADDR_LEN)
+            if rc < ERROR_FLOOR {
+                held = held + 1
+            }
+        }
+        n = n + 1
+    }
+    say_held(held, wanted)
+    while true {
+        nap(HOLD_WAIT_S)
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    if ulib.arg_count(args) < 4 {
+        return 1
+    }
+    var addr: [u8; 16] = [0 as u8; 16]
+    if !parse_ip(ulib.arg_at(args, 1), &addr) {
+        return 1
+    }
+    let port: u64 = ulib.to_num(ulib.arg_at(args, 2))
+    addr[0 as usize] = AF_INET as u8
+    addr[2 as usize] = ((port >> 8) & 255) as u8
+    addr[3 as usize] = (port & 255) as u8
+    let wanted: u64 = ulib.to_num(ulib.arg_at(args, 3))
+    if ulib.sys(SYS_FORK, 0, 0, 0) == 0 {
+        hold_all(&addr, wanted)
+    }
+    nap(PARENT_WAIT_S)
+    return 0
+}

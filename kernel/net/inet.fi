@@ -21,6 +21,7 @@ import net.sharebind
 import net.wg
 import net.kodb
 import net.tcporphan
+import net.tcpreserve
 
 export { arp_flush, arp_ask, echoes, EPHEMERAL_BASE, EPHEMERAL_MASK,
     init, ready, pump, netd_body, wake, configure, readdr, us, set_task,
@@ -1286,6 +1287,47 @@ fn make_room(state: u64) -> bool {
     return evicted
 }
 
+fn slot_admitted(state: u64, caller: u64) -> bool {
+    var flags: u64 = hold(state)
+    var ok: bool = tcpreserve.admit(state, st(state), caller)
+    drop_lock(state, flags)
+    if ok {
+        return true
+    }
+    let _evicted: bool = make_room(state)
+    flags = hold(state)
+    ok = tcpreserve.admit(state, st(state), caller)
+    drop_lock(state, flags)
+    if !ok {
+        tcpreserve.say_refused(caller)
+    }
+    return ok
+}
+
+fn detach_stale(state: u64, i: u64, h: u64) {
+    let dead_epoch: u64 = (in_epoch + 1) & H_MASK
+    kstate.set(state, so_at(i) + SO_H, (h & H_MASK) | (dead_epoch << 32))
+}
+
+fn reclaim_leaked(state: u64) -> bool {
+    let flags: u64 = hold(state)
+    var reclaimed: bool = false
+    var i: u64 = 0
+    while i < SOCK_MAX && !reclaimed {
+        let h: u64 = sock_handle(state, i)
+        if sock_kind(state, i) == SK_TCP && h != NOHANDLE
+            && stack.net_state(st(state), h as i32) == tcp.S_CLOSE_WAIT {
+            tcpreserve.say_reclaimed(tcp.S_CLOSE_WAIT as u64)
+            stack.net_abort(st(state), h as i32)
+            detach_stale(state, i, h)
+            reclaimed = true
+        }
+        i = i + 1
+    }
+    drop_lock(state, flags)
+    return reclaimed
+}
+
 fn sock_connect(state: u64, i: u64, addr: u64, port: u64) -> u64 {
     let k: u64 = sock_kind(state, i)
     if k == SK_FREE {
@@ -1308,8 +1350,15 @@ fn sock_connect(state: u64, i: u64, addr: u64, port: u64) -> u64 {
     if kstate.get(state, so_at(i) + SO_H) != NOHANDLE {
         return errno.neg(errno.E_ISCONN)
     }
+    let caller: u64 = sched.current(state)
+    if !slot_admitted(state, caller) {
+        return errno.neg(errno.E_NFILE)
+    }
     var h: i32 = connect_slot(state, addr, port)
     if h < 0 && make_room(state) {
+        h = connect_slot(state, addr, port)
+    }
+    if h < 0 && tcpreserve.is_bridge(state, caller) && reclaim_leaked(state) {
         h = connect_slot(state, addr, port)
     }
     let ep: u64 = in_epoch

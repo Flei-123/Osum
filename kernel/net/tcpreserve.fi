@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import lib.kstate
+import net.stack
+import net.tcp
+import net.netmon
+import serial
+
+export { is_bridge, admit, say_refused, say_reclaimed }
+
+const RESERVED_SLOTS: u64 = 1
+const BRIDGE_NAME_LEN: u64 = 7
+const SAY_MAX: u64 = 20
+
+static mut BRIDGE_NAME: [u8; 8] = "jarvisd\0"
+static mut said: u64 = 0
+
+fn is_bridge(state: u64, task: u64) -> bool {
+    var i: u64 = 0
+    while i < BRIDGE_NAME_LEN {
+        if netmon.name_at(state, task, i) != (BRIDGE_NAME[i as usize] as u64) {
+            return false
+        }
+        i = i + 1
+    }
+    return netmon.name_at(state, task, BRIDGE_NAME_LEN) == 0
+}
+
+fn live_count(s: *mut stack.Stack) -> u64 {
+    let t: *mut tcp.Tcp = stack.net_tcp(s)
+    var n: u64 = 0
+    var k: usize = 0
+    while k < tcp.MAXCONN {
+        let c: *mut tcp.Tcb = &(*t).c[k]
+        if (*c).used == 1 && (*c).state != tcp.S_TIME_WAIT {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn admit(state: u64, s: *mut stack.Stack, task: u64) -> bool {
+    if kstate.mode_on(state, kstate.M_NOBRIDGESLOT) {
+        return true
+    }
+    if is_bridge(state, task) {
+        return true
+    }
+    return live_count(s) + RESERVED_SLOTS <= (tcp.MAXCONN as u64)
+}
+
+fn say_refused(task: u64) {
+    if said >= SAY_MAX {
+        return
+    }
+    said = said + 1
+    var s_head: [u8; 36] = "inet: tcp slot kept for the bridge\0\0"
+    var s_task: [u8; 8] = " task=\0\0"
+    serial.puts((&s_head[0]) as u64)
+    serial.puts((&s_task[0]) as u64)
+    serial.dec(task)
+    serial.nl()
+}
+
+fn say_reclaimed(conn_state: u64) {
+    if said >= SAY_MAX {
+        return
+    }
+    said = said + 1
+    var s_head: [u8; 25] = "inet: tcp leak reclaimed\0"
+    var s_state: [u8; 8] = " state=\0"
+    serial.puts((&s_head[0]) as u64)
+    serial.puts((&s_state[0]) as u64)
+    serial.dec(conn_state)
+    serial.nl()
+}
