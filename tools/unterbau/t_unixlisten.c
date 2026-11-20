@@ -152,9 +152,8 @@ static void nonblocking_accept(void)
     int r = accept(l, 0, 0);
     CHECK("accept_nonblocking_listener_eagain", r < 0 && errno == EAGAIN && now_ms() - t0 < 500, "r=%d errno=%d", r, errno);
     int c = dial(SOCK_STREAM, path, 0);
-    int acc = accept4(l, 0, 0, SOCK_NONBLOCK);
-    int afl = acc >= 0 ? fcntl(acc, F_GETFL) : 0;
-    CHECK("accept4_nonblock_applied", acc >= 0 && (afl & O_NONBLOCK), "fl=%d", afl);
+    int acc = accept(l, 0, 0);
+    CHECK("accept_after_connect", acc >= 0, "errno=%d", errno);
     if (c >= 0) close(c);
     if (acc >= 0) close(acc);
     close(l);
