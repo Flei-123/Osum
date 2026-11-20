@@ -3,10 +3,14 @@
 #include "t.h"
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+
+static volatile int sigpipes;
+static void on_sigpipe(int n) { (void)n; sigpipes++; }
 
 static struct sockaddr_un mk(const char *p) { struct sockaddr_un a; memset(&a, 0, sizeof a); a.sun_family = AF_UNIX; strcpy(a.sun_path, p); return a; }
 #define SALEN(a) ((socklen_t)(offsetof(struct sockaddr_un, sun_path) + strlen((a).sun_path) + 1))
@@ -68,5 +72,9 @@ int main(void)
     ssize_t bw = sendto(s2, big, sizeof big, 0, (struct sockaddr *)&sa, SALEN(sa));
     ssize_t br = recv(srv2, rb, sizeof rb, 0);
     CHECK("big_message", bw == (ssize_t)sizeof big && br == (ssize_t)sizeof big && !memcmp(big, rb, sizeof big), "sent %zd got %zd", bw, br);
+    signal(SIGPIPE, on_sigpipe);
+    int lone = socket(AF_UNIX, SOCK_DGRAM, 0);
+    errno = 0; ssize_t lw = send(lone, "x", 1, 0);
+    CHECK("unconnected_send_enotconn_no_sigpipe", lw == -1 && errno == ENOTCONN && sigpipes == 0, "ret %zd errno %d sigpipes %d", lw, errno, sigpipes);
     return 0;
 }
