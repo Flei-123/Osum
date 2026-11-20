@@ -38,6 +38,8 @@ export {
 const PROT_READ: u64 = 1
 const PROT_WRITE: u64 = 2
 const PROT_EXEC: u64 = 4
+const SHM_COW: u64 = 0x10000000000
+const SHM_COWW: u64 = 0x20000000000
 const MAP_PRIVATE: u64 = 2
 const MAP_FIXED: u64 = 16
 const MAP_FIXED_NOREPLACE: u64 = 0x100000
@@ -672,7 +674,11 @@ fn map_file_shared_ro(state: u64, me: u64, at: u64, len: u64, of: u64, off: u64,
 }
 
 fn map_file_private_following(state: u64, me: u64, at: u64, len: u64, of: u64, off: u64, prot: u64) -> u64 {
-    let r: u64 = map_file_shared_ro(state, me, at, len, of, off, prot & ~PROT_WRITE)
+    var view: u64 = (prot & ~PROT_WRITE) | SHM_COW
+    if (prot & PROT_WRITE) != 0 {
+        view = view | SHM_COWW
+    }
+    let r: u64 = map_file_shared_ro(state, me, at, len, of, off, view)
     if r >= 0xFFFFFFFFFFFFF000 {
         return 0
     }
@@ -902,7 +908,10 @@ fn map_shm_obj(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64, at: 
     return map_shm_obj_at(state, me, i, wok, len, prot, at, 0)
 }
 
-fn map_shm_obj_at(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64, at: u64, skip: u64) -> u64 {
+fn map_shm_obj_at(state: u64, me: u64, i: u64, wok: bool, len: u64, prot_in: u64, at: u64, skip: u64) -> u64 {
+    let cow: bool = (prot_in & SHM_COW) != 0
+    let cow_write_ok: bool = (prot_in & SHM_COWW) != 0
+    let prot: u64 = prot_in & ~(SHM_COW | SHM_COWW)
     if unixsock.shm_used(state, i) == 0 {
         return sysuser.neg(errno.E_NODEV)
     }
@@ -964,8 +973,13 @@ fn map_shm_obj_at(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64, a
             return sysuser.neg(errno.E_NOMEM)
         }
         if frame != 0 {
-            if !procmap.map_frame(state, me, base + p * sysconst.PAGE, frame,
-                writing) {
+            var placed: bool = false
+            if cow {
+                placed = procmap.map_frame_cow(state, me, base + p * sysconst.PAGE, frame, cow_write_ok)
+            } else {
+                placed = procmap.map_frame(state, me, base + p * sysconst.PAGE, frame, writing)
+            }
+            if !placed {
                 return sysuser.neg(errno.E_NOMEM)
             }
             kstate.add(state, kstate.MAPS, 1)

@@ -177,7 +177,7 @@ fn unshare_page(state: u64, i: u64, pt: u64, s: u64, e: u64) -> u64 {
         return 0
     }
     procswap.copy_frame_words(mmframe.kva(f), mmframe.kva(e & procbase.ADDR_MASK))
-    let ne: u64 = (e & (~(procbase.ADDR_MASK | procbase.PAGE_SHARED | procbase.PAGE_PCACHE))) | f
+    let ne: u64 = (e & (~(procbase.ADDR_MASK | procbase.PAGE_SHARED | procbase.PAGE_PCACHE | procbase.PAGE_COW | procbase.PAGE_COWW))) | f
     procpt.write_entry(pt, s, ne)
     return ne
 }
@@ -197,6 +197,37 @@ fn unshare_cached(state: u64, i: u64, addr: u64) -> bool {
     }
     tlb_flush_if_current(state, i)
     return true
+}
+
+fn cow_write(state: u64, i: u64, addr: u64) -> bool {
+    let page: u64 = addr & 0xFFFFFFFFFFFFF000
+    let s: u64 = procpt.pt_slot(page)
+    if s >= 512 {
+        return false
+    }
+    let pt: u64 = procpt.pt_for(state, i, page, false)
+    if pt == 0 {
+        return false
+    }
+    var ok: bool = false
+    mmlock.demand_lock(state)
+    let e: u64 = procpt.read_entry(pt, s)
+    if (e & (procbase.PAGE_PRESENT | procbase.PAGE_USER)) == (procbase.PAGE_PRESENT | procbase.PAGE_USER) {
+        if (e & procbase.PAGE_WRITE) != 0 {
+            ok = true
+        } else if (e & (procbase.PAGE_COW | procbase.PAGE_COWW)) == (procbase.PAGE_COW | procbase.PAGE_COWW) {
+            let ne: u64 = unshare_page(state, i, pt, s, e)
+            if ne != 0 {
+                procpt.write_entry(pt, s, ne | procbase.PAGE_WRITE)
+                ok = true
+            }
+        }
+    }
+    mmlock.demand_unlock(state)
+    if ok {
+        tlb_flush_if_current(state, i)
+    }
+    return ok
 }
 
 fn page_protect(state: u64, i: u64, addr: u64, readable: bool, writable: bool, runnable: bool) -> u64 {
@@ -236,7 +267,7 @@ fn protect_entry(state: u64, i: u64, pt: u64, s: u64, readable: bool, writable: 
     }
     var want_w: bool = writable
     var cur_e: u64 = e
-    if (cur_e & procbase.PAGE_PCACHE) != 0 && want_w {
+    if (cur_e & (procbase.PAGE_PCACHE | procbase.PAGE_COW)) != 0 && want_w {
         cur_e = unshare_page(state, i, pt, s, cur_e)
         if cur_e == 0 {
             return 3
@@ -245,7 +276,7 @@ fn protect_entry(state: u64, i: u64, pt: u64, s: u64, readable: bool, writable: 
     if (cur_e & procbase.PAGE_SHARED) != 0 && (cur_e & procbase.PAGE_WRITE) == 0 && want_w {
         return 2
     }
-    var rest: u64 = cur_e & (~(procbase.PAGE_WRITE | procbase.PAGE_USER | procbase.PAGE_NX))
+    var rest: u64 = cur_e & (~(procbase.PAGE_WRITE | procbase.PAGE_USER | procbase.PAGE_NX | procbase.PAGE_COWW))
     if readable || writable || runnable {
         rest = rest | procbase.PAGE_USER
         if want_w {
