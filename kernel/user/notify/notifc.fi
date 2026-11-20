@@ -37,6 +37,8 @@ const CLICK_CHANGED: u64 = 1
 const CLICK_CLOSE: u64 = 2
 const ROW_BYTES: u64 = 96
 const ARG_BYTES: u64 = 24
+const APP_PATH_BYTES: u64 = 64
+const CRASH_NAME_OFFSET: u64 = 6
 const ACT_NONE: u64 = 0
 const ACT_FOLDER: u64 = 1
 const SEC_NONE: u64 = 0
@@ -58,6 +60,7 @@ static mut row_hi: [u64; 8] = [0 as u64; 8]
 static mut list_pt: u64 = 0
 static mut list_cap: u64 = 0
 static mut row_arg: [u8; 192] = [0 as u8; 192]
+static mut row_app: [u8; 192] = [0 as u8; 192]
 static mut toast_arg: [u8; 24] = [0 as u8; 24]
 static mut raw_buf: [u8; 96] = [0 as u8; 96]
 static mut hum_buf: [u8; 96] = [0 as u8; 96]
@@ -71,6 +74,10 @@ static mut s_rc: [u8; 5] = " rc=\0"
 static mut s_toast: [u8; 19] = "notifc: toast act \0"
 static mut k_sec_eject: [u8; 16] = "notif.act.eject\0"
 static mut k_sec_report: [u8; 17] = "notif.act.report\0"
+static mut k_sec_restart: [u8; 18] = "notif.act.restart\0"
+static mut p_apps_dir: [u8; 7] = "/apps/\0"
+static mut p_bundle_start: [u8; 12] = ".osp/start\0\0"
+static mut s_restart: [u8; 22] = "notifc: restart row=\0\0"
 static mut k_eject_busy: [u8; 16] = "note.eject.busy\0"
 static mut k_eject_fail: [u8; 16] = "note.eject.fail\0"
 
@@ -235,11 +242,52 @@ fn store_text(slot: u64, hum: u64, prio: u64) {
     __mmio_write8((p + 1) as *mut u8, 32 as u8)
 }
 
+fn crash_app_name(raw: u64, n: u64, dst: u64) {
+    var k: u64 = 0
+    while k < ARG_BYTES - 1 && CRASH_NAME_OFFSET + k < n {
+        let c: u64 = regio.read8_at(raw, CRASH_NAME_OFFSET + k)
+        if c == 32 || c == 0 {
+            break
+        }
+        __mmio_write8((dst + k) as *mut u8, c as u8)
+        k = k + 1
+    }
+    __mmio_write8((dst + k) as *mut u8, 0 as u8)
+}
+
+fn app_start_path(name: u64, out: u64) {
+    let _a: u64 = ulib.strcpy(out, (&p_apps_dir[0 as usize]) as u64)
+    let _b: u64 = ulib.strcat(out, name)
+    let _c: u64 = ulib.strcat(out, (&p_bundle_start[0 as usize]) as u64)
+}
+
+fn app_restartable(name: u64) -> bool {
+    var path: [u8; 64] = [0 as u8; 64]
+    if regio.read8_at(name, 0) == 0 {
+        return false
+    }
+    app_start_path(name, (&path[0 as usize]) as u64)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let _x: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return true
+}
+
 fn store_row(slot: u64, hum: u64, raw: u64, n: u64, prio: u64, seq: u64) -> bool {
     notecard.from_bus(slot + 1, raw, n, prio, seq)
     let act: u64 = classify(raw, n, (&row_arg[0 as usize]) as u64 + slot * ARG_BYTES)
     let sec: u64 = secondary(raw, n, act)
-    if sec != SEC_NONE {
+    let app: u64 = (&row_app[0 as usize]) as u64 + slot * ARG_BYTES
+    __mmio_write8(app as *mut u8, 0 as u8)
+    if sec == SEC_REPORT {
+        crash_app_name(raw, n, app)
+    }
+    if sec == SEC_REPORT && app_restartable(app) {
+        notecard.set_buttons(slot + 1, msg.get((&k_sec_restart[0 as usize]) as u64), sec_label(sec))
+    } else if sec != SEC_NONE {
+        __mmio_write8(app as *mut u8, 0 as u8)
         notecard.set_buttons(slot + 1, sec_label(sec), 0)
     }
     let need: u64 = notecard.card_h_pt(slot + 1) + GAPP
@@ -368,6 +416,24 @@ fn carrier_of(path: u64) -> u64 {
     return ulib.WX_MAX
 }
 
+fn restart_row(i: u64) {
+    if i >= n_rows || row_sec[i as usize] != SEC_REPORT {
+        return
+    }
+    var path: [u8; 64] = [0 as u8; 64]
+    var av: [u64; 2] = [0 as u64; 2]
+    app_start_path((&row_app[0 as usize]) as u64 + i * ARG_BYTES, (&path[0 as usize]) as u64)
+    av[0 as usize] = (&path[0 as usize]) as u64
+    let pid: u64 = ulib.spawn_app((&path[0 as usize]) as u64, (&av[0 as usize]) as u64, 1)
+    say((&s_restart[0 as usize]) as u64)
+    lineout.add_num(i)
+    say((&s_actp[0 as usize]) as u64)
+    say((&path[0 as usize]) as u64)
+    say((&s_rc[0 as usize]) as u64)
+    lineout.add_num(pid)
+    lineout.end_line()
+}
+
 fn eject_row(i: u64) {
     if i >= n_rows || row_sec[i as usize] != SEC_EJECT {
         return
@@ -455,7 +521,12 @@ fn click(i: u64, lx: u64, ly: u64) -> u64 {
         notecard.dismiss_range(row_lo[i as usize], row_hi[i as usize])
         return CLICK_CHANGED
     }
-    if notecard.hit_button(i + 1, lx, ly) != 0 {
+    let hit: u64 = notecard.hit_button(i + 1, lx, ly)
+    if hit == 1 && row_sec[i as usize] == SEC_REPORT && regio.read8_at((&row_app[0 as usize]) as u64, i * ARG_BYTES) != 0 {
+        restart_row(i)
+        return CLICK_CLOSE
+    }
+    if hit != 0 {
         if row_sec[i as usize] == SEC_EJECT {
             eject_row(i)
             return CLICK_CHANGED
