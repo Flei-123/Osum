@@ -44,7 +44,7 @@ import sys.sysdents
 import sys.sysfifo
 
 export {
-    at_enter1, do_access, do_chdir, do_chmod, do_chown, do_chown_at, do_chroot, do_lchown, do_diskup, do_fallocate, do_fchdir, do_fchmod, do_fchown, do_flist, do_fopen, do_freg, do_fstat, do_ftype, do_getcwd, do_getdents, do_jrnl, do_link, do_lstat, do_memfd, do_mkdir_mode, do_mntstat, do_mount, do_readlink, do_rename, do_rmdir, do_scan, do_stat, do_statfs, do_statx, do_symlink, do_sync, do_unlink, do_utimensat, do_vfs_mount, do_vfs_umount, ev_in_any, ev_in_path, ev_in_rename, ev_open_create, ev_path_exists, lc_at
+    at_enter1, do_access, do_chdir, do_chmod, do_chown, do_chown_at, do_chroot, do_lchown, do_diskup, do_fallocate, do_fchdir, do_fchmod, do_fchown, do_flist, do_fopen, do_freg, do_fstat, do_ftype, do_getcwd, do_getdents, do_jrnl, do_link, do_lstat, do_memfd, do_mkdir_mode, do_mntstat, do_mount, do_readlink, do_rename, do_rmdir, do_scan, do_stat, do_statfs, do_statfs_path, do_fstatfs, do_statx, do_symlink, do_sync, do_unlink, do_utimensat, do_vfs_mount, do_vfs_umount, ev_in_any, ev_in_path, ev_in_rename, ev_open_create, ev_path_exists, lc_at
 }
 
 const UTIME_NOW: u64 = 1073741823 // (1 << 30) - 1
@@ -1721,6 +1721,72 @@ fn do_chroot(state: u64, me: u64, name: u64) -> u64 {
 
 // statfs/fstatfs (struct statfs, 120 octets): the numbers of the root file system (OFS). The path/descriptor is only checked; every
 // mount of this kernel except /proc, /dev answers with the root numbers. f_files/f_ffree stay 0 (not counted), f_type is the OFS tag.
+const TMPFS_MAGIC: u64 = 0x01021994
+const TMPFS_BLOCK_SIZE: u64 = 4096
+const STATFS_WORDS: u64 = 15
+const STATFS_BYTES: u64 = 120
+
+fn do_statfs_path(state: u64, me: u64, name: u64, out: u64) -> u64 {
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = sysuser.fetch_path(state, me, name, buf, sysconst.MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if !devfs.is_shm_tree(buf) {
+        let ino: u64 = sysuser.ino_of_path(state, me, name)
+        if errno.is_error(ino) {
+            return ino
+        }
+        return do_statfs(state, me, out)
+    }
+    if !perm.walk(state, me, buf) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if !devfs.is_shm_root(buf) && !shm_path_exists(state, buf) {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    return do_statfs_tmpfs(state, me, out)
+}
+
+fn shm_path_exists(state: u64, path: u64) -> bool {
+    if !vfs.ready(state) {
+        return false
+    }
+    let m: u64 = vfs.mount_for(state, path)
+    return m < vfs.MAX_MNT && vfs.node_for(state, m, path) != 0
+}
+
+fn do_fstatfs(state: u64, me: u64, fd: u64, out: u64) -> u64 {
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if file.open_kind(state, of) == file.K_SHM {
+        return do_statfs_tmpfs(state, me, out)
+    }
+    return do_statfs(state, me, out)
+}
+
+fn do_statfs_tmpfs(state: u64, me: u64, out: u64) -> u64 {
+    if !procfault.user_ok(state, me, out, STATFS_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    var k: u64 = 0
+    while k < STATFS_WORDS {
+        let _z: bool = sysuser.put64(state, me, out + k * 8, 0)
+        k = k + 1
+    }
+    let total: u64 = unixsock.SHM_PAGES_LIMIT
+    let _t: bool = sysuser.put64(state, me, out, TMPFS_MAGIC)
+    let _bs: bool = sysuser.put64(state, me, out + 8, TMPFS_BLOCK_SIZE)
+    let _b: bool = sysuser.put64(state, me, out + 16, total)
+    let _f: bool = sysuser.put64(state, me, out + 24, total)
+    let _a: bool = sysuser.put64(state, me, out + 32, total)
+    let _nl: bool = sysuser.put64(state, me, out + 64, 255)
+    let _fr: bool = sysuser.put64(state, me, out + 72, TMPFS_BLOCK_SIZE)
+    return 0
+}
+
 fn do_statfs(state: u64, me: u64, out: u64) -> u64 {
     if !procfault.user_ok(state, me, out, 120) {
         return sysuser.neg(errno.E_FAULT)
