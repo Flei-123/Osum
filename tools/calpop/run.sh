@@ -11,4 +11,5 @@ D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 bash tools/calpop/shot.sh "$D/new" > "$D/new.log" 2>&1
 python3 -I tools/calpop/check.py "$D/new" | tee "$D/new.res"
 [ -n "$KEEP" ] && { mkdir -p "$KEEP"; cp "$D"/new/* "$KEEP/" 2>/dev/null; }
-grep -q 'RESULT ok=[0-9]* fail=0' "$D/new.res"
+bash tools/calpop/scroll.sh | tee "$D/scroll.res"
+grep -q 'RESULT ok=[0-9]* fail=0' "$D/new.res" && grep -q 'RESULT ok=[0-9]* fail=0' "$D/scroll.res"

@@ -29,7 +29,7 @@ import msg
 import libc.regio
 import notify.notecard
 
-export { report_open, report_card, report_shut, load, rows, list_h_pt, changed, clear_all, report, click, act_newest, CLICK_NONE, CLICK_CHANGED, CLICK_CLOSE, NC_MAXR }
+export { report_open, report_card, report_shut, load, rows, list_h_pt, total_rows, first_row, scrollable, scroll_by, scroll_reset, scroll_pages, cap_pt, report_scroll, changed, clear_all, report, click, act_newest, CLICK_NONE, CLICK_CHANGED, CLICK_CLOSE, NC_MAXR }
 
 const NC_MAXR: u64 = 8
 const CLICK_NONE: u64 = 0
@@ -59,6 +59,15 @@ static mut row_lo: [u64; 8] = [0 as u64; 8]
 static mut row_hi: [u64; 8] = [0 as u64; 8]
 static mut list_pt: u64 = 0
 static mut list_cap: u64 = 0
+static mut scroll_top_row: u64 = 0
+static mut merged_rows: u64 = 0
+static mut cur_stored: u64 = 0
+static mut list_full: u64 = 0
+static mut prev_pri: u64 = 0
+static mut prev_hum: [u8; 96] = [0 as u8; 96]
+static mut s_scroll: [u8; 22] = "notifc: scroll first=\0"
+static mut s_scroll_of: [u8; 5] = " of=\0"
+static mut s_scroll_n: [u8; 5] = " n=\0\0"
 static mut row_arg: [u8; 192] = [0 as u8; 192]
 static mut row_app: [u8; 192] = [0 as u8; 192]
 static mut toast_arg: [u8; 24] = [0 as u8; 24]
@@ -305,17 +314,42 @@ fn store_row(slot: u64, hum: u64, raw: u64, n: u64, prio: u64, seq: u64) -> bool
     return true
 }
 
+fn remember_prev(hum: u64, prio: u64) {
+    var k: u64 = 0
+    while k < ROW_BYTES {
+        let c: u8 = __mmio_read8((hum + k) as *mut u8)
+        prev_hum[k as usize] = c
+        if c == 0 as u8 {
+            break
+        }
+        k = k + 1
+    }
+    prev_hum[(ROW_BYTES - 1) as usize] = 0 as u8
+    prev_pri = prio
+}
+
 fn add_entry(raw: u64, n: u64, prio: u64, seq: u64) {
     let hum: u64 = humanized_copy(raw, n)
-    if n_rows > 0 && same_text(hum, (&row_txt[0 as usize]) as u64 + (n_rows - 1) * ROW_BYTES + 2)
-        && row_pri[(n_rows - 1) as usize] == prio {
-        row_cnt[(n_rows - 1) as usize] = row_cnt[(n_rows - 1) as usize] + 1
-        row_lo[(n_rows - 1) as usize] = seq
+    if merged_rows > 0 && same_text(hum, (&prev_hum[0 as usize]) as u64) && prev_pri == prio {
+        if cur_stored != 0 {
+            row_cnt[(n_rows - 1) as usize] = row_cnt[(n_rows - 1) as usize] + 1
+            row_lo[(n_rows - 1) as usize] = seq
+        }
+        return
+    }
+    let idx: u64 = merged_rows
+    merged_rows = merged_rows + 1
+    remember_prev(hum, prio)
+    cur_stored = 0
+    if idx < scroll_top_row || list_full != 0 {
         return
     }
     if n_rows < NC_MAXR && store_row(n_rows, hum, raw, n, prio, seq) {
         n_rows = n_rows + 1
+        cur_stored = 1
+        return
     }
+    list_full = 1
 }
 
 fn append_counts() {
@@ -337,6 +371,9 @@ fn read_rows() {
     seen_total = svcnoti.noti_total()
     n_rows = 0
     list_pt = 0
+    merged_rows = 0
+    cur_stored = 0
+    list_full = 0
     var i: u64 = 0
     while i < raw_n {
         let raw: u64 = (&raw_buf[0 as usize]) as u64
@@ -352,6 +389,13 @@ fn read_rows() {
         i = i + 1
     }
     append_counts()
+    if n_rows == 0 && scroll_top_row > 0 {
+        scroll_top_row = 0
+        if merged_rows > 0 {
+            scroll_top_row = merged_rows - 1
+        }
+        read_rows()
+    }
 }
 
 fn spawn_explorer(path: u64) {
@@ -475,6 +519,71 @@ fn load(cap_pt: u64) -> u64 {
 
 fn rows() -> u64 {
     return n_rows
+}
+
+fn total_rows() -> u64 {
+    return merged_rows
+}
+
+fn first_row() -> u64 {
+    return scroll_top_row
+}
+
+fn cap_pt() -> u64 {
+    return list_cap
+}
+
+fn scrollable() -> bool {
+    return scroll_top_row > 0 || scroll_top_row + n_rows < merged_rows
+}
+
+fn scroll_reset() {
+    scroll_top_row = 0
+}
+
+fn scroll_by(down: bool, step: u64) -> bool {
+    var want: u64 = scroll_top_row
+    if down {
+        let room: u64 = merged_rows - scroll_top_row - n_rows
+        if scroll_top_row + n_rows >= merged_rows {
+            return false
+        }
+        if step > room {
+            want = scroll_top_row + room
+        } else {
+            want = scroll_top_row + step
+        }
+    } else {
+        if scroll_top_row == 0 {
+            return false
+        }
+        if step > scroll_top_row {
+            want = 0
+        } else {
+            want = scroll_top_row - step
+        }
+    }
+    scroll_top_row = want
+    let _n: u64 = load(list_cap)
+    report_scroll()
+    return true
+}
+
+fn scroll_pages() -> u64 {
+    if n_rows == 0 {
+        return 1
+    }
+    return n_rows
+}
+
+fn report_scroll() {
+    say((&s_scroll[0 as usize]) as u64)
+    lineout.add_num(scroll_top_row)
+    say((&s_scroll_of[0 as usize]) as u64)
+    lineout.add_num(merged_rows)
+    say((&s_scroll_n[0 as usize]) as u64)
+    lineout.add_num(n_rows)
+    lineout.end_line()
 }
 
 fn list_h_pt() -> u64 {
