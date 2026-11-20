@@ -34,7 +34,7 @@ make_bundle teamlist "Teamlist" "Lists teams" "team" /bin/edit
 printf 'use=notes-two:3\n' > "$TMPD/startuse.conf"
 LONG=a-very-long-file-name-for-the-index-test.txt
 for f in certus-notes.txt zzqq-file.txt spinatus.txt tattoo.txt x-remote-notes.txt $LONG; do printf 'x\n' > "$TMPD/files/$f"; done
-MKFS_EXTRA="/data/ /var/store/ /var/store/apps=$TMPD/catalog.tsv@0644"
+MKFS_EXTRA="/data/ /var/ /var/store/ /var/store/apps=$TMPD/catalog.tsv@0644"
 for f in certus-notes.txt zzqq-file.txt spinatus.txt tattoo.txt x-remote-notes.txt $LONG; do MKFS_EXTRA="$MKFS_EXTRA /data/$f=$TMPD/files/$f@0644"; done
 
 echo "== mutant tree: the old ranking =="
