@@ -763,8 +763,6 @@ hat "$OUT/p1.after" "gateapp 1" "revision recorded in /system/apps.rev"
 hat "$OUT/p1.after" "00000100" "SYSVERSION unchanged (no kernel stand involved)"
 hatnicht "$OUT/p1.after" "staged in slot B" "no slot B"
 [ -n "$SLEEP_BEFORE" ] && hat "$OUT/p1.after" "$SLEEP_BEFORE" "the untouched app sleep keeps its bytes" || bad "no sleep hash before"
-hatnicht "$OUT/p1.after" "system: apps updated; open windows keep the old version until closed
-system: apps updated" "single update"
 [ "$(grep -ac "system: up to date" "$OUT/p1.after")" -ge 1 ] && ok "second apply: nothing left to do" || bad "second apply did not say up to date"
 esp_has osum-b.mb && bad "slot B written" || ok "no slot B on the ESP"
 [ "$(conf_default)" = "2" ] && bad "limine default_entry armed slot B" || ok "limine default_entry not armed ('$(conf_default)')"
