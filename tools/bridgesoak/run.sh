@@ -96,7 +96,7 @@ start_peer() {
 start_guest() {
     local serial=$1 flags=$2 deadline=$3
     cp "$W/probe.img" "$W/live.img"
-    timeout 300 qemu-system-x86_64 -kernel "$W/k.mb" -m 256 \
+    timeout $((SOAK_S + 300)) qemu-system-x86_64 -kernel "$W/k.mb" -m 256 \
         -append "osum vfs nokbd nosched nofs noring3 gfx nocursor nic nip=$OSUM_IP/24 ngw=$HOST_IP $SVC_WORDS $flags script=tablewatch $WATCH_PERIOD_S;jarvisd -v -t $deadline;exit" \
         -serial "file:$serial" -display none -no-reboot \
         -drive "file=$W/live.img,format=raw,if=ide,index=0" \
