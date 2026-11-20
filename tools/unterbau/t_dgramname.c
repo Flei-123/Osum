@@ -50,7 +50,7 @@ int main(void)
     errno = 0; ssize_t nw = sendto(s2, "x", 1, 0, (struct sockaddr *)&none, SALEN(none));
     CHECK("sendto_nobody_econnrefused", nw == -1 && errno == ECONNREFUSED, "ret %zd errno %d", nw, errno);
     errno = 0; int cc = connect(s2, (struct sockaddr *)&none, SALEN(none));
-    CHECK("connect_nobody_econnrefused", cc == -1 && errno == ECONNREFUSED, "ret %d errno %d", cc, errno);
+    CHECK("connect_nobody_enoent", cc == -1 && errno == ENOENT, "ret %d errno %d", cc, errno);
     /* close the server: the connected client gets an error, the path can be bound again */
     close(srv);
     errno = 0; ssize_t dw = send(c, "late", 4, MSG_NOSIGNAL);

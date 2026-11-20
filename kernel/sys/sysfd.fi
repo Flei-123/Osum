@@ -52,7 +52,7 @@ import sys.usockpath
 import sys.sysfdalias
 
 export {
-    cx_bit, cx_close_marked, cx_copy, cx_pair, cx_put, cx_result, dir_allowed, do_close, do_dup, do_dup2, do_dup_min, do_fsync, do_ftruncate, do_lseek, do_open_mode, do_pio, do_pipe, do_pipe_flags, do_pvec, do_read, do_recvfrom, do_sendto, do_writev, ev_kind, file_io_loop, fsync_of, nl_name_out, nl_recv_of, nl_run, nl_wait, open_named, page_up, read_of, readable, sa_in, sa_out, sa_un, net_wait, sock_deadline, sock_wait_error, sock_of, vfs_on_create, wl_recv, wl_send, writable, write_of
+    cx_bit, cx_close_marked, cx_copy, cx_pair, cx_put, cx_result, dir_allowed, do_close, do_dup, do_dup2, do_dup_min, do_fsync, do_ftruncate, do_lseek, do_open_mode, do_pio, do_pipe, do_pipe_flags, do_pvec, do_read, do_recvfrom, do_sendto, do_writev, ev_kind, file_io_loop, fsync_of, nl_name_out, nl_recv_of, nl_run, nl_wait, open_named, page_up, read_of, readable, sa_in, sa_out, sa_un, net_wait, sock_deadline, usock_deadline, sock_wait_error, sock_of, vfs_on_create, wl_recv, wl_send, writable, write_of
 }
 
 const SA_BYTES: u64 = 16
@@ -81,6 +81,7 @@ fn readable(state: u64, of: u64) -> bool {
 // ------------------------------------------------------------- write
 
 const MAX_FWRITE: u64 = 1048576
+const PIPE_BUF: u64 = 4096
 
 fn fan_modified(state: u64, me: u64, fd: u64) {
     let of: u64 = sysuser.of_of(state, me, fd)
@@ -531,7 +532,37 @@ fn pipe_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
 // A writer into a pipe nobody reads gets -EPIPE. On a full pipe it waits;
 // what it could place before that is a SHORT write, which is what the
 // interface has always allowed.
+fn pipe_write_atomic(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    let p: u64 = file.open_ino(state, of)
+    while true {
+        let seen: u64 = sched.poll_seq(state)
+        if file.pipe_readers(state, p) == 0 {
+            return sysuser.neg(errno.E_PIPE)
+        }
+        if file.pipe_room(state, p) >= len {
+            let bounce: u64 = sysuser.blockb(state)
+            if !sysuser.copy_in(state, me, bounce, buf, len) {
+                return sysuser.neg(errno.E_FAULT)
+            }
+            if file.pipe_put_block(state, p, bounce, len) {
+                sched.poll_kick(state)
+                return len
+            }
+        } else if (file.open_flags(state, of) & sysconst.UB_O_NONBLOCK) != 0 {
+            return sysuser.neg(errno.E_AGAIN)
+        } else if signal.interrupted(state, me) {
+            return sysuser.neg(errno.E_INTR)
+        } else {
+            let _slept: u64 = net_wait(state, seen)
+        }
+    }
+    return 0
+}
+
 fn pipe_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    if len != 0 && len <= PIPE_BUF {
+        return pipe_write_atomic(state, me, of, buf, len)
+    }
     let p: u64 = file.open_ino(state, of)
     var n: u64 = 0
     var stop_error: u64 = sysuser.neg(errno.E_AGAIN)
@@ -940,6 +971,9 @@ fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64, mode: u64, known
             }
             return sysuser.neg(errno.E_PERM)
         }
+        if (flags & O_EXCL) != 0 && vfs.node_for_nofollow(state, m, path) != 0 {
+            return sysuser.neg(errno.E_EXIST)
+        }
         node = vfs.v_create(state, m, path, vfsops.N_FILE)
         if node == 0 {
             if vfs.type_of(state, m) == vfsops.FS_DEV && !devfs.full_path_in_shm(path) {
@@ -1135,6 +1169,9 @@ fn open_named(state: u64, me: u64, buf: u64, len: u64, flags: u64, mode: u64) ->
     if ino == 0 {
         if (flags & O_CREAT) == 0 {
             return sysuser.neg(errno.E_NOENT)
+        }
+        if (flags & O_EXCL) != 0 && fs.path_nofollow(state, buf) != 0 {
+            return sysuser.neg(errno.E_EXIST)
         }
         ino = fs.create_path(state, buf, fs.T_FILE)
         if ino == 0 {
@@ -1975,6 +2012,14 @@ fn sock_deadline(state: u64, si: u64, snd: bool) -> u64 {
     return kstate.get(state, kstate.TICKS) + t + 1
 }
 
+fn usock_deadline(state: u64, si: u64, snd: bool) -> u64 {
+    let t: u64 = unixsock.sock_tmo(state, si, snd)
+    if t == 0 {
+        return 0
+    }
+    return kstate.get(state, kstate.TICKS) + t + 1
+}
+
 fn net_wait(state: u64, seen: u64) -> u64 {
     let t0: u64 = kstate.get(state, kstate.TICKS)
     sched.poll_sleep(state, seen, t0 + 1)
@@ -2320,6 +2365,7 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool,
             }
             free = unixsock.dgram_room(state, unixsock.sock_peer(state, si))
         }
+        let send_deadline: u64 = usock_deadline(state, si, true)
         while free == 0 || (dg && free < n) {
             if nonblock {
                 return sysuser.neg(errno.E_AGAIN)
@@ -2327,8 +2373,9 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool,
             if unixsock.write_closed(state, si) {
                 return sysuser.neg(errno.E_PIPE)
             }
-            if signal.interrupted(state, me) {
-                return sysuser.neg(errno.E_INTR)
+            let stop: u64 = sock_wait_error(state, me, send_deadline)
+            if stop != 0 {
+                return stop
             }
             sched.poll_sleep(state, sched.poll_seq(state), kstate.get(state, kstate.TICKS) + 1)
             free = unixsock.room(state, unixsock.sock_peer(state, si))
@@ -2349,6 +2396,7 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool,
         sched.poll_kick(state)
         return w
     }
+    let recv_deadline: u64 = usock_deadline(state, si, false)
     while true {
         let seen: u64 = sched.poll_seq(state)
         if unixsock.waiting(state, si) != 0 {
@@ -2360,8 +2408,9 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool,
         if nonblock {
             return sysuser.neg(errno.E_AGAIN)
         }
-        if signal.interrupted(state, me) {
-            return sysuser.neg(errno.E_INTR)
+        let stop: u64 = sock_wait_error(state, me, recv_deadline)
+        if stop != 0 {
+            return stop
         }
         sched.poll_sleep(state, seen, kstate.get(state, kstate.TICKS) + 1)
     }
