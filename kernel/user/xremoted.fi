@@ -15,6 +15,11 @@ const POLL_MS: u64 = 2000
 const RESTART_WAIT_MIN: u64 = 3
 const RESTART_WAIT_MAX: u64 = 30
 const HEALTHY_TICKS: u64 = 15
+const SYS_NETGET: u64 = 1300
+const NETGET_IP: u64 = 1
+const NETGET_GW: u64 = 3
+static mut net_sig: u64 = 0
+static mut net_down_seen: bool = false
 static mut restart_wait: u64 = RESTART_WAIT_MIN
 static mut run_ticks: u64 = 0
 static mut W_NOSESSION: [u8; 10] = "nosession\0"
@@ -34,6 +39,7 @@ static mut S_RESTART: [u8; 11] = "restarting\0"
 static mut M_UP: [u8; 18] = "xremoted: started\0"
 static mut M_HOST: [u8; 23] = "xremoted: host started\0"
 static mut M_STOP: [u8; 23] = "xremoted: host stopped\0"
+static mut M_NETCHG: [u8; 41] = "xremoted: network changed, host restarts\0"
 static mut M_FAIL: [u8; 28] = "xremoted: host start failed\0"
 static mut M_PW: [u8; 43] = "xremoted: no random bytes for the password\0"
 static mut password: [u8; 40] = [0 as u8; 40]
@@ -73,6 +79,19 @@ fn mode_word() -> u64 {
         return (&MODE_FIXED[0 as usize]) as u64
     }
     return (&MODE_RANDOM[0 as usize]) as u64
+}
+
+fn net_changed() -> bool {
+    let ip: u64 = ulib.sys(SYS_NETGET, NETGET_IP, 0, 0)
+    if ip == 0 {
+        net_down_seen = true
+        return false
+    }
+    let sig: u64 = (ip << 32) ^ ulib.sys(SYS_NETGET, NETGET_GW, 0, 0)
+    let changed: bool = net_down_seen || (net_sig != 0 && sig != net_sig)
+    net_down_seen = false
+    net_sig = sig
+    return changed
 }
 
 fn session_ok() -> bool {
@@ -140,6 +159,12 @@ fn step(wait: u64) -> u64 {
     }
     if password[0 as usize] != 0 as u8 && fixed_changed() {
         stop_all()
+        return 0
+    }
+    if net_changed() && xrhost.host_running() {
+        xfxio.msg((&M_NETCHG[0 as usize]) as u64)
+        xrhost.stop_host()
+        restart_wait = RESTART_WAIT_MIN
         return 0
     }
     if xrhost.host_running() {
