@@ -49,6 +49,8 @@ BEREICHE = [
     ("CTX",        "kstate.fi", "CTX_OFF",        "CTX_MAX"),
     ("PIPEBUF",    "kstate.fi", "PIPEBUF_OFF",    "PIPEBUF_MAX"),
     ("PIPEHDR",    "kstate.fi", "PIPEHDR_OFF",    "PIPEHDR_MAX"),
+    ("PIPEHDR2",   "kstate.fi", "PIPEHDR2_OFF",   "PIPEHDR2_MAX"),
+    ("PIPEBUF2",   "kstate.fi", "PIPEBUF2_OFF",   "PIPEBUF2_MAX"),
     ("TRACE",      "kstate.fi", "TRACE_OFF",      "TRACE_MAX"),
     ("CONSOLE",    "kstate.fi", "CONSOLE_OFF",    "CONSOLE_MAX"),
     ("EARG",       "kstate.fi", "EARG_OFF",       "EARG_MAX"),

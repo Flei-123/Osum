@@ -107,6 +107,21 @@ try:
     say(region_diff("05-today", "05a-event") >= 1, "the event line and entry repaint the card (%d %% differs)" % region_diff("05-today", "05a-event"))
 except OSError as e:
     say(False, "event pictures missing: %s" % e)
+try:
+    cr = rects.get("cell")
+    wa, ha, da = load_ppm(os.path.join(out, "01-open.ppm"))
+    x0, y0, w0, h0 = cr
+    ref_at = ((y0 + h0 // 2) * wa + px + 3 * max(pw // 376, 1)) * 3
+    ref = da[ref_at:ref_at + 3]
+    dev = 0
+    for yy in range(y0 + 4, y0 + h0 - 4):
+        for xx in (x0 + 1, x0 + w0 - 2):
+            o = (yy * wa + xx) * 3
+            if max(abs(da[o + c] - ref[c]) for c in range(3)) > 14:
+                dev += 1
+    say(dev <= 2, "a plain day cell has no box: edge pixels equal the card background (%d of %d differ)" % (dev, 2 * (h0 - 8)))
+except (OSError, TypeError, IndexError) as e:
+    say(False, "day cell box check impossible: %s" % e)
 cn = re.findall(r"calpop: contacts (\d+)", ser)
 say(len(cn) >= 2 and all(int(v) == 4 for v in cn), "every open reports the 4 seeded contacts (%s)" % cn)
 def ink(name, y0, y1):
