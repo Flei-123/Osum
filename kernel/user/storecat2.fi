@@ -8,7 +8,9 @@ import msg
 
 export {
     ensure, reset, loaded, level_rank, level_key, developer, category, license, notes, limits, tested, gate,
-    LEVEL_BROKEN, LEVEL_UNTESTED, LEVEL_PARTIAL, LEVEL_WORKS,
+    load_list, list_count, list_find, list_name, list_level, list_label, list_version, list_extra, list_short, list_id,
+    group_count, group_label, level_text,
+    NONE, LEVEL_BROKEN, LEVEL_UNTESTED, LEVEL_PARTIAL, LEVEL_WORKS,
 }
 
 const LEVEL_BROKEN: u64 = 0
@@ -24,6 +26,24 @@ const COL_GATE: u64 = 11
 const COL_NOTES: u64 = 12
 const COL_LIMITS: u64 = 13
 const LINE_CAP: u64 = 1100
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const LIST_MAX: u64 = 48
+const ID_W: u64 = 48
+const NAME_W: u64 = 32
+const CAT_W: u64 = 16
+const VER_W: u64 = 12
+const GROUP_MAX: u64 = 8
+const LABEL_W: u64 = 24
+const LIST_LINE: u64 = 400
+const FLAG_NATIVE: u64 = 1
+const FLAG_AVAILABLE: u64 = 2
+const L_ID: u64 = 0
+const L_NAME: u64 = 1
+const L_CAT: u64 = 2
+const L_LEVEL: u64 = 4
+const L_KINDS: u64 = 5
+const L_VERSION: u64 = 6
+const L_AVAILABLE: u64 = 8
 
 static mut ID_PREFIX: [u8; 13] = "com.fleitec.\0"
 static mut V_CALL: [u8; 15] = "call store.app\0"
@@ -43,6 +63,9 @@ static mut W_WORKS: [u8; 6] = "works\0"
 static mut W_PARTIAL: [u8; 8] = "partial\0"
 static mut W_BROKEN: [u8; 7] = "broken\0"
 static mut SEP: [u8; 5] = " · \0"
+static mut V_LIST_CALL: [u8; 16] = "call store.apps\0"
+static mut S_LAPP: [u8; 5] = "app=\0"
+static mut S_LGROUP: [u8; 5] = "cat=\0"
 
 static mut c_name: [u8; 64] = [0 as u8; 64]
 static mut c_loaded: bool = false
@@ -56,6 +79,17 @@ static mut c_tested: [u8; 160] = [0 as u8; 160]
 static mut c_gate: [u8; 96] = [0 as u8; 96]
 static mut c_line: [u8; 1104] = [0 as u8; 1104]
 static mut c_part: [u8; 160] = [0 as u8; 160]
+static mut l_id: [u8; 2304] = [0 as u8; 2304]
+static mut l_name: [u8; 1536] = [0 as u8; 1536]
+static mut l_cat: [u8; 768] = [0 as u8; 768]
+static mut l_ver: [u8; 576] = [0 as u8; 576]
+static mut l_rank: [u8; 48] = [0 as u8; 48]
+static mut l_flags: [u8; 48] = [0 as u8; 48]
+static mut l_n: u64 = 0
+static mut g_id: [u8; 128] = [0 as u8; 128]
+static mut g_label: [u8; 192] = [0 as u8; 192]
+static mut g_n: u64 = 0
+static mut l_line: [u8; 400] = [0 as u8; 400]
 
 fn loaded() -> bool {
     return c_loaded
@@ -94,16 +128,7 @@ fn gate() -> u64 {
 }
 
 fn level_key() -> u64 {
-    if c_rank == LEVEL_WORKS {
-        return msg.get((&KEY_WORKS[0 as usize]) as u64)
-    }
-    if c_rank == LEVEL_PARTIAL {
-        return msg.get((&KEY_PARTIAL[0 as usize]) as u64)
-    }
-    if c_rank == LEVEL_BROKEN {
-        return msg.get((&KEY_BROKEN[0 as usize]) as u64)
-    }
-    return msg.get((&KEY_UNTESTED[0 as usize]) as u64)
+    return level_text(c_rank)
 }
 
 fn same(a: u64, b: u64) -> bool {
@@ -214,6 +239,13 @@ fn clear() {
     octets.st8((&c_gate[0 as usize]) as u64, 0, 0)
 }
 
+fn lang_word() -> u64 {
+    if octets.ld8(msg.lang(), 0) == 101 {
+        return (&LANG_EN[0 as usize]) as u64
+    }
+    return (&LANG_DE[0 as usize]) as u64
+}
+
 fn fetch(id: u64) {
     clear()
     if !actcli.open() {
@@ -221,11 +253,7 @@ fn fetch(id: u64) {
     }
     actcli.req((&V_CALL[0 as usize]) as u64)
     actcli.arg((&K_NAME[0 as usize]) as u64, id)
-    var lang: u64 = (&LANG_DE[0 as usize]) as u64
-    if octets.ld8(msg.lang(), 0) == 101 {
-        lang = (&LANG_EN[0 as usize]) as u64
-    }
-    actcli.arg((&K_LANG[0 as usize]) as u64, lang)
+    actcli.arg((&K_LANG[0 as usize]) as u64, lang_word())
     if actcli.send(300) != actcli.R_OK {
         return
     }
@@ -245,6 +273,155 @@ fn fetch(id: u64) {
     }
 }
 
+fn has_letter(text: u64, letter: u64) -> bool {
+    var i: u64 = 0
+    while octets.ld8(text, i) != 0 {
+        if octets.ld8(text, i) == letter {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn add_group(line: u64) {
+    if g_n >= GROUP_MAX {
+        return
+    }
+    pipe_field(line, 0, (&g_id[0 as usize]) as u64 + g_n * CAT_W, CAT_W)
+    pipe_field(line, 1, (&g_label[0 as usize]) as u64 + g_n * LABEL_W, LABEL_W)
+    g_n = g_n + 1
+}
+
+fn add_app(line: u64) {
+    if l_n >= LIST_MAX {
+        return
+    }
+    let part: u64 = (&c_part[0 as usize]) as u64
+    pipe_field(line, L_ID, (&l_id[0 as usize]) as u64 + l_n * ID_W, ID_W)
+    pipe_field(line, L_NAME, (&l_name[0 as usize]) as u64 + l_n * NAME_W, NAME_W)
+    pipe_field(line, L_CAT, (&l_cat[0 as usize]) as u64 + l_n * CAT_W, CAT_W)
+    pipe_field(line, L_VERSION, (&l_ver[0 as usize]) as u64 + l_n * VER_W, VER_W)
+    pipe_field(line, L_LEVEL, part, 160)
+    l_rank[l_n as usize] = rank_of(part) as u8
+    var flags: u64 = FLAG_AVAILABLE
+    pipe_field(line, L_AVAILABLE, part, 160)
+    if octets.ld8(part, 0) == 48 {
+        flags = 0
+    }
+    pipe_field(line, L_KINDS, part, 160)
+    if has_letter(part, 110) {
+        flags = flags | FLAG_NATIVE
+    }
+    l_flags[l_n as usize] = flags as u8
+    l_n = l_n + 1
+}
+
+fn load_list() {
+    l_n = 0
+    g_n = 0
+    if !actcli.open() {
+        return
+    }
+    actcli.req((&V_LIST_CALL[0 as usize]) as u64)
+    actcli.arg((&K_LANG[0 as usize]) as u64, lang_word())
+    if actcli.send(300) != actcli.R_OK {
+        return
+    }
+    let lp: u64 = (&l_line[0 as usize]) as u64
+    var k: u64 = 1
+    while actcli.line(k, lp, LIST_LINE) {
+        if after_prefix(lp, (&S_LGROUP[0 as usize]) as u64, lp, LIST_LINE) {
+            add_group(lp)
+        } else if after_prefix(lp, (&S_LAPP[0 as usize]) as u64, lp, LIST_LINE) {
+            add_app(lp)
+        }
+        k = k + 1
+    }
+}
+
+fn list_count() -> u64 {
+    return l_n
+}
+
+fn group_count() -> u64 {
+    return g_n
+}
+
+fn group_label(g: u64) -> u64 {
+    return (&g_label[0 as usize]) as u64 + g * LABEL_W
+}
+
+fn list_short(i: u64) -> u64 {
+    let id: u64 = (&l_id[0 as usize]) as u64 + i * ID_W
+    var at: u64 = 0
+    var k: u64 = 0
+    while octets.ld8(id, k) != 0 {
+        if octets.ld8(id, k) == 46 {
+            at = k + 1
+        }
+        k = k + 1
+    }
+    return id + at
+}
+
+fn list_id(i: u64) -> u64 {
+    return (&l_id[0 as usize]) as u64 + i * ID_W
+}
+
+fn list_find(short: u64) -> u64 {
+    var i: u64 = 0
+    while i < l_n {
+        if same(list_short(i), short) {
+            return i
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn list_name(i: u64) -> u64 {
+    return (&l_name[0 as usize]) as u64 + i * NAME_W
+}
+
+fn list_version(i: u64) -> u64 {
+    return (&l_ver[0 as usize]) as u64 + i * VER_W
+}
+
+fn list_level(i: u64) -> u64 {
+    return l_rank[i as usize] as u64
+}
+
+fn list_label(i: u64) -> u64 {
+    let cat: u64 = (&l_cat[0 as usize]) as u64 + i * CAT_W
+    var g: u64 = 0
+    while g < g_n {
+        if same((&g_id[0 as usize]) as u64 + g * CAT_W, cat) {
+            return group_label(g)
+        }
+        g = g + 1
+    }
+    return cat
+}
+
+fn list_extra(i: u64) -> bool {
+    let flags: u64 = l_flags[i as usize] as u64
+    return (flags & FLAG_AVAILABLE) == 0 || (flags & FLAG_NATIVE) == 0
+}
+
+fn level_text(rank: u64) -> u64 {
+    if rank == LEVEL_WORKS {
+        return msg.get((&KEY_WORKS[0 as usize]) as u64)
+    }
+    if rank == LEVEL_PARTIAL {
+        return msg.get((&KEY_PARTIAL[0 as usize]) as u64)
+    }
+    if rank == LEVEL_BROKEN {
+        return msg.get((&KEY_BROKEN[0 as usize]) as u64)
+    }
+    return msg.get((&KEY_UNTESTED[0 as usize]) as u64)
+}
+
 fn reset() {
     octets.st8((&c_name[0 as usize]) as u64, 0, 0)
 }
@@ -255,8 +432,13 @@ fn ensure(name: u64) {
     }
     var id: [u8; 96] = [0 as u8; 96]
     let ip: u64 = (&id[0 as usize]) as u64
-    ulib.strcpy(ip, (&ID_PREFIX[0 as usize]) as u64)
-    ulib.strcat(ip, name)
+    let known: u64 = list_find(name)
+    if known != NONE {
+        ulib.strcpy(ip, list_id(known))
+    } else {
+        ulib.strcpy(ip, (&ID_PREFIX[0 as usize]) as u64)
+        ulib.strcat(ip, name)
+    }
     ulib.strncpy((&c_name[0 as usize]) as u64, name, 63)
     fetch(ip)
 }

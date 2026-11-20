@@ -47,6 +47,23 @@ def good_rows():
     return rows
 
 
+def window_rows():
+    tested = dict(build="main test", device="QEMU", at="2026-11-20")
+    rows = ["#apps\t2\t8"]
+    rows += [row("C", cid, de, en) for cid, de, en in CATEGORIES]
+    rows += [app("com.fleitec.hallo", "Hallo", "Hallo"),
+             variant("com.fleitec.hallo", "opk", "osum-x86_64", "works", gate="tools/test", pkg="opk:hallo", **tested),
+             app("com.fleitec.gruss", "Gruss", "Gruss", "internet"),
+             variant("com.fleitec.gruss", "opk", "osum-x86_64", "works", gate="tools/test", pkg="opk:gruss", **tested),
+             app("org.test.wine", "Weinprogramm", "Wine program"),
+             variant("org.test.wine", "exe", "osum-windows-x86_64", "broken", gate="tools/wine", available=0,
+                     notes=("Startet nicht.", "Does not start."), **tested),
+             app("org.test.lfox", "Feuerfuchs", "Fire fox", "internet"),
+             variant("org.test.lfox", "system", "osum-linux-x86_64", "partial", gate="tools/linux",
+                     notes=("Teilweise nutzbar.", "Partly usable."), limits=(LIMIT_DE, LIMIT_EN), **tested)]
+    return rows
+
+
 def sign(seed_path, data):
     seed = open(seed_path, "rb").read()
     return Ed25519PrivateKey.from_private_bytes(seed).sign(data)
@@ -61,8 +78,8 @@ def gen(directory):
     open(os.path.join(directory, "catalog.pub"), "wb").write(pub)
 
 
-def write(directory, seed_path, flip):
-    data = ("\n".join(good_rows()) + "\n").encode("utf-8")
+def write(directory, seed_path, flip, rows=None):
+    data = ("\n".join(rows or good_rows()) + "\n").encode("utf-8")
     sig = sign(seed_path, data)
     if flip:
         data = data.replace(b"Nativ", b"Natxv", 1)
@@ -75,6 +92,8 @@ def main(argv):
         gen(argv[2])
     elif argv[1] == "write":
         write(argv[2], argv[3], len(argv) > 4 and argv[4] == "flip")
+    elif argv[1] == "window":
+        write(argv[2], argv[3], False, window_rows())
     else:
         sys.exit(2)
 

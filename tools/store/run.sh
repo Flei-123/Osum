@@ -523,6 +523,10 @@ if want window; then
 echo "== 5. the window (/bin/store) on a screen: grid, detail page, install, update, remove, search, keys =="
 # STORE_RES=WxH (default 1024x768)  STORE_MODE=light|dark  STORE_SHOTS=<dir> keeps the pictures as PNG
 RES=${STORE_RES:-1024x768}; MODE=${STORE_MODE:-light}; SHOTS=${STORE_SHOTS:-}
+python3 tools/storeapps/mkview.py gen "$TMPD/c2wkey"
+cp -r "$TMPD/srv/good" "$TMPD/srv/c2win"
+python3 tools/storeapps/mkview.py window "$TMPD/srv/c2win" "$TMPD/c2wkey/catalog.seed"
+serve c2win $((P0+7)) && ok "the window source: package list plus signed catalog 2 (hallo, gruss, a Windows and a Linux entry)" || bad "the window source does not start"
 printf 'lang=de\n' > "$TMPD/locale.conf"
 printf '# /etc/theme.conf\nscheme=day\nmode=%s\naccent=\nshape=classic\n' "$MODE" > "$TMPD/theme.conf"
 {
@@ -541,12 +545,12 @@ EOS
     for _ in $(seq 1 55); do printf 'sleep 40\necho ==S-SNAP==\nopk list\nact call store.list\nact call store.status\n'; done
     echo "echo ==FERTIG=="
 } > "$TMPD/sW.sh"
-EXTRA=("/etc/uitrace=$TMPD/locale.conf" "/etc/theme.conf=$TMPD/theme.conf" "/etc/locale.conf=$TMPD/locale.conf")
+EXTRA=("/etc/store.catalog.pub=$TMPD/c2wkey/catalog.pub" "/etc/uitrace=$TMPD/locale.conf" "/etc/theme.conf=$TMPD/theme.conf" "/etc/locale.conf=$TMPD/locale.conf")
 EXTRA+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/de/ /usr/share/locale/en/ "/usr/share/locale/de/messages=locale/de/messages" "/usr/share/locale/en/messages=locale/en/messages")
 [ -f assets/osum-icons.ttf ] && EXTRA+=("/lib/icons.ttf=assets/osum-icons.ttf")
 [ -f assets/osum-sans-bold.ttf ] && EXTRA+=("/lib/bold.ttf=assets/osum-sans-bold.ttf")
 PROGS_SAVE=$PROGS; PROGS="$PROGS store"
-image "$TMPD/W.img" "$TMPD/sW.sh" "$P0"
+image "$TMPD/W.img" "$TMPD/sW.sh" $((P0+7))
 PROGS=$PROGS_SAVE
 SCALE_WORD=${STORE_SCALE:+uiscale=$STORE_SCALE}
 SOCK="$TMPD/mon.sock"; rm -f "$SOCK"
@@ -612,19 +616,40 @@ if waitfor "==S-WAIT==" 150; then
     MARK=1; i=0; while [ $i -lt 60 ]; do sawt "Alle" && break; sleep 1; i=$((i + 1)); done
     sawt "Alle" && ok "the window opened" || bad "no window"
     MARK=1
-    i=0; while [ $i -lt 120 ] && [ "$(lastn)" != 2 ]; do sleep 1; i=$((i + 1)); done
-    [ "$(lastn)" = 2 ] && ok "the window fetched the signed catalog by itself (first start): two tiles" || bad "no catalog tiles after the first start"
+    i=0; while [ $i -lt 120 ] && [ "$(lastn)" != 4 ]; do sleep 1; i=$((i + 1)); done
+    [ "$(lastn)" = 4 ] && ok "the window fetched the signed catalog by itself (first start): four tiles (two packages, two entries without a package)" || bad "no catalog tiles after the first start"
     sawt "store." && bad "raw locale keys painted" || ok "no raw locale keys"
     sleep 3; shot s1-grid
     MARK=1
     for t in "Updates" "Installiert" "Installieren" "Neue Fassung"; do sawt "$t" && ok "the window shows '$t'" || bad "no '$t'"; done
-    [ "$(lastn)" = 2 ] && ok "two tiles (gruss, hallo) -- what the signed catalog delivers, nothing made up" || bad "tiles: '$(lastn)'"
+    [ "$(lastn)" = 4 ] && ok "four tiles (gruss, hallo, Weinprogramm, Feuerfuchs) -- what the signed catalogs deliver, nothing made up" || bad "tiles: '$(lastn)'"
     mark
     echo "  -- keys: Ctrl+F, type, the grid filters"
     key ctrl-f; typetext gru; sleep 2; shot s2-search
     [ "$(lastn)" = 1 ] && ok "search 'gru': one tile" || bad "search 'gru': tiles '$(lastn)'"
     key esc; sleep 2
-    [ "$(lastn)" = 2 ] && ok "Esc clears the search: two tiles again" || bad "Esc: tiles '$(lastn)'"
+    [ "$(lastn)" = 4 ] && ok "Esc clears the search: four tiles again" || bad "Esc: tiles '$(lastn)'"
+    echo "  -- catalog 2 in the list: badges, the filter 'Nur einwandfreie', entries without a package"
+    MARK=1
+    sawt "Einwandfrei" && ok "a card carries the badge 'Einwandfrei'" || bad "no badge 'Einwandfrei'"
+    sawt "Teilweise" && ok "a card carries the badge 'Teilweise'" || bad "no badge 'Teilweise'"
+    sawt "Startet nicht" && ok "a card carries the badge 'Startet nicht'" || bad "no badge 'Startet nicht'"
+    sawt "Nur einwandfreie" && ok "the filter chip 'Nur einwandfreie' is there" || bad "no filter chip"
+    sawt "Internet" && ok "the category chips come from the catalog ('Internet')" || bad "no category chip from the catalog"
+    mark; tapt "Nur einwandfreie" || bad "filter chip not found"; sleep 2
+    [ "$(lastn)" = 2 ] && ok "'Nur einwandfreie': two tiles (hallo, gruss), nothing broken or partial" || bad "filter: tiles '$(lastn)'"
+    shot s2b-works
+    mark; tapt "Nur einwandfreie"; sleep 2
+    [ "$(lastn)" = 4 ] && ok "the chip again: four tiles" || bad "chip off: tiles '$(lastn)'"
+    mark; key ctrl-f; typetext wine; sleep 2
+    [ "$(lastn)" = 1 ] && ok "search 'wine': the entry without a package" || bad "search 'wine': tiles '$(lastn)'"
+    mark; key down ret; sleep 2; shot s2c-nopkg
+    sawt "Kein Paket verfügbar" && ok "its detail page says there is no package" || bad "no 'Kein Paket verfügbar'"
+    sawt "Installieren" && bad "an entry without a package offers Installieren" || ok "no Installieren button for an entry without a package"
+    sawt "Startet nicht." && ok "the detail page shows the notes of the catalog" || bad "no notes on the detail page"
+    key esc; sleep 1; key esc; sleep 2
+    [ "$(lastn)" = 4 ] && ok "back to the list: four tiles" || bad "back: tiles '$(lastn)'"
+    mark
     echo "  -- detail page of the first tile, by keys"
     mark; key ctrl-f down ret; sleep 2; shot s3-detail
     sawt "Version: " && ok "Enter on a tile opens the detail page (Version line)" || bad "no detail page"

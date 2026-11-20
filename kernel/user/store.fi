@@ -77,6 +77,8 @@ static mut T_CURRENT: [u8; 14] = "store.current\0"
 static mut T_HASUPD: [u8; 13] = "store.hasupd\0"
 static mut T_CHIP_UPD: [u8; 18] = "store.nav.updates\0"
 static mut T_CHIP_INST: [u8; 16] = "store.installed\0"
+static mut T_CHIP_WORKS: [u8; 17] = "store.chip.works\0"
+static mut T_NOPKG: [u8; 12] = "store.nopkg\0"
 static mut T_VERS: [u8; 10] = "Version: \0"
 static mut T_SIZEL: [u8; 12] = "store.sizel\0"
 static mut T_SRCL: [u8; 9] = "Quelle: \0"
@@ -173,6 +175,8 @@ const K_AUTOALL: u64 = 11
 const K_AUTOAPP: u64 = 12
 const K_CHIP: u64 = 60
 const MAXCHIP: u64 = 8
+const K_WORKS: u64 = K_CHIP + MAXCHIP
+const ST_UNLISTED: u64 = 3
 const K_NAV: u64 = 20
 const K_TILE: u64 = 100
 const K_QACT: u64 = 120
@@ -258,6 +262,7 @@ static mut b_wrap: [u8; 128] = [0 as u8; 128]
 static mut b_chip: [u8; 256] = [0 as u8; 256]
 static mut s_chip_n: u64 = 0
 static mut s_chip: u64 = 0
+static mut s_works: bool = false
 static mut b_catq: [u8; 64] = [0 as u8; 64]
 static mut b_ph: [u8; 8] = [0 as u8; 8]
 static mut b_pcl: [u8; 24] = [0 as u8; 24]
@@ -454,7 +459,12 @@ fn desc_of(i: u64) -> u64 {
     let d: u64 = (&b_dsc[0 as usize]) as u64
     var pre: [u8; 11] = "store.app.\0"
     if !app_text(i, (&pre[0 as usize]) as u64, d, 127) {
-        ulib.strncpy(d, msg.get((&T_GENERIC[0 as usize]) as u64), 127)
+        let c: u64 = catalog_of(i)
+        if s_state[i as usize] == ST_UNLISTED as u8 && c != storecat2.NONE {
+            ulib.strncpy(d, storecat2.level_text(storecat2.list_level(c)), 127)
+        } else {
+            ulib.strncpy(d, msg.get((&T_GENERIC[0 as usize]) as u64), 127)
+        }
     }
     return d
 }
@@ -462,14 +472,29 @@ fn desc_of(i: u64) -> u64 {
 fn title_of(i: u64) -> u64 {
     let d: u64 = (&b_disp[0 as usize]) as u64
     var pre: [u8; 12] = "store.name.\0"
-    if !app_text(i, (&pre[0 as usize]) as u64, d, 63) {
-        ulib.strncpy(d, name_at(i), 63)
-        let c: u64 = (*(d as *mut u8)) as u64
-        if c >= 97 && c <= 122 {
-            *(d as *mut u8) = (c - 32) as u8
-        }
+    if app_text(i, (&pre[0 as usize]) as u64, d, 63) {
+        return d
+    }
+    let cat: u64 = catalog_of(i)
+    if cat != storecat2.NONE {
+        ulib.strncpy(d, storecat2.list_name(cat), 63)
+        return d
+    }
+    ulib.strncpy(d, name_at(i), 63)
+    let c: u64 = (*(d as *mut u8)) as u64
+    if c >= 97 && c <= 122 {
+        *(d as *mut u8) = (c - 32) as u8
     }
     return d
+}
+
+fn catalog_of(i: u64) -> u64 {
+    return storecat2.list_find(name_at(i))
+}
+
+fn item_works(i: u64) -> bool {
+    let c: u64 = catalog_of(i)
+    return c != storecat2.NONE && storecat2.list_level(c) == storecat2.LEVEL_WORKS
 }
 
 fn item_match(i: u64) -> bool {
@@ -487,7 +512,10 @@ fn item_match(i: u64) -> bool {
     if s_cat == 4 && st != 2 {
         return false
     }
-    if s_cat == 5 && st == 0 {
+    if s_cat == 5 && (st == 0 || st == ST_UNLISTED) {
+        return false
+    }
+    if s_works && !item_works(i) {
         return false
     }
     if s_chip > 0 && s_chip < s_chip_n {
@@ -544,7 +572,7 @@ fn count_classes() {
         if st == 2 {
             s_n_upd = s_n_upd + 1
         }
-        if st != 0 {
+        if st == 1 || st == 2 {
             s_n_inst = s_n_inst + 1
         }
         let c: u64 = class_of(i)
@@ -579,6 +607,33 @@ fn parse_num(p: u64) -> u64 {
         k = k + 1
     }
     return v
+}
+
+fn is_listed(short: u64) -> bool {
+    var i: u64 = 0
+    while i < s_count {
+        if ulib.streq(name_at(i), short) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn add_unlisted() {
+    var c: u64 = 0
+    while c < storecat2.list_count() && s_count < MAXI {
+        if storecat2.list_extra(c) && !is_listed(storecat2.list_short(c)) {
+            let row: u64 = name_at(s_count)
+            memcopy.fill(row, 0, NAMEW)
+            ulib.strncpy(row, storecat2.list_short(c), 23)
+            ulib.strncpy(row + 24, storecat2.list_version(c), 11)
+            s_state[s_count as usize] = ST_UNLISTED as u8
+            s_autooff[s_count as usize] = 0 as u8
+            s_count = s_count + 1
+        }
+        c = c + 1
+    }
 }
 
 fn load_list() {
@@ -663,6 +718,8 @@ fn load_list() {
         }
         n = n + 1
     }
+    storecat2.load_list()
+    add_unlisted()
     count_classes()
     refilter()
     if s_count == 0 {
@@ -875,10 +932,19 @@ fn focus_ring(x: u64, y: u64, w: u64, h: u64, r: u64) {
     fuiscene.cv_ring(x + 1, y + 1, w - 2, h - 2, r, fuiscene.R_ACCENT)
 }
 
+fn category_text(i: u64, out: u64) -> bool {
+    let c: u64 = catalog_of(i)
+    if c != storecat2.NONE {
+        ulib.strncpy(out, storecat2.list_label(c), 63)
+        return true
+    }
+    var pre: [u8; 11] = "store.cat.\0"
+    return app_text(i, (&pre[0 as usize]) as u64, out, 63)
+}
+
 fn cat_of(i: u64) -> u64 {
     let d: u64 = (&b_line[0 as usize]) as u64
-    var pre: [u8; 11] = "store.cat.\0"
-    if app_text(i, (&pre[0 as usize]) as u64, d, 63) {
+    if category_text(i, d) {
         return d
     }
     sb_begin(d, 96)
@@ -934,7 +1000,15 @@ fn paint_card_info(i: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
     let tx: u64 = x + isz + fuiscene.sp(12)
     let room: u64 = w - isz - fuiscene.sp(12)
     tt(tx, y, room, title_of(i), fuiscene.sp(14), true, fuiscene.R_TEXT)
-    tt(tx, y + fuiscene.sp(18), room, cat_of(i), fuiscene.sp(12), false, fuiscene.R_MUTED)
+    var catw: u64 = room
+    let c: u64 = catalog_of(i)
+    if c != storecat2.NONE {
+        let rank: u64 = storecat2.list_level(c)
+        let bw: u64 = badge_width(rank)
+        catw = room - bw - fuiscene.sp(6)
+        paint_level_badge(tx + room - bw, y + fuiscene.sp(18), rank)
+    }
+    tt(tx, y + fuiscene.sp(18), catw, cat_of(i), fuiscene.sp(12), false, fuiscene.R_MUTED)
     tt_wrap2(tx, y + fuiscene.sp(36), room, desc_of(i), fuiscene.sp(12), fuiscene.sp(17))
     if (st & fuiscene.TS_FOCUS) != 0 {
         focus_ring(x, y, w, h, radius())
@@ -950,6 +1024,11 @@ fn paint_row_info(i: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
     paint_icon(i, gx, y + (h - isz) / 2, isz)
     let tx: u64 = gx + isz + fuiscene.sp(12)
     tt(tx, y + fuiscene.sp(7), w - isz - fuiscene.sp(36), title_of(i), fuiscene.sp(14), true, fuiscene.R_TEXT)
+    let c: u64 = catalog_of(i)
+    if c != storecat2.NONE {
+        let rank: u64 = storecat2.list_level(c)
+        paint_level_badge(x + w - badge_width(rank) - fuiscene.sp(8), y + fuiscene.sp(7), rank)
+    }
     sb_begin((&b_line[0 as usize]) as u64, 96)
     sb_s(ver_at(i))
     sb_s((&T_DOT[0 as usize]) as u64)
@@ -1015,7 +1094,12 @@ fn paint_nav(k: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
 }
 
 fn paint_chip_tile(k: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
-    let on: bool = k == s_chip
+    var on: bool = k == s_chip
+    var nm: u64 = (&b_chip[0 as usize]) as u64 + k * 32
+    if k == MAXCHIP {
+        on = s_works
+        nm = msg.get((&T_CHIP_WORKS[0 as usize]) as u64)
+    }
     let r: u64 = h / 2
     if on {
         fuiscene.cv_round(x, y, w, h, r, fuiscene.R_ACCENT)
@@ -1023,7 +1107,6 @@ fn paint_chip_tile(k: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
         fuiscene.cv_round(x, y, w, h, r, fuiscene.R_SURFACE)
         fuiscene.cv_ring(x, y, w, h, r, fuiscene.R_BORDER)
     }
-    let nm: u64 = (&b_chip[0 as usize]) as u64 + k * 32
     let px: u64 = fuiscene.sp(12)
     let tw: u64 = fuiscene.text_width(nm, px)
     var role: u64 = fuiscene.R_TEXT
@@ -1056,11 +1139,8 @@ fn collect_chips() {
     s_chip_n = 1
     var i: u64 = 0
     while i < s_count {
-        if class_of(i) == 0 {
-            var pre: [u8; 11] = "store.cat.\0"
-            if app_text(i, (&pre[0 as usize]) as u64, (&b_catq[0 as usize]) as u64, 63) {
-                chip_add((&b_catq[0 as usize]) as u64)
-            }
+        if class_of(i) == 0 && category_text(i, (&b_catq[0 as usize]) as u64) {
+            chip_add((&b_catq[0 as usize]) as u64)
         }
         i = i + 1
     }
@@ -1068,7 +1148,7 @@ fn collect_chips() {
 
 fn build_chips(col: usize) {
     collect_chips()
-    if s_chip_n < 2 {
+    if s_chip_n < 2 && storecat2.list_count() == 0 {
         return
     }
     let cr: usize = fuiscene.row(col)
@@ -1079,6 +1159,11 @@ fn build_chips(col: usize) {
         let w: u64 = fuiscene.text_width(nm, 12) + 26
         let _t: usize = fuiscene.ftile_nb(cr, K_CHIP + k, nm, w, 28, 300 + k, tile_cb)
         k = k + 1
+    }
+    if storecat2.list_count() > 0 {
+        let wn: u64 = msg.get((&T_CHIP_WORKS[0 as usize]) as u64)
+        let ww: u64 = fuiscene.text_width(wn, 12) + 26
+        let _w: usize = fuiscene.ftile_nb(cr, K_WORKS, wn, ww, 28, 300 + MAXCHIP, tile_cb)
     }
 }
 
@@ -1145,12 +1230,11 @@ fn cv_hero(x: u64, y: u64, w: u64, h: u64) {
         cx = cx + paint_chip(tx, y + fuiscene.sp(72), msg.get((&T_CHIP_INST[0 as usize]) as u64), false) + fuiscene.sp(8)
     }
     if storecat2.loaded() {
-        paint_level_chip(cx, y + fuiscene.sp(72))
+        paint_level_badge(cx, y + fuiscene.sp(72), storecat2.level_rank())
     }
 }
 
-fn level_role() -> u64 {
-    let r: u64 = storecat2.level_rank()
+fn level_role(r: u64) -> u64 {
     if r == storecat2.LEVEL_WORKS {
         return fuiscene.R_SUCCESS
     }
@@ -1163,13 +1247,15 @@ fn level_role() -> u64 {
     return fuiscene.R_MUTED
 }
 
-fn paint_level_chip(x: u64, y: u64) {
-    let text: u64 = storecat2.level_key()
-    let px: u64 = fuiscene.sp(11)
-    let w: u64 = fuiscene.text_width(text, px) + fuiscene.sp(12)
+fn badge_width(rank: u64) -> u64 {
+    return fuiscene.text_width(storecat2.level_text(rank), fuiscene.sp(11)) + fuiscene.sp(12)
+}
+
+fn paint_level_badge(x: u64, y: u64, rank: u64) {
+    let w: u64 = badge_width(rank)
     let h: u64 = fuiscene.sp(18)
     fuiscene.cv_round(x, y, w, h, h / 2, fuiscene.R_FIELD)
-    tt(x + fuiscene.sp(6), y + fuiscene.sp(2), w, text, px, true, level_role())
+    tt(x + fuiscene.sp(6), y + fuiscene.sp(2), w, storecat2.level_text(rank), fuiscene.sp(11), true, level_role(rank))
 }
 
 fn cv_empty(x: u64, y: u64, w: u64, h: u64) {
@@ -1319,6 +1405,8 @@ fn button_text(i: u64) -> u64 {
         return msg.get((&T_UPDATE[0 as usize]) as u64)
     } else if st == 1 {
         return msg.get((&T_OPEN[0 as usize]) as u64)
+    } else if st == ST_UNLISTED {
+        return msg.get((&T_NOPKG[0 as usize]) as u64)
     }
     return msg.get((&T_INSTALL[0 as usize]) as u64)
 }
@@ -1327,6 +1415,9 @@ fn can_act(i: u64) -> bool {
     let st: u64 = s_state[i as usize] as u64
     if st == 1 {
         return true
+    }
+    if st == ST_UNLISTED {
+        return false
     }
     return !s_busy && s_bus && s_can_i
 }
@@ -1550,11 +1641,17 @@ fn build_detail(col: usize) {
             let pb2: usize = fuiscene.button_main(ar, msg.get((&T_INSTALL[0 as usize]) as u64), K_PRIMARY)
             fuiscene.set_size(pb2, 150, 36)
             fuiscene.set_enabled(pb2, can_act(i))
+        } else if st == ST_UNLISTED {
+            let nb: usize = fuiscene.button(ar, msg.get((&T_NOPKG[0 as usize]) as u64), K_PRIMARY)
+            fuiscene.set_size(nb, 200, 36)
+            fuiscene.set_enabled(nb, false)
         }
-        let rb: usize = fuiscene.button(ar, msg.get((&T_REMOVE[0 as usize]) as u64), K_REMOVE)
-        fuiscene.set_size(rb, 130, 36)
-        fuiscene.set_enabled(rb, !s_busy && s_bus && s_can_r && st != 0)
-        if st != 0 {
+        if st != ST_UNLISTED {
+            let rb: usize = fuiscene.button(ar, msg.get((&T_REMOVE[0 as usize]) as u64), K_REMOVE)
+            fuiscene.set_size(rb, 130, 36)
+            fuiscene.set_enabled(rb, !s_busy && s_bus && s_can_r && st != 0)
+        }
+        if st == 1 || st == 2 {
             let ag: usize = fuiscene.toggle(ar, msg.get((&T_AUTOAPP[0 as usize]) as u64), K_AUTOAPP, s_autooff[i as usize] == 0 as u8)
             fuiscene.set_enabled(ag, s_bus && s_can_i)
         }
@@ -1693,6 +1790,9 @@ fn warn_dialog() {
 fn ask(verb: u64, item: u64) {
     if item == NONE || item >= s_count {
         notice(msg.get((&T_PICK[0 as usize]) as u64), 0)
+        return
+    }
+    if s_state[item as usize] == ST_UNLISTED as u8 {
         return
     }
     if verb != 3 && !s_can_i {
@@ -1911,6 +2011,11 @@ fn u_start(args: u64) -> u64 {
             changed = true
         } else if key == K_BACK {
             s_detail = NONE
+            changed = true
+        } else if key == K_WORKS {
+            s_works = !s_works
+            s_page = 0
+            refilter()
             changed = true
         } else if key >= K_CHIP && key < K_CHIP + s_chip_n {
             s_chip = key - K_CHIP
