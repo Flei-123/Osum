@@ -46,6 +46,7 @@ if [ -z "${OUT:-}" ]; then OUT=$(mktemp -d "${TMPDIR:-/tmp}/osupdate-run.XXXXXX"
 mkdir -p "$OUT"
 . "$ROOT/tools/lib/lock.sh" && osum_sperre "$OUT"
 export OUT
+. "$ROOT/tools/lib/firnenv.sh"
 PORT=${OSU_PORT:-$(( 18000 + ($$ % 900) ))}
 NETZ="nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0"
 export OSUM_CPU=${OSUM_CPU:-SandyBridge}   # no AVX2 for /bin/fetch (docs/OTA.md)
