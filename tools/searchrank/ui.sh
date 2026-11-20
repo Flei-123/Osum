@@ -18,7 +18,7 @@ make_bundle() { # make_bundle <dir> <name> <info> <keys> <start>
 }
 
 mkdir -p "$TMPD/apps" "$TMPD/files"
-printf '#apps\t2\t2\nA\tcom.fleitec.certus\tCertus\tCertus\tinternet\tFleitec\tGPL\tKurz\tShort\tD\tD\t\t\t\nV\tcom.fleitec.certus\tsystem\tosum-any\t1.0.0\t0\t\t\t\t1\t1\t1\tuntested\nA\tcom.test.zebranotes\tZebra Notizen\tZebra Notes\ttools\tTest\tMIT\tKurz\tShort\tD\tD\t\t\t\nV\tcom.test.zebranotes\tsystem\tosum-any\t1.0.0\t0\t\t\t\t1\t1\t1\tpartial\n' > "$TMPD/catalog.tsv"
+printf '#apps\t2\t2\nA\tcom.fleitec.certus\tCertus\tCertus\tinternet\tFleitec\tGPL\tKurz\tShort\tD\tD\t\t\t\nV\tcom.fleitec.certus\tsystem\tosum-any\t1.0.0\t0\t\t\t\t1\t1\t1\tuntested\nA\tcom.test.zebranotes\tZebra Notizen\tZebra Notes\ttools\tTest\tMIT\tKurz\tShort\tD\tD\t\t\t\nV\tcom.test.zebranotes\tsystem\tosum-any\t1.0.0\t0\t\t\t\t1\t1\t1\tpartial\nA\tcom.test.quokkaview\tQuokka Viewer\tQuokka Viewer\ttools\tTest\tMIT\tKurz\tShort\tD\tD\t\t\t\nV\tcom.test.quokkaview\tsystem\tosum-any\t1.0.0\t0\t\t\t\t1\t1\t1\tworks\n' > "$TMPD/catalog.tsv"
 for keep in explorer settings taskmgr; do cp -a assets/apps/$keep.osp "$TMPD/apps/"; done
 for n in $(seq -w 1 30); do make_bundle "a-gorp$n" "Gorp $n" "Filler" "gorpfill" /bin/edit; done
 cp -a assets/apps/certus.osp "$TMPD/apps/"
@@ -32,6 +32,7 @@ make_bundle xremote "Remote control" "Let another device see and control this co
 make_bundle firefox "Firefox" "Web browser" "firefox,browser,web,internet,www,mozilla,surf" /bin/edit
 make_bundle terminal "Terminal" "A command prompt with a shell" "terminal,konsole,shell,sh,eingabe,befehl,kommando,prompt" /bin/edit
 make_bundle teamlist "Teamlist" "Lists teams" "team" /bin/edit
+make_bundle qk-side "Sidecar" "Works with quokka viewer" "sidecar" /bin/edit
 printf 'use=notes-two:3\n' > "$TMPD/startuse.conf"
 LONG=a-very-long-file-name-for-the-index-test.txt
 for f in certus-notes.txt zzqq-file.txt spinatus.txt tattoo.txt x-remote-notes.txt $LONG; do printf 'x\n' > "$TMPD/files/$f"; done
@@ -70,6 +71,11 @@ stub("bonus", "(token: u64) -> u64", "return token * 0")
 stub("pinned", "(query: u64, token: u64) -> bool", "return query + token == 1 && false")
 stub("suggest", "(out: u64, max: u64) -> u64", "return out * 0 + max * 0")
 open(p, "w").write(s)
+q = sys.argv[1] + "/kernel/user/launcher.fi"
+b = open(q, "rb").read()
+old = b"g_store_best = napp > 0 &&"
+assert b.count(old) == 1
+open(q, "wb").write(b.replace(old, b"g_store_best = false && napp > 0 &&"))
 PY
 
 run_tree() { # run_tree <tree> <name>
@@ -94,7 +100,7 @@ for n in new old nol; do
     python3 -I tools/searchrank/check.py "$S" certus > "$TMPD/$n.certus" 2>&1
     python3 -I tools/searchrank/check.py "$S" zzqq > "$TMPD/$n.zzqq" 2>&1
     python3 -I tools/searchrank/check.py "$S" notes > "$TMPD/$n.notes" 2>&1
-    for q in xremote x-remote "X Remote" fernst firfox fire term einst te bluetooth long-file; do
+    for q in quokka xremote x-remote "X Remote" fernst firfox fire term einst te bluetooth long-file; do
         python3 -I tools/searchrank/check.py "$S" "$q" > "$TMPD/$n.q_${q// /_}" 2>&1
     done
 done
@@ -149,6 +155,9 @@ list_right=$(( ${list_x:-0} + ${list_w:-0} ))
 [ "$(rect_field 8 x | sed "s/^$/0/")" -ge "$list_right" ] && ok "detail card buttons stand right of the result list (x=$(rect_field 8 x) >= $list_right)" || bad "detail card buttons overlap the result list"
 [ "$(rect_field 8 y | sed "s/^$/0/")" -gt "$(rect_field 7 y | sed "s/^$/99999/")" ] && ok "detail card buttons stand below the top of the best match" || bad "detail card buttons above the best match"
 [ "$(val $D.certus stores)" = "" ] && ok "certus is installed: no store hit for it" || bad "certus: store hits '$(val $D.certus stores)'"
+[ "$(val $D.q_quokka best)" = "Quokka Viewer" ] && ok "'quokka': the store hit with a name match beats an installed app that only mentions it" || bad "'quokka': best is '$(val $D.q_quokka best)'"
+[ "$(val $D.q_quokka apps)" = "Sidecar" ] && ok "'quokka': the installed app is still listed" || bad "'quokka': apps are '$(val $D.q_quokka apps)'"
+[ "$(val $TMPD/nol.q_quokka best)" = "Sidecar" ] && ok "store-best off: the installed app stays best" || bad "store-best off: best is '$(val $TMPD/nol.q_quokka best)' -- the test is blind"
 grep -aq 'launcher: use \[xremote\]' "$D/serial.txt" && ok "Enter on 'xremote' starts the app" || bad "Enter on 'xremote' started nothing"
 python3 -I tools/searchrank/check.py "$D/serial.txt" zebra > "$D.q_zebra" 2>&1
 [ "$(val $D.q_zebra stores)" = "zebranotes" ] && ok "'zebra': the catalog app is listed as a store hit" || bad "'zebra': store hits are '$(val $D.q_zebra stores)'"
