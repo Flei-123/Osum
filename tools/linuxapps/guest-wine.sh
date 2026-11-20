@@ -7,9 +7,9 @@ t() {
     timeout ${WINE_TMO:-240} "$@" > /tmp/o.$n 2>&1 < /dev/null
     rc=$?
     if [ $rc -eq 0 ] && grep -q -- "$want" /tmp/o.$n; then echo "WINE-RESULT $n ok"; else echo "WINE-RESULT $n red rc=$rc want=$want"; fi
-    head -${WINE_LINES:-40} /tmp/o.$n
+    grep -a -v preloader /tmp/o.$n | head -${WINE_LINES:-150}
 }
 t version wine-11 /usr/bin/wine --version
 t server-version "Wine 11.0" /usr/bin/wineserver --version
-t console-echo hello-from-wine env WINEDEBUG=err+all,warn+virtual /usr/bin/wine64 cmd /c echo hello-from-wine
+t console-echo hello-from-wine env WINEDEBUG=err+all,warn+virtual,warn+winstation,warn+section,warn+server /usr/bin/wine64 cmd /c echo hello-from-wine
 echo FX-END
