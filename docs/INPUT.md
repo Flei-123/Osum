@@ -104,7 +104,10 @@ HOLO-LAPTOP-3 = Surface Laptop 4 (Windows). Its input is not I2C-HID:
 - Touch pad and keyboard: Surface Aggregator (`vid 045e pid 09ae/09af`, virtual HID). The pad itself is a standard Windows Precision Touchpad (5 contacts, x 0..2227, y 0..1459, feature reports for input mode).
 - Touch screen and pen: Intel Precise Touch & Stylus (PCI `8086:a0d0`, `vid 045e pid 0c32`). HID shows a single-contact touch screen (tip, x, y 15 bit) and a pen with pressure and tilt; multi-touch frames come as vendor reports (7488 bytes). OrientOS needs two more transports (Surface Aggregator, IPTS) before this machine works; they are not built.
 
-HP stick (`/proc/inputdevs`, build 6358e3d4, 26.10.2026): `i2c_ctrls=0 i2c_devs=0 hid_devs=0`. The LPSS functions `8086:9d60..9d62` are present with PCI class 0x1180, the DSDT contains `PNP0C50`, `WCOM48..` and `ALP0..`. Why `find_ctrls` found no controller is unknown. `/proc/inputdevs` now lists every candidate (`cand<N> bdf= id= bar0= comp= ok=`); the next boot of an HP stick built from this tree shows which step failed.
+HP (Kaby Lake-U, measured on the device 20.11.2026, build 6518):
+- ACPI namespace (`/bin/hwinv`, section acpi): touch screen `WCOM481A` (Wacom, `cid=PNP0C50` = HID over I2C) at `\_SB.PCI0.I2C0.TPL0`; touch pad candidates `XXXX0000 cid=PNP0C50` at `I2C0.TPD0` and `ALP0016 cid=PNP0C50` at `I2C1.CPD0`; PS/2 keyboard `HPQ8002`, PS/2 mouse `ALP0116`. No USB touch device in `/proc/usb`.
+- I2C0 = LPSS function `00:15.0` (`8086:9d60`), I2C1 = `00:15.1`, I2C2 = `00:15.2`: class 0x1180, BAR0 64 bit at `0x1ff3020000` / `0x1ff301f000` / `0x1ff301e000` (above 4 GiB), command register 0 (memory decode off) as left by the firmware.
+- Why `find_ctrls` found nothing: the BAR was read as a physical address with no mapping, and the whole stage was off unless the boot word `i2chid` was given (not in the HP command line, so `i2c_tables=0`). Fix: the stage runs by default (`noi2c` disables it) and maps BAR0 through `apic.map_device`.
 
 ## 9. Gate
 
