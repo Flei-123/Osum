@@ -40,6 +40,8 @@ moreprogs=""
 tzrule=""
 # AA-CORNER: extra lines for /etc/theme.conf, `;`-separated (e.g. themeextra="aa_old=1"); empty = none
 themeextra=""
+# text smoothing of the image: grey (default, keeps the pixel references) or lcd (subpixel text)
+textsmooth=grey
 progs="desktop taskbar settings launcher explorer netview taskmgr \
 edit sh echo ls cat ps uname date df mkdir rm cp mv grep head tail wc \
 find du chmod id whoami touch true false sleep kill sort uniq rmdir \
@@ -72,6 +74,7 @@ for a in "$@"; do
         moreprogs=*) moreprogs=${a#*=} ;;
         tzrule=*) tzrule=${a#*=} ;;
         themeextra=*) themeextra=${a#*=} ;;
+        textsmooth=*) textsmooth=${a#*=} ;;
         xfile=*) xfiles="$xfiles ${a#*=}" ;;
         *) echo "unbekannt: $a" >&2; exit 2 ;;
     esac
@@ -154,6 +157,7 @@ printf '# taskbar.conf\nedge=bottom\nwidth=104\nautohide=0\nontop=1\nalign=left\
   [ -n "$window_alpha" ] && printf 'window_alpha=%s\n' "$window_alpha"
   [ -n "$themeextra" ] && printf '%s\n' "${themeextra//;/$'\n'}"
 } > "$OUT/theme.conf"
+printf '%s\n' "$textsmooth" > "$OUT/textsmooth.conf"
 printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
 [ -z "$tzrule" ] || printf 'rule=%s\n' "$tzrule" >> "$OUT/time.conf"
 printf 'lang=%s\n' "$lang" > "$OUT/locale.conf"
@@ -174,6 +178,7 @@ ARGS+=("/bin/files@/bin/explorer")
 ARGS+=(/etc/
        "/etc/theme.conf=$OUT/theme.conf@0644"
        "/etc/time.conf=$OUT/time.conf@0644"
+       "/etc/textsmooth.conf=$OUT/textsmooth.conf@0644"
        "/etc/locale.conf=$OUT/locale.conf@0644"
        "/etc/passwd=$OUT/passwd@0644"
        "/etc/uitrace=$OUT/uitrace@0644"

@@ -483,8 +483,8 @@ fn dw_setup(state: u64, adr: u64) {
     w32(state, mm, IC_CON, CON_MASTER | CON_SPEED_FAST | CON_RESTART_EN
         | CON_SLAVE_DIS)
     w32(state, mm, IC_TAR, adr & 0x7F)
-    w32(state, mm, IC_FS_HCNT, 0x3C)
-    w32(state, mm, IC_FS_LCNT, 0x82)
+    w32(state, mm, IC_FS_HCNT, 0x80)
+    w32(state, mm, IC_FS_LCNT, 0xB0)
     w32(state, mm, IC_RX_TL, 0)
     w32(state, mm, IC_TX_TL, 0)
     w32(state, mm, IC_INTR_MASK, 0)
@@ -524,32 +524,39 @@ fn dw_xfer(state: u64, wp: u64, wlen: u64, rp: u64, rlen: u64) -> u64 {
             w32(state, mm, IC_DATA_CMD, c)
             sent = sent + 1
         }
-        if (r32(state, mm, IC_RAW_INTR) & STAT_TX_ABRT) != 0 {
-            let u2: u64 = r32(state, mm, IC_CLR_TX_ABRT)
-            s(state, S_ABORTS, g(state, S_ABORTS) + 1)
-            let c1: u64 = tg(X_CUR_C)
-            if c1 < MAX_CTRL {
-                cts(c1, CT_ABRT, ctg(c1, CT_ABRT) + 1)
-            }
+        if take_abort(state, mm) {
             return 0
         }
         var w: u64 = 0
-        while w < 20000 && r32(state, mm, IC_RXFLR) == 0 {
+        while w < 20000 && r32(state, mm, IC_RXFLR) == 0 && (r32(state, mm, IC_RAW_INTR) & STAT_TX_ABRT) == 0 {
             w = w + 1
         }
         if r32(state, mm, IC_RXFLR) == 0 {
-            note_timeout(state, mm)
+            if !take_abort(state, mm) {
+                note_timeout(state, mm)
+            }
             return 0
         }
         kstate.set8(rp + got, (r32(state, mm, IC_DATA_CMD) & 0xFF) as u8)
         got = got + 1
     }
-    if (r32(state, mm, IC_RAW_INTR) & STAT_TX_ABRT) != 0 {
-        let u3: u64 = r32(state, mm, IC_CLR_TX_ABRT)
-        s(state, S_ABORTS, g(state, S_ABORTS) + 1)
+    if take_abort(state, mm) {
         return 0
     }
     return got
+}
+
+fn take_abort(state: u64, mm: u64) -> bool {
+    if (r32(state, mm, IC_RAW_INTR) & STAT_TX_ABRT) == 0 {
+        return false
+    }
+    let cleared: u64 = r32(state, mm, IC_CLR_TX_ABRT)
+    s(state, S_ABORTS, g(state, S_ABORTS) + 1)
+    let c: u64 = tg(X_CUR_C)
+    if c < MAX_CTRL {
+        cts(c, CT_ABRT, ctg(c, CT_ABRT) + 1)
+    }
+    return true
 }
 
 fn note_timeout(state: u64, mm: u64) {
@@ -1313,6 +1320,7 @@ fn render(state: u64, out: u64, cap: u64) -> u64 {
     var k_hs: [u8; 4] = "hid\0"
     var k_bs: [u8; 5] = "bus=\0"
     var k_qk: [u8; 3] = "q=\0"
+    var k_sv: [u8; 8] = "slaves=\0"
     var k_cd: [u8; 5] = "cand\0"
     var k_b0: [u8; 6] = "bar0=\0"
     var k_cp: [u8; 6] = "comp=\0"
@@ -1354,6 +1362,14 @@ fn render(state: u64, out: u64, cap: u64) -> u64 {
     r_dec(g(state, S_TABLES))
     r_key((&k_g[0]) as u64)
     r_dec(hid_n)
+    r_c(10)
+    r_s((&k_sv[0]) as u64)
+    var sv: u64 = 0
+    while sv < g(state, S_NSLAVE) && sv < MAX_SLAVES {
+        r_hex(g(state, S_SLAVES + sv * 8), 2)
+        r_c(32)
+        sv = sv + 1
+    }
     r_c(10)
     c = 0
     while c < nctrl() {

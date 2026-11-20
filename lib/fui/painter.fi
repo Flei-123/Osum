@@ -1,0 +1,4378 @@
+// SPDX-License-Identifier: MPL-2.0
+// lib/fui/painter.fi -- THE DRAWING LAYER OF fUi.
+//
+// ========================================================= WHY IT EXISTS
+//
+// lib/fenster/fenster.fi says outright in F1 what it does NOT do:
+//
+//     "NO drawing except pixels, rectangles and system text. Whoever
+//      wants curves rasterises them himself and pushes the finished
+//      buffer across with `bild`."
+//
+// Exactly that "rasterises them himself" stands here. Every control in
+// fUi paints EXCLUSIVELY through this file -- no widget sets a pixel
+// itself.
+//
+// THAT IS THE RULE THIS IS ABOUT. In OrientOS the control centre paints
+// its own tiles instead of using `paint_button`, and that is why they
+// look different from every other button in the system. In Certus the
+// bar painted its buttons itself, and lib/android/ui.fi did it once
+// more. Three drawings of the same thing. Whoever paints past this file
+// builds the same mistake in.
+//
+// ====================================================== WHAT IT DRAWS
+//
+// Everything antialiased through the rasteriser Certus also paints the
+// page with (lib/font/raster.fi) -- no GDI, no Xlib, no system font.
+//
+//   surface          a rectangle
+//   round_rect       a rectangle with round corners
+//   round_ring       its outline (for the focus ring)
+//   border_col       a horizontal or vertical line
+//   text             text with an alignment, on a baseline
+//   text_width       how wide it would be -- for the layout
+//   caret_bar        the caret
+//
+// ================================= THE FOUR CORNERS WITHOUT lib/svg
+//
+// Certus rounds with `svg.pfad.pfad_rund_rechteck`. THIS PARAGRAPH USED
+// TO SAY that lib/svg does not exist in the Firn tree -- it did not
+// when the file was written, but it does since the port in `2b82d78e`,
+// and a reason that has stopped being true is worse than none. The
+// corners stay here anyway, for the reason that actually carries:
+//
+// this file is the layer every widget draws through, and it draws
+// STRAIGHT INTO THE RASTERISER with four cubics and no allocation.
+// `svg.pfad` is the other direction -- a path object that is built,
+// kept and handed to a filler, which is what a DOCUMENT needs and what
+// a button does not. Pulling it in here would hang the drawing layer of
+// every control on the SVG stack (path, stroke, paint, xml) for four
+// corner arcs.
+//
+// Where lib/svg genuinely OWNS something, fUi uses it and does not
+// write a second copy: `lib/fui/transform.fi` takes all of its matrix
+// arithmetic from `lib/svg/matrix.fi`. The rule is one place per thing,
+// not one library per tree.
+//
+// The factor 0.5523 is the well known one: a cubic Bezier meets a
+// quarter circle with an error under 0.03 % of the radius when the
+// control points lie at 4/3 * (sqrt(2) - 1) = 0.55228... of the edge
+// length. That is not an approximation by feel but the number every
+// vector drawing program uses.
+//
+// =============================================== THE TEXT SITS CENTRED
+//
+// Justin, 10.09.2026: in OrientOS the label does not sit in the middle
+// of the button. That is a mistake fUi must not inherit, and it has a
+// known cause: whoever centres vertically by the LINE HEIGHT centres
+// the line and not the font.
+//
+// Right is the FONT METRIC. A capital letter stands on the baseline and
+// reaches `ascent` upwards; `descent` hangs below it and is not used at
+// all by "Button". The optical middle of a line therefore lies at
+//
+//     baseline = y + (h + ascent - descent) / 2
+//
+// and NOT at `y + h/2 + size/2`. `text_baseline_mid` computes exactly
+// that, and `tools/fui/preview_main.fi` measures on the finished
+// picture afterwards that as many empty rows stand above as below.
+import std.rt
+import paint.canvas
+import font.raster
+import font.metrics
+import font.platglyph
+import font.ttf
+import font.gsub
+import font.cbdt
+import str.ucd_bidi
+import fui.theme
+import fui.bidi
+import fui.shape
+import fui.fcache
+import fui.glyphcache
+import str.linebreak
+import fui.textcurve
+import fui.gpu
+import fui.fontback
+
+export {
+    Painter, raster_window, painter_new, painter_init, painter_free, painter_ok,
+    painter_canvas, painter_set_canvas, painter_raster, painter_swap_canvas, painter_set_font, painter_font, painter_clear,
+    painter_set_font_slot, painter_font_slot, FONT_SLOTS,
+    painter_set_backend, painter_backend, painter_reset_backend,
+    painter_set_backend_ctx, painter_backend_ctx,
+    painter_fill_raster, fill_raster_gradient, painter_set_band,
+    surface, round_rect, round_ring, border_col, mit_alpha, clip_rows,
+    round_rect_grad, round_rect_radial, mix_argb,
+    text, text_width, text_fits_upto, text_baseline_mid,
+    TEXT_L, TEXT_M, TEXT_R,
+    caret_bar,
+    font_ascent, font_descent,
+    TextRun, run_new, run_plain,
+    run_set_tracking, run_set_word_spacing, run_set_kerning,
+    run_set_weight, run_set_slant, run_set_line_height,
+    run_set_outline, run_set_shadow, run_set_gradient,
+    bgcache_blit, bgcache_store, bgcache_reset, bgcache_frame, bgcache_stat,
+    run_width, run_fits_upto, run_draw, run_line_height,
+    run_fits_ellipsis, run_draw_ellipsis, ellipsis_w,
+    run_line_upto, run_line_count, run_draw_wrapped,
+    advance_of, pair_core,
+    painter_set_fallback, painter_fallback, fb_pick, fb_hash, FB_SLOTS, glyph_present,
+    painter_set_weight_face, face_sel, WFACE_SLOTS,
+    painter_set_lcd, painter_lcd, painter_set_lcd_flip, painter_lcd_flip,
+    // BIDIRECTIONAL TEXT (see "THE BIDI PATH" further down)
+    run_set_dir, run_dir, run_caret_x, run_hit, run_para_rtl,
+    run_sel_draw, run_is_bidi, BIDI_CAP,
+    Measure, measure_new, measure_x, measure_hit, measure_width,
+    measure_rtl, measure_set_secret,
+    // A SECRET (password) IS MEASURED AND PAINTED AS ITS MASK
+    MASK_CAP, mask_build, mask_index, mask_source,
+}
+
+// The alignment horizontally. Vertically there is only one sensible
+// one (centred to the font metric), so it is not a choice.
+const TEXT_L: u32 = 0
+const TEXT_M: u32 = 1
+const TEXT_R: u32 = 2
+
+// The scratch buffer of the TrueType reader. The same number as in
+// lib/browser/chrome.fi -- it is enough for every glyph of a user
+// interface.
+const SCRATCH: usize = 65536
+
+struct Painter {
+    cv: u64, // the canvas, owned by the caller
+    ra: raster.Raster,
+    rbuf: *mut u8,
+    rcap: usize,
+    scratch: *mut u8,
+    fm: u64, // the font set (metrics.FontSet), 0 = none
+    w: usize,
+    h: usize,
+    ok: usize,
+    // ---- THE BIDI PATH (see there). The table from the UCD, the
+    // work area for BIDI_CAP characters, and what currently stands in it.
+    bt: u64, // ucd_bidi.ucd_bidi_map, 0 = no table
+    bx: u64, // bidi_bytes(z) Oktette
+    bcap: usize, // characters the work area holds; grows on demand
+    bn: usize, // prepared characters, 0 = the old way
+    blev: u8, // Absatzebene des ersten Absatzes
+    bvn: usize, // visible glyphs of the most recently laid out line
+    gs: gsub.Gsub, // the Arabic lookups of the script
+    gs_fm: u64, // which script `gs` applies to
+    // MORE FACES (29.09.2026): the font sets a style picks with its
+    // `font_id` (style.style_set_font(s, id, px)); slot 0 is `fm` itself.
+    fslot: [u64; 4],
+    // FALLBACK FACES (r251): font sets tried, in order, for a character the
+    // main font has no glyph for (gid 0). 0 = unused slot.
+    fb: [u64; 3],
+    // WEIGHT FACES (r252): real faces for other weights (Inter 500/600/700 ...).
+    wface: [u64; 4],
+    wface_w: [usize; 4],
+    back: fontback.FontBackend,
+    fb_col: [usize; 3], // 1 per fallback slot that is a colour bitmap face
+    emoji_any: usize, // 1 when a fallback face is a colour bitmap font (CBDT)
+}
+
+#[no_gc]
+fn painter_new() -> Painter {
+    return Painter {
+        cv: 0, ra: raster.raster_new(), rbuf: 0 as *mut u8, rcap: 0,
+        scratch: 0 as *mut u8, fm: 0, w: 0, h: 0, ok: 0,
+        bt: 0, bx: 0, bcap: 0, bn: 0, blev: 0 as u8, bvn: 0,
+        gs: gsub.gsub_new(), gs_fm: 0, fslot: [0 as u64; 4], fb: [0 as u64; 3],
+        wface: [0 as u64; 4], wface_w: [0 as usize; 4], back: fontback.fbk_default(), fb_col: [0 as usize; 3], emoji_any: 0,
+    }
+}
+
+// `w` x `h` is the largest area rasterised at once. That is NOT the
+// canvas: what gets rasterised is always only the rectangle of one
+// widget, and a button is seldom bigger than a few hundred pixels.
+// Whoever gives the whole canvas pays (w + 2) * h * 8 bytes for
+// nothing.
+fn painter_init(z: *mut Painter, cv: *mut canvas.Canvas, w: usize,
+    h: usize) -> bool {
+    (*z).cv = cv as u64
+    (*z).w = w
+    (*z).h = h
+    let need: usize = raster.raster_bytes_needed(w, h)
+    (*z).rbuf = rt.heap_alloc(need) as *mut u8
+    if (*z).rbuf as usize == 0 {
+        return false
+    }
+    (*z).rcap = need
+    raster.raster_attach(&(*z).ra, (*z).rbuf, need)
+    (*z).scratch = rt.heap_alloc(SCRATCH) as *mut u8
+    if (*z).scratch as usize == 0 {
+        return false
+    }
+    // THE BIDI TABLE AND ITS WORK AREA. If one of them fails,
+    // this painter keeps painting -- but every text from left to right, as
+    // before the bidi round. That is no silent substitute: `run_is_bidi`
+    // says so, and tools/fui/bidi_main.fi checks it.
+    (*z).bt = ucd_bidi.ucd_bidi_map()
+    if (*z).bt != 0 {
+        (*z).bcap = BIDI_CAP
+        (*z).bx = rt.heap_alloc(bidi_bytes(z))
+        if (*z).bx == 0 {
+            ucd_bidi.ucd_bidi_free((*z).bt)
+            (*z).bt = 0
+        }
+    }
+    (*z).ok = 1
+    return true
+}
+
+fn painter_free(z: *mut Painter) {
+    if (*z).rbuf as usize != 0 {
+        rt.heap_free((*z).rbuf as u64, (*z).rcap)
+        (*z).rbuf = 0 as *mut u8
+    }
+    if (*z).scratch as usize != 0 {
+        rt.heap_free((*z).scratch as u64, SCRATCH)
+        (*z).scratch = 0 as *mut u8
+    }
+    if (*z).bx != 0 {
+        rt.heap_free((*z).bx, bidi_bytes(z))
+        (*z).bx = 0
+    }
+    if (*z).bt != 0 {
+        ucd_bidi.ucd_bidi_free((*z).bt)
+        (*z).bt = 0
+    }
+    (*z).ok = 0
+}
+
+#[no_gc]
+fn painter_ok(z: *mut Painter) -> bool { return (*z).ok != 0 }
+
+#[no_gc]
+fn painter_canvas(z: *mut Painter) -> *mut canvas.Canvas {
+    return (*z).cv as *mut canvas.Canvas
+}
+
+// PAINT SOMEWHERE ELSE for a while (lib/fui/layer.fi): the painter draws
+// into `cv` from now on and gives back the canvas it drew into so far.
+// `cv` must be at least as large -- the raster windows are clipped to it.
+fn painter_swap_canvas(z: *mut Painter, cv: *mut canvas.Canvas) -> *mut canvas.Canvas {
+    let old: u64 = (*z).cv
+    (*z).cv = cv as u64
+    return old as *mut canvas.Canvas
+}
+
+#[no_gc]
+fn painter_set_canvas(z: *mut Painter, cv: *mut canvas.Canvas) {
+    (*z).cv = cv as u64
+}
+
+#[no_gc]
+fn painter_raster(z: *mut Painter) -> *mut raster.Raster {
+    return &(*z).ra
+}
+
+#[no_gc]
+fn painter_set_font(z: *mut Painter, fm: u64) { (*z).fm = fm }
+
+#[no_gc]
+fn painter_font(z: *mut Painter) -> u64 { return (*z).fm }
+
+fn painter_set_backend(z: *mut Painter, b: fontback.FontBackend) {
+    (*z).back = fontback.fbk_custom(b)
+}
+
+fn painter_backend(z: *mut Painter) -> *mut fontback.FontBackend {
+    return &(*z).back
+}
+
+fn painter_reset_backend(z: *mut Painter) {
+    (*z).back = fontback.fbk_default()
+}
+
+fn painter_set_backend_ctx(z: *mut Painter, ctx: u64) {
+    fontback.fbk_set_ctx(&(*z).back, ctx)
+}
+
+fn painter_backend_ctx(z: *mut Painter) -> u64 {
+    return fontback.fbk_ctx(&(*z).back)
+}
+
+// THE FONT SLOTS. A style says `font_id` 1..3 ("the monospace face", "the
+// bold face"); the program says once which font set that is. The main font
+// stays in slot 0 (painter_set_font). render.fi swaps the slot in for the
+// length of one text -- measuring and painting -- and back; every glyph
+// cache keys on the font set, so two faces never share a glyph.
+const FONT_SLOTS: usize = 4
+
+fn painter_set_font_slot(z: *mut Painter, id: usize, fm: u64) {
+    if id >= 1 && id < FONT_SLOTS {
+        (*z).fslot[id] = fm
+    }
+}
+
+// The font set of slot `id`; 0 when the slot is empty (the caller keeps
+// the main font then -- a missing face is a plainer text, not no text).
+fn painter_font_slot(z: *mut Painter, id: usize) -> u64 {
+    if id >= 1 && id < FONT_SLOTS {
+        return (*z).fslot[id]
+    }
+    return 0
+}
+
+// THE FALLBACK CHAIN (r251). `painter_set_fallback(z, i, fm)` puts a font
+// set into slot 0..FB_SLOTS-1; the main font stays first. For each character
+// `fb_pick` returns the FIRST font set whose cmap has a real glyph (gid != 0);
+// when none has it, the main font (its .notdef box). Advance, kerning and
+// glyph come from the same font set, so measuring and painting agree.
+// Honest limit: the choice is per character, not per grapheme cluster, and
+// the bidi path still uses the main font only.
+const FB_SLOTS: usize = 3
+
+fn painter_set_fallback(z: *mut Painter, i: usize, fm: u64) {
+    if i < FB_SLOTS {
+        (*z).fb[i] = fm
+        var k: usize = 0
+        var any: usize = 0
+        while k < FB_SLOTS {
+            let f: u64 = (*z).fb[k]
+            (*z).fb_col[k] = 0
+            if f != 0 && fontback.fbk_present(&(*z).back, f) &&
+            cbdt.cbdt_ok(metrics.fontset_font(f)) {
+                any = 1
+                (*z).fb_col[k] = 1
+            }
+            k = k + 1
+        }
+        (*z).emoji_any = any
+    }
+}
+
+fn painter_fallback(z: *mut Painter, i: usize) -> u64 {
+    if i < FB_SLOTS {
+        return (*z).fb[i]
+    }
+    return 0
+}
+
+// WEIGHT FACES (r252). A static font set per weight instead of the faux bold:
+// `painter_set_weight_face(z, i, 600, fm)`. The main font counts as weight
+// 400. A run takes the face with the closest weight (a tie goes to the
+// heavier one above 450, else the lighter one). The faux bold (three passes)
+// stays only when the chosen face is more than 100 lighter than the run --
+// so 700 on a 600 face is NOT thickened again, 700 on a lone 400 face is.
+// Honest limit: static faces only (no fvar/gvar interpolation, r141), and the
+// bidi path keeps the main font.
+const WFACE_SLOTS: usize = 4
+
+fn painter_set_weight_face(z: *mut Painter, i: usize, weight: usize, fm: u64) {
+    if i < WFACE_SLOTS {
+        (*z).wface[i] = fm
+        (*z).wface_w[i] = weight
+    }
+}
+
+// The font set for the run's weight; `out_w` gets that face's weight.
+#[no_gc]
+fn face_sel(z: *mut Painter, r: *mut TextRun, out_w: *mut usize) -> u64 {
+    var best: u64 = (*z).fm
+    var bw: usize = 400
+    if (*z).wface[0] == 0 {
+        *out_w = bw
+        return best
+    }
+    let w: usize = (*r).weight
+    var bd: usize = 0
+    if w > bw {
+        bd = w - bw
+    } else {
+        bd = bw - w
+    }
+    var i: usize = 0
+    while i < WFACE_SLOTS {
+        let f: u64 = (*z).wface[i]
+        if f != 0 && fontback.fbk_present(&(*z).back, f) {
+            let fw: usize = (*z).wface_w[i]
+            var d: usize = 0
+            if w > fw {
+                d = w - fw
+            } else {
+                d = fw - w
+            }
+            if d < bd || (d == bd && fw > bw && w > 450) {
+                best = f
+                bw = fw
+                bd = d
+            }
+        }
+        i = i + 1
+    }
+    *out_w = bw
+    return best
+}
+
+// True when the main font or a fallback face has a glyph for `cp` (always true without a font).
+#[no_gc]
+fn glyph_present(z: *mut Painter, cp: u32) -> bool {
+    if cp < 128 as u32 || !fontback.fbk_present(&(*z).back, (*z).fm) {
+        return true
+    }
+    if fontback.fbk_has(&(*z).back, (*z).fm, cp) {
+        return true
+    }
+    var j: usize = 0
+    while j < FB_SLOTS {
+        let g: u64 = (*z).fb[j]
+        if g != 0 && fontback.fbk_present(&(*z).back, g) && fontback.fbk_has(&(*z).back, g, cp) {
+            return true
+        }
+        j = j + 1
+    }
+    return false
+}
+
+// The font set that draws `cp` in run `r`: the face of the run's weight, then
+// the main font, then the fallbacks; the first with a real glyph (gid != 0).
+// When none has it, the face itself (its .notdef box).
+#[no_gc]
+fn fb_pick(z: *mut Painter, r: *mut TextRun, cp: u32) -> u64 {
+    if (*z).back.custom != 0 {
+        let alt: u64 = fontback.fbk_pick(&(*z).back, (*z).fm, cp)
+        if alt != (*z).fm {
+            return alt
+        }
+    }
+    if (*z).fb[0] == 0 && (*z).wface[0] == 0 {
+        return (*z).fm
+    }
+    var fw: usize = 400
+    let prim: u64 = face_sel(z, r, &fw)
+    if (*z).fb[0] == 0 || cp < 128 as u32 {
+        return prim
+    }
+    // Pictographs prefer a colour bitmap face over a monochrome outline
+    // (DejaVu has a black U+1F600 too); everything else is "first with a glyph".
+    if (*z).emoji_any != 0 && cp >= 0x1F000 as u32 && cp <= 0x1FAFF as u32 {
+        var j: usize = 0
+        while j < FB_SLOTS {
+            let g: u64 = (*z).fb[j]
+            if g != 0 && (*z).fb_col[j] != 0 && fontback.fbk_present(&(*z).back, g) &&
+            fontback.fbk_has(&(*z).back, g, cp) {
+                return g
+            }
+            j = j + 1
+        }
+    }
+    if fontback.fbk_present(&(*z).back, prim) && fontback.fbk_has(&(*z).back, prim, cp) {
+        return prim
+    }
+    if prim != (*z).fm && fontback.fbk_present(&(*z).back, (*z).fm) && fontback.fbk_has(&(*z).back, (*z).fm, cp) {
+        return (*z).fm
+    }
+    var i: usize = 0
+    while i < FB_SLOTS {
+        let f: u64 = (*z).fb[i]
+        if f != 0 && fontback.fbk_present(&(*z).back, f) && fontback.fbk_has(&(*z).back, f, cp) {
+            return f
+        }
+        i = i + 1
+    }
+    return prim
+}
+
+// A number for the line-cache key: 0 without fallbacks or weight faces, so
+// keys do not change for programs that never set one.
+fn fb_hash(z: *mut Painter) -> u64 {
+    if (*z).fb[0] == 0 && (*z).wface[0] == 0 {
+        return 0
+    }
+    var h: u64 = 14695981039346656037
+    var i: usize = 0
+    while i < FB_SLOTS {
+        h = (h ^ (*z).fb[i]) *% 1099511628211
+        i = i + 1
+    }
+    i = 0
+    while i < WFACE_SLOTS {
+        h = (h ^ (*z).wface[i] ^ (((*z).wface_w[i] as u64) << 48)) *% 1099511628211
+        i = i + 1
+    }
+    return h
+}
+
+// ------------------------------------------------------------- helpers
+
+#[no_gc]
+// Down to the whole pixel. Used for raster window origins -- the
+// reason stands at `raster_window`.
+#[no_gc]
+fn floor_px(v: f64) -> f64 {
+    let t: f64 = (v as i64) as f64
+    if t > v {
+        return t - 1.0
+    }
+    return t
+}
+
+#[no_gc]
+fn clamp(v: f64, lo: f64, hi: f64) -> f64 {
+    if v < lo { return lo }
+    if v > hi { return hi }
+    return v
+}
+
+#[no_gc]
+fn b8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+// A code point from UTF-8. Taken from lib/browser/chrome.fi.
+#[no_gc]
+fn utf8_at(p: u64, n: usize, i: usize, adv: *mut usize) -> u32 {
+    let c0: u32 = b8(p, i) as u32
+    if c0 < 128 as u32 {
+        *adv = 1
+        return c0
+    }
+    if c0 >= 240 as u32 && i + 3 < n {
+        *adv = 4
+        return ((c0 & 7 as u32) << 18)
+        | (((b8(p, i + 1) as u32) & 63 as u32) << 12)
+        | (((b8(p, i + 2) as u32) & 63 as u32) << 6)
+        | ((b8(p, i + 3) as u32) & 63 as u32)
+    }
+    if c0 >= 224 as u32 && i + 2 < n {
+        *adv = 3
+        return ((c0 & 15 as u32) << 12)
+        | (((b8(p, i + 1) as u32) & 63 as u32) << 6)
+        | ((b8(p, i + 2) as u32) & 63 as u32)
+    }
+    if c0 >= 192 as u32 && i + 1 < n {
+        *adv = 2
+        return ((c0 & 31 as u32) << 6)
+        | ((b8(p, i + 1) as u32) & 63 as u32)
+    }
+    *adv = 1
+    return c0
+}
+
+// ========================================================== THE AREAS
+
+// A rectangle. The simplest thing, and it does NOT go through the
+// rasteriser: whole pixels need no antialiasing, and `canvas_fill_rect`
+// is many times faster.
+
+// ===================================== ADD ALPHA, DO NOT DISCARD
+//
+// TAKEN OVER FROM THE CERTUS BRANCH (lib/fui/uipaint.fi, 13.09.2026),
+// where this bug was found and written out. It sat in
+// BOTH shells, and it sat here too.
+//
+// All four fill paths called `theme.opaque(col)`. That SETS the alpha
+// to full -- even if the caller expressly supplied one. A colour like
+// `0x22 << 24 | 0x1A73E8` ("the accent with 13 % opacity") thereby became
+// full blue.
+//
+// MEASURED (Certus): the focus border of the address bar on the phone.
+// What was meant was a glaze under which the pill stays light (arithmetically
+// #D4E2F2); what was painted was the pill FULL in the accent colour. Why nobody
+// noticed: blue on blue looks like intent. Only with a green accent
+// was the surface bright green.
+//
+// `opaque` stays for the normal case: whoever passes 0xRRGGBB (alpha
+// 0) wants an opaque surface. Whoever SETS an alpha means it too.
+#[no_gc]
+fn mit_alpha(col: u32) -> u32 {
+    if (col >> 24) & 255 as u32 == 0 as u32 {
+        return theme.opaque(col)
+    }
+    return col
+}
+// The whole canvas cleared to `col` -- in memory, or on the GPU when the
+// canvas is backed by one (lib/fui/gpu.fi; canvas_clear itself cannot
+// reach the GPU). A program that clears its canvas before a picture calls
+// this instead of canvas.canvas_clear.
+fn painter_clear(z: *mut Painter, col: u32) {
+    let cv: *mut canvas.Canvas = painter_canvas(z)
+    let g: *mut gpu.Gpu = gpu.gpu_of(cv)
+    if g as u64 != 0 {
+        gpu.gpu_clear(g, col)
+        return
+    }
+    canvas.canvas_clear(cv, col)
+}
+
+// A finished raster (its window at (ox, oy)) filled with `col` -- into
+// memory, or on the GPU as a mask (lib/fui/gpu.fi). For a caller outside
+// this file that rasters a shape of its own (lib/fui/transform.fi).
+fn painter_fill_raster(z: *mut Painter, ra: *mut raster.Raster, ox: usize,
+    oy: usize, col: u32) {
+    let cv: *mut canvas.Canvas = painter_canvas(z)
+    let g: *mut gpu.Gpu = gpu.gpu_of(cv)
+    if g as u64 != 0 {
+        gpu.gpu_fill_raster(g, ra, ox, oy, col)
+        return
+    }
+    canvas.canvas_fill_raster(cv, ra, ox, oy, col)
+}
+
+fn surface(z: *mut Painter, x: f64, y: f64, w: f64, h: f64, col: u32) {
+    if (*z).ok == 0 || w <= 0.0 || h <= 0.0 {
+        return
+    }
+    let g: *mut gpu.Gpu = gpu.gpu_of(painter_canvas(z))
+    if g as u64 != 0 {
+        gpu.gpu_rect(g, x, y, x + w, y + h, mit_alpha(col))
+        return
+    }
+    canvas.canvas_fill_rect(painter_canvas(z), x, y, x + w, y + h,
+        mit_alpha(col))
+}
+
+// A line. Horizontal or vertical -- a slanted line is only needed by a
+// user interface for icons, and those have their own path. `st` is the
+// stroke width.
+fn border_col(z: *mut Painter, x: f64, y: f64, w: f64, h: f64, st: f64,
+    col: u32) {
+    if w >= h {
+        surface(z, x, y, w, st, col)
+    } else {
+        surface(z, x, y, st, h, col)
+    }
+}
+
+// The factor for the quarter circle out of a cubic.
+#[no_gc]
+fn K() -> f64 { return 0.5522847498307933 }
+
+// Write the outline of a round rectangle into the rasteriser.
+// `r` is clamped to half the shorter side -- a radius bigger than the
+// rectangle is not a shape but a mistake, and in `u64` the subtraction
+// below would be exactly the overflow Justin's start menu in OrientOS
+// died of (kernel/user/wlib.fi, round ECHTHARDWARE-1). Here everything
+// is f64, but the clamp stands all the same.
+#[no_gc]
+fn path_round(ra: *mut raster.Raster, x: f64, y: f64, w: f64, h: f64,
+    r0: f64) {
+    var r: f64 = r0
+    var m: f64 = w
+    if h < m {
+        m = h
+    }
+    if r > m / 2.0 {
+        r = m / 2.0
+    }
+    if r < 0.0 {
+        r = 0.0
+    }
+    let x1: f64 = x + w
+    let y1: f64 = y + h
+    let k: f64 = r * K()
+    if r <= 0.0 {
+        // A square rectangle is the same path with four lines -- that
+        // way `shape_classic` (radius 0) is pixel-identical with what
+        // `surface` paints, and not a second lot of drawing code.
+        raster.raster_line(ra, x, y, x1, y)
+        raster.raster_line(ra, x1, y, x1, y1)
+        raster.raster_line(ra, x1, y1, x, y1)
+        raster.raster_line(ra, x, y1, x, y)
+        return
+    }
+    // top, clockwise
+    raster.raster_line(ra, x + r, y, x1 - r, y)
+    raster.raster_cubic(ra, x1 - r, y, x1 - r + k, y, x1, y + r - k,
+        x1, y + r)
+    raster.raster_line(ra, x1, y + r, x1, y1 - r)
+    raster.raster_cubic(ra, x1, y1 - r, x1, y1 - r + k, x1 - r + k, y1,
+        x1 - r, y1)
+    raster.raster_line(ra, x1 - r, y1, x + r, y1)
+    raster.raster_cubic(ra, x + r, y1, x + r - k, y1, x, y1 - r + k,
+        x, y1 - r)
+    raster.raster_line(ra, x, y1 - r, x, y + r)
+    raster.raster_cubic(ra, x, y + r, x, y + r - k, x + r - k, y,
+        x + r, y)
+}
+
+// THE CLIP CULLS (fUi tempo, stage 1, 24.09.2026). A picture that is
+// painted again only where it changed paints under a clip (a band, a
+// row, the input line) -- and every shape of the page used to be
+// rasterised whole all the same, to have most of its pixels thrown away
+// by the clip one by one. Now a window is cut to the ROWS of the clip:
+// `ay`/`by` (a window's first row, whole, and its end) are narrowed to
+// the clip's rows, and false comes back when nothing of [x0, x1) x the
+// rows is inside it.
+//
+// ONLY ROWS ARE CUT, and that is the point of it: the rasteriser cuts an
+// edge in y without shortening it (lib/font/raster.fi, `accumulate`: x
+// follows along), so a row inside the window gets the same coverage
+// whether the rows above it were in the window or not. In x it clamps --
+// the piece of an edge left of the window is folded onto the window's
+// border, which is exact for the running sum but not for the columns next
+// to the border. So columns stay as they were; a shape wholly left or
+// right of the clip is dropped, never cut.
+#[no_gc]
+fn clip_rows(cv: *mut canvas.Canvas, x0: f64, x1: f64, ay: *mut f64,
+    by: *mut f64) -> bool {
+    if x1 <= canvas.clip_x0(cv) || x0 >= canvas.clip_x1(cv) {
+        return false
+    }
+    let ky0: f64 = floor_px(canvas.clip_y0(cv))
+    let ky1: f64 = canvas.clip_y1(cv)
+    if *ay < ky0 {
+        *ay = ky0
+    }
+    if *by > ky1 {
+        // up to the clip's last row, whole: a clip edge in the middle of
+        // a row still lets part of that row through (canvas.clip_factor)
+        var e: f64 = floor_px(ky1)
+        if e < ky1 {
+            e = e + 1.0
+        }
+        if *by > e {
+            *by = e
+        }
+    }
+    return *by > *ay
+}
+
+// Open the raster window for a rectangle. Gives false when there is
+// nothing to do.
+#[no_gc]
+fn raster_window(z: *mut Painter, x: f64, y: f64, w: f64, h: f64,
+    luft: f64, wx: *mut f64, wy: *mut f64) -> bool {
+    return raster_window_at(z, x, y, w, h, luft, wx, wy, true)
+}
+
+// ... and with the choice whether the window is cut to the rows of the
+// clip (`cut`): a coverage that is to be KEPT (lib/fui/fcache.fi) needs
+// all of its rows.
+#[no_gc]
+fn raster_window_at(z: *mut Painter, x: f64, y: f64, w: f64, h: f64,
+    luft: f64, wx: *mut f64, wy: *mut f64, cut: bool) -> bool {
+    return raster_window_xc(z, x, y, w, h, luft, wx, wy, cut, 1.0e30, 0.0 - 1.0e30)
+}
+
+// ... and with leave to cut the window in x as well (r456). A caller whose shape has NO slanted or curved edge between `xlo` and
+// `xhi` (a round rectangle between its corners: only horizontal edges there, and a horizontal edge adds no coverage) says so.
+// The border of the window may then move to the clip (2 px of air) inside [xlo, xhi]: an edge wholly left of the border is folded
+// onto column 0 exactly, and none crosses it, so every column of the clip gets the octets it got with the wide window.
+// `xlo > xhi` = no leave (the default).
+#[no_gc]
+fn raster_window_xc(z: *mut Painter, x: f64, y: f64, w: f64, h: f64,
+    luft: f64, wx: *mut f64, wy: *mut f64, cut: bool, xlo: f64, xhi: f64) -> bool {
+    let cv: *mut canvas.Canvas = painter_canvas(z)
+    let cw: f64 = canvas.canvas_width(cv) as f64
+    let ch: f64 = canvas.canvas_height(cv) as f64
+    // THE ORIGIN SITS ON A WHOLE PIXEL.
+    //
+    // Justin, 12.09.2026: adding letter spacing moved the "N" of a
+    // badge one pixel left, and the wave 3 pixel check caught it. The
+    // cause was NOT the spacing -- it was here.
+    //
+    // `canvas_fill_raster` writes the coverage back at
+    // `wx as usize, wy as usize`, so it TRUNCATES the origin. The
+    // rasteriser meanwhile subtracts the true, fractional origin. The
+    // difference between the two is a subpixel shift, and it depends on
+    // the FRACTION of the origin. As long as every caller happened to
+    // hand in the same fraction, everything lined up. The wider window
+    // the text needs for an outline pushed the origin below zero, the
+    // clamp made it exactly 0.0, the fraction changed -- and the glyph
+    // moved.
+    //
+    // Flooring the origin makes the fraction always zero, so the
+    // rasteriser and the write-back agree by construction. This is the
+    // same class of bug as the baseline being rounded to a whole pixel
+    // (see `text_baseline_mid`), and it gets the same answer.
+    var ax: f64 = floor_px(clamp(x - luft, 0.0, cw))
+    var ay: f64 = floor_px(clamp(y - luft, 0.0, ch))
+    var bx: f64 = clamp(x + w + luft, 0.0, cw)
+    var by: f64 = clamp(y + h + luft, 0.0, ch)
+    if cut && !clip_rows(cv, x - luft, x + w + luft, &ay, &by) {
+        return false
+    }
+    if cut && xlo <= xhi {
+        let cl: f64 = floor_px(canvas.clip_x0(cv)) - 2.0
+        if cl > ax && cl >= xlo {
+            ax = cl
+        }
+        let cr: f64 = floor_px(canvas.clip_x1(cv)) + 3.0
+        if cr < bx && cr <= xhi {
+            bx = cr
+        }
+    }
+    if bx <= ax || by <= ay {
+        return false
+    }
+    // One extra column/row for the antialiased edge -- but a shape that spans
+    // the WHOLE canvas has no pixel beyond it: it gets the canvas size, and
+    // is painted. (Before 03.10.2026 `rw` was one too many there and a round
+    // rectangle as wide as the canvas -- a full-width list row -- was not
+    // painted at all.)
+    var rw: usize = (bx - ax) as usize + 1
+    var rh: usize = (by - ay) as usize + 1
+    if rw > (*z).w && (bx - ax) as usize <= (*z).w {
+        rw = (*z).w
+    }
+    if rh > (*z).h && (by - ay) as usize <= (*z).h {
+        rh = (*z).h
+    }
+    if rw > (*z).w || rh > (*z).h {
+        return false
+    }
+    *wx = ax
+    *wy = ay
+    return raster.raster_begin(&(*z).ra, ax, ay, rw, rh)
+}
+
+// The band can be switched off -- only for the proof that it changes no
+// octet (tools/fui/tempo_main.fi paints the same page with and without).
+static mut G_NO_BAND: bool = false
+
+fn painter_set_band(on: bool) {
+    G_NO_BAND = !on
+}
+
+// THE ROWS BETWEEN THE CORNERS (fUi tempo r23, 29.09.2026). Between
+// y + r and y + h - r a round rectangle is two vertical sides and
+// nothing else: every row there that the sides cross from top to bottom
+// gets exactly the same differences in the rasteriser (x stays the same
+// number, the height of the piece is exactly 1.0), so the rasteriser may
+// finish ONE of them for all (`raster.raster_finish_band`). `r0` is
+// clamped exactly as `path_round` clamps it, and the two ends are the
+// same expressions the path hands to `raster_line`. One row of margin at
+// each end: a flattened corner may round one ulp past y + r.
+// Result in rows of the raster window whose top is `wy`; `*b1 <= *b0`
+// when there is no such band.
+#[no_gc]
+fn band_rows(x: f64, y: f64, w: f64, h: f64, r0: f64, wy: f64,
+    b0: *mut usize, b1: *mut usize) {
+    *b0 = 0
+    *b1 = 0
+    if G_NO_BAND {
+        return
+    }
+    var r: f64 = r0
+    var m: f64 = w
+    if h < m {
+        m = h
+    }
+    if r > m / 2.0 {
+        r = m / 2.0
+    }
+    if r < 0.0 {
+        r = 0.0
+    }
+    let y1: f64 = y + h
+    let ta: f64 = (y + r) - wy
+    let tb: f64 = (y1 - r) - wy
+    if !(ta > -1.0e9 && ta < 1.0e9 && tb > -1.0e9 && tb < 1.0e9) {
+        return
+    }
+    // first row: floor(ta) + 1, last row + 1: ceil(tb) - 1
+    var lo: i64 = (floor_px(ta) as i64) + 1
+    var hi: i64 = (floor_px(tb) as i64)
+    if (hi as f64) < tb {
+        hi = hi + 1
+    }
+    hi = hi - 1
+    if lo < 0 {
+        lo = 0
+    }
+    if hi <= lo + 1 {
+        return
+    }
+    *b0 = lo as usize
+    *b1 = hi as usize
+}
+
+// A RECTANGLE WITH ROUND CORNERS, antialiased.
+fn round_rect(z: *mut Painter, x: f64, y: f64, w: f64, h: f64, r: f64,
+    col: u32) {
+    if (*z).ok == 0 || w <= 0.0 || h <= 0.0 {
+        return
+    }
+    if r <= 0.0 {
+        surface(z, x, y, w, h, col)
+        return
+    }
+    let g: *mut gpu.Gpu = gpu.gpu_of(painter_canvas(z))
+    if g as u64 != 0 {
+        gpu.gpu_round(g, x, y, w, h, r, 0.0, mit_alpha(col), mit_alpha(col), false,
+            0.0, 0.0)
+        return
+    }
+    var wx: f64 = 0.0
+    var wy: f64 = 0.0
+    // between its corners a round rectangle has only horizontal edges (r456): the window may be cut to the clip in x
+    var rr: f64 = r
+    if rr > w / 2.0 { rr = w / 2.0 }
+    if rr > h / 2.0 { rr = h / 2.0 }
+    if !raster_window_xc(z, x, y, w, h, 1.0, &wx, &wy, true, x + rr + 1.0, x + w - rr - 1.0) {
+        return
+    }
+    path_round(&(*z).ra, x, y, w, h, r)
+    var b0: usize = 0
+    var b1: usize = 0
+    band_rows(x, y, w, h, r, wy, &b0, &b1)
+    raster.raster_finish_band(&(*z).ra, b0, b1)
+    canvas.canvas_fill_raster(painter_canvas(z), &(*z).ra,
+        wx as usize, wy as usize, mit_alpha(col))
+}
+
+// THE OUTLINE. A ring and not a filled area: it lies ON an already
+// painted widget. It is made as two paths in ONE raster run -- outside
+// clockwise, inside against it. The rasteriser counts windings, so
+// exactly the border stays.
+//
+// That is the focus ring, and it is the only thing somebody working by
+// keyboard relies on. Therefore it is two pixels wide
+// (theme.Shape.focus_w) and not one: one disappears on every screen
+// with scaling.
+fn round_ring(z: *mut Painter, x: f64, y: f64, w: f64, h: f64, r: f64,
+    st: f64, col: u32) {
+    if (*z).ok == 0 || w <= 0.0 || h <= 0.0 || st <= 0.0 {
+        return
+    }
+    let g: *mut gpu.Gpu = gpu.gpu_of(painter_canvas(z))
+    if g as u64 != 0 {
+        gpu.gpu_round(g, x, y, w, h, r, st, mit_alpha(col), mit_alpha(col), false,
+            0.0, 0.0)
+        return
+    }
+    var wx: f64 = 0.0
+    var wy: f64 = 0.0
+    // r461: between the corners of BOTH paths a ring has only horizontal edges (and vertical ones wholly outside the cut): cut the
+    // window to the clip in x. The inner path's corners start at x + max(r, st) at the latest.
+    var rr: f64 = r
+    if rr > w / 2.0 { rr = w / 2.0 }
+    if rr > h / 2.0 { rr = h / 2.0 }
+    if rr < st { rr = st }
+    if !raster_window_xc(z, x, y, w, h, 1.0, &wx, &wy, true, x + rr + 1.0, x + w - rr - 1.0) {
+        return
+    }
+    path_round(&(*z).ra, x, y, w, h, r)
+    // inside, counter-running -- hence the points in reverse order
+    let ix: f64 = x + st
+    let iy: f64 = y + st
+    let iw: f64 = w - 2.0 * st
+    let ih: f64 = h - 2.0 * st
+    if iw > 0.0 && ih > 0.0 {
+        var ir: f64 = r - st
+        if ir < 0.0 {
+            ir = 0.0
+        }
+        path_round_ccw(&(*z).ra, ix, iy, iw, ih, ir)
+    }
+    // the band has to lie between the corners of BOTH paths (the inner
+    // one's sides run from iy + ir to iy + ih - ir, clamped the same way)
+    var b0: usize = 0
+    var b1: usize = 0
+    band_rows(x, y, w, h, r, wy, &b0, &b1)
+    if iw > 0.0 && ih > 0.0 {
+        var ir2: f64 = r - st
+        if ir2 < 0.0 {
+            ir2 = 0.0
+        }
+        var c0: usize = 0
+        var c1: usize = 0
+        band_rows(ix, iy, iw, ih, ir2, wy, &c0, &c1)
+        if c0 > b0 {
+            b0 = c0
+        }
+        if c1 < b1 {
+            b1 = c1
+        }
+    }
+    raster.raster_finish_band(&(*z).ra, b0, b1)
+    canvas.canvas_fill_raster(painter_canvas(z), &(*z).ra,
+        wx as usize, wy as usize, mit_alpha(col))
+}
+
+// A ROUND RECTANGLE WITH A LINEAR GRADIENT, antialiased.
+//
+// `c0` at the start, `c1` at the end of the direction (dx, dy): (0, 1)
+// runs top to bottom, (1, 1) from the upper left corner to the lower
+// right one -- the diagonal of avatars and accent buttons. The ramp is
+// laid over the box, not over the canvas, so the same call gives the
+// same picture wherever it stands. Colours carry alpha like every other
+// colour here (0 alpha = opaque, `mit_alpha`), and are mixed per channel
+// in sRGB, the way CSS `linear-gradient` mixes by default.
+//
+// Same path, same raster window as `round_rect` -- only the write-back
+// asks for a colour per pixel instead of one for all.
+fn round_rect_grad(z: *mut Painter, x: f64, y: f64, w: f64, h: f64,
+    r: f64, c0: u32, c1: u32, dx: f64, dy: f64) {
+    if (*z).ok == 0 || w <= 0.0 || h <= 0.0 {
+        return
+    }
+    let g: *mut gpu.Gpu = gpu.gpu_of(painter_canvas(z))
+    if g as u64 != 0 {
+        gpu.gpu_round(g, x, y, w, h, r, 0.0, mit_alpha(c0), mit_alpha(c1), true,
+            dx, dy)
+        return
+    }
+    var wx: f64 = 0.0
+    var wy: f64 = 0.0
+    // r461: like round_rect, the window may be cut to the clip in x between the corners (the colour of a pixel depends on its
+    // position, not on the window)
+    var rr: f64 = r
+    if rr > w / 2.0 { rr = w / 2.0 }
+    if rr > h / 2.0 { rr = h / 2.0 }
+    if !raster_window_xc(z, x, y, w, h, 1.0, &wx, &wy, true, x + rr + 1.0, x + w - rr - 1.0) {
+        grad_rect(painter_canvas(z), x, y, w, h, mit_alpha(c0), mit_alpha(c1),
+            dx, dy)
+        return
+    }
+    path_round(&(*z).ra, x, y, w, h, r)
+    raster.raster_finish(&(*z).ra)
+    let a: u32 = mit_alpha(c0)
+    let b: u32 = mit_alpha(c1)
+    // the length of the box along the direction: t runs 0..1 over it
+    var ax: f64 = dx
+    if ax < 0.0 {
+        ax = 0.0 - ax
+    }
+    var ay: f64 = dy
+    if ay < 0.0 {
+        ay = 0.0 - ay
+    }
+    var span: f64 = w * ax + h * ay
+    if span <= 0.0 {
+        span = 1.0
+    }
+    // the corner the ramp starts in
+    var ox: f64 = x
+    if dx < 0.0 {
+        ox = x + w
+    }
+    var oy: f64 = y
+    if dy < 0.0 {
+        oy = y + h
+    }
+    let cv: *mut canvas.Canvas = painter_canvas(z)
+    let ra: *mut raster.Raster = &(*z).ra
+    let rh: usize = raster.raster_used_y1(ra)
+    let rw: usize = raster.raster_used_x1(ra)
+    let rx0: usize = raster.raster_used_x0(ra)
+    var yy: usize = raster.raster_used_y0(ra)
+    while yy < rh {
+        let row: u64 = raster.raster_cov_row(ra, yy)
+        let py: f64 = wy + (yy as f64) + 0.5
+        // a ramp that runs straight down has ONE colour per row: mixed
+        // once here, not once per pixel
+        var rowcol: u32 = 0 as u32
+        if dx == 0.0 {
+            rowcol = mix_argb(a, b, clamp01(((py - oy) * dy) / span))
+        }
+        var xx: usize = rx0
+        while xx < rw {
+            let v: f64 = *((row + (xx * 8) as u64) as *mut f64)
+            if v > 0.0 {
+                var col: u32 = rowcol
+                if dx != 0.0 {
+                    let px: f64 = wx + (xx as f64) + 0.5
+                    col = mix_argb(a, b,
+                        clamp01(((px - ox) * dx + (py - oy) * dy) / span))
+                }
+                var cov: f64 = v
+                if cov > 1.0 {
+                    cov = 1.0
+                }
+                canvas.canvas_blend(cv, (wx as usize) + xx, (wy as usize) + yy,
+                    col, cov)
+            }
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+}
+
+// ================================================ THE BACKDROP CACHE
+//
+// A page ground made of gradients (linear ramp + radial lights, style.SF_BG_GLOW) costs a float calculation per pixel. It is the
+// same picture every frame, so the finished pixels of the box are kept (premultiplied RGBA, as the canvas has them) and copied
+// back by rows. `key` says what the picture is (colours, light, size; the caller hashes them); any MISS clears every slot, so a
+// box painted over another cached one never reuses a stale underlay. Only square boxes on a canvas in memory, and a copy only
+// inside the current clip (a partial repaint touches nothing outside its damage rectangle). A store only happens when the clip
+// covers the whole box (otherwise the pixels outside would be old ones).
+struct BgSlot {
+    px: u64,
+    cap: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    key: u64,
+}
+
+static mut BG_NEXT: usize = 0
+static mut BG_CHAIN: u64 = 0
+static mut BG_PEND: u64 = 0
+static mut BG_ST: [i64; 4] = [0; 4] // 0 hit, 1 miss, 2 refused because the canvas is GPU-backed, 3 refused otherwise
+
+// Counters of the lit-ground cache since process start (diagnostics): hit, miss, GPU refusal, other refusal.
+fn bgcache_stat(k: usize) -> i64 {
+    if k >= 4 { return 0 }
+    return BG_ST[k]
+}
+
+// A frame (or a partial repaint) begins: the chain of lit grounds starts over.
+fn bgcache_frame() {
+    BG_CHAIN = 0
+}
+static mut BG_SLOTS: [BgSlot; 4] = [BgSlot { px: 0, cap: 0, x: 0, y: 0, w: 0, h: 0, key: 0 }; 4]
+
+fn bgcache_reset() {
+    var i: usize = 0
+    while i < 4 {
+        if BG_SLOTS[i].px != 0 {
+            rt.heap_free(BG_SLOTS[i].px, BG_SLOTS[i].cap)
+        }
+        BG_SLOTS[i] = BgSlot { px: 0, cap: 0, x: 0, y: 0, w: 0, h: 0, key: 0 }
+        i = i + 1
+    }
+}
+
+// The integer pixel box of (x, y, w, h) on the canvas; false = nothing to cache (empty, GPU canvas, or a clip mask is active).
+fn bgcache_box(z: *mut Painter, x: f64, y: f64, w: f64, h: f64, x0: *mut usize, y0: *mut usize, x1: *mut usize, y1: *mut usize) -> bool {
+    let cv: *mut canvas.Canvas = painter_canvas(z)
+    if canvas.canvas_gpu(cv) != 0 {
+        BG_ST[2] = BG_ST[2] + 1
+        return false
+    }
+    if (*z).ok == 0 {
+        BG_ST[3] = BG_ST[3] + 1
+        return false
+    }
+    if !px_span(cv, x, y, w, h, x0, y0, x1, y1) {
+        BG_ST[3] = BG_ST[3] + 1
+        return false
+    }
+    if canvas.canvas_clip_masked(cv) {
+        BG_ST[3] = BG_ST[3] + 1
+        return false
+    }
+    return true
+}
+
+// Copy the cached picture of this box (same key and place) onto the canvas, inside the clip. true = done, nothing to paint.
+fn bgcache_blit(z: *mut Painter, x: f64, y: f64, w: f64, h: f64, key0: u64) -> bool {
+    let key: u64 = (key0 ^ BG_CHAIN) *% (1099511628211 as u64)
+    BG_PEND = key
+    var x0: usize = 0
+    var y0: usize = 0
+    var x1: usize = 0
+    var y1: usize = 0
+    if !bgcache_box(z, x, y, w, h, &x0, &y0, &x1, &y1) {
+        return false
+    }
+    let cv: *mut canvas.Canvas = painter_canvas(z)
+    var i: usize = 0
+    while i < 4 {
+        let sl: *mut BgSlot = &BG_SLOTS[i]
+        if (*sl).px != 0 && (*sl).key == key && (*sl).x == x0 && (*sl).y == y0 && (*sl).w == x1 - x0 && (*sl).h == y1 - y0 {
+            // inside the clip only (whole pixels)
+            var cx0: usize = x0
+            var cy0: usize = y0
+            var cx1: usize = x1
+            var cy1: usize = y1
+            canvas.canvas_clip_pixels(cv, &cx0, &cy0, &cx1, &cy1)
+            BG_CHAIN = key
+            BG_ST[0] = BG_ST[0] + 1
+            if cx1 > cx0 && cy1 > cy0 {
+                let cw: usize = canvas.canvas_width(cv)
+                let row: usize = cx1 - cx0
+                var yy: usize = cy0
+                while yy < cy1 {
+                    let dst: u64 = canvas.canvas_pixels(cv) as u64 + ((yy * cw + cx0) * 4) as u64
+                    let src: u64 = (*sl).px + (((yy - y0) * (*sl).w + (cx0 - x0)) * 4) as u64
+                    rt.mem_copy(dst, src, row * 4)
+                    yy = yy + 1
+                }
+            }
+            return true
+        }
+        i = i + 1
+    }
+    BG_ST[1] = BG_ST[1] + 1
+    // a miss: keep the other slots. Several lit grounds (the window root, the main column on it) live side by side, each found by its key.
+    // A picture holds everything painted below it (the column's glow lies over the root's ramp), so its key is mixed with the chain of
+    // the grounds that came before it in this frame (BG_CHAIN): a changed ground below changes every key above it.
+    return false
+}
+
+// Keep what the box looks like NOW (call right after painting it). Skipped unless the clip covers the whole box.
+fn bgcache_store(z: *mut Painter, x: f64, y: f64, w: f64, h: f64, key0: u64) {
+    let key: u64 = BG_PEND
+    BG_CHAIN = key
+    var x0: usize = 0
+    var y0: usize = 0
+    var x1: usize = 0
+    var y1: usize = 0
+    if !bgcache_box(z, x, y, w, h, &x0, &y0, &x1, &y1) {
+        return
+    }
+    let cv: *mut canvas.Canvas = painter_canvas(z)
+    var cx0: usize = x0
+    var cy0: usize = y0
+    var cx1: usize = x1
+    var cy1: usize = y1
+    canvas.canvas_clip_pixels(cv, &cx0, &cy0, &cx1, &cy1)
+    if cx0 != x0 || cy0 != y0 || cx1 != x1 || cy1 != y1 {
+        return
+    }
+    // the slot of this very box (its picture is out of date), else a free one, else the oldest (round robin)
+    var slot: usize = 4
+    var i: usize = 0
+    while i < 4 && slot == 4 {
+        if BG_SLOTS[i].px != 0 && BG_SLOTS[i].x == x0 && BG_SLOTS[i].y == y0 && BG_SLOTS[i].w == x1 - x0 && BG_SLOTS[i].h == y1 - y0 {
+            slot = i
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < 4 && slot == 4 {
+        if BG_SLOTS[i].px == 0 {
+            slot = i
+        }
+        i = i + 1
+    }
+    if slot == 4 {
+        slot = BG_NEXT % 4
+        BG_NEXT = BG_NEXT + 1
+    }
+    if BG_SLOTS[slot].px != 0 {
+        rt.heap_free(BG_SLOTS[slot].px, BG_SLOTS[slot].cap)
+        BG_SLOTS[slot] = BgSlot { px: 0, cap: 0, x: 0, y: 0, w: 0, h: 0, key: 0 }
+    }
+    let n: usize = (x1 - x0) * (y1 - y0) * 4
+    let buf: u64 = rt.heap_alloc(n)
+    if buf == 0 {
+        return
+    }
+    let cw: usize = canvas.canvas_width(cv)
+    var yy: usize = y0
+    while yy < y1 {
+        rt.mem_copy(buf + ((yy - y0) * (x1 - x0) * 4) as u64, canvas.canvas_pixels(cv) as u64 + ((yy * cw + x0) * 4) as u64, (x1 - x0) * 4)
+        yy = yy + 1
+    }
+    BG_SLOTS[slot] = BgSlot { px: buf, cap: n, x: x0, y: y0, w: x1 - x0, h: y1 - y0, key: key }
+}
+
+// A SOFT LIGHT IN A ROUND RECTANGLE -- a radial gradient from `col` in
+// the centre (cx, cy) to nothing at the ellipse (rx, ry), over whatever is
+// there already. The weight falls as (1 - d^2)^2 (d^2 = (dx/rx)^2 +
+// (dy/ry)^2), the same fall-off as effect.glow_ground: smooth to its rim,
+// no exp per pixel. `col` carries the strongest opacity.
+//
+// On a GPU canvas the band is painted in memory (gpu.gpu_sw_begin): the
+// GPU has no shader for it yet, and correct beats fast.
+fn round_rect_radial(z: *mut Painter, x: f64, y: f64, w: f64, h: f64,
+    r: f64, col: u32, cx: f64, cy: f64, rx: f64, ry: f64) {
+    if (*z).ok == 0 || w <= 0.0 || h <= 0.0 || rx <= 0.0 || ry <= 0.0 {
+        return
+    }
+    let cv: *mut canvas.Canvas = painter_canvas(z)
+    let g: *mut gpu.Gpu = gpu.gpu_of(cv)
+    if g as u64 != 0 && r <= 0.0 && radial_gpu_kept(g, cv, x, y, w, h, col, cx, cy, rx, ry) {
+        return
+    }
+    var b0: i32 = 0
+    var b1: i32 = 0
+    var b2: i32 = 0
+    var b3: i32 = 0
+    if g as u64 != 0 {
+        b0 = floor_px(clamp(x, 0.0, canvas.canvas_width(cv) as f64)) as i32
+        b1 = floor_px(clamp(y, 0.0, canvas.canvas_height(cv) as f64)) as i32
+        b2 = (clamp(x + w + 1.0, 0.0, canvas.canvas_width(cv) as f64)) as i32
+        b3 = (clamp(y + h + 1.0, 0.0, canvas.canvas_height(cv) as f64)) as i32
+        if b2 <= b0 || b3 <= b1 {
+            return
+        }
+        gpu.gpu_sw_begin(g, cv, b0, b1, b2, b3)
+    }
+    var wx: f64 = 0.0
+    var wy: f64 = 0.0
+    if r <= 0.0 || !raster_window(z, x, y, w, h, 1.0, &wx, &wy) {
+        // square corners, or larger than the raster window: every pixel
+        // of the box (clipped to the canvas) with full coverage
+        radial_rect(cv, x, y, w, h, mit_alpha(col), cx, cy, rx, ry)
+    } else {
+        path_round(&(*z).ra, x, y, w, h, r)
+        raster.raster_finish(&(*z).ra)
+        let base: u32 = mit_alpha(col)
+        let a0: f64 = ((base >> 24) & 255 as u32) as f64
+        let rgb: u32 = base & 16777215 as u32
+        let irx: f64 = 1.0 / (rx * rx)
+        let iry: f64 = 1.0 / (ry * ry)
+        let ra: *mut raster.Raster = &(*z).ra
+        let rh: usize = raster.raster_used_y1(ra)
+        let rw: usize = raster.raster_used_x1(ra)
+        let rx0: usize = raster.raster_used_x0(ra)
+        var yy: usize = raster.raster_used_y0(ra)
+        while yy < rh {
+            let row: u64 = raster.raster_cov_row(ra, yy)
+            let py: f64 = wy + (yy as f64) + 0.5 - cy
+            let qy: f64 = py * py * iry
+            if qy < 1.0 {
+                var xx: usize = rx0
+                while xx < rw {
+                    let v: f64 = *((row + (xx * 8) as u64) as *mut f64)
+                    if v > 0.0 {
+                        let px: f64 = wx + (xx as f64) + 0.5 - cx
+                        let d2: f64 = px * px * irx + qy
+                        if d2 < 1.0 {
+                            let u: f64 = 1.0 - d2
+                            var cov: f64 = v
+                            if cov > 1.0 {
+                                cov = 1.0
+                            }
+                            let a: u32 = (a0 * u * u + 0.5) as u32
+                            if a > 0 as u32 {
+                                canvas.canvas_blend(cv, (wx as usize) + xx,
+                                    (wy as usize) + yy, (a << 24) | rgb, cov)
+                            }
+                        }
+                    }
+                    xx = xx + 1
+                }
+            }
+            yy = yy + 1
+        }
+    }
+    if g as u64 != 0 {
+        gpu.gpu_sw_end(g, cv, b0, b1, b2, b3)
+    }
+}
+
+static mut RK_NEXT: usize = 0
+
+fn rk_mix(k: u64, v: f64) -> u64 {
+    return (k ^ ((v * 64.0) as i64 as u64)) *% (1099511628211 as u64)
+}
+
+// THE LIGHT OF A SQUARE PAGE GROUND ON A GPU CANVAS: the picture (premultiplied RGBA of the box, computed once in memory, no
+// read-back of the GPU) is kept in a texture slot and laid over the ground with one quad per frame. The software fallback below
+// read the band back from the GPU and painted it per pixel EVERY frame (~150 ms a frame on a phone). false = not handled.
+fn radial_gpu_kept(g: *mut gpu.Gpu, cv: *mut canvas.Canvas, x: f64, y: f64, w: f64, h: f64, col: u32,
+    cx: f64, cy: f64, rx: f64, ry: f64) -> bool {
+    if canvas.canvas_clip_masked(cv) {
+        return false
+    }
+    let cw: f64 = canvas.canvas_width(cv) as f64
+    let ch: f64 = canvas.canvas_height(cv) as f64
+    let b0: i32 = floor_px(clamp(x, 0.0, cw)) as i32
+    let b1: i32 = floor_px(clamp(y, 0.0, ch)) as i32
+    var b2: i32 = (clamp(x + w, 0.0, cw)) as i32
+    var b3: i32 = (clamp(y + h, 0.0, ch)) as i32
+    if (b2 as f64) < clamp(x + w, 0.0, cw) { b2 = b2 + 1 }
+    if (b3 as f64) < clamp(y + h, 0.0, ch) { b3 = b3 + 1 }
+    if b2 <= b0 || b3 <= b1 {
+        return true
+    }
+    let base: u32 = mit_alpha(col)
+    var key: u64 = 1469598103934665603 as u64
+    key = rk_mix(key, x)
+    key = rk_mix(key, y)
+    key = rk_mix(key, w)
+    key = rk_mix(key, h)
+    key = rk_mix(key, cx)
+    key = rk_mix(key, cy)
+    key = rk_mix(key, rx)
+    key = rk_mix(key, ry)
+    key = (key ^ (base as u64)) *% (1099511628211 as u64)
+    key = (key ^ ((b2 - b0) as u64 * 65536 as u64 + (b3 - b1) as u64)) *% (1099511628211 as u64)
+    if key == 0 as u64 { key = 1 as u64 }
+    var sl: i32 = gpu.gpu_slot_find(g, key)
+    if sl >= 0 {
+        BG_ST[0] = BG_ST[0] + 1
+        gpu.gpu_draw_photo_slot(g, sl, key, 0, b2 - b0, b3 - b1, b0 as f64, b1 as f64)
+        return true
+    }
+    let iw: usize = (b2 - b0) as usize
+    let ih: usize = (b3 - b1) as usize
+    let buf: u64 = rt.heap_alloc(iw * ih * 4)
+    if buf == 0 {
+        return false
+    }
+    BG_ST[1] = BG_ST[1] + 1
+    let a0: f64 = ((base >> 24) & 255 as u32) as f64
+    let cr: u32 = (base >> 16) & 255 as u32
+    let cg: u32 = (base >> 8) & 255 as u32
+    let cb: u32 = base & 255 as u32
+    let irx: f64 = 1.0 / (rx * rx)
+    let iry: f64 = 1.0 / (ry * ry)
+    var yy: usize = 0
+    while yy < ih {
+        let py: f64 = (b1 as f64) + (yy as f64) + 0.5
+        let inside_y: bool = py >= y && py <= y + h
+        let dy: f64 = py - cy
+        let qy: f64 = dy * dy * iry
+        var xx: usize = 0
+        while xx < iw {
+            let o: u64 = buf + ((yy * iw + xx) * 4) as u64
+            var v: u32 = 0 as u32
+            let pxc: f64 = (b0 as f64) + (xx as f64) + 0.5
+            if inside_y && qy < 1.0 && pxc >= x && pxc <= x + w {
+                let dx: f64 = pxc - cx
+                let d2: f64 = dx * dx * irx + qy
+                if d2 < 1.0 {
+                    let u: f64 = 1.0 - d2
+                    let a: u32 = (a0 * u * u + 0.5) as u32
+                    if a > 0 as u32 {
+                        // bytes R, G, B, A (little endian word: A B G R), premultiplied
+                        let pr: u32 = (cr * a + 127 as u32) / 255 as u32
+                        let pg: u32 = (cg * a + 127 as u32) / 255 as u32
+                        let pb: u32 = (cb * a + 127 as u32) / 255 as u32
+                        v = pr | (pg << 8) | (pb << 16) | (a << 24)
+                    }
+                }
+            }
+            *(o as *mut u32) = v
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+    sl = RK_NEXT as i32
+    RK_NEXT = (RK_NEXT + 1) % 4
+    gpu.gpu_draw_photo_slot(g, sl, key, buf, iw as i32, ih as i32, b0 as f64, b1 as f64)
+    rt.heap_free(buf, iw * ih * 4)
+    return true
+}
+
+// The pixel rows of (x, y, w, h) clipped to the canvas: *y0..*y1,
+// *x0..*x1. False when nothing is left.
+fn px_span(cv: *mut canvas.Canvas, x: f64, y: f64, w: f64, h: f64,
+    x0: *mut usize, y0: *mut usize, x1: *mut usize, y1: *mut usize) -> bool {
+    let cw: f64 = canvas.canvas_width(cv) as f64
+    let ch: f64 = canvas.canvas_height(cv) as f64
+    let a: f64 = clamp(x + 0.5, 0.0, cw)
+    let b: f64 = clamp(y + 0.5, 0.0, ch)
+    let c: f64 = clamp(x + w + 0.5, 0.0, cw)
+    let d: f64 = clamp(y + h + 0.5, 0.0, ch)
+    *x0 = a as usize
+    *y0 = b as usize
+    *x1 = c as usize
+    *y1 = d as usize
+    return *x1 > *x0 && *y1 > *y0
+}
+
+fn radial_rect(cv: *mut canvas.Canvas, x: f64, y: f64, w: f64, h: f64,
+    base: u32, cx: f64, cy: f64, rx: f64, ry: f64) {
+    var x0: usize = 0
+    var y0: usize = 0
+    var x1: usize = 0
+    var y1: usize = 0
+    if !px_span(cv, x, y, w, h, &x0, &y0, &x1, &y1) {
+        return
+    }
+    let a0: f64 = ((base >> 24) & 255 as u32) as f64
+    let rgb: u32 = base & 16777215 as u32
+    let irx: f64 = 1.0 / (rx * rx)
+    let iry: f64 = 1.0 / (ry * ry)
+    var yy: usize = y0
+    while yy < y1 {
+        let py: f64 = (yy as f64) + 0.5 - cy
+        let qy: f64 = py * py * iry
+        if qy < 1.0 {
+            // only the columns inside the ellipse on this row
+            let half: f64 = rx * root_of(1.0 - qy)
+            var xa: usize = x0
+            let fa: f64 = cx - half
+            let fb: f64 = cx + half + 1.0
+            // a centre outside the box (a light peeking in from a corner): a row whose span lies wholly left or right of the box has nothing to paint
+            // (casting a negative f64 to usize wraps to a huge value)
+            if fb <= x0 as f64 || fa >= x1 as f64 {
+                yy = yy + 1
+                continue
+            }
+            if fa > xa as f64 {
+                xa = fa as usize
+            }
+            var xb: usize = x1
+            if fb < xb as f64 {
+                xb = fb as usize
+            }
+            var xx: usize = xa
+            while xx < xb {
+                let px: f64 = (xx as f64) + 0.5 - cx
+                let d2: f64 = px * px * irx + qy
+                if d2 < 1.0 {
+                    let u: f64 = 1.0 - d2
+                    let a: u32 = (a0 * u * u + 0.5) as u32
+                    if a > 0 as u32 {
+                        canvas.canvas_blend(cv, xx, yy, (a << 24) | rgb, 1.0)
+                    }
+                }
+                xx = xx + 1
+            }
+        }
+        yy = yy + 1
+    }
+}
+
+// A square root by Newton (no libm in the kernel profile of the callers).
+fn root_of(v: f64) -> f64 {
+    if v <= 0.0 {
+        return 0.0
+    }
+    var g: f64 = v
+    if g < 1.0 {
+        g = 1.0
+    }
+    var i: usize = 0
+    while i < 24 {
+        g = 0.5 * (g + v / g)
+        i = i + 1
+    }
+    return g
+}
+
+// The linear ramp of `round_rect_grad` over a box with square corners or
+// one larger than the raster window: every pixel, full coverage.
+fn grad_rect(cv: *mut canvas.Canvas, x: f64, y: f64, w: f64, h: f64,
+    a: u32, b: u32, dx: f64, dy: f64) {
+    var x0: usize = 0
+    var y0: usize = 0
+    var x1: usize = 0
+    var y1: usize = 0
+    if !px_span(cv, x, y, w, h, &x0, &y0, &x1, &y1) {
+        return
+    }
+    var ax: f64 = dx
+    if ax < 0.0 {
+        ax = 0.0 - ax
+    }
+    var ay: f64 = dy
+    if ay < 0.0 {
+        ay = 0.0 - ay
+    }
+    var span: f64 = w * ax + h * ay
+    if span <= 0.0 {
+        span = 1.0
+    }
+    var ox: f64 = x
+    if dx < 0.0 {
+        ox = x + w
+    }
+    var oy: f64 = y
+    if dy < 0.0 {
+        oy = y + h
+    }
+    var yy: usize = y0
+    while yy < y1 {
+        let py: f64 = (yy as f64) + 0.5
+        if dx == 0.0 {
+            let col: u32 = mix_argb(a, b, clamp01(((py - oy) * dy) / span))
+            canvas.canvas_fill_rect(cv, x0 as f64, yy as f64, x1 as f64,
+                (yy + 1) as f64, col)
+        } else {
+            var xx: usize = x0
+            while xx < x1 {
+                let px: f64 = (xx as f64) + 0.5
+                canvas.canvas_blend(cv, xx, yy, mix_argb(a, b,
+                        clamp01(((px - ox) * dx + (py - oy) * dy) / span)), 1.0)
+                xx = xx + 1
+            }
+        }
+        yy = yy + 1
+    }
+}
+
+fn clamp01(t: f64) -> f64 {
+    if t < 0.0 {
+        return 0.0
+    }
+    if t > 1.0 {
+        return 1.0
+    }
+    return t
+}
+
+// Two colours mixed per channel, alpha included: t = 0 is `a`, 1 is `b`.
+fn mix_argb(a: u32, b: u32, t: f64) -> u32 {
+    var out: u32 = 0 as u32
+    var sh: u32 = 0 as u32
+    while sh < 32 as u32 {
+        let ca: f64 = ((a >> sh) & 255 as u32) as f64
+        let cb: f64 = ((b >> sh) & 255 as u32) as f64
+        var v: f64 = ca + (cb - ca) * t + 0.5
+        if v > 255.0 {
+            v = 255.0
+        }
+        if v < 0.0 {
+            v = 0.0
+        }
+        out = out | ((v as u32) << sh)
+        sh = sh + 8 as u32
+    }
+    return out
+}
+
+// The same path counter-clockwise. It stands as a function of its own
+// and not as a switch in `path_round`, because a loop with swapped
+// points is harder to read than two clear cases.
+#[no_gc]
+fn path_round_ccw(ra: *mut raster.Raster, x: f64, y: f64, w: f64,
+    h: f64, r0: f64) {
+    var r: f64 = r0
+    var m: f64 = w
+    if h < m {
+        m = h
+    }
+    if r > m / 2.0 {
+        r = m / 2.0
+    }
+    if r < 0.0 {
+        r = 0.0
+    }
+    let x1: f64 = x + w
+    let y1: f64 = y + h
+    let k: f64 = r * K()
+    if r <= 0.0 {
+        raster.raster_line(ra, x, y, x, y1)
+        raster.raster_line(ra, x, y1, x1, y1)
+        raster.raster_line(ra, x1, y1, x1, y)
+        raster.raster_line(ra, x1, y, x, y)
+        return
+    }
+    // THE BUG THAT JUSTIN FOUND IN THE PICTURE (10.09.2026).
+    //
+    // These four curves were wrong, in a way that
+    // translates, runs and looks almost right:
+    //
+    //   * The FIRST curve ended on its own START
+    //     (P3 = (x+r, y) instead of (x, y+r)) -- a segment that leads
+    //     nowhere.
+    //   * In all four the control points were SHIFTED by one place, so that the
+    //     second control point lay on the end point. A Bezier with c2 == P3 is no
+    //     quarter-circle rounding any more, but falls off towards the chord.
+    //
+    // This became visible only at the focus ring, because there the OUTER and
+    // INNER path lie on top of each other: the inner path cut away too little at the
+    // top. Measured in the light picture, ring of the button "Focused",
+    // colour (0,96,223):
+    //
+    //     top edge     y=52..57  -> 6 rows thick
+    //     bottom edge  y=80..81  -> 2 rows thick
+    //     top right up to x=661, the sides only up to x=659
+    //
+    // The target everywhere is 2 (theme.Shape.focus_w at scale 1).
+    //
+    // THE RULE THAT APPLIES: with a quarter-circle Bezier c1 lies
+    // TANGENTIAL at the start point and c2 TANGENTIAL at the end point, each
+    // k = r * K() away. Whoever only copies the points and in doing so
+    // reverses the order gets exactly this error.
+    //
+    // Counter-clockwise, starting at the top left:
+    //     (x+r, y) -> (x, y+r) -> (x, y1-r) -> (x+r, y1)
+    //  -> (x1-r, y1) -> (x1, y1-r) -> (x1, y+r) -> (x1-r, y)
+    //
+    // top left: start horizontally, arrive vertically
+    raster.raster_cubic(ra, x + r, y, x + r - k, y, x, y + r - k,
+        x, y + r)
+    raster.raster_line(ra, x, y + r, x, y1 - r)
+    // unten links: senkrecht los, waagerecht an
+    raster.raster_cubic(ra, x, y1 - r, x, y1 - r + k, x + r - k, y1,
+        x + r, y1)
+    raster.raster_line(ra, x + r, y1, x1 - r, y1)
+    // unten rechts: waagerecht los, senkrecht an
+    raster.raster_cubic(ra, x1 - r, y1, x1 - r + k, y1, x1, y1 - r + k,
+        x1, y1 - r)
+    raster.raster_line(ra, x1, y1 - r, x1, y + r)
+    // oben rechts: senkrecht los, waagerecht an
+    raster.raster_cubic(ra, x1, y + r, x1, y + r - k, x1 - r + k, y,
+        x1 - r, y)
+    raster.raster_line(ra, x1 - r, y, x + r, y)
+}
+
+// ============================================================ THE TEXT
+
+// ======================================================================
+// THE TEXT RUN
+// ======================================================================
+//
+// ========================================================= WHY IT EXISTS
+//
+// Justin, 12.09.2026: "can you make the text bold, letter size, letter
+// spacing -- like TextMeshPro in Unity? or would an own text library be
+// good?" The answer to the second half is no: lib/font already does the
+// hard part (TrueType outlines, metrics, a real `kern` table). What was
+// missing is that fUi never USED most of it.
+//
+// A TextRun is the set of attributes one piece of text is drawn with.
+// It exists for ONE reason, and it is the reason the wave 3 measurement
+// found a real bug:
+//
+//     `text_width`, `text_fits_upto` and `text` each walked the string
+//     themselves and each worked out the advance themselves. Three
+//     copies of the same arithmetic. When `painter.text` learned to cut
+//     off, the cut used a width that the drawing then did not keep to.
+//
+// So now there is ONE function that says how wide a character is --
+// `advance_of` -- and all three ask it. Add letter spacing there and
+// the measurement, the cutting and the drawing change TOGETHER. They
+// cannot drift apart, because there is nothing left to drift.
+//
+// THIS IS THE SAME RULE AS EVERYWHERE IN fUi, one level down: a bug is
+// fixed once. Not once per function.
+//
+// ================================================== WHAT IT CAN DO
+//
+//   tracking       letter spacing, in pixels, MAY BE NEGATIVE
+//   word_spacing   extra space on U+0020 only
+//   kerning        the font's own pair adjustment, on by default
+//   weight         400 normal, 700 bold (synthetic if the font has no
+//                  bold face: the glyph is drawn several times, offset)
+//   slant          upright or italic (a shear on the outline)
+//   line_height    for multi-line text
+//   outline        a contour around the glyph, colour + width
+//   shadow         an offset copy underneath, colour + alpha
+//   gradient       a second colour, blended over the height of the line
+//
+// ============================================ WHY TRACKING IS PIXELS
+//
+// The style says it in DESIGN POINTS and `render.len_of` turns that
+// into pixels -- the same road every other length in fUi takes, so
+// tracking scales with the display like a padding does. By the time it
+// reaches here it is pixels, because the painter knows nothing about
+// design points and must not start now.
+//
+// ================================= WHY TRACKING SITS AFTER EVERY GLYPH
+//
+// `(n - 1) * tracking` is what the acceptance measures, and that is the
+// definition it measures against: the space sits BETWEEN the letters,
+// so a single letter is not made wider by it. The loops therefore add
+// the tracking only when another character follows -- `advance_of` gets
+// told whether it is the last one.
+struct TextRun {
+    size: f64,
+    tracking: f64,
+    word_spacing: f64,
+    line_height: f64, // 0 = from the font metric
+    kerning: usize, // 0 = off, 1 = on
+    weight: usize, // 400 / 700
+    slant: usize, // 0 = upright, 1 = italic
+    // --- outline
+    out_w: f64,
+    out_col: u32,
+    out_on: usize,
+    // --- shadow
+    sh_dx: f64,
+    sh_dy: f64,
+    sh_col: u32,
+    sh_on: usize,
+    // --- gradient
+    grad_col: u32,
+    grad_on: usize,
+    // --- the paragraph direction: bidi.DIR_AUTO (the first strong character
+    // decides), DIR_LTR or DIR_RTL. render.text_run_of sets it
+    // from `direction` in the style.
+    dir: u32,
+}
+
+// A run with nothing switched on except the things that are always
+// true: kerning on (that is what a reader expects) and the weight the
+// font was made for.
+#[no_gc]
+fn run_new(size: f64) -> TextRun {
+    return TextRun {
+        size: size, tracking: 0.0, word_spacing: 0.0, line_height: 0.0,
+        kerning: 1, weight: 400, slant: 0,
+        out_w: 0.0, out_col: 0, out_on: 0,
+        sh_dx: 0.0, sh_dy: 0.0, sh_col: 0, sh_on: 0,
+        grad_col: 0, grad_on: 0, dir: bidi.DIR_AUTO,
+    }
+}
+
+// The same thing under the name the old callers used, so `text` and
+// `text_width` keep behaving exactly as before.
+#[no_gc]
+fn run_plain(size: f64) -> TextRun {
+    return run_new(size)
+}
+
+#[no_gc]
+fn run_set_tracking(r: TextRun, px: f64) -> TextRun {
+    var o: TextRun = r
+    o.tracking = px
+    return o
+}
+
+#[no_gc]
+fn run_set_word_spacing(r: TextRun, px: f64) -> TextRun {
+    var o: TextRun = r
+    o.word_spacing = px
+    return o
+}
+
+#[no_gc]
+fn run_set_kerning(r: TextRun, on: bool) -> TextRun {
+    var o: TextRun = r
+    if on {
+        o.kerning = 1
+    } else {
+        o.kerning = 0
+    }
+    return o
+}
+
+#[no_gc]
+fn run_set_weight(r: TextRun, w: usize) -> TextRun {
+    var o: TextRun = r
+    o.weight = w
+    return o
+}
+
+#[no_gc]
+fn run_set_slant(r: TextRun, s: usize) -> TextRun {
+    var o: TextRun = r
+    o.slant = s
+    return o
+}
+
+#[no_gc]
+fn run_set_line_height(r: TextRun, px: f64) -> TextRun {
+    var o: TextRun = r
+    o.line_height = px
+    return o
+}
+
+#[no_gc]
+fn run_set_outline(r: TextRun, width_px: f64, col: u32) -> TextRun {
+    var o: TextRun = r
+    o.out_w = width_px
+    o.out_col = col
+    o.out_on = 1
+    return o
+}
+
+#[no_gc]
+fn run_set_shadow(r: TextRun, dx: f64, dy: f64, col: u32) -> TextRun {
+    var o: TextRun = r
+    o.sh_dx = dx
+    o.sh_dy = dy
+    o.sh_col = col
+    o.sh_on = 1
+    return o
+}
+
+#[no_gc]
+fn run_set_dir(r: TextRun, d: u32) -> TextRun {
+    var o: TextRun = r
+    o.dir = d
+    return o
+}
+
+#[no_gc]
+fn run_dir(r: *mut TextRun) -> u32 { return (*r).dir }
+
+#[no_gc]
+fn run_set_gradient(r: TextRun, col: u32) -> TextRun {
+    var o: TextRun = r
+    o.grad_col = col
+    o.grad_on = 1
+    return o
+}
+
+// THE LINE HEIGHT of a run. Without a set value it comes from the font
+// metric (ascent + descent) -- that is the height the font itself says
+// it needs, and it is the right default for every language.
+#[no_gc]
+fn run_line_height(z: *mut Painter, r: *mut TextRun) -> f64 {
+    if (*r).line_height > 0.0 {
+        return (*r).line_height
+    }
+    return fontback.fbk_ascent(&(*z).back, (*z).fm, (*r).size)
+    +fontback.fbk_descent(&(*z).back, (*z).fm, (*r).size)
+}
+
+// THE KERNING BETWEEN TWO CHARACTERS, or zero when it is switched off.
+//
+// WHY IT CAN BE SWITCHED OFF: in a table of numbers every column has to
+// stand under the one above it. Kerning makes "11" narrower than "10"
+// and the column starts to wobble. That is why the switch exists and
+// why the table in wave 3 is the place that uses it.
+#[no_gc]
+fn pair_core(z: *mut Painter, r: *mut TextRun, a: u32, b: u32) -> f64 {
+    if (*r).kerning == 0 {
+        return 0.0
+    }
+    let fa: u64 = fb_pick(z, r, a)
+    if fa != fb_pick(z, r, b) {
+        return 0.0 // never kern across two faces
+    }
+    return fontback.fbk_pair_adjust(&(*z).back, fa, (*r).size, a, b)
+}
+
+// HOW FAR THE PEN MOVES AFTER ONE CHARACTER.
+//
+// THE ONE PLACE THIS IS DECIDED. Every measurement and the drawing ask
+// this function, and that is what keeps them from disagreeing.
+//
+//   * the font's advance for the glyph
+//   * the kerning against the character that FOLLOWS
+//   * the word spacing, on the space only
+//   * the tracking, but NOT after the last character
+//
+// `nxt` is 0 when nothing follows -- then neither kerning nor tracking
+// is added, and that is exactly the `(n - 1) * tracking` the acceptance
+// measures.
+#[no_gc]
+fn advance_of(z: *mut Painter, r: *mut TextRun, cp: u32,
+    nxt: u32) -> f64 {
+    var a: f64 = fontback.fbk_advance(&(*z).back, fb_pick(z, r, cp), (*r).size, cp)
+    if cp == 32 as u32 {
+        a = a + (*r).word_spacing
+    }
+    if nxt != 0 as u32 {
+        a = a + pair_core(z, r, cp, nxt)
+        a = a + (*r).tracking
+    }
+    return a
+}
+
+// The character that follows position `i`, or 0 at the end. Needed
+// because kerning and tracking look forward.
+#[no_gc]
+fn next_cp(p: u64, n: usize, i: usize, adv: usize) -> u32 {
+    let j: usize = i + adv
+    if j >= n {
+        return 0
+    }
+    var a2: usize = 1
+    return utf8_at(p, n, j, &a2)
+}
+
+// HOW WIDE THE RUN IS. Walks exactly like the drawing does.
+#[no_gc]
+fn run_width(z: *mut Painter, r: *mut TextRun, p: u64,
+    n: usize) -> f64 {
+    if !fontback.fbk_present(&(*z).back, (*z).fm) || n == 0 {
+        return 0.0
+    }
+    let k: usize = bidi_prepare(z, r, p, n)
+    if k > 0 {
+        return bw_range(z, r, 0, k)
+    }
+    var x: f64 = 0.0
+    var i: usize = 0
+    while i < n {
+        var adv: usize = 1
+        let cp: u32 = utf8_at(p, n, i, &adv)
+        let nx: u32 = next_cp(p, n, i, adv)
+        x = x + advance_of(z, r, cp, nx)
+        i = i + adv
+    }
+    return x
+}
+
+// HOW MANY BYTES FIT into `room`, on a character boundary.
+//
+// It counts with the SAME advance as the drawing, so a text that is cut
+// here really does end inside the rect. Wave 3 measured that a long
+// file name ran into the next column; with tracking the same mistake
+// would come straight back if this function did its own arithmetic.
+#[no_gc]
+fn run_fits_upto(z: *mut Painter, r: *mut TextRun, p: u64, n: usize,
+    room: f64) -> usize {
+    if !fontback.fbk_present(&(*z).back, (*z).fm) {
+        return n
+    }
+    let k: usize = bidi_prepare(z, r, p, n)
+    if k > 0 {
+        return bo_byte(z, bidi_fits(z, r, 0, k, room))
+    }
+    var x: f64 = 0.0
+    var i: usize = 0
+    while i < n {
+        var adv: usize = 1
+        let cp: u32 = utf8_at(p, n, i, &adv)
+        let nx: u32 = next_cp(p, n, i, adv)
+        // WHAT HAS TO FIT IS THE FULL ADVANCE, exactly as the old
+        // `text_fits_upto` counted it -- and that is not a detail.
+        //
+        // The first version of this function asked whether the INK
+        // fits, reasoning that the tracking after the last letter may
+        // hang over the edge. That is defensible, but it made every
+        // centred text ONE PIXEL WIDER than before, because the
+        // alignment divides the measured width in half. The wave 3
+        // badge check caught it at once: the "N" of NEW moved a pixel
+        // left and the measured pill colour became the glyph's
+        // antialiased edge.
+        //
+        // The lesson is the one this file keeps learning: the
+        // measurement and the drawing have to count THE SAME THING.
+        // `run_width` counts full advances, so this counts full
+        // advances. Whoever wants the ink can ask `run_width` for one
+        // character.
+        let step: f64 = advance_of(z, r, cp, nx)
+        if x + step > room {
+            return i
+        }
+        x = x + step
+        i = i + adv
+    }
+    return n
+}
+
+// ======================================================================
+// SHORTENING WITH ELLIPSIS, AND WRAPPING
+// ======================================================================
+//
+// Justin, 13.09.2026, at the picture of the control centre: a tile whose
+// label ends as "Netz vortaeusc" is no result. Windows
+// wraps the label or ends it with "...".
+//
+// WHY THIS BELONGS HERE AND NOT IN THE CALLER. `run_fits_upto`
+// cuts hard on the last character that still fits -- that is
+// right for a text cursor and wrong for a label. Whoever
+// rebuilds it in the program measures with a second calculation and gets
+// a different width than the painter: exactly the error that the head of
+// `art_text_split` describes. So it stands in the file that knows the
+// advances, and every element gets it for free.
+//
+// THE ELLIPSIS IS THREE DOTS AND NOT U+2026. The
+// symbol font of this tree does not necessarily carry the single character; every font has
+// three dots. Measuring is done with the same advances as the rest of the line, kerning included.
+
+// How wide are the three dots in this run?
+fn ellipsis_w(z: *mut Painter, r: *mut TextRun) -> f64 {
+    var w: f64 = 0.0
+    var k: usize = 0
+    while k < 3 {
+        var nx: u32 = 0
+        if k < 2 {
+            nx = 46
+        }
+        w = w + advance_of(z, r, 46, nx)
+        k = k + 1
+    }
+    return w
+}
+
+// HOW MANY OCTETS FIT IF "..." STILL HAS TO STAND BEHIND THEM.
+//
+// Additionally returns via `gekuerzt` WHETHER it was shortened -- the
+// caller must know whether he is to paint the dots at all, and
+// is not to read it off a second-hand length comparison.
+fn run_fits_ellipsis(z: *mut Painter, r: *mut TextRun, p: u64, n: usize,
+    room: f64, gekuerzt: *mut bool) -> usize {
+    *gekuerzt = false
+    if !fontback.fbk_present(&(*z).back, (*z).fm) || n == 0 {
+        return n
+    }
+    // If everything fits, there is nothing to do -- and that is the frequent case.
+    if run_width(z, r, p, n) <= room {
+        return n
+    }
+    *gekuerzt = true
+    let ew: f64 = ellipsis_w(z, r)
+    if ew > room {
+        return 0
+    }
+    return run_fits_upto(z, r, p, n, room - ew)
+}
+
+// PAINT A LINE THAT ENDS WITH "..." IF IT DOES NOT FIT.
+//
+// Return as `run_draw`: where the pen stopped.
+fn run_draw_ellipsis(z: *mut Painter, r: *mut TextRun, x: f64,
+    base_y: f64, w: f64, col: u32, p: u64, n: usize,
+    align: u32) -> f64 {
+    if (*z).ok == 0 || !fontback.fbk_present(&(*z).back, (*z).fm) || n == 0 {
+        return x
+    }
+    if w <= 0.0 {
+        return run_draw(z, r, x, base_y, w, col, p, n, align)
+    }
+    let bk: usize = bidi_prepare(z, r, p, n)
+    if bk > 0 {
+        return bidi_draw_ellipsis(z, r, x, base_y, w, col, 0, bk, align)
+    }
+    var ab: bool = false
+    let nn: usize = run_fits_ellipsis(z, r, p, n, w, &ab)
+    if !ab {
+        return run_draw(z, r, x, base_y, w, col, p, n, align)
+    }
+    if nn == 0 {
+        return x
+    }
+    // THE ALIGNMENT CALCULATES WITH THE TOTAL WIDTH OF TEXT AND DOTS,
+    // otherwise a centred label sits half the dot width off
+    // -- the same error that `run_draw` describes in its head.
+    let bw: f64 = run_width(z, r, p, nn)
+    let ew: f64 = ellipsis_w(z, r)
+    var sx: f64 = x
+    if align == TEXT_M {
+        sx = x + (w - (bw + ew)) / 2.0
+    } else if align == TEXT_R {
+        sx = x + w - (bw + ew)
+    }
+    // Both pieces flush left from `sx` -- the alignment is already
+    // included above, a second time it would be doubled.
+    let e1: f64 = run_draw(z, r, sx, base_y, 0.0, col, p, nn, TEXT_L)
+    var pkt: [u8; 4] = "...\0"
+    let e2: f64 = run_draw(z, r, e1, base_y, 0.0, col,
+        (&pkt[0 as usize]) as u64, 3, TEXT_L)
+    return e2
+}
+
+// ================================================== WRAPPING AT WORD BOUNDARIES
+//
+// Looks for the end of the line that fits in `room` and returns via `nach`
+// where the next line BEGINS (the space in between
+// is skipped, it belongs to neither of the two lines).
+//
+// WHY AT WORD BOUNDARIES AND NOT AT CHARACTERS: a break in the middle of a word
+// reads worse than a shorter line. If a SINGLE
+// word does not fit into the width, it is nevertheless split at a character --
+// otherwise the line would stand there empty and the loop would not progress.
+fn run_line_upto(z: *mut Painter, r: *mut TextRun, p: u64, n: usize,
+    room: f64, to: *mut usize) -> usize {
+    *to = n
+    if !fontback.fbk_present(&(*z).back, (*z).fm) || n == 0 {
+        return n
+    }
+    let k: usize = bidi_prepare(z, r, p, n)
+    if k > 0 {
+        var nx: usize = k
+        let e: usize = bidi_line_break(z, r, 0, k, room, &nx)
+        *to = bo_byte(z, nx)
+        return bo_byte(z, e)
+    }
+    // UAX #14 (lib/str/linebreak.fi): breaks where the standard allows them --
+    // after spaces and hyphens, between CJK characters, never before ")" or
+    // inside a number. Spaces hang over the edge. Only the first LB_WINDOW
+    // octets are analysed per line; a line wider than that breaks hard.
+    let lt: u64 = lb_table()
+    var m: usize = n
+    if m > LB_WINDOW {
+        m = LB_WINDOW
+        while m > 0 && (b8(p, m) & 192 as u8) == 128 as u8 {
+            m = m - 1
+        }
+    }
+    var flags: u64 = 0
+    if lt != 0 {
+        flags = rt.heap_alloc(m + 1)
+        if flags != 0 {
+            linebreak.lb_breaks(lt, p, m, flags)
+        }
+    }
+    var x: f64 = 0.0
+    var i: usize = 0
+    var last_brk: usize = 0
+    while i < n {
+        var adv: usize = 1
+        let cp: u32 = utf8_at(p, n, i, &adv)
+        let nx: u32 = next_cp(p, n, i, adv)
+        if flags != 0 && i > 0 && i < m {
+            let d: u8 = rt.ld8(flags, i)
+            if d != 0 as u8 {
+                if line_trim(p, i) > 0 {
+                    last_brk = i
+                }
+                if d == 2 as u8 && line_trim(p, i) > 0 {
+                    rt.heap_free(flags, m + 1)
+                    *to = i
+                    return line_trim(p, i)
+                }
+            }
+        } else if flags == 0 && cp == 32 && i > 0 {
+            last_brk = i + adv
+        }
+        let step: f64 = advance_of(z, r, cp, nx)
+        if cp != 32 && x + step > room {
+            if flags != 0 {
+                rt.heap_free(flags, m + 1)
+            }
+            if last_brk > 0 {
+                *to = last_brk
+                return line_trim(p, last_brk)
+            }
+            // A single word that is too long: split hard, but never come back
+            // with zero characters.
+            if i == 0 {
+                *to = adv
+                return adv
+            }
+            *to = i
+            return i
+        }
+        x = x + step
+        i = i + adv
+    }
+    if flags != 0 {
+        rt.heap_free(flags, m + 1)
+    }
+    *to = n
+    return n
+}
+
+const LB_WINDOW: usize = 8192
+static mut G_LB_T: u64 = 0
+static mut G_LB_TRIED: bool = false
+
+fn lb_table() -> u64 {
+    if !G_LB_TRIED {
+        G_LB_TRIED = true
+        G_LB_T = linebreak.lb_map()
+    }
+    return G_LB_T
+}
+
+// The end of the line text that ends at the break `q`: trailing spaces and
+// line ends do not belong to the line.
+fn line_trim(p: u64, q: usize) -> usize {
+    var e: usize = q
+    while e > 0 {
+        let c: u8 = b8(p, e - 1)
+        if c == 32 as u8 || c == 10 as u8 || c == 13 as u8 || c == 11 as u8 || c == 12 as u8 {
+            e = e - 1
+        } else {
+            break
+        }
+    }
+    return e
+}
+
+// HOW MANY LINES DOES THIS TEXT NEED AT THIS WIDTH?
+// For measuring, before anything is painted -- the layout asks for it.
+// ONLY SPACES ARE NO LINE.
+//
+// FOUND IN THE TEST RIG, not in the head: `run_line_count` predicted THREE
+// lines where `run_draw_wrapped` painted TWO. The third was the
+// remainder "  " at the end of the string -- a break behind the last
+// word leaves the spaces standing, and a line of two
+// spaces is nothing in the picture, but in the calculation a line.
+//
+// That is exactly the kind of deviation that the head of this file
+// warns against: measuring and painting must count THE SAME. Whoever
+// takes the height from the prediction otherwise leaves room for an empty line.
+fn only_empty(p: u64, n: usize) -> bool {
+    var i: usize = 0
+    while i < n {
+        if b8(p, i) != 32 as u8 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn run_line_count(z: *mut Painter, r: *mut TextRun, p: u64, n: usize,
+    room: f64, max_lines: usize) -> usize {
+    if n == 0 || room <= 0.0 {
+        return 0
+    }
+    let k: usize = bidi_prepare(z, r, p, n)
+    if k > 0 {
+        return bidi_wrapped(z, r, 0.0, 0.0, room, 0.0, 0 as u32, k, TEXT_L,
+            max_lines, false)
+    }
+    var lines: usize = 0
+    var i: usize = 0
+    while i < n && lines < max_lines {
+        if only_empty(p + (i as u64), n - i) {
+            return lines
+        }
+        var next: usize = 0
+        let bis: usize = run_line_upto(z, r, p + (i as u64), n - i,
+            room, &next)
+        if bis == 0 {
+            return lines + 1
+        }
+        lines = lines + 1
+        i = i + next
+    }
+    return lines
+}
+
+// PAINT MULTI-LINE. The last allowed line gets "..." if the
+// text is not yet at its end there -- otherwise it breaks off silently, and
+// exactly that is the error that led to this round in the first place.
+//
+// `zeilen_h` is the line spacing in pixels; `base_y` the
+// baseline of the FIRST line. Return: the number of lines painted.
+fn run_draw_wrapped(z: *mut Painter, r: *mut TextRun, x: f64,
+    base_y: f64, w: f64, lines_h: f64, col: u32, p: u64, n: usize,
+    align: u32, max_lines: usize) -> usize {
+    if (*z).ok == 0 || !fontback.fbk_present(&(*z).back, (*z).fm) || n == 0 {
+        return 0
+    }
+    if w <= 0.0 || max_lines == 0 {
+        return 0
+    }
+    let k: usize = bidi_prepare(z, r, p, n)
+    if k > 0 {
+        return bidi_wrapped(z, r, x, base_y, w, lines_h, col, k, align,
+            max_lines, true)
+    }
+    var lines: usize = 0
+    var i: usize = 0
+    var y: f64 = base_y
+    while i < n && lines < max_lines {
+        // See `nur_leer`: the remainder of nothing but spaces gets
+        // no line of its own, otherwise the prediction counts differently from
+        // the picture.
+        if only_empty(p + (i as u64), n - i) {
+            return lines
+        }
+        var next: usize = 0
+        let bis: usize = run_line_upto(z, r, p + (i as u64), n - i, w,
+            &next)
+        if bis == 0 {
+            return lines
+        }
+        let is_last: bool = (lines + 1 == max_lines)
+        let rest_stays: bool = (i + next < n)
+        if is_last && rest_stays {
+            // On the last line the WHOLE remainder is up for choice, not
+            // only what the wrapping assigned to it -- otherwise
+            // the dots would stand already after the second to last word.
+            let e4: f64 = run_draw_ellipsis(z, r, x, y, w, col,
+                p + (i as u64), n - i, align)
+        } else {
+            let e5: f64 = run_draw(z, r, x, y, w, col, p + (i as u64),
+                bis, align)
+        }
+        lines = lines + 1
+        y = y + lines_h
+        i = i + next
+    }
+    return lines
+}
+
+// ======================================================================
+// DRAWING A RUN
+// ======================================================================
+//
+// ============================================== THE ORDER OF THE PASSES
+//
+// shadow, then outline, then the glyph. That order is not a taste, it
+// is what makes the result readable:
+//
+//   * the SHADOW lies furthest back, so it must go down first
+//   * the OUTLINE lies around the glyph and must not cover it, so it
+//     goes down before it
+//   * the GLYPH last, on top of both
+//
+// The other way round the outline would eat the letter and the letter
+// would sit in a fog.
+//
+// =================================== WHY THE OUTLINE IS DRAWN AND NOT GROWN
+//
+// A real contour needs the path offset outwards (Minkowski). That is a
+// hard piece of geometry, it goes wrong on sharp corners, and it is not
+// what a user interface needs.
+//
+// What is done here: the glyph is rasterised SEVERAL TIMES, moved by
+// `out_w` in eight directions. The union of the copies is the glyph
+// grown by `out_w` in every direction -- which is exactly what a
+// contour is. Eight directions is enough because the steps in between
+// are covered by the neighbouring copies; with four the diagonals stay
+// thin, and that is visible on an O.
+//
+// It costs eight rasterisations per outlined text. That is paid only by
+// whoever switches the outline on, and it is drawn into ONE raster and
+// filled ONCE -- so it costs one fill, not eight.
+//
+// ============================================ SYNTHETIC BOLD AND ITALIC
+//
+// If the font set has no bold face, bold is made: the glyph is drawn
+// three times, each a little to the right. That is what every text
+// engine does as a fallback and it is honest -- it says so here.
+//
+// Italic is a SHEAR: x' = x + y * 0.21. The 0.21 is the tangent of
+// about 12 degrees, the slant of most italic faces. `ttf.outline_at`
+// takes a 2x3 matrix, so this costs nothing extra.
+const ITALIC_SHEAR: f64 = 0.21
+const BOLD_STEP: f64 = 0.035 // of the font size, per pass
+const BOLD_PASSES: usize = 3
+
+// One glyph into the raster, with the run's weight and slant.
+#[no_gc]
+fn glyph_into(z: *mut Painter, r: *mut TextRun, f: *mut ttf.Font,
+    gid0: u32, pen: f64, base_y: f64, sc: f64) {
+    var gid: u32 = gid0
+    if (gid0 & metrics.GID_PLATFORM) != 0 as u32 {
+        let pcp: u32 = metrics.fm_cp(gid0)
+        if platglyph.pg_compose(&(*z).ra, pcp, (*r).size, metrics.fm_weight(f as u64),
+            (*r).slant as u32, pen, base_y) {
+            return
+        }
+        gid = ttf.font_glyph_for(f, pcp)
+    }
+    var m10: f64 = 0.0
+    if (*r).slant != 0 {
+        // A shear in x by the height. The sign is such that the top
+        // leans RIGHT, which is what italic means. It is the THIRD
+        // number of the matrix: `outline_at` computes x' = x * m00 +
+        // y * m10 and y' = x * m01 + y * m11 (the second one used to
+        // carry the shear, which tilted the glyphs UP to the right
+        // instead of leaning them; found by the font dialog's sample).
+        m10 = ITALIC_SHEAR
+    }
+    var k: usize = 0
+    var passes: usize = 1
+    var step: f64 = 0.0
+    var fwt: usize = 400
+    let fbase: u64 = face_sel(z, r, &fwt)
+    if (*r).weight >= 700 && (*r).weight > fwt + 100 {
+        passes = BOLD_PASSES
+        step = (*r).size * BOLD_STEP
+    }
+    var vy: f64 = 1.0
+    let szr: f64 = (*r).size
+    let pxi: i64 = (szr + 0.5) as i64
+    var dpx: f64 = szr - (pxi as f64)
+    if dpx < 0.0 {
+        dpx = 0.0 - dpx
+    }
+    if pxi > 0 && dpx < 0.05 {
+        var bx0: i32 = 0
+        var by0: i32 = 0
+        var bx1: i32 = 0
+        var by1: i32 = 0
+        if ttf.font_glyph_bbox(f, gid, &bx0, &by0, &bx1, &by1) {
+            vy = ttf.font_vhint(f, pxi as u32, by1)
+        }
+    }
+    while k < passes {
+        let dx: f64 = (k as f64) * step
+        let okg: bool = ttf.outline_at(f, gid, &(*z).ra,
+            pen + dx, base_y, sc,
+            1.0, 0.0, m10, vy, 0.0, 0.0,
+            (*z).scratch, SCRATCH, 0)
+        k = k + 1
+    }
+}
+
+// A whole string into the raster at one offset. Used by every pass --
+// shadow, outline and the glyph itself -- so the three cannot land in
+// different places.
+#[no_gc]
+fn run_into_raster(z: *mut Painter, r: *mut TextRun, p: u64, n: usize,
+    sx: f64, base_y: f64, dx: f64, dy: f64) {
+    var pen: f64 = sx + dx
+    var i: usize = 0
+    while i < n {
+        var adv: usize = 1
+        let cp: u32 = utf8_at(p, n, i, &adv)
+        let nx: u32 = next_cp(p, n, i, adv)
+        let fm: u64 = fb_pick(z, r, cp)
+        let f: *mut ttf.Font = metrics.fontset_font(fm)
+        let sc: f64 = (*r).size / metrics.fm_upem(fm)
+        let gid: u32 = metrics.fm_gid(fm, cp)
+        glyph_into(z, r, f, gid, pen, base_y + dy, sc)
+        pen = pen + advance_of(z, r, cp, nx)
+        i = i + adv
+    }
+}
+
+// Which path into the raster? See `paint_run`.
+#[no_gc]
+fn into_raster(z: *mut Painter, r: *mut TextRun, vis: bool, p: u64,
+    n: usize, sx: f64, base_y: f64, dx: f64, dy: f64) {
+    if vis {
+        bidi_into_raster(z, r, sx, base_y, dx, dy)
+    } else {
+        run_into_raster(z, r, p, n, sx, base_y, dx, dy)
+    }
+}
+
+// The eight directions the outline grows in.
+#[no_gc]
+fn out_dir_x(k: usize) -> f64 {
+    if k == 0 { return 1.0 }
+    if k == 1 { return -1.0 }
+    if k == 2 { return 0.0 }
+    if k == 3 { return 0.0 }
+    if k == 4 { return 0.7071 }
+    if k == 5 { return -0.7071 }
+    if k == 6 { return 0.7071 }
+    return -0.7071
+}
+
+#[no_gc]
+fn out_dir_y(k: usize) -> f64 {
+    if k == 0 { return 0.0 }
+    if k == 1 { return 0.0 }
+    if k == 2 { return 1.0 }
+    if k == 3 { return -1.0 }
+    if k == 4 { return 0.7071 }
+    if k == 5 { return 0.7071 }
+    if k == 6 { return -0.7071 }
+    return -0.7071
+}
+
+// Fills the current raster with one colour and clears it for the next
+// pass. Returns nothing -- the raster belongs to the painter.
+// Fills the FINISHED raster with one colour. The caller finishes it --
+// see the note at `fill_raster_gradient` for why that must happen
+// exactly once.
+#[no_gc]
+fn flush_raster(z: *mut Painter, wx: f64, wy: f64, col: u32) {
+    canvas.canvas_fill_raster(painter_canvas(z), &(*z).ra,
+        wx as usize, wy as usize, mit_alpha(col))
+}
+
+// A GRADIENT OVER THE LINE.
+//
+// The glyph is filled row by row, and the colour is mixed from the top
+// colour to the bottom one over the height of the font. That is what
+// TextMeshPro calls a vertical gradient, and it is the only one worth
+// having in a user interface -- a horizontal one over a whole line
+// makes the last word a different colour from the first and looks like
+// a fault.
+//
+// It goes through `canvas_blend` per row because the colour changes per
+// row; `canvas_fill_raster` can only do one colour.
+// RASTER_FINISH IS CALLED HERE AND EXACTLY ONCE.
+//
+// Justin, 12.09.2026: the gradient came out invisible and nothing in
+// the source said why. The cause is worth writing down, because it is
+// a trap for the next person who reads coverage back:
+//
+//     `raster.raster_finish` INTEGRATES THE ACCUMULATOR IN PLACE. It
+//     walks each row, adds the cell deltas into a running sum and
+//     writes the sum back over the delta. Run it a second time and it
+//     integrates the already-integrated values -- every cell is then
+//     positive, the running sum never returns to zero, and the result
+//     is nothing that resembles the glyph.
+//
+// The first version of this function called `raster_finish` itself and
+// was called from a place that had already finished the raster. So the
+// fix is not a bigger threshold or a different offset: it is to finish
+// ONCE. `run_draw` now finishes before it chooses between the flat
+// fill and this one, and neither of them finishes again.
+fn fill_raster_gradient(z: *mut Painter, wx: f64, wy: f64, top: u32,
+    bot: u32, y0: f64, y1: f64) {
+    let cv: *mut canvas.Canvas = painter_canvas(z)
+    let ry0: usize = raster.raster_used_y0(&(*z).ra)
+    let ry1: usize = raster.raster_used_y1(&(*z).ra)
+    let span: f64 = y1 - y0
+    var y: usize = ry0
+    while y < ry1 {
+        let devy: f64 = wy + (y as f64)
+        var t: f64 = 0.0
+        if span > 0.0 {
+            t = (devy - y0) / span
+        }
+        if t < 0.0 { t = 0.0 }
+        if t > 1.0 { t = 1.0 }
+        let col: u32 = theme.opaque(theme.mix(top, bot,
+                (t * 1000.0) as usize))
+        canvas.canvas_fill_raster_row(cv, &(*z).ra, wx as usize, wy as usize, y, col, 0.001)
+        y = y + 1
+    }
+}
+
+// DRAW THE RUN. Returns where the pen ended, like `text` does.
+//
+// `w` is the room it may use; 0 or less means "no cutting". The
+// alignment is worked out from the width the run REALLY has, so a
+// centred text with tracking still sits in the middle.
+fn run_draw(z: *mut Painter, r: *mut TextRun, x: f64, base_y: f64,
+    w: f64, col: u32, p: u64, n: usize, align: u32) -> f64 {
+    if (*z).ok == 0 || !fontback.fbk_present(&(*z).back, (*z).fm) || n == 0 {
+        return x
+    }
+    let k: usize = bidi_prepare(z, r, p, n)
+    if k > 0 {
+        var c: usize = k
+        if w > 0.0 {
+            c = bidi_fits(z, r, 0, k, w)
+        }
+        return bidi_draw_line(z, r, x, base_y, w, col, 0, c, align)
+    }
+    return run_draw_ltr(z, r, x, base_y, w, col, p, n, align)
+}
+
+// THE OLD WAY, UNCHANGED: every character in logical order from
+// left to right. Every text without a right-to-left character arrives here
+// and is painted pixel for pixel as before the bidi round.
+fn run_draw_ltr(z: *mut Painter, r: *mut TextRun, x: f64, base_y: f64,
+    w: f64, col: u32, p: u64, n: usize, align: u32) -> f64 {
+    if (*z).ok == 0 || !fontback.fbk_present(&(*z).back, (*z).fm) || n == 0 {
+        return x
+    }
+    var nn: usize = n
+    if w > 0.0 {
+        nn = run_fits_upto(z, r, p, n, w)
+    }
+    if nn == 0 {
+        return x
+    }
+    let br: f64 = run_width(z, r, p, nn)
+    var sx: f64 = x
+    if align == TEXT_M {
+        sx = x + (w - br) / 2.0
+    } else if align == TEXT_R {
+        sx = x + w - br
+    }
+    sx = ((sx + 0.5) as i64) as f64
+    return paint_run(z, r, sx, base_y, br, col, p, nn, false)
+}
+
+// THE THREE PASSES (shadow, outline, glyph) FOR A LAID-OUT LINE.
+//
+// One place for both ways: `vis` = false paints `p`/`nn` in logical
+// order (the old way), `vis` = true the line last laid out
+// with `bidi_layout` in the order on the screen. Window, shadow,
+// outline and gradient are thereby the same for Arabic as for
+// Latin -- a second set of passes for the bidi path would be
+// exactly the second place that at some point calculates differently.
+fn paint_run_base(z: *mut Painter, r: *mut TextRun, sx: f64, base_y: f64,
+    br: f64, col: u32, p: u64, nn: usize, vis: bool) -> f64 {
+    // THE WINDOW. It has to hold everything the passes reach into:
+    // the shadow offset, the outline width and the shear of an italic.
+    // Too small a window and the raster clips -- which is the class of
+    // bug that cost two rounds on the close cross.
+    // ONLY AS MUCH ROOM AS THE PASSES REALLY NEED.
+    //
+    // `raster_window` already adds one font size of air on every side
+    // and refuses a window bigger than the painter's raster budget.
+    // The first version added half a font size ON TOP of that for
+    // every text, which pushed the window one row over the budget on a
+    // short canvas -- `raster_window` then returned false and
+    // `run_draw` returned WITHOUT DRAWING ANYTHING. The gradient
+    // looked broken; in truth nothing was drawn at all.
+    //
+    // So the padding starts at zero and only grows for the features
+    // that really reach outside the glyph. Plain text asks for exactly
+    // the window the old `text` asked for, which is also why the other
+    // waves keep rendering pixel for pixel as before.
+    var pad: f64 = 0.0
+    if (*r).out_on != 0 {
+        pad = pad + (*r).out_w + 1.0
+    }
+    var shx: f64 = 0.0
+    var shy: f64 = 0.0
+    if (*r).sh_on != 0 {
+        shx = (*r).sh_dx
+        shy = (*r).sh_dy
+        if shx < 0.0 { shx = 0.0 - shx }
+        if shy < 0.0 { shy = 0.0 - shy }
+    }
+    if (*r).slant != 0 {
+        pad = pad + (*r).size * ITALIC_SHEAR
+    }
+    if (*r).weight >= 700 {
+        pad = pad + (*r).size * BOLD_STEP * (BOLD_PASSES as f64)
+    }
+    var wx: f64 = 0.0
+    var wy: f64 = 0.0
+    let wl: f64 = sx - pad - shx
+    let wt: f64 = base_y - (*r).size * 1.4 - pad - shy
+    let ww: f64 = br + 2.0 * pad + 2.0 * shx
+    let wh: f64 = (*r).size * 2.0 + 2.0 * pad + 2.0 * shy
+    // A WINDOW THAT DOES NOT FIT MEANS NOTHING IS DRAWN, and that has
+    // to be visible to whoever debugs it.
+    //
+    // Justin, 12.09.2026: the gradient looked broken for half an hour.
+    // It was not: the painter had been set up with a raster budget of
+    // 120 rows, the window for 40 px text needs 121, `raster_window`
+    // said no, and this function returned in silence. The old `text`
+    // did exactly the same, so the trap is as old as the file.
+    //
+    // It still returns -- there is nothing sensible to draw into a
+    // window that does not exist -- but the reason is written down
+    // here now, in the one place somebody will be standing when it
+    // happens: give `painter_init` a raster height of at least
+    // 3 * the largest font size.
+    // ---- ON THE GPU (lib/fui/gpu.fi): glyphs out of the atlas
+    let gg: *mut gpu.Gpu = gpu.gpu_of(painter_canvas(z))
+    if gg as u64 != 0 {
+        paint_run_gpu(gg, z, r, sx, base_y, br, col, p, nn, vis, wl, wt, ww, wh)
+        return sx + br
+    }
+    // ---- WHOLLY OUTSIDE THE CLIP: nothing to raster, nothing to write.
+    // (A partial repaint of the window around a text: lib/fui/damage.fi.)
+    let cvc: *mut canvas.Canvas = painter_canvas(z)
+    if wl + ww <= canvas.clip_x0(cvc) || wl >= canvas.clip_x1(cvc) ||
+    wt + wh <= canvas.clip_y0(cvc) || wt >= canvas.clip_y1(cvc) {
+        return sx + br
+    }
+    // ---- THE KEPT PICTURE (lib/fui/fcache.fi): a plain run -- one pass,
+    // one colour, left to right -- is rastered once and then only written
+    // back, wherever it stands at a whole-pixel offset.
+    if !vis && (*r).sh_on == 0 && (*r).out_on == 0 && (*r).grad_on == 0 {
+        if fcache.fc_on() {
+            if paint_run_kept(z, r, sx, base_y, wl, wt, ww, wh, col, p, nn) {
+                return sx + br
+            }
+            // r281: a line whose window the canvas edge would cut is not kept, and a kept
+            // line cannot be written back at the edge. It must still look like the kept
+            // ones (glyphs at 1/8 px), not like the exact whole-line raster below -- else
+            // the same line differs by a few levels depending on where it stands.
+            if glyphcache.gc_on() {
+                if glyph_run_paint(z, r, sx, base_y, wl, wt, ww, wh, col, p, nn,
+                    true, 0 as u64 as *mut fcache.CKey) {
+                    return sx + br
+                }
+            }
+        } else if glyphcache.gc_on() {
+            // no kept lines, but kept glyphs (lib/fui/glyphcache.fi)
+            if glyph_run_paint(z, r, sx, base_y, wl, wt, ww, wh, col, p, nn,
+                true, 0 as u64 as *mut fcache.CKey) {
+                return sx + br
+            }
+        }
+    }
+    if !raster_window(z, wl, wt, ww, wh, (*r).size, &wx, &wy) {
+        return sx + br
+    }
+
+    // ---- pass 1: THE SHADOW, furthest back
+    if (*r).sh_on != 0 {
+        into_raster(z, r, vis, p, nn, sx, base_y, (*r).sh_dx,
+            (*r).sh_dy)
+        raster.raster_finish(&(*z).ra)
+        flush_raster(z, wx, wy, (*r).sh_col)
+        // a fresh window for the next pass
+        if !raster_window(z, wl, wt, ww, wh, (*r).size, &wx, &wy) {
+            return sx + br
+        }
+    }
+
+    // ---- pass 2: THE OUTLINE, eight copies into ONE raster
+    if (*r).out_on != 0 && (*r).out_w > 0.0 {
+        var k: usize = 0
+        while k < 8 {
+            into_raster(z, r, vis, p, nn, sx, base_y,
+                out_dir_x(k) * (*r).out_w,
+                out_dir_y(k) * (*r).out_w)
+            k = k + 1
+        }
+        raster.raster_finish(&(*z).ra)
+        flush_raster(z, wx, wy, (*r).out_col)
+        if !raster_window(z, wl, wt, ww, wh, (*r).size, &wx, &wy) {
+            return sx + br
+        }
+    }
+
+    // ---- pass 3: THE GLYPH
+    into_raster(z, r, vis, p, nn, sx, base_y, 0.0, 0.0)
+    raster.raster_finish(&(*z).ra)
+    if (*r).grad_on == 0 {
+        textcurve.tc_apply(&(*z).ra, textcurve.tc_bucket(mit_alpha(col)))
+    }
+    if (*r).grad_on != 0 {
+        let asc: f64 = fontback.fbk_ascent(&(*z).back, (*z).fm, (*r).size)
+        let dsc: f64 = fontback.fbk_descent(&(*z).back, (*z).fm, (*r).size)
+        fill_raster_gradient(z, wx, wy, col, (*r).grad_col,
+            base_y - asc, base_y + dsc)
+    } else {
+        flush_raster(z, wx, wy, col)
+    }
+    return sx + br
+}
+
+// ============================================================ COLOUR EMOJI (r256)
+//
+// A fallback face with CBDT/CBLC bitmaps (Noto Color Emoji) has no outlines:
+// the passes above draw nothing for its glyphs. After them, `emoji_overlay`
+// paints the bitmap of each such character, scaled to the run size
+// (lib/font/cbdt.fi), into the canvas. The destination pixels are copied to a
+// scratch buffer, blended there and written back INSIDE THE CLIP only, so a
+// scrolled list cuts an emoji like it cuts a letter.
+// Limits: CPU path only (not the GPU atlas, not the bidi path), no shadow or
+// outline or gradient on the bitmap, no ZWJ sequence joining (the parts stand
+// side by side), PNG decoded per paint (no bitmap cache yet).
+const EM_SIDE: usize = 256
+static mut G_EM_BUF: u64 = 0
+
+fn emoji_glyph(z: *mut Painter, fm: u64, cp: u32, size: f64, pen: f64,
+    base_y: f64) {
+    if G_EM_BUF == 0 {
+        G_EM_BUF = rt.heap_alloc(EM_SIDE * EM_SIDE * 4)
+        if G_EM_BUF == 0 {
+            return
+        }
+    }
+    let f: *mut ttf.Font = metrics.fontset_font(fm)
+    let k: usize = cbdt.cbdt_pick(f, size)
+    if k == cbdt.CB_NONE {
+        return
+    }
+    let gid: u32 = ttf.font_glyph_for(f, cp)
+    if gid == 0 as u32 {
+        return
+    }
+    let cv: *mut canvas.Canvas = painter_canvas(z)
+    let cw: i64 = canvas.canvas_width(cv) as i64
+    let ch: i64 = canvas.canvas_height(cv) as i64
+    let left: i64 = floor_px(pen) as i64 - 4
+    let top: i64 = floor_px(base_y - size * 1.3) as i64 - 2
+    let rw: i64 = (size * 1.6) as i64 + 8
+    let rh: i64 = (size * 1.6) as i64 + 4
+    if rw > EM_SIDE as i64 || rh > EM_SIDE as i64 {
+        return
+    }
+    // the part of the region that may be written: canvas AND clip
+    var ix0: i64 = left
+    var iy0: i64 = top
+    var ix1: i64 = left + rw
+    var iy1: i64 = top + rh
+    let c0: i64 = canvas.clip_x0(cv) as i64
+    let c1: i64 = canvas.clip_x1(cv) as i64
+    let c2: i64 = canvas.clip_y0(cv) as i64
+    let c3: i64 = canvas.clip_y1(cv) as i64
+    if ix0 < c0 { ix0 = c0 }
+    if iy0 < c2 { iy0 = c2 }
+    if ix1 > c1 { ix1 = c1 }
+    if iy1 > c3 { iy1 = c3 }
+    if ix0 < 0 { ix0 = 0 }
+    if iy0 < 0 { iy0 = 0 }
+    if ix1 > cw { ix1 = cw }
+    if iy1 > ch { iy1 = ch }
+    if ix0 >= ix1 || iy0 >= iy1 {
+        return
+    }
+    let dst: u64 = canvas.canvas_pixels(cv) as u64
+    // copy the destination into the scratch buffer (rows outside stay 0)
+    var y: i64 = 0
+    while y < rh {
+        var x: i64 = 0
+        while x < rw {
+            var v: u32 = 0 as u32
+            let gx: i64 = left + x
+            let gy: i64 = top + y
+            if gx >= 0 && gy >= 0 && gx < cw && gy < ch {
+                v = rt.ld32(dst, (gy * cw + gx) as usize)
+            }
+            rt.st32(G_EM_BUF, (y * rw + x) as usize, v)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    if !cbdt.cbdt_paint(f, k, gid, size, pen - (left as f64),
+        base_y - (top as f64), G_EM_BUF, rw as i32, rh as i32) {
+        return
+    }
+    y = iy0
+    while y < iy1 {
+        var x: i64 = ix0
+        while x < ix1 {
+            rt.st32(dst, (y * cw + x) as usize,
+                rt.ld32(G_EM_BUF, ((y - top) * rw + (x - left)) as usize))
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+fn emoji_overlay(z: *mut Painter, r: *mut TextRun, sx: f64, p: u64,
+    nn: usize, base_y: f64) {
+    if (*z).emoji_any == 0 {
+        return
+    }
+    if gpu.gpu_of(painter_canvas(z)) as u64 != 0 {
+        return
+    }
+    var pen: f64 = sx
+    var i: usize = 0
+    while i < nn {
+        var adv: usize = 1
+        let cp: u32 = utf8_at(p, nn, i, &adv)
+        let nx: u32 = next_cp(p, nn, i, adv)
+        if cp >= 0x80 as u32 {
+            let fm: u64 = fb_pick(z, r, cp)
+            if fm != (*z).fm && cbdt.cbdt_ok(metrics.fontset_font(fm)) {
+                emoji_glyph(z, fm, cp, (*r).size, pen, base_y)
+            }
+        }
+        pen = pen + advance_of(z, r, cp, nx)
+        i = i + adv
+    }
+}
+
+// ============================================================ LCD SUBPIXEL TEXT (r256)
+//
+// Opt-in (`painter_set_lcd(true)`, default OFF so every golden stays as it
+// is). A plain run (no shadow/outline/gradient/italic/faux bold) is rastered
+// THREE times as wide, the coverage goes through the FreeType default
+// 5-tap filter [8 77 86 77 8]/256 per subpixel, and each pixel channel is
+// blended with its own coverage (RGB stripe order: R left). The window must
+// fit the raster budget, else the normal grey path paints. Not on the GPU,
+// not in the bidi path, no line cache.
+static mut G_LCD: bool = false
+static mut G_LCD_FLIP: bool = false
+
+fn painter_set_lcd(on: bool) { G_LCD = on }
+fn painter_lcd() -> bool { return G_LCD }
+fn painter_set_lcd_flip(on: bool) { G_LCD_FLIP = on }
+fn painter_lcd_flip() -> bool { return G_LCD_FLIP }
+
+// 0..1 coverage of subpixel `j` (row start `row`, `n3` cells), 0 outside.
+fn lcd_c(rowp: u64, n3: i64, j: i64) -> f64 {
+    if j < 0 || j >= n3 {
+        return 0.0
+    }
+    var v: f64 = *((rowp + (j * 8) as u64) as *mut f64)
+    if v < 0.0 { v = 0.0 }
+    if v > 1.0 { v = 1.0 }
+    return v
+}
+
+// One segment of the run: characters [i0, i1) starting at `pen0`, `segw` pixels
+// wide (it fits the raster budget three times over).
+fn lcd_seg(z: *mut Painter, r: *mut TextRun, p: u64, nn: usize, i0: usize,
+    i1: usize, pen0: f64, segw: f64, base_y: f64, col: u32) {
+    let sz: f64 = (*r).size
+    let cv: *mut canvas.Canvas = painter_canvas(z)
+    let cw: i64 = canvas.canvas_width(cv) as i64
+    let ch: i64 = canvas.canvas_height(cv) as i64
+    let x0: i64 = floor_px(pen0) as i64 - 3
+    let y0: i64 = floor_px(base_y - sz * 1.25) as i64 - 1
+    let wpx: usize = (segw + 8.0) as usize
+    let hpx: usize = (sz * 1.75 + 4.0) as usize
+    if !raster.raster_begin(&(*z).ra, (x0 * 3) as f64, y0 as f64, wpx * 3, hpx) {
+        return
+    }
+    var pen: f64 = pen0
+    var i: usize = i0
+    while i < i1 {
+        var adv: usize = 1
+        let cp: u32 = utf8_at(p, nn, i, &adv)
+        let nx: u32 = next_cp(p, nn, i, adv)
+        let fm: u64 = fb_pick(z, r, cp)
+        let f: *mut ttf.Font = metrics.fontset_font(fm)
+        let sc: f64 = sz / metrics.fm_upem(fm)
+        let gid: u32 = ttf.font_glyph_for(f, cp)
+        let okg: bool = ttf.outline_at(f, gid, &(*z).ra, pen * 3.0, base_y, sc,
+            3.0, 0.0, 0.0, 1.0, 0.0, 0.0, (*z).scratch, SCRATCH, 0)
+        pen = pen + advance_of(z, r, cp, nx)
+        i = i + adv
+    }
+    raster.raster_finish(&(*z).ra)
+    let mc: u32 = mit_alpha(col)
+    textcurve.tc_apply(&(*z).ra, textcurve.tc_bucket(mc))
+    let n3: i64 = (wpx * 3) as i64
+    let dst: u64 = canvas.canvas_pixels(cv) as u64
+    let sa: f64 = (canvas.color_a(mc) as f64) / 255.0
+    let sr: f64 = canvas.color_r(mc) as f64
+    let sg: f64 = canvas.color_g(mc) as f64
+    let sb: f64 = canvas.color_b(mc) as f64
+    var yy: usize = 0
+    while yy < hpx {
+        let gy: i64 = y0 + yy as i64
+        if gy >= 0 && gy < ch {
+            let rowp: u64 = raster.raster_cov_row(&(*z).ra, yy)
+            var xp: i64 = 0
+            while xp < wpx as i64 {
+                let gx: i64 = x0 + xp
+                if gx >= 0 && gx < cw {
+                    let j: i64 = xp * 3
+                    // quick skip: nothing within reach of the 5-tap filter
+                    let m: f64 = lcd_c(rowp, n3, j - 2) + lcd_c(rowp, n3, j - 1) +
+                    lcd_c(rowp, n3, j) + lcd_c(rowp, n3, j + 1) +
+                    lcd_c(rowp, n3, j + 2) + lcd_c(rowp, n3, j + 3) +
+                    lcd_c(rowp, n3, j + 4)
+                    if m > 0.0 {
+                        var cf: f64 = 1.0
+                        cf = canvas.clip_factor(cv, gx as usize, gy as usize)
+                        var ch3: usize = 0
+                        let q: u64 = dst + ((gy * cw + gx) * 4) as u64
+                        while ch3 < 3 {
+                            var sub: i64 = ch3 as i64
+                            if G_LCD_FLIP { sub = 2 - sub }
+                            let jj: i64 = j + sub
+                            let c: f64 = (8.0 * (lcd_c(rowp, n3, jj - 2) +
+                                    lcd_c(rowp, n3, jj + 2)) +
+                                77.0 * (lcd_c(rowp, n3, jj - 1) +
+                                    lcd_c(rowp, n3, jj + 1)) +
+                                86.0 * lcd_c(rowp, n3, jj)) / 256.0
+                            let a: f64 = c * sa * cf
+                            if a > 0.0 {
+                                var src: f64 = sr
+                                if ch3 == 1 { src = sg }
+                                if ch3 == 2 { src = sb }
+                                let d8: u8 = *((q + ch3 as u64) as *mut u8)
+                                let d: f64 = d8 as f64
+                                var v: f64 = d + (src - d) * a + 0.5
+                                if v > 255.0 { v = 255.0 }
+                                if v < 0.0 { v = 0.0 }
+                                *((q + ch3 as u64) as *mut u8) = v as u8
+                            }
+                            ch3 = ch3 + 1
+                        }
+                    }
+                }
+                xp = xp + 1
+            }
+        }
+        yy = yy + 1
+    }
+}
+
+fn lcd_run_paint(z: *mut Painter, r: *mut TextRun, sx: f64, base_y: f64,
+    br: f64, col: u32, p: u64, nn: usize) -> bool {
+    let sz: f64 = (*r).size
+    if sz < 1.0 || sz > 96.0 {
+        return false
+    }
+    let maxw: f64 = ((*z).w / 3) as f64 - 10.0
+    let hpx: usize = (sz * 1.75 + 4.0) as usize
+    if maxw < sz * 2.0 || hpx > (*z).h {
+        return false
+    }
+    var i: usize = 0
+    var pen: f64 = sx
+    while i < nn {
+        let i0: usize = i
+        let pen0: f64 = pen
+        var j: usize = i
+        var pw: f64 = pen
+        while j < nn {
+            var adv: usize = 1
+            let cp: u32 = utf8_at(p, nn, j, &adv)
+            let nx: u32 = next_cp(p, nn, j, adv)
+            let step: f64 = advance_of(z, r, cp, nx)
+            if pw + step - pen0 > maxw && j > i0 {
+                break
+            }
+            pw = pw + step
+            j = j + adv
+        }
+        lcd_seg(z, r, p, nn, i0, j, pen0, pw - pen0, base_y, col)
+        i = j
+        pen = pw
+    }
+    return true
+}
+
+fn paint_run(z: *mut Painter, r: *mut TextRun, sx: f64, base_y: f64,
+    br: f64, col: u32, p: u64, nn: usize, vis: bool) -> f64 {
+    if G_LCD && !vis && (*r).sh_on == 0 && (*r).out_on == 0 && (*r).grad_on == 0 &&
+    (*r).slant == 0 && (*r).weight < 700 && nn > 0 &&
+    gpu.gpu_of(painter_canvas(z)) as u64 == 0 {
+        let cvc: *mut canvas.Canvas = painter_canvas(z)
+        if sx + br <= canvas.clip_x0(cvc) || sx >= canvas.clip_x1(cvc) ||
+        base_y + (*r).size * 0.5 <= canvas.clip_y0(cvc) ||
+        base_y - (*r).size * 1.25 >= canvas.clip_y1(cvc) {
+            return sx + br
+        }
+        if lcd_run_paint(z, r, sx, base_y, br, col, p, nn) {
+            if (*z).emoji_any != 0 {
+                emoji_overlay(z, r, sx, p, nn, base_y)
+            }
+            return sx + br
+        }
+    }
+    let e: f64 = paint_run_base(z, r, sx, base_y, br, col, p, nn, vis)
+    if !vis && (*z).emoji_any != 0 {
+        emoji_overlay(z, r, sx, p, nn, base_y)
+    }
+    return e
+}
+
+// ============================================================ TEXT ON THE GPU
+//
+// fUi tempo, stage 2 (lib/fui/gpu.fi). Every glyph is rastered ONCE -- per
+// font, glyph, size, weight, slant and QUARTER PIXEL of its position --
+// by the same outline code as the CPU path (`glyph_into`: the same bold
+// passes, the same shear), and kept in the GPU's atlas; a run is then one
+// quad per glyph. The differences to the CPU picture: the position is
+// rounded to a quarter pixel (an eighth at most), the coverage to an
+// octet, and two glyphs that share an edge pixel blend one over the other
+// instead of adding in one raster. The outline pass stays on the CPU (eight
+// copies of the run in one raster) and goes up as a mask.
+const GLYPH_KEY: u64 = 1
+
+fn gpu_glyph(g: *mut gpu.Gpu, z: *mut Painter, r: *mut TextRun, fm: u64,
+    f: *mut ttf.Font, gid: u32, pen: f64, base_y: f64, sc: f64, col: u32,
+    grad: bool, col2: u32, gy0: f64, gy1: f64) {
+    var ax: f64 = floor_px(pen)
+    var q: i64 = ((pen - ax) * 4.0 + 0.5) as i64
+    if q >= 4 {
+        q = 0
+        ax = ax + 1.0
+    }
+    var ay: f64 = floor_px(base_y)
+    var qy: i64 = ((base_y - ay) * 4.0 + 0.5) as i64
+    if qy >= 4 {
+        qy = 0
+        ay = ay + 1.0
+    }
+    var k: gpu.AKey = gpu.akey_new()
+    k.k[0] = GLYPH_KEY
+    k.k[1] = fm
+    k.k[2] = gid as u64
+    k.k[3] = intr_bits_f64((*r).size)
+    var tcb: u64 = 0
+    if !grad {
+        tcb = textcurve.tc_bucket(mit_alpha(col))
+    }
+    k.k[4] = ((*r).weight as u64) | (((*r).slant as u64) << 16) | (tcb << 32)
+    k.k[5] = (q as u64) | ((qy as u64) << 8)
+    var e: u64 = gpu.gpu_atlas_find(g, &k)
+    if e == 0 {
+        // the glyph alone in a window around its pen: a font size left of
+        // it, three right, two above the baseline and one below
+        let sz: f64 = (*r).size
+        let wox: f64 = ax - sz - 2.0
+        let woy: f64 = ay - 2.0 * sz - 2.0
+        var ww: usize = (sz * 4.0 + 6.0) as usize
+        var wh: usize = (sz * 3.0 + 6.0) as usize
+        if ww > (*z).w { ww = (*z).w }
+        if wh > (*z).h { wh = (*z).h }
+        if !raster.raster_begin(&(*z).ra, wox, woy, ww, wh) {
+            return
+        }
+        glyph_into(z, r, f, gid, ax + (q as f64) * 0.25, ay + (qy as f64) * 0.25, sc)
+        raster.raster_finish(&(*z).ra)
+        textcurve.tc_apply(&(*z).ra, tcb)
+        e = gpu.gpu_atlas_put(g, &k, &(*z).ra, wox as i64, woy as i64, ax as i64,
+            ay as i64)
+        if e == 0 {
+            return
+        }
+    }
+    gpu.gpu_atlas_draw(g, e, ax as i64, ay as i64, col, grad, col2, gy0, gy1)
+}
+
+// All glyphs of the run (in visual order when it went through bidi_prepare)
+// at the offset (dx, dy), in one colour or a gradient.
+fn glyphs_gpu(g: *mut gpu.Gpu, z: *mut Painter, r: *mut TextRun, vis: bool,
+    p: u64, n: usize, sx: f64, base_y: f64, dx: f64, dy: f64, col: u32,
+    grad: bool, col2: u32, gy0: f64, gy1: f64) {
+    let f: *mut ttf.Font = metrics.fontset_font((*z).fm)
+    let sc: f64 = (*r).size / metrics.fm_upem((*z).fm)
+    if vis {
+        var k: usize = 0
+        while k < (*z).bvn {
+            let j: usize = br32(z, bo_vis(z), k) as usize
+            var cn: usize = 0
+            if gsub.gsub_x_count(&(*z).gs) > 0 {
+                cn = xg_count(z, j)
+            }
+            var gi: usize = 0
+            while gi <= cn {
+                gpu_glyph(g, z, r, (*z).fm, f, xg_gid(z, j, gi),
+                    sx + dx + brf(z, bo_x(z), j) + xg_dx(z, f, sc, j, gi, cn),
+                    base_y + dy, sc, col, grad, col2, gy0, gy1)
+                gi = gi + 1
+            }
+            k = k + 1
+        }
+        return
+    }
+    var pen: f64 = sx + dx
+    var i: usize = 0
+    while i < n {
+        var adv: usize = 1
+        let cp: u32 = utf8_at(p, n, i, &adv)
+        let nx: u32 = next_cp(p, n, i, adv)
+        let fm2: u64 = fb_pick(z, r, cp)
+        let f2: *mut ttf.Font = metrics.fontset_font(fm2)
+        let gid: u32 = metrics.fm_gid(fm2, cp)
+        gpu_glyph(g, z, r, fm2, f2, gid, pen, base_y + dy,
+            (*r).size / metrics.fm_upem(fm2), col, grad, col2, gy0, gy1)
+        pen = pen + advance_of(z, r, cp, nx)
+        i = i + adv
+    }
+}
+
+// paint_run on the GPU: the same three passes.
+fn paint_run_gpu(g: *mut gpu.Gpu, z: *mut Painter, r: *mut TextRun, sx: f64,
+    base_y: f64, br: f64, col: u32, p: u64, nn: usize, vis: bool, wl: f64,
+    wt: f64, ww: f64, wh: f64) {
+    let cv: *mut canvas.Canvas = painter_canvas(z)
+    let sz: f64 = (*r).size
+    // wholly outside the clip: nothing (the CPU window would say so too)
+    if wl + ww + sz <= canvas.clip_x0(cv) || wl - sz >= canvas.clip_x1(cv) ||
+    wt + wh + sz <= canvas.clip_y0(cv) || wt - sz >= canvas.clip_y1(cv) {
+        return
+    }
+    if (*r).sh_on != 0 {
+        glyphs_gpu(g, z, r, vis, p, nn, sx, base_y, (*r).sh_dx, (*r).sh_dy,
+            mit_alpha((*r).sh_col), false, 0 as u32, 0.0, 0.0)
+    }
+    if (*r).out_on != 0 && (*r).out_w > 0.0 {
+        var wx: f64 = 0.0
+        var wy: f64 = 0.0
+        if raster_window(z, wl, wt, ww, wh, sz, &wx, &wy) {
+            var k: usize = 0
+            while k < 8 {
+                into_raster(z, r, vis, p, nn, sx, base_y, out_dir_x(k) * (*r).out_w,
+                    out_dir_y(k) * (*r).out_w)
+                k = k + 1
+            }
+            raster.raster_finish(&(*z).ra)
+            gpu.gpu_fill_raster(g, &(*z).ra, wx as usize, wy as usize,
+                mit_alpha((*r).out_col))
+        }
+    }
+    if (*r).grad_on != 0 {
+        let asc: f64 = fontback.fbk_ascent(&(*z).back, (*z).fm, sz)
+        let dsc: f64 = fontback.fbk_descent(&(*z).back, (*z).fm, sz)
+        glyphs_gpu(g, z, r, vis, p, nn, sx, base_y, 0.0, 0.0, theme.opaque(col),
+            true, theme.opaque((*r).grad_col), base_y - asc, base_y + dsc)
+        return
+    }
+    glyphs_gpu(g, z, r, vis, p, nn, sx, base_y, 0.0, 0.0, mit_alpha(col), false,
+        0 as u32, 0.0, 0.0)
+}
+
+// ============================================================ KEPT GLYPHS
+//
+// A plain run from the glyph cache (lib/fui/glyphcache.fi): pass 1 makes sure
+// every glyph of the run is kept (rastering the missing ones, one window
+// each), pass 2 composes them into the window of the line, which then goes
+// through the same curve and write-back as a rastered line.
+const GL_MAX: usize = 256
+const GL_MAX_SIZE: f64 = 96.0
+const GL_QX: f64 = 8.0 // x steps per pixel
+const GL_QXI: i64 = 8
+static mut G_GL_BUF: u64 = 0 // GL_MAX blocks (u64) and GL_MAX anchors (i64)
+
+fn glyph_line_prepare(z: *mut Painter, r: *mut TextRun, p: u64, n: usize,
+    sx: f64, base_y: f64, ay_out: *mut i64) -> usize {
+    let sz: f64 = (*r).size
+    if sz > GL_MAX_SIZE || sz < 1.0 || n > GL_MAX {
+        return 0
+    }
+    if G_GL_BUF == 0 {
+        G_GL_BUF = rt.heap_alloc(GL_MAX * 16)
+        if G_GL_BUF == 0 {
+            return 0
+        }
+    }
+    var ay: f64 = floor_px(base_y)
+    var qy: i64 = glyphcache.gc_quarter(base_y - ay, 4.0)
+    if qy >= 4 {
+        qy = 0
+        ay = ay + 1.0
+    }
+    *ay_out = ay as i64
+    let ww: usize = (sz * 4.0 + 6.0) as usize
+    let wh: usize = (sz * 3.0 + 6.0) as usize
+    if ww > (*z).w || wh > (*z).h {
+        return 0
+    }
+    let k2: u64 = intr_bits_f64(sz)
+    let k3: u64 = ((*r).weight as u64) | (((*r).slant as u64) << 16)
+    var pen: f64 = sx
+    var cnt: usize = 0
+    var i: usize = 0
+    while i < n {
+        var adv: usize = 1
+        let cp: u32 = utf8_at(p, n, i, &adv)
+        let nx: u32 = next_cp(p, n, i, adv)
+        let k0: u64 = fb_pick(z, r, cp)
+        let f: *mut ttf.Font = metrics.fontset_font(k0)
+        let sc: f64 = sz / metrics.fm_upem(k0)
+        let gid: u32 = metrics.fm_gid(k0, cp)
+        var ax: f64 = floor_px(pen)
+        var q: i64 = glyphcache.gc_quarter(pen - ax, GL_QX)
+        if q >= GL_QXI {
+            q = 0
+            ax = ax + 1.0
+        }
+        let k4: u64 = (q as u64) | ((qy as u64) << 8)
+        var e: u64 = glyphcache.gc_find(k0, gid as u64, k2, k3, k4)
+        if e == 0 {
+            let wox: f64 = floor_px(ax - sz - 2.0)
+            let woy: f64 = floor_px(ay - 2.0 * sz - 2.0)
+            if !raster.raster_begin(&(*z).ra, wox, woy, ww, wh) {
+                return 0
+            }
+            glyph_into(z, r, f, gid, ax + (q as f64) / GL_QX,
+                ay + (qy as f64) * 0.25, sc)
+            raster.raster_finish(&(*z).ra)
+            e = glyphcache.gc_put(k0, gid as u64, k2, k3, k4, &(*z).ra,
+                wox as i64, woy as i64, ax as i64, ay as i64)
+            if e == 0 {
+                return 0
+            }
+        }
+        *((G_GL_BUF + (cnt * 8) as u64) as *mut u64) = e
+        *((G_GL_BUF + (GL_MAX * 8 + cnt * 8) as u64) as *mut i64) = ax as i64
+        cnt = cnt + 1
+        pen = pen + advance_of(z, r, cp, nx)
+        i = i + adv
+    }
+    return cnt
+}
+
+// True when the run was painted here. `k` (or null): the line cache key
+// the finished coverage is kept under.
+fn glyph_run_paint(z: *mut Painter, r: *mut TextRun, sx: f64, base_y: f64,
+    wl: f64, wt: f64, ww: f64, wh: f64, col: u32, p: u64, nn: usize,
+    cut: bool, k: *mut fcache.CKey) -> bool {
+    var ay: i64 = 0
+    let cnt: usize = glyph_line_prepare(z, r, p, nn, sx, base_y, &ay)
+    if cnt == 0 {
+        return false
+    }
+    var wx: f64 = 0.0
+    var wy: f64 = 0.0
+    if !raster_window_at(z, wl, wt, ww, wh, (*r).size, &wx, &wy, cut) {
+        return false
+    }
+    var j: usize = 0
+    while j < cnt {
+        glyphcache.gc_compose(*((G_GL_BUF + (j * 8) as u64) as *mut u64),
+            &(*z).ra, wx as i64, wy as i64,
+            *((G_GL_BUF + (GL_MAX * 8 + j * 8) as u64) as *mut i64), ay)
+        j = j + 1
+    }
+    textcurve.tc_apply(&(*z).ra, textcurve.tc_bucket(mit_alpha(col)))
+    if k as u64 != 0 {
+        fcache.fc_store(k, p, nn, &(*z).ra, wx, wy, floor_px(sx) as i64,
+            floor_px(base_y) as i64)
+    }
+    flush_raster(z, wx, wy, col)
+    return true
+}
+
+// A PLAIN RUN THROUGH THE CACHE. True when it was painted here (from
+// the cache, or rastered and kept); false sends the caller the old way --
+// the window would be cut by the canvas edge, or it does not fit into the
+// raster budget uncut. See lib/fui/fcache.fi for why that keeps the
+// octets the same.
+fn paint_run_kept(z: *mut Painter, r: *mut TextRun, sx: f64, base_y: f64,
+    wl: f64, wt: f64, ww: f64, wh: f64, col: u32, p: u64, nn: usize) -> bool {
+    let cv: *mut canvas.Canvas = painter_canvas(z)
+    let cw: f64 = canvas.canvas_width(cv) as f64
+    let ch: f64 = canvas.canvas_height(cv) as f64
+    let sz: f64 = (*r).size
+    // the window a fresh raster would get (raster_window: luft = size)
+    let x0: f64 = wl - sz
+    let x1: f64 = wl + ww + sz
+    let y0: f64 = wt - sz
+    let y1: f64 = wt + wh + sz
+    if x0 < 0.0 || x1 > cw {
+        return false
+    }
+    let fx: f64 = floor_px(sx)
+    let fy: f64 = floor_px(base_y)
+    var k: fcache.CKey = fcache.ckey_new(fcache.KIND_TEXT)
+    k.a = (*z).fm ^ fb_hash(z)
+    k.b = intr_bits_f64(sz)
+    k.c = ((*r).weight as u64) | (((*r).slant as u64) << 16) |
+    (((*r).kerning as u64) << 24) | (((*r).dir as u64) << 32) |
+    (textcurve.tc_bucket(mit_alpha(col)) << 40)
+    k.d = intr_bits_f64((*r).tracking)
+    k.e = intr_bits_f64((*r).word_spacing)
+    k.f = intr_bits_f64(sx - fx)
+    k.g = intr_bits_f64(base_y - fy)
+    let e: u64 = fcache.fc_lookup(&k, p, nn)
+    if e != 0 {
+        return fcache.fc_fill(cv, e, fx as i64, fy as i64, mit_alpha(col))
+    }
+    // A miss. Only a window wholly on the canvas is kept.
+    if y0 < 0.0 || y1 > ch {
+        return false
+    }
+    // wholly outside the clip: nothing to paint, and nothing rastered
+    if x1 <= canvas.clip_x0(cv) || x0 >= canvas.clip_x1(cv) ||
+    y1 <= canvas.clip_y0(cv) || y0 >= canvas.clip_y1(cv) {
+        return true
+    }
+    if glyphcache.gc_on() {
+        if glyph_run_paint(z, r, sx, base_y, wl, wt, ww, wh, col, p, nn,
+            false, &k) {
+            return true
+        }
+    }
+    var wx: f64 = 0.0
+    var wy: f64 = 0.0
+    if !raster_window_at(z, wl, wt, ww, wh, sz, &wx, &wy, false) {
+        return false
+    }
+    into_raster(z, r, false, p, nn, sx, base_y, 0.0, 0.0)
+    raster.raster_finish(&(*z).ra)
+    textcurve.tc_apply(&(*z).ra, textcurve.tc_bucket(mit_alpha(col)))
+    fcache.fc_store(&k, p, nn, &(*z).ra, wx, wy, fx as i64, fy as i64)
+    flush_raster(z, wx, wy, col)
+    return true
+}
+
+#[no_gc]
+fn font_ascent(z: *mut Painter, size: f64) -> f64 {
+    return fontback.fbk_ascent(&(*z).back, (*z).fm, size)
+}
+
+#[no_gc]
+fn font_descent(z: *mut Painter, size: f64) -> f64 {
+    return fontback.fbk_descent(&(*z).back, (*z).fm, size)
+}
+
+// How wide does the text get? The number every layout rests on.
+#[no_gc]
+fn text_width(z: *mut Painter, p: u64, n: usize, size: f64) -> f64 {
+    var r: TextRun = run_new(size)
+    return run_width(z, &r, p, n)
+}
+
+// How many bytes fit into `platz`? Always on a character boundary --
+// never in the middle of a UTF-8 character.
+#[no_gc]
+fn text_fits_upto(z: *mut Painter, p: u64, n: usize, size: f64,
+    slot: f64) -> usize {
+    var r: TextRun = run_new(size)
+    return run_fits_upto(z, &r, p, n, slot)
+}
+
+// THE BASELINE FOR VERTICALLY CENTRED TEXT.
+//
+// This is the arithmetic that fixes Justin's finding "the label does
+// not sit in the middle", and the reason stands at the head of this
+// file: what is centred is the FONT, not the line.
+//
+//     The font occupies from (baseline - ascent) to
+//     (baseline + descent). Its middle lies at
+//     baseline - (ascent - descent) / 2, and that should fall on
+//     y + h/2:
+//
+//         baseline = y + h/2 + (ascent - descent) / 2
+//                  = y + (h + ascent - descent) / 2
+//
+// Rounded to a whole pixel: a baseline between two pixels makes every
+// line half blurred (the same reasoning stands in lib/font/metrics.fi
+// at `fm_ascent`).
+#[no_gc]
+fn text_baseline_mid(z: *mut Painter, y: f64, h: f64, size: f64) -> f64 {
+    let a: f64 = fontback.fbk_ascent(&(*z).back, (*z).fm, size)
+    let d: f64 = fontback.fbk_descent(&(*z).back, (*z).fm, size)
+    let b: f64 = y + (h + a - d) / 2.0
+    let t: f64 = ((b + 0.5) as i64) as f64
+    return t
+}
+
+// DRAW TEXT.
+//
+// `x`/`w` is the rect it is aligned in; `base_y` the baseline (from
+// `text_baseline_mid`). Back comes the position where it ends -- from
+// that the TextBuf works out where its caret sits.
+fn text(z: *mut Painter, x: f64, base_y: f64, w: f64, size: f64,
+    col: u32, p: u64, n: usize, align: u32) -> f64 {
+    // THE PLAIN CASE OF `run_draw`. It stays because most callers want
+    // nothing special, and because every caller in the tree already
+    // uses it -- but there is only ONE walk over the string now, in
+    // run_draw. When wave 3's measurement found that this function
+    // drew every glyph however narrow the rect was, the reason was
+    // that it did its own arithmetic. That cannot happen again here:
+    // there is no arithmetic left in it.
+    var r: TextRun = run_new(size)
+    return run_draw(z, &r, x, base_y, w, col, p, n, align)
+}
+
+// THE CARET. A vertical stroke on whole pixels -- it must NOT go
+// through the rasteriser, otherwise at half positions it is two pale
+// columns instead of one sharp one.
+fn caret_bar(z: *mut Painter, x: f64, y: f64, h: f64, st: f64,
+    col: u32) {
+    let ix: f64 = ((x + 0.5) as i64) as f64
+    var s: f64 = st
+    if s < 1.0 {
+        s = 1.0
+    }
+    surface(z, ix, y, s, h, col)
+}
+
+// ======================================================================
+// THE BIDI PATH
+// ======================================================================
+//
+// WHY IT STANDS HERE. Every label, every button, every table and
+// every text field measures and paints via `run_width`, `run_fits_upto`,
+// `run_draw`, `run_draw_ellipsis` and `run_draw_wrapped`. Whoever forgets
+// bidirectional text at ONE of these places gets exactly
+// the error that the head of this file describes: something different is measured
+// from what is painted. So each of them decides the same thing at the start:
+//
+//   `bidi_prepare` -- does this text need the algorithm? NO means:
+//   no R, AL, AN and no RLE/RLO/RLI in it, and the direction is not
+//   RTL (bidi.bidi_needed). Then it goes the old way, unchanged --
+//   every Latin line in every proof stays, pixel for pixel,
+//   what it was. YES means: the WHOLE text is prepared once
+//
+//     1. UTF-8 -> code points, together with the octet position of each character
+//     2. levels (bidi.bidi_run) -- for the whole paragraph, not for the
+//        line: whether a wrapped piece runs from right to left
+//        is decided by its paragraph
+//     3. glyphs (shape.shape_run): mirrored images, Arabic shapes
+//     4. advances per character from the font
+//
+//   and everything further -- measuring, wrapping, shortening, painting, the
+//   caret -- calculates with the same prepared numbers.
+//
+// WHAT THE BIDI PATH DOES DIFFERENTLY FROM THE OLD ONE, and why:
+//
+//   * PAIR KERNING ONLY INSIDE A LEFT-TO-RIGHT RUN (round W2). The `kern`
+//     table is built by glyph pairs from left to right; in a mixed line the
+//     neighbours on the screen can differ from those in the text, and a
+//     kerning that sees a different pair when measuring (logical) from
+//     when painting (visual) makes exactly the deviation that is forbidden
+//     here. So only pairs that are neighbours in BOTH orders get kerned:
+//     both on the same even level (see the advance loop of `bidi_prepare`).
+//     DejaVu Sans does not kern Arabic and Hebrew anyway.
+//   * THE LETTER SPACING (tracking) stands between VISIBLE glyphs --
+//     an alif that has been absorbed into the lam-alif gets none.
+//   * THE VOWEL SIGNS. Without GPOS there are no anchor points. DejaVu Sans
+//     draws Arabic and Hebrew vowels with advance 0 and the
+//     ink to the RIGHT of the origin, so for the position BEFORE their
+//     base letter on the screen -- and exactly there they stand after
+//     L2, because the reversal turns "base letter, vowel" into "vowel,
+//     base letter". Rule L3 (reverse the order again) is meant for
+//     fonts that expect the opposite; it is therefore
+//     NOT applied here.
+//
+// THE LIMIT: the work area starts with room for `BIDI_CAP` characters and
+// GROWS (doubling) when a longer text comes, up to `BIDI_MAX`. Only a text
+// above that goes the old way (from left to right). A word processor
+// window needs a paragraph store of its own and not this work area.
+
+const BIDI_CAP: usize = 4096
+const BIDI_MAX: usize = 262144
+
+// Make room for a text of `n` octets (so at most `n` characters). The work
+// area is rebuilt from scratch with every `bidi_prepare`, so a new, larger
+// one can replace the old without copying. false = too long or no memory.
+#[no_gc]
+fn bidi_reserve(z: *mut Painter, n: usize) -> bool {
+    if n <= (*z).bcap {
+        return true
+    }
+    if n > BIDI_MAX {
+        return false
+    }
+    let oldcap: usize = (*z).bcap
+    let oldbytes: usize = bidi_bytes(z)
+    var nc: usize = oldcap
+    while nc < n {
+        nc = nc * 2
+    }
+    (*z).bcap = nc
+    let nx: u64 = rt.heap_alloc(bidi_bytes(z))
+    if nx == 0 {
+        (*z).bcap = oldcap
+        return false
+    }
+    rt.heap_free((*z).bx, oldbytes)
+    (*z).bx = nx
+    return true
+}
+
+// The sub-arrays of the work area, in this order from `bx`:
+//   cp u32, boff u32 (CAP + 2), cls0/cls/lev/pl/del/form/ll u8,
+//   gid/ord/vis u32, used u32[16], adv/x f64, work (bidi.fi)
+#[no_gc]
+fn bo_cp(z: *mut Painter) -> usize { return 0 }
+#[no_gc]
+fn bo_boff(z: *mut Painter) -> usize { return (*z).bcap * 4 }
+#[no_gc]
+fn bo_cls0(z: *mut Painter) -> usize { return (*z).bcap * 8 + 8 }
+#[no_gc]
+fn bo_cls(z: *mut Painter) -> usize { return bo_cls0(z) + (*z).bcap }
+#[no_gc]
+fn bo_lev(z: *mut Painter) -> usize { return bo_cls(z) + (*z).bcap }
+#[no_gc]
+fn bo_pl(z: *mut Painter) -> usize { return bo_lev(z) + (*z).bcap }
+#[no_gc]
+fn bo_del(z: *mut Painter) -> usize { return bo_pl(z) + (*z).bcap }
+#[no_gc]
+fn bo_form(z: *mut Painter) -> usize { return bo_del(z) + (*z).bcap }
+#[no_gc]
+fn bo_ll(z: *mut Painter) -> usize { return bo_form(z) + (*z).bcap }
+#[no_gc]
+fn bo_gid(z: *mut Painter) -> usize { return bo_ll(z) + (*z).bcap }
+#[no_gc]
+fn bo_ord(z: *mut Painter) -> usize { return bo_gid(z) + (*z).bcap * 4 }
+#[no_gc]
+fn bo_vis(z: *mut Painter) -> usize { return bo_ord(z) + (*z).bcap * 4 }
+#[no_gc]
+fn bo_used(z: *mut Painter) -> usize { return bo_vis(z) + (*z).bcap * 4 }
+#[no_gc]
+fn bo_adv(z: *mut Painter) -> usize { return bo_used(z) + 64 }
+#[no_gc]
+fn bo_x(z: *mut Painter) -> usize { return bo_adv(z) + (*z).bcap * 8 }
+#[no_gc]
+fn bo_work(z: *mut Painter) -> usize { return bo_x(z) + (*z).bcap * 8 }
+#[no_gc]
+fn bidi_bytes(z: *mut Painter) -> usize { return bo_work(z) + bidi.bidi_work_bytes((*z).bcap) }
+
+#[no_gc]
+fn bq(z: *mut Painter, off: usize) -> u64 { return (*z).bx + off as u64 }
+#[no_gc]
+fn br8(z: *mut Painter, off: usize, i: usize) -> u8 {
+    return *((bq(z, off) + i as u64) as *mut u8)
+}
+#[no_gc]
+fn br32(z: *mut Painter, off: usize, i: usize) -> u32 {
+    return *((bq(z, off) + (i * 4) as u64) as *mut u32)
+}
+#[no_gc]
+fn bw32(z: *mut Painter, off: usize, i: usize, v: u32) {
+    *((bq(z, off) + (i * 4) as u64) as *mut u32) = v
+}
+#[no_gc]
+fn brf(z: *mut Painter, off: usize, i: usize) -> f64 {
+    return *((bq(z, off) + (i * 8) as u64) as *mut f64)
+}
+#[no_gc]
+fn bwf(z: *mut Painter, off: usize, i: usize, v: f64) {
+    *((bq(z, off) + (i * 8) as u64) as *mut f64) = v
+}
+
+// The octet position of character `i` (at `bn` the end of the text).
+#[no_gc]
+fn bo_byte(z: *mut Painter, i: usize) -> usize {
+    return br32(z, bo_boff(z), i) as usize
+}
+
+// The character that begins at octet `b` (or the first one behind it).
+#[no_gc]
+fn bo_char(z: *mut Painter, b: usize) -> usize {
+    var i: usize = 0
+    while i < (*z).bn && bo_byte(z, i) < b {
+        i = i + 1
+    }
+    return i
+}
+
+#[no_gc]
+fn bidi_para(z: *mut Painter) -> bidi.BidiPara {
+    return bidi.bidi_new((*z).bt, bq(z, bo_cp(z)), (*z).bn, bq(z, bo_cls0(z)),
+        bq(z, bo_cls(z)), bq(z, bo_lev(z)), bq(z, bo_pl(z)), bq(z, bo_work(z)))
+}
+
+// A character without a glyph: absorbed into a ligature, or a
+// control character that X9 takes out (LRM, RLE, ZWJ ...).
+#[no_gc]
+fn bidi_hidden(z: *mut Painter, i: usize) -> bool {
+    return br8(z, bo_del(z), i) != 0 as u8
+    || bidi.bidi_is_removed(br8(z, bo_cls0(z), i))
+}
+
+// Is a text currently prepared on the bidi path? For the check.
+#[no_gc]
+fn run_is_bidi(z: *mut Painter) -> bool { return (*z).bn > 0 }
+
+// THE PREPARATION. Return: the number of characters, 0 = the old way.
+#[no_gc]
+fn bidi_prepare(z: *mut Painter, r: *mut TextRun, p: u64, n: usize) -> usize {
+    (*z).bn = 0
+    if (*z).bt == 0 || (*z).bx == 0 || n == 0
+    || !fontback.fbk_present(&(*z).back, (*z).fm) {
+        return 0
+    }
+    if !bidi_reserve(z, n) {
+        return 0
+    }
+    // 1. die Codepunkte
+    var i: usize = 0
+    var k: usize = 0
+    while i < n {
+        if k >= (*z).bcap {
+            return 0
+        }
+        var adv: usize = 1
+        let cp: u32 = utf8_at(p, n, i, &adv)
+        bw32(z, bo_cp(z), k, cp)
+        bw32(z, bo_boff(z), k, i as u32)
+        k = k + 1
+        i = i + adv
+    }
+    bw32(z, bo_boff(z), k, n as u32)
+    if !bidi.bidi_needed((*z).bt, bq(z, bo_cp(z)), k, (*r).dir) {
+        return 0
+    }
+    // 2. die Ebenen
+    (*z).bn = k
+    var bp: bidi.BidiPara = bidi_para(z)
+    (*z).blev = bidi.bidi_run(&bp, (*r).dir)
+    // 3. die Glyphen
+    let f: *mut ttf.Font = metrics.fontset_font((*z).fm)
+    if (*z).gs_fm != (*z).fm {
+        let has: bool = gsub.gsub_init(f, &(*z).gs)
+        (*z).gs_fm = (*z).fm
+    }
+    var miss: usize = 0
+    let how: u32 = shape.shape_run((*z).bt, f, &(*z).gs, true,
+        bq(z, bo_cp(z)), bq(z, bo_cls0(z)), bq(z, bo_lev(z)), k,
+        bq(z, bo_gid(z)), bq(z, bo_del(z)), bq(z, bo_form(z)),
+        bq(z, bo_used(z)), &miss)
+    // 4. die Vorschuebe
+    let sc: f64 = (*r).size / metrics.fm_upem((*z).fm)
+    var j: usize = 0
+    while j < k {
+        var a: f64 = 0.0
+        if !bidi_hidden(z, j) {
+            a = (ttf.font_advance(f, br32(z, bo_gid(z), j)) as f64) * sc
+            if gsub.gsub_x_count(&(*z).gs) > 0 {
+                a = a + xg_span(z, f, sc, j, 1, xg_count(z, j) + 1)
+            }
+            if br32(z, bo_cp(z), j) == 32 as u32 {
+                a = a + (*r).word_spacing
+            }
+        }
+        // PAIR KERNING INSIDE A LEFT-TO-RIGHT RUN (r13). Two neighbours in the
+        // text that are neighbours on the screen too -- both visible, both on
+        // the same EVEN level -- are kerned like in the plain path, so the
+        // Latin words in an Arabic or Hebrew line look like those outside it.
+        // The pair is decided here once, in logical order; measuring and
+        // painting read the same advances, so they cannot disagree. Right-to-left
+        // runs and pairs across a level change stay unkerned (see above).
+        if a > 0.0 && (*r).kerning != 0 && j + 1 < k && !bidi_hidden(z, j + 1) {
+            let lv: u8 = br8(z, bo_lev(z), j)
+            if lv == br8(z, bo_lev(z), j + 1) && (lv & 1 as u8) == 0 as u8 {
+                var lg: u32 = br32(z, bo_gid(z), j)
+                if gsub.gsub_x_count(&(*z).gs) > 0 {
+                    lg = xg_gid(z, j, xg_count(z, j))
+                }
+                a = a + (ttf.font_kern(f, lg,
+                        br32(z, bo_gid(z), j + 1)) as f64) * sc
+            }
+        }
+        bwf(z, bo_adv(z), j, a)
+        j = j + 1
+    }
+    return k
+}
+
+// EXTRA GLYPHS of a character (GSUB type 2 with several output glyphs, see
+// lib/font/gsub.fi gsub_x_insert): the character j has the glyph in the
+// glyph array plus these, one cluster. Index 0 is the glyph of the position,
+// 1.. the extras in glyph order. Left to right they are painted in this
+// order, at an odd level (right to left) in the opposite order, so the first
+// glyph stands at the start of the character in the reading direction.
+#[no_gc]
+fn xg_count(z: *mut Painter, j: usize) -> usize {
+    var c: usize = 0
+    var e: usize = 0
+    while e < gsub.gsub_x_count(&(*z).gs) {
+        if gsub.gsub_x_pos(&(*z).gs, e) == j {
+            c = c + 1
+        }
+        e = e + 1
+    }
+    return c
+}
+
+#[no_gc]
+fn xg_gid(z: *mut Painter, j: usize, idx: usize) -> u32 {
+    if idx == 0 {
+        return br32(z, bo_gid(z), j)
+    }
+    var c: usize = 0
+    var e: usize = 0
+    while e < gsub.gsub_x_count(&(*z).gs) {
+        if gsub.gsub_x_pos(&(*z).gs, e) == j {
+            c = c + 1
+            if c == idx {
+                return gsub.gsub_x_gid(&(*z).gs, e)
+            }
+        }
+        e = e + 1
+    }
+    return br32(z, bo_gid(z), j)
+}
+
+// The sum of the advances of the glyphs idx0..idx1 - 1 of the character j.
+#[no_gc]
+fn xg_span(z: *mut Painter, f: *mut ttf.Font, sc: f64, j: usize, idx0: usize,
+    idx1: usize) -> f64 {
+    var w: f64 = 0.0
+    var i: usize = idx0
+    while i < idx1 {
+        w = w + (ttf.font_advance(f, xg_gid(z, j, i)) as f64) * sc
+        i = i + 1
+    }
+    return w
+}
+
+// How far from the left edge of the character j the glyph idx stands
+// (cnt = number of extras of j).
+#[no_gc]
+fn xg_dx(z: *mut Painter, f: *mut ttf.Font, sc: f64, j: usize, idx: usize,
+    cnt: usize) -> f64 {
+    if cnt == 0 {
+        return 0.0
+    }
+    if (br8(z, bo_lev(z), j) & 1 as u8) != 0 as u8 {
+        return xg_span(z, f, sc, j, idx + 1, cnt + 1)
+    }
+    return xg_span(z, f, sc, j, 0, idx)
+}
+
+// The width of the characters a..b-1: advances plus the letter spacing
+// between the visible glyphs.
+#[no_gc]
+fn bw_range(z: *mut Painter, r: *mut TextRun, a: usize, b: usize) -> f64 {
+    var x: f64 = 0.0
+    var nv: usize = 0
+    var i: usize = a
+    while i < b {
+        x = x + brf(z, bo_adv(z), i)
+        if !bidi_hidden(z, i) {
+            nv = nv + 1
+        }
+        i = i + 1
+    }
+    if nv > 1 {
+        x = x + ((nv - 1) as f64) * (*r).tracking
+    }
+    return x
+}
+
+// The step after character i, if something still comes after it up to b -- the
+// counterpart to `advance_of` with its `nxt`.
+#[no_gc]
+fn bidi_step(z: *mut Painter, r: *mut TextRun, i: usize, b: usize) -> f64 {
+    var s: f64 = brf(z, bo_adv(z), i)
+    if !bidi_hidden(z, i) && i + 1 < b {
+        s = s + (*r).tracking
+    }
+    return s
+}
+
+// How many characters from a fit into `room`? Return: the end (a..b).
+// Invisible characters behind the last fitting one go along -- an alif
+// that sits in the lam-alif must not land alone on the next
+// line.
+#[no_gc]
+fn bidi_fits(z: *mut Painter, r: *mut TextRun, a: usize, b: usize,
+    room: f64) -> usize {
+    var x: f64 = 0.0
+    var i: usize = a
+    while i < b {
+        let st: f64 = bidi_step(z, r, i, b)
+        if !bidi_hidden(z, i) && x + st > room {
+            return i
+        }
+        x = x + st
+        i = i + 1
+    }
+    return b
+}
+
+// Where does the line from a end, and where does the next begin? The same rule
+// as `run_line_upto`: at spaces, and a single word that is too long
+// is nevertheless split at a character.
+#[no_gc]
+fn bidi_line_break(z: *mut Painter, r: *mut TextRun, a: usize, b: usize,
+    room: f64, to: *mut usize) -> usize {
+    var x: f64 = 0.0
+    var i: usize = a
+    var gap: usize = a
+    var after: usize = a
+    while i < b {
+        if br32(z, bo_cp(z), i) == 32 as u32 {
+            gap = i
+            after = i + 1
+        }
+        let st: f64 = bidi_step(z, r, i, b)
+        if !bidi_hidden(z, i) && x + st > room {
+            if gap > a {
+                *to = after
+                return gap
+            }
+            if i == a {
+                var e: usize = a + 1
+                while e < b && bidi_hidden(z, e) {
+                    e = e + 1
+                }
+                *to = e
+                return e
+            }
+            *to = i
+            return i
+        }
+        x = x + st
+        i = i + 1
+    }
+    *to = b
+    return b
+}
+
+// LAY OUT THE LINE a..b-1: L1 for its end, L2 for the order, and
+// afterwards per character its left edge (`bo_x`, relative to the line start)
+// as well as the list of visible glyphs from left to right
+// (`bo_vis`, `bvn`). Return: the width of the line.
+#[no_gc]
+fn bidi_layout(z: *mut Painter, r: *mut TextRun, a: usize, b: usize) -> f64 {
+    (*z).bvn = 0
+    if b <= a {
+        return 0.0
+    }
+    var bp: bidi.BidiPara = bidi_para(z)
+    bidi.bidi_line_levels(&bp, a, b, bq(z, bo_ll(z)))
+    bidi.bidi_reorder(bq(z, bo_ll(z)), b - a, bq(z, bo_ord(z)))
+    var tv: usize = 0
+    var i: usize = a
+    while i < b {
+        if !bidi_hidden(z, i) {
+            tv = tv + 1
+        }
+        i = i + 1
+    }
+    var x: f64 = 0.0
+    var seen: usize = 0
+    var k: usize = 0
+    while k < b - a {
+        let j: usize = a + br32(z, bo_ord(z), k) as usize
+        bwf(z, bo_x(z), j, x)
+        if !bidi_hidden(z, j) {
+            bw32(z, bo_vis(z), (*z).bvn, j as u32)
+            (*z).bvn = (*z).bvn + 1
+            x = x + brf(z, bo_adv(z), j)
+            seen = seen + 1
+            if seen < tv {
+                x = x + (*r).tracking
+            }
+        }
+        k = k + 1
+    }
+    return x
+}
+
+// The line last laid out into the raster.
+#[no_gc]
+fn bidi_into_raster(z: *mut Painter, r: *mut TextRun, sx: f64,
+    base_y: f64, dx: f64, dy: f64) {
+    let f: *mut ttf.Font = metrics.fontset_font((*z).fm)
+    let sc: f64 = (*r).size / metrics.fm_upem((*z).fm)
+    var k: usize = 0
+    while k < (*z).bvn {
+        let j: usize = br32(z, bo_vis(z), k) as usize
+        var cn: usize = 0
+        if gsub.gsub_x_count(&(*z).gs) > 0 {
+            cn = xg_count(z, j)
+        }
+        var gi: usize = 0
+        while gi <= cn {
+            glyph_into(z, r, f, xg_gid(z, j, gi),
+                sx + dx + brf(z, bo_x(z), j) + xg_dx(z, f, sc, j, gi, cn),
+                base_y + dy, sc)
+            gi = gi + 1
+        }
+        k = k + 1
+    }
+}
+
+// Paint a line a..b-1 aligned. Return as `run_draw`.
+fn bidi_draw_line(z: *mut Painter, r: *mut TextRun, x: f64, base_y: f64,
+    w: f64, col: u32, a: usize, b: usize, align: u32) -> f64 {
+    if b <= a {
+        return x
+    }
+    let br: f64 = bidi_layout(z, r, a, b)
+    var sx: f64 = x
+    if align == TEXT_M {
+        sx = x + (w - br) / 2.0
+    } else if align == TEXT_R {
+        sx = x + w - br
+    }
+    sx = ((sx + 0.5) as i64) as f64
+    return paint_run(z, r, sx, base_y, br, col, 0, 0, true)
+}
+
+// A LINE WITH "..." -- AT THE RIGHT END. The dots stand where
+// the text would continue: in a paragraph from left to right
+// on the right, in one from right to left on the LEFT. Shortening is logical
+// (the start of the text stays), only what remains is laid out.
+fn bidi_draw_ellipsis(z: *mut Painter, r: *mut TextRun, x: f64,
+    base_y: f64, w: f64, col: u32, a: usize, b: usize,
+    align: u32) -> f64 {
+    let full: f64 = bw_range(z, r, a, b)
+    if w <= 0.0 || full <= w {
+        return bidi_draw_line(z, r, x, base_y, w, col, a, b, align)
+    }
+    let ew: f64 = ellipsis_w(z, r)
+    if ew > w {
+        return x
+    }
+    let c: usize = bidi_fits(z, r, a, b, w - ew)
+    if c == a {
+        return x
+    }
+    let tw: f64 = bidi_layout(z, r, a, c)
+    var sx: f64 = x
+    if align == TEXT_M {
+        sx = x + (w - (tw + ew)) / 2.0
+    } else if align == TEXT_R {
+        sx = x + w - (tw + ew)
+    }
+    let rtl: bool = (br8(z, bo_pl(z), a) & 1 as u8) != 0 as u8
+    var tx: f64 = sx
+    var dx: f64 = sx + tw
+    if rtl {
+        tx = sx + ew
+        dx = sx
+    }
+    tx = ((tx + 0.5) as i64) as f64
+    let e1: f64 = paint_run(z, r, tx, base_y, tw, col, 0, 0, true)
+    // The dots go the old way: three ASCII characters need no
+    // algorithm -- and `run_draw` would overwrite the prepared text
+    // that a multi-line caller still needs.
+    var pkt: [u8; 4] = "...\0"
+    let e2: f64 = run_draw_ltr(z, r, dx, base_y, 0.0, col,
+        (&pkt[0 as usize]) as u64, 3, TEXT_L)
+    if rtl {
+        return tx + tw
+    }
+    return e2
+}
+
+// MULTI-LINE, for measuring (`malen` = false) and painting. One function,
+// so that the prediction of the line count and the picture do not
+// drift apart -- the same lesson as with `nur_leer`.
+fn bidi_wrapped(z: *mut Painter, r: *mut TextRun, x: f64, base_y: f64,
+    w: f64, lines_h: f64, col: u32, k: usize, align: u32,
+    max_lines: usize, paint: bool) -> usize {
+    var lines: usize = 0
+    var i: usize = 0
+    var y: f64 = base_y
+    while i < k && lines < max_lines {
+        var empty: bool = true
+        var q: usize = i
+        while q < k {
+            if br32(z, bo_cp(z), q) != 32 as u32 {
+                empty = false
+                break
+            }
+            q = q + 1
+        }
+        if empty {
+            return lines
+        }
+        var next: usize = k
+        let bis: usize = bidi_line_break(z, r, i, k, w, &next)
+        if bis == i {
+            return lines
+        }
+        if paint {
+            if lines + 1 == max_lines && next < k {
+                let e4: f64 = bidi_draw_ellipsis(z, r, x, y, w, col, i, k,
+                    align)
+            } else {
+                let e5: f64 = bidi_draw_line(z, r, x, y, w, col, i, bis,
+                    align)
+            }
+        }
+        lines = lines + 1
+        y = y + lines_h
+        i = next
+    }
+    return lines
+}
+
+// ======================================================================
+// THE CARET IN BIDIRECTIONAL TEXT
+// ======================================================================
+//
+// In a mixed text the boundary behind character i does NOT lie
+// at "width of the first i characters": behind a Hebrew word the caret stands
+// to the LEFT of it. The rule by which every text editor
+// sets it: it hangs on the TRAILING edge of the character before it -- right at an
+// even level, left at an odd one. At the start of the text there is no character
+// before it; then it hangs on the LEADING edge of the first.
+//
+// All numbers are relative to the left margin of the text, as `run_draw`
+// lays it with TEXT_L. Without the bidi path this is the width of the first
+// `bi` octets -- exactly what the text field calculated before.
+#[no_gc]
+fn run_caret_x(z: *mut Painter, r: *mut TextRun, p: u64, n: usize,
+    bi: usize) -> f64 {
+    var b: usize = bi
+    if b > n {
+        b = n
+    }
+    let k: usize = bidi_prepare(z, r, p, n)
+    if k == 0 {
+        if b == 0 {
+            return 0.0
+        }
+        return run_width(z, r, p, b)
+    }
+    let tw: f64 = bidi_layout(z, r, 0, k)
+    let ci: usize = bo_char(z, b)
+    if ci == 0 {
+        let x0: f64 = brf(z, bo_x(z), 0)
+        if (br8(z, bo_ll(z), 0) & 1 as u8) != 0 as u8 {
+            return x0 + brf(z, bo_adv(z), 0)
+        }
+        return x0
+    }
+    let j: usize = ci - 1
+    let xj: f64 = brf(z, bo_x(z), j)
+    if (br8(z, bo_ll(z), j) & 1 as u8) != 0 as u8 {
+        return xj
+    }
+    return xj + brf(z, bo_adv(z), j)
+}
+
+// THE BOUNDARY UNDER A POINT x (relative to the left text margin), as an
+// octet position. What is hit is the nearest visible glyph; the left
+// half of a glyph of even level is its start, the left half
+// of a glyph of odd level its END.
+#[no_gc]
+fn run_hit(z: *mut Painter, r: *mut TextRun, p: u64, n: usize,
+    x: f64) -> usize {
+    let k: usize = bidi_prepare(z, r, p, n)
+    if k == 0 {
+        // the old way: the next character boundary by the width before it
+        var best: usize = 0
+        var bestd: f64 = x
+        if bestd < 0.0 {
+            bestd = 0.0 - bestd
+        }
+        var i: usize = 0
+        while i < n {
+            var adv: usize = 1
+            let cp: u32 = utf8_at(p, n, i, &adv)
+            i = i + adv
+            var d: f64 = run_width(z, r, p, i) - x
+            if d < 0.0 {
+                d = 0.0 - d
+            }
+            if d < bestd {
+                bestd = d
+                best = i
+            }
+        }
+        return best
+    }
+    let tw: f64 = bidi_layout(z, r, 0, k)
+    var best_i: usize = k
+    var best_d: f64 = 0.0
+    var j: usize = 0
+    while j < k {
+        if !bidi_hidden(z, j) {
+            let l: f64 = brf(z, bo_x(z), j)
+            let rr: f64 = l + brf(z, bo_adv(z), j)
+            var d: f64 = 0.0
+            if x < l {
+                d = l - x
+            } else if x > rr {
+                d = x - rr
+            }
+            if best_i == k || d < best_d {
+                best_i = j
+                best_d = d
+            }
+        }
+        j = j + 1
+    }
+    if best_i == k {
+        return 0
+    }
+    let l2: f64 = brf(z, bo_x(z), best_i)
+    let mid: f64 = l2 + brf(z, bo_adv(z), best_i) / 2.0
+    let odd: bool = (br8(z, bo_ll(z), best_i) & 1 as u8) != 0 as u8
+    var after: bool = x >= mid
+    if odd {
+        after = !after
+    }
+    var c: usize = best_i
+    if after {
+        c = best_i + 1
+        // behind a lam-alif the caret stands behind the alif
+        while c < k && bidi_hidden(z, c) && br8(z, bo_del(z), c) != 0 as u8 {
+            c = c + 1
+        }
+    }
+    return bo_byte(z, c)
+}
+
+// Does the paragraph of this text run from right to left?
+#[no_gc]
+fn run_para_rtl(z: *mut Painter, r: *mut TextRun, p: u64, n: usize) -> bool {
+    if n == 0 {
+        return (*r).dir == bidi.DIR_RTL
+    }
+    let k: usize = bidi_prepare(z, r, p, n)
+    if k == 0 {
+        return false
+    }
+    return ((*z).blev & 1 as u8) != 0 as u8
+}
+
+// THE SELECTION: highlight the octets sa..sb-1. On the old way that
+// is ONE rectangle; in bidirectional text a logically
+// contiguous selection can fall apart on the screen into several pieces
+// ("abc אבג" with a selection over "c א" are two pieces), and each is painted
+// on its own. `ox` is the left text margin.
+fn run_sel_draw(z: *mut Painter, r: *mut TextRun, ox: f64, y: f64, h: f64,
+    p: u64, n: usize, sa: usize, sb: usize, col: u32) {
+    if sb <= sa {
+        return
+    }
+    let k: usize = bidi_prepare(z, r, p, n)
+    if k == 0 {
+        let xa: f64 = run_width(z, r, p, sa)
+        let xb: f64 = run_width(z, r, p, sb)
+        surface(z, ox + xa, y, xb - xa, h, col)
+        return
+    }
+    let tw: f64 = bidi_layout(z, r, 0, k)
+    let ca: usize = bo_char(z, sa)
+    let cb: usize = bo_char(z, sb)
+    var open: bool = false
+    var x0: f64 = 0.0
+    var x1: f64 = 0.0
+    var q: usize = 0
+    while q < k {
+        let j: usize = br32(z, bo_ord(z), q) as usize
+        let inside: bool = j >= ca && j < cb
+        let l: f64 = brf(z, bo_x(z), j)
+        let rr: f64 = l + brf(z, bo_adv(z), j)
+        if inside {
+            if !open {
+                open = true
+                x0 = l
+            }
+            x1 = rr
+        } else if open && !bidi_hidden(z, j) {
+            surface(z, ox + x0, y, x1 - x0, h, col)
+            open = false
+        }
+        q = q + 1
+    }
+    if open {
+        surface(z, ox + x0, y, x1 - x0, h, col)
+    }
+}
+
+// ======================================================================
+// MEASURING FOR THE TEXT FIELD
+// ======================================================================
+//
+// lib/fui/editor.fi knows no canvas (deliberately, see there) and
+// asks for the position of the caret via function pointers with a
+// context value -- the same form as the clipboard. `Measure` is
+// this context: a painter and the text run with which the field paints.
+struct Measure {
+    z: u64,
+    r: TextRun,
+    secret: u32, // 1 = a password: measure the mask, never the text
+}
+
+fn measure_new(z: *mut Painter, r: TextRun) -> Measure {
+    return Measure { z: z as u64, r: r, secret: 0 }
+}
+
+// A field that holds a secret measures what it paints: one bullet per
+// character (mask_build). Otherwise the caret and the scroll position
+// would follow the widths of the real letters -- a side channel -- and
+// the caret would stand beside the bullets.
+fn measure_set_secret(m: *mut Measure, on: bool) {
+    if on { (*m).secret = 1 } else { (*m).secret = 0 }
+}
+
+fn measure_x(ctx: u64, p: u64, n: usize, i: usize) -> f64 {
+    let m: *mut Measure = ctx as *mut Measure
+    if (*m).secret != 0 {
+        var mk: [u8; 1024] = [0 as u8; 1024]
+        let mn: usize = mask_build(p, n, (&mk[0]) as u64, MASK_CAP)
+        return run_caret_x((*m).z as *mut Painter, &(*m).r, (&mk[0]) as u64,
+            mn, mask_index(p, n, i))
+    }
+    return run_caret_x((*m).z as *mut Painter, &(*m).r, p, n, i)
+}
+
+fn measure_hit(ctx: u64, p: u64, n: usize, x: f64) -> usize {
+    let m: *mut Measure = ctx as *mut Measure
+    if (*m).secret != 0 {
+        var mk: [u8; 1024] = [0 as u8; 1024]
+        let mn: usize = mask_build(p, n, (&mk[0]) as u64, MASK_CAP)
+        let k: usize = run_hit((*m).z as *mut Painter, &(*m).r,
+            (&mk[0]) as u64, mn, x)
+        return mask_source(p, n, k)
+    }
+    return run_hit((*m).z as *mut Painter, &(*m).r, p, n, x)
+}
+
+fn measure_width(ctx: u64, p: u64, n: usize) -> f64 {
+    let m: *mut Measure = ctx as *mut Measure
+    if (*m).secret != 0 {
+        var mk: [u8; 1024] = [0 as u8; 1024]
+        let mn: usize = mask_build(p, n, (&mk[0]) as u64, MASK_CAP)
+        return run_width((*m).z as *mut Painter, &(*m).r, (&mk[0]) as u64, mn)
+    }
+    return run_width((*m).z as *mut Painter, &(*m).r, p, n)
+}
+
+// A mask has no strong letter; the direction of a secret field comes
+// from its style alone, never from what was typed.
+fn measure_rtl(ctx: u64, p: u64, n: usize) -> bool {
+    let m: *mut Measure = ctx as *mut Measure
+    if (*m).secret != 0 {
+        var mk: [u8; 4] = [0 as u8; 4]
+        return run_para_rtl((*m).z as *mut Painter, &(*m).r, (&mk[0]) as u64,
+            mask_build(p, n, (&mk[0]) as u64, 3))
+    }
+    return run_para_rtl((*m).z as *mut Painter, &(*m).r, p, n)
+}
+
+// ======================================================================
+// THE MASK OF A SECRET
+// ======================================================================
+//
+// U+2022 (bullet, 3 bytes in UTF-8) once per character of the text. The
+// buffer holds MASK_CAP bytes, so at most MASK_CAP / 3 = 341 bullets; a
+// longer password shows 341 of them (its length stays hidden beyond
+// that anyway). `mask_index` maps a byte offset of the text to the byte
+// offset in the mask, `mask_source` the other way (a hit in the mask to
+// the character boundary in the text).
+const MASK_CAP: usize = 1023
+
+fn mask_build(p: u64, n: usize, out: u64, cap: usize) -> usize {
+    var k: usize = 0
+    var i: usize = 0
+    while i < n && k + 3 <= cap {
+        let b: u8 = *((p + i as u64) as *mut u8)
+        // count lead bytes only: continuation bytes are 10xxxxxx
+        if (b & (192 as u8)) != (128 as u8) {
+            *((out + k as u64) as *mut u8) = 226 as u8
+            *((out + (k + 1) as u64) as *mut u8) = 128 as u8
+            *((out + (k + 2) as u64) as *mut u8) = 162 as u8
+            k = k + 3
+        }
+        i = i + 1
+    }
+    return k
+}
+
+fn mask_index(p: u64, n: usize, i: usize) -> usize {
+    var k: usize = 0
+    var j: usize = 0
+    while j < i && j < n {
+        let b: u8 = *((p + j as u64) as *mut u8)
+        if (b & (192 as u8)) != (128 as u8) {
+            k = k + 3
+        }
+        j = j + 1
+    }
+    if k > MASK_CAP - (MASK_CAP % 3) {
+        k = MASK_CAP - (MASK_CAP % 3)
+    }
+    return k
+}
+
+fn mask_source(p: u64, n: usize, k: usize) -> usize {
+    let want: usize = k / 3
+    var seen: usize = 0
+    var j: usize = 0
+    while j < n {
+        let b: u8 = *((p + j as u64) as *mut u8)
+        if (b & (192 as u8)) != (128 as u8) {
+            if seen == want {
+                return j
+            }
+            seen = seen + 1
+        }
+        j = j + 1
+    }
+    return n
+}
+
+#[allow_fp]
+fn intr_bits_f64(x: f64) -> u64 {
+    var t: f64 = x
+    return *(((&t) as usize) as *mut u64)
+}
