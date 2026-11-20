@@ -24,7 +24,7 @@ as --64 -o "$OUT/crt.o" kernel/user/crt.s
 printf 'root:x:0:0:root:/:/bin/sh\njustin:x:1000:1000:Justin:/home/justin:/bin/sh\n' > "$OUT/passwd"
 printf 'root:x:0:\njustin:x:1000:\n' > "$OUT/group"
 head -c 128 /dev/zero | tr '\0' 'x' > "$OUT/installed"
-cp assets/xfx/user.js "$OUT/user.js"
+cp "${XL_USERJS:-assets/xfx/user.js}" "$OUT/user.js"
 grep -v -E '^/etc/(passwd|group|shadow)=' "$WD/fxrun/spec.txt" > "$OUT/spec.in"
 cp "$OUT/spec.in" "$OUT/spec.base"
 
@@ -39,6 +39,7 @@ cp "$OUT/spec.in" "$OUT/spec.base"
         echo "grep -a wayd /var/log/xfx.log"
         echo "sleep $UP_SECONDS"
         echo "echo XLUP $r"
+        echo "cat /proc/loadavg"
         echo "/bin/xfx status"
         echo "grep -a ShmObjects: /proc/meminfo"
         echo "/bin/xfxt procs"
@@ -87,6 +88,8 @@ while [ "$r" -le "$ROUNDS" ]; do
     [ "${up_fx:-0}" -ge 1 ] && ok "round $r: firefox alive after ${UP_SECONDS}s ($up_fx tasks)" || bad "round $r: firefox not alive after ${UP_SECONDS}s"
     chunk=$(awk -v r="$r" '$1=="XLUP"&&$2==r{f=1;next} f&&$1=="XLCHUNK"{g=1;next} g&&/^[0-9]+$/{print; exit}' "$S")
     [ "${chunk:-1}" = 0 ] && ok "round $r: no chunk allocation failure logged" || bad "round $r: chunk allocation failures logged: ${chunk:-?}"
+    tasks_up=$(awk -v r="$r" '$1=="XLUP"&&$2==r{f=1;next} f&&/^[0-9.]+ [0-9.]+ [0-9.]+ [0-9]+\/[0-9]+/{split($4,a,"/"); print a[2]; exit}' "$S")
+    echo "  INFO  round $r: ${tasks_up:-?} live tasks"
     shm_down=$(awk -v r="$r" '$1=="XLDOWN"&&$2==r{f=1;next} f&&/ShmObjects:/{print $2; exit}' "$S")
     procs_down=$(awk -v r="$r" '$1=="XLDOWN"&&$2==r{f=1;next} f&&/^xfxt: proc /{if($3=="firefox"||$3=="wayd")n++} f&&/^(XLROUND|XLEND)/{exit} END{print n+0}' "$S")
     [ "${procs_down:-1}" = 0 ] && ok "round $r: no firefox/wayd process after stop" || bad "round $r: $procs_down firefox/wayd processes left after stop"

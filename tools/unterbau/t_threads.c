@@ -243,7 +243,7 @@ int main(void)
     group_case("group_exit_group_150_is_exit", 4, 0, 150);
     {
         long me = getpid(), slot = -1;
-        for (long i = 0; i < 256 && slot < 0; i++) if (syscall(1003, i, 1L) == me) slot = i;
+        for (long i = 0; i < 512 && slot < 0; i++) if (syscall(1003, i, 1L) == me) slot = i;
         pthread_t th[2]; int made = 0;
         for (int i = 0; i < 2; i++) if (pthread_create(&th[i], 0, idle_thr, 0) == 0) made++;
         settle(200);
