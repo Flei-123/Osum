@@ -82,6 +82,11 @@ const SK_NAME: u64 = 56
 const SK_RCVTMO: u64 = 64
 const SK_SNDTMO: u64 = 72
 const SK_STYPE: u64 = 80
+const SK_NEXT: u64 = 88
+const SK_BACKLOG: u64 = 96
+const SK_PENDN: u64 = 104
+const ST_SEQPACKET: u64 = 5
+const BACKLOG_MAX: u64 = 64
 
 const FQ_COUNT: u64 = 0
 const FQ_SLOT: u64 = 8
@@ -308,6 +313,9 @@ fn sock_new_held(state: u64, kind: u64) -> u64 {
             kstate.set(state, sk_at(i) + SK_RCVTMO, 0)
             kstate.set(state, sk_at(i) + SK_SNDTMO, 0)
             kstate.set(state, sk_at(i) + SK_STYPE, kind)
+            kstate.set(state, sk_at(i) + SK_NEXT, USOCK_MAX)
+            kstate.set(state, sk_at(i) + SK_BACKLOG, 0)
+            kstate.set(state, sk_at(i) + SK_PENDN, 0)
             kstate.add(state, mmlock.LOCK_BASE + C_SOCKS, 1)
             return i
         }
@@ -336,9 +344,25 @@ fn ensure_ring(state: u64, i: u64) -> u64 {
     return r
 }
 
+fn drain_queue(state: u64, lst: u64) {
+    var guard: u64 = 0
+    while guard < USOCK_MAX {
+        let srv: u64 = kstate.get(state, sk_at(lst) + SK_HEAD)
+        if srv >= USOCK_MAX {
+            return
+        }
+        kstate.set(state, sk_at(lst) + SK_HEAD, kstate.get(state, sk_at(srv) + SK_NEXT))
+        sock_free(state, srv)
+        guard = guard + 1
+    }
+}
+
 fn sock_free(state: u64, i: u64) {
     if i >= USOCK_MAX || kstate.get(state, sk_at(i) + SK_USED) == 0 {
         return
+    }
+    if kstate.get(state, sk_at(i) + SK_STATE) == S_LISTEN {
+        drain_queue(state, i)
     }
     let r: u64 = kstate.get(state, sk_at(i) + SK_RING)
     if r != 0 {
@@ -467,7 +491,7 @@ fn find_dgram(state: u64, path: u64, len: u64) -> u64 {
     while n < UNAME_MAX {
         if kstate.get(state, nm_at(n) + NM_USED) != 0 && name_eq(state, n, path, len) {
             let s: u64 = kstate.get(state, nm_at(n) + NM_SOCK)
-            if s < USOCK_MAX && kstate.get(state, sk_at(s) + SK_KIND) == UK_DGRAM && kstate.get(state, sk_at(s) + SK_RING) != 0 {
+            if s < USOCK_MAX && kstate.get(state, sk_at(s) + SK_KIND) == UK_DGRAM && kstate.get(state, sk_at(s) + SK_STYPE) != ST_SEQPACKET && kstate.get(state, sk_at(s) + SK_RING) != 0 {
                 return s
             }
             return USOCK_MAX
@@ -541,16 +565,54 @@ fn pending(state: u64, i: u64) -> bool {
     return kstate.get(state, sk_at(i) + SK_HEAD) < USOCK_MAX
 }
 
-fn listen_on(state: u64, i: u64) -> u64 {
+fn listen_on(state: u64, i: u64, backlog: u64) -> u64 {
     if i >= USOCK_MAX || kstate.get(state, sk_at(i) + SK_USED) == 0 {
         return errno.E_BADF
+    }
+    if kstate.get(state, sk_at(i) + SK_KIND) == UK_DGRAM
+        && kstate.get(state, sk_at(i) + SK_STYPE) != ST_SEQPACKET {
+        return errno.E_OPNOTSUPP
     }
     if kstate.get(state, sk_at(i) + SK_NAME) >= UNAME_MAX {
         return errno.E_INVAL
     }
-    kstate.set(state, sk_at(i) + SK_HEAD, USOCK_MAX)
-    kstate.set(state, sk_at(i) + SK_STATE, S_LISTEN)
+    var limit: u64 = backlog + 1
+    if backlog > BACKLOG_MAX {
+        limit = BACKLOG_MAX + 1
+    }
+    kstate.set(state, sk_at(i) + SK_BACKLOG, limit)
+    if kstate.get(state, sk_at(i) + SK_STATE) != S_LISTEN {
+        kstate.set(state, sk_at(i) + SK_HEAD, USOCK_MAX)
+        kstate.set(state, sk_at(i) + SK_PENDN, 0)
+        kstate.set(state, sk_at(i) + SK_STATE, S_LISTEN)
+    }
     return 0
+}
+
+fn enqueue_pending(state: u64, lst: u64, srv: u64) {
+    kstate.set(state, sk_at(srv) + SK_NEXT, USOCK_MAX)
+    var cur: u64 = kstate.get(state, sk_at(lst) + SK_HEAD)
+    if cur >= USOCK_MAX {
+        kstate.set(state, sk_at(lst) + SK_HEAD, srv)
+    } else {
+        var guard: u64 = 0
+        while guard < USOCK_MAX {
+            let nxt: u64 = kstate.get(state, sk_at(cur) + SK_NEXT)
+            if nxt >= USOCK_MAX {
+                kstate.set(state, sk_at(cur) + SK_NEXT, srv)
+                guard = USOCK_MAX
+            } else {
+                cur = nxt
+                guard = guard + 1
+            }
+        }
+    }
+    kstate.add(state, sk_at(lst) + SK_PENDN, 1)
+}
+
+fn reset_ring_ends(state: u64, i: u64) {
+    kstate.set(state, sk_at(i) + SK_HEAD, 0)
+    kstate.set(state, sk_at(i) + SK_TAIL, 0)
 }
 
 fn connect_to(state: u64, i: u64, lst: u64) -> u64 {
@@ -560,23 +622,34 @@ fn connect_to(state: u64, i: u64, lst: u64) -> u64 {
     if kstate.get(state, sk_at(lst) + SK_STATE) != S_LISTEN {
         return errno.E_CONNREFUSED
     }
-    var cur: u64 = kstate.get(state, sk_at(lst) + SK_HEAD)
-    if cur >= USOCK_MAX {
-        kstate.set(state, sk_at(lst) + SK_HEAD, i)
-    } else {
-        var guard: u64 = 0
-        while guard < USOCK_MAX {
-            let nxt: u64 = kstate.get(state, sk_at(cur) + SK_PEER)
-            if nxt >= USOCK_MAX {
-                kstate.set(state, sk_at(cur) + SK_PEER, i)
-                guard = USOCK_MAX
-            } else {
-                cur = nxt
-                guard = guard + 1
-            }
-        }
+    let ukind: u64 = kstate.get(state, sk_at(i) + SK_KIND)
+    if ukind != kstate.get(state, sk_at(lst) + SK_KIND)
+        || kstate.get(state, sk_at(i) + SK_STYPE) != kstate.get(state, sk_at(lst) + SK_STYPE) {
+        return errno.E_PROTOTYPE
     }
-    kstate.set(state, sk_at(i) + SK_PEER, USOCK_MAX)
+    if kstate.get(state, sk_at(lst) + SK_PENDN) >= kstate.get(state, sk_at(lst) + SK_BACKLOG) {
+        return errno.E_AGAIN
+    }
+    let srv: u64 = sock_new(state, ukind)
+    if srv >= USOCK_MAX {
+        return errno.E_NFILE
+    }
+    if ensure_ring(state, srv) == 0 || ensure_ring(state, i) == 0 {
+        sock_free(state, srv)
+        return errno.E_NOMEM
+    }
+    kstate.set(state, sk_at(srv) + SK_STYPE, kstate.get(state, sk_at(i) + SK_STYPE))
+    reset_ring_ends(state, srv)
+    reset_ring_ends(state, i)
+    let lname: u64 = kstate.get(state, sk_at(lst) + SK_NAME)
+    if lname < UNAME_MAX {
+        kstate.set(state, sk_at(srv) + SK_NAME, NM_BORROW + lname)
+    }
+    kstate.set(state, sk_at(srv) + SK_PEER, i)
+    kstate.set(state, sk_at(i) + SK_PEER, srv)
+    kstate.set(state, sk_at(srv) + SK_STATE, S_CONNECTED)
+    kstate.set(state, sk_at(i) + SK_STATE, S_CONNECTED)
+    enqueue_pending(state, lst, srv)
     return 0
 }
 
@@ -585,35 +658,16 @@ fn accept_from(state: u64, lst: u64) -> u64 {
         || kstate.get(state, sk_at(lst) + SK_STATE) != S_LISTEN {
         return USOCK_MAX
     }
-    let cli: u64 = kstate.get(state, sk_at(lst) + SK_HEAD)
-    if cli >= USOCK_MAX {
-        return USOCK_MAX
-    }
-    kstate.set(state, sk_at(lst) + SK_HEAD,
-        kstate.get(state, sk_at(cli) + SK_PEER))
-    let srv: u64 = sock_new(state, UK_STREAM)
+    let srv: u64 = kstate.get(state, sk_at(lst) + SK_HEAD)
     if srv >= USOCK_MAX {
-        kstate.set(state, sk_at(cli) + SK_PEER,
-            kstate.get(state, sk_at(lst) + SK_HEAD))
-        kstate.set(state, sk_at(lst) + SK_HEAD, cli)
         return USOCK_MAX
     }
-    if ensure_ring(state, srv) == 0 || ensure_ring(state, cli) == 0 {
-        sock_free(state, srv)
-        return USOCK_MAX
+    kstate.set(state, sk_at(lst) + SK_HEAD, kstate.get(state, sk_at(srv) + SK_NEXT))
+    kstate.set(state, sk_at(srv) + SK_NEXT, USOCK_MAX)
+    let n: u64 = kstate.get(state, sk_at(lst) + SK_PENDN)
+    if n != 0 {
+        kstate.set(state, sk_at(lst) + SK_PENDN, n - 1)
     }
-    kstate.set(state, sk_at(srv) + SK_HEAD, 0)
-    kstate.set(state, sk_at(srv) + SK_TAIL, 0)
-    kstate.set(state, sk_at(cli) + SK_HEAD, 0)
-    kstate.set(state, sk_at(cli) + SK_TAIL, 0)
-    let lname: u64 = kstate.get(state, sk_at(lst) + SK_NAME)
-    if lname < UNAME_MAX {
-        kstate.set(state, sk_at(srv) + SK_NAME, NM_BORROW + lname)
-    }
-    kstate.set(state, sk_at(srv) + SK_PEER, cli)
-    kstate.set(state, sk_at(cli) + SK_PEER, srv)
-    kstate.set(state, sk_at(srv) + SK_STATE, S_CONNECTED)
-    kstate.set(state, sk_at(cli) + SK_STATE, S_CONNECTED)
     return srv
 }
 

@@ -448,7 +448,7 @@ fn do_bind(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
 
 fn do_listen(state: u64, me: u64, fd: u64, backlog: u64) -> u64 {
     if usock_of(state, me, fd) < unixsock.USOCK_MAX {
-        return do_ulisten(state, me, fd)
+        return do_ulisten(state, me, fd, backlog)
     }
     let si: u64 = sysfd.sock_of(state, me, fd)
     if si >= inet.SOCK_MAX {
@@ -1455,22 +1455,28 @@ fn shm_of(state: u64, me: u64, fd: u64) -> u64 {
 
 fn do_usocket(state: u64, me: u64, kind: u64, protocol: u64) -> u64 {
     let base: u64 = kind & 0xFF
-    // r731: SOCK_DGRAM on AF_UNIX (bind/sendto/connect by path); everything else is refused honestly
-    if base != SOCK_STREAM && base != sysconst.SOCK_DGRAM {
+    if base != SOCK_STREAM && base != sysconst.SOCK_DGRAM && base != SOCK_SEQPACKET {
         return sysuser.neg(errno.E_PROTONOSUPPORT)
     }
     if protocol != 0 {
         return sysuser.neg(errno.E_PROTONOSUPPORT)
     }
     var ukind: u64 = unixsock.UK_STREAM
-    if base == sysconst.SOCK_DGRAM {
+    if base == sysconst.SOCK_DGRAM || base == SOCK_SEQPACKET {
         ukind = unixsock.UK_DGRAM
     }
     let si: u64 = unixsock.sock_new(state, ukind)
     if si >= unixsock.USOCK_MAX {
         return sysuser.neg(errno.E_NFILE)
     }
-    let of: u64 = file.open_alloc(state, file.K_USOCK, si, sysconst.O_RDWR)
+    if base == SOCK_SEQPACKET {
+        unixsock.sock_set_stype(state, si, SOCK_SEQPACKET)
+    }
+    var open_flags: u64 = sysconst.O_RDWR
+    if (kind & sysconst.SOCK_NONBLOCK) != 0 {
+        open_flags = open_flags | sysconst.UB_O_NONBLOCK
+    }
+    let of: u64 = file.open_alloc(state, file.K_USOCK, si, open_flags)
     if of >= file.MAX_OPEN {
         unixsock.sock_free(state, si)
         return sysuser.neg(errno.E_NFILE)
@@ -1517,12 +1523,12 @@ fn do_ubind(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
     return 0
 }
 
-fn do_ulisten(state: u64, me: u64, fd: u64) -> u64 {
+fn do_ulisten(state: u64, me: u64, fd: u64, backlog: u64) -> u64 {
     let si: u64 = usock_of(state, me, fd)
     if si >= unixsock.USOCK_MAX {
         return sysuser.neg(errno.E_BADF)
     }
-    let r: u64 = unixsock.listen_on(state, si)
+    let r: u64 = unixsock.listen_on(state, si, backlog & 0xFFFFFFFF)
     if r != 0 {
         return sysuser.neg(r)
     }
@@ -1545,8 +1551,7 @@ fn do_uconnect(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
         mmlock.scratch_unlock(state, pfl)
         return sysuser.neg(errno.E_NOENT)
     }
-    if unixsock.sock_kind(state, si) == unixsock.UK_DGRAM {
-        // r731: a datagram connect() just picks the default destination
+    if !usock_connection_oriented(state, si) {
         let dst: u64 = unixsock.find_dgram(state, sysconst.WL_PATH + 2, plen)
         if dst >= unixsock.USOCK_MAX {
             mmlock.scratch_unlock(state, pfl)
@@ -1556,26 +1561,51 @@ fn do_uconnect(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
         mmlock.scratch_unlock(state, pfl)
         return 0
     }
+    let st: u64 = unixsock.sock_state(state, si)
+    if st == unixsock.S_LISTEN {
+        mmlock.scratch_unlock(state, pfl)
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if st != unixsock.S_OPEN {
+        mmlock.scratch_unlock(state, pfl)
+        return sysuser.neg(errno.E_ISCONN)
+    }
     let lst: u64 = unixsock.find_listener(state, sysconst.WL_PATH + 2, plen)
     mmlock.scratch_unlock(state, pfl)
     if lst >= unixsock.USOCK_MAX {
         return sysuser.neg(errno.E_CONNREFUSED)
     }
-    let c: u64 = unixsock.connect_to(state, si, lst)
+    return usock_enqueue(state, me, fd, si, lst)
+}
+
+fn usock_connection_oriented(state: u64, si: u64) -> bool {
+    return unixsock.sock_kind(state, si) == unixsock.UK_STREAM
+        || unixsock.sock_stype(state, si) == SOCK_SEQPACKET
+}
+
+fn usock_enqueue(state: u64, me: u64, fd: u64, si: u64, lst: u64) -> u64 {
+    let deadline: u64 = sysfd.usock_deadline(state, si, true)
+    let nb: bool = frame_nonblock(state, me, fd, 0)
+    var c: u64 = errno.E_AGAIN
+    while c == errno.E_AGAIN {
+        let seen: u64 = sched.poll_seq(state)
+        c = unixsock.connect_to(state, si, lst)
+        if c == errno.E_AGAIN {
+            if nb {
+                return sysuser.neg(errno.E_AGAIN)
+            }
+            let stop: u64 = sysfd.sock_wait_error(state, me, deadline)
+            if stop != 0 {
+                return stop
+            }
+            let _slept: u64 = sysfd.net_wait(state, seen)
+        }
+    }
     if c != 0 {
         return sysuser.neg(c)
     }
     sched.poll_kick(state)
-    var waited: u64 = 0
-    while waited < sysconst.NET_ROUNDS {
-        let seen: u64 = sched.poll_seq(state)
-        let now: u64 = unixsock.sock_state(state, si)
-        if now == unixsock.S_CONNECTED || now == unixsock.S_CLOSED {
-            return 0
-        }
-        waited = waited + sysfd.net_wait(state, seen)
-    }
-    return sysuser.neg(errno.E_AGAIN)
+    return 0
 }
 
 fn do_uaccept(state: u64, me: u64, fd: u64, flags: u64) -> u64 {
@@ -1583,7 +1613,10 @@ fn do_uaccept(state: u64, me: u64, fd: u64, flags: u64) -> u64 {
     if si >= unixsock.USOCK_MAX {
         return sysuser.neg(errno.E_BADF)
     }
-    let nb: bool = (flags & sysconst.SOCK_NONBLOCK) != 0
+    if unixsock.sock_state(state, si) != unixsock.S_LISTEN {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let nb: bool = frame_nonblock(state, me, fd, 0)
     let deadline: u64 = sysfd.usock_deadline(state, si, false)
     var got: u64 = unixsock.USOCK_MAX
     while got >= unixsock.USOCK_MAX {
@@ -1600,7 +1633,12 @@ fn do_uaccept(state: u64, me: u64, fd: u64, flags: u64) -> u64 {
             let _slept: u64 = sysfd.net_wait(state, seen)
         }
     }
-    let of: u64 = file.open_alloc(state, file.K_USOCK, got, sysconst.O_RDWR)
+    sched.poll_kick(state)
+    var accepted_flags: u64 = sysconst.O_RDWR
+    if (flags & sysconst.SOCK_NONBLOCK) != 0 {
+        accepted_flags = accepted_flags | sysconst.UB_O_NONBLOCK
+    }
+    let of: u64 = file.open_alloc(state, file.K_USOCK, got, accepted_flags)
     if of >= file.MAX_OPEN {
         unixsock.sock_free(state, got)
         return sysuser.neg(errno.E_NFILE)
