@@ -76,7 +76,7 @@ part "$T/o.klar" USB NET > "$T/usb.txt"
 part "$T/o.klar" INFO END > "$T/info.txt"
 
 # --- /proc/version
-hasre "$T/ver.txt" 'version [0-9]+ build [0-9a-f]{7,8}\+? image gate42$' "/proc/version: 'version N build <hash> image <id>'"
+hasre "$T/ver.txt" 'version [0-9]+ build [0-9a-f]{7,8}\+? image gate42 abi [0-9]+$' "/proc/version: 'version N build <hash> image <id>'"
 hasre "$T/ver.txt" '^[A-Za-z][A-Za-z ]* \(Firn\) version [0-9]+' "/proc/version: still starts '<name> (Firn) version N' (parseable)"
 # --- /proc/usb
 has "$T/usb.txt" "controller xhci " "/proc/usb: a controller line (xhci)"
