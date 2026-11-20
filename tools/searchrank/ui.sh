@@ -142,6 +142,10 @@ h=$(grep -a 'launcher: rect id=7 ' "$D/serial.txt" | tail -1 | sed -n 's/.* h=\(
 for id in 8 9; do
     grep -aq "launcher: rect id=$id " "$D/serial.txt" && ok "best match button id=$id is reported as a rectangle" || bad "no rectangle for best match button id=$id"
 done
+rect_field() { grep -a "launcher: rect id=$1 " "$D/serial.txt" | tail -1 | sed -n "s/.* $2=\\([0-9]*\\).*/\\1/p"; }
+list_right=$(( $(rect_field 2 x) + $(rect_field 2 w) ))
+[ "$(rect_field 8 x)" -ge "$list_right" ] && ok "detail card buttons stand right of the result list (x=$(rect_field 8 x) >= $list_right)" || bad "detail card buttons overlap the result list"
+[ "$(rect_field 8 y)" -gt "$(rect_field 7 y)" ] && ok "detail card buttons stand below the top of the best match" || bad "detail card buttons above the best match"
 [ "$(val $D.certus stores)" = "" ] && ok "certus is installed: no store hit for it" || bad "certus: store hits '$(val $D.certus stores)'"
 grep -aq 'launcher: use \[xremote\]' "$D/serial.txt" && ok "Enter on 'xremote' starts the app" || bad "Enter on 'xremote' started nothing"
 python3 -I tools/searchrank/check.py "$D/serial.txt" zebra > "$D.q_zebra" 2>&1
