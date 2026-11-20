@@ -1,0 +1,159 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.io
+import gpu.intel.vblank
+
+const REG_CAP: u64 = 32
+const NOT_FOUND: u64 = 0xffff
+const FRAME_STEP_US: u64 = 1000
+const WRAP_START: u64 = 0xfffffffe
+const PIPE_B: u64 = 1
+const PIPE_C: u64 = 2
+const FIRST_BAD_PIPE: u64 = 3
+
+static mut reg_off: [u64; 32] = [0; 32]
+static mut reg_val: [u64; 32] = [0; 32]
+static mut reg_n: u64 = 0
+static mut ticks_per_frame: u64 = 0
+static mut tick_acc: u64 = 0
+static mut frozen: bool = false
+static mut writes: u64 = 0
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn reg_find(off: u64) -> u64 {
+    var i: u64 = 0
+    while i < reg_n {
+        if reg_off[i as usize] == off {
+            return i
+        }
+        i = i + 1
+    }
+    return NOT_FOUND
+}
+
+fn reg_set(off: u64, v: u64) {
+    var i: u64 = reg_find(off)
+    if i == NOT_FOUND {
+        if reg_n >= REG_CAP {
+            return
+        }
+        i = reg_n
+        reg_off[i as usize] = off
+        reg_n = reg_n + 1
+    }
+    reg_val[i as usize] = v
+}
+
+fn reg_get(off: u64) -> u64 {
+    let i: u64 = reg_find(off)
+    if i == NOT_FOUND {
+        return 0
+    }
+    return reg_val[i as usize]
+}
+
+fn m_rd(off: u64) -> u64 {
+    return reg_get(off)
+}
+
+fn m_wr(off: u64, v: u64) -> u64 {
+    writes = writes + 1
+    if off >= 0x44400 && off < 0x44430 && (off & 0xf) == 8 {
+        reg_set(off, reg_get(off) & (~v) & 0xffffffff)
+        return 0
+    }
+    reg_set(off, v)
+    return 0
+}
+
+fn m_us(n: u64) -> u64 {
+    if frozen {
+        return 0
+    }
+    tick_acc = tick_acc + n
+    while tick_acc >= ticks_per_frame {
+        tick_acc = tick_acc - ticks_per_frame
+        reg_set(vblank.FRMCOUNT_A, (reg_get(vblank.FRMCOUNT_A) + 1) & 0xffffffff)
+    }
+    return 0
+}
+
+fn reset(frame_us: u64) {
+    reg_n = 0
+    ticks_per_frame = frame_us
+    tick_acc = 0
+    frozen = false
+    writes = 0
+}
+
+fn test_offsets() {
+    chk("offsets: pipe A IMR", vblank.pipe_imr(0) == 0x44404)
+    chk("offsets: pipe B IIR", vblank.pipe_iir(1) == 0x44418)
+    chk("offsets: pipe C IER", vblank.pipe_ier(2) == 0x4442c)
+    chk("offsets: master bit for pipe B", vblank.master_pipe_bit(1) == 0x20000)
+    chk("offsets: master bit for pipe C", vblank.master_pipe_bit(2) == 0x40000)
+    chk("offsets: frame counter pipe B", vblank.FRMCOUNT_A + PIPE_B * vblank.PIPE_STRIDE == 0x71040)
+}
+
+fn test_wait() {
+    reset(FRAME_STEP_US)
+    chk("wait: one frame", vblank.wait_frames(m_rd, m_us, 0, 1) == vblank.V_OK)
+    chk("wait: counter advanced by at least one", vblank.frame_count(m_rd, 0) >= 1)
+    reset(FRAME_STEP_US)
+    chk("wait: three frames", vblank.wait_frames(m_rd, m_us, 0, 3) == vblank.V_OK && vblank.frame_count(m_rd, 0) >= 3)
+    reset(FRAME_STEP_US)
+    reg_set(vblank.FRMCOUNT_A, WRAP_START)
+    chk("wait: counter wrap is handled", vblank.wait_frames(m_rd, m_us, 0, 4) == vblank.V_OK)
+    reset(FRAME_STEP_US)
+    frozen = true
+    chk("wait: a stuck counter times out", vblank.wait_frames(m_rd, m_us, 0, 1) == vblank.V_TIMEOUT)
+    chk("wait: pipe out of range", vblank.wait_frames(m_rd, m_us, vblank.MAX_PIPES, 1) == vblank.V_ARG)
+    chk("wait: zero frames", vblank.wait_frames(m_rd, m_us, 0, 0) == vblank.V_ARG)
+    reset(FRAME_STEP_US)
+    reg_set(vblank.FRMCOUNT_A + PIPE_C * vblank.PIPE_STRIDE, 0)
+    frozen = true
+    chk("wait: reads the counter of the requested pipe", vblank.wait_frames(m_rd, m_us, PIPE_C, 1) == vblank.V_TIMEOUT)
+}
+
+fn test_irq() {
+    reset(FRAME_STEP_US)
+    reg_set(vblank.pipe_imr(PIPE_B), 0xffffffff)
+    reg_set(vblank.pipe_ier(PIPE_B), 0x2)
+    chk("irq: enable", vblank.irq_enable(m_rd, m_wr, PIPE_B) == vblank.V_OK)
+    chk("irq: vblank unmasked, other bits stay masked", reg_get(vblank.pipe_imr(PIPE_B)) == 0xfffffffe)
+    chk("irq: vblank enabled, other bits kept", reg_get(vblank.pipe_ier(PIPE_B)) == 0x3)
+    chk("irq: master enable set", (reg_get(vblank.MASTER_IRQ) & vblank.MASTER_ENABLE) != 0)
+    chk("irq: nothing pending yet", !vblank.irq_pending(m_rd, PIPE_B))
+    reg_set(vblank.pipe_iir(PIPE_B), 1)
+    chk("irq: iir alone is not pending without the master bit", !vblank.irq_pending(m_rd, PIPE_B))
+    reg_set(vblank.MASTER_IRQ, vblank.MASTER_ENABLE | vblank.master_pipe_bit(PIPE_B))
+    chk("irq: pending with master bit and iir", vblank.irq_pending(m_rd, PIPE_B))
+    chk("irq: other pipe not pending", !vblank.irq_pending(m_rd, 0))
+    chk("irq: ack", vblank.irq_ack(m_wr, PIPE_B) == vblank.V_OK)
+    chk("irq: ack clears the status", !vblank.irq_pending(m_rd, PIPE_B))
+    chk("irq: disable", vblank.irq_disable(m_rd, m_wr, PIPE_B) == vblank.V_OK)
+    chk("irq: vblank masked again", (reg_get(vblank.pipe_imr(PIPE_B)) & 1) == 1)
+    chk("irq: vblank disabled, other bits kept", reg_get(vblank.pipe_ier(PIPE_B)) == 0x2)
+    let w: u64 = writes
+    chk("irq: bad pipe enable", vblank.irq_enable(m_rd, m_wr, vblank.MAX_PIPES) == vblank.V_ARG)
+    chk("irq: bad pipe disable", vblank.irq_disable(m_rd, m_wr, vblank.MAX_PIPES) == vblank.V_ARG)
+    chk("irq: bad pipe ack", vblank.irq_ack(m_wr, vblank.MAX_PIPES) == vblank.V_ARG)
+    chk("irq: bad pipe writes nothing", writes == w)
+    chk("irq: bad pipe is never pending", !vblank.irq_pending(m_rd, vblank.MAX_PIPES))
+    chk("pipes: index 3 is rejected everywhere", vblank.irq_enable(m_rd, m_wr, FIRST_BAD_PIPE) == vblank.V_ARG
+        && vblank.wait_frames(m_rd, m_us, FIRST_BAD_PIPE, 1) == vblank.V_ARG && writes == w)
+}
+
+fn main() -> i32 {
+    test_offsets()
+    test_wait()
+    test_irq()
+    return 0
+}

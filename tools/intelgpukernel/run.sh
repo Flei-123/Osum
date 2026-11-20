@@ -25,15 +25,16 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 build_kernel() {
-    local src=$1 out=$2 w
+    local src=$1 out=$2 w user_mod=proccopy
+    [ -f "$src/kernel/sched/proc/proccopy.fi" ] || user_mod=proc
     w=$(mktemp -d "$TMPD/bk.XXXXXX")
     ( cd "$src" || exit 1
       for f in boot isr switch smp hv; do as --64 -o "$w/$f.o" "kernel/arch/x86_64/$f.s" 2>/dev/null || exit 1; done
-      FIRNLIB="$src/lib" "$ROOT/$FIRNC" kernel/kmain.fi -o "$w/k.o" >"$w/e" 2>&1 \
-          && FIRNLIB="$src/lib" "$ROOT/$FIRNC" kernel/uprog.fi -o "$w/u.o" >>"$w/e" 2>&1 || { head -8 "$w/e"; exit 1; }
+      FIRNLIB="$src/lib" "$FIRNC" kernel/kmain.fi -o "$w/k.o" >"$w/e" 2>&1 \
+          && FIRNLIB="$src/lib" "$FIRNC" kernel/uprog.fi -o "$w/u.o" >>"$w/e" 2>&1 || { head -8 "$w/e"; exit 1; }
       ld -n -T kernel/kernel.ld --defsym=KERNEL_MAIN="_F0.kernel_main" --defsym=KERNEL_TRAP="_F0.trap__entry" \
           --defsym=KERNEL_SYSCALL="_F0.sys__entry" --defsym=KERNEL_TASK_MAIN="_F0.tasks__main" \
-          --defsym=KERNEL_USER_START="_F0.proccopy__user_start" --defsym=KERNEL_AP_MAIN="_F0.smp__ap_main" \
+          --defsym=KERNEL_USER_START="_F0.${user_mod}__user_start" --defsym=KERNEL_AP_MAIN="_F0.smp__ap_main" \
           --defsym=USER_MAIN="_F0.u_enter" -o "$w/k.elf" "$w/boot.o" "$w/isr.o" "$w/switch.o" "$w/smp.o" "$w/hv.o" \
           "$w/k.o" "$w/u.o" 2>"$w/ld.err" || { head -5 "$w/ld.err"; exit 1; }
       objcopy -O elf32-i386 "$w/k.elf" "$out" 2>/dev/null )
@@ -60,6 +61,8 @@ count() { grep -ac "$2" "$TMPD/$1.txt"; }
 mkdir -p "$TMPD/base"
 git archive "$BASE_REF" kernel lib | tar -x -C "$TMPD/base"
 ln -s "$ROOT/vendor" "$TMPD/base/vendor"
+mkdir -p "$TMPD/base/lib/font"
+ln -sfn "$FIRN_TOOLCHAIN/lib/font/ttf.fi" "$TMPD/base/lib/font/fuittf.fi"
 
 build_kernel "$ROOT" "$TMPD/new.mb" && ok "kernel with the driver builds" || bad "kernel with the driver does not build"
 build_kernel "$TMPD/base" "$TMPD/base.mb" && ok "kernel before the driver ($BASE_REF) builds" || bad "base kernel does not build"
