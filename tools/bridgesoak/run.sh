@@ -61,7 +61,7 @@ log           = /var/log/jarvisd.log
 work_file     = /var/jarvis/output.txt
 permit_file   = /var/jarvis/screenshot-permit
 CONF
-SPEC="/bin/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/"
+SPEC="/bin/ /proc/ /dev/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/"
 for p in sh ls cat echo chmod jsig jarvisctl tablewatch; do SPEC="$SPEC /bin/$p=$W/$p.elf"; done
 SPEC="$SPEC /bin/jarvisd=$W/jarvisd.elf /etc/jarvis/permissions.conf=$W/permissions.conf"
 SPEC="$SPEC /etc/ssl/roots.pem=$W/roots.pem /etc/resolv.conf=$W/resolv.conf"
@@ -97,7 +97,7 @@ start_guest() {
     local serial=$1 flags=$2 deadline=$3
     cp "$W/probe.img" "$W/live.img"
     timeout 300 qemu-system-x86_64 -kernel "$W/k.mb" -m 256 \
-        -append "osum nokbd nosched noproc nofs noring3 gfx nocursor nic nip=$OSUM_IP/24 ngw=$HOST_IP $SVC_WORDS $flags script=tablewatch $WATCH_PERIOD_S;jarvisd -v -t $deadline;exit" \
+        -append "osum vfs nokbd nosched nofs noring3 gfx nocursor nic nip=$OSUM_IP/24 ngw=$HOST_IP $SVC_WORDS $flags script=tablewatch $WATCH_PERIOD_S;jarvisd -v -t $deadline;exit" \
         -serial "file:$serial" -display none -no-reboot \
         -drive "file=$W/live.img,format=raw,if=ide,index=0" \
         -netdev "socket,id=n0,udp=127.0.0.1:$BPORT,localaddr=127.0.0.1:$QPORT" \
