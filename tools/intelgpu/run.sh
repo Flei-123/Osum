@@ -12,7 +12,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 
-for m in ids regs bits mode timing edid aux snap dump flip ggtt dbuf backbuf confirm modeset flushpol flushstat engregs fwake micmd ring lrc elsp ereset engine submit blt blit blitpool rcsparse vblank; do
+for m in ids regs bits mode timing edid aux snap dump flip ggtt dbuf backbuf confirm modeset flushpol flushstat engregs fwake micmd ring lrc elsp ereset engine submit blt blit blitpool rcsparse vblank ppgtt; do
     printf 'import gpu.intel.%s\nfn main() -> i32 {\n    return 0\n}\n' "$m" > "$T/k_$m.fi"
     "$FIRNC" --profile=kernel -c "$T/k_$m.fi" -o "$T/k_$m.o" 2> "$T/k.err" \
         && ok "gpu.intel.$m compiles with --profile=kernel" \
@@ -97,6 +97,7 @@ run_oracle() {
 
 run_oracle rcs tools/intelgpu/rcs.fi 36
 run_oracle vblank tools/intelgpu/vblank.fi 33
+run_oracle ppgtt tools/intelgpu/ppgtt.fi 91
 
 ORACLE=tools/intelgpu/oracle.fi
 
@@ -343,6 +344,37 @@ mutate vb_status_bit  vblank 's/PIPE_VBLANK: u64 = 1$/PIPE_VBLANK: u64 = 2/'
 mutate vb_dis_ier     vblank 's/    wr(pipe_ier(pipe), rd(pipe_ier(pipe)) \& (~PIPE_VBLANK) \& ALL_BITS)//'
 mutate vb_pipes       vblank 's/MAX_PIPES: u64 = 3/MAX_PIPES: u64 = 4/'
 mutate vb_ack_noop    vblank 's/^    wr(pipe_iir(pipe), PIPE_VBLANK)\n    return V_OK$/    return V_OK/;/^fn irq_ack/,/^}/{s/    wr(pipe_iir(pipe), PIPE_VBLANK)//}'
+ORACLE=tools/intelgpu/ppgtt.fi
+mutate pp_pwt         ppgtt 's/PPAT_UNCACHED: u64 = 0x18/PPAT_UNCACHED: u64 = 0x08/'
+mutate pp_wt          ppgtt 's/PPAT_WT: u64 = 0x10/PPAT_WT: u64 = 0x08/'
+mutate pp_wb          ppgtt 's/PPAT_WB: u64 = 0x80/PPAT_WB: u64 = 0x40/'
+mutate pp_readonly    ppgtt 's/        pte = pte \& (~RW)/        pte = pte/'
+mutate pp_phys_mask   ppgtt 's/PTE_PHYS_MASK: u64 = 0x7ffffff000/PTE_PHYS_MASK: u64 = 0xfffffffff000/'
+mutate pp_pdp_shift   ppgtt 's/PDP_SHIFT: u64 = 30/PDP_SHIFT: u64 = 29/'
+mutate pp_pd_shift    ppgtt 's/PD_SHIFT: u64 = 21/PD_SHIFT: u64 = 20/'
+mutate pp_pt_shift    ppgtt 's/PT_SHIFT: u64 = 12/PT_SHIFT: u64 = 13/'
+mutate pp_limit       ppgtt 's/VA_LIMIT: u64 = 0x100000000/VA_LIMIT: u64 = 0x200000000/'
+mutate pp_pd_fill     ppgtt 's/        fill(pd, scratch_pde_pt(st))//'
+mutate pp_exists      ppgtt 's/    if octets.ld64(at, 0) != scratch_pte(st) {/    if false {/'
+mutate pp_nomem       ppgtt 's/    if used >= slot(st, S_POOL_PAGES) {/    if false {/'
+mutate pp_unmap_clear ppgtt 's/    octets.st64(at, 0, scratch_pte(st))/    octets.st64(at, 0, 0)/'
+mutate pp_count       ppgtt 's/    octets.st64(st, S_MAPPED, slot(st, S_MAPPED) + 1)//'
+mutate pp_uncount     ppgtt 's/    octets.st64(st, S_MAPPED, slot(st, S_MAPPED) - 1)//'
+mutate pp_ensure      ppgtt 's/    if pt != slot(st, S_SCRATCH_PT) {/    if true {/'
+mutate pp_pt_fill     ppgtt 's/    fill(fresh, scratch_pte(st))//'
+mutate pp_audit_pool  ppgtt 's/ || in_pool(st, pte \& PTE_PHYS_MASK)//'
+mutate pp_audit_win   ppgtt 's/ || allowed(pte \& PTE_PHYS_MASK) == 0//'
+mutate pp_audit_pde   ppgtt 's/ || !in_pool(st, pt)//'
+mutate pp_ctx_ldw     ppgtt 's/CTX_LDW_AFTER_UDW: u64 = 2/CTX_LDW_AFTER_UDW: u64 = 1/'
+mutate pp_ctx_step    ppgtt 's/CTX_PDP_STEP: u64 = 4/CTX_PDP_STEP: u64 = 2/'
+mutate pp_ctx_low     ppgtt 's/ADDR_LOW_MASK: u64 = 0xffffffff/ADDR_LOW_MASK: u64 = 0xfffff/'
+mutate pp_cache_range ppgtt 's/ || cache > CACHE_WB//'
+mutate pp_va_align    ppgtt 's/ \&\& (va \& PAGE_MASK) == 0 \&\& (phys/ \&\& (phys/'
+mutate pp_phys_align  ppgtt 's/ \&\& (phys \& PAGE_MASK) == 0 \&\& phys <=/ \&\& phys <=/'
+mutate pp_phys_limit  ppgtt 's/ \&\& phys <= PTE_PHYS_MASK$//'
+mutate pp_min_pool    ppgtt 's/ || pool_pages < MIN_POOL_PAGES//'
+mutate pp_pool_align  ppgtt 's/ || (pool \& PAGE_MASK) != 0//'
+mutate pp_pdp_range   ppgtt 's/    if n >= PDP_COUNT {/    if false {/'
 ORACLE=tools/intelgpu/oracle.fi
 
 echo "INTELGPU: $pass passed, $fail failed"
