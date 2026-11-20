@@ -31,6 +31,14 @@ int main(void)
     void *low = reserve(0x10000, 0x100000);
     CHECK("noreplace_unmappable_not_einval", low == MAP_FAILED && errno != EINVAL, "errno=%d", errno);
 
+    errno = 0;
+    void *probe_ok = reserve(1UL << 32, PG);
+    CHECKC("probe_below_window_top", probe_ok == (void *)(1UL << 32));
+    if (probe_ok != MAP_FAILED) munmap(probe_ok, PG);
+    errno = 0;
+    void *probe_far = reserve(1UL << 40, PG);
+    CHECK("probe_far_not_eexist", probe_far == MAP_FAILED && errno != EEXIST, "errno=%d", errno);
+
     int fd = open(PATH, O_RDWR | O_CREAT | O_TRUNC, 0600);
     CHECKC("create", fd >= 0);
     if (fd < 0) return 1;
@@ -79,6 +87,18 @@ int main(void)
     CHECK("unmap_fixed", munmap((void *)SHARED_DATA, PG) == 0, "errno=%d", errno);
     void *redo = mmap((void *)SHARED_DATA, PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
     CHECKC("remap_after_unmap", redo == (void *)SHARED_DATA);
+    int bfd = open(PATH, O_RDWR | O_TRUNC);
+    unsigned long big = 324 * PG;
+    CHECK("big_size", bfd >= 0 && ftruncate(bfd, big) == 0, "errno=%d", errno);
+    volatile unsigned char *bw = mmap(0, big, PROT_READ | PROT_WRITE, MAP_SHARED, bfd, 0);
+    CHECKC("big_shared_rw", bw != MAP_FAILED);
+    if (bw != MAP_FAILED) {
+        bw[big - 1] = 0x77;
+        bw[250 * PG] = 0x66;
+        volatile unsigned char *br = mmap(0, big, PROT_READ, MAP_SHARED, bfd, 0);
+        CHECKC("big_shared_ro_attach", br != MAP_FAILED);
+        if (br != MAP_FAILED) CHECK("big_shared_ro_sees_write", br[big - 1] == 0x77 && br[250 * PG] == 0x66, "bytes");
+    }
     unlink(PATH);
     return 0;
 }

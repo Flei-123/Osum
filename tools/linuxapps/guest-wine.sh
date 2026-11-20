@@ -7,7 +7,7 @@ t() {
     timeout ${WINE_TMO:-240} "$@" > /tmp/o.$n 2>&1 < /dev/null
     rc=$?
     if [ $rc -eq 0 ] && grep -q -- "$want" /tmp/o.$n; then echo "WINE-RESULT $n ok"; else echo "WINE-RESULT $n red rc=$rc want=$want"; fi
-    head -${WINE_LINES:-8} /tmp/o.$n
+    head -${WINE_LINES:-40} /tmp/o.$n
 }
 t version wine-11 /usr/bin/wine --version
 t server-version "Wine 11.0" /usr/bin/wineserver --version
