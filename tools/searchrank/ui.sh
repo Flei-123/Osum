@@ -20,6 +20,7 @@ make_bundle() { # make_bundle <dir> <name> <info> <keys> <start>
 mkdir -p "$TMPD/apps" "$TMPD/files"
 printf '#apps\t2\t2\nA\tcom.fleitec.certus\tCertus\tCertus\tinternet\tFleitec\tGPL\tKurz\tShort\tD\tD\t\t\t\nV\tcom.fleitec.certus\tsystem\tosum-any\t1.0.0\t0\t\t\t\t1\t1\t1\tuntested\nA\tcom.test.zebranotes\tZebra Notizen\tZebra Notes\ttools\tTest\tMIT\tKurz\tShort\tD\tD\t\t\t\nV\tcom.test.zebranotes\tsystem\tosum-any\t1.0.0\t0\t\t\t\t1\t1\t1\tpartial\n' > "$TMPD/catalog.tsv"
 for keep in explorer settings taskmgr; do cp -a assets/apps/$keep.osp "$TMPD/apps/"; done
+for n in $(seq -w 1 30); do make_bundle "a-pad$n" "Zq Pad $n" "Filler" "zqpad" /bin/edit; done
 cp -a assets/apps/certus.osp "$TMPD/apps/"
 printf '/bin/echo\n' > "$TMPD/apps/certus.osp/start.txt"
 make_bundle aa-reader "Aa Reader" "Reads certus files" "reader" /bin/edit
@@ -85,7 +86,7 @@ run_tree "$TMPD/nol" nol &
 P3=$!
 wait $P1 $P2 $P3
 
-if [ -n "${SEARCHRANKUI_SHOTS:-}" ]; then mkdir -p "$SEARCHRANKUI_SHOTS"; cp "$TMPD"/new/1*.ppm "$TMPD"/new/2*.ppm "$SEARCHRANKUI_SHOTS/" 2>/dev/null; fi
+if [ -n "${SEARCHRANKUI_SHOTS:-}" ]; then mkdir -p "$SEARCHRANKUI_SHOTS"; cp "$TMPD"/new/1*.ppm "$TMPD"/new/2*.ppm "$SEARCHRANKUI_SHOTS/" 2>/dev/null; cp "$TMPD/new/serial.txt" "$SEARCHRANKUI_SHOTS/serial.txt" 2>/dev/null; fi
 val() { sed -n "s/^$2=//p" "$1" | head -1; }
 for n in new old nol; do
     S="$TMPD/$n/serial.txt"
