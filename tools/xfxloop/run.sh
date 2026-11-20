@@ -42,7 +42,12 @@ cp "$OUT/spec.in" "$OUT/spec.base"
         echo "/bin/xfx status"
         echo "grep -a ShmObjects: /proc/meminfo"
         echo "/bin/xfxt procs"
+        echo "echo XLCHUNK"
         echo "grep -a -c failed.to.allocate /var/log/xfx.log"
+        [ -n "${XL_DIAG:-}" ] && echo "grep -a -v ShmSegmentsWriter /var/log/xfx.log"
+        [ -n "${XL_DIAG:-}" ] && echo "echo XLLOGEND"
+        [ -n "${XL_DIAG:-}" ] && echo "grep -a ShmSegmentsWriter /var/log/xfx.log"
+        [ -n "${XL_DIAG:-}" ] && echo "echo XLSHMEND"
         echo "/bin/xfx stop"
         echo "sleep 1"
         echo "echo XLT1"
@@ -52,12 +57,13 @@ cp "$OUT/spec.in" "$OUT/spec.base"
         echo "grep -a ShmObjects: /proc/meminfo"
         echo "sleep 40"
         echo "echo XLDOWN $r"
+        [ -n "${XL_DIAG:-}" ] && echo "grep -a -v ShmSegmentsWriter /var/log/xfx.log"
+        [ -n "${XL_DIAG:-}" ] && echo "echo XLLOGEND"
         echo "/bin/xfx status"
         echo "grep -a ShmObjects: /proc/meminfo"
         echo "/bin/xfxt procs"
         r=$((r + 1))
     done
-    echo "tail -n 12 /var/log/xfx.log"
     echo "echo XLEND"
     echo "echo FX-END"
 } > "$OUT/guest.sh"
@@ -79,7 +85,7 @@ while [ "$r" -le "$ROUNDS" ]; do
     case "$started" in "xfx: started uid=1000") ok "round $r: xfx start succeeded" ;; *) bad "round $r: xfx start said '$started'" ;; esac
     up_fx=$(awk -v r="$r" '$1=="XLUP"&&$2==r{f=1;next} f&&/^xfxt: proc firefox/{n++} f&&/^XLDOWN/{exit} END{print n+0}' "$S")
     [ "${up_fx:-0}" -ge 1 ] && ok "round $r: firefox alive after ${UP_SECONDS}s ($up_fx tasks)" || bad "round $r: firefox not alive after ${UP_SECONDS}s"
-    chunk=$(awk -v r="$r" '$1=="XLUP"&&$2==r{f=1;next} f&&/^[0-9]+$/{print; exit}' "$S")
+    chunk=$(awk -v r="$r" '$1=="XLUP"&&$2==r{f=1;next} f&&$1=="XLCHUNK"{g=1;next} g&&/^[0-9]+$/{print; exit}' "$S")
     [ "${chunk:-1}" = 0 ] && ok "round $r: no chunk allocation failure logged" || bad "round $r: chunk allocation failures logged: ${chunk:-?}"
     shm_down=$(awk -v r="$r" '$1=="XLDOWN"&&$2==r{f=1;next} f&&/ShmObjects:/{print $2; exit}' "$S")
     procs_down=$(awk -v r="$r" '$1=="XLDOWN"&&$2==r{f=1;next} f&&/^xfxt: proc /{if($3=="firefox"||$3=="wayd")n++} f&&/^(XLROUND|XLEND)/{exit} END{print n+0}' "$S")

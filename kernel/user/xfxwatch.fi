@@ -1,0 +1,77 @@
+profile kernel
+
+import ulib
+import libc.clockapi
+import xfxio
+import xfxpath
+
+export { spawn_watched }
+
+const SYS_WAIT4: u64 = 61
+const O_LOG: u64 = 1089
+const SPAWN_POLLS: u64 = 40
+const SPAWN_POLL_MS: u64 = 100
+const EXIT_SPAWN_FAILED: u64 = 1
+
+fn log_text(text: u64) {
+    xfxio.write_text(xfxpath.p_log(), text, O_LOG)
+}
+
+fn log_number(value: u64) {
+    var digits: [u8; 24] = [0 as u8; 24]
+    xfxio.num_text(value, (&digits[0 as usize]) as u64)
+    log_text((&digits[0 as usize]) as u64)
+}
+
+fn report_end(pid: u64, status: u64) {
+    var head: [u8; 18] = "xfx: firefox pid \0"
+    var code: [u8; 14] = " ended: code \0"
+    var sig: [u8; 9] = " signal \0"
+    var eol: [u8; 2] = "\n\0"
+    log_text((&head[0 as usize]) as u64)
+    log_number(pid)
+    log_text((&code[0 as usize]) as u64)
+    log_number((status >> 8) & 255)
+    log_text((&sig[0 as usize]) as u64)
+    log_number(status & 127)
+    log_text((&eol[0 as usize]) as u64)
+}
+
+fn report_spawn_failed() {
+    var line: [u8; 35] = "xfx: firefox could not be spawned\n\0"
+    log_text((&line[0 as usize]) as u64)
+}
+
+fn supervise(path: u64, argv: u64, argc: u64, uid: u64) {
+    ulib.sys(ulib.SYS_CLOSE, 0, 0, 0)
+    let pid: u64 = ulib.spawn_user(path, argv, argc)
+    if ulib.bad(pid) {
+        report_spawn_failed()
+        ulib.sys(ulib.SYS_EXIT, EXIT_SPAWN_FAILED, 0, 0)
+    }
+    xfxio.store_pid(xfxpath.p_pidf(), pid, uid)
+    var status: [u64; 1] = [0 as u64; 1]
+    ulib.sys(SYS_WAIT4, pid, (&status[0 as usize]) as u64, 0)
+    report_end(pid, status[0 as usize])
+    ulib.sys(ulib.SYS_EXIT, 0, 0, 0)
+}
+
+fn spawn_watched(path: u64, argv: u64, argc: u64, uid: u64) -> u64 {
+    let supervisor: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+    if supervisor == 0 {
+        supervise(path, argv, argc, uid)
+    }
+    if ulib.bad(supervisor) {
+        return ulib.EOF
+    }
+    var polls: u64 = 0
+    while polls < SPAWN_POLLS {
+        let pid: u64 = xfxio.pid_field(xfxpath.p_pidf(), 0)
+        if pid != 0 {
+            return pid
+        }
+        clockapi.sleep_ms(SPAWN_POLL_MS)
+        polls = polls + 1
+    }
+    return ulib.EOF
+}
