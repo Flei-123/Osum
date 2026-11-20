@@ -40,6 +40,8 @@ const PROT_WRITE: u64 = 2
 const PROT_EXEC: u64 = 4
 const MAP_PRIVATE: u64 = 2
 const MAP_FIXED: u64 = 16
+const MAP_FIXED_NOREPLACE: u64 = 0x100000
+const PAGES_PER_FIXED_MAX: u64 = 0x100000
 
 // ------------------------------------------------------------- memory
 
@@ -259,6 +261,12 @@ fn do_map(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64,
     if len == 0 {
         return sysuser.neg(errno.E_INVAL)
     }
+    if (flags & MAP_FIXED_NOREPLACE) != 0 {
+        let busy: u64 = fixed_range_errno(state, me, addr, len)
+        if busy != 0 {
+            return sysuser.neg(busy)
+        }
+    }
     if (flags & sysconst.MAP_ANONYMOUS) == 0 {
         // RUNDE UNTERBAU: a mapping of a REGULAR FILE (dlopen of a shared object, a mapped data file). The other descriptors that
         // can be mapped (frame buffer, shared memory objects) keep their way.
@@ -266,7 +274,7 @@ fn do_map(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64,
         if of < file.MAX_OPEN && (file.open_kind(state, of) == file.K_FILE || file.open_kind(state, of) == file.K_VFILE) {
             return map_file(state, me, addr, len, prot, flags, fd, off)
         }
-        return map_fd(state, me, fd, len, prot, off)
+        return map_fd(state, me, fd, len, prot, off, fixed_addr(addr, flags))
     }
     // With MAP_ANONYMOUS Linux ignores the descriptor as well.
     if off != 0 {
@@ -285,7 +293,8 @@ fn map_anon(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64) -> 
         return sysuser.neg(errno.E_INVAL)
     }
     // RUNDE LIMITS3: a big PROT_NONE | MAP_NORESERVE mapping is a RESERVATION (JS engines, allocators): address space only, no frame.
-    if prot == 0 && (flags & MAP_FIXED) == 0 && len >= RES_MIN && len <= RES_MAX {
+    let fixed: bool = is_fixed(flags)
+    if prot == 0 && !fixed && len >= RES_MIN && len <= RES_MAX {
         if pages <= LAZY_RESERVE_PAGES {
             let lr: u64 = lazy_alloc(state, me, pages, prot)
             if lr < 0xFFFFFFFFFFFFF000 {
@@ -294,14 +303,14 @@ fn map_anon(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64) -> 
         }
         return res_add(state, mem_owner(state, me), sysfd.page_up(len))
     }
-    if (flags & MAP_FIXED) == 0 && pages >= LAZY_MIN_PAGES && !kstate.mode_on(state, kstate.M_NOLAZY) {
+    if !fixed && pages >= LAZY_MIN_PAGES && !kstate.mode_on(state, kstate.M_NOLAZY) {
         let lz: u64 = lazy_alloc(state, me, pages, prot)
         if lz < 0xFFFFFFFFFFFFF000 {
             return lz
         }
     }
     var base: u64 = 0
-    if (flags & MAP_FIXED) != 0 {
+    if fixed {
         base = map_fixed(state, me, addr, pages, prot)
     } else {
         base = map_alloc(state, me, pages, prot)
@@ -334,6 +343,55 @@ fn set_range_prot(state: u64, me: u64, base: u64, pages: u64, prot: u64) -> u64 
 // MAP_FIXED: the pages go exactly to `addr`, whatever was mapped there is replaced (and zero). Only inside the two windows that
 // `mmap` hands out of and only ABOVE their bump marks -- the pages below a mark are the allocator's to give, a fixed mapping there
 // would meet the next ordinary `mmap`.
+fn is_fixed(flags: u64) -> bool {
+    return (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0
+}
+
+fn fixed_addr(addr: u64, flags: u64) -> u64 {
+    if is_fixed(flags) {
+        return addr
+    }
+    return 0
+}
+
+fn lazy_span(addr: u64, end: u64) -> bool {
+    if addr >= procbase.LAZY_BASE && end <= procbase.LAZY_TOP {
+        return true
+    }
+    return addr >= procbase.FIXED_BASE && end <= procbase.FIXED_TOP
+}
+
+fn fixed_zone_ok(state: u64, me: u64, addr: u64, end: u64) -> bool {
+    let in_alt: bool = addr >= map_bottom(state, me) && end <= MMAP_TOP
+    let in_big: bool = addr >= big_bottom(state, me) && end <= procbase.BIG_TOP
+    return in_alt || in_big || lazy_span(addr, end)
+}
+
+fn fixed_range_errno(state: u64, me: u64, addr: u64, len: u64) -> u64 {
+    let pages: u64 = sysfd.page_up(len) / sysconst.PAGE
+    if (addr & (sysconst.PAGE - 1)) != 0 || pages == 0 {
+        return errno.E_INVAL
+    }
+    let end: u64 = addr + pages * sysconst.PAGE
+    if pages > PAGES_PER_FIXED_MAX || end < addr || !fixed_zone_ok(state, me, addr, end) {
+        return errno.E_NOMEM
+    }
+    var p: u64 = addr
+    while p < end {
+        if procmap.page_taken(state, me, p) {
+            return errno.E_EXIST
+        }
+        p = p + sysconst.PAGE
+    }
+    return 0
+}
+
+fn release_fixed_range(state: u64, me: u64, addr: u64, end: u64) {
+    file_shm_flush_maps(state, me, addr, end - addr, true)
+    let _released: bool = unixsock.map_release(state, mem_owner(state, me), addr, end - addr)
+    procrange.release(state, me, addr, end)
+}
+
 fn map_fixed(state: u64, me: u64, addr: u64, pages: u64, prot: u64) -> u64 {
     return map_fixed_f(state, me, addr, pages, prot, 0, 0)
 }
@@ -342,14 +400,12 @@ fn map_fixed_f(state: u64, me: u64, addr: u64, pages: u64, prot: u64, fk: u64, f
     if (addr & (sysconst.PAGE - 1)) != 0 {
         return sysuser.neg(errno.E_INVAL)
     }
-    if pages == 0 || pages > 0x100000 {
+    if pages == 0 || pages > PAGES_PER_FIXED_MAX {
         return sysuser.neg(errno.E_INVAL)
     }
     let end: u64 = addr + pages * sysconst.PAGE
-    let in_alt: bool = addr >= map_bottom(state, me) && end <= MMAP_TOP
-    let in_big: bool = addr >= big_bottom(state, me) && end <= procbase.BIG_TOP
-    let in_lazy: bool = addr >= procbase.LAZY_BASE && end <= procbase.LAZY_TOP
-    if !in_alt && !in_big && !in_lazy {
+    let in_lazy: bool = lazy_span(addr, end)
+    if !fixed_zone_ok(state, me, addr, end) {
         return sysuser.neg(errno.E_NOMEM)
     }
     if addr >= RES_BASE && !res_covers(state, mem_owner(state, me), addr, pages * sysconst.PAGE) {
@@ -397,14 +453,14 @@ fn map_fixed_f(state: u64, me: u64, addr: u64, pages: u64, prot: u64, fk: u64, f
 // not seen by the mapping (and a changed mapped page overwrites it at the next write-back); no MAP_FIXED; at most 256 pages (1 MiB) per
 // mapping; two mappings of one file that start at different offsets and overlap are two objects (not coherent with each other); the
 // pages are written back only at msync/munmap/exit, not by a timer; a mapping that a fork child inherited is written back by the parent.
-const FSHM_MAX_PAGES: u64 = 256
+const FSHM_MAX_PAGES: u64 = 2048
 
 // Pages [from, to) of object `i` get the bytes of the file (page `first_pg + p`); the frames are zero already, a short read leaves the rest zero.
 fn file_shm_fill(state: u64, i: u64, ino: u64, first_pg: u64, from: u64, to: u64) -> bool {
     let bounce: u64 = sysuser.blockb(state)
     var p: u64 = from
     while p < to {
-        let frame: u64 = unixsock.shm_frame(state, i, p)
+        let frame: u64 = unixsock.shm_frame_demand(state, i, p)
         if frame == 0 {
             return false
         }
@@ -509,21 +565,21 @@ fn file_shm_flush_maps_locked(state: u64, me: u64, addr: u64, len: u64, exact: b
     }
 }
 
-fn map_file_shared(state: u64, me: u64, len: u64, flags: u64, fd: u64, off: u64, prot: u64) -> u64 {
+fn map_file_shared(state: u64, me: u64, at: u64, len: u64, fd: u64, off: u64, prot: u64) -> u64 {
     mmlock.vm_lock(state, me)
     let fl: u64 = fslock.enter(state)
-    let r: u64 = map_file_shared_locked(state, me, len, flags, fd, off, prot)
+    let r: u64 = map_file_shared_locked(state, me, at, len, fd, off, prot)
     fslock.leave(state, fl)
     mmlock.vm_unlock(state, me)
     return r
 }
 
-fn map_file_shared_locked(state: u64, me: u64, len: u64, flags: u64, fd: u64, off: u64, prot: u64) -> u64 {
+fn map_file_shared_locked(state: u64, me: u64, at: u64, len: u64, fd: u64, off: u64, prot: u64) -> u64 {
     let of: u64 = sysuser.of_of(state, me, fd)
     if of >= file.MAX_OPEN || !sysfd.readable(state, of) || !sysfd.writable(state, of) {
         return sysuser.neg(errno.E_ACCES)
     }
-    if (flags & MAP_FIXED) != 0 || len > FSHM_MAX_PAGES * sysconst.PAGE || off >= 0x7FFFFFFF000 {
+    if len > FSHM_MAX_PAGES * sysconst.PAGE || off >= 0x7FFFFFFF000 {
         return sysuser.neg(errno.E_NODEV)
     }
     let ino: u64 = file.open_ino(state, of)
@@ -535,11 +591,12 @@ fn map_file_shared_locked(state: u64, me: u64, len: u64, flags: u64, fd: u64, of
     var i: u64 = unixsock.shm_file_find_ref(state, ino, first_pg)
     var made: bool = false
     if i >= unixsock.USHM_MAX {
-        i = unixsock.shm_new(state)
-        if i >= unixsock.USHM_PAGED {
-            if i < unixsock.USHM_MAX {
-                unixsock.shm_free(state, i)
-            }
+        if npages > unixsock.SHM_PAGES_MAX {
+            i = unixsock.shm_new_any(state)
+        } else {
+            i = unixsock.shm_new(state)
+        }
+        if i >= unixsock.USHM_MAX {
             return sysuser.neg(errno.E_NOMEM)
         }
         made = true
@@ -557,13 +614,33 @@ fn map_file_shared_locked(state: u64, me: u64, len: u64, flags: u64, fd: u64, of
         unixsock.shm_unref(state, i)
         return sysuser.neg(errno.E_PERM)
     }
-    let r: u64 = map_shm_obj(state, me, i, true, len, prot)
+    let r: u64 = map_shm_obj(state, me, i, true, len, prot, at)
     if r >= 0xFFFFFFFFFFFFF000 {
         unixsock.shm_wmap_drop(state, i)
     } else if made {
         unixsock.shm_file_mark(state, i, ino, first_pg)
     }
     unixsock.shm_unref(state, i)
+    return r
+}
+
+fn map_file_shared_ro(state: u64, me: u64, at: u64, len: u64, of: u64, off: u64, prot: u64) -> u64 {
+    mmlock.vm_lock(state, me)
+    let fl: u64 = fslock.enter(state)
+    var r: u64 = 0
+    let ino: u64 = file.open_ino(state, of)
+    let i: u64 = unixsock.shm_file_find_ref(state, ino, off / sysconst.PAGE)
+    if i < unixsock.USHM_MAX {
+        if sysfd.page_up(len) / sysconst.PAGE <= unixsock.shm_pages(state, i) {
+            r = map_shm_obj(state, me, i, false, len, prot, at)
+            if r >= 0xFFFFFFFFFFFFF000 && at == 0 {
+                r = 0
+            }
+        }
+        unixsock.shm_unref(state, i)
+    }
+    fslock.leave(state, fl)
+    mmlock.vm_unlock(state, me)
     return r
 }
 
@@ -593,8 +670,8 @@ fn map_file_lazy(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64
     if ino >= procmap.LAZYF_MAX || pages < FLAZY_MIN_PAGES || fpg + pages >= procmap.LAZYF_MAX {
         return 0
     }
-    if (flags & MAP_FIXED) != 0 {
-        if (addr & (sysconst.PAGE - 1)) != 0 || addr < procbase.LAZY_BASE || addr + pages * sysconst.PAGE > procbase.LAZY_TOP {
+    if is_fixed(flags) {
+        if (addr & (sysconst.PAGE - 1)) != 0 || !lazy_span(addr, addr + pages * sysconst.PAGE) {
             return 0
         }
         let r: u64 = map_fixed_f(state, me, addr, pages, prot, ino + 1, fpg)
@@ -622,11 +699,17 @@ fn map_file(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64, fd:
         if !plain_file(state, sysuser.of_of(state, me, fd)) {
             return sysuser.neg(errno.E_NODEV)
         }
-        return map_file_shared(state, me, len, flags, fd, off, prot)
+        return map_file_shared(state, me, fixed_addr(addr, flags), len, fd, off, prot)
     }
     let of: u64 = sysuser.of_of(state, me, fd)
     if of >= file.MAX_OPEN || !sysfd.readable(state, of) {
         return sysuser.neg(errno.E_ACCES)
+    }
+    if (flags & MAP_SHARED) != 0 && (flags & MAP_PRIVATE) == 0 && plain_file(state, of) {
+        let ro: u64 = map_file_shared_ro(state, me, fixed_addr(addr, flags), len, of, off, prot)
+        if ro != 0 {
+            return ro
+        }
     }
     let lz: u64 = map_file_lazy(state, me, addr, len, prot, flags, of, off)
     if lz != 0 {
@@ -742,15 +825,15 @@ fn map_run(state: u64, me: u64, base: u64, pages: u64, prot: u64) -> bool {
 // K-07: a writable mapping of a memfd takes a count on the object first (refused with -EPERM once F_SEAL_WRITE is set); the count is
 // given back by `munmap` / exit (`unixsock.map_release*`, record flag UM_WRITE) or here when the mapping fails.
 fn map_shm(state: u64, me: u64, of: u64, len: u64, prot: u64,
-    off: u64) -> u64 {
+    off: u64, at: u64) -> u64 {
     if (prot & PROT_WRITE) == 0 || file.open_kind(state, of) != file.K_SHM {
-        return map_shm_do(state, me, of, len, prot, off)
+        return map_shm_do(state, me, of, len, prot, off, at)
     }
     let i: u64 = file.open_ino(state, of)
     if !unixsock.shm_wmap_take(state, i) {
         return sysuser.neg(errno.E_PERM)
     }
-    let r: u64 = map_shm_do(state, me, of, len, prot, off)
+    let r: u64 = map_shm_do(state, me, of, len, prot, off, at)
     if r >= 0xFFFFFFFFFFFFF000 {
         unixsock.shm_wmap_drop(state, i)
     }
@@ -758,11 +841,11 @@ fn map_shm(state: u64, me: u64, of: u64, len: u64, prot: u64,
 }
 
 fn map_shm_do(state: u64, me: u64, of: u64, len: u64, prot: u64,
-    off: u64) -> u64 {
+    off: u64, at: u64) -> u64 {
     if off != 0 {
         return sysuser.neg(errno.E_INVAL)
     }
-    return map_shm_obj(state, me, file.open_ino(state, of), sysfd.writable(state, of), len, prot)
+    return map_shm_obj(state, me, file.open_ino(state, of), sysfd.writable(state, of), len, prot, at)
 }
 
 fn big_place(state: u64, me: u64, pages: u64) -> u64 {
@@ -774,7 +857,7 @@ fn big_place(state: u64, me: u64, pages: u64) -> u64 {
 }
 
 // The mapping of shared object `i` (a memfd, or since LCSH the shared pages of a file); `wok` = the caller may write the object.
-fn map_shm_obj(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64) -> u64 {
+fn map_shm_obj(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64, at: u64) -> u64 {
     if unixsock.shm_used(state, i) == 0 {
         return sysuser.neg(errno.E_NODEV)
     }
@@ -799,7 +882,15 @@ fn map_shm_obj(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64) -> u
     var is_big: bool = false
     let lazy: bool = unixsock.shm_lazy(state, i)
     var in_arena: bool = lazy
-    if !lazy {
+    let at_fixed: bool = at != 0
+    if at_fixed {
+        let at_end: u64 = at + pages * sysconst.PAGE
+        if lazy || (at & (sysconst.PAGE - 1)) != 0 || at_end < at || !fixed_zone_ok(state, me, at, at_end) {
+            return sysuser.neg(errno.E_NOMEM)
+        }
+        release_fixed_range(state, me, at, at_end)
+        base = at
+    } else if !lazy {
         if pages * sysconst.PAGE <= top
             && top - pages * sysconst.PAGE >= sysfd.page_up(brk_of(state, me)) + sysconst.PAGE {
             base = top - pages * sysconst.PAGE
@@ -815,7 +906,7 @@ fn map_shm_obj(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64) -> u
             }
         }
     }
-    if in_arena {
+    if in_arena && !at_fixed {
         base = unixsock.map_arena_find(state, me, pages, procfault.SHM_ARENA_BASE, procfault.SHM_ARENA_TOP)
         if base == 0 {
             return sysuser.neg(errno.E_NOMEM)
@@ -838,14 +929,14 @@ fn map_shm_obj(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64) -> u
     }
     unixsock.shm_ref(state, i)
     var note_flags: u64 = 0
-    if in_arena {
+    if in_arena && !at_fixed {
         note_flags = unixsock.UM_LAZY
     }
     if writing {
         note_flags = note_flags | unixsock.UM_WRITE
     }
     let _noted: bool = unixsock.map_note(state, mem_owner(state, me), i, base, pages, note_flags)
-    if !in_arena {
+    if !in_arena && !at_fixed {
         if is_big {
             taskslot.tset(state, mem_owner(state, me), taskconst.T_BIG, base)
         } else {
@@ -862,17 +953,17 @@ fn map_drm(state: u64, me: u64, of: u64, len: u64, prot: u64, off: u64) -> u64 {
     if s >= unixsock.USHM_MAX {
         return sysuser.neg(errno.E_INVAL)
     }
-    return map_shm_obj(state, me, s, sysfd.writable(state, of), len, prot)
+    return map_shm_obj(state, me, s, sysfd.writable(state, of), len, prot, 0)
 }
 
 fn map_fd(state: u64, me: u64, fd: u64, len: u64, prot: u64,
-    off: u64) -> u64 {
+    off: u64, at: u64) -> u64 {
     let of: u64 = sysuser.of_of(state, me, fd)
     if of >= file.MAX_OPEN {
         return sysuser.neg(errno.E_NODEV)
     }
     if file.open_kind(state, of) == file.K_SHM {
-        return map_shm(state, me, of, len, prot, off)
+        return map_shm(state, me, of, len, prot, off, at)
     }
     if file.open_kind(state, of) == file.K_DRM {
         return map_drm(state, me, of, len, prot, off)
@@ -1060,7 +1151,8 @@ fn do_unmap(state: u64, me: u64, addr: u64, len: u64) -> u64 {
     let in_big: bool = addr >= big_bottom(state, me) && addr < procbase.BIG_TOP
     let in_arena: bool = addr >= procfault.SHM_ARENA_BASE && addr < procfault.SHM_ARENA_TOP
     let in_lazy: bool = addr >= procbase.LAZY_BASE && addr < procbase.LAZY_TOP
-    if !in_alt && !in_big && !in_arena && !in_lazy {
+    let in_fixed: bool = addr >= procbase.FIXED_BASE && addr < procbase.FIXED_TOP
+    if !in_alt && !in_big && !in_arena && !in_lazy && !in_fixed {
         return sysuser.neg(errno.E_INVAL)
     }
     // COMPOSITOR S3: a mapping of a shared object gives its reference back (LCSH: a file mapping writes back first)
