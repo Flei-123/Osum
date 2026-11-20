@@ -487,7 +487,7 @@ grep -qa '==FERTIG==' "$D" || { bad "the catalog 2 guest did not finish"; tail -
 part "$D" D-BEFORE D-REFRESH > "$TMPD/p.txt"
 has "$TMPD/p.txt" "no_catalog2" "before any refresh there is no catalog 2 (old feeds show the old window)"
 part "$D" D-LIST D-APP > "$TMPD/p.txt"
-grep -qx "apps" "$TMPD/p.txt" && ok "the verified view is stored as /var/store/apps" || bad "no /var/store/apps after refresh"
+grep -q " apps " "$TMPD/p.txt" && ok "the verified view is stored as /var/store/apps" || bad "no /var/store/apps after refresh"
 has "$TMPD/p.txt" "cat=internet|Internet" "categories are listed (de)"
 has "$TMPD/p.txt" "cat=tools|Tools" "categories are listed (en)"
 has "$TMPD/p.txt" "app=com.test.native|Nativ|tools|Fleitec|works|n|1.0.0|opk:nativ" "native app: works with gate, kind n, package"
@@ -505,16 +505,17 @@ has "$TMPD/p.txt" "screenshots=2" "detail: two screenshots"
 has "$TMPD/p.txt" "variant=exe|osum-windows-x86_64|1.0.0|0|0|0|0|broken|" "detail: Windows variant is broken and not available"
 has "$TMPD/p.txt" "Startet nicht." "detail: German notes with lang=de"
 hasnot "$TMPD/p.txt" "android-arm64" "detail: the Android variant of a mixed app is dropped"
-has "$TMPD/p.txt" "|untested|||||" "detail: works without gate is downgraded to untested"
+has "$TMPD/p.txt" "|1|untested|main test|QEMU|2026-11-20||" "detail: works without gate is downgraded to untested"
 part "$D" D-REFUSE FERTIG > "$TMPD/p.txt"
-[ "$(grep -c 'no_such_app' "$TMPD/p.txt")" -ge 3 ] && ok "an Android-only app, a bad name and an unknown app are refused (no_such_app)" || bad "refusals: $(grep -c no_such_app "$TMPD/p.txt") of 3"
+[ "$(grep -c '^err ' "$TMPD/p.txt")" -ge 3 ] && ok "an Android-only app, a bad name and an unknown app are refused" || { bad "refusals: $(grep -c '^err ' "$TMPD/p.txt") of 3"; sed 's/^/        /' "$TMPD/p.txt" | head -8; }
+has "$TMPD/p.txt" "err no_such_app com.test.phone" "the Android-only app is refused with no_such_app"
 for n in flip foreign; do
     X="$TMPD/d$n.klar"
     grep -qa '==FERTIG==' "$X" || bad "the $n guest did not finish"
     part "$X" D-LIST D-APP > "$TMPD/p.txt"
     has "$TMPD/p.txt" "no_catalog2" "$n: the signature check refuses the view, store.apps has no catalog"
     hasnot "$TMPD/p.txt" "com.test.native" "$n: nothing of the refused view is shown"
-    grep -qx "apps" "$TMPD/p.txt" && bad "$n: an apps file was installed" || ok "$n: no apps file was installed"
+    grep -q " apps " "$TMPD/p.txt" && bad "$n: an apps file was installed" || ok "$n: no apps file was installed"
 done
 fi
 
