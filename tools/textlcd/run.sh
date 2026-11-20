@@ -22,10 +22,9 @@ run_one() {
     $HEAVY bash tools/design/eh6.sh "$TMPD/$1" res=1280x800 accel=kvm uiscale=1 tafel=nein progs="$PROGS" \
         drehbuch="$SCENE" $2 > "$TMPD/$1.log" 2>&1
 }
-printf "grey\n" > "$TMPD/grey.conf"
-run_one lcd "" &
+run_one lcd "textsmooth=lcd" &
 p1=$!
-run_one grey "xfile=/etc/textsmooth.conf=$TMPD/grey.conf" &
+run_one grey "textsmooth=grey" &
 p2=$!
 wait $p1 $p2
 
