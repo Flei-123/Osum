@@ -47,5 +47,5 @@ Device: `ota system apply` (on demand) or the service round (schedule `sysabstan
 - The updater itself (`/bin/ota`) must be new enough: a device with an older `ota` ignores `sysapp` lines until one
   normal system stand (with this `ota`) has been applied once.
 - Only programs that opt in (`probe=1`, `--appcheck`) get an automatic crash check; shell programs are checked for
-  restart. A GUI app that crashes at its first window is not detected; `/system/old/<name>` stays until the next apply.
+  restart. A GUI app that crashes at its first window is not detected; backups are dropped on success, a bad revision is withdrawn by publishing the previous file as a higher revision.
 - App revisions are not shown in Settings yet.
