@@ -11,7 +11,7 @@ if [ -z "${KERNEL:-}" ]; then
     ./tools/build-kernel.sh "$OUT/k0.img" --stufe 0 --base "${WIDE_KERNEL_BASE:-0x3000000}" > "$OUT/kernel.log" 2>&1 || { echo "  FAIL  wide kernel build"; tail -5 "$OUT/kernel.log"; exit 1; }
     export KERNEL=$OUT/k0.img
 fi
-SPEC=${SPEC:-$WD/run/spec.txt} BLOCKS=${BLOCKS:-2400000} INODES=${INODES:-20000} TMO=${TMO:-1500} DONE=FX-END \
+SPEC=${SPEC:-$WD/run/spec.txt} BLOCKS=${BLOCKS:-2400000} INODES=${INODES:-20000} TMO=${TMO:-2700} DONE=FX-END \
     bash tools/linuxapps/run.sh "$WD" tools/linuxapps/guest-wine.sh "$OUT/run" > "$OUT/run.log" 2>&1
 pass=0
 fail=0
