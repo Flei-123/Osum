@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import libc.memcopy
+import libc.io
+import ulib
+import symvar
+import appreg
+
+export { slot_for, reset }
+
+const SLOT_COUNT: u64 = 12
+const NAME_W: u64 = 24
+const STATE_EMPTY: u8 = 0
+const STATE_OK: u8 = 1
+const STATE_MISSING: u8 = 2
+
+static mut s_data: [u8; 538800] = [0 as u8; 718400]
+static mut s_name: [u8; 288] = [0 as u8; 384]
+static mut s_state: [u8; 12] = [0 as u8; 16]
+static mut s_next: u64 = 0
+
+static mut P_APPS: [u8; 7] = "/apps/\0"
+static mut P_TAIL: [u8; 12] = ".osp/symbol\0"
+
+fn slot_ptr(k: u64) -> u64 {
+    return (&s_data[0 as usize]) as u64 + k * symvar.SLOT_BYTES
+}
+
+fn name_ptr(k: u64) -> u64 {
+    return (&s_name[0 as usize]) as u64 + k * NAME_W
+}
+
+fn find(name: u64) -> u64 {
+    var k: u64 = 0
+    while k < SLOT_COUNT {
+        if s_state[k as usize] != STATE_EMPTY && ulib.streq(name_ptr(k), name) {
+            return k
+        }
+        k = k + 1
+    }
+    return SLOT_COUNT
+}
+
+fn read_bundle_symbol(name: u64, slot: u64) -> u64 {
+    var path: [u8; 64] = [0 as u8; 64]
+    ulib.strcpy((&path[0 as usize]) as u64, (&P_APPS[0 as usize]) as u64)
+    ulib.strcat((&path[0 as usize]) as u64, name)
+    ulib.strcat((&path[0 as usize]) as u64, (&P_TAIL[0 as usize]) as u64)
+    let fd: u64 = io.open((&path[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let got: u64 = io.read_full(fd, slot, symvar.SLOT_BYTES)
+    io.close(fd)
+    if ulib.bad(got) {
+        return 0
+    }
+    return got
+}
+
+fn load(name: u64, k: u64) -> bool {
+    let slot: u64 = slot_ptr(k)
+    memcopy.fill(slot, 0, symvar.SLOT_BYTES)
+    let got: u64 = appreg.resolve_symbol(name, slot, read_bundle_symbol(name, slot))
+    if !symvar.joined_ok(slot, got) {
+        return false
+    }
+    symvar.register(slot, got)
+    return true
+}
+
+fn slot_for(name: u64) -> u64 {
+    if name == 0 || __mmio_read8(name as *mut u8) == 0 as u8 {
+        return 0
+    }
+    var k: u64 = find(name)
+    if k < SLOT_COUNT {
+        if s_state[k as usize] == STATE_OK {
+            return slot_ptr(k)
+        }
+        return 0
+    }
+    k = s_next
+    s_next = (s_next + 1) % SLOT_COUNT
+    ulib.strncpy(name_ptr(k), name, NAME_W)
+    if load(name, k) {
+        s_state[k as usize] = STATE_OK
+        return slot_ptr(k)
+    }
+    s_state[k as usize] = STATE_MISSING
+    return 0
+}
+
+fn reset() {
+    var k: u64 = 0
+    while k < SLOT_COUNT {
+        s_state[k as usize] = STATE_EMPTY
+        k = k + 1
+    }
+    s_next = 0
+}
