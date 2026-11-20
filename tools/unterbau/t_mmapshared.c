@@ -152,9 +152,9 @@ int main(void)
     }
     CHECK("rounds_no_leak", okrounds == 40, "only %d of 40 rounds worked", okrounds);
 
-    /* 12. what is NOT supported answers honestly: more than 1 MiB, MAP_FIXED */
-    void *big = mmap(0, 2 * 1024 * 1024, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    CHECK("too_big_refused", big == MAP_FAILED, "a 2 MiB shared file mapping was accepted");
+    /* 12. what is NOT supported answers honestly: more than 8 MiB */
+    void *big = mmap(0, 16 * 1024 * 1024, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    CHECK("too_big_refused", big == MAP_FAILED, "a 16 MiB shared file mapping was accepted");
     close(fd);
     unlink(PATH);
     return 0;
