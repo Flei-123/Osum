@@ -18,6 +18,7 @@ make_bundle() { # make_bundle <dir> <name> <info> <keys> <start>
 }
 
 mkdir -p "$TMPD/apps" "$TMPD/files"
+printf '#apps\t2\t2\nA\tcom.fleitec.certus\tCertus\tCertus\tinternet\tFleitec\tGPL\tKurz\tShort\tD\tD\t\t\t\nV\tcom.fleitec.certus\tsystem\tosum-any\t1.0.0\t0\t\t\t\t1\t1\t1\tuntested\nA\tcom.test.zebranotes\tZebra Notizen\tZebra Notes\ttools\tTest\tMIT\tKurz\tShort\tD\tD\t\t\t\nV\tcom.test.zebranotes\tsystem\tosum-any\t1.0.0\t0\t\t\t\t1\t1\t1\tpartial\n' > "$TMPD/catalog.tsv"
 for keep in explorer settings taskmgr; do cp -a assets/apps/$keep.osp "$TMPD/apps/"; done
 cp -a assets/apps/certus.osp "$TMPD/apps/"
 printf '/bin/echo\n' > "$TMPD/apps/certus.osp/start.txt"
@@ -33,7 +34,7 @@ make_bundle teamlist "Teamlist" "Lists teams" "team" /bin/edit
 printf 'use=notes-two:3\n' > "$TMPD/startuse.conf"
 LONG=a-very-long-file-name-for-the-index-test.txt
 for f in certus-notes.txt zzqq-file.txt spinatus.txt tattoo.txt x-remote-notes.txt $LONG; do printf 'x\n' > "$TMPD/files/$f"; done
-MKFS_EXTRA="/data/"
+MKFS_EXTRA="/data/ /var/ /var/store/ /var/store/apps=$TMPD/catalog.tsv@0644"
 for f in certus-notes.txt zzqq-file.txt spinatus.txt tattoo.txt x-remote-notes.txt $LONG; do MKFS_EXTRA="$MKFS_EXTRA /data/$f=$TMPD/files/$f@0644"; done
 
 echo "== mutant tree: the old ranking =="
@@ -138,7 +139,15 @@ expect_best einst einst "Settings"
 grep -aq 'launcher: rect id=7 ' "$D/serial.txt" && ok "the best match card is reported as a rectangle" || bad "no best match card rectangle"
 h=$(grep -a 'launcher: rect id=7 ' "$D/serial.txt" | tail -1 | sed -n 's/.* h=\([0-9]*\).*/\1/p')
 [ "${h:-0}" -ge 48 ] && ok "the best match card is large (h=$h)" || bad "the best match card is small (h=${h:-0})"
+for id in 8 9; do
+    grep -aq "launcher: rect id=$id " "$D/serial.txt" && ok "best match button id=$id is reported as a rectangle" || bad "no rectangle for best match button id=$id"
+done
+[ "$(val $D.certus stores)" = "" ] && ok "certus is installed: no store hit for it" || bad "certus: store hits '$(val $D.certus stores)'"
 grep -aq 'launcher: use \[xremote\]' "$D/serial.txt" && ok "Enter on 'xremote' starts the app" || bad "Enter on 'xremote' started nothing"
+python3 -I tools/searchrank/check.py "$D/serial.txt" zebra > "$D.q_zebra" 2>&1
+[ "$(val $D.q_zebra stores)" = "zebranotes" ] && ok "'zebra': the catalog app is listed as a store hit" || bad "'zebra': store hits are '$(val $D.q_zebra stores)'"
+grep -q 'apps=0 ' "$D.q_zebra" && ok "'zebra': no installed app hit" || bad "'zebra': unexpected installed hit"
+grep -aq 'launcher: store open \[zebranotes\] pid=' "$D/serial.txt" && ok "Enter on a store hit opens the Store page for it" || bad "Enter on the store hit did nothing"
 maxus=$(grep -a '^launcher: suche \[' "$D/serial.txt" | sed -n 's/.* us=\([0-9]*\).*/\1/p' | sort -n | tail -1)
 [ "${maxus:-999999}" -le 16000 ] && ok "slowest search took ${maxus} us (<= 16 ms)" || bad "slowest search took ${maxus:-?} us"
 echo "SEARCH_MAX_US=${maxus:-0}"

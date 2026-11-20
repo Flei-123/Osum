@@ -1,0 +1,320 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.io
+import libc.octets
+import msg
+import fui.searchrank
+
+export { query, reset, bundle_present, is_hit, index_of, title_at, short_at, level_label, open_store, HIT_FLAG }
+
+const HIT_FLAG: u64 = 0x100000000
+const FILE_CAP: u64 = 24000
+const MAX_ENTRIES: u64 = 48
+const ID_W: u64 = 48
+const NAME_W: u64 = 32
+const SUMMARY_W: u64 = 96
+const TAB: u64 = 9
+const NL: u64 = 10
+const COL_ID: u64 = 1
+const COL_NAME_DE: u64 = 2
+const COL_NAME_EN: u64 = 3
+const COL_SUMMARY_DE: u64 = 7
+const COL_SUMMARY_EN: u64 = 8
+const COL_LEVEL: u64 = 12
+const LEVEL_UNSET: u64 = 255
+const LEVEL_UNTESTED: u64 = 3
+const KIND_APP: u64 = 65
+const KIND_VARIANT: u64 = 86
+const LANG_EN_FIRST: u64 = 101
+const MAX_HITS: u64 = 8
+
+static mut P_VIEW: [u8; 16] = "/var/store/apps\0"
+static mut P_APPS: [u8; 7] = "/apps/\0"
+static mut P_INFO: [u8; 10] = ".osp/INFO\0"
+static mut P_STORE_START: [u8; 22] = "/apps/store.osp/start\0"
+static mut ARG_APP: [u8; 5] = "app=\0"
+static mut KEY_WORKS: [u8; 18] = "store.level.works\0"
+static mut KEY_PARTIAL: [u8; 20] = "store.level.partial\0"
+static mut KEY_BROKEN: [u8; 19] = "store.level.broken\0"
+static mut KEY_UNTESTED: [u8; 21] = "store.level.untested\0"
+
+static mut file_buf: [u8; 24001] = [0 as u8; 24001]
+static mut loaded: bool = false
+static mut count: u64 = 0
+static mut e_id: [u8; 2304] = [0 as u8; 2304]
+static mut e_name: [u8; 1536] = [0 as u8; 1536]
+static mut e_summary: [u8; 4608] = [0 as u8; 4608]
+static mut e_level: [u8; 48] = [0 as u8; 48]
+static mut e_here: [u8; 48] = [0 as u8; 48]
+static mut tmp_id: [u8; 48] = [0 as u8; 48]
+static mut tmp_name: [u8; 32] = [0 as u8; 32]
+static mut tmp_summary: [u8; 96] = [0 as u8; 96]
+static mut tmp_level: [u8; 16] = [0 as u8; 16]
+static mut probe_path: [u8; 80] = [0 as u8; 80]
+static mut hit_tier: [u8; 8] = [0 as u8; 8]
+static mut open_arg: [u8; 64] = [0 as u8; 64]
+
+fn buf() -> u64 {
+    return (&file_buf[0 as usize]) as u64
+}
+
+fn english() -> bool {
+    return octets.ld8(msg.lang(), 0) == LANG_EN_FIRST
+}
+
+fn field(at: u64, k: u64, out: u64, cap: u64) -> bool {
+    let p: u64 = buf()
+    var i: u64 = at
+    var f: u64 = 0
+    while f < k {
+        while octets.ld8(p, i) != TAB && octets.ld8(p, i) != NL && octets.ld8(p, i) != 0 {
+            i = i + 1
+        }
+        if octets.ld8(p, i) != TAB {
+            octets.st8(out, 0, 0)
+            return false
+        }
+        i = i + 1
+        f = f + 1
+    }
+    var n: u64 = 0
+    while octets.ld8(p, i) != TAB && octets.ld8(p, i) != NL && octets.ld8(p, i) != 0 && n + 1 < cap {
+        octets.st8(out, n, octets.ld8(p, i))
+        n = n + 1
+        i = i + 1
+    }
+    octets.st8(out, n, 0)
+    return true
+}
+
+fn next_line(at: u64) -> u64 {
+    var i: u64 = at
+    while octets.ld8(buf(), i) != NL && octets.ld8(buf(), i) != 0 {
+        i = i + 1
+    }
+    if octets.ld8(buf(), i) == NL {
+        i = i + 1
+    }
+    return i
+}
+
+fn id_at(i: u64) -> u64 {
+    return (&e_id[0 as usize]) as u64 + i * ID_W
+}
+
+fn short_of(id: u64) -> u64 {
+    var at: u64 = 0
+    var k: u64 = 0
+    while octets.ld8(id, k) != 0 {
+        if octets.ld8(id, k) == 46 {
+            at = k + 1
+        }
+        k = k + 1
+    }
+    return id + at
+}
+
+fn bundle_present(short: u64) -> bool {
+    let p: u64 = (&probe_path[0 as usize]) as u64
+    ulib.strcpy(p, (&P_APPS[0 as usize]) as u64)
+    ulib.strcat(p, short)
+    ulib.strcat(p, (&P_INFO[0 as usize]) as u64)
+    let fd: u64 = io.open(p, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    io.close(fd)
+    return true
+}
+
+fn find(id: u64) -> u64 {
+    var i: u64 = 0
+    while i < count {
+        if ulib.streq(id_at(i), id) {
+            return i
+        }
+        i = i + 1
+    }
+    return 0xFFFFFFFFFFFFFFFF
+}
+
+fn level_rank(word: u64) -> u64 {
+    let c: u64 = octets.ld8(word, 0)
+    if c == 119 {
+        return 0
+    }
+    if c == 112 {
+        return 1
+    }
+    if c == 98 {
+        return 2
+    }
+    return LEVEL_UNTESTED
+}
+
+fn add_app(at: u64) {
+    var name_col: u64 = COL_NAME_DE
+    var summary_col: u64 = COL_SUMMARY_DE
+    if english() {
+        name_col = COL_NAME_EN
+        summary_col = COL_SUMMARY_EN
+    }
+    let id: u64 = (&tmp_id[0 as usize]) as u64
+    if !field(at, COL_ID, id, ID_W) || octets.ld8(id, 0) == 0 {
+        return
+    }
+    if !field(at, name_col, (&tmp_name[0 as usize]) as u64, NAME_W) || octets.ld8((&tmp_name[0 as usize]) as u64, 0) == 0 {
+        return
+    }
+    let here: bool = bundle_present(short_of(id))
+    let _s: bool = field(at, summary_col, (&tmp_summary[0 as usize]) as u64, SUMMARY_W)
+    ulib.strncpy(id_at(count), id, ID_W - 1)
+    ulib.strncpy((&e_name[0 as usize]) as u64 + count * NAME_W, (&tmp_name[0 as usize]) as u64, NAME_W - 1)
+    ulib.strncpy((&e_summary[0 as usize]) as u64 + count * SUMMARY_W, (&tmp_summary[0 as usize]) as u64, SUMMARY_W - 1)
+    e_level[count as usize] = LEVEL_UNSET as u8
+    if here {
+        e_here[count as usize] = 1 as u8
+    } else {
+        e_here[count as usize] = 0 as u8
+    }
+    count = count + 1
+}
+
+fn set_level(at: u64) {
+    if !field(at, COL_ID, (&tmp_id[0 as usize]) as u64, ID_W) {
+        return
+    }
+    let i: u64 = find((&tmp_id[0 as usize]) as u64)
+    if i == 0xFFFFFFFFFFFFFFFF || (e_level[i as usize] as u64) != LEVEL_UNSET {
+        return
+    }
+    let _l: bool = field(at, COL_LEVEL, (&tmp_level[0 as usize]) as u64, 16)
+    e_level[i as usize] = level_rank((&tmp_level[0 as usize]) as u64) as u8
+}
+
+fn parse() {
+    var at: u64 = 0
+    while octets.ld8(buf(), at) != 0 {
+        let kind: u64 = octets.ld8(buf(), at)
+        if kind == KIND_APP && count < MAX_ENTRIES {
+            add_app(at)
+        } else if kind == KIND_VARIANT {
+            set_level(at)
+        }
+        at = next_line(at)
+    }
+}
+
+fn load() {
+    if loaded {
+        return
+    }
+    count = 0
+    let fd: u64 = io.open((&P_VIEW[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let n: u64 = io.read_full(fd, buf(), FILE_CAP)
+    io.close(fd)
+    if ulib.bad(n) || n == 0 {
+        return
+    }
+    octets.st8(buf(), n, 0)
+    parse()
+    loaded = true
+}
+
+fn reset() {
+    loaded = false
+}
+
+fn insert_hit(out: u64, n: u64, max: u64, idx: u64, tier: u64) -> u64 {
+    var pos: u64 = n
+    while pos > 0 && tier < (hit_tier[(pos - 1) as usize] as u64) {
+        pos = pos - 1
+    }
+    if pos >= max {
+        return n
+    }
+    var last: u64 = n
+    if last >= max {
+        last = max - 1
+    }
+    while last > pos {
+        __mmio_write64((out + last * 8) as *mut u64, *((out + (last - 1) * 8) as *mut u64))
+        hit_tier[last as usize] = hit_tier[(last - 1) as usize]
+        last = last - 1
+    }
+    __mmio_write64((out + pos * 8) as *mut u64, HIT_FLAG | idx)
+    hit_tier[pos as usize] = tier as u8
+    if n < max {
+        return n + 1
+    }
+    return n
+}
+
+fn query(term: u64, out: u64, max: u64) -> u64 {
+    load()
+    if count == 0 || max == 0 || max > MAX_HITS {
+        return 0
+    }
+    searchrank.set_query(term)
+    if searchrank.query_len() == 0 {
+        return 0
+    }
+    var kept: u64 = 0
+    var i: u64 = 0
+    while i < count {
+        if e_here[i as usize] == 0 as u8 {
+            let tier: u64 = searchrank.tier_fields((&e_name[0 as usize]) as u64 + i * NAME_W,
+                (&e_summary[0 as usize]) as u64 + i * SUMMARY_W, short_of(id_at(i)), false)
+            if tier != searchrank.NO_MATCH {
+                kept = insert_hit(out, kept, max, i, tier)
+            }
+        }
+        i = i + 1
+    }
+    return kept
+}
+
+fn is_hit(v: u64) -> bool {
+    return (v & HIT_FLAG) != 0
+}
+
+fn index_of(v: u64) -> u64 {
+    return v & (HIT_FLAG - 1)
+}
+
+fn title_at(v: u64) -> u64 {
+    return (&e_name[0 as usize]) as u64 + index_of(v) * NAME_W
+}
+
+fn short_at(v: u64) -> u64 {
+    return short_of(id_at(index_of(v)))
+}
+
+fn level_label(v: u64) -> u64 {
+    let rank: u64 = e_level[index_of(v) as usize] as u64
+    if rank == 0 {
+        return msg.get((&KEY_WORKS[0 as usize]) as u64)
+    }
+    if rank == 1 {
+        return msg.get((&KEY_PARTIAL[0 as usize]) as u64)
+    }
+    if rank == 2 {
+        return msg.get((&KEY_BROKEN[0 as usize]) as u64)
+    }
+    return msg.get((&KEY_UNTESTED[0 as usize]) as u64)
+}
+
+fn open_store(v: u64) -> u64 {
+    var argv: [u64; 2] = [0 as u64; 2]
+    let a: u64 = (&open_arg[0 as usize]) as u64
+    ulib.strcpy(a, (&ARG_APP[0 as usize]) as u64)
+    ulib.strcat(a, short_at(v))
+    argv[0 as usize] = (&P_STORE_START[0 as usize]) as u64
+    argv[1 as usize] = a
+    return ulib.spawn_app((&P_STORE_START[0 as usize]) as u64, (&argv[0 as usize]) as u64, 2)
+}

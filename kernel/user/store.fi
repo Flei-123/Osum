@@ -14,6 +14,7 @@ import appreg
 import icons
 import msg
 import storecat2
+import startcat
 import libc.ascii
 
 export { u_start }
@@ -207,6 +208,8 @@ static mut s_state: [u8; 64] = [0 as u8; 64]
 static mut s_count: u64 = 0
 static mut s_auto_all: bool = true
 static mut s_autooff: [u8; 64] = [0 as u8; 64]
+static mut s_system: [u8; 64] = [0 as u8; 64]
+static mut P_ARG_APP: [u8; 5] = "app=\0"
 static mut s_status: [u8; 160] = [0 as u8; 160]
 static mut s_info: [u8; 96] = [0 as u8; 96]
 static mut s_source: [u8; 100] = [0 as u8; 100]
@@ -460,7 +463,7 @@ fn desc_of(i: u64) -> u64 {
     var pre: [u8; 11] = "store.app.\0"
     if !app_text(i, (&pre[0 as usize]) as u64, d, 127) {
         let c: u64 = catalog_of(i)
-        if s_state[i as usize] == ST_UNLISTED as u8 && c != storecat2.NONE {
+        if (s_state[i as usize] == ST_UNLISTED as u8 || s_system[i as usize] != 0 as u8) && c != storecat2.NONE {
             ulib.strncpy(d, storecat2.level_text(storecat2.list_level(c)), 127)
         } else {
             ulib.strncpy(d, msg.get((&T_GENERIC[0 as usize]) as u64), 127)
@@ -623,12 +626,17 @@ fn is_listed(short: u64) -> bool {
 fn add_unlisted() {
     var c: u64 = 0
     while c < storecat2.list_count() && s_count < MAXI {
-        if storecat2.list_extra(c) && !is_listed(storecat2.list_short(c)) {
+        if !is_listed(storecat2.list_short(c)) {
             let row: u64 = name_at(s_count)
             memcopy.fill(row, 0, NAMEW)
             ulib.strncpy(row, storecat2.list_short(c), 23)
             ulib.strncpy(row + 24, storecat2.list_version(c), 11)
             s_state[s_count as usize] = ST_UNLISTED as u8
+            s_system[s_count as usize] = 0 as u8
+            if startcat.bundle_present(storecat2.list_short(c)) {
+                s_state[s_count as usize] = 1 as u8
+                s_system[s_count as usize] = 1 as u8
+            }
             s_autooff[s_count as usize] = 0 as u8
             s_count = s_count + 1
         }
@@ -676,6 +684,7 @@ fn load_list() {
             memcopy.fill(row, 0, NAMEW)
             s_state[s_count as usize] = 0 as u8
             s_autooff[s_count as usize] = 0 as u8
+            s_system[s_count as usize] = 0 as u8
             while (*((t + i) as *mut u8)) != 0 as u8 {
                 let c: u64 = (*((t + i) as *mut u8)) as u64
                 if c == 124 {
@@ -1434,6 +1443,20 @@ fn notice(a: u64, b: u64) {
         msg.get((&T_DLG_OK[0 as usize]) as u64), 0)
 }
 
+fn open_by_arg(arg: u64) {
+    if !starts(arg, (&P_ARG_APP[0 as usize]) as u64) {
+        return
+    }
+    var i: u64 = 0
+    while i < s_count {
+        if ulib.streq(name_at(i), arg + 4) {
+            open_detail(i)
+            return
+        }
+        i = i + 1
+    }
+}
+
 fn open_app(i: u64) -> bool {
     var path: [u8; 64] = [0 as u8; 64]
     ulib.strcpy((&path[0 as usize]) as u64, (&P_APPS[0 as usize]) as u64)
@@ -1653,9 +1676,9 @@ fn build_detail_actions(col: usize, i: u64) {
         if st != ST_UNLISTED {
             let rb: usize = fuiscene.button(ar, msg.get((&T_REMOVE[0 as usize]) as u64), K_REMOVE)
             fuiscene.set_size(rb, 130, 36)
-            fuiscene.set_enabled(rb, !s_busy && s_bus && s_can_r && st != 0)
+            fuiscene.set_enabled(rb, !s_busy && s_bus && s_can_r && st != 0 && s_system[i as usize] == 0 as u8)
         }
-        if st == 1 || st == 2 {
+        if (st == 1 || st == 2) && s_system[i as usize] == 0 as u8 {
             let ag: usize = fuiscene.toggle(ar, msg.get((&T_AUTOAPP[0 as usize]) as u64), K_AUTOAPP, s_autooff[i as usize] == 0 as u8)
             fuiscene.set_enabled(ag, s_bus && s_can_i)
         }
@@ -1961,6 +1984,9 @@ fn u_start(args: u64) -> u64 {
     load_list()
     load_status()
     sync_info()
+    if ulib.arg_count(args) >= 2 {
+        open_by_arg(ulib.arg_at(args, 1))
+    }
     fuiscene.refresh()
     var rounds: u64 = 0
     var wait_empty: bool = s_count == 0 && s_bus
