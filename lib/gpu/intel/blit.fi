@@ -1,0 +1,93 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import gpu.intel.engine
+import gpu.intel.submit
+import gpu.intel.blt
+
+export {
+    Surface, Blit, surface_new, blit_new, fill_rect, copy_rect, copy_between,
+    B_REJECT, MAX_BLIT_DWORDS
+}
+
+const B_REJECT: u64 = 0x100
+const MAX_BLIT_DWORDS: u64 = 24
+const ADDR_ALIGN_MASK: u64 = 0xfff
+
+struct Surface {
+    ggtt: u64,
+    pitch: u64,
+    bytes: u64
+}
+
+struct Blit {
+    dst: Surface,
+    scratch: u64,
+    buf: u64,
+    fills: u64,
+    copies: u64,
+    rejects: u64,
+    errors: u64
+}
+
+fn surface_new(ggtt: u64, pitch: u64, bytes: u64) -> Surface {
+    var s: Surface = Surface { ggtt: ggtt, pitch: pitch, bytes: bytes }
+    return s
+}
+
+fn blit_new(dst: Surface, scratch_ggtt: u64, buf: u64) -> Blit {
+    var b: Blit = Blit { dst: dst, scratch: scratch_ggtt, buf: buf, fills: 0, copies: 0, rejects: 0, errors: 0 }
+    return b
+}
+
+fn reject(b: *mut Blit) -> u64 {
+    (*b).rejects = (*b).rejects + 1
+    return B_REJECT
+}
+
+fn finish(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, e: *mut engine.Engine, b: *mut Blit, n: u64) -> u64 {
+    let total: u64 = n + blt.flush((*b).buf + n * 4, (*b).scratch)
+    let r: u64 = submit.run_dwords(rd, wr, us, e, (*b).buf, total)
+    if r != engine.S_OK {
+        (*b).errors = (*b).errors + 1
+    }
+    return r
+}
+
+fn surface_ok(s: *mut Surface) -> bool {
+    return (*s).ggtt != 0 && ((*s).ggtt & ADDR_ALIGN_MASK) == 0
+}
+
+fn fill_rect(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, e: *mut engine.Engine, b: *mut Blit, x1: u64, y1: u64, x2: u64, y2: u64, color: u64) -> u64 {
+    let d: *mut Surface = &(*b).dst
+    if !surface_ok(d) || !blt.rect_ok((*d).pitch, (*d).bytes, x1, y1, x2, y2) {
+        return reject(b)
+    }
+    let n: u64 = blt.fill((*b).buf, (*d).ggtt, (*d).pitch, x1, y1, x2, y2, color)
+    let r: u64 = finish(rd, wr, us, e, b, n)
+    if r == engine.S_OK {
+        (*b).fills = (*b).fills + 1
+    }
+    return r
+}
+
+fn copy_between(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, e: *mut engine.Engine, b: *mut Blit, src: *mut Surface, dx: u64, dy: u64, sx: u64, sy: u64, w: u64, h: u64) -> u64 {
+    let d: *mut Surface = &(*b).dst
+    if !surface_ok(d) || !surface_ok(src) {
+        return reject(b)
+    }
+    if !blt.rect_ok((*d).pitch, (*d).bytes, dx, dy, dx + w, dy + h) || !blt.rect_ok((*src).pitch, (*src).bytes, sx, sy, sx + w, sy + h) {
+        return reject(b)
+    }
+    if (*d).ggtt == (*src).ggtt && !blt.rects_disjoint(dx, dy, dx + w, dy + h, sx, sy, sx + w, sy + h) {
+        return reject(b)
+    }
+    let n: u64 = blt.copy((*b).buf, (*d).ggtt, (*d).pitch, dx, dy, dx + w, dy + h, (*src).ggtt, (*src).pitch, sx, sy)
+    let r: u64 = finish(rd, wr, us, e, b, n)
+    if r == engine.S_OK {
+        (*b).copies = (*b).copies + 1
+    }
+    return r
+}
+
+fn copy_rect(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, e: *mut engine.Engine, b: *mut Blit, dx: u64, dy: u64, sx: u64, sy: u64, w: u64, h: u64) -> u64 {
+    return copy_between(rd, wr, us, e, b, &(*b).dst, dx, dy, sx, sy, w, h)
+}

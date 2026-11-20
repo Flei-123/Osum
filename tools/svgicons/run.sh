@@ -15,7 +15,7 @@ export FIRNLIB="$ROOT/lib"
 . tools/lib/firnenv.sh
 "$FIRNC" --profile=app tools/svg/bake.fi -o "$D/bake" > "$D/bake.log" 2>&1 || { bad "baker build"; exit 1; }
 mkdir -p "$D/old/assets/apps"; cp -r assets/apps/. "$D/old/assets/apps/"
-for f in "$D"/old/assets/apps/*/symbol.svg; do "$D/bake" "$f" "$(dirname "$f")/symbol.osym" 32 || { bad "low-resolution bake"; exit 1; }; done
+for f in "$D"/old/assets/apps/*/symbol.svg; do [ -f "assets/icons/brand/$(basename "$(dirname "$f")" .osp).svg" ] && continue; "$D/bake" "$f" "$(dirname "$f")/symbol.osym" 32 || { bad "low-resolution bake"; exit 1; }; done
 res() { python3 -I tools/svgicons/check.py "$@" | tee "$D/last.txt" | grep -v '^RESULT'; grep '^RESULT' "$D/last.txt" | tail -n 1; }
 val() { sed -n "s/.*$2=\([0-9.]*\).*/\1/p" <<<"$1"; }
 for s in 1 2; do

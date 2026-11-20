@@ -12,7 +12,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 
-for m in ids regs bits mode timing edid aux snap dump flip ggtt dbuf backbuf confirm modeset flushpol flushstat engregs fwake micmd ring lrc elsp ereset engine submit; do
+for m in ids regs bits mode timing edid aux snap dump flip ggtt dbuf backbuf confirm modeset flushpol flushstat engregs fwake micmd ring lrc elsp ereset engine submit blt blit blitpool; do
     printf 'import gpu.intel.%s\nfn main() -> i32 {\n    return 0\n}\n' "$m" > "$T/k_$m.fi"
     "$FIRNC" --profile=kernel -c "$T/k_$m.fi" -o "$T/k_$m.o" 2> "$T/k.err" \
         && ok "gpu.intel.$m compiles with --profile=kernel" \
@@ -76,7 +76,7 @@ if [ -x "$T/engine" ]; then
     sed -n 's/^FAIL /  FAIL  engine: /p' "$T/out4.txt"
     [ "$rc" = 0 ] && ok "engine oracle exits 0" || bad "engine oracle exit code $rc"
     [ "$nbad" = 0 ] && ok "engine oracle: no FAIL line" || bad "engine oracle: $nbad FAIL lines"
-    [ "$nok" -ge 105 ] && ok "engine oracle: $nok promises OK (>= 105)" || bad "engine oracle: only $nok OK (< 105)"
+    [ "$nok" -ge 205 ] && ok "engine oracle: $nok promises OK (>= 205)" || bad "engine oracle: only $nok OK (< 205)"
     pass=$((pass+nok))
 fi
 
@@ -250,6 +250,35 @@ mutate en_noack_keep  fwake   '0,/wr(req, engregs.masked_off(engregs.FORCEWAKE_K
 mutate en_reset_skip  ereset  's/wr(engregs.GDRST, domain)/wr(engregs.GDRST, 0)/'
 mutate en_reset_keep  ereset  's/wr(ctl, engregs.masked_off(engregs.RESET_REQUEST))//'
 mutate en_stuck_ok    ereset  's/return R_STUCK/return R_OK/'
+mutate bl_fill_op     blt     's/CMD_XY_COLOR_BLT: u64 = 0x54300005/CMD_XY_COLOR_BLT: u64 = 0x54200005/'
+mutate bl_copy_len    blt     's/CMD_XY_SRC_COPY_BLT: u64 = 0x54f00008/CMD_XY_SRC_COPY_BLT: u64 = 0x54f00007/'
+mutate bl_flush_cmd   blt     's/CMD_MI_FLUSH_DW: u64 = 0x13204001/CMD_MI_FLUSH_DW: u64 = 0x13200001/'
+mutate bl_flush_gtt   blt     's/FLUSH_USE_GTT: u64 = 0x4/FLUSH_USE_GTT: u64 = 0x0/'
+mutate bl_rop_fill    blt     's/ROP_COLOR_COPY: u64 = 0xf00000/ROP_COLOR_COPY: u64 = 0xcc0000/'
+mutate bl_rop_copy    blt     's/ROP_SRC_COPY: u64 = 0xcc0000/ROP_SRC_COPY: u64 = 0xf00000/'
+mutate bl_depth       blt     's/DEPTH_32: u64 = 0x3000000/DEPTH_32: u64 = 0x2000000/'
+mutate bl_xy_swap     blt     's/return (y << COORD_SHIFT) | x/return (x << COORD_SHIFT) | y/'
+mutate bl_addr_hi     blt     's/put(out, 5, dst >> 32)/put(out, 5, 0)/'
+mutate bl_color       blt     's/put(out, 6, color)/put(out, 6, 0)/'
+mutate bl_src_pitch   blt     's/put(out, 7, src_pitch)/put(out, 7, dst_pitch)/'
+mutate bl_src_addr    blt     's/put(out, 8, src)/put(out, 8, dst)/'
+mutate bl_rect_x      blt     's/if x2 \* PIXEL_BYTES > pitch {/if false {/'
+mutate bl_rect_y      blt     's/return y2 \* pitch <= bytes/return true/'
+mutate bl_rect_empty  blt     's/if x2 <= x1 || y2 <= y1 || /if /'
+mutate bl_pitch_align blt     's/ || (pitch \& ADDR_ALIGN_MASK) != 0//'
+mutate bl_disjoint    blt     's/return ax2 <= bx1 || bx2 <= ax1 || ay2 <= by1 || by2 <= ay1/return true/'
+mutate bt_noflush     blit    's/let total: u64 = n + blt.flush((\*b).buf + n \* 4, (\*b).scratch)/let total: u64 = n/'
+mutate bt_fill_count  blit    's/(\*b).fills = (\*b).fills + 1//'
+mutate bt_copy_count  blit    's/(\*b).copies = (\*b).copies + 1//'
+mutate bt_reject_cnt  blit    's/(\*b).rejects = (\*b).rejects + 1//'
+mutate bt_error_cnt   blit    's/(\*b).errors = (\*b).errors + 1//'
+mutate bt_surface_ok  blit    's/return (\*s).ggtt != 0 \&\& ((\*s).ggtt \& ADDR_ALIGN_MASK) == 0/return true/'
+mutate bt_overlap     blit    's/if (\*d).ggtt == (\*src).ggtt \&\& !blt.rects_disjoint/if false \&\& !blt.rects_disjoint/'
+mutate bt_src_check   blit    's/ || !blt.rect_ok((\*src).pitch, (\*src).bytes, sx, sy, sx + w, sy + h)//'
+mutate bp_full_reset  blitpool 's/ \&\& (value \& ~engregs.GRDOM_BLT) == 0//'
+mutate bp_layout_ctx  blitpool 's/CTX_AT: u64 = 0x1000/CTX_AT: u64 = 0x2000/'
+mutate bp_scratch     blitpool 's/SCRATCH_OFFSET: u64 = 0x440/SCRATCH_OFFSET: u64 = 0x400/'
+mutate bp_forcewake   blitpool 's/if off == engregs.FORCEWAKE_GT {/if off == engregs.FORCEWAKE_RENDER {/'
 mutate en_mode_check  engine  's/\& engregs.RUN_LIST_ENABLE) == 0 {/\& 0) != 0 {/'
 mutate en_seqno_off   engine  's/SEQNO_OFFSET: u64 = 0x400/SEQNO_OFFSET: u64 = 0x404/'
 mutate en_align       engine  's/return ((\*l).ring_ggtt \& PAGE_MASK) == 0 \&\& /return /'

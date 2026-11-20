@@ -11,6 +11,9 @@ import gpu.intel.elsp
 import gpu.intel.ereset
 import gpu.intel.engine
 import gpu.intel.submit
+import gpu.intel.blt
+import gpu.intel.blit
+import gpu.intel.blitpool
 
 const PAGE: u64 = 0x1000
 const RING_BYTES: u64 = 0x1000
@@ -19,6 +22,13 @@ const RING_AT: u64 = 0x0
 const CTX_AT: u64 = 0x1000
 const HWS_AT: u64 = 0x3000
 const POOL_BYTES: u64 = 0x4000
+const POOL_TOTAL: u64 = 0x8000
+const SURF_AT: u64 = 0x4000
+const SURF_PITCH: u64 = 256
+const SURF_ROWS: u64 = 64
+const SURF_BYTES: u64 = 0x4000
+const SCRATCH_AT: u64 = 0x3440
+const BG_PIXEL: u64 = 0x11223344
 const REG_CAP: u64 = 64
 const NOT_FOUND: u64 = 0xffff
 const STEP_CAP: u64 = 4096
@@ -26,7 +36,7 @@ const BAD_DWORD: u64 = 0x7fffffff
 const LOW32: u64 = 0xffffffff
 const HANG_BUDGET_US: u64 = 15000
 
-static mut pool: [u32; 8192] = [0; 8192]
+static mut pool: [u32; 12288] = [0; 12288]
 static mut base_cpu: u64 = 0
 static mut reg_off: [u64; 64] = [0; 64]
 static mut reg_val: [u64; 64] = [0; 64]
@@ -55,6 +65,11 @@ static mut inj_nomode: bool = false
 static mut inj_notready: bool = false
 static mut inj_stuck: bool = false
 static mut inj_drop_store: bool = false
+static mut inj_drop_blt: bool = false
+static mut blt_fills: u64 = 0
+static mut blt_copies: u64 = 0
+static mut blt_flushes: u64 = 0
+static mut cmd_buf: [u32; 32] = [0; 32]
 
 fn chk(name: str, cond: bool) {
     if cond {
@@ -123,6 +138,118 @@ fn ring_dw(start: u64, head: u64) -> u64 {
     return octets.ld32(cpu_of(start), head)
 }
 
+fn rdw(start: u64, head: u64, size: u64, i: u64) -> u64 {
+    return ring_dw(start, (head + i * 4) % size)
+}
+
+fn in_pool(addr: u64, bytes: u64) -> bool {
+    return addr >= GGTT_BASE && addr + bytes <= GGTT_BASE + POOL_TOTAL
+}
+
+fn pix_ok(addr: u64, pitch: u64, x1: u64, y1: u64, x2: u64, y2: u64) -> bool {
+    return (pitch & 3) == 0 && x2 > x1 && y2 > y1 && x2 * 4 <= pitch && in_pool(addr, (y2 - 1) * pitch + x2 * 4)
+}
+
+fn blt_fill(start: u64, head: u64, size: u64) -> u64 {
+    let d1: u64 = rdw(start, head, size, 1)
+    let d2: u64 = rdw(start, head, size, 2)
+    let d3: u64 = rdw(start, head, size, 3)
+    let addr: u64 = rdw(start, head, size, 4) | (rdw(start, head, size, 5) << 32)
+    let color: u64 = rdw(start, head, size, 6)
+    let pitch: u64 = d1 & 0xffff
+    let x1: u64 = d2 & 0xffff
+    let y1: u64 = d2 >> 16
+    let x2: u64 = d3 & 0xffff
+    let y2: u64 = d3 >> 16
+    if (d1 & 0xffff0000) != 0x03f00000 || !pix_ok(addr, pitch, x1, y1, x2, y2) {
+        return 0
+    }
+    if !inj_drop_blt {
+        var y: u64 = y1
+        while y < y2 {
+            var x: u64 = x1
+            while x < x2 {
+                mem_st(addr + y * pitch + x * 4, color)
+                x = x + 1
+            }
+            y = y + 1
+        }
+    }
+    blt_fills = blt_fills + 1
+    return 28
+}
+
+fn blt_copy(start: u64, head: u64, size: u64) -> u64 {
+    let d1: u64 = rdw(start, head, size, 1)
+    let d2: u64 = rdw(start, head, size, 2)
+    let d3: u64 = rdw(start, head, size, 3)
+    let dst: u64 = rdw(start, head, size, 4) | (rdw(start, head, size, 5) << 32)
+    let d6: u64 = rdw(start, head, size, 6)
+    let spitch: u64 = rdw(start, head, size, 7)
+    let src: u64 = rdw(start, head, size, 8) | (rdw(start, head, size, 9) << 32)
+    let dpitch: u64 = d1 & 0xffff
+    let x1: u64 = d2 & 0xffff
+    let y1: u64 = d2 >> 16
+    let x2: u64 = d3 & 0xffff
+    let y2: u64 = d3 >> 16
+    let sx: u64 = d6 & 0xffff
+    let sy: u64 = d6 >> 16
+    if (d1 & 0xffff0000) != 0x03cc0000 || !pix_ok(dst, dpitch, x1, y1, x2, y2) {
+        return 0
+    }
+    if !pix_ok(src, spitch, sx, sy, sx + (x2 - x1), sy + (y2 - y1)) {
+        return 0
+    }
+    if !inj_drop_blt {
+        var y: u64 = 0
+        while y < y2 - y1 {
+            var x: u64 = 0
+            while x < x2 - x1 {
+                mem_st(dst + (y1 + y) * dpitch + (x1 + x) * 4, octets.ld32(cpu_of(src + (sy + y) * spitch + (sx + x) * 4), 0))
+                x = x + 1
+            }
+            y = y + 1
+        }
+    }
+    blt_copies = blt_copies + 1
+    return 40
+}
+
+fn mi_flush(start: u64, head: u64, size: u64) -> u64 {
+    let d1: u64 = rdw(start, head, size, 1)
+    let addr: u64 = d1 & 0xfffffff8
+    if (d1 & 4) == 0 || !in_pool(addr, 4) {
+        return 0
+    }
+    mem_st(addr, rdw(start, head, size, 2))
+    blt_flushes = blt_flushes + 1
+    return 16
+}
+
+fn exec_one(start: u64, head: u64, size: u64) -> u64 {
+    let dw: u64 = ring_dw(start, head)
+    if dw == micmd.MI_NOOP || dw == micmd.MI_USER_INTERRUPT {
+        return 4
+    }
+    if dw == micmd.store_dword_ggtt() {
+        let addr: u64 = rdw(start, head, size, 1)
+        if !inj_drop_store {
+            mem_st(addr, rdw(start, head, size, 3))
+        }
+        return 16
+    }
+    if dw == blt.CMD_XY_COLOR_BLT {
+        return blt_fill(start, head, size)
+    }
+    if dw == blt.CMD_XY_SRC_COPY_BLT {
+        return blt_copy(start, head, size)
+    }
+    if dw == blt.CMD_MI_FLUSH_DW {
+        return mi_flush(start, head, size)
+    }
+    return 0
+}
+
 fn run_ring(state: u64) {
     let start: u64 = octets.ld32(state, lrc.CTX_RING_START * 4)
     let ctl: u64 = octets.ld32(state, lrc.CTX_RING_CTL * 4)
@@ -131,20 +258,12 @@ fn run_ring(state: u64) {
     let tail: u64 = octets.ld32(state, lrc.CTX_RING_TAIL * 4)
     var steps: u64 = 0
     while head != tail && steps < STEP_CAP {
-        let dw: u64 = ring_dw(start, head)
-        if dw == micmd.MI_NOOP || dw == micmd.MI_USER_INTERRUPT {
-            head = (head + 4) % size
-        } else if dw == micmd.store_dword_ggtt() {
-            let addr: u64 = ring_dw(start, (head + 4) % size)
-            let val: u64 = ring_dw(start, (head + 12) % size)
-            if !inj_drop_store {
-                mem_st(addr, val)
-            }
-            head = (head + 16) % size
-        } else {
+        let adv: u64 = exec_one(start, head, size)
+        if adv == 0 {
             hung = true
             return
         }
+        head = (head + adv) % size
         steps = steps + 1
     }
     octets.st32(state, lrc.CTX_RING_HEAD * 4, head)
@@ -282,10 +401,23 @@ fn model_reset() {
     inj_notready = false
     inj_stuck = false
     inj_drop_store = false
+    inj_drop_blt = false
+    blt_fills = 0
+    blt_copies = 0
+    blt_flushes = 0
     var i: u64 = 0
     while i < POOL_BYTES {
         octets.st32(base_cpu, i, 0xdeadbeef)
         i = i + 4
+    }
+    fill_surface(BG_PIXEL)
+}
+
+fn fill_surface(v: u64) {
+    var j: u64 = 0
+    while j < SURF_BYTES {
+        octets.st32(base_cpu + SURF_AT, j, v)
+        j = j + 4
     }
 }
 
@@ -491,6 +623,190 @@ fn test_guards() {
     chk("not set up: refused", submit.run_store(mrd, mwr, mus, &off) == engine.S_DEAD && wr_count == 0)
 }
 
+fn px(x: u64, y: u64) -> u64 {
+    return octets.ld32(base_cpu + SURF_AT + y * SURF_PITCH + x * 4, 0)
+}
+
+fn count_px(v: u64) -> u64 {
+    var n: u64 = 0
+    var j: u64 = 0
+    while j < SURF_BYTES {
+        if octets.ld32(base_cpu + SURF_AT, j) == v {
+            n = n + 1
+        }
+        j = j + 4
+    }
+    return n
+}
+
+fn new_blit() -> blit.Blit {
+    return blit.blit_new(blit.surface_new(GGTT_BASE + SURF_AT, SURF_PITCH, SURF_BYTES), GGTT_BASE + SCRATCH_AT, (&cmd_buf[0]) as u64)
+}
+
+fn cdw(i: u64) -> u64 {
+    return octets.ld32((&cmd_buf[0]) as u64, i * 4)
+}
+
+fn test_blt_encoders() {
+    chk("xy color blt cmd = 2<<29|0x50<<22|rgba|5", blt.CMD_XY_COLOR_BLT == ((2 << 29) | (0x50 << 22) | (3 << 20) | 5))
+    chk("xy src copy cmd = 2<<29|0x53<<22|rgba|8", blt.CMD_XY_SRC_COPY_BLT == ((2 << 29) | (0x53 << 22) | (3 << 20) | 8))
+    chk("mi flush dw = 0x26<<23|1|store index|store dw", blt.CMD_MI_FLUSH_DW == ((0x26 << 23) | 1 | (1 << 21) | (1 << 14)))
+    let buf: u64 = (&cmd_buf[0]) as u64
+    chk("fill: 7 dwords", blt.fill(buf, 0x100001000, 7680, 3, 2, 11, 6, 0xff0000ff) == 7)
+    chk("fill: dw0 cmd", cdw(0) == 0x54300005)
+    chk("fill: dw1 depth|rop|pitch", cdw(1) == (0x3000000 | 0xf00000 | 7680))
+    chk("fill: dw2 y1<<16|x1", cdw(2) == 0x20003)
+    chk("fill: dw3 y2<<16|x2", cdw(3) == 0x6000b)
+    chk("fill: dw4 addr lo", cdw(4) == 0x1000)
+    chk("fill: dw5 addr hi", cdw(5) == 1)
+    chk("fill: dw6 color", cdw(6) == 0xff0000ff)
+    chk("copy: 10 dwords", blt.copy(buf, 0x2000, 256, 16, 17, 24, 25, 0x3000, 128, 4, 5) == 10)
+    chk("copy: dw0 cmd", cdw(0) == 0x54f00008)
+    chk("copy: dw1 depth|rop|dst pitch", cdw(1) == (0x3000000 | 0xcc0000 | 256))
+    chk("copy: dw2/dw3 dst rect", cdw(2) == 0x110010 && cdw(3) == 0x190018)
+    chk("copy: dw4/dw5 dst addr", cdw(4) == 0x2000 && cdw(5) == 0)
+    chk("copy: dw6 src y<<16|x", cdw(6) == 0x50004)
+    chk("copy: dw7 src pitch", cdw(7) == 128)
+    chk("copy: dw8/dw9 src addr", cdw(8) == 0x3000 && cdw(9) == 0)
+    chk("flush: 4 dwords", blt.flush(buf, 0x3440) == 4)
+    chk("flush: dw0..3", cdw(0) == 0x13204001 && cdw(1) == 0x3444 && cdw(2) == 0 && cdw(3) == 0)
+    chk("rect ok: normal", blt.rect_ok(256, 0x4000, 0, 0, 64, 64))
+    chk("rect ok: x past pitch", !blt.rect_ok(256, 0x4000, 0, 0, 65, 64))
+    chk("rect ok: y past bytes", !blt.rect_ok(256, 0x4000, 0, 0, 64, 65))
+    chk("rect ok: empty x", !blt.rect_ok(256, 0x4000, 5, 5, 5, 9))
+    chk("rect ok: empty y", !blt.rect_ok(256, 0x4000, 5, 9, 9, 9))
+    chk("rect ok: inverted", !blt.rect_ok(256, 0x4000, 9, 5, 4, 9))
+    chk("rect ok: pitch not dword aligned", !blt.rect_ok(254, 0x4000, 0, 0, 8, 8))
+    chk("rect ok: pitch over 0x7fff", !blt.rect_ok(0x8000, 0x1000000, 0, 0, 8, 8))
+    chk("rect ok: coordinate over 0x7fff", !blt.rect_ok(0x7ffc, 0x10000000, 0, 0, 0x8000, 1))
+    chk("disjoint: apart", blt.rects_disjoint(0, 0, 8, 8, 8, 0, 16, 8))
+    chk("disjoint: overlap", !blt.rects_disjoint(0, 0, 8, 8, 7, 7, 16, 16))
+}
+
+fn test_blit_fill() {
+    var e: engine.Engine = ready()
+    var b: blit.Blit = new_blit()
+    let w0: u64 = wr_count
+    chk("blit fill: S_OK", blit.fill_rect(mrd, mwr, mus, &e, &b, 3, 2, 11, 6, 0xff0000ff) == engine.S_OK)
+    chk("blit fill: first pixel", px(3, 2) == 0xff0000ff)
+    chk("blit fill: last pixel", px(10, 5) == 0xff0000ff)
+    chk("blit fill: right neighbour untouched", px(11, 5) == BG_PIXEL)
+    chk("blit fill: left neighbour untouched", px(2, 2) == BG_PIXEL)
+    chk("blit fill: row above untouched", px(3, 1) == BG_PIXEL)
+    chk("blit fill: row below untouched", px(3, 6) == BG_PIXEL)
+    chk("blit fill: exactly 32 pixels", count_px(0xff0000ff) == 32)
+    chk("blit fill: one fill executed", blt_fills == 1 && blt_copies == 0)
+    chk("blit fill: flush executed", blt_flushes == 1 && octets.ld32(base_cpu + SCRATCH_AT, 0) == 0)
+    chk("blit fill: fence seqno 1", hws_seqno() == 1)
+    chk("blit fill: counters", b.fills == 1 && b.copies == 0 && b.rejects == 0 && b.errors == 0)
+    chk("blit fill: forcewake released", fw_state == 0)
+    chk("blit fill: writes bounded", wr_count - w0 <= 12)
+    chk("blit fill: tail qword aligned", (e.ring.tail & 7) == 0)
+    chk("blit fill full surface: S_OK", blit.fill_rect(mrd, mwr, mus, &e, &b, 0, 0, 64, 64, 0x80402010) == engine.S_OK)
+    chk("blit fill full surface: all pixels", count_px(0x80402010) == 4096)
+    var n: u64 = 0
+    var oks: u64 = 0
+    while n < 200 {
+        if blit.fill_rect(mrd, mwr, mus, &e, &b, 0, n % 60, 64, n % 60 + 4, 0x01010101 * (n % 200)) == engine.S_OK {
+            oks = oks + 1
+        }
+        n = n + 1
+    }
+    chk("blit fill x200 across ring wraps: all ok", oks == 200 && b.fills == 202 && e.hangs == 0)
+}
+
+fn test_blit_copy() {
+    var e: engine.Engine = ready()
+    var b: blit.Blit = new_blit()
+    blit.fill_rect(mrd, mwr, mus, &e, &b, 0, 0, 8, 8, 0xaa55aa55)
+    chk("blit copy: S_OK", blit.copy_rect(mrd, mwr, mus, &e, &b, 16, 16, 0, 0, 8, 8) == engine.S_OK)
+    chk("blit copy: first pixel", px(16, 16) == 0xaa55aa55)
+    chk("blit copy: last pixel", px(23, 23) == 0xaa55aa55)
+    chk("blit copy: right neighbour untouched", px(24, 16) == BG_PIXEL)
+    chk("blit copy: left neighbour untouched", px(15, 16) == BG_PIXEL)
+    chk("blit copy: below untouched", px(16, 24) == BG_PIXEL)
+    chk("blit copy: source intact", px(0, 0) == 0xaa55aa55 && px(7, 7) == 0xaa55aa55)
+    chk("blit copy: pixel total", count_px(0xaa55aa55) == 128)
+    chk("blit copy: one copy executed", blt_copies == 1 && b.copies == 1)
+    chk("blit copy: flush after each blit", blt_flushes == 2)
+    var half: blit.Surface = blit.surface_new(GGTT_BASE + SURF_AT + 0x2000, 128, 0x2000)
+    var y: u64 = 0
+    while y < 4 {
+        var x: u64 = 0
+        while x < 6 {
+            octets.st32(base_cpu + SURF_AT + 0x2000 + y * 128 + x * 4, 0, 0x10000000 + y * 16 + x)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    chk("blit copy between surfaces: S_OK", blit.copy_between(mrd, mwr, mus, &e, &b, &half, 40, 40, 0, 0, 6, 4) == engine.S_OK)
+    chk("blit copy between: corner pixels", px(40, 40) == 0x10000000 && px(45, 43) == 0x10000000 + 3 * 16 + 5)
+    chk("blit copy between: src pitch used", px(41, 41) == 0x10000000 + 16 + 1)
+    chk("blit copy between: neighbour untouched", px(46, 40) == BG_PIXEL)
+}
+
+fn test_blit_reject() {
+    var e: engine.Engine = ready()
+    var b: blit.Blit = new_blit()
+    let el: u64 = elsp_count
+    chk("reject: fill x past pitch", blit.fill_rect(mrd, mwr, mus, &e, &b, 0, 0, 65, 4, 1) == blit.B_REJECT)
+    chk("reject: fill y past surface", blit.fill_rect(mrd, mwr, mus, &e, &b, 0, 60, 8, 65, 1) == blit.B_REJECT)
+    chk("reject: fill empty", blit.fill_rect(mrd, mwr, mus, &e, &b, 5, 5, 5, 9, 1) == blit.B_REJECT)
+    chk("reject: fill inverted", blit.fill_rect(mrd, mwr, mus, &e, &b, 9, 5, 4, 9, 1) == blit.B_REJECT)
+    chk("reject: copy zero width", blit.copy_rect(mrd, mwr, mus, &e, &b, 0, 0, 16, 16, 0, 4) == blit.B_REJECT)
+    chk("reject: copy overlap", blit.copy_rect(mrd, mwr, mus, &e, &b, 4, 4, 0, 0, 8, 8) == blit.B_REJECT)
+    chk("reject: copy dst past surface", blit.copy_rect(mrd, mwr, mus, &e, &b, 60, 0, 0, 20, 8, 8) == blit.B_REJECT)
+    var small: blit.Surface = blit.surface_new(GGTT_BASE + SURF_AT, 256, 0x400)
+    chk("reject: copy src past source surface", blit.copy_between(mrd, mwr, mus, &e, &b, &small, 20, 20, 0, 3, 4, 4) == blit.B_REJECT)
+    var bad: blit.Blit = blit.blit_new(blit.surface_new(GGTT_BASE + SURF_AT + 4, SURF_PITCH, SURF_BYTES), GGTT_BASE + SCRATCH_AT, (&cmd_buf[0]) as u64)
+    chk("reject: unaligned surface", blit.fill_rect(mrd, mwr, mus, &e, &bad, 0, 0, 8, 8, 1) == blit.B_REJECT)
+    var null_surf: blit.Blit = blit.blit_new(blit.surface_new(0, SURF_PITCH, SURF_BYTES), GGTT_BASE + SCRATCH_AT, (&cmd_buf[0]) as u64)
+    chk("reject: null surface", blit.fill_rect(mrd, mwr, mus, &e, &null_surf, 0, 0, 8, 8, 1) == blit.B_REJECT)
+    chk("reject: nothing submitted", elsp_count == el && blt_fills == 0 && blt_copies == 0 && blt_flushes == 0)
+    chk("reject: surface untouched", count_px(BG_PIXEL) == 4096)
+    chk("reject: counters", b.rejects == 8 && b.fills == 0 && b.errors == 0 && bad.rejects == 1 && null_surf.rejects == 1)
+}
+
+fn test_blit_hang() {
+    var e: engine.Engine = ready()
+    var wild: blit.Blit = blit.blit_new(blit.surface_new(GGTT_BASE + 0x100000, SURF_PITCH, SURF_BYTES), GGTT_BASE + SCRATCH_AT, (&cmd_buf[0]) as u64)
+    chk("wild address: hang reported", blit.fill_rect(mrd, mwr, mus, &e, &wild, 0, 0, 8, 8, 1) == engine.S_HUNG)
+    chk("wild address: error counted, no fill", wild.errors == 1 && wild.fills == 0 && blt_fills == 0)
+    chk("wild address: engine reset once", e.hangs == 1 && e.resets == 1 && gdrst_writes >= 1)
+    chk("wild address: forcewake released", fw_state == 0)
+    var b: blit.Blit = new_blit()
+    chk("after hang: valid fill ok", blit.fill_rect(mrd, mwr, mus, &e, &b, 0, 0, 4, 4, 0x0badf00d) == engine.S_OK)
+    chk("after hang: pixels written", count_px(0x0badf00d) == 16 && b.errors == 0)
+    inj_drop_blt = true
+    blit.fill_rect(mrd, mwr, mus, &e, &b, 8, 8, 12, 12, 0x77777777)
+    chk("dropped blit model: pixels stay (counter-check for the pixel tests)", count_px(0x77777777) == 0)
+    inj_drop_blt = false
+}
+
+fn test_pool_policy() {
+    let base: u64 = engregs.BCS_BASE
+    chk("pool: five pages", blitpool.POOL_PAGES == 5 && blitpool.POOL_BYTES == 0x5000)
+    chk("pool: layout offsets", blitpool.CTX_AT == 0x1000 && blitpool.HWS_AT == 0x3000 && blitpool.CMD_AT == 0x4000)
+    let l: engine.Layout = blitpool.layout(0x10000, 0x200000)
+    chk("pool: layout bases", l.base == base && l.domain == engregs.GRDOM_BLT && l.ring_ggtt == 0x200000 && l.ctx_ggtt == 0x201000 && l.hws_ggtt == 0x203000)
+    chk("pool: layout cpu side", l.ring_cpu == 0x10000 && l.ctx_cpu == 0x11000 && l.hws_cpu == 0x13000)
+    chk("pool: scratch inside hws page", blitpool.scratch_ggtt(0x200000) == 0x203440)
+    chk("pool: cmd page", blitpool.cmd_cpu(0x10000) == 0x14000)
+    chk("pool: elsp detected", blitpool.is_elsp(base + engregs.RING_ELSP) && !blitpool.is_elsp(base + engregs.RING_MODE))
+    chk("policy: engine registers allowed", blitpool.engine_write_ok(base + engregs.RING_ELSP, 1) && blitpool.engine_write_ok(base + engregs.RING_MODE, 1))
+    chk("policy: hws mi_mode csb reset_ctl allowed", blitpool.engine_write_ok(base + engregs.RING_HWS_PGA, 1) && blitpool.engine_write_ok(base + engregs.RING_MI_MODE, 1)
+        && blitpool.engine_write_ok(base + engregs.RING_CSB_PTR, 1) && blitpool.engine_write_ok(base + engregs.RING_RESET_CTL, 1))
+    chk("policy: forcewake gt allowed", blitpool.engine_write_ok(engregs.FORCEWAKE_GT, 0x10001))
+    chk("policy: blitter reset domain allowed", blitpool.engine_write_ok(engregs.GDRST, engregs.GRDOM_BLT))
+    chk("policy: full reset refused", !blitpool.engine_write_ok(engregs.GDRST, engregs.GRDOM_FULL))
+    chk("policy: render reset refused", !blitpool.engine_write_ok(engregs.GDRST, engregs.GRDOM_RENDER))
+    chk("policy: blitter plus render reset refused", !blitpool.engine_write_ok(engregs.GDRST, engregs.GRDOM_BLT | engregs.GRDOM_RENDER))
+    chk("policy: render forcewake refused", !blitpool.engine_write_ok(engregs.FORCEWAKE_RENDER, 1))
+    chk("policy: ring tail not writable directly", !blitpool.engine_write_ok(base + engregs.RING_TAIL, 8))
+    chk("policy: other engine base refused", !blitpool.engine_write_ok(0x2000 + engregs.RING_ELSP, 1))
+    chk("policy: plane surface refused here", !blitpool.engine_write_ok(0x7019c, 0x1000))
+}
+
 fn main() -> i32 {
     base_cpu = (((&pool[0]) as u64) + PAGE - 1) & (~(PAGE - 1))
     test_encoders()
@@ -501,5 +817,11 @@ fn main() -> i32 {
     test_hang()
     test_reset_paths()
     test_guards()
+    test_blt_encoders()
+    test_blit_fill()
+    test_blit_copy()
+    test_blit_reject()
+    test_blit_hang()
+    test_pool_policy()
     return 0
 }

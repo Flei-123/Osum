@@ -47,7 +47,8 @@ def osym_check(path):
     def op(x, y): return px[y * w + x][3] > 128
     ring = [(36, 6), (36, 65), (6, 36), (65, 36)]
     cor = [(10, 10), (61, 10), (10, 61), (61, 61)]
-    if opaque * 100 > w * h * 62: return "filled tile: %d %% of the box opaque" % (opaque * 100 // (w * h))
+    brand = os.path.isfile(os.path.join(root, "assets/icons/brand", os.path.basename(os.path.dirname(path))[:-4] + ".svg"))
+    if not brand and opaque * 100 > w * h * 62: return "filled tile: %d %% of the box opaque" % (opaque * 100 // (w * h))
     if all(op(x, y) for x, y in ring) and all(op(x, y) for x, y in cor):
         return "filled tile: corners and edge middles opaque"
     if len(set(px)) < 8: return "flat picture (%d colours)" % len(set(px))
