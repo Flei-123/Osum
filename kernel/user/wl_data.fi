@@ -45,7 +45,8 @@ export {
     sel_kind, n_sets, n_receives, n_mirrors, n_offers, n_lazy_offers, n_lazy_fills,
 }
 
-const MAXC: u64 = 4
+const MAXC: u64 = 16
+const NO_SLOT: u64 = 64
 const MS: u64 = 4 // sources per client
 const MM: u64 = 4 // mime types per source
 const ML: u64 = 48 // octets per mime type, with the zero
@@ -61,26 +62,26 @@ const SEL_SYS: u64 = 2
 const SYS_LOCK: u64 = 1870
 
 // ------------------------------------------------------------------ state
-static mut d_dev: [u64; 4] = [0 as u64; 4] // the wl_data_device of a client
-static mut sent_gen: [u64; 4] = [0 as u64; 4]
-static mut had_focus: [u64; 4] = [0 as u64; 4]
-static mut next_off: [u64; 4] = [0 as u64; 4]
+static mut d_dev: [u64; 16] = [0 as u64; 16] // the wl_data_device of a client
+static mut sent_gen: [u64; 16] = [0 as u64; 16]
+static mut had_focus: [u64; 16] = [0 as u64; 16]
+static mut next_off: [u64; 16] = [0 as u64; 16]
 
-static mut sr_id: [u64; 16] = [0 as u64; 16]
-static mut sr_gen: [u64; 16] = [0 as u64; 16]
-static mut sr_dead: [u64; 16] = [0 as u64; 16] // 1: no longer usable (replaced / refused)
-static mut sr_cancel: [u64; 16] = [0 as u64; 16] // 1: `cancelled` is still to be sent
-static mut sr_nm: [u64; 16] = [0 as u64; 16]
-static mut sr_mlen: [u64; 64] = [0 as u64; 64]
-static mut sr_mime: [u8; 3072] = [0 as u8; 3072] // 16 sources * 4 mime * 48
+static mut sr_id: [u64; 64] = [0 as u64; 64]
+static mut sr_gen: [u64; 64] = [0 as u64; 64]
+static mut sr_dead: [u64; 64] = [0 as u64; 64] // 1: no longer usable (replaced / refused)
+static mut sr_cancel: [u64; 64] = [0 as u64; 64] // 1: `cancelled` is still to be sent
+static mut sr_nm: [u64; 64] = [0 as u64; 64]
+static mut sr_mlen: [u64; 256] = [0 as u64; 256]
+static mut sr_mime: [u8; 12288] = [0 as u8; 12288] // 64 sources * 4 mime * 48
 
-static mut of_id: [u64; 16] = [0 as u64; 16]
-static mut of_kind: [u64; 16] = [0 as u64; 16]
-static mut of_sc: [u64; 16] = [0 as u64; 16]
-static mut of_sk: [u64; 16] = [0 as u64; 16]
-static mut of_sgen: [u64; 16] = [0 as u64; 16]
-static mut of_seq: [u64; 16] = [0 as u64; 16]
-static mut of_rr: [u64; 4] = [0 as u64; 4]
+static mut of_id: [u64; 64] = [0 as u64; 64]
+static mut of_kind: [u64; 64] = [0 as u64; 64]
+static mut of_sc: [u64; 64] = [0 as u64; 64]
+static mut of_sk: [u64; 64] = [0 as u64; 64]
+static mut of_sgen: [u64; 64] = [0 as u64; 64]
+static mut of_seq: [u64; 64] = [0 as u64; 64]
+static mut of_rr: [u64; 16] = [0 as u64; 16]
 
 static mut sel_kind: u64 = 0
 static mut sel_c: u64 = 0
@@ -294,7 +295,7 @@ fn find_src(c: u64, id: u64) -> u64 {
         }
         k = k + 1
     }
-    return 16
+    return NO_SLOT
 }
 
 fn find_off(c: u64, id: u64) -> u64 {
@@ -305,7 +306,7 @@ fn find_off(c: u64, id: u64) -> u64 {
         }
         k = k + 1
     }
-    return 16
+    return NO_SLOT
 }
 
 fn init_bridge() {
@@ -416,12 +417,12 @@ fn on_manager(c: u64, id: u64, op: u64, argp: u64) {
 fn on_source(c: u64, id: u64, op: u64, argp: u64) {
     let si: u64 = find_src(c, id)
     if op == wlproto.RQ_WL_DATA_SOURCE_DESTROY {
-        if si < 16 {
+        if si < NO_SLOT {
             src_free(si)
         }
         return
     }
-    if op == wlproto.RQ_WL_DATA_SOURCE_OFFER && si < 16 {
+    if op == wlproto.RQ_WL_DATA_SOURCE_OFFER && si < NO_SLOT {
         let n1: u64 = wl_msg.rd32(argp) // length with the zero
         if n1 == 0 || sr_nm[si as usize] >= MM {
             return
@@ -541,7 +542,7 @@ fn on_device(c: u64, id: u64, op: u64, argp: u64) {
     if op == wlproto.RQ_WL_DATA_DEVICE_START_DRAG {
         // no drag and drop here: the source is told so and does not wait for a drop
         let si: u64 = find_src(c, wl_msg.rd32(argp))
-        if si < 16 {
+        if si < NO_SLOT {
             sr_cancel[si as usize] = 1
             sr_dead[si as usize] = 1
         }
@@ -553,16 +554,16 @@ fn on_device(c: u64, id: u64, op: u64, argp: u64) {
     let sid: u64 = wl_msg.rd32(argp)
     let serial: u64 = wl_msg.rd32(argp + 4)
     n_sets = n_sets + 1
-    var si: u64 = 16
+    var si: u64 = NO_SLOT
     if sid != 0 {
         si = find_src(c, sid)
-        if si >= 16 {
+        if si >= NO_SLOT {
             return
         }
     }
     // a wrong serial, no focus, or a locked screen: the request is ignored and the source is told it was refused
     if locked() || !wl_input.serial_ok(c, serial) {
-        if si < 16 {
+        if si < NO_SLOT {
             sr_cancel[si as usize] = 1
             sr_dead[si as usize] = 1
         }
@@ -593,7 +594,7 @@ fn on_device(c: u64, id: u64, op: u64, argp: u64) {
 fn on_offer(c: u64, id: u64, op: u64, argp: u64, fd: u64) {
     let oi: u64 = find_off(c, id)
     if op == wlproto.RQ_WL_DATA_OFFER_DESTROY {
-        if oi < 16 {
+        if oi < NO_SLOT {
             of_id[oi as usize] = 0
         }
         return
@@ -602,7 +603,7 @@ fn on_offer(c: u64, id: u64, op: u64, argp: u64, fd: u64) {
         return
     }
     n_receives = n_receives + 1
-    if oi >= 16 || fd == 0 || locked() {
+    if oi >= NO_SLOT || fd == 0 || locked() {
         close_fd(fd)
         return
     }

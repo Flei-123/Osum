@@ -286,4 +286,5 @@ def main():
     print("system stand %d (%s) -> %s  [%s]" % (count, commit, out, chan))
 
 
-main()
+if __name__ == "__main__":
+    main()
