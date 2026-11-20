@@ -10,6 +10,7 @@ if [ ! -x "$WD/root/sbin/apk" ]; then
 fi
 cp /etc/resolv.conf "$WD/root/etc/resolv.conf"
 timeout 900 chroot "$WD/root" /sbin/apk add --no-cache $PKGS > "$WD/apk.log" 2>&1 || { tail -3 "$WD/apk.log"; exit 1; }
+[ -z "${APP_HOOK:-}" ] || bash "$APP_HOOK" "$WD" || exit 1
 python3 -I "$HERE/mkroot.py" "$WD/root" "$WD/run/spec.txt" --base \
     --tree /usr/lib --tree /usr/libexec --tree /usr/share/terminfo --tree /usr/share/vim --tree /usr/share/misc \
     --tree /usr/share/mime --tree /usr/share/icu --tree /usr/share/fonts --tree /usr/share/X11 --tree /usr/share/git-core \

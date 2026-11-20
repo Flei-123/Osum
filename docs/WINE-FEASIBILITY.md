@@ -2,15 +2,21 @@
 
 Method: Wine 11.0 (Alpine 3.24 package, musl, new-WoW64 build: `x86_64-unix`, `x86_64-windows`, `i386-windows`) was read at source level (gitlab.winehq.org master), traced with `strace -f` on Linux (`wine cmd /c echo`) and started inside Osum under QEMU (`tools/linuxapps/wine-gate.sh`, prep: `tools/linuxapps/prep-wine.sh`).
 
-## Result in Osum today (QEMU KVM, main 9d4a7ce95)
+## Result in Osum today (QEMU KVM, main 651a0115f, 20.11.2026)
 
 | step | result |
 |---|---|
-| `wine --version` | ok (`wine-11.0`): ELF load of musl + libwine, dynamic linking, exit |
-| `wineserver --version` | ok (`Wine 11.0`) |
-| `wine64 cmd /c echo hello` | red: `preloader: failed to reserve range 0x10000-0x110000, 0x7f000000-0x7fff0000, 0x7ffffe000000-0x7fffffff0000`, then `err:virtual:virtual_alloc_first_teb wine: failed to map the shared user data: c0000018` (fixed mapping at 0x7ffe0000) |
+| `wine --version`, `wineserver --version` | ok |
+| prefix (`wineboot --init`, ~800 DLL copies) | ok, ~6.5 min in the guest |
+| `wine64 cmd /c echo`, mingw `hello.exe` | ok (E1 green, `tools/linuxapps/wine-gate.sh` 5/5) |
+| `wine64 notepad` on wayd (winewayland) | red: `waylanddrv` starts and talks to wayd (optional protocols missing only), but clients get `nodrv_CreateWindow: The explorer process failed to start.` (no `GraphicsDriver`/`DriverError` registry value found, win32u driver.c `load_desktop_driver`); no window ever created (`tools/linuxapps/wine-notepad.sh`, expected red) |
 
-Only ENOSYS seen: `userfaultfd` (323); Wine falls back silently (`kernel_writewatch_init` returns on failure, virtual.c:388).
+Measurements (this run):
+- Prefix prebuilt on the host (`tools/linuxapps/mkprefix.sh`, bwrap, 25 s; 425 MB, 72 MB when 1435 DLLs are symlinks to /usr/lib/wine): does NOT remove the startup cost. `wine64 cmd /c echo` with the prebuilt prefix still needs 217 s (symlinked prefix, console kernel) to 339 s (real files, GUI kernel).
+- Profile (`tools/linuxapps/wine-prof.sh`, RIP sampling during that warm start): 69 % of samples are guest idle (`tasks__idle`), 15 % port I/O of which most is the serial trace (`fremdtrace`, `sys: ERR` lines; 14995 failing mmap probes, 6393 readlink EINVAL, 1064 getxattr, 408 ENOENT opens in one start). Startup is wait-bound, not CPU-bound: next step is finding which wait (futex/poll/nanosleep timeouts between wineserver, wineboot, services.exe, explorer) and running without `fremdtrace`.
+- A symlinked prefix leaves orphans after a timeout kill that exhaust the 1024-entry open file table (`can't create pipe: Too many open files in system`).
+
+Copy-on-write (r3903, main 4b469aad4): private file mappings that follow a shared object now carry `PAGE_COW` (+`PAGE_COWW` when the mmap asked for write); `mprotect(PROT_WRITE)` and a write fault copy the page (`procspace.cow_write`, `procfault.cow_fault`), read-only private pages still fault. `tools/unterbau/t_cowprivate.c` 17/17 (old main: 3 pass, `mprotect_write` EACCES, then crash).
 
 ## What Wine needs (source-verified unless marked)
 
@@ -55,9 +61,17 @@ All run as separate user-space programs: no conflict with the GPL-2.0-only kerne
 | stage | goal | needs | status |
 |---|---|---|---|
 | E0 | Wine loader starts | ELF/musl/libwine | done: `wine --version`, `wineserver --version` green in `wine-gate.sh` |
-| E1 | 64-bit console PE (`cmd /c echo`, mingw hello.exe) | blocker 1, prefix creation (wineboot) | red: single error, see above; gate marks it expected-red |
-| E2 | Notepad (user32/gdi32) | E1, winewayland on wayd, fonts | open |
-| E3 | 32-bit apps + Vulkan/DXVK hello triangle | blockers 3, 5 | open |
+| E1 | 64-bit console PE (`cmd /c echo`, mingw hello.exe) | blocker 1, prefix creation (wineboot) | done: gate 5/5 green |
+| E2 | Notepad (user32/gdi32) | E1, winewayland on wayd, fonts | red: explorer cannot publish the graphics driver (see above); gate `wine-notepad.sh` ready |
+| E3 | 32-bit apps + Vulkan/DXVK hello triangle | blockers 3, 5 | assessed, see E3 section |
 | E4 | Steam/Proton game | blocker 6 + E3 | open |
 
 ArtCraft: no source in the repo. Web search (20.11.2026) says: Rust + Tauri desktop app (storytold/artcraft), Windows/macOS downloads, Linux built from source; licence information conflicts between sources, backend is a separate repo. A Tauri app on Linux needs WebKitGTK (a Linux-native route, not Wine); the Windows build would need WebView2 under Wine (not assessed).
+
+## E3 assessment (20.11.2026, desk study + repo facts, nothing run)
+
+32-bit (WoW64): Wine 11 new-WoW64 runs 32-bit code inside the 64-bit process (compat-mode far jump). Needed from the kernel: compat-mode user segment (GDT 0x18 exists), 32-bit TEB selector (`modify_ldt`/`set_thread_area`, both in the t_sysall table as not implemented), signal frames for 32-bit context, fixed maps below 4 GiB. Blocker, effort L; none of it measured yet.
+
+Vulkan: DXVK README lists no minimum Vulkan version and no required extensions (needs a recent driver; `VK_EXT_graphics_pipeline_library` optional). vkd3d-proton needs Vulkan 1.3, full descriptor indexing (>= 1,000,000 UpdateAfterBind descriptors), `samplerMirrorClampToEdge`, `shaderDrawParameters`, `VK_EXT_robustness2`, `VK_KHR_push_descriptor`. Our ICD is exercised with API 1.1 (tools/vulkan/client.c) and a 1.3 draw client (tools/vulkan/draw.c, 7 draws against lavapipe); descriptor indexing, robustness2 and push descriptors are not verified. Wine's `winevulkan` also needs `libvulkan.so.1` in the guest (`err:vulkan:vulkan_init_once Failed to load libvulkan.so.1` in the Notepad run) and a WSI surface through winewayland, which does not load yet.
+
+Blockers in order: (1) winewayland driver publish (E2), (2) Wine startup latency (wait-bound, 200-340 s), (3) 32-bit kernel support, (4) libvulkan loader + ICD feature set for vkd3d-proton, (5) real GPU for playable speed.
