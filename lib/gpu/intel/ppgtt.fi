@@ -1,0 +1,319 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.octets
+
+export {
+    create, map, unmap, pte_of, lookup, pdp_phys, ctx_set_pdps, audit, pool_used, mapped_pages,
+    pte_encode, pde_encode, scratch_pte, va_split_pdp, va_split_pd, va_split_pt,
+    P_OK, P_ARG, P_NOMEM, P_EXISTS, P_UNMAPPED,
+    CACHE_UNCACHED, CACHE_WT, CACHE_WB,
+    STATE_BYTES, VA_LIMIT, MIN_POOL_PAGES, PAGE_SIZE, PDP_COUNT, ENTRIES,
+    CTX_PDP0_UDW, CTX_PDP3_UDW, PTE_PHYS_MASK
+}
+
+const P_OK: u64 = 0
+const P_ARG: u64 = 1
+const P_NOMEM: u64 = 2
+const P_EXISTS: u64 = 3
+const P_UNMAPPED: u64 = 4
+
+const CACHE_UNCACHED: u64 = 0
+const CACHE_WT: u64 = 1
+const CACHE_WB: u64 = 2
+
+const PAGE_SIZE: u64 = 0x1000
+const PAGE_MASK: u64 = 0xfff
+const ENTRIES: u64 = 512
+const ENTRY_BYTES: u64 = 8
+const ENTRY_MASK: u64 = 0x1ff
+const PDP_COUNT: u64 = 4
+const PDP_MASK: u64 = 3
+const PDP_SHIFT: u64 = 30
+const PD_SHIFT: u64 = 21
+const PT_SHIFT: u64 = 12
+const VA_LIMIT: u64 = 0x100000000
+
+const PRESENT: u64 = 1
+const RW: u64 = 2
+const PPAT_PWT: u64 = 0x08
+const PPAT_PCD: u64 = 0x10
+const PPAT_PAT: u64 = 0x80
+const PPAT_UNCACHED: u64 = 0x18
+const PPAT_WT: u64 = 0x10
+const PPAT_WB: u64 = 0x80
+const PTE_PHYS_MASK: u64 = 0x7ffffff000
+
+const S_POOL: u64 = 0
+const S_POOL_PAGES: u64 = 8
+const S_USED: u64 = 16
+const S_SCRATCH_PAGE: u64 = 24
+const S_SCRATCH_PT: u64 = 32
+const S_SCRATCH_PD: u64 = 40
+const S_PD: u64 = 48
+const S_MAPPED: u64 = 80
+const STATE_BYTES: u64 = 96
+const FIXED_PAGES: u64 = 7
+const MIN_POOL_PAGES: u64 = 8
+
+const DWORD: u64 = 4
+const CTX_PDP3_UDW: u64 = 37
+const CTX_PDP0_UDW: u64 = 49
+const CTX_PDP_STEP: u64 = 4
+const CTX_LDW_AFTER_UDW: u64 = 2
+const ADDR_LOW_MASK: u64 = 0xffffffff
+const ADDR_HIGH_SHIFT: u64 = 32
+
+fn cache_bits(cache: u64) -> u64 {
+    if cache == CACHE_UNCACHED {
+        return PPAT_UNCACHED
+    }
+    if cache == CACHE_WT {
+        return PPAT_WT
+    }
+    return PPAT_WB
+}
+
+fn pte_encode(phys: u64, cache: u64, readonly: bool) -> u64 {
+    var pte: u64 = (phys & PTE_PHYS_MASK) | PRESENT | RW | cache_bits(cache)
+    if readonly {
+        pte = pte & (~RW)
+    }
+    return pte
+}
+
+fn pde_encode(phys: u64) -> u64 {
+    return (phys & PTE_PHYS_MASK) | PRESENT | RW | PPAT_UNCACHED
+}
+
+fn va_split_pdp(va: u64) -> u64 {
+    return (va >> PDP_SHIFT) & PDP_MASK
+}
+
+fn va_split_pd(va: u64) -> u64 {
+    return (va >> PD_SHIFT) & ENTRY_MASK
+}
+
+fn va_split_pt(va: u64) -> u64 {
+    return (va >> PT_SHIFT) & ENTRY_MASK
+}
+
+fn slot(st: u64, off: u64) -> u64 {
+    return octets.ld64(st, off)
+}
+
+fn entry_at(table: u64, idx: u64) -> u64 {
+    return table + idx * ENTRY_BYTES
+}
+
+fn scratch_pte(st: u64) -> u64 {
+    return pte_encode(slot(st, S_SCRATCH_PAGE), CACHE_UNCACHED, false)
+}
+
+fn scratch_pde_pt(st: u64) -> u64 {
+    return pde_encode(slot(st, S_SCRATCH_PT))
+}
+
+fn scratch_pde_pd(st: u64) -> u64 {
+    return pde_encode(slot(st, S_SCRATCH_PD))
+}
+
+fn fill(table: u64, value: u64) {
+    var i: u64 = 0
+    while i < ENTRIES {
+        octets.st64(entry_at(table, i), 0, value)
+        i = i + 1
+    }
+}
+
+fn alloc_page(st: u64) -> u64 {
+    let used: u64 = slot(st, S_USED)
+    if used >= slot(st, S_POOL_PAGES) {
+        return 0
+    }
+    octets.st64(st, S_USED, used + 1)
+    let page: u64 = slot(st, S_POOL) + used * PAGE_SIZE
+    octets.zero(page, PAGE_SIZE)
+    return page
+}
+
+fn pool_used(st: u64) -> u64 {
+    return slot(st, S_USED)
+}
+
+fn mapped_pages(st: u64) -> u64 {
+    return slot(st, S_MAPPED)
+}
+
+fn create(st: u64, pool: u64, pool_pages: u64) -> u64 {
+    if st == 0 || pool == 0 || (pool & PAGE_MASK) != 0 || pool_pages < MIN_POOL_PAGES {
+        return P_ARG
+    }
+    octets.zero(st, STATE_BYTES)
+    octets.st64(st, S_POOL, pool)
+    octets.st64(st, S_POOL_PAGES, pool_pages)
+    octets.st64(st, S_SCRATCH_PAGE, alloc_page(st))
+    octets.st64(st, S_SCRATCH_PT, alloc_page(st))
+    octets.st64(st, S_SCRATCH_PD, alloc_page(st))
+    fill(slot(st, S_SCRATCH_PT), scratch_pte(st))
+    fill(slot(st, S_SCRATCH_PD), scratch_pde_pt(st))
+    var n: u64 = 0
+    while n < PDP_COUNT {
+        let pd: u64 = alloc_page(st)
+        octets.st64(st, S_PD + n * ENTRY_BYTES, pd)
+        fill(pd, scratch_pde_pt(st))
+        n = n + 1
+    }
+    return P_OK
+}
+
+fn pdp_phys(st: u64, n: u64) -> u64 {
+    if n >= PDP_COUNT {
+        return 0
+    }
+    return slot(st, S_PD + n * ENTRY_BYTES)
+}
+
+fn pde_slot(st: u64, va: u64) -> u64 {
+    return entry_at(pdp_phys(st, va_split_pdp(va)), va_split_pd(va))
+}
+
+fn pt_of(st: u64, va: u64) -> u64 {
+    let pde: u64 = octets.ld64(pde_slot(st, va), 0)
+    if (pde & PRESENT) == 0 {
+        return 0
+    }
+    return pde & PTE_PHYS_MASK
+}
+
+fn va_ok(va: u64, phys: u64) -> bool {
+    return va < VA_LIMIT && (va & PAGE_MASK) == 0 && (phys & PAGE_MASK) == 0 && phys <= PTE_PHYS_MASK
+}
+
+fn ensure_pt(st: u64, va: u64) -> u64 {
+    let pt: u64 = pt_of(st, va)
+    if pt != slot(st, S_SCRATCH_PT) {
+        return pt
+    }
+    let fresh: u64 = alloc_page(st)
+    if fresh == 0 {
+        return 0
+    }
+    fill(fresh, scratch_pte(st))
+    octets.st64(pde_slot(st, va), 0, pde_encode(fresh))
+    return fresh
+}
+
+fn map(st: u64, va: u64, phys: u64, cache: u64, readonly: bool) -> u64 {
+    if !va_ok(va, phys) || cache > CACHE_WB {
+        return P_ARG
+    }
+    let pt: u64 = ensure_pt(st, va)
+    if pt == 0 {
+        return P_NOMEM
+    }
+    let at: u64 = entry_at(pt, va_split_pt(va))
+    if octets.ld64(at, 0) != scratch_pte(st) {
+        return P_EXISTS
+    }
+    octets.st64(at, 0, pte_encode(phys, cache, readonly))
+    octets.st64(st, S_MAPPED, slot(st, S_MAPPED) + 1)
+    return P_OK
+}
+
+fn pte_of(st: u64, va: u64) -> u64 {
+    if va >= VA_LIMIT || (va & PAGE_MASK) != 0 {
+        return scratch_pte(st)
+    }
+    let pt: u64 = pt_of(st, va)
+    if pt == 0 {
+        return scratch_pte(st)
+    }
+    return octets.ld64(entry_at(pt, va_split_pt(va)), 0)
+}
+
+fn lookup(st: u64, va: u64) -> u64 {
+    let pte: u64 = pte_of(st, va)
+    if pte == scratch_pte(st) || (pte & PRESENT) == 0 {
+        return 0
+    }
+    return pte & PTE_PHYS_MASK
+}
+
+fn unmap(st: u64, va: u64) -> u64 {
+    if va >= VA_LIMIT || (va & PAGE_MASK) != 0 {
+        return P_ARG
+    }
+    let pt: u64 = pt_of(st, va)
+    if pt == 0 || pt == slot(st, S_SCRATCH_PT) {
+        return P_UNMAPPED
+    }
+    let at: u64 = entry_at(pt, va_split_pt(va))
+    if octets.ld64(at, 0) == scratch_pte(st) {
+        return P_UNMAPPED
+    }
+    octets.st64(at, 0, scratch_pte(st))
+    octets.st64(st, S_MAPPED, slot(st, S_MAPPED) - 1)
+    return P_OK
+}
+
+fn in_pool(st: u64, phys: u64) -> bool {
+    let base: u64 = slot(st, S_POOL)
+    return phys >= base && phys < base + slot(st, S_POOL_PAGES) * PAGE_SIZE
+}
+
+fn audit_pt(st: u64, pt: u64, allowed: fn(u64) -> u64) -> u64 {
+    var bad: u64 = 0
+    var i: u64 = 0
+    while i < ENTRIES {
+        let pte: u64 = octets.ld64(entry_at(pt, i), 0)
+        if pte != scratch_pte(st) {
+            if (pte & PRESENT) == 0 || allowed(pte & PTE_PHYS_MASK) == 0 || in_pool(st, pte & PTE_PHYS_MASK) {
+                bad = bad + 1
+            }
+        }
+        i = i + 1
+    }
+    return bad
+}
+
+fn audit_pd(st: u64, pd: u64, allowed: fn(u64) -> u64) -> u64 {
+    var bad: u64 = 0
+    var i: u64 = 0
+    while i < ENTRIES {
+        let pde: u64 = octets.ld64(entry_at(pd, i), 0)
+        if pde != scratch_pde_pt(st) {
+            let pt: u64 = pde & PTE_PHYS_MASK
+            if (pde & PRESENT) == 0 || !in_pool(st, pt) {
+                bad = bad + 1
+            } else {
+                bad = bad + audit_pt(st, pt, allowed)
+            }
+        }
+        i = i + 1
+    }
+    return bad
+}
+
+fn audit(st: u64, allowed: fn(u64) -> u64) -> u64 {
+    var bad: u64 = 0
+    var n: u64 = 0
+    while n < PDP_COUNT {
+        bad = bad + audit_pd(st, pdp_phys(st, n), allowed)
+        n = n + 1
+    }
+    return bad
+}
+
+fn put(ctx: u64, idx: u64, v: u64) {
+    octets.st32(ctx, idx * DWORD, v)
+}
+
+fn ctx_set_pdps(ctx: u64, st: u64) {
+    var n: u64 = 0
+    while n < PDP_COUNT {
+        let pd: u64 = pdp_phys(st, n)
+        let udw: u64 = CTX_PDP0_UDW - n * CTX_PDP_STEP
+        put(ctx, udw, pd >> ADDR_HIGH_SHIFT)
+        put(ctx, udw + CTX_LDW_AFTER_UDW, pd & ADDR_LOW_MASK)
+        n = n + 1
+    }
+}

@@ -12,6 +12,7 @@ HOLD_LIMIT_S = 300.0
 POLL_STEP_S = 0.5
 NONCE_HEX = "00112233445566778899aabbccddeeff"
 DNS_TTL = 60
+HANDSHAKE_TIMEOUT_S = 10.0
 
 lock = threading.Lock()
 config = {}
@@ -78,6 +79,24 @@ def hold_until_closed(connection):
     return time.time() - start
 
 
+class TlsServer(ThreadingHTTPServer):
+    def get_request(self):
+        return self.socket.accept()
+
+    def finish_request(self, request, client_address):
+        try:
+            request.settimeout(HANDSHAKE_TIMEOUT_S)
+            wrapped = config["context"].wrap_socket(request, server_side=True)
+            wrapped.settimeout(None)
+        except (OSError, ssl.SSLError):
+            record("HANDSHAKE-FAILED %s:%d" % client_address)
+            return
+        try:
+            super().finish_request(wrapped, client_address)
+        finally:
+            wrapped.close()
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
@@ -132,11 +151,11 @@ def main():
     config["log"] = args.log
     config["stall"] = args.stall
     threading.Thread(target=serve_dns, args=(args.bind,), daemon=True).start()
-    server = ThreadingHTTPServer((args.bind, 443), Handler)
+    server = TlsServer((args.bind, 443), Handler)
     server.daemon_threads = True
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(args.cert, args.key)
-    server.socket = context.wrap_socket(server.socket, server_side=True)
+    config["context"] = context
     record("READY")
     server.serve_forever()
 
