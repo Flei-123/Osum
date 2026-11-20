@@ -34,17 +34,16 @@ static int connect_accepted(int listener, const char *path)
 {
     pid_t child = fork();
     if (child == 0) {
-        int a = accept(listener, NULL, NULL);
-        if (a >= 0) close(a);
-        _exit(0);
+        int c = socket(AF_UNIX, SOCK_STREAM, 0);
+        int r = connect_to(c, path);
+        _exit(r == 0 ? 0 : (errno & 0x7f));
     }
-    int c = socket(AF_UNIX, SOCK_STREAM, 0);
-    int r = connect_to(c, path);
-    int saved = errno;
-    close(c);
-    waitpid(child, NULL, 0);
-    errno = saved;
-    return r;
+    int a = accept(listener, NULL, NULL);
+    if (a >= 0) close(a);
+    int status = 0;
+    waitpid(child, &status, 0);
+    errno = WEXITSTATUS(status);
+    return WEXITSTATUS(status) == 0 ? 0 : -1;
 }
 
 static void check_node(void)
