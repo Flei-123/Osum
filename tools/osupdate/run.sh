@@ -29,7 +29,7 @@
 #  13. trust-root delivery (sysfile roots): rootsctl apply from the signed list; counter-proofs wrong hash, junk block
 #  14. absolute overlay targets (/etc, /usr/share), syslink of /apps/<x>.osp/start to a new /bin file, reboot, counter-proofs
 #  15. detached apply (apply bg): running/done/failed state + log, second call refused, stale state released, force
-#  18. single system apps (sysapp lines, tools/ota/publish_app.py): delta, no kernel, ABI gate, self-check rollback, signature/hash counter-proofs
+#  19. single system apps (sysapp lines, tools/ota/publish_app.py): delta, no kernel, ABI gate, self-check rollback, signature/hash counter-proofs
 #  17. split overlay file (--split-gz): parts as ordinary overlay files, cut line refused, joined by sha256, link, wrong join hash refused
 # Sections 2 and 5 run with the gzip feed (kernel + overlay files as .gz, streaming gunzip on the
 # device): the trial boot sees the new /bin files, confirm drops the backups, a lost trial restores them.
@@ -60,6 +60,8 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 gleich() { if [ "$2" = "$3" ]; then ok "$1: $2"; else bad "$1: '$2', expected '$3'"; fi; }
 hat() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
+line_has() { tr -d '\r' < "$1" | grep -qxF -- "$2" && ok "$3" || bad "$3 -- line '$2' missing"; }
+line_hasnot() { tr -d '\r' < "$1" | grep -qxF -- "$2" && bad "$3 -- line '$2' present but must not be" || ok "$3"; }
 hatnicht() { grep -qaF -- "$2" "$1" && bad "$3 -- '$2' present but must not be" || ok "$3"; }
 
 SRVPID=""
@@ -735,8 +737,8 @@ hatnicht "$OUT/v2.txt" "system: available build" "oversized list: nothing announ
 dienst_aus
 fi
 
-if want 18; then
-echo "== 18. single system apps (sysapp lines): one app updated, kernel and everything else untouched, ABI/signature/hash/self-check counter-proofs =="
+if want 19; then
+echo "== 19. single system apps (sysapp lines): one app updated, kernel and everything else untouched, ABI/signature/hash/self-check counter-proofs =="
 puba() { # <feed> <name> <elf> <rev> [args]
     local f=$1 n=$2 e=$3 r=$4; shift 4
     python3 tools/ota/publish_app.py "$f" dev --name "$n" --elf "$e" --rev "$r" --key "$OUT/geheim.key" "$@" > "$OUT/puba.log" 2>&1
@@ -759,7 +761,7 @@ SLEEP_BEFORE=$(sed -n '/^osum\$ shasum \/bin\/sleep/,/^osum\$ cat \/proc/p' "$OU
 hat "$OUT/p1.txt" " abi 1" "/proc/version reports the kernel ABI"
 hat "$OUT/p1.after" "ota: app files staged: 1" "delta: only the changed app is staged (the byte-identical one is skipped)"
 hat "$OUT/p1.after" "system: apps updated" "apply reports the apps updated, no restart"
-hat "$OUT/p1.after" "hello1" "the new app runs in the SAME boot"
+line_has "$OUT/p1.after" "hello1" "the new app runs in the SAME boot"
 hat "$OUT/p1.after" "gateapp 1" "revision recorded in /system/apps.rev"
 hat "$OUT/p1.after" "00000100" "SYSVERSION unchanged (no kernel stand involved)"
 hatnicht "$OUT/p1.after" "staged in slot B" "no slot B"
@@ -769,22 +771,22 @@ esp_has osum-b.mb && bad "slot B written" || ok "no slot B on the ESP"
 [ "$(conf_default)" = "2" ] && bad "limine default_entry armed slot B" || ok "limine default_entry not armed ('$(conf_default)')"
 gleich "kernel (slot A) untouched" "$(esp_sha osum.mb)" "$APP_KSHA"
 rc=$(lauf p2 "cat /system/apps.rev;gateapp hello2;ota system apply;exit" keep)
-hat "$OUT/p2.txt" "hello2" "the app survives the reboot"
+line_has "$OUT/p2.txt" "hello2" "the app survives the reboot"
 hat "$OUT/p2.txt" "gateapp 1" "revision survives the reboot"
 dienst_aus
 
-echo "-- 18b. rev 2 whose self-check fails: restored, old app and revision stay"
+echo "-- 19b. rev 2 whose self-check fails: restored, old app and revision stay"
 puba "$OUT/feed-app" gateapp "$OUT/app-bad" 2 --probe && ok "sysapp gateapp rev 2 (broken: cat as app) published" || bad "publish broken rev"
 dienst "$OUT/feed-app" && ok "feed up" || bad "feed does not start"
 rc=$(lauf p3 "ota system apply;gateapp hello3;cat /system/apps.rev;ls /system/old;exit" keep)
 sed -n '/^osum\$ ota system apply/,$p' "$OUT/p3.txt" > "$OUT/p3.after"
 hat "$OUT/p3.after" "app self-check failed, previous files restored" "counter-proof: failing self-check -> rolled back"
-hat "$OUT/p3.after" "hello3" "the previous app version still runs"
+line_has "$OUT/p3.after" "hello3" "the previous app version still runs"
 hat "$OUT/p3.after" "gateapp 1" "revision still 1"
 hatnicht "$OUT/p3.after" "system: apps updated" "no success message"
 dienst_aus
 
-echo "-- 18c. ABI too new / wrong signature / wrong hash: refused, nothing installed"
+echo "-- 19c. ABI too new / wrong signature / wrong hash: refused, nothing installed"
 fresh_disk
 mkfeed "$OUT/feed-abi"; puba "$OUT/feed-abi" gateapp "$OUT/app-good" 1 --abi 2
 mkfeed "$OUT/feed-sig"; puba "$OUT/feed-sig" gateapp "$OUT/app-good" 1 --bad-sig
@@ -794,17 +796,17 @@ rc=$(lauf a1 "ota system apply;cat /system/apps.rev;gateapp hello4;exit")
 sed -n '/^osum\$ ota system apply/,$p' "$OUT/a1.txt" > "$OUT/a1.after"
 hat "$OUT/a1.after" "needs kernel ABI 2" "counter-proof: incompatible ABI named"
 hat "$OUT/a1.after" "no app could be installed" "counter-proof: update refused"
-hatnicht "$OUT/a1.after" "hello4" "counter-proof: the app was not installed"
+line_hasnot "$OUT/a1.after" "hello4" "counter-proof: the app was not installed"
 dienst "$OUT/feed-sig" && ok "feed up (bad signature)" || bad "feed does not start"
 rc=$(lauf a2 "ota system apply;gateapp hello5;exit")
 sed -n '/^osum\$ ota system apply/,$p' "$OUT/a2.txt" > "$OUT/a2.after"
 hat "$OUT/a2.after" "SIGNATURE" "counter-proof: broken signature rejected"
-hatnicht "$OUT/a2.after" "hello5" "counter-proof: nothing installed"
+line_hasnot "$OUT/a2.after" "hello5" "counter-proof: nothing installed"
 dienst "$OUT/feed-hash" && ok "feed up (bad hash)" || bad "feed does not start"
 rc=$(lauf a3 "ota system apply;gateapp hello6;exit")
 sed -n '/^osum\$ ota system apply/,$p' "$OUT/a3.txt" > "$OUT/a3.after"
 hat "$OUT/a3.after" "overlay file download or check failed" "counter-proof: wrong file hash refused"
-hatnicht "$OUT/a3.after" "hello6" "counter-proof: nothing installed"
+line_hasnot "$OUT/a3.after" "hello6" "counter-proof: nothing installed"
 dienst_aus
 fi
 
