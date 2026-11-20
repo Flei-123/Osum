@@ -301,9 +301,6 @@ fn hd_pid(state: u64) -> u64 {
     return g(state, H_PID)
 }
 
-const LPSS_PRIV_CLOCK: u64 = 0x200
-const LPSS_CLOCK_ENABLE: u64 = 1
-const LPSS_CLOCK_UNITY: u64 = 0x10002
 const LPSS_PRIV_RESETS: u64 = 0x204
 const LPSS_RESETS_RELEASE: u64 = 3
 const PCI_CAP_PM: u64 = 0x01
@@ -325,13 +322,6 @@ fn lpss_wake(state: u64, i: u64, mm: u64) {
         }
     }
     __mmio_write32((mm + LPSS_PRIV_RESETS) as *mut u32, LPSS_RESETS_RELEASE as u32)
-    var clock: u64 = regio.read32(mm + LPSS_PRIV_CLOCK)
-    if (clock & LPSS_CLOCK_ENABLE) == 0 {
-        if (clock & 0x7FFFFFFE) == 0 {
-            clock = LPSS_CLOCK_UNITY
-        }
-        __mmio_write32((mm + LPSS_PRIV_CLOCK) as *mut u32, ((clock | LPSS_CLOCK_ENABLE) & 0xFFFFFFFF) as u32)
-    }
 }
 
 fn is_lpss_id(dev: u64) -> bool {
@@ -534,32 +524,39 @@ fn dw_xfer(state: u64, wp: u64, wlen: u64, rp: u64, rlen: u64) -> u64 {
             w32(state, mm, IC_DATA_CMD, c)
             sent = sent + 1
         }
-        if (r32(state, mm, IC_RAW_INTR) & STAT_TX_ABRT) != 0 {
-            let u2: u64 = r32(state, mm, IC_CLR_TX_ABRT)
-            s(state, S_ABORTS, g(state, S_ABORTS) + 1)
-            let c1: u64 = tg(X_CUR_C)
-            if c1 < MAX_CTRL {
-                cts(c1, CT_ABRT, ctg(c1, CT_ABRT) + 1)
-            }
+        if take_abort(state, mm) {
             return 0
         }
         var w: u64 = 0
-        while w < 20000 && r32(state, mm, IC_RXFLR) == 0 {
+        while w < 20000 && r32(state, mm, IC_RXFLR) == 0 && (r32(state, mm, IC_RAW_INTR) & STAT_TX_ABRT) == 0 {
             w = w + 1
         }
         if r32(state, mm, IC_RXFLR) == 0 {
-            note_timeout(state, mm)
+            if !take_abort(state, mm) {
+                note_timeout(state, mm)
+            }
             return 0
         }
         kstate.set8(rp + got, (r32(state, mm, IC_DATA_CMD) & 0xFF) as u8)
         got = got + 1
     }
-    if (r32(state, mm, IC_RAW_INTR) & STAT_TX_ABRT) != 0 {
-        let u3: u64 = r32(state, mm, IC_CLR_TX_ABRT)
-        s(state, S_ABORTS, g(state, S_ABORTS) + 1)
+    if take_abort(state, mm) {
         return 0
     }
     return got
+}
+
+fn take_abort(state: u64, mm: u64) -> bool {
+    if (r32(state, mm, IC_RAW_INTR) & STAT_TX_ABRT) == 0 {
+        return false
+    }
+    let cleared: u64 = r32(state, mm, IC_CLR_TX_ABRT)
+    s(state, S_ABORTS, g(state, S_ABORTS) + 1)
+    let c: u64 = tg(X_CUR_C)
+    if c < MAX_CTRL {
+        cts(c, CT_ABRT, ctg(c, CT_ABRT) + 1)
+    }
+    return true
 }
 
 fn note_timeout(state: u64, mm: u64) {
