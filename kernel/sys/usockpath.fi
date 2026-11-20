@@ -1,0 +1,119 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.kstate
+import fs.fs
+import fs.unixsock
+import lib.errno
+import ipc.perm
+import ipc.appfs
+import ipc.uio
+import sys.sysconst
+import sys.sysfifo
+import sys.sysuser
+
+export {
+    resolve_name, create_node, node_missing
+}
+
+const NODE_MODE: u64 = 511
+
+fn sun_path(state: u64) -> u64 {
+    return state + sysconst.WL_PATH + 2
+}
+
+fn is_abstract(state: u64) -> bool {
+    return kstate.get8(sun_path(state)) == 0
+}
+
+fn copy_octets(from: u64, to: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(to + i, kstate.get8(from + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(to + n, 0 as u8)
+}
+
+fn resolve_name(state: u64, me: u64, plen: u64) -> u64 {
+    if is_abstract(state) {
+        return plen
+    }
+    let buf: u64 = sysuser.nameb(state)
+    copy_octets(sun_path(state), buf, plen)
+    let n: u64 = uio.resolve(state, me, buf, plen)
+    if errno.is_error(n) {
+        return n
+    }
+    if n == 0 || n > unixsock.USUN_MAX {
+        return sysuser.neg(errno.E_NAMETOOLONG)
+    }
+    copy_octets(buf, sun_path(state), n)
+    return n
+}
+
+fn load_path(state: u64, plen: u64) -> u64 {
+    let buf: u64 = sysuser.nameb(state)
+    copy_octets(sun_path(state), buf, plen)
+    return buf
+}
+
+fn tracked(state: u64, buf: u64) -> bool {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return false
+    }
+    if fs.version(state) < fs.OFS_V2 {
+        return false
+    }
+    return !sysfifo.off_root_mount(state, buf)
+}
+
+fn create_node(state: u64, me: u64, plen: u64) -> u64 {
+    if is_abstract(state) {
+        return 0
+    }
+    if unixsock.name_bound(state, sun_path(state), plen) {
+        return sysuser.neg(errno.E_ADDRINUSE)
+    }
+    let buf: u64 = load_path(state, plen)
+    if !tracked(state, buf) {
+        return 0
+    }
+    if !perm.walk_w(state, me, buf) || !appfs.write_ok(state, me, buf) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    let existing: u64 = fs.path_nofollow(state, buf)
+    if existing != 0 {
+        if fs.inode_is_sock(state, existing) {
+            return 0
+        }
+        return sysuser.neg(errno.E_ADDRINUSE)
+    }
+    let dir: u64 = fs.parent_ino(state, buf)
+    if dir == 0 {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    if !perm.may(state, me, dir, perm.R_WRITE | perm.R_EXEC) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    let ino: u64 = fs.create_path(state, buf, fs.T_FILE)
+    if ino == 0 {
+        return sysuser.neg(errno.E_NOSPC)
+    }
+    perm.on_create(state, me, ino, NODE_MODE)
+    if !fs.mark_sock(state, ino) {
+        fs.unlink_path(state, buf)
+        return sysuser.neg(errno.E_IO)
+    }
+    return 0
+}
+
+fn node_missing(state: u64, plen: u64) -> bool {
+    if is_abstract(state) {
+        return false
+    }
+    let buf: u64 = load_path(state, plen)
+    if !tracked(state, buf) {
+        return false
+    }
+    return fs.path_nofollow(state, buf) == 0
+}
