@@ -64,7 +64,7 @@ log           = /var/log/jarvisd.log
 work_file     = /var/jarvis/output.txt
 permit_file   = /var/jarvis/screenshot-permit
 CONF
-SPEC="/bin/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/"
+SPEC="/bin/ /proc/ /dev/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/"
 for p in sh ls cat echo chmod jsig jarvisctl tcphog; do SPEC="$SPEC /bin/$p=$W/$p.elf"; done
 SPEC="$SPEC /bin/jarvisd=$W/jarvisd.elf /etc/jarvis/permissions.conf=$W/permissions.conf"
 SPEC="$SPEC /etc/ssl/roots.pem=$W/roots.pem /etc/resolv.conf=$W/resolv.conf"
@@ -100,7 +100,7 @@ start_guest() {
     local serial=$1 flags=$2 deadline=$3
     cp "$W/probe.img" "$W/live.img"
     timeout 300 qemu-system-x86_64 -kernel "$W/k.mb" -m 256 \
-        -append "osum nokbd nosched noproc nofs noring3 gfx nocursor nic nip=$OSUM_IP/24 ngw=$HOST_IP nsvc=0 nwait=0 $flags script=tcphog $HOST_IP $HOG_PORT $HOG_COUNT;jarvisd -v -t $deadline;exit" \
+        -append "osum vfs nokbd nosched noproc nofs noring3 gfx nocursor nic nip=$OSUM_IP/24 ngw=$HOST_IP nsvc=0 nwait=0 $flags script=tcphog $HOST_IP $HOG_PORT $HOG_COUNT;jarvisd -v -t $deadline;exit" \
         -serial "file:$serial" -display none -no-reboot \
         -drive "file=$W/live.img,format=raw,if=ide,index=0" \
         -netdev "socket,id=n0,udp=127.0.0.1:$BPORT,localaddr=127.0.0.1:$QPORT" \
@@ -142,7 +142,7 @@ sleep 75
 L=$(grep -a '^TCPHOG' "$W/s-old.txt" | head -1)
 if echo "$L" | grep -q "held=$HOG_COUNT "; then ok "counter-proof: the hog takes every slot ($L)"; else bad "counter-proof: hog result unexpected ($L)"; fi
 if [ "$(grep -c 'ANSWER welcome' "$W/peer.log")" -eq 0 ]; then ok "counter-proof: device never signs in"; else bad "counter-proof is not red: device signed in"; fi
-if grep -a ' net ' "$W/s-old.txt" | grep -aq 'tcp='; then ok "net log lines carry the TCP table state"; grep -a ' net ' "$W/s-old.txt" | head -3 | sed 's/^/        /'; else bad "net log lines lack tcp="; fi
+if grep -a ' net ' "$W/s-old.txt" | grep -aq "tcp=$HOG_COUNT"; then ok "net log lines carry the TCP table state"; grep -a ' net ' "$W/s-old.txt" | head -3 | sed 's/^/        /'; else bad "net log lines lack tcp="; fi
 kill $QPID 2>/dev/null; wait $QPID 2>/dev/null
 
 echo
