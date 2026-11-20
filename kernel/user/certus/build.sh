@@ -37,7 +37,7 @@ done
 SUPPORT_REPO=${CERTUS_SUPPORT:-/root/certus-ui}
 for pair in rt:.rt-win std:.std-win; do
     for base in "$CERTUS_REPO" "$SUPPORT_REPO"; do
-        for candidate in "${pair#*:}" "vendor/${pair%%:*}-win"; do
+        for candidate in "${pair#*:}" "target/win/${pair%%:*}"; do
             if [ -d "$base/$candidate" ]; then
                 ln -sfn "$base/$candidate" "$BAU/${pair%%:*}"
                 break 2
