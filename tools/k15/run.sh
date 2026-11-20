@@ -161,7 +161,8 @@ ARGS=(build "$TMPD/disk.img" 16384 /lib/
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
 printf 'on\n' > "$TMPD/uitrace"
-ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/uitrace=$TMPD/uitrace")
+printf "grey\n" > "$TMPD/textsmooth.conf"
+ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/uitrace=$TMPD/uitrace" "/etc/textsmooth.conf=$TMPD/textsmooth.conf")
 ARGS+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/en/
        "/usr/share/locale/en/messages=locale/en/messages"
        /usr/share/locale/de/
