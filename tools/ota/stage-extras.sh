@@ -15,6 +15,9 @@ while read -r dest src; do
     echo "stage-extras: asset $dest"
 done < "$LIST"
 
+bash tools/xremote/stage.sh "$EXTRA" > /dev/null
+echo "stage-extras: xremote bundle"
+
 [ -d "$REGISTRY" ] || { echo "stage-extras: missing app registry $REGISTRY" >&2; exit 1; }
 mkdir -p "$EXTRA/usr/share"
 cp -a "$REGISTRY" "$EXTRA/usr/share/"
