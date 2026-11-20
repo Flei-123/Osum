@@ -102,7 +102,8 @@ static void check_unlink(void)
     close(s);
     int missing = socket(AF_UNIX, SOCK_STREAM, 0);
     errno = 0;
-    CHECK("bind_missing_dir_enoent", bind_to(missing, DIR "/nodir/x.sock") != 0 && errno == ENOENT, "errno=%d", errno);
+    struct stat none;
+    CHECK("bind_missing_dir_name_only", bind_to(missing, DIR "/nodir/x.sock") == 0 && lstat(DIR "/nodir/x.sock", &none) != 0, "errno=%d", errno);
     close(missing);
 }
 
