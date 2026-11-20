@@ -153,6 +153,10 @@ python3 -I tools/searchrank/check.py "$D/serial.txt" zebra > "$D.q_zebra" 2>&1
 [ "$(val $D.q_zebra stores)" = "zebranotes" ] && ok "'zebra': the catalog app is listed as a store hit" || bad "'zebra': store hits are '$(val $D.q_zebra stores)'"
 grep -q 'apps=0 ' "$D.q_zebra" && ok "'zebra': no installed app hit" || bad "'zebra': unexpected installed hit"
 grep -aq 'launcher: store open \[zebranotes\] pid=' "$D/serial.txt" && ok "Enter on a store hit opens the Store page for it" || bad "Enter on the store hit did nothing"
+zebra_from=$(grep -an 'launcher: suche \[zebra\]' "$D/serial.txt" | tail -1 | cut -d: -f1)
+for id in 7 8 9; do
+    tail -n +"${zebra_from:-1}" "$D/serial.txt" | grep -aq "launcher: rect id=$id " && ok "'zebra': detail card element id=$id is reported" || bad "'zebra': no detail card element id=$id"
+done
 maxus=$(grep -a '^launcher: suche \[' "$D/serial.txt" | sed -n 's/.* us=\([0-9]*\).*/\1/p' | sort -n | tail -1)
 [ "${maxus:-999999}" -le 16000 ] && ok "slowest search took ${maxus} us (<= 16 ms)" || bad "slowest search took ${maxus:-?} us"
 echo "SEARCH_MAX_US=${maxus:-0}"
