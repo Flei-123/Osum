@@ -37,10 +37,12 @@ done
 SUPPORT_REPO=${CERTUS_SUPPORT:-/root/certus-ui}
 for pair in rt:.rt-win std:.std-win; do
     for base in "$CERTUS_REPO" "$SUPPORT_REPO"; do
-        if [ -d "$base/${pair#*:}" ]; then
-            ln -sfn "$base/${pair#*:}" "$BAU/${pair%%:*}"
-            break
-        fi
+        for candidate in "${pair#*:}" "vendor/${pair%%:*}-win"; do
+            if [ -d "$base/$candidate" ]; then
+                ln -sfn "$base/$candidate" "$BAU/${pair%%:*}"
+                break 2
+            fi
+        done
     done
 done
 FIRN_SHARED=${FIRN_SHARED:-$FIRN_TOOLCHAIN}
