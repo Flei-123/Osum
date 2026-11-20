@@ -12,7 +12,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 
-for m in ids regs bits mode timing edid aux snap dump flip ggtt dbuf backbuf confirm modeset flushpol flushstat engregs fwake micmd ring lrc elsp ereset engine submit blt blit blitpool; do
+for m in ids regs bits mode timing edid aux snap dump flip ggtt dbuf backbuf confirm modeset flushpol flushstat engregs fwake micmd ring lrc elsp ereset engine submit blt blit blitpool rcsparse vblank; do
     printf 'import gpu.intel.%s\nfn main() -> i32 {\n    return 0\n}\n' "$m" > "$T/k_$m.fi"
     "$FIRNC" --profile=kernel -c "$T/k_$m.fi" -o "$T/k_$m.o" 2> "$T/k.err" \
         && ok "gpu.intel.$m compiles with --profile=kernel" \
@@ -79,6 +79,24 @@ if [ -x "$T/engine" ]; then
     [ "$nok" -ge 205 ] && ok "engine oracle: $nok promises OK (>= 205)" || bad "engine oracle: only $nok OK (< 205)"
     pass=$((pass+nok))
 fi
+
+run_oracle() {
+    local name=$1 file=$2 min=$3 rc nok nbad
+    "$FIRNC" "$file" -o "$T/$name" 2> "$T/$name.err" \
+        && ok "$name oracle builds" || { bad "$name oracle does not build"; head -10 "$T/$name.err"; return; }
+    "$T/$name" > "$T/$name.txt" 2>&1
+    rc=$?
+    nok=$(grep -c '^OK' "$T/$name.txt")
+    nbad=$(grep -c '^FAIL' "$T/$name.txt")
+    sed -n "s/^FAIL /  FAIL  $name: /p" "$T/$name.txt"
+    [ "$rc" = 0 ] && ok "$name oracle exits 0" || bad "$name oracle exit code $rc"
+    [ "$nbad" = 0 ] && ok "$name oracle: no FAIL line" || bad "$name oracle: $nbad FAIL lines"
+    [ "$nok" -ge "$min" ] && ok "$name oracle: $nok promises OK (>= $min)" || bad "$name oracle: only $nok OK (< $min)"
+    pass=$((pass+nok))
+}
+
+run_oracle rcs tools/intelgpu/rcs.fi 33
+run_oracle vblank tools/intelgpu/vblank.fi 32
 
 ORACLE=tools/intelgpu/oracle.fi
 
@@ -289,6 +307,42 @@ mutate en_fw_put      submit  's/^    fwake.put(rd, wr, us, engregs.FORCEWAKE_GT
 mutate en_wait_long   submit  's/WAIT_POLLS: u64 = 100/WAIT_POLLS: u64 = 1000000/'
 mutate en_fits        submit  's/if !ring.fits(/if false \&\& !ring.fits(/'
 mutate en_size_cap    submit  's/if n > MAX_USER_DWORDS {/if false {/'
+ORACLE=tools/intelgpu/rcs.fi
+mutate rp_arb_op      rcsparse 's/MI_ARB_ON_OFF: u64 = 0x08/MI_ARB_ON_OFF: u64 = 0x09/'
+mutate rp_bbe_op      rcsparse 's/MI_BATCH_BUFFER_END: u64 = 0x0a/MI_BATCH_BUFFER_END: u64 = 0x0b/'
+mutate rp_sba_client  rcsparse 's/return mode == MODE_KERNEL/return true/'
+mutate rp_pc_post     rcsparse 's/return (octets.ld32(batch, (at + 1) \* DWORD) \& PIPE_CONTROL_POST_SYNC_MASK) != 0/return false/'
+mutate rp_pc_kernel   rcsparse 's/if class != GFX_PIPE_CONTROL || mode == MODE_KERNEL {/if class != GFX_PIPE_CONTROL {/'
+mutate rp_len_bias    rcsparse 's/GFX_LEN_BIAS: u64 = 2/GFX_LEN_BIAS: u64 = 1/'
+mutate rp_psel_len    rcsparse 's/    if class == GFX_PIPELINE_SELECT {/    if false {/'
+mutate rp_trunc       rcsparse 's/            if at + len > dwords {/            if false {/'
+mutate rp_range       rcsparse 's/ || dwords > MAX_DWORDS//'
+mutate rp_cap         rcsparse 's/if packets >= MAX_PACKETS {/if false {/'
+mutate rp_mi_gate     rcsparse 's/            if !mi_single(op) {/            if false {/'
+mutate rp_aux_class   rcsparse 's/class == GFX_STATE_AUX || //'
+mutate rp_count       rcsparse 's/return finish(res, packets + 1, at + 1, W_OK)/return finish(res, packets, at + 1, W_OK)/'
+mutate rp_words       rcsparse 's/octets.st64(res, R_WORDS, at)/octets.st64(res, R_WORDS, 0)/'
+mutate rp_bad_at      rcsparse 's/octets.st64(res, R_BAD_AT, at)/octets.st64(res, R_BAD_AT, 0)/'
+mutate rp_no_end      rcsparse 's/    return finish(res, packets, at, W_NO_END)/    return finish(res, packets, at, W_OK)/'
+mutate rp_len_mask    rcsparse 's/GFX_LEN_MASK: u64 = 0xff/GFX_LEN_MASK: u64 = 0x7f/'
+mutate rp_blitter     rcsparse 's/TYPE_GFX: u64 = 3/TYPE_GFX: u64 = 2/'
+ORACLE=tools/intelgpu/vblank.fi
+mutate vb_frm_off     vblank 's/FRMCOUNT_A: u64 = 0x70040/FRMCOUNT_A: u64 = 0x70044/'
+mutate vb_stride      vblank 's/PIPE_STRIDE: u64 = 0x1000/PIPE_STRIDE: u64 = 0x2000/'
+mutate vb_master_bit  vblank 's/MASTER_PIPE_SHIFT: u64 = 16/MASTER_PIPE_SHIFT: u64 = 15/'
+mutate vb_imr_off     vblank 's/IMR_OFFSET: u64 = 4/IMR_OFFSET: u64 = 8/'
+mutate vb_ier_off     vblank 's/IER_OFFSET: u64 = 12/IER_OFFSET: u64 = 8/'
+mutate vb_wrap        vblank 's/(frame_count(rd, pipe) + FRMCOUNT_SPAN - start)/(frame_count(rd, pipe) + FRMCOUNT_SPAN - start - 1)/'
+mutate vb_noimr       vblank 's/    wr(pipe_imr(pipe), rd(pipe_imr(pipe)) \& (~PIPE_VBLANK) \& ALL_BITS)//'
+mutate vb_noier       vblank 's/    wr(pipe_ier(pipe), rd(pipe_ier(pipe)) | PIPE_VBLANK)//'
+mutate vb_nomaster    vblank 's/    wr(MASTER_IRQ, rd(MASTER_IRQ) | MASTER_ENABLE)//'
+mutate vb_clobber_imr vblank 's/rd(pipe_imr(pipe)) \& (~PIPE_VBLANK) \& ALL_BITS)/0)/'
+mutate vb_noargs      vblank 's/    if !valid(pipe) || frames == 0 {/    if false {/'
+mutate vb_pend_master vblank 's/    if (rd(MASTER_IRQ) \& master_pipe_bit(pipe)) == 0 {/    if false {/'
+mutate vb_status_bit  vblank 's/PIPE_VBLANK: u64 = 1$/PIPE_VBLANK: u64 = 2/'
+mutate vb_dis_ier     vblank 's/    wr(pipe_ier(pipe), rd(pipe_ier(pipe)) \& (~PIPE_VBLANK) \& ALL_BITS)//'
+mutate vb_pipes       vblank 's/MAX_PIPES: u64 = 3/MAX_PIPES: u64 = 4/'
+mutate vb_ack_noop    vblank 's/^    wr(pipe_iir(pipe), PIPE_VBLANK)\n    return V_OK$/    return V_OK/;/^fn irq_ack/,/^}/{s/    wr(pipe_iir(pipe), PIPE_VBLANK)//}'
 ORACLE=tools/intelgpu/oracle.fi
 
 echo "INTELGPU: $pass passed, $fail failed"

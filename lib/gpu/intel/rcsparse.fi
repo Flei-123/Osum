@@ -1,0 +1,126 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.octets
+
+export {
+    walk,
+    W_OK, W_RANGE, W_TRUNCATED, W_NO_END, W_FORBIDDEN, W_TOO_MANY,
+    MODE_CLIENT, MODE_KERNEL, MAX_DWORDS, MAX_PACKETS,
+    R_PACKETS, R_BAD_AT, R_WORDS, RESULT_BYTES
+}
+
+const W_OK: u64 = 0
+const W_RANGE: u64 = 1
+const W_TRUNCATED: u64 = 2
+const W_NO_END: u64 = 3
+const W_FORBIDDEN: u64 = 4
+const W_TOO_MANY: u64 = 5
+
+const MODE_CLIENT: u64 = 0
+const MODE_KERNEL: u64 = 1
+
+const MAX_DWORDS: u64 = 16384
+const MAX_PACKETS: u64 = 4096
+
+const R_PACKETS: u64 = 0
+const R_BAD_AT: u64 = 8
+const R_WORDS: u64 = 16
+const RESULT_BYTES: u64 = 24
+
+const DWORD: u64 = 4
+const TYPE_SHIFT: u64 = 29
+const TYPE_MI: u64 = 0
+const TYPE_GFX: u64 = 3
+const MI_OPCODE_SHIFT: u64 = 23
+const MI_OPCODE_MASK: u64 = 0x3f
+const GFX_CLASS_SHIFT: u64 = 24
+const GFX_LEN_MASK: u64 = 0xff
+const GFX_LEN_BIAS: u64 = 2
+
+const MI_NOOP: u64 = 0x00
+const MI_FLUSH: u64 = 0x04
+const MI_ARB_ON_OFF: u64 = 0x08
+const MI_SUSPEND_FLUSH: u64 = 0x0b
+const MI_PREDICATE: u64 = 0x0c
+const MI_BATCH_BUFFER_END: u64 = 0x0a
+
+const GFX_STATE_BASE: u64 = 0x61
+const GFX_STATE_AUX: u64 = 0x68
+const GFX_PIPELINE_SELECT: u64 = 0x69
+const GFX_STATE_3D_A: u64 = 0x78
+const GFX_STATE_3D_B: u64 = 0x79
+const GFX_PIPE_CONTROL: u64 = 0x7a
+const GFX_PRIMITIVE: u64 = 0x7b
+
+const PIPE_CONTROL_POST_SYNC_MASK: u64 = 0xc000
+
+fn finish(res: u64, packets: u64, at: u64, status: u64) -> u64 {
+    octets.st64(res, R_PACKETS, packets)
+    octets.st64(res, R_BAD_AT, at)
+    octets.st64(res, R_WORDS, at)
+    return status
+}
+
+fn mi_single(op: u64) -> bool {
+    return op == MI_NOOP || op == MI_FLUSH || op == MI_ARB_ON_OFF || op == MI_SUSPEND_FLUSH || op == MI_PREDICATE
+}
+
+fn gfx_length(h: u64, class: u64) -> u64 {
+    if class == GFX_PIPELINE_SELECT {
+        return 1
+    }
+    return (h & GFX_LEN_MASK) + GFX_LEN_BIAS
+}
+
+fn gfx_allowed(class: u64, mode: u64) -> bool {
+    if class == GFX_STATE_BASE {
+        return mode == MODE_KERNEL
+    }
+    return class == GFX_STATE_AUX || class == GFX_PIPELINE_SELECT || class == GFX_STATE_3D_A
+        || class == GFX_STATE_3D_B || class == GFX_PIPE_CONTROL || class == GFX_PRIMITIVE
+}
+
+fn post_sync_denied(batch: u64, at: u64, class: u64, mode: u64) -> bool {
+    if class != GFX_PIPE_CONTROL || mode == MODE_KERNEL {
+        return false
+    }
+    return (octets.ld32(batch, (at + 1) * DWORD) & PIPE_CONTROL_POST_SYNC_MASK) != 0
+}
+
+fn walk(batch: u64, dwords: u64, mode: u64, res: u64) -> u64 {
+    if batch == 0 || dwords == 0 || dwords > MAX_DWORDS {
+        return finish(res, 0, 0, W_RANGE)
+    }
+    var at: u64 = 0
+    var packets: u64 = 0
+    while at < dwords {
+        if packets >= MAX_PACKETS {
+            return finish(res, packets, at, W_TOO_MANY)
+        }
+        let h: u64 = octets.ld32(batch, at * DWORD)
+        let kind: u64 = h >> TYPE_SHIFT
+        var len: u64 = 1
+        if kind == TYPE_MI {
+            let op: u64 = (h >> MI_OPCODE_SHIFT) & MI_OPCODE_MASK
+            if op == MI_BATCH_BUFFER_END {
+                return finish(res, packets + 1, at + 1, W_OK)
+            }
+            if !mi_single(op) {
+                return finish(res, packets, at, W_FORBIDDEN)
+            }
+        } else if kind == TYPE_GFX {
+            let class: u64 = h >> GFX_CLASS_SHIFT
+            if !gfx_allowed(class, mode) || post_sync_denied(batch, at, class, mode) {
+                return finish(res, packets, at, W_FORBIDDEN)
+            }
+            len = gfx_length(h, class)
+            if at + len > dwords {
+                return finish(res, packets, at, W_TRUNCATED)
+            }
+        } else {
+            return finish(res, packets, at, W_FORBIDDEN)
+        }
+        at = at + len
+        packets = packets + 1
+    }
+    return finish(res, packets, at, W_NO_END)
+}

@@ -1,0 +1,156 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.io
+import libc.octets
+import gpu.intel.rcsparse
+import corpus9
+
+const EXPECT_PACKETS: u64 = 340
+const SBA_AT: u64 = 489
+const BBE_AT: u64 = 885
+const WORK_DWORDS: u64 = 64
+const MI_BBE: u64 = 0x05000000
+const MI_LRI: u64 = 0x11000001
+const MI_NOOP_WORD: u64 = 0
+const BLT_FILL_HEADER: u64 = 0x54300005
+const PIPE_CONTROL_HEADER: u64 = 0x7a000004
+const POST_SYNC_WRITE: u64 = 0x4000
+const PIPE_CONTROL_DWORDS: u64 = 6
+const PRIMITIVE_HEADER: u64 = 0x7b000005
+const PRIMITIVE_DWORDS: u64 = 7
+const GPGPU_WALKER_HEADER: u64 = 0x7105000d
+const DWORD: u64 = 4
+
+static mut work: [u32; 64] = [0; 64]
+static mut result: [u64; 3] = [0; 3]
+static mut big: [u32; 4200] = [0; 4200]
+const BIG_DWORDS: u64 = 4200
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn work_base() -> u64 {
+    return (&work[0]) as u64
+}
+
+fn result_base() -> u64 {
+    return (&result[0]) as u64
+}
+
+fn corpus_base() -> u64 {
+    return (&corpus9.corpus[0]) as u64
+}
+
+fn put(i: u64, v: u64) {
+    octets.st32(work_base(), i * DWORD, v)
+}
+
+fn reset_work() {
+    var i: u64 = 0
+    while i < WORK_DWORDS {
+        put(i, MI_NOOP_WORD)
+        i = i + 1
+    }
+}
+
+fn bad_at() -> u64 {
+    return octets.ld64(result_base(), rcsparse.R_BAD_AT)
+}
+
+fn packets() -> u64 {
+    return octets.ld64(result_base(), rcsparse.R_PACKETS)
+}
+
+fn run_work(dwords: u64, mode: u64) -> u64 {
+    return rcsparse.walk(work_base(), dwords, mode, result_base())
+}
+
+fn test_corpus() {
+    let st: u64 = rcsparse.walk(corpus_base(), corpus9.CORPUS_DWORDS, rcsparse.MODE_KERNEL, result_base())
+    chk("corpus: kernel mode accepts the Linux gen9 null-state batch", st == rcsparse.W_OK)
+    chk("corpus: 340 packets walked", packets() == EXPECT_PACKETS)
+    chk("corpus: walk consumed every dword", octets.ld64(result_base(), rcsparse.R_WORDS) == corpus9.CORPUS_DWORDS)
+    let cl: u64 = rcsparse.walk(corpus_base(), corpus9.CORPUS_DWORDS, rcsparse.MODE_CLIENT, result_base())
+    chk("corpus: client mode rejects STATE_BASE_ADDRESS", cl == rcsparse.W_FORBIDDEN)
+    chk("corpus: client rejection points at STATE_BASE_ADDRESS", bad_at() == SBA_AT)
+    let ne: u64 = rcsparse.walk(corpus_base(), BBE_AT, rcsparse.MODE_KERNEL, result_base())
+    chk("corpus: cut before BBE is W_NO_END", ne == rcsparse.W_NO_END)
+    let tr: u64 = rcsparse.walk(corpus_base(), 3, rcsparse.MODE_KERNEL, result_base())
+    chk("corpus: cut inside the first packet is W_TRUNCATED", tr == rcsparse.W_TRUNCATED)
+    chk("corpus: truncation reported at packet start", bad_at() == 0)
+}
+
+fn test_ranges() {
+    reset_work()
+    chk("range: zero dwords", run_work(0, rcsparse.MODE_CLIENT) == rcsparse.W_RANGE)
+    chk("range: above MAX_DWORDS", run_work(rcsparse.MAX_DWORDS + 1, rcsparse.MODE_CLIENT) == rcsparse.W_RANGE)
+    chk("range: null base", rcsparse.walk(0, 4, rcsparse.MODE_CLIENT, result_base()) == rcsparse.W_RANGE)
+    put(0, MI_BBE)
+    chk("range: lone BBE is accepted", run_work(1, rcsparse.MODE_CLIENT) == rcsparse.W_OK)
+    chk("range: lone BBE counts one packet", packets() == 1)
+    put(0, MI_NOOP_WORD)
+    chk("range: noops only is W_NO_END", run_work(WORK_DWORDS, rcsparse.MODE_CLIENT) == rcsparse.W_NO_END)
+    chk("range: noops counted", packets() == WORK_DWORDS)
+}
+
+fn test_forbidden() {
+    reset_work()
+    put(0, MI_LRI)
+    put(1, MI_BBE)
+    chk("forbidden: MI_LOAD_REGISTER_IMM in client mode", run_work(WORK_DWORDS, rcsparse.MODE_CLIENT) == rcsparse.W_FORBIDDEN)
+    chk("forbidden: MI_LOAD_REGISTER_IMM in kernel mode", run_work(WORK_DWORDS, rcsparse.MODE_KERNEL) == rcsparse.W_FORBIDDEN)
+    chk("forbidden: reported at the offending dword", bad_at() == 0)
+    reset_work()
+    put(2, BLT_FILL_HEADER)
+    chk("forbidden: blitter command on the render ring", run_work(WORK_DWORDS, rcsparse.MODE_KERNEL) == rcsparse.W_FORBIDDEN)
+    chk("forbidden: blitter offset", bad_at() == 2)
+    reset_work()
+    put(0, GPGPU_WALKER_HEADER)
+    chk("forbidden: GPGPU_WALKER", run_work(WORK_DWORDS, rcsparse.MODE_KERNEL) == rcsparse.W_FORBIDDEN)
+}
+
+fn test_pipe_control() {
+    reset_work()
+    put(0, PIPE_CONTROL_HEADER)
+    put(PIPE_CONTROL_DWORDS, MI_BBE)
+    chk("pipe control: plain accepted in client mode", run_work(WORK_DWORDS, rcsparse.MODE_CLIENT) == rcsparse.W_OK)
+    chk("pipe control: plain batch is two packets", packets() == 2)
+    put(1, POST_SYNC_WRITE)
+    chk("pipe control: post-sync write denied for clients", run_work(WORK_DWORDS, rcsparse.MODE_CLIENT) == rcsparse.W_FORBIDDEN)
+    chk("pipe control: post-sync write allowed for the kernel", run_work(WORK_DWORDS, rcsparse.MODE_KERNEL) == rcsparse.W_OK)
+}
+
+fn test_lengths() {
+    reset_work()
+    put(0, PRIMITIVE_HEADER)
+    put(PRIMITIVE_DWORDS, MI_BBE)
+    chk("length: 3DPRIMITIVE is seven dwords", run_work(WORK_DWORDS, rcsparse.MODE_CLIENT) == rcsparse.W_OK)
+    chk("length: two packets", packets() == 2)
+    chk("length: truncated primitive", run_work(PRIMITIVE_DWORDS - 1, rcsparse.MODE_CLIENT) == rcsparse.W_TRUNCATED)
+    chk("length: exact fit without end is W_NO_END", run_work(PRIMITIVE_DWORDS, rcsparse.MODE_CLIENT) == rcsparse.W_NO_END)
+    put(1, MI_BBE)
+    put(2, MI_BBE)
+    chk("length: payload words are not parsed as commands", run_work(WORK_DWORDS, rcsparse.MODE_CLIENT) == rcsparse.W_OK)
+    chk("length: payload skipped, packets stay two", packets() == 2)
+}
+
+fn test_packet_cap() {
+    let st: u64 = rcsparse.walk((&big[0]) as u64, BIG_DWORDS, rcsparse.MODE_CLIENT, result_base())
+    chk("cap: more noops than MAX_PACKETS is W_TOO_MANY", st == rcsparse.W_TOO_MANY)
+    chk("cap: stops at the limit", packets() == rcsparse.MAX_PACKETS)
+}
+
+fn main() -> i32 {
+    test_corpus()
+    test_ranges()
+    test_forbidden()
+    test_pipe_control()
+    test_lengths()
+    test_packet_cap()
+    return 0
+}

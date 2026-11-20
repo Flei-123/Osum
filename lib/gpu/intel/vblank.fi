@@ -1,0 +1,107 @@
+// SPDX-License-Identifier: GPL-2.0-only
+export {
+    frame_count, wait_frames, irq_enable, irq_disable, irq_pending, irq_ack,
+    V_OK, V_ARG, V_TIMEOUT, MAX_PIPES, FRAME_POLLS, FRAME_POLL_US,
+    PIPE_STRIDE, FRMCOUNT_A, MASTER_IRQ, MASTER_ENABLE, PIPE_VBLANK,
+    pipe_imr, pipe_iir, pipe_ier, master_pipe_bit
+}
+
+const V_OK: u64 = 0
+const V_ARG: u64 = 1
+const V_TIMEOUT: u64 = 2
+const MAX_PIPES: u64 = 3
+const FRAME_POLLS: u64 = 60
+const FRAME_POLL_US: u64 = 1000
+const PIPE_STRIDE: u64 = 0x1000
+const FRMCOUNT_A: u64 = 0x70040
+const FRMCOUNT_MASK: u64 = 0xffffffff
+const FRMCOUNT_SPAN: u64 = 0x100000000
+const MASTER_IRQ: u64 = 0x44200
+const MASTER_ENABLE: u64 = 0x80000000
+const MASTER_PIPE_SHIFT: u64 = 16
+const PIPE_IRQ_BASE: u64 = 0x44400
+const PIPE_IRQ_STRIDE: u64 = 0x10
+const IMR_OFFSET: u64 = 4
+const IIR_OFFSET: u64 = 8
+const IER_OFFSET: u64 = 12
+const PIPE_VBLANK: u64 = 1
+const ALL_BITS: u64 = 0xffffffff
+
+fn valid(pipe: u64) -> bool {
+    return pipe < MAX_PIPES
+}
+
+fn pipe_imr(pipe: u64) -> u64 {
+    return PIPE_IRQ_BASE + pipe * PIPE_IRQ_STRIDE + IMR_OFFSET
+}
+
+fn pipe_iir(pipe: u64) -> u64 {
+    return PIPE_IRQ_BASE + pipe * PIPE_IRQ_STRIDE + IIR_OFFSET
+}
+
+fn pipe_ier(pipe: u64) -> u64 {
+    return PIPE_IRQ_BASE + pipe * PIPE_IRQ_STRIDE + IER_OFFSET
+}
+
+fn master_pipe_bit(pipe: u64) -> u64 {
+    return 1 << (MASTER_PIPE_SHIFT + pipe)
+}
+
+fn frame_count(rd: fn(u64) -> u64, pipe: u64) -> u64 {
+    return rd(FRMCOUNT_A + pipe * PIPE_STRIDE) & FRMCOUNT_MASK
+}
+
+fn wait_frames(rd: fn(u64) -> u64, us: fn(u64) -> u64, pipe: u64, frames: u64) -> u64 {
+    if !valid(pipe) || frames == 0 {
+        return V_ARG
+    }
+    let start: u64 = frame_count(rd, pipe)
+    var n: u64 = 0
+    while n < FRAME_POLLS * frames {
+        if ((frame_count(rd, pipe) + FRMCOUNT_SPAN - start) & FRMCOUNT_MASK) >= frames {
+            return V_OK
+        }
+        us(FRAME_POLL_US)
+        n = n + 1
+    }
+    return V_TIMEOUT
+}
+
+fn irq_enable(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, pipe: u64) -> u64 {
+    if !valid(pipe) {
+        return V_ARG
+    }
+    wr(pipe_iir(pipe), PIPE_VBLANK)
+    wr(pipe_imr(pipe), rd(pipe_imr(pipe)) & (~PIPE_VBLANK) & ALL_BITS)
+    wr(pipe_ier(pipe), rd(pipe_ier(pipe)) | PIPE_VBLANK)
+    wr(MASTER_IRQ, rd(MASTER_IRQ) | MASTER_ENABLE)
+    return V_OK
+}
+
+fn irq_disable(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, pipe: u64) -> u64 {
+    if !valid(pipe) {
+        return V_ARG
+    }
+    wr(pipe_ier(pipe), rd(pipe_ier(pipe)) & (~PIPE_VBLANK) & ALL_BITS)
+    wr(pipe_imr(pipe), rd(pipe_imr(pipe)) | PIPE_VBLANK)
+    wr(pipe_iir(pipe), PIPE_VBLANK)
+    return V_OK
+}
+
+fn irq_pending(rd: fn(u64) -> u64, pipe: u64) -> bool {
+    if !valid(pipe) {
+        return false
+    }
+    if (rd(MASTER_IRQ) & master_pipe_bit(pipe)) == 0 {
+        return false
+    }
+    return (rd(pipe_iir(pipe)) & PIPE_VBLANK) != 0
+}
+
+fn irq_ack(wr: fn(u64, u64) -> u64, pipe: u64) -> u64 {
+    if !valid(pipe) {
+        return V_ARG
+    }
+    wr(pipe_iir(pipe), PIPE_VBLANK)
+    return V_OK
+}
