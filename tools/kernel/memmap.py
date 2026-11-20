@@ -62,6 +62,7 @@ BEREICHE = [
     ("SIGCTX",     "kstate.fi", "SIGCTX_OFF",     "SIGCTX_BYTES * MAX_TASKS"),
     ("SIGRT",      "kstate.fi", "SIGRT_OFF",      "SIGRT_TASK * MAX_TASKS"),
     ("EXE",        "kstate.fi", "EXE_OFF",        "EXE_SLOT * MAX_TASKS"),
+    ("BUSBOX",     "kstate.fi", "BUSBOX_OFF",     "BUSBOX_MAX"),
     ("SHMN",       "kstate.fi", "SHMN_OFF",       "SHMN_MAX"),
     ("TTY",        "kstate.fi", "TTY_OFF",        "TTY_MAX"),
     ("TTY2",       "kstate.fi", "TTY2_OFF",       "TTY2_MAX"),
