@@ -137,6 +137,21 @@ static void backlog_full(void)
     unlink(path);
 }
 
+static void accept4_flag_call(void)
+{
+    const char *path = "/tmp/ul-a4";
+    int l = listener(SOCK_STREAM, path, 2);
+    if (l < 0) {
+        GAP("a4_listen", "errno=%d", errno);
+        return;
+    }
+    long t0 = now_ms();
+    int r = accept4(l, 0, 0, SOCK_NONBLOCK);
+    CHECK("accept4_nonblock_flag_does_not_wait", r < 0 && errno == EAGAIN && now_ms() - t0 < 500, "r=%d errno=%d", r, errno);
+    close(l);
+    unlink(path);
+}
+
 static void nonblocking_accept(void)
 {
     const char *path = "/tmp/ul-nb";
@@ -272,6 +287,7 @@ int main(void)
     connect_does_not_wait();
     backlog_full();
     nonblocking_accept();
+    accept4_flag_call();
     type_mismatch_and_close();
     connect_state_errors();
     many_sequential();
