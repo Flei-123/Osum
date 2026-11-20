@@ -574,6 +574,51 @@ fn map_file_shared(state: u64, me: u64, at: u64, len: u64, fd: u64, off: u64, pr
     return r
 }
 
+fn file_shm_extend(state: u64, i: u64, ino: u64, need: u64) -> bool {
+    let have: u64 = unixsock.shm_pages(state, i)
+    if need <= have {
+        return true
+    }
+    let base: u64 = unixsock.shm_file_key(state, i) >> 32
+    if unixsock.shm_grow(state, i, need) != 0 {
+        return false
+    }
+    return file_shm_fill(state, i, ino, base, have, unixsock.shm_pages(state, i))
+}
+
+fn file_shm_cover(state: u64, ino: u64, first_pg: u64, npages: u64, create: bool) -> u64 {
+    let end_pg: u64 = first_pg + npages
+    var i: u64 = unixsock.shm_file_cover_ref(state, ino, first_pg)
+    if i < unixsock.USHM_MAX {
+        let need: u64 = end_pg - (unixsock.shm_file_key(state, i) >> 32)
+        if need <= unixsock.shm_pages(state, i) {
+            return i
+        }
+        if need > FSHM_MAX_PAGES || unixsock.shm_file_overlaps(state, ino, first_pg, end_pg) || !file_shm_extend(state, i, ino, need) {
+            unixsock.shm_unref(state, i)
+            return unixsock.USHM_MAX
+        }
+        return i
+    }
+    if !create || unixsock.shm_file_overlaps(state, ino, first_pg, end_pg) {
+        return unixsock.USHM_MAX
+    }
+    if npages > unixsock.SHM_PAGES_MAX {
+        i = unixsock.shm_new_any(state)
+    } else {
+        i = unixsock.shm_new(state)
+    }
+    if i >= unixsock.USHM_MAX {
+        return unixsock.USHM_MAX
+    }
+    unixsock.shm_file_mark(state, i, ino, first_pg)
+    if !file_shm_extend(state, i, ino, npages) {
+        unixsock.shm_unref(state, i)
+        return unixsock.USHM_MAX
+    }
+    return i
+}
+
 fn map_file_shared_locked(state: u64, me: u64, at: u64, len: u64, fd: u64, off: u64, prot: u64) -> u64 {
     let of: u64 = sysuser.of_of(state, me, fd)
     if of >= file.MAX_OPEN || !sysfd.readable(state, of) || !sysfd.writable(state, of) {
@@ -587,38 +632,18 @@ fn map_file_shared_locked(state: u64, me: u64, at: u64, len: u64, fd: u64, off: 
         return sysuser.neg(errno.E_NODEV)
     }
     let first_pg: u64 = off / sysconst.PAGE
-    let npages: u64 = sysfd.page_up(len) / sysconst.PAGE
-    var i: u64 = unixsock.shm_file_find_ref(state, ino, first_pg)
-    var made: bool = false
+    let i: u64 = file_shm_cover(state, ino, first_pg, sysfd.page_up(len) / sysconst.PAGE, true)
     if i >= unixsock.USHM_MAX {
-        if npages > unixsock.SHM_PAGES_MAX {
-            i = unixsock.shm_new_any(state)
-        } else {
-            i = unixsock.shm_new(state)
-        }
-        if i >= unixsock.USHM_MAX {
-            return sysuser.neg(errno.E_NOMEM)
-        }
-        made = true
-    }
-    let have: u64 = unixsock.shm_pages(state, i)
-    if npages > have {
-        let g: u64 = unixsock.shm_grow(state, i, npages)
-        let ok: bool = file_shm_fill(state, i, ino, first_pg, have, unixsock.shm_pages(state, i))
-        if g != 0 || !ok {
-            unixsock.shm_unref(state, i)
-            return sysuser.neg(errno.E_NOMEM)
-        }
+        return sysuser.neg(errno.E_NODEV)
     }
     if !unixsock.shm_wmap_take(state, i) {
         unixsock.shm_unref(state, i)
         return sysuser.neg(errno.E_PERM)
     }
-    let r: u64 = map_shm_obj(state, me, i, true, len, prot, at)
+    let skip: u64 = first_pg - (unixsock.shm_file_key(state, i) >> 32)
+    let r: u64 = map_shm_obj_at(state, me, i, true, len, prot, at, skip)
     if r >= 0xFFFFFFFFFFFFF000 {
         unixsock.shm_wmap_drop(state, i)
-    } else if made {
-        unixsock.shm_file_mark(state, i, ino, first_pg)
     }
     unixsock.shm_unref(state, i)
     return r
@@ -629,15 +654,17 @@ fn map_file_shared_ro(state: u64, me: u64, at: u64, len: u64, of: u64, off: u64,
     let fl: u64 = fslock.enter(state)
     var r: u64 = 0
     let ino: u64 = file.open_ino(state, of)
-    let i: u64 = unixsock.shm_file_find_ref(state, ino, off / sysconst.PAGE)
-    if i < unixsock.USHM_MAX {
-        if sysfd.page_up(len) / sysconst.PAGE <= unixsock.shm_pages(state, i) {
-            r = map_shm_obj(state, me, i, false, len, prot, at)
+    let first_pg: u64 = off / sysconst.PAGE
+    if len <= FSHM_MAX_PAGES * sysconst.PAGE {
+        let i: u64 = file_shm_cover(state, ino, first_pg, sysfd.page_up(len) / sysconst.PAGE, false)
+        if i < unixsock.USHM_MAX {
+            let skip: u64 = first_pg - (unixsock.shm_file_key(state, i) >> 32)
+            r = map_shm_obj_at(state, me, i, false, len, prot, at, skip)
             if r >= 0xFFFFFFFFFFFFF000 && at == 0 {
                 r = 0
             }
+            unixsock.shm_unref(state, i)
         }
-        unixsock.shm_unref(state, i)
     }
     fslock.leave(state, fl)
     mmlock.vm_unlock(state, me)
@@ -858,11 +885,15 @@ fn big_place(state: u64, me: u64, pages: u64) -> u64 {
 
 // The mapping of shared object `i` (a memfd, or since LCSH the shared pages of a file); `wok` = the caller may write the object.
 fn map_shm_obj(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64, at: u64) -> u64 {
+    return map_shm_obj_at(state, me, i, wok, len, prot, at, 0)
+}
+
+fn map_shm_obj_at(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64, at: u64, skip: u64) -> u64 {
     if unixsock.shm_used(state, i) == 0 {
         return sysuser.neg(errno.E_NODEV)
     }
     let pages: u64 = sysfd.page_up(len) / sysconst.PAGE
-    if pages == 0 || pages > unixsock.shm_max_pages(state, i) {
+    if pages == 0 || skip + pages > unixsock.shm_max_pages(state, i) {
         return sysuser.neg(errno.E_INVAL)
     }
     // COMPOSITOR S3: a read-only object (the window table page) is never mapped writable
@@ -873,14 +904,14 @@ fn map_shm_obj(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64, at: 
     if !unixsock.map_room(state) {
         return sysuser.neg(errno.E_NOMEM)
     }
-    if unixsock.shm_grow(state, i, pages) != 0 {
+    if unixsock.shm_grow(state, i, skip + pages) != 0 {
         return sysuser.neg(errno.E_NOMEM)
     }
     let writing: bool = (prot & PROT_WRITE) != 0
     let top: u64 = map_bottom(state, me)
     var base: u64 = 0
     var is_big: bool = false
-    let lazy: bool = unixsock.shm_lazy(state, i)
+    let lazy: bool = unixsock.shm_lazy(state, i) && (unixsock.shm_flags(state, i) & unixsock.SMF_FILE) == 0
     var in_arena: bool = lazy
     let at_fixed: bool = at != 0
     if at_fixed {
@@ -914,7 +945,7 @@ fn map_shm_obj(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64, at: 
     }
     var p: u64 = 0
     while p < pages {
-        let frame: u64 = unixsock.shm_frame(state, i, p)
+        let frame: u64 = unixsock.shm_frame(state, i, skip + p)
         if frame == 0 && !lazy {
             return sysuser.neg(errno.E_NOMEM)
         }

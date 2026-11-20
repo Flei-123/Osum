@@ -23,7 +23,7 @@ export {
     pending,
     send_bytes, recv_bytes, waiting, room, peer_gone, read_closed, write_closed, shutdown_sock,
     push_fd, pop_fd, fd_waiting, fd_room,
-    map_room, map_note, map_release, map_release_all, maps_live, map_rec_base, map_rec_word, shm_file_find, shm_file_find_ref, shm_file_mark, shm_file_key,
+    map_room, map_note, map_release, map_release_all, maps_live, map_rec_base, map_rec_word, shm_file_cover_ref, shm_file_overlaps, shm_file_mark, shm_file_key,
     map_arena_find, shm_demand, shm_lazy, shm_frame_demand, shm_resident, UM_LAZY, UM_WRITE,
     shm_new, shm_new_any, shm_free, shm_used, shm_pages, shm_frame, shm_grow, shm_new_contig, shm_wrap, shm_contig, shm_base, shm_flags, shm_max_pages,
     shm_ref, shm_ref_live, shm_unref, shm_refs, shm_size, shm_set_size,
@@ -1171,41 +1171,56 @@ fn map_rec_word(state: u64, k: u64) -> u64 {
     return kstate.get(state, um_at(k) + 8)
 }
 
-fn shm_file_find(state: u64, ino: u64, first_pg: u64) -> u64 {
-    let key: u64 = (ino + 1) | (first_pg << 32)
+fn shm_file_is(state: u64, i: u64, ino: u64) -> bool {
+    if kstate.get(state, sm_at(i) + SM_USED) == 0 || (kstate.get(state, sm_at(i) + SM_FLAGS) & SMF_FILE) == 0 {
+        return false
+    }
+    return (kstate.get(state, sm_at(i) + SM_SIZE) & 0xFFFFFFFF) == ino + 1
+}
+
+fn shm_file_cover_ref(state: u64, ino: u64, first_pg: u64) -> u64 {
+    var best: u64 = USHM_MAX
+    var best_base: u64 = 0
     var i: u64 = 0
-    while i < USHM_PAGED {
-        if kstate.get(state, sm_at(i) + SM_USED) != 0 && (kstate.get(state, sm_at(i) + SM_FLAGS) & SMF_FILE) != 0
-            && kstate.get(state, sm_at(i) + SM_SIZE) == key {
-            return i
+    while i < USHM_MAX {
+        if shm_file_is(state, i, ino) {
+            let base: u64 = kstate.get(state, sm_at(i) + SM_SIZE) >> 32
+            if base <= first_pg && (best == USHM_MAX || base > best_base) {
+                best = i
+                best_base = base
+            }
         }
         i = i + 1
+    }
+    if best < USHM_MAX && shm_ref_live(state, best) {
+        return best
     }
     return USHM_MAX
 }
 
-fn shm_file_find_ref(state: u64, ino: u64, first_pg: u64) -> u64 {
-    let key: u64 = (ino + 1) | (first_pg << 32)
+fn shm_file_overlaps(state: u64, ino: u64, above_pg: u64, to_pg: u64) -> bool {
     var i: u64 = 0
-    while i < USHM_PAGED {
-        if kstate.get(state, sm_at(i) + SM_USED) != 0 && (kstate.get(state, sm_at(i) + SM_FLAGS) & SMF_FILE) != 0
-            && kstate.get(state, sm_at(i) + SM_SIZE) == key && shm_ref_live(state, i) {
-            return i
+    while i < USHM_MAX {
+        if shm_file_is(state, i, ino) {
+            let base: u64 = kstate.get(state, sm_at(i) + SM_SIZE) >> 32
+            if base > above_pg && base < to_pg {
+                return true
+            }
         }
         i = i + 1
     }
-    return USHM_MAX
+    return false
 }
 
 fn shm_file_mark(state: u64, i: u64, ino: u64, first_pg: u64) {
-    if i < USHM_PAGED {
+    if i < USHM_MAX {
         kstate.set(state, sm_at(i) + SM_SIZE, (ino + 1) | (first_pg << 32))
         kstate.set(state, sm_at(i) + SM_FLAGS, kstate.get(state, sm_at(i) + SM_FLAGS) | SMF_FILE)
     }
 }
 
 fn shm_file_key(state: u64, i: u64) -> u64 {
-    if i >= USHM_PAGED || (kstate.get(state, sm_at(i) + SM_FLAGS) & SMF_FILE) == 0 {
+    if i >= USHM_MAX || (kstate.get(state, sm_at(i) + SM_FLAGS) & SMF_FILE) == 0 {
         return 0
     }
     return kstate.get(state, sm_at(i) + SM_SIZE)
