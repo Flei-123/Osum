@@ -1,0 +1,89 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+
+const PHASE_IDLE: u64 = 0
+const PHASE_DNS: u64 = 1
+const PHASE_CONNECT: u64 = 2
+const PHASE_TLS: u64 = 3
+const PHASE_SEND: u64 = 4
+const PHASE_RECV: u64 = 5
+
+const REWRITE_AFTER_MS: u64 = 5000
+const SPACE: u8 = 32 as u8
+const NEWLINE: u8 = 10 as u8
+const DIGIT_0: u64 = 48
+const DIGIT_9: u64 = 57
+
+static mut P_PHASE: [u8; 19] = "/var/jarvis/phase\0\0"
+static mut last_phase: u64 = 99
+static mut last_write_ms: u64 = 0
+
+fn phase_name(phase: u64) -> str {
+    if phase == PHASE_DNS {
+        return "dns"
+    }
+    if phase == PHASE_CONNECT {
+        return "connect"
+    }
+    if phase == PHASE_TLS {
+        return "tls"
+    }
+    if phase == PHASE_SEND {
+        return "send"
+    }
+    if phase == PHASE_RECV {
+        return "recv"
+    }
+    return "idle"
+}
+
+fn enter(phase: u64, now_ms: u64) {
+    if phase == last_phase && now_ms - last_write_ms < REWRITE_AFTER_MS {
+        return
+    }
+    last_phase = phase
+    last_write_ms = now_ms
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&b, phase)
+    rt.buf_push(&b, SPACE)
+    rt.buf_push_dec_u64(&b, now_ms)
+    rt.buf_push(&b, NEWLINE)
+    let _ok: bool = rt.write_file((&P_PHASE[0]) as u64, b.ptr, b.len)
+    rt.buf_free(&b)
+}
+
+fn parse_number(p: u64, n: usize, at: *mut usize) -> u64 {
+    var v: u64 = 0
+    while *at < n {
+        let c: u64 = rt.ld8(p, *at) as u64
+        if c < DIGIT_0 || c > DIGIT_9 {
+            break
+        }
+        v = v * 10 + (c - DIGIT_0)
+        *at = *at + 1
+    }
+    return v
+}
+
+fn push_state(out: *mut rt.Buf, now_ms: u64) {
+    var b: rt.Buf = rt.buf_new()
+    if rt.read_file((&P_PHASE[0]) as u64, &b) {
+        var at: usize = 0
+        let phase: u64 = parse_number(b.ptr, b.len, &at)
+        at = at + 1
+        let since: u64 = parse_number(b.ptr, b.len, &at)
+        var label: [u8; 8] = " phase=\0"
+        rt.buf_push_bytes(out, (&label[0]) as u64, 7)
+        let name: str = phase_name(phase)
+        rt.buf_push_bytes(out, name.p as u64, name.n)
+        var age: [u8; 6] = " age=\0"
+        rt.buf_push_bytes(out, (&age[0]) as u64, 5)
+        if since > now_ms {
+            rt.buf_push_dec_u64(out, 0)
+        } else {
+            rt.buf_push_dec_u64(out, (now_ms - since) / 1000)
+        }
+        rt.buf_push(out, 115 as u8)
+    }
+    rt.buf_free(&b)
+}

@@ -1,0 +1,71 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const SYS_NANOSLEEP: u64 = 35
+const SYS_FORK: u64 = 57
+const ERROR_FLOOR: u64 = 0xFFFFFFFFFFFFF000
+const O_READ: u64 = 0
+const READ_CAP: u64 = 4095
+const DEFAULT_PERIOD_S: u64 = 30
+const PARENT_WAIT_S: u64 = 2
+
+static mut P_TCP: [u8; 14] = "/proc/net/tcp\0"
+static mut P_FILE_NR: [u8; 21] = "/proc/sys/fs/file-nr\0"
+static mut chunk: [u8; 4096] = [0 as u8; 4096]
+
+fn nap(seconds: u64) {
+    var ts: [u64; 2] = [0 as u64; 2]
+    ts[0 as usize] = seconds
+    ulib.sys(SYS_NANOSLEEP, (&ts[0 as usize]) as u64, 0, 0)
+}
+
+fn dump_file(path: u64) {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, O_READ, 0)
+    if fd >= ERROR_FLOOR {
+        return
+    }
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&chunk[0 as usize]) as u64, READ_CAP)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if n >= ERROR_FLOOR {
+        return
+    }
+    chunk[n as usize] = 0 as u8
+    ulib.say((&chunk[0 as usize]) as u64)
+}
+
+fn sample() {
+    var head: [u8; 13] = "WATCH up_ms=\0"
+    var tasks: [u8; 8] = " tasks=\0"
+    var tail: [u8; 10] = "WATCHEND\n\0"
+    ulib.say((&head[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0))
+    ulib.say((&tasks[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(ulib.SYS_SYSINFO, ulib.I_TASKS, 0, 0))
+    ulib.nl()
+    dump_file((&P_FILE_NR[0 as usize]) as u64)
+    dump_file((&P_TCP[0 as usize]) as u64)
+    ulib.say((&tail[0 as usize]) as u64)
+}
+
+fn watch_loop(period_s: u64) {
+    while true {
+        sample()
+        nap(period_s)
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    var period_s: u64 = DEFAULT_PERIOD_S
+    if ulib.arg_count(args) >= 2 {
+        period_s = ulib.to_num(ulib.arg_at(args, 1))
+    }
+    if ulib.sys(SYS_FORK, 0, 0, 0) == 0 {
+        watch_loop(period_s)
+    }
+    nap(PARENT_WAIT_S)
+    return 0
+}
