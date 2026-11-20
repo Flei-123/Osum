@@ -1,0 +1,577 @@
+profile kernel
+
+import ulib
+import libc.io
+import libc.octets
+import libc.text
+import crypto.ed25519
+
+export {
+    view_install, view_load, view_list, view_detail, out_ptr, out_len,
+    VIEW_OK, VIEW_UNREADABLE, VIEW_BAD_SIGNATURE, VIEW_MALFORMED, VIEW_TOO_BIG,
+}
+
+const VIEW_OK: u64 = 0
+const VIEW_UNREADABLE: u64 = 1
+const VIEW_BAD_SIGNATURE: u64 = 2
+const VIEW_MALFORMED: u64 = 3
+const VIEW_TOO_BIG: u64 = 4
+const VIEW_CAP: u64 = 65536
+const OUT_CAP: u64 = 8100
+const FIELD_CAP: u64 = 700
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const TAB: u64 = 9
+const NL: u64 = 10
+
+const A_ID: u64 = 1
+const A_NAME_DE: u64 = 2
+const A_CATEGORY: u64 = 4
+const A_DEVELOPER: u64 = 5
+const A_LICENSE: u64 = 6
+const A_SUMMARY_DE: u64 = 7
+const A_DESC_DE: u64 = 9
+const A_PERMISSIONS: u64 = 11
+const A_ICON: u64 = 12
+const A_SHOTS: u64 = 13
+const V_APP: u64 = 1
+const V_ART: u64 = 2
+const V_PLATFORMS: u64 = 3
+const V_VERSION: u64 = 4
+const V_SIZE: u64 = 5
+const V_PACKAGE: u64 = 7
+const V_SYSTEM: u64 = 9
+const V_REVISION: u64 = 10
+const V_AVAILABLE: u64 = 11
+const V_LEVEL: u64 = 12
+const V_TESTED_BUILD: u64 = 13
+const V_TESTED_DEVICE: u64 = 14
+const V_TESTED_AT: u64 = 15
+const V_GATE: u64 = 16
+const V_NOTES_DE: u64 = 17
+const V_LIMITS_DE: u64 = 19
+const V_CHANGES: u64 = 21
+const C_NAME_DE: u64 = 2
+
+static mut P_VIEW: [u8; 16] = "/var/store/apps\0"
+static mut P_VIEW_SIG: [u8; 20] = "/var/store/apps.sig\0"
+static mut P_KEY_FILE: [u8; 23] = "/etc/store.catalog.pub\0"
+static mut PINNED_HEX: [u8; 65] = "33f41a31ce341fc7d441406233bf10f82ca82940b956bb5eaa46bd6047aa2f5b\0"
+static mut HEADER: [u8; 9] = "#apps\t2\t\0"
+static mut S_CAT: [u8; 5] = "cat=\0"
+static mut S_APP: [u8; 5] = "app=\0"
+static mut S_VARIANT: [u8; 9] = "variant=\0"
+static mut S_NAME: [u8; 6] = "name=\0"
+static mut S_DEV: [u8; 11] = "developer=\0"
+static mut S_CATEGORY: [u8; 10] = "category=\0"
+static mut S_LICENSE: [u8; 9] = "license=\0"
+static mut S_SUMMARY: [u8; 9] = "summary=\0"
+static mut S_DESC: [u8; 13] = "description=\0"
+static mut S_PERMS: [u8; 13] = "permissions=\0"
+static mut S_SHOTS: [u8; 13] = "screenshots=\0"
+static mut S_ICON: [u8; 6] = "icon=\0"
+static mut S_COUNT: [u8; 6] = "apps=\0"
+static mut L_WORKS: [u8; 6] = "works\0"
+static mut L_PARTIAL: [u8; 8] = "partial\0"
+static mut L_BROKEN: [u8; 7] = "broken\0"
+static mut L_UNTESTED: [u8; 9] = "untested\0"
+static mut PF_NATIVE: [u8; 12] = "osum-x86_64\0"
+static mut PF_ANY: [u8; 9] = "osum-any\0"
+static mut PF_LINUX: [u8; 18] = "osum-linux-x86_64\0"
+static mut PF_WINDOWS: [u8; 20] = "osum-windows-x86_64\0"
+
+static mut vbuf: [u8; 65537] = [0 as u8; 65537]
+static mut vlen: u64 = 0
+static mut sigb: [u8; 64] = [0 as u8; 64]
+static mut keyb: [u8; 32] = [0 as u8; 32]
+static mut obuf: [u8; 8192] = [0 as u8; 8192]
+static mut olen: u64 = 0
+static mut fa: [u8; 704] = [0 as u8; 704]
+static mut fb: [u8; 704] = [0 as u8; 704]
+static mut lvl: [u8; 16] = [0 as u8; 16]
+static mut gate: [u8; 8] = [0 as u8; 8]
+
+fn out_ptr() -> u64 {
+    return (&obuf[0 as usize]) as u64
+}
+
+fn out_len() -> u64 {
+    return olen
+}
+
+fn vp() -> u64 {
+    return (&vbuf[0 as usize]) as u64
+}
+
+fn w_reset() {
+    olen = 0
+    octets.st8(out_ptr(), 0, 0)
+}
+
+fn w_ch(c: u64) {
+    if olen + 1 < OUT_CAP {
+        octets.st8(out_ptr(), olen, c)
+        olen = olen + 1
+        octets.st8(out_ptr(), olen, 0)
+    }
+}
+
+fn w_s(p: u64) {
+    var i: u64 = 0
+    while octets.ld8(p, i) != 0 {
+        w_ch(octets.ld8(p, i))
+        i = i + 1
+    }
+}
+
+fn w_n(v: u64) {
+    var t: [u8; 24] = [0 as u8; 24]
+    let n: u64 = text.digits(v, (&t[0 as usize]) as u64, true)
+    var i: u64 = 0
+    while n > i {
+        w_ch(octets.ld8((&t[0 as usize]) as u64, i))
+        i = i + 1
+    }
+}
+
+fn w_field(p: u64) {
+    var i: u64 = 0
+    while octets.ld8(p, i) != 0 {
+        let c: u64 = octets.ld8(p, i)
+        if c == 124 || c == 10 {
+            w_ch(47)
+        } else {
+            w_ch(c)
+        }
+        i = i + 1
+    }
+}
+
+fn hex_val(c: u64) -> u64 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    return NONE
+}
+
+fn key_load() -> bool {
+    let fd: u64 = io.open((&P_KEY_FILE[0 as usize]) as u64, 0)
+    if !ulib.bad(fd) {
+        let n: u64 = io.read_full(fd, (&keyb[0 as usize]) as u64, 32)
+        io.close(fd)
+        if n == 32 {
+            return true
+        }
+        return false
+    }
+    var i: u64 = 0
+    while i < 32 {
+        let hi: u64 = hex_val(octets.ld8((&PINNED_HEX[0 as usize]) as u64, i * 2))
+        let lo: u64 = hex_val(octets.ld8((&PINNED_HEX[0 as usize]) as u64, i * 2 + 1))
+        if hi == NONE || lo == NONE {
+            return false
+        }
+        octets.st8((&keyb[0 as usize]) as u64, i, hi * 16 + lo)
+        i = i + 1
+    }
+    return true
+}
+
+fn file_into(path: u64, buf: u64, cap: u64) -> u64 {
+    let fd: u64 = io.open(path, 0)
+    if ulib.bad(fd) {
+        return NONE
+    }
+    let n: u64 = io.read_full(fd, buf, cap)
+    io.close(fd)
+    if ulib.bad(n) {
+        return NONE
+    }
+    return n
+}
+
+fn starts_with(p: u64, pre: u64) -> bool {
+    var i: u64 = 0
+    while octets.ld8(pre, i) != 0 {
+        if octets.ld8(p, i) != octets.ld8(pre, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn same(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while octets.ld8(a, i) == octets.ld8(b, i) {
+        if octets.ld8(a, i) == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn store_file(path: u64, buf: u64, n: u64) -> bool {
+    let fd: u64 = io.create(path)
+    if ulib.bad(fd) {
+        return false
+    }
+    let w: u64 = io.write_all(fd, buf, n)
+    io.close(fd)
+    return !ulib.bad(w) && w == n
+}
+
+fn view_install(tsv: u64, sig: u64) -> u64 {
+    let n: u64 = file_into(tsv, vp(), VIEW_CAP)
+    if n == NONE || n == 0 {
+        return VIEW_UNREADABLE
+    }
+    if n >= VIEW_CAP {
+        return VIEW_TOO_BIG
+    }
+    octets.st8(vp(), n, 0)
+    if file_into(sig, (&sigb[0 as usize]) as u64, 64) != 64 || !key_load() {
+        return VIEW_UNREADABLE
+    }
+    var c: ed25519.Ctx = ed25519.ctx_new()
+    if !ed25519.ctx_init(&c) {
+        return VIEW_UNREADABLE
+    }
+    if !ed25519.ed25519_verify(&c, (&keyb[0 as usize]) as u64, vp(), n as usize, (&sigb[0 as usize]) as u64) {
+        return VIEW_BAD_SIGNATURE
+    }
+    if !starts_with(vp(), (&HEADER[0 as usize]) as u64) {
+        return VIEW_MALFORMED
+    }
+    if !store_file((&P_VIEW[0 as usize]) as u64, vp(), n) {
+        return VIEW_UNREADABLE
+    }
+    store_file((&P_VIEW_SIG[0 as usize]) as u64, (&sigb[0 as usize]) as u64, 64)
+    vlen = n
+    return VIEW_OK
+}
+
+fn view_load() -> bool {
+    let n: u64 = file_into((&P_VIEW[0 as usize]) as u64, vp(), VIEW_CAP)
+    if n == NONE || n == 0 || n >= VIEW_CAP {
+        vlen = 0
+        return false
+    }
+    octets.st8(vp(), n, 0)
+    vlen = n
+    return starts_with(vp(), (&HEADER[0 as usize]) as u64)
+}
+
+fn fld(at: u64, k: u64, out: u64, cap: u64) -> bool {
+    let p: u64 = vp()
+    var i: u64 = at
+    var f: u64 = 0
+    while f < k {
+        while octets.ld8(p, i) != TAB && octets.ld8(p, i) != NL && octets.ld8(p, i) != 0 {
+            i = i + 1
+        }
+        if octets.ld8(p, i) != TAB {
+            octets.st8(out, 0, 0)
+            return false
+        }
+        i = i + 1
+        f = f + 1
+    }
+    var n: u64 = 0
+    while octets.ld8(p, i) != TAB && octets.ld8(p, i) != NL && octets.ld8(p, i) != 0 && n + 1 < cap {
+        octets.st8(out, n, octets.ld8(p, i))
+        n = n + 1
+        i = i + 1
+    }
+    octets.st8(out, n, 0)
+    return true
+}
+
+fn next_line(at: u64) -> u64 {
+    var i: u64 = at
+    while octets.ld8(vp(), i) != NL && octets.ld8(vp(), i) != 0 {
+        i = i + 1
+    }
+    if octets.ld8(vp(), i) == NL {
+        i = i + 1
+    }
+    return i
+}
+
+fn kind_at(at: u64) -> u64 {
+    return octets.ld8(vp(), at)
+}
+
+fn de_col(lang: u64, col_de: u64) -> u64 {
+    if octets.ld8(lang, 0) == 101 && octets.ld8(lang, 1) == 110 {
+        return col_de + 1
+    }
+    return col_de
+}
+
+fn platform_ok(platforms: u64) -> bool {
+    var i: u64 = 0
+    var n: u64 = 0
+    var word: [u8; 40] = [0 as u8; 40]
+    let wp: u64 = (&word[0 as usize]) as u64
+    while true {
+        let c: u64 = octets.ld8(platforms, i)
+        if c == 44 || c == 0 {
+            octets.st8(wp, n, 0)
+            if same(wp, (&PF_NATIVE[0 as usize]) as u64) || same(wp, (&PF_ANY[0 as usize]) as u64)
+                || same(wp, (&PF_LINUX[0 as usize]) as u64) || same(wp, (&PF_WINDOWS[0 as usize]) as u64) {
+                return true
+            }
+            n = 0
+            if c == 0 {
+                return false
+            }
+        } else if n < 38 {
+            octets.st8(wp, n, c)
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn level_honest(level: u64, gate_col: u64) -> u64 {
+    if same(level, (&L_WORKS[0 as usize]) as u64) {
+        if octets.ld8(gate_col, 0) == 0 {
+            return (&L_UNTESTED[0 as usize]) as u64
+        }
+        return level
+    }
+    if same(level, (&L_PARTIAL[0 as usize]) as u64) || same(level, (&L_BROKEN[0 as usize]) as u64) {
+        return level
+    }
+    return (&L_UNTESTED[0 as usize]) as u64
+}
+
+fn variant_ok(at: u64) -> bool {
+    return fld(at, V_PLATFORMS, (&fa[0 as usize]) as u64, FIELD_CAP) && platform_ok((&fa[0 as usize]) as u64)
+}
+
+fn level_rank(level: u64) -> u64 {
+    if same(level, (&L_BROKEN[0 as usize]) as u64) {
+        return 0
+    }
+    if same(level, (&L_UNTESTED[0 as usize]) as u64) {
+        return 1
+    }
+    if same(level, (&L_PARTIAL[0 as usize]) as u64) {
+        return 2
+    }
+    return 3
+}
+
+fn kind_letter(platforms: u64) -> u64 {
+    var i: u64 = 0
+    while octets.ld8(platforms, i) != 0 {
+        if starts_with(platforms + i, (&PF_LINUX[0 as usize]) as u64) {
+            return 108
+        }
+        if starts_with(platforms + i, (&PF_WINDOWS[0 as usize]) as u64) {
+            return 119
+        }
+        i = i + 1
+    }
+    return 110
+}
+
+fn app_summary(at: u64, kinds: u64) -> u64 {
+    var worst: u64 = 3
+    var seen: u64 = 0
+    var line: u64 = next_line(at)
+    var level_buf: [u8; 16] = [0 as u8; 16]
+    var gate_buf: [u8; 8] = [0 as u8; 8]
+    while kind_at(line) == 86 {
+        if variant_ok(line) {
+            fld(line, V_LEVEL, (&level_buf[0 as usize]) as u64, 16)
+            fld(line, V_GATE, (&gate_buf[0 as usize]) as u64, 8)
+            let r: u64 = level_rank(level_honest((&level_buf[0 as usize]) as u64, (&gate_buf[0 as usize]) as u64))
+            if r < worst {
+                worst = r
+            }
+            octets.st8(kinds, seen, kind_letter((&fa[0 as usize]) as u64))
+            seen = seen + 1
+        }
+        line = next_line(line)
+    }
+    octets.st8(kinds, seen, 0)
+    if seen == 0 {
+        return NONE
+    }
+    return worst
+}
+
+fn level_word(rank: u64) -> u64 {
+    if rank == 0 {
+        return (&L_BROKEN[0 as usize]) as u64
+    }
+    if rank == 1 {
+        return (&L_UNTESTED[0 as usize]) as u64
+    }
+    if rank == 2 {
+        return (&L_PARTIAL[0 as usize]) as u64
+    }
+    return (&L_WORKS[0 as usize]) as u64
+}
+
+fn first_variant_cols(app_at: u64) {
+    var line: u64 = next_line(app_at)
+    while kind_at(line) == 86 {
+        if variant_ok(line) {
+            fld(line, V_VERSION, (&fa[0 as usize]) as u64, FIELD_CAP)
+            w_field((&fa[0 as usize]) as u64)
+            w_ch(124)
+            fld(line, V_PACKAGE, (&fa[0 as usize]) as u64, FIELD_CAP)
+            w_field((&fa[0 as usize]) as u64)
+            return
+        }
+        line = next_line(line)
+    }
+}
+
+fn view_list(lang: u64) {
+    w_reset()
+    var at: u64 = next_line(0)
+    var count: u64 = 0
+    var kinds: [u8; 24] = [0 as u8; 24]
+    while octets.ld8(vp(), at) != 0 {
+        if kind_at(at) == 67 {
+            w_s((&S_CAT[0 as usize]) as u64)
+            fld(at, 1, (&fa[0 as usize]) as u64, FIELD_CAP)
+            w_field((&fa[0 as usize]) as u64)
+            w_ch(124)
+            fld(at, de_col(lang, C_NAME_DE), (&fa[0 as usize]) as u64, FIELD_CAP)
+            w_field((&fa[0 as usize]) as u64)
+            w_ch(10)
+        }
+        if kind_at(at) == 65 {
+            let rank: u64 = app_summary(at, (&kinds[0 as usize]) as u64)
+            if rank != NONE {
+                count = count + 1
+                w_s((&S_APP[0 as usize]) as u64)
+                fld(at, A_ID, (&fa[0 as usize]) as u64, FIELD_CAP)
+                w_field((&fa[0 as usize]) as u64)
+                w_ch(124)
+                fld(at, de_col(lang, A_NAME_DE), (&fa[0 as usize]) as u64, FIELD_CAP)
+                w_field((&fa[0 as usize]) as u64)
+                w_ch(124)
+                fld(at, A_CATEGORY, (&fa[0 as usize]) as u64, FIELD_CAP)
+                w_field((&fa[0 as usize]) as u64)
+                w_ch(124)
+                fld(at, A_DEVELOPER, (&fa[0 as usize]) as u64, FIELD_CAP)
+                w_field((&fa[0 as usize]) as u64)
+                w_ch(124)
+                w_s(level_word(rank))
+                w_ch(124)
+                w_s((&kinds[0 as usize]) as u64)
+                w_ch(124)
+                first_variant_cols(at)
+                w_ch(10)
+            }
+        }
+        at = next_line(at)
+    }
+    w_s((&S_COUNT[0 as usize]) as u64)
+    w_n(count)
+    w_ch(10)
+}
+
+fn find_app(id: u64) -> u64 {
+    var at: u64 = next_line(0)
+    while octets.ld8(vp(), at) != 0 {
+        if kind_at(at) == 65 && fld(at, A_ID, (&fb[0 as usize]) as u64, FIELD_CAP) && same((&fb[0 as usize]) as u64, id) {
+            return at
+        }
+        at = next_line(at)
+    }
+    return NONE
+}
+
+fn count_items(p: u64) -> u64 {
+    if octets.ld8(p, 0) == 0 {
+        return 0
+    }
+    var n: u64 = 1
+    var i: u64 = 0
+    while octets.ld8(p, i) != 0 {
+        if octets.ld8(p, i) == 44 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn line_field(label: u64, at: u64, col: u64) {
+    w_s(label)
+    fld(at, col, (&fa[0 as usize]) as u64, FIELD_CAP)
+    w_field((&fa[0 as usize]) as u64)
+    w_ch(10)
+}
+
+fn col_out(line: u64, col: u64) {
+    fld(line, col, (&fa[0 as usize]) as u64, FIELD_CAP)
+    w_field((&fa[0 as usize]) as u64)
+    w_ch(124)
+}
+
+fn variant_line(line: u64, lang: u64) {
+    w_s((&S_VARIANT[0 as usize]) as u64)
+    col_out(line, V_ART)
+    col_out(line, V_PLATFORMS)
+    col_out(line, V_VERSION)
+    col_out(line, V_SIZE)
+    col_out(line, V_SYSTEM)
+    col_out(line, V_REVISION)
+    col_out(line, V_AVAILABLE)
+    fld(line, V_LEVEL, (&lvl[0 as usize]) as u64, 16)
+    fld(line, V_GATE, (&gate[0 as usize]) as u64, 8)
+    w_s(level_honest((&lvl[0 as usize]) as u64, (&gate[0 as usize]) as u64))
+    w_ch(124)
+    col_out(line, V_TESTED_BUILD)
+    col_out(line, V_TESTED_DEVICE)
+    col_out(line, V_TESTED_AT)
+    col_out(line, V_GATE)
+    col_out(line, de_col(lang, V_NOTES_DE))
+    col_out(line, de_col(lang, V_LIMITS_DE))
+    col_out(line, V_CHANGES)
+    fld(line, V_PACKAGE, (&fa[0 as usize]) as u64, FIELD_CAP)
+    w_field((&fa[0 as usize]) as u64)
+    w_ch(10)
+}
+
+fn view_detail(id: u64, lang: u64) -> bool {
+    w_reset()
+    let at: u64 = find_app(id)
+    if at == NONE {
+        return false
+    }
+    line_field((&S_NAME[0 as usize]) as u64, at, de_col(lang, A_NAME_DE))
+    line_field((&S_DEV[0 as usize]) as u64, at, A_DEVELOPER)
+    line_field((&S_CATEGORY[0 as usize]) as u64, at, A_CATEGORY)
+    line_field((&S_LICENSE[0 as usize]) as u64, at, A_LICENSE)
+    line_field((&S_SUMMARY[0 as usize]) as u64, at, de_col(lang, A_SUMMARY_DE))
+    line_field((&S_DESC[0 as usize]) as u64, at, de_col(lang, A_DESC_DE))
+    line_field((&S_PERMS[0 as usize]) as u64, at, A_PERMISSIONS)
+    line_field((&S_ICON[0 as usize]) as u64, at, A_ICON)
+    w_s((&S_SHOTS[0 as usize]) as u64)
+    fld(at, A_SHOTS, (&fa[0 as usize]) as u64, FIELD_CAP)
+    w_n(count_items((&fa[0 as usize]) as u64))
+    w_ch(10)
+    var line: u64 = next_line(at)
+    while kind_at(line) == 86 {
+        if variant_ok(line) {
+            variant_line(line, lang)
+        }
+        line = next_line(line)
+    }
+    return true
+}
+

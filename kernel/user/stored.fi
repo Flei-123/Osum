@@ -9,6 +9,7 @@ import xfxio
 import xfxpack
 import libc.octets
 import libc.clockapi
+import storeapps
 
 export { u_start }
 
@@ -27,6 +28,12 @@ static mut P_OPK: [u8; 9] = "/bin/opk\0"
 static mut P_ME: [u8; 12] = "/bin/stored\0"
 static mut N_INDEX: [u8; 6] = "INDEX\0"
 static mut N_ISIG: [u8; 10] = "INDEX.sig\0"
+static mut N_VIEW: [u8; 9] = "apps.tsv\0"
+static mut N_VIEWSIG: [u8; 13] = "apps.tsv.sig\0"
+static mut P_TMPV: [u8; 16] = "/tmp/store/APPS\0"
+static mut P_TMPVS: [u8; 20] = "/tmp/store/APPS.sig\0"
+static mut P_VIEW: [u8; 16] = "/var/store/apps\0"
+static mut P_VIEWSIG: [u8; 20] = "/var/store/apps.sig\0"
 
 static mut ARGV: [u64; 8] = [0 as u64; 8]
 static mut u_pid: u64 = 0
@@ -614,6 +621,57 @@ static mut A_EMPTY: [u8; 1] = "\0"
 static mut DT: [u8; 128] = [0 as u8; 128]
 static mut NB: [u8; 64] = [0 as u8; 64]
 
+fn lang_of(msg: u64, out: u64) {
+    var k_lang: [u8; 5] = "lang\0"
+    octets.st8(out, 0, 100)
+    octets.st8(out, 1, 101)
+    octets.st8(out, 2, 0)
+    var lb: [u8; 8] = [0 as u8; 8]
+    if actwire.kv_find(msg, (&k_lang[0 as usize]) as u64, (&lb[0 as usize]) as u64, 8) && octets.ld8((&lb[0 as usize]) as u64, 0) == 101 {
+        octets.st8(out, 0, 101)
+        octets.st8(out, 1, 110)
+    }
+}
+
+fn apps_reply() {
+    var s_ok: [u8; 4] = "ok\n\0"
+    r_reset()
+    r_str((&s_ok[0 as usize]) as u64)
+    r_str(storeapps.out_ptr())
+}
+
+fn do_apps(msg: u64) {
+    var lg: [u8; 4] = [0 as u8; 4]
+    var e1: [u8; 12] = "no_catalog2\0"
+    lang_of(msg, (&lg[0 as usize]) as u64)
+    if !storeapps.view_load() {
+        r_err((&e1[0 as usize]) as u64, 0)
+        return
+    }
+    storeapps.view_list((&lg[0 as usize]) as u64)
+    apps_reply()
+}
+
+fn do_app(msg: u64, id: u64) {
+    var lg: [u8; 4] = [0 as u8; 4]
+    var e1: [u8; 12] = "no_catalog2\0"
+    var e2: [u8; 12] = "no_such_app\0"
+    lang_of(msg, (&lg[0 as usize]) as u64)
+    if !storeapps.view_load() {
+        r_err((&e1[0 as usize]) as u64, 0)
+        return
+    }
+    if !name_ok(id) {
+        r_err((&e2[0 as usize]) as u64, 0)
+        return
+    }
+    if !storeapps.view_detail(id, (&lg[0 as usize]) as u64) {
+        r_err((&e2[0 as usize]) as u64, id)
+        return
+    }
+    apps_reply()
+}
+
 fn handle(msg: u64) -> bool {
     var verb: [u8; 16] = [0 as u8; 16]
     var name: [u8; 40] = [0 as u8; 40]
@@ -643,6 +701,8 @@ fn handle(msg: u64) -> bool {
     var a_upd: [u8; 13] = "store.update\0"
     var a_rem: [u8; 13] = "store.remove\0"
     var a_auto: [u8; 14] = "store.autoset\0"
+    var a_apps: [u8; 11] = "store.apps\0"
+    var a_app: [u8; 10] = "store.app\0"
     if actwire.str_eq(vp, (&k_ping[0 as usize]) as u64) {
         var s_pong: [u8; 6] = "pong\n\0"
         r_reset()
@@ -671,6 +731,14 @@ fn handle(msg: u64) -> bool {
     }
     if actwire.str_eq(np, (&a_rem[0 as usize]) as u64) {
         do_run((&W_REMOVE[0 as usize]) as u64, nbp, uid, dry)
+        return false
+    }
+    if actwire.str_eq(np, (&a_apps[0 as usize]) as u64) {
+        do_apps(msg)
+        return false
+    }
+    if actwire.str_eq(np, (&a_app[0 as usize]) as u64) {
+        do_app(msg, nbp)
         return false
     }
     if actwire.str_eq(np, (&a_auto[0 as usize]) as u64) {
@@ -981,7 +1049,20 @@ fn refresh_catalog(verb: u64, name: u64) -> u64 {
         return fail(verb, name, (&T_SIG[0 as usize]) as u64)
     }
     pct_set(24)
+    refresh_apps_view()
     return 0
+}
+
+fn refresh_apps_view() {
+    if run((&P_OTA[0 as usize]) as u64, (&A_HOL[0 as usize]) as u64, (&N_VIEW[0 as usize]) as u64,
+        (&P_TMPV[0 as usize]) as u64, 0, 4) == 0
+        && run((&P_OTA[0 as usize]) as u64, (&A_HOL[0 as usize]) as u64, (&N_VIEWSIG[0 as usize]) as u64,
+        (&P_TMPVS[0 as usize]) as u64, 0, 4) == 0
+        && storeapps.view_install((&P_TMPV[0 as usize]) as u64, (&P_TMPVS[0 as usize]) as u64) == storeapps.VIEW_OK {
+        return
+    }
+    io.unlink((&P_VIEW[0 as usize]) as u64)
+    io.unlink((&P_VIEWSIG[0 as usize]) as u64)
 }
 
 fn work(verb: u64, name: u64) -> u64 {
