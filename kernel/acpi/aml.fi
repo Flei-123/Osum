@@ -62,7 +62,7 @@ export {
     // ROUND ACPI-EVENTS: HOLD the namespace instead of discarding it,
     // and evaluate a single node.
     ns_hold, ns_arena, hold_err, hold_bad, eval_node, eval_node_arg, eval_node_args, ns_bytes,
-    hold_report, snapshot_boot, fuzz_load, busy_refusals, guard_probe
+    hold_report, snapshot_boot, fuzz_load, busy_refusals, guard_probe, bind_fields
 }
 
 const SNAP_FRAMES: u64 = 256
@@ -268,6 +268,10 @@ fn load_createfield(state: u64, scope: u64, p: u64, c: u64) -> u64 {
         amlns.set_flags(state, node, NF_FIELD_NAME)
         amlns.set_a(state, node, out[0])
         amlns.set_b(state, node, 0)
+        amlns.set_c(state, node, 0)
+        if c != 0x5B {
+            amlns.set_c(state, node, p)
+        }
     }
     return out[0]
 }
@@ -1518,6 +1522,40 @@ fn eval_node(state: u64, node: u64, dst: u64) -> bool {
     let ok: bool = call0(state, node, dst)
     release()
     return ok
+}
+
+fn bind_field(state: u64, scope: u64, node: u64) {
+    var d: [u64; 3] = [0 as u64; 3]
+    let stmt: u64 = amlns.node_c(state, node)
+    amlns.set_c(state, node, 0)
+    amlns.set_flags(state, node, 0)
+    let f: u64 = amlev.frame_new(state)
+    if f == 0 {
+        return
+    }
+    amlev.frame_scope_set(f, scope)
+    amlev.ev(state, f, stmt, (&d[0]) as u64)
+}
+
+fn bind_fields(state: u64, scope: u64) {
+    if g(state, A_HOLD) == 0 || !acquire() {
+        return
+    }
+    amlev.budget_set(state, BUDGET)
+    amlev.depth_reset(state)
+    amlev.stack_base(state)
+    amlns.err_clear(state)
+    let n: u64 = amlns.nodes(state)
+    var i: u64 = 1
+    while i < n {
+        if amlns.node_parent(state, i) == scope && amlns.node_kind(state, i) == amlns.NK_NAME
+            && (amlns.node_flags(state, i) & NF_FIELD_NAME) != 0 && amlns.node_c(state, i) != 0 {
+            bind_field(state, scope, i)
+        }
+        i = i + 1
+    }
+    amlns.err_clear(state)
+    release()
 }
 
 fn eval_node_arg(state: u64, node: u64, arg: u64, dst: u64) -> bool {

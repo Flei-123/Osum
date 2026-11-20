@@ -9,7 +9,9 @@ import acpi.acpi
 import acpi.aml
 import acpi.amlns
 import acpi.amlobj
+import acpi.acpidev
 import drv.hid.inreg
+import drv.hid.amldiag
 import drv.hid.hidmode
 import touchev.inmode
 import drv.hid.evring
@@ -766,11 +768,12 @@ fn stage(state: u64) {
     acpi_scan(state)
     find_ctrls(state)
     say(state)
+    aml_scan(state)
+    say_aml(state)
+    say_diag(state)
     if nctrl() == 0 {
         return
     }
-    aml_scan(state)
-    say_aml(state)
     probe_all(state)
     say_devs(state)
 }
@@ -1130,53 +1133,221 @@ fn aml_add_cand(c: u64, adr: u64, hreg: u64, node: u64) {
     ts(X_NAML, n + 1)
 }
 
-fn aml_scan(state: u64) -> u64 {
+fn aml_read_global(state: u64, name: u64) -> u64 {
+    let n: u64 = amlns.child(state, 0, amlns.seg_of(name))
+    var r: [u64; 3] = [0 as u64; 3]
+    if n == amlns.NONE || !aml.eval_node(state, n, (&r[0]) as u64) {
+        return amldiag.OSYS_UNKNOWN
+    }
+    if regio.read64((&r[0]) as u64) != amlobj.OT_INT {
+        return amldiag.OSYS_UNKNOWN
+    }
+    return amlobj.to_int((&r[0]) as u64)
+}
+
+fn aml_dev_value(state: u64, dev: u64, name: u64) -> u64 {
+    let n: u64 = amlns.child(state, dev, amlns.seg_of(name))
+    var r: [u64; 3] = [0 as u64; 3]
+    if n == amlns.NONE || !aml.eval_node(state, n, (&r[0]) as u64) {
+        return amldiag.OSYS_UNKNOWN
+    }
+    if regio.read64((&r[0]) as u64) != amlobj.OT_INT {
+        return amldiag.OSYS_UNKNOWN
+    }
+    return amlobj.to_int((&r[0]) as u64)
+}
+
+fn aml_note_dev_values(state: u64, dev: u64, rec: u64) {
+    var w_badr: [u8; 5] = "BADR\0"
+    var w_hid2: [u8; 5] = "HID2\0"
+    amldiag.set(rec, amldiag.F_BADR, aml_dev_value(state, dev, (&w_badr[0]) as u64))
+    amldiag.set(rec, amldiag.F_HID2, aml_dev_value(state, dev, (&w_hid2[0]) as u64))
+}
+
+fn aml_read_osys(state: u64) -> u64 {
+    var w_osys: [u8; 5] = "OSYS\0"
+    return aml_read_global(state, (&w_osys[0]) as u64)
+}
+
+fn aml_note_probes(state: u64) {
+    var w_a: [u8; 5] = "TPSA\0"
+    var w_b: [u8; 5] = "THHA\0"
+    var w_c: [u8; 5] = "TPLE\0"
+    var w_d: [u8; 5] = "SDM0\0"
+    amldiag.note_probe(0, aml_read_global(state, (&w_a[0]) as u64))
+    amldiag.note_probe(1, aml_read_global(state, (&w_b[0]) as u64))
+    amldiag.note_probe(2, aml_read_global(state, (&w_c[0]) as u64))
+    amldiag.note_probe(3, aml_read_global(state, (&w_d[0]) as u64))
+}
+
+fn aml_run_ini(state: u64, node: u64) -> u64 {
+    var w_ini: [u8; 5] = "_INI\0"
+    var r: [u64; 3] = [0 as u64; 3]
+    let n: u64 = amlns.child(state, node, amlns.seg_of((&w_ini[0]) as u64))
+    if n == amlns.NONE {
+        return amldiag.ST_NONE
+    }
+    if aml.eval_node(state, n, (&r[0]) as u64) {
+        return amldiag.ST_OK
+    }
+    return amldiag.ST_FAILED
+}
+
+const INI_DONE_MAX: u64 = 16
+const INI_CHAIN_MAX: u64 = 8
+static mut ini_done: [u64; 16] = [0 as u64; 16]
+static mut ini_done_n: u64 = 0
+static mut ini_seen: bool = false
+
+fn aml_ini_once(state: u64, node: u64) -> u64 {
+    var k: u64 = 0
+    while k < ini_done_n {
+        if ini_done[k as usize] == node {
+            return amldiag.ST_NONE
+        }
+        k = k + 1
+    }
+    if ini_done_n < INI_DONE_MAX {
+        ini_done[ini_done_n as usize] = node
+        ini_done_n = ini_done_n + 1
+    }
+    return aml_run_ini(state, node)
+}
+
+fn aml_ini_ancestors(state: u64, dev: u64) {
+    var chain: [u64; 8] = [0 as u64; 8]
+    var depth: u64 = 0
+    var n: u64 = amlns.node_parent(state, dev)
+    while n != 0 && n != amlns.NONE && depth < INI_CHAIN_MAX {
+        chain[depth as usize] = n
+        depth = depth + 1
+        n = amlns.node_parent(state, n)
+    }
+    var worst: u64 = amldiag.sb_ini()
+    while depth > 0 {
+        depth = depth - 1
+        let st: u64 = aml_ini_once(state, chain[depth as usize])
+        if st == amldiag.ST_FAILED {
+            worst = amldiag.ST_FAILED
+        } else if st == amldiag.ST_OK && worst == amldiag.ST_NONE {
+            worst = amldiag.ST_OK
+        }
+    }
+    amldiag.note_sb_ini(worst)
+}
+
+fn aml_prepare(state: u64, dev: u64) {
+    if !ini_seen {
+        amldiag.note_osys(true, aml_read_osys(state))
+        ini_seen = true
+    }
+    aml_ini_ancestors(state, dev)
+    amldiag.note_osys(false, aml_read_osys(state))
+    aml_note_probes(state)
+}
+
+fn aml_crs_gpio(q: u64, rl: u64, rec: u64) {
+    amldiag.set(rec, amldiag.F_GPIO, amldiag.get(rec, amldiag.F_GPIO) + 1)
+    let off: u64 = kstate.get8(q + 14) | (kstate.get8(q + 15) << 8)
+    if kstate.get8(q + 4) == 0 && off + 2 <= 3 + rl {
+        amldiag.set(rec, amldiag.F_PIN, kstate.get8(q + off) | (kstate.get8(q + off + 1) << 8))
+    }
+}
+
+fn aml_crs_i2c(state: u64, dev: u64, rec: u64, q: u64, rl: u64) {
+    let tdl: u64 = kstate.get8(q + 10) | (kstate.get8(q + 11) << 8)
+    let adr: u64 = kstate.get8(q + 16) | (kstate.get8(q + 17) << 8)
+    amldiag.set(rec, amldiag.F_I2C, amldiag.get(rec, amldiag.F_I2C) + 1)
+    amldiag.set(rec, amldiag.F_ADR, adr)
+    if tdl < 6 || adr == 0 || adr >= 0x80 || 12 + tdl >= 3 + rl {
+        return
+    }
+    let cnode: u64 = aml_resolve(state, q + 12 + tdl, 3 + rl - 12 - tdl)
+    if cnode == amlns.NONE {
+        return
+    }
+    amldiag.set(rec, amldiag.F_RES, 1)
+    let c: u64 = aml_ctrl_of(state, cnode)
+    amldiag.set(rec, amldiag.F_CTRL, c)
+    if c == 0xFF {
+        return
+    }
+    let hreg: u64 = aml_dsm_hreg(state, dev)
+    amldiag.set(rec, amldiag.F_HREG, hreg)
+    aml_add_cand(c, adr, hreg, dev)
+}
+
+fn aml_crs_large(state: u64, dev: u64, rec: u64, q: u64, rl: u64) {
+    let b: u64 = kstate.get8(q)
+    if b == 0x89 {
+        amldiag.set(rec, amldiag.F_IRQ, amldiag.get(rec, amldiag.F_IRQ) + 1)
+    } else if b == 0x8C && rl >= 14 {
+        aml_crs_gpio(q, rl, rec)
+    } else if b == 0x8E && rl >= 15 && kstate.get8(q + 5) == 1 {
+        aml_crs_i2c(state, dev, rec, q, rl)
+    }
+}
+
+fn aml_crs_walk(state: u64, dev: u64, rec: u64, p: u64, len: u64) {
+    var o: u64 = 0
+    while o + 3 <= len {
+        let b: u64 = kstate.get8(p + o)
+        if (b & 0x80) == 0 {
+            if (b >> 3) == 0x0F {
+                return
+            }
+            o = o + 1 + (b & 7)
+        } else {
+            let rl: u64 = kstate.get8(p + o + 1) | (kstate.get8(p + o + 2) << 8)
+            if o + 3 + rl > len {
+                return
+            }
+            aml_crs_large(state, dev, rec, p + o, rl)
+            o = o + 3 + rl
+        }
+    }
+}
+
+fn aml_scan_crs(state: u64, dev: u64, rec: u64) {
     var w_crs: [u8; 5] = "_CRS\0"
+    var r: [u64; 3] = [0 as u64; 3]
+    let cn: u64 = amlns.child(state, dev, amlns.seg_of((&w_crs[0]) as u64))
+    if cn == amlns.NONE {
+        return
+    }
+    if !aml.eval_node(state, cn, (&r[0]) as u64) {
+        amldiag.set(rec, amldiag.F_CRS, amldiag.ST_FAILED)
+        return
+    }
+    if regio.read64((&r[0]) as u64) != amlobj.OT_BUF {
+        amldiag.set(rec, amldiag.F_CRS, 3)
+        return
+    }
+    let len: u64 = amlobj.ov2((&r[0]) as u64)
+    amldiag.set(rec, amldiag.F_CRS, amldiag.ST_OK)
+    amldiag.set(rec, amldiag.F_LEN, len)
+    aml_crs_walk(state, dev, rec, amlobj.ov1((&r[0]) as u64), len)
+}
+
+fn aml_scan(state: u64) -> u64 {
     ts(X_NAML, 0)
     ts(X_AML, 0)
+    amldiag.reset()
     if kstate.mode_on(state, kstate.M_I2CNOAML) || aml.ns_arena(state) == 0 {
         return 0
     }
-    let crs_seg: u64 = amlns.seg_of((&w_crs[0]) as u64)
+    ini_done_n = 0
+    ini_seen = false
     let nn: u64 = amlns.nodes(state)
     var i: u64 = 1
     while i < nn {
         if amlns.node_kind(state, i) == amlns.NK_DEVICE && aml_dev_is_hidi2c(state, i) {
-            let cn: u64 = amlns.child(state, i, crs_seg)
-            var r: [u64; 3] = [0 as u64; 3]
-            if cn != amlns.NONE && aml.eval_node(state, cn, (&r[0]) as u64)
-                && regio.read64((&r[0]) as u64) == amlobj.OT_BUF {
-                let p: u64 = amlobj.ov1((&r[0]) as u64)
-                let len: u64 = amlobj.ov2((&r[0]) as u64)
-                var o: u64 = 0
-                while o + 3 <= len {
-                    let b: u64 = kstate.get8(p + o)
-                    if (b & 0x80) == 0 {
-                        if (b >> 3) == 0x0F {
-                            o = len
-                        } else {
-                            o = o + 1 + (b & 7)
-                        }
-                    } else {
-                        let rl: u64 = kstate.get8(p + o + 1) | (kstate.get8(p + o + 2) << 8)
-                        if b == 0x8E && rl >= 15 && o + 3 + rl <= len && kstate.get8(p + o + 5) == 1 {
-                            let tdl: u64 = kstate.get8(p + o + 10) | (kstate.get8(p + o + 11) << 8)
-                            let adr: u64 = kstate.get8(p + o + 16) | (kstate.get8(p + o + 17) << 8)
-                            if tdl >= 6 && adr > 0 && adr < 0x80 && 12 + tdl < 3 + rl {
-                                let src: u64 = p + o + 12 + tdl
-                                let cnode: u64 = aml_resolve(state, src, 3 + rl - 12 - tdl)
-                                if cnode != amlns.NONE {
-                                    let c: u64 = aml_ctrl_of(state, cnode)
-                                    if c != 0xFF {
-                                        aml_add_cand(c, adr, aml_dsm_hreg(state, i), i)
-                                    }
-                                }
-                            }
-                        }
-                        o = o + 3 + rl
-                    }
-                }
-            }
+            aml_prepare(state, i)
+            aml.bind_fields(state, i)
+            let rec: u64 = amldiag.begin(i)
+            amldiag.set(rec, amldiag.F_INI, aml_ini_once(state, i))
+            aml_note_dev_values(state, i, rec)
+            aml_scan_crs(state, i, rec)
         }
         i = i + 1
     }
@@ -1290,6 +1461,87 @@ fn r_hex(v: u64, digits: u64) {
 fn r_key(k: u64) {
     r_c(32)
     r_s(k)
+}
+
+fn r_diag_field(name: u64, v: u64, hex: bool) {
+    r_key(name)
+    if hex {
+        r_hex(v, 4)
+    } else {
+        r_dec(v)
+    }
+}
+
+fn r_aml_diag(state: u64) {
+    var k_hd: [u8; 9] = "aml_ini \0"
+    var k_sb: [u8; 4] = "sb=\0"
+    var k_ob: [u8; 12] = "osys_pre=\0\0\0"
+    var k_oa: [u8; 12] = "osys_post=\0\0"
+    var k_pa: [u8; 6] = "tpsa=\0"
+    var k_pb: [u8; 6] = "thha=\0"
+    var k_pc: [u8; 6] = "tple=\0"
+    var k_pd: [u8; 6] = "sdm0=\0"
+    var k_am: [u8; 4] = "aml\0"
+    var k_in: [u8; 5] = "ini=\0"
+    var k_cr: [u8; 5] = "crs=\0"
+    var k_ln: [u8; 5] = "len=\0"
+    var k_i2: [u8; 5] = "i2c=\0"
+    var k_gp: [u8; 6] = "gpio=\0"
+    var k_iq: [u8; 5] = "irq=\0"
+    var k_ad: [u8; 5] = "adr=\0"
+    var k_hr: [u8; 6] = "hreg=\0"
+    var k_rs: [u8; 5] = "res=\0"
+    var k_ct: [u8; 6] = "ctrl=\0"
+    var k_pn: [u8; 5] = "pin=\0"
+    var k_bd: [u8; 6] = "badr=\0"
+    var k_h2: [u8; 6] = "hid2=\0"
+    r_s((&k_hd[0]) as u64)
+    r_s((&k_sb[0]) as u64)
+    r_dec(amldiag.sb_ini())
+    r_c(32)
+    r_s((&k_ob[0]) as u64)
+    r_hex(amldiag.osys_before(), 4)
+    r_c(32)
+    r_s((&k_oa[0]) as u64)
+    r_hex(amldiag.osys_after(), 4)
+    r_diag_field((&k_pa[0]) as u64, amldiag.probe(0), true)
+    r_diag_field((&k_pb[0]) as u64, amldiag.probe(1), true)
+    r_diag_field((&k_pc[0]) as u64, amldiag.probe(2), true)
+    r_diag_field((&k_pd[0]) as u64, amldiag.probe(3), true)
+    r_c(10)
+    var k: u64 = 0
+    while k < amldiag.count() {
+        r_s((&k_am[0]) as u64)
+        r_dec(k)
+        r_c(32)
+        r_at = acpidev.put_path(r_out, r_at, r_cap, state, amldiag.get(k, amldiag.F_NODE))
+        r_diag_field((&k_in[0]) as u64, amldiag.get(k, amldiag.F_INI), false)
+        r_diag_field((&k_cr[0]) as u64, amldiag.get(k, amldiag.F_CRS), false)
+        r_diag_field((&k_ln[0]) as u64, amldiag.get(k, amldiag.F_LEN), false)
+        r_diag_field((&k_i2[0]) as u64, amldiag.get(k, amldiag.F_I2C), false)
+        r_diag_field((&k_gp[0]) as u64, amldiag.get(k, amldiag.F_GPIO), false)
+        r_diag_field((&k_iq[0]) as u64, amldiag.get(k, amldiag.F_IRQ), false)
+        r_diag_field((&k_ad[0]) as u64, amldiag.get(k, amldiag.F_ADR), true)
+        r_diag_field((&k_hr[0]) as u64, amldiag.get(k, amldiag.F_HREG), true)
+        r_diag_field((&k_rs[0]) as u64, amldiag.get(k, amldiag.F_RES), false)
+        r_diag_field((&k_ct[0]) as u64, amldiag.get(k, amldiag.F_CTRL), false)
+        r_diag_field((&k_pn[0]) as u64, amldiag.get(k, amldiag.F_PIN), false)
+        r_diag_field((&k_bd[0]) as u64, amldiag.get(k, amldiag.F_BADR), true)
+        r_diag_field((&k_h2[0]) as u64, amldiag.get(k, amldiag.F_HID2), true)
+        r_c(10)
+        k = k + 1
+    }
+}
+
+static mut diag_buf: [u8; 2048] = [0 as u8; 2048]
+
+fn say_diag(state: u64) {
+    r_out = (&diag_buf[0]) as u64
+    r_cap = 2047
+    r_at = 0
+    r_aml_diag(state)
+    diag_buf[r_at as usize] = 0 as u8
+    serial.puts((&diag_buf[0]) as u64)
 }
 
 fn render(state: u64, out: u64, cap: u64) -> u64 {
@@ -1476,6 +1728,7 @@ fn render(state: u64, out: u64, cap: u64) -> u64 {
         r_c(10)
         cn = cn + 1
     }
+    r_aml_diag(state)
     return r_at
 }
 
