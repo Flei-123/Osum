@@ -72,7 +72,7 @@ class Roh:
 
 FAELLE = ["kennung", "inodes", "bloecke", "bereiche", "zeigerkreis",
           "verzkreis", "selbstverz", "doppelt", "wildzeiger", "totlink",
-          "leerkarte", "muell", "jmuell"]
+          "leerkarte", "muell", "jmuell", "lostblock"]
 
 
 def mach(fall, reason, target):
@@ -118,6 +118,8 @@ def mach(fall, reason, target):
         bmb = r.g(mkfs.SB["BMBLOCKS"]) or 1
         for k in range(bmb):
             r.put(r.g(mkfs.SB["BITMAP"]) + k, bytearray(BS))
+    elif fall == "lostblock":
+        _frei(r)
     elif fall == "muell":
         zuf = os.urandom(64 * BS)
         for i in range(64):

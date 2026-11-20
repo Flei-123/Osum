@@ -144,6 +144,7 @@ num "BESCHAEDIGTE FAELLE (Wirt)" "$n_w" eq 0
 echo
 echo "== 3b. the plain image (no journal): $LAEUFE kills =="
 mkdir -p "$TMPD/plainruns"
+export FSR_TOLERATE_LOST=1
 seq 201 $((200 + LAEUFE)) | xargs -P "$PAR" -I{} sh -c \
     "bash tools/fsrobust/crash.sh $TMPD/nj.img $TMPD/plainruns {} '' 2>&1" \
     > "$TMPD/plain.log" 2>&1
@@ -151,9 +152,13 @@ p_l=$(grep -c '^lauf=' "$TMPD/plain.log")
 p_b=$(grep '^lauf=' "$TMPD/plain.log" | grep -vc 'rc2=21')
 p_s=$(grep '^lauf=' "$TMPD/plain.log" | grep -c 'schaeden=[1-9]')
 p_f=$(grep '^lauf=' "$TMPD/plain.log" | grep -c 'fsck=[1-9]')
+p_w=$(grep '^lauf=' "$TMPD/plain.log" | grep -c 'wirt=[1-9]')
+p_x=$(grep '^lauf=' "$TMPD/plain.log" | grep -c 'lost=[1-9]')
+unset FSR_TOLERATE_LOST
 num "plain image: runs done" "$p_l" eq "$LAEUFE"
 num "plain image: runs that did not come up again" "$p_b" eq 0
-echo "        plain image damage (informational, no journal): guest=$p_s fsck=$p_f of $LAEUFE"
+echo "        plain image damage (informational, no journal): guest=$p_s fsck=$p_f host=$p_w of $LAEUFE"
+echo "        plain image leaked blocks (deferred free, known and repairable by fsck -r): $p_x of $LAEUFE"
 
 echo "== 4. the control run: the same kills with 'nojournal' =="
 echo "        (hier MUESSEN Schaeden auftreten -- sonst misst"
@@ -191,7 +196,7 @@ echo "== 6. /bin/fsck auf mutwillig zerstoerten Abbildern =="
 python3 tools/fsrobust/corrupt.py "$TMPD/j.img" "$TMPD/kaputt" \
     > "$TMPD/kaputt.txt" 2>&1 || bad "corrupt.py"
 n_k=$(grep -c '^kaputt: ' "$TMPD/kaputt.txt")
-num "kaputte Abbilder gebaut" "$n_k" ge 13
+num "kaputte Abbilder gebaut" "$n_k" ge 14
 fertig=0
 haengt=0
 for f in "$TMPD"/kaputt/*.img; do
@@ -217,9 +222,21 @@ done
 num "kaputte Abbilder, auf denen fsck FERTIG WIRD" "$fertig" eq "$n_k"
 num "kaputte Abbilder, auf denen es haengenbleibt" "$haengt" eq 0
 
-cp --sparse=always "$TMPD/kaputt/kaputt-leerkarte.img" "$TMPD/rep.img"
+echo
+echo "        leaked blocks are a known finding, real damage still counts:"
+CHK="python3 tools/fsrobust/check.py struktur"
+$CHK "$TMPD/kaputt/kaputt-lostblock.img" >/dev/null 2>&1; rc_strict=$?
+$CHK "$TMPD/kaputt/kaputt-lostblock.img" --tolerate-lost >/dev/null 2>&1; rc_tol=$?
+num "leaked block, strict check" "$rc_strict" eq 1
+num "leaked block, tolerant check" "$rc_tol" eq 0
+for bad_case in leerkarte doppelt totlink wildzeiger; do
+    $CHK "$TMPD/kaputt/kaputt-$bad_case.img" --tolerate-lost >/dev/null 2>&1
+    num "counter-proof $bad_case: tolerant check still reports damage" "$?" eq 1
+done
+
+cp --sparse=always "$TMPD/kaputt/kaputt-lostblock.img" "$TMPD/rep.img"
 cp --sparse=always "$TMPD/j.img" "$TMPD/repboot.img"
-fsck2() { # abbild anhang ausgabe
+fsck2() {
     timeout 300 qemu-system-x86_64 -accel tcg -kernel "$TMPD/k.mb" -m 512 \
         -append "osum vfs nokbd nowlock script=fsck $1 /dev/hdb;exit" \
         -serial "file:$2" -display none -no-reboot \
@@ -227,6 +244,15 @@ fsck2() { # abbild anhang ausgabe
         -drive "file=$TMPD/rep.img,format=raw,if=ide,index=1" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
 }
+fsck2 "" "$TMPD/l0.txt"
+fsck2 "-r" "$TMPD/l1.txt"
+fsck2 "" "$TMPD/l2.txt"
+num "leaked block: fsck reports it (lost)" "$(val "$TMPD/l0.txt" fsck lost)" eq 1
+num "leaked block: fsck -r repairs it" "$(val "$TMPD/l1.txt" fsck fixed)" eq 1
+num "leaked block: clean after repair" "$(val "$TMPD/l2.txt" fsck errors)" eq 0
+
+cp --sparse=always "$TMPD/kaputt/kaputt-leerkarte.img" "$TMPD/rep.img"
+cp --sparse=always "$TMPD/j.img" "$TMPD/repboot.img"
 fsck2 "" "$TMPD/r0.txt"
 v0=$(val "$TMPD/r0.txt" fsck errors)
 fsck2 "-r" "$TMPD/r1.txt"

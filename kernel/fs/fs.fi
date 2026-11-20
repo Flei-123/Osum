@@ -63,6 +63,7 @@ import fs.pcache
 import mm.fileshare
 import fs.ofsj
 import fs.wbscope
+import fs.deferfree
 import fs.ofsext
 import sched.time
 import libc.regio
@@ -77,7 +78,7 @@ export {
     NAME_LEN, INODE_COUNT, version, directs, inode_mode, inode_uid,
     inode_gid, set_mode, set_owner, set_meta, parent_ino, OFS_V1,
     OFS_V2, S_ISUID, S_ISGID, S_ISVTX, inode_is_fifo, mark_fifo, DIRECT_V1, DIRECT_V2,
-    rename_path,
+    rename_path, reclaim_locked,
     enter, leave, lock_only, unlock_only, flags_nested,
     // ---- RUNDE PROTOKOLL ----
     free, ready,
@@ -879,6 +880,9 @@ fn inode_alloc(state: u64, kind: u64) -> u64 {
     if ino == 0 && start > 1 {
         ino = inode_scan_free(state, 1, start - 1)
     }
+    if ino == 0 && reclaim_for_space(state) {
+        ino = inode_scan_free(state, 1, last)
+    }
     if ino == 0 {
         return 0
     }
@@ -891,6 +895,10 @@ fn inode_alloc(state: u64, kind: u64) -> u64 {
 
 fn inode_release(state: u64, ino: u64) -> bool {
     wbscope.mark_freed(state)
+    return inode_free_now(state, ino)
+}
+
+fn inode_free_now(state: u64, ino: u64) -> bool {
     let hint: u64 = kstate.get(state, kstate.FSG_OFF + G_IHINT)
     if hint != 0 && ino < hint {
         kstate.set(state, kstate.FSG_OFF + G_IHINT, ino)
@@ -926,7 +934,7 @@ fn used_inodes(state: u64) -> u64 {
         + used_in_region(state, kstate.get(state, kstate.FSG_OFF + G_XIT),
             ext_inodes(state))
     leave(state, flags)
-    return n
+    return n - deferfree.queued_inodes(state)
 }
 
 // ---------------------------------------------------------- the bitmap
@@ -984,7 +992,11 @@ fn block_alloc(state: u64) -> u64 {
     if got != 0 {
         return got
     }
-    return search_free(state, von, start)
+    let wrapped: u64 = search_free(state, von, start)
+    if wrapped != 0 || !reclaim_for_space(state) {
+        return wrapped
+    }
+    return search_free(state, von, lim)
 }
 
 fn search_free(state: u64, von: u64, bis: u64) -> u64 {
@@ -1076,7 +1088,14 @@ fn block_free(state: u64, b: u64) {
     if b >= max_blocks(state) {
         return
     }
+    if deferfree.active() && deferfree.push_block(state, b) {
+        return
+    }
     wbscope.mark_freed(state)
+    block_clear_bit(state, b)
+}
+
+fn block_clear_bit(state: u64, b: u64) {
     let kb: u64 = bm_block_of(state, b)
     if !bm_load(state, kb) {
         return
@@ -1134,7 +1153,7 @@ fn free_blocks(state: u64) -> u64 {
         }
     }
     leave(state, flags)
-    return n
+    return n + deferfree.queued_blocks(state)
 }
 
 // The `index`-th block of a file. With `grow` a missing one is created --
@@ -1396,6 +1415,8 @@ fn file_truncate(state: u64, ino: u64) {
 
 fn file_truncate_run(state: u64, ino: u64) {
     let vk_flags: u64 = enter(state)
+    reclaim_due(state)
+    deferfree.scope_begin(state)
     free_batch_begin()
     var i: u64 = 0
     let dn: u64 = directs(state)
@@ -1473,6 +1494,8 @@ fn file_truncate_run(state: u64, ino: u64) {
     }
     free_batch_end(state)
     size_write(state, ino, 0, false)
+    deferfree.scope_end()
+    deferfree.seal(state, blk.wb_epoch(state))
     leave(state, vk_flags)
 }
 
@@ -2743,6 +2766,7 @@ fn order_dir_blocks(state: u64, dir: u64) {
 
 fn create_path_run(state: u64, p: u64, kind: u64) -> u64 {
     let flags: u64 = enter(state)
+    reclaim_due(state)
     let name: u64 = state + kstate.OFS3_OFF + kstate.OP_OLD
     let dir: u64 = parent_of(state, p, name)
     if dir == 0 {
@@ -2868,6 +2892,7 @@ fn dir_init(state: u64, ino: u64, parent: u64) -> bool {
 
 fn unlink_path_run(state: u64, p: u64) -> bool {
     let flags: u64 = enter(state)
+    reclaim_due(state)
     let name: u64 = state + kstate.OFS3_OFF + kstate.OP_OLD
     let dir: u64 = parent_of(state, p, name)
     if dir == 0 {
@@ -2904,10 +2929,80 @@ fn unlink_path_run(state: u64, p: u64) -> bool {
         leave(state, flags)
         return true
     }
+    if kind != T_DIR && deferfree.enabled(state) {
+        dir_remove_kind(state, dir, name, kind)
+        orphan_release(state, ino)
+        leave(state, flags)
+        return true
+    }
     file_truncate(state, ino)
     inode_release(state, ino)
     inode_set(state, ino, I_NLINK, 0)
     dir_remove_kind(state, dir, name, kind)
+    leave(state, flags)
+    return true
+}
+
+fn orphan_release(state: u64, ino: u64) {
+    file_truncate(state, ino)
+    inode_set(state, ino, I_NLINK, 0)
+    if deferfree.push_inode(state, ino) {
+        deferfree.seal(state, blk.wb_epoch(state))
+        return
+    }
+    inode_release(state, ino)
+}
+
+fn reclaim_apply(state: u64) {
+    let epoch: u64 = blk.wb_epoch(state)
+    let batched: bool = fb_on != 0
+    if !batched {
+        free_batch_begin()
+    }
+    while deferfree.take_run(state, epoch) {
+        let first: u64 = deferfree.took_start()
+        let count: u64 = deferfree.took_len()
+        var i: u64 = 0
+        while i < count {
+            block_clear_bit(state, first + i)
+            i = i + 1
+        }
+    }
+    if !batched {
+        free_batch_end(state)
+    }
+    while deferfree.take_inode(state, epoch) {
+        let _freed: bool = inode_free_now(state, deferfree.took_ino())
+    }
+}
+
+fn reclaim_due(state: u64) {
+    if !deferfree.pending() {
+        return
+    }
+    if deferfree.due_pressure() {
+        wbscope.barrier(state)
+    }
+    reclaim_apply(state)
+}
+
+fn reclaim_for_space(state: u64) -> bool {
+    if !deferfree.pending() {
+        return false
+    }
+    wbscope.barrier(state)
+    reclaim_apply(state)
+    return true
+}
+
+fn reclaim_locked(state: u64) -> bool {
+    if !deferfree.pending() {
+        return false
+    }
+    let flags: u64 = enter(state)
+    let scoped: bool = wbscope.begin(state)
+    reclaim_apply(state)
+    let _flushed: bool = wbscope.finish(state, scoped)
     leave(state, flags)
     return true
 }
@@ -2918,6 +3013,7 @@ fn rename_path_run(state: u64, from: u64, to: u64) -> u64 {
     let newname: u64 = state + kstate.OFS3_OFF + kstate.OP_NEW
     var dotdot: [u8; 3] = "..\0"
     let flags: u64 = enter(state)
+    reclaim_due(state)
     let odir: u64 = parent_of(state, from, oldname)
     if odir == 0 {
         leave(state, flags)
@@ -2949,12 +3045,16 @@ fn rename_path_run(state: u64, from: u64, to: u64) -> u64 {
         let exnl: u64 = inode_get(state, ex, I_NLINK)
         if exnl > 1 {
             inode_set(state, ex, I_NLINK, exnl - 1)
+            dir_remove_kind(state, ndir, newname, T_FILE)
+        } else if deferfree.enabled(state) {
+            dir_remove_kind(state, ndir, newname, T_FILE)
+            orphan_release(state, ex)
         } else {
             file_truncate(state, ex)
             inode_release(state, ex)
             inode_set(state, ex, I_NLINK, 0)
+            dir_remove_kind(state, ndir, newname, T_FILE)
         }
-        dir_remove_kind(state, ndir, newname, T_FILE)
     }
     if odir == ndir && dir_rename_inplace(state, odir, oldname, newname) {
         leave(state, flags)
@@ -3026,6 +3126,7 @@ fn format_as(state: u64, v: u64, inodes: u64) -> bool {
     let flags: u64 = enter(state)
     dirindex.reset()
     iattr.flush()
+    deferfree.reset(state)
     kstate.set(state, kstate.K13_OFF + kstate.U_FSVER, v)
     let total: u64 = blk.blocks(state)
     var isz: u64 = INODE_SIZE
@@ -3171,6 +3272,7 @@ fn mount(state: u64) -> bool {
     let flags: u64 = enter(state)
     dirindex.reset()
     iattr.flush()
+    deferfree.reset(state)
     kstate.set(state, kstate.FS_READY, 0)
     geom_j(state, 0, 0)
     if !blk.read(state, 0, buf_sb(state)) {

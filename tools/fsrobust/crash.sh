@@ -19,6 +19,8 @@ else
     FSCK_STEP=";fsck /dev/hda"
 fi
 
+TOLERATE=""
+[ "${FSR_TOLERATE_LOST:-0}" = 1 ] && TOLERATE="--tolerate-lost"
 LIVE="$ARB/live-$NR.img"
 S1="$ARB/w-$NR.txt"
 S2="$ARB/v-$NR.txt"
@@ -68,12 +70,19 @@ JOFF=$(val fsck journal_open)
 if [ -z "$FSCK_STEP" ]; then FSCK=0; JOFF=0; fi
 NACH=$(tr -d '\000' < "$S2" 2>/dev/null | grep -oa 'ofsj: nachgetragen=[0-9]*' | head -1 | sed 's/.*=//')
 
-WS=$(python3 tools/fsrobust/check.py struktur "$LIVE" 2>&1 | grep -c BEFUND)
+WS=$(python3 tools/fsrobust/check.py struktur "$LIVE" $TOLERATE 2>&1 | grep -c BEFUND)
+LOSTW=$(python3 tools/fsrobust/check.py struktur "$LIVE" $TOLERATE 2>&1 | grep -o 'INFO lost=[0-9]*' | head -1 | sed 's/.*=//')
+LOSTF=$(val fsck lost)
+if [ -n "$TOLERATE" ] && [ -n "$FSCK_STEP" ] && [ "${FSCK:-0}" -ge "${LOSTF:-0}" ] 2>/dev/null; then
+    FSCK=$(( ${FSCK:-0} - ${LOSTF:-0} ))
+fi
+LOSTN=${LOSTW:-0}
+[ "${LOSTF:-0}" -gt "$LOSTN" ] 2>/dev/null && LOSTN=${LOSTF:-0}
 WI=$(python3 tools/fsrobust/check.py inhalt "$LIVE" 2>&1 | grep -c BEFUND)
 WIRT=$(( WS + WI ))
 
 echo "lauf=$NR ms=$MS los=$LOS count=${COUNT:-?} schaeden=${SCH:-?}" \
-     "rollok=${ROK:-?},${ROK2:-?} nachgetragen=${NACH:-0} fsck=${FSCK:-?} joffen=${JOFF:-?} wirt=$WIRT rc2=$RC2"
+     "rollok=${ROK:-?},${ROK2:-?} nachgetragen=${NACH:-0} fsck=${FSCK:-?} joffen=${JOFF:-?} wirt=$WIRT lost=$LOSTN rc2=$RC2"
 if [ "$WIRT" != 0 ]; then
     python3 tools/fsrobust/check.py struktur "$LIVE" 2>&1 | sed 's/^/    /'
     python3 tools/fsrobust/check.py inhalt "$LIVE" 2>&1 | sed 's/^/    /'

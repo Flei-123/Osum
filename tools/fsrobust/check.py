@@ -428,13 +428,19 @@ def main(argv):
         print(__doc__)
         return 2
     was, path_2 = argv[1], argv[2]
+    tolerate_lost = "--tolerate-lost" in argv[3:]
     image = Image_2(path_2)
     if was == "struktur":
         befunde, z = struktur(image)
         print("struktur: " + " ".join("%s=%d" % kv for kv in z.items()))
+        hard = 0
         for b in befunde:
+            if tolerate_lost and b.startswith("lost="):
+                print("  INFO " + b + " (known, repairable by fsck)")
+                continue
+            hard += 1
             print("  BEFUND " + b)
-        return 1 if befunde else 0
+        return 1 if hard else 0
     if was == "journal":
         print("journal: " + " ".join("%s=%s" % kv
                                      for kv in journal(image).items()))
