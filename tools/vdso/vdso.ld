@@ -1,6 +1,6 @@
 PHDRS {
     text PT_LOAD FILEHDR PHDRS FLAGS(5);
-    dynamic PT_DYNAMIC;
+    dynamic PT_DYNAMIC FLAGS(4);
 }
 SECTIONS {
     . = SIZEOF_HEADERS;
