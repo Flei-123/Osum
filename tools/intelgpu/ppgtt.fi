@@ -1,0 +1,250 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.io
+import libc.octets
+import gpu.intel.ppgtt
+import gpu.intel.lrc
+
+const POOL_PAGES: u64 = 16
+const POOL_SLACK: u64 = 4096
+const PAGE: u64 = 4096
+const WINDOW_LO: u64 = 0x20000000
+const WINDOW_HI: u64 = 0x20100000
+const OUTSIDE_PHYS: u64 = 0x30000000
+const VA_A: u64 = 0x00400000
+const VA_B: u64 = 0x00401000
+const VA_C: u64 = 0x00800000
+const VA_TOP: u64 = 0xc0201000
+const VA_UNTOUCHED: u64 = 0x80000000
+const BCS_BASE: u64 = 0x22000
+const RING_BYTES: u64 = 4096
+const RING_GGTT: u64 = 0x100000
+const CTX_PAGES: u64 = 3
+const SMALL_POOL_PAGES: u64 = 9
+const SCRATCH_PDE_SENTINEL: u64 = 0xdeadb000
+
+static mut pool_raw: [u8; 81920] = [0 as u8; 81920]
+static mut small_raw: [u8; 40960] = [0 as u8; 40960]
+static mut state: [u64; 12] = [0; 12]
+static mut ctx_raw: [u8; 16384] = [0 as u8; 16384]
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn align_up(p: u64) -> u64 {
+    return (p + PAGE - 1) & (~(PAGE - 1))
+}
+
+fn pool_base() -> u64 {
+    return align_up((&pool_raw[0]) as u64)
+}
+
+fn small_base() -> u64 {
+    return align_up((&small_raw[0]) as u64)
+}
+
+fn st() -> u64 {
+    return (&state[0]) as u64
+}
+
+fn in_window(phys: u64) -> u64 {
+    if phys >= WINDOW_LO && phys < WINDOW_HI {
+        return 1
+    }
+    return 0
+}
+
+fn allow_all(phys: u64) -> u64 {
+    return 1
+}
+
+fn fresh() -> u64 {
+    octets.zero(pool_base(), POOL_PAGES * PAGE)
+    return ppgtt.create(st(), pool_base(), POOL_PAGES)
+}
+
+fn count_scratch_pde(pd: u64, pde: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < ppgtt.ENTRIES {
+        if octets.ld64(pd + i * 8, 0) == pde {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn test_encoders() {
+    chk("pte uncached = phys|present|rw|pwt|pcd", ppgtt.pte_encode(0x12345000, ppgtt.CACHE_UNCACHED, false) == 0x1234501b)
+    chk("pte write-through = phys|present|rw|pcd", ppgtt.pte_encode(0x12345000, ppgtt.CACHE_WT, false) == 0x12345013)
+    chk("pte write-back = phys|present|rw|pat", ppgtt.pte_encode(0x12345000, ppgtt.CACHE_WB, false) == 0x12345083)
+    chk("pte read-only clears rw", ppgtt.pte_encode(0x12345000, ppgtt.CACHE_UNCACHED, true) == 0x12345019)
+    chk("pte read-only write-back", ppgtt.pte_encode(0x12345000, ppgtt.CACHE_WB, true) == 0x12345081)
+    chk("pte masks bits above the physical range", ppgtt.pte_encode(0x8012345000, ppgtt.CACHE_UNCACHED, false) == 0x1234501b)
+    chk("pte masks low flag bits of the address", ppgtt.pte_encode(0x12345fff, ppgtt.CACHE_UNCACHED, false) == 0x1234501b)
+    chk("pde = phys|present|rw|pwt|pcd", ppgtt.pde_encode(0x12345000) == 0x1234501b)
+    chk("pde masks flags in the address", ppgtt.pde_encode(0x12345ffe) == 0x1234501b)
+    chk("va split pdp", ppgtt.va_split_pdp(VA_TOP) == 3)
+    chk("va split pd", ppgtt.va_split_pd(VA_TOP) == 1)
+    chk("va split pt", ppgtt.va_split_pt(VA_TOP) == 1)
+    chk("va split zero", ppgtt.va_split_pdp(0) == 0 && ppgtt.va_split_pd(0) == 0 && ppgtt.va_split_pt(0) == 0)
+    chk("va split last page", ppgtt.va_split_pdp(0xfffff000) == 3 && ppgtt.va_split_pd(0xfffff000) == 511 && ppgtt.va_split_pt(0xfffff000) == 511)
+    chk("va split pd boundary", ppgtt.va_split_pd(0x200000) == 1 && ppgtt.va_split_pt(0x200000) == 0)
+    chk("va split pdp boundary", ppgtt.va_split_pdp(0x40000000) == 1 && ppgtt.va_split_pd(0x40000000) == 0)
+}
+
+fn test_create() {
+    chk("create rejects null state", ppgtt.create(0, pool_base(), POOL_PAGES) == ppgtt.P_ARG)
+    chk("create rejects null pool", ppgtt.create(st(), 0, POOL_PAGES) == ppgtt.P_ARG)
+    chk("create rejects unaligned pool", ppgtt.create(st(), pool_base() + 8, POOL_PAGES) == ppgtt.P_ARG)
+    chk("create rejects tiny pool", ppgtt.create(st(), pool_base(), ppgtt.MIN_POOL_PAGES - 1) == ppgtt.P_ARG)
+    chk("create ok", fresh() == ppgtt.P_OK)
+    chk("create takes scratch page, scratch pt, scratch pd and four pds", ppgtt.pool_used(st()) == 7)
+    chk("create starts with nothing mapped", ppgtt.mapped_pages(st()) == 0)
+    chk("pool pages are inside the pool", ppgtt.pdp_phys(st(), 0) >= pool_base() && ppgtt.pdp_phys(st(), 3) < pool_base() + POOL_PAGES * PAGE)
+    chk("pdps are distinct pages", ppgtt.pdp_phys(st(), 0) != ppgtt.pdp_phys(st(), 1) && ppgtt.pdp_phys(st(), 2) != ppgtt.pdp_phys(st(), 3))
+    let scratch_pt_pde: u64 = ppgtt.pde_encode(octets.ld64(st(), 32))
+    chk("every pd entry of pdp 0 starts on the scratch pt", count_scratch_pde(ppgtt.pdp_phys(st(), 0), scratch_pt_pde) == 512)
+    chk("every pd entry of pdp 3 starts on the scratch pt", count_scratch_pde(ppgtt.pdp_phys(st(), 3), scratch_pt_pde) == 512)
+    chk("scratch pt entries all hit the scratch pte", count_scratch_pde(octets.ld64(st(), 32), ppgtt.scratch_pte(st())) == 512)
+    chk("unmapped va reads as scratch", ppgtt.pte_of(st(), VA_A) == ppgtt.scratch_pte(st()))
+    chk("unmapped va has no lookup", ppgtt.lookup(st(), VA_A) == 0)
+    chk("create twice resets the pool", fresh() == ppgtt.P_OK && ppgtt.pool_used(st()) == 7)
+}
+
+fn test_map() {
+    fresh()
+    chk("map ok", ppgtt.map(st(), VA_A, WINDOW_LO, ppgtt.CACHE_UNCACHED, false) == ppgtt.P_OK)
+    chk("map allocates one pt", ppgtt.pool_used(st()) == 8)
+    chk("map counts the page", ppgtt.mapped_pages(st()) == 1)
+    chk("lookup returns the physical page", ppgtt.lookup(st(), VA_A) == WINDOW_LO)
+    chk("pte matches the encoder", ppgtt.pte_of(st(), VA_A) == ppgtt.pte_encode(WINDOW_LO, ppgtt.CACHE_UNCACHED, false))
+    chk("neighbour page still scratch", ppgtt.lookup(st(), VA_B) == 0)
+    chk("map same va again is refused", ppgtt.map(st(), VA_A, WINDOW_LO + PAGE, ppgtt.CACHE_UNCACHED, false) == ppgtt.P_EXISTS)
+    chk("refused map keeps the old page", ppgtt.lookup(st(), VA_A) == WINDOW_LO)
+    chk("refused map does not count", ppgtt.mapped_pages(st()) == 1)
+    chk("map neighbour in the same pt", ppgtt.map(st(), VA_B, WINDOW_LO + PAGE, ppgtt.CACHE_WB, true) == ppgtt.P_OK)
+    chk("same pt is reused", ppgtt.pool_used(st()) == 8)
+    chk("read-only write-back pte", ppgtt.pte_of(st(), VA_B) == ppgtt.pte_encode(WINDOW_LO + PAGE, ppgtt.CACHE_WB, true))
+    chk("map in another 2 MiB range allocates a second pt", ppgtt.map(st(), VA_C, WINDOW_LO + 2 * PAGE, ppgtt.CACHE_WT, false) == ppgtt.P_OK && ppgtt.pool_used(st()) == 9)
+    chk("map in the top pdp", ppgtt.map(st(), VA_TOP, WINDOW_LO + 3 * PAGE, ppgtt.CACHE_UNCACHED, false) == ppgtt.P_OK && ppgtt.lookup(st(), VA_TOP) == WINDOW_LO + 3 * PAGE)
+    chk("pages are counted", ppgtt.mapped_pages(st()) == 4)
+    chk("pdp 4 does not exist", ppgtt.pdp_phys(st(), 4) == 0)
+    chk("map rejects va at the 4 GiB limit", ppgtt.map(st(), 0x100000000, WINDOW_LO, ppgtt.CACHE_UNCACHED, false) == ppgtt.P_ARG)
+    chk("map rejects unaligned va", ppgtt.map(st(), VA_A + 4, WINDOW_LO, ppgtt.CACHE_UNCACHED, false) == ppgtt.P_ARG)
+    chk("map rejects unaligned phys", ppgtt.map(st(), 0x1000000, WINDOW_LO + 8, ppgtt.CACHE_UNCACHED, false) == ppgtt.P_ARG)
+    chk("map rejects phys above the pte range", ppgtt.map(st(), 0x1000000, 0x8000000000, ppgtt.CACHE_UNCACHED, false) == ppgtt.P_ARG)
+    chk("map rejects unknown cache mode", ppgtt.map(st(), 0x1000000, WINDOW_LO, 3, false) == ppgtt.P_ARG)
+    chk("rejected maps allocate nothing", ppgtt.pool_used(st()) == 10)
+    chk("lookup of unaligned va is unmapped", ppgtt.lookup(st(), VA_A + 8) == 0)
+    chk("lookup above the limit is unmapped", ppgtt.lookup(st(), 0x100000000) == 0)
+}
+
+fn test_unmap() {
+    fresh()
+    ppgtt.map(st(), VA_A, WINDOW_LO, ppgtt.CACHE_UNCACHED, false)
+    ppgtt.map(st(), VA_B, WINDOW_LO + PAGE, ppgtt.CACHE_UNCACHED, false)
+    chk("unmap ok", ppgtt.unmap(st(), VA_A) == ppgtt.P_OK)
+    chk("unmap restores the scratch pte", ppgtt.pte_of(st(), VA_A) == ppgtt.scratch_pte(st()))
+    chk("unmap keeps the neighbour", ppgtt.lookup(st(), VA_B) == WINDOW_LO + PAGE)
+    chk("unmap decrements the count", ppgtt.mapped_pages(st()) == 1)
+    chk("unmap twice is reported", ppgtt.unmap(st(), VA_A) == ppgtt.P_UNMAPPED)
+    chk("second unmap does not underflow", ppgtt.mapped_pages(st()) == 1)
+    chk("unmap in an untouched range is reported", ppgtt.unmap(st(), VA_UNTOUCHED) == ppgtt.P_UNMAPPED)
+    chk("unmap in an untouched range allocates nothing", ppgtt.pool_used(st()) == 8)
+    chk("unmap rejects unaligned va", ppgtt.unmap(st(), VA_B + 1) == ppgtt.P_ARG)
+    chk("unmap rejects va above the limit", ppgtt.unmap(st(), 0x100000000) == ppgtt.P_ARG)
+    chk("remap after unmap", ppgtt.map(st(), VA_A, WINDOW_LO + 2 * PAGE, ppgtt.CACHE_UNCACHED, false) == ppgtt.P_OK && ppgtt.lookup(st(), VA_A) == WINDOW_LO + 2 * PAGE)
+}
+
+fn test_exhaustion() {
+    octets.zero(small_base(), SMALL_POOL_PAGES * PAGE)
+    chk("small pool creates", ppgtt.create(st(), small_base(), SMALL_POOL_PAGES) == ppgtt.P_OK)
+    chk("first pt fits", ppgtt.map(st(), VA_A, WINDOW_LO, ppgtt.CACHE_UNCACHED, false) == ppgtt.P_OK)
+    chk("second pt fits", ppgtt.map(st(), VA_C, WINDOW_LO + PAGE, ppgtt.CACHE_UNCACHED, false) == ppgtt.P_OK)
+    chk("third pt is refused with no memory", ppgtt.map(st(), VA_TOP, WINDOW_LO + 2 * PAGE, ppgtt.CACHE_UNCACHED, false) == ppgtt.P_NOMEM)
+    chk("refused map leaves the va unmapped", ppgtt.lookup(st(), VA_TOP) == 0)
+    chk("refused map leaves the pde on scratch", ppgtt.pte_of(st(), VA_TOP) == ppgtt.scratch_pte(st()))
+    chk("existing pt still takes pages after exhaustion", ppgtt.map(st(), VA_B, WINDOW_LO + 3 * PAGE, ppgtt.CACHE_UNCACHED, false) == ppgtt.P_OK)
+    chk("pool never exceeds its size", ppgtt.pool_used(st()) == SMALL_POOL_PAGES)
+}
+
+fn test_audit() {
+    fresh()
+    chk("empty space audits clean", ppgtt.audit(st(), in_window) == 0)
+    ppgtt.map(st(), VA_A, WINDOW_LO, ppgtt.CACHE_UNCACHED, false)
+    ppgtt.map(st(), VA_TOP, WINDOW_LO + PAGE, ppgtt.CACHE_WB, true)
+    chk("mappings inside the window audit clean", ppgtt.audit(st(), in_window) == 0)
+    ppgtt.map(st(), VA_B, OUTSIDE_PHYS, ppgtt.CACHE_UNCACHED, false)
+    chk("a page outside the window is found", ppgtt.audit(st(), in_window) == 1)
+    ppgtt.unmap(st(), VA_B)
+    chk("unmapping the stray page cleans the audit", ppgtt.audit(st(), in_window) == 0)
+    ppgtt.map(st(), VA_B, ppgtt.pdp_phys(st(), 0), ppgtt.CACHE_UNCACHED, false)
+    chk("a page table page as data is found", ppgtt.audit(st(), in_window) == 1)
+    chk("a page table page as data is found even if the callback allows everything", ppgtt.audit(st(), allow_all) == 1)
+    ppgtt.unmap(st(), VA_B)
+    var pt_slot: u64 = ppgtt.pdp_phys(st(), 0) + ppgtt.va_split_pd(VA_A) * 8
+    let good_pde: u64 = octets.ld64(pt_slot, 0)
+    octets.st64(pt_slot, 0, ppgtt.pde_encode(OUTSIDE_PHYS))
+    chk("a pde leaving the pool is found", ppgtt.audit(st(), in_window) >= 1)
+    octets.st64(pt_slot, 0, SCRATCH_PDE_SENTINEL)
+    chk("a non-present pde is found", ppgtt.audit(st(), in_window) >= 1)
+    octets.st64(pt_slot, 0, good_pde)
+    chk("restoring the pde cleans the audit", ppgtt.audit(st(), in_window) == 0)
+    let pt: u64 = good_pde & ppgtt.PTE_PHYS_MASK
+    octets.st64(pt + 8 * ppgtt.va_split_pt(VA_B), 0, 0x1000)
+    chk("a non-present pte is found", ppgtt.audit(st(), in_window) == 1)
+}
+
+fn ctx_dword(i: u64) -> u64 {
+    return octets.ld32((&ctx_raw[0]) as u64, i * 4)
+}
+
+fn test_context() {
+    fresh()
+    let ctx: u64 = align_up((&ctx_raw[0]) as u64)
+    octets.zero(ctx, CTX_PAGES * PAGE)
+    chk("lrc image builds", lrc.init_xcs(ctx, BCS_BASE, RING_GGTT, RING_BYTES))
+    ppgtt.ctx_set_pdps(ctx, st())
+    var n: u64 = 0
+    var udw_ok: u64 = 0
+    var ldw_ok: u64 = 0
+    var reg_ok: u64 = 0
+    while n < 4 {
+        let pd: u64 = ppgtt.pdp_phys(st(), n)
+        let udw: u64 = ppgtt.CTX_PDP0_UDW - n * 4
+        if octets.ld32(ctx, udw * 4) == (pd >> 32) {
+            udw_ok = udw_ok + 1
+        }
+        if octets.ld32(ctx, (udw + 2) * 4) == (pd & 0xffffffff) {
+            ldw_ok = ldw_ok + 1
+        }
+        if octets.ld32(ctx, (udw - 1) * 4) == BCS_BASE + 0x270 + n * 8 + 4 && octets.ld32(ctx, (udw + 1) * 4) == BCS_BASE + 0x270 + n * 8 {
+            reg_ok = reg_ok + 1
+        }
+        n = n + 1
+    }
+    chk("all four udw slots hold the pd addresses", udw_ok == 4)
+    chk("all four ldw slots hold the pd addresses", ldw_ok == 4)
+    chk("slots sit right after their PDP register offsets", reg_ok == 4)
+    chk("pdp 3 udw index matches the Linux layout", ppgtt.CTX_PDP3_UDW == 37 && ppgtt.CTX_PDP0_UDW == 49)
+    chk("context control untouched", octets.ld32(ctx, 3 * 4) == lrc.context_control())
+    chk("ring start untouched", octets.ld32(ctx, lrc.CTX_RING_START * 4) == RING_GGTT)
+}
+
+fn main() -> i32 {
+    test_encoders()
+    test_create()
+    test_map()
+    test_unmap()
+    test_exhaustion()
+    test_audit()
+    test_context()
+    return 0
+}
