@@ -546,7 +546,7 @@ fn write_env(state: u64, frame: u64) {
     regio.write64(frame + ENV_OFF + 8 + n * 8, 0)
 }
 
-fn write_args(state: u64, t: u64, args: u64, argc: u64) -> bool {
+fn write_args(state: u64, t: u64, args: u64, argc: u64, lossy: bool) -> bool {
     if argc > procbase.MAX_ARGS {
         return false
     }
@@ -569,7 +569,13 @@ fn write_args(state: u64, t: u64, args: u64, argc: u64) -> bool {
         var going: bool = true
         while going {
             if at >= ENV_OFF - 1 {
-                return false
+                if !lossy {
+                    return false
+                }
+                regio.write64(frame, k)
+                regio.write64(frame + 8 + k * 8, 0)
+                write_env(state, frame)
+                return true
             }
             let c: u64 = kstate.get8(src)
             kstate.set8(frame + at, c as u8)
@@ -607,7 +613,8 @@ const AT_HWCAP2: u64 = 26
 const AT_EXECFN: u64 = 31
 const AT_SYSINFO_EHDR: u64 = 33
 
-const SP_PAGE: u64 = procspace.INIT_STACK
+const SP_PAGE: u64 = procspace.STACK_START
+const STACK_BYTES: u64 = 2 * PAGE
 
 const AUXN: u64 = 40
 
@@ -629,21 +636,38 @@ fn map_vdso(state: u64, t: u64) -> u64 {
     return 0
 }
 
+fn stack_frame(state: u64, t: u64, page: u64) -> u64 {
+    if procmap.page_free(state, t, page) {
+        if procmap.map_page_zero(state, t, page, true, false) == 0 {
+            return 0
+        }
+    }
+    let frame: u64 = procmap.translate(state, t, page)
+    if frame == 0 {
+        return 0
+    }
+    fill_bytes(frame, PAGE, 0)
+    return frame
+}
+
+fn stack_put8(frame: u64, frame2: u64, off: u64, c: u8) {
+    if off < PAGE {
+        kstate.set8(frame + off, c)
+        return
+    }
+    kstate.set8(frame2 + off - PAGE, c)
+}
+
 fn build_stack(state: u64, t: u64, args: u64, argc: u64,
     phdr: u64, phnum: u64, entry: u64, ibase: u64, path: u64) -> u64 {
     if argc > procbase.MAX_ARGS {
         return 0
     }
-    if procmap.page_free(state, t, SP_PAGE) {
-        if procmap.map_page_zero(state, t, SP_PAGE, true, false) == 0 {
-            return 0
-        }
-    }
-    let frame: u64 = procmap.translate(state, t, SP_PAGE)
-    if frame == 0 {
+    let frame: u64 = stack_frame(state, t, SP_PAGE)
+    let frame2: u64 = stack_frame(state, t, SP_PAGE + PAGE)
+    if frame == 0 || frame2 == 0 {
         return 0
     }
-    fill_bytes(frame, PAGE, 0)
     let vdso_at: u64 = map_vdso(state, t)
 
     let e0: u64 = kstate.get(state, kstate.K11_OFF + kstate.ENV_N)
@@ -653,8 +677,8 @@ fn build_stack(state: u64, t: u64, args: u64, argc: u64,
     }
 
     let need: u64 = (1 + argc + 1 + envc + 1 + AUXN) * 8
-    let str_at: u64 = PAGE / 2
-    if need > str_at {
+    let str_at: u64 = (need + 15) & 0xFFFFFFFFFFFFFFF0
+    if str_at > PAGE / 2 {
         return 0
     }
 
@@ -670,11 +694,11 @@ fn build_stack(state: u64, t: u64, args: u64, argc: u64,
         at = at + 8
         var going: bool = true
         while going {
-            if sp_str >= PAGE - 24 {
+            if sp_str >= STACK_BYTES - 24 {
                 return 0
             }
             let c: u64 = kstate.get8(src)
-            kstate.set8(frame + sp_str, c as u8)
+            stack_put8(frame, frame2, sp_str, c as u8)
             sp_str = sp_str + 1
             src = src + 1
             if c == 0 {
@@ -693,11 +717,11 @@ fn build_stack(state: u64, t: u64, args: u64, argc: u64,
         at = at + 8
         var going2: bool = true
         while going2 {
-            if sp_str >= PAGE - 24 {
+            if sp_str >= STACK_BYTES - 24 {
                 return 0
             }
             let c2: u64 = kstate.get8(esrc)
-            kstate.set8(frame + sp_str, c2 as u8)
+            stack_put8(frame, frame2, sp_str, c2 as u8)
             sp_str = sp_str + 1
             esrc = esrc + 1
             if c2 == 0 {
@@ -709,7 +733,7 @@ fn build_stack(state: u64, t: u64, args: u64, argc: u64,
     sv_put(frame, at, 0)
     at = at + 8
 
-    if sp_str + 16 >= PAGE {
+    if sp_str + 16 >= STACK_BYTES {
         return 0
     }
     let rnd: u64 = sp_str
@@ -717,35 +741,35 @@ fn build_stack(state: u64, t: u64, args: u64, argc: u64,
     let seed: u64 = kstate.get(state, kstate.TICKS) + t * 2654435761
     while b < 16 {
         let value: u64 = (seed >> ((b & 7) * 8)) + b * 31 + t
-        kstate.set8(frame + rnd + b, (value & 255) as u8)
+        stack_put8(frame, frame2, rnd + b, (value & 255) as u8)
         b = b + 1
     }
     sp_str = sp_str + 16
 
     let plat: u64 = sp_str
-    if sp_str + 8 >= PAGE {
+    if sp_str + 8 >= STACK_BYTES {
         return 0
     }
-    kstate.set8(frame + plat, 120)
-    kstate.set8(frame + plat + 1, 56)
-    kstate.set8(frame + plat + 2, 54)
-    kstate.set8(frame + plat + 3, 95)
-    kstate.set8(frame + plat + 4, 54)
-    kstate.set8(frame + plat + 5, 52)
-    kstate.set8(frame + plat + 6, 0)
+    stack_put8(frame, frame2, plat, 120)
+    stack_put8(frame, frame2, plat + 1, 56)
+    stack_put8(frame, frame2, plat + 2, 54)
+    stack_put8(frame, frame2, plat + 3, 95)
+    stack_put8(frame, frame2, plat + 4, 54)
+    stack_put8(frame, frame2, plat + 5, 52)
+    stack_put8(frame, frame2, plat + 6, 0)
     sp_str = sp_str + 8
 
     let execfn: u64 = sp_str
     var xi: u64 = 0
     var xgoing: bool = path != 0
     while xgoing {
-        if sp_str >= PAGE - 8 || xi >= 255 {
-            kstate.set8(frame + sp_str, 0)
+        if sp_str >= STACK_BYTES - 8 || xi >= 255 {
+            stack_put8(frame, frame2, sp_str, 0)
             sp_str = sp_str + 1
             xgoing = false
         } else {
             let xc: u64 = kstate.get8(path + xi)
-            kstate.set8(frame + sp_str, xc as u8)
+            stack_put8(frame, frame2, sp_str, xc as u8)
             sp_str = sp_str + 1
             xi = xi + 1
             if xc == 0 {
@@ -754,7 +778,7 @@ fn build_stack(state: u64, t: u64, args: u64, argc: u64,
         }
     }
     if path == 0 {
-        kstate.set8(frame + sp_str, 0)
+        stack_put8(frame, frame2, sp_str, 0)
         sp_str = sp_str + 1
     }
 
@@ -1289,7 +1313,7 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
             + kstate.FT_SCALARS + DYN_ENTRY)
     }
     perm.apply_exec(state, t, ino)
-    if !write_args(state, t, a, n) {
+    if !write_args(state, t, a, n, braucht_lader || ist_dyn || low_exec) {
         procswap.discard(state, t)
         sched.irq_restore(flags)
         fail(state, R_ARGS)

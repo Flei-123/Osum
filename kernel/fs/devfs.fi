@@ -21,8 +21,14 @@ import fs.procbt
 import diag.tpmdev
 import fs.devdri
 
-export { ops, node_root, D_TTY, D_FB, D_CONSOLE, is_tty, is_fb, rdev_of, is_ptmx, pts_slot, shm_slot, full_path_in_shm, is_sink, zero_fill, D_NULL, D_ZERO }
+export { ops, node_root, link_shm, LINK_PERM, LINK_NOENT, LINK_EXIST, LINK_MLINK, D_TTY, D_FB, D_CONSOLE, is_tty, is_fb, rdev_of, is_ptmx, pts_slot, shm_slot, full_path_in_shm, is_sink, zero_fill, D_NULL, D_ZERO }
 
+const SHM_SLOTS: u64 = 2
+const SHM_ALIAS_DELTA: u64 = 0x400
+const LINK_PERM: u64 = 1
+const LINK_NOENT: u64 = 2
+const LINK_EXIST: u64 = 3
+const LINK_MLINK: u64 = 4
 const D_NULL: u64 = 1
 const D_ZERO: u64 = 2
 const D_RANDOM: u64 = 3
@@ -106,19 +112,113 @@ fn shm_name_addr(state: u64, i: u64) -> u64 {
     return state + kstate.SHMN_OFF + i * kstate.SHMN_SLOT
 }
 
+fn shm_alias_addr(state: u64, i: u64) -> u64 {
+    return shm_name_addr(state, i) + SHM_ALIAS_DELTA
+}
+
+fn shm_slot_addr(state: u64, i: u64, slot: u64) -> u64 {
+    if slot == 0 {
+        return shm_name_addr(state, i)
+    }
+    return shm_alias_addr(state, i)
+}
+
+fn shm_slot_set(state: u64, i: u64, slot: u64) -> bool {
+    return i < unixsock.USHM_PAGED && kstate.get8(shm_slot_addr(state, i, slot)) != 0 && unixsock.shm_used(state, i) != 0
+}
+
 fn shm_named(state: u64, i: u64) -> bool {
-    return i < unixsock.USHM_PAGED && kstate.get8(shm_name_addr(state, i)) != 0 && unixsock.shm_used(state, i) != 0
+    return shm_slot_set(state, i, 0) || shm_slot_set(state, i, 1)
 }
 
 fn shm_find(state: u64, name: u64) -> u64 {
     var i: u64 = 0
     while i < unixsock.USHM_PAGED {
-        if shm_named(state, i) && streq(name, shm_name_addr(state, i)) {
+        if shm_slot_of(state, i, name) < SHM_SLOTS {
             return i
         }
         i = i + 1
     }
     return unixsock.USHM_PAGED
+}
+
+fn shm_slot_of(state: u64, i: u64, name: u64) -> u64 {
+    var slot: u64 = 0
+    while slot < SHM_SLOTS {
+        if shm_slot_set(state, i, slot) && streq(name, shm_slot_addr(state, i, slot)) {
+            return slot
+        }
+        slot = slot + 1
+    }
+    return SHM_SLOTS
+}
+
+fn shm_free_slot(state: u64, i: u64) -> u64 {
+    var slot: u64 = 0
+    while slot < SHM_SLOTS {
+        if !shm_slot_set(state, i, slot) {
+            return slot
+        }
+        slot = slot + 1
+    }
+    return SHM_SLOTS
+}
+
+fn shm_plain_name(nm: u64) -> bool {
+    if nm == 0 || kstate.get8(nm) == 0 {
+        return false
+    }
+    var n: u64 = 0
+    while kstate.get8(nm + n) != 0 {
+        if kstate.get8(nm + n) == 47 {
+            return false
+        }
+        n = n + 1
+    }
+    return n + 1 < kstate.SHMN_SLOT
+}
+
+fn shm_copy_name(state: u64, i: u64, slot: u64, nm: u64) {
+    var k: u64 = 0
+    while kstate.get8(nm + k) != 0 {
+        kstate.set8(shm_slot_addr(state, i, slot) + k, kstate.get8(nm + k) as u8)
+        k = k + 1
+    }
+    kstate.set8(shm_slot_addr(state, i, slot) + k, 0 as u8)
+}
+
+fn shm_rest_full(path: u64) -> u64 {
+    var i: u64 = 0
+    while kstate.get8(path + i) != 0 {
+        if kstate.get8(path + i) == 47 && kstate.get8(path + i + 1) == 115 && kstate.get8(path + i + 2) == 104
+            && kstate.get8(path + i + 3) == 109 && kstate.get8(path + i + 4) == 47 {
+            return path + i + 5
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn link_shm(state: u64, from: u64, to: u64) -> u64 {
+    let src: u64 = shm_rest_full(from)
+    let dst: u64 = shm_rest_full(to)
+    if !shm_plain_name(src) || !shm_plain_name(dst) {
+        return LINK_PERM
+    }
+    let i: u64 = shm_find(state, src)
+    if i >= unixsock.USHM_PAGED {
+        return LINK_NOENT
+    }
+    if shm_find(state, dst) < unixsock.USHM_PAGED {
+        return LINK_EXIST
+    }
+    let slot: u64 = shm_free_slot(state, i)
+    if slot >= SHM_SLOTS {
+        return LINK_MLINK
+    }
+    shm_copy_name(state, i, slot, dst)
+    unixsock.shm_ref(state, i)
+    return 0
 }
 
 fn shm_rest(path: u64) -> u64 {
@@ -410,17 +510,21 @@ fn shm_readdir(state: u64, index: u64, out: u64) -> u64 {
     var want: u64 = index - 2
     var i: u64 = 0
     while i < unixsock.USHM_PAGED {
-        if shm_named(state, i) {
-            if want == 0 {
-                var k: u64 = 0
-                while k + 1 < kstate.SHMN_SLOT && kstate.get8(shm_name_addr(state, i) + k) != 0 {
-                    kstate.set8(out + k, kstate.get8(shm_name_addr(state, i) + k) as u8)
-                    k = k + 1
+        var slot: u64 = 0
+        while slot < SHM_SLOTS {
+            if shm_slot_set(state, i, slot) {
+                if want == 0 {
+                    var k: u64 = 0
+                    while k + 1 < kstate.SHMN_SLOT && kstate.get8(shm_slot_addr(state, i, slot) + k) != 0 {
+                        kstate.set8(out + k, kstate.get8(shm_slot_addr(state, i, slot) + k) as u8)
+                        k = k + 1
+                    }
+                    kstate.set8(out + k, 0 as u8)
+                    return SHM_BASE + i
                 }
-                kstate.set8(out + k, 0 as u8)
-                return SHM_BASE + i
+                want = want - 1
             }
-            want = want - 1
+            slot = slot + 1
         }
         i = i + 1
     }
@@ -902,29 +1006,15 @@ fn d_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
         return 0
     }
     let nm: u64 = shm_rest(path)
-    if nm == 0 || kstate.get8(nm) == 0 {
-        return 0
-    }
-    var n: u64 = 0
-    while kstate.get8(nm + n) != 0 {
-        if kstate.get8(nm + n) == 47 {
-            return 0
-        }
-        n = n + 1
-    }
-    if n + 1 >= kstate.SHMN_SLOT {
+    if !shm_plain_name(nm) {
         return 0
     }
     let i: u64 = unixsock.shm_new(state)
     if i >= unixsock.USHM_PAGED {
         return 0
     }
-    var k: u64 = 0
-    while k < n {
-        kstate.set8(shm_name_addr(state, i) + k, kstate.get8(nm + k) as u8)
-        k = k + 1
-    }
-    kstate.set8(shm_name_addr(state, i) + n, 0 as u8)
+    shm_copy_name(state, i, 0, nm)
+    kstate.set8(shm_alias_addr(state, i), 0 as u8)
     return SHM_BASE + i
 }
 
@@ -938,7 +1028,7 @@ fn d_unlink(state: u64, m: u64, path: u64) -> u64 {
     if i >= unixsock.USHM_PAGED {
         return 2
     }
-    kstate.set8(shm_name_addr(state, i), 0 as u8)
+    kstate.set8(shm_slot_addr(state, i, shm_slot_of(state, i, nm)), 0 as u8)
     unixsock.shm_unref(state, i)
     return 0
 }
