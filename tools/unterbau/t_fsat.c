@@ -101,8 +101,8 @@ int main(void)
     put("/tmp/fat/c", "x");
     errno = 0; r = syscall(N_RENAMEAT2, CWD, "/tmp/fat/c", CWD, "/tmp/fat/d", 0L);
     CHECKC("renameat2_flags0", r == 0);
-    errno = 0; r = syscall(N_RENAMEAT2, CWD, "/tmp/fat/d", CWD, "/tmp/fat/e", 1L);
-    CHECK("renameat2_noreplace_einval", r < 0 && errno == EINVAL, "r=%ld errno=%d", r, errno);
+    errno = 0; r = syscall(N_RENAMEAT2, CWD, "/tmp/fat/d", CWD, "/tmp/fat/e", 0x80L);
+    CHECK("renameat2_bad_flag_einval", r < 0 && errno == EINVAL, "r=%ld errno=%d", r, errno);
 
     errno = 0; r = syscall(N_LINKAT, CWD, "/tmp/fat/d", CWD, "/tmp/fat/d2", 0L);
     CHECKC("linkat", r == 0);

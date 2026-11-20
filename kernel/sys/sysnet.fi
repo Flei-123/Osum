@@ -707,10 +707,50 @@ fn do_sockname(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
 // recv, accept and send (`sock_deadline`). Until this round the option was
 // taken and thrown away, so a "timed" read blocked until data came (up to
 // NET_ROUNDS = 30 s) and every program that relied on the timeout stalled.
+fn timeval_ticks(state: u64, me: u64, val: u64, optlen: u64) -> u64 {
+    if optlen < 16 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !procfault.user_ok(state, me, val, 16) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    var sec: u64 = 0
+    var usec: u64 = 0
+    var k: u64 = 0
+    while k < 8 {
+        sec = sec | (sysuser.peek(state, me, val + k) << (k * 8))
+        usec = usec | (sysuser.peek(state, me, val + 8 + k) << (k * 8))
+        k = k + 1
+    }
+    if sec >= 0x8000000000000000 || usec >= 1000000 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if sec >= 100000 {
+        return inet.TMO_MASK
+    }
+    return (sec * 1000000 + usec + 9999) / 10000
+}
+
+fn usock_setsockopt(state: u64, me: u64, usi: u64, level: u64, name: u64, val: u64, optlen: u64) -> u64 {
+    if level == 1 && (name == 20 || name == 21 || name == 66 || name == 67) {
+        let ticks: u64 = timeval_ticks(state, me, val, optlen)
+        if errno.is_error(ticks) {
+            return ticks
+        }
+        unixsock.sock_set_tmo(state, usi, name == 21 || name == 67, ticks)
+        return 0
+    }
+    return 0
+}
+
 fn do_setsockopt(state: u64, me: u64, fd: u64, level: u64,
     name: u64, val: u64, optlen: u64) -> u64 {
     if sysevent.nl_of(state, me, fd) < file.MAX_OPEN {
         return 0
+    }
+    let usi: u64 = usock_of(state, me, fd)
+    if usi < unixsock.USOCK_MAX {
+        return usock_setsockopt(state, me, usi, level, name, val, optlen)
     }
     let si: u64 = sysfd.sock_of(state, me, fd)
     if si >= inet.SOCK_MAX {
@@ -830,6 +870,16 @@ fn do_getsockopt(state: u64, me: u64, fd: u64, level: u64, name: u64,
         }
         return 0
     }
+    if level == 1 && (name == 20 || name == 21 || name == 66 || name == 67) && ui < unixsock.USOCK_MAX {
+        if room < 16 {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        let us: u64 = unixsock.sock_tmo(state, ui, name == 21 || name == 67) * 10000
+        if !sysuser.put64(state, me, val, us / 1000000) || !sysuser.put64(state, me, val + 8, us % 1000000) || !sysuser.put32(state, me, lenp, 16) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        return 0
+    }
     var v: u64 = 0
     var known: bool = false
     if level == 1 {
@@ -848,6 +898,9 @@ fn do_getsockopt(state: u64, me: u64, fd: u64, level: u64, name: u64,
             v = 1
             if si < inet.SOCK_MAX && inet.sock_kind(state, si) == inet.SK_UDP {
                 v = 2
+            }
+            if ui < unixsock.USOCK_MAX {
+                v = unixsock.sock_stype(state, ui)
             }
         }
         if name == 4 {
@@ -1531,7 +1584,7 @@ fn do_uaccept(state: u64, me: u64, fd: u64, flags: u64) -> u64 {
         return sysuser.neg(errno.E_BADF)
     }
     let nb: bool = (flags & sysconst.SOCK_NONBLOCK) != 0
-    var waited: u64 = 0
+    let deadline: u64 = sysfd.usock_deadline(state, si, false)
     var got: u64 = unixsock.USOCK_MAX
     while got >= unixsock.USOCK_MAX {
         let seen: u64 = sched.poll_seq(state)
@@ -1540,10 +1593,11 @@ fn do_uaccept(state: u64, me: u64, fd: u64, flags: u64) -> u64 {
             if nb {
                 return sysuser.neg(errno.E_AGAIN)
             }
-            if waited >= sysconst.NET_ROUNDS {
-                return sysuser.neg(errno.E_AGAIN)
+            let stop: u64 = sysfd.sock_wait_error(state, me, deadline)
+            if stop != 0 {
+                return stop
             }
-            waited = waited + sysfd.net_wait(state, seen)
+            let _slept: u64 = sysfd.net_wait(state, seen)
         }
     }
     let of: u64 = file.open_alloc(state, file.K_USOCK, got, sysconst.O_RDWR)
@@ -1610,16 +1664,20 @@ fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
                 }
                 chk = chk + 1
             }
-            var qwait: u64 = 0
+            let fd_deadline: u64 = sysfd.usock_deadline(state, si, true)
             while unixsock.fd_room(state, si) < nfds {
                 let seen: u64 = sched.poll_seq(state)
                 if unixsock.write_closed(state, si) {
                     return sysuser.neg(errno.E_PIPE)
                 }
-                if (flags & sysconst.MSG_DONTWAIT) != 0 || qwait >= sysconst.NET_ROUNDS {
+                if (flags & sysconst.MSG_DONTWAIT) != 0 {
                     return sysuser.neg(errno.E_AGAIN)
                 }
-                qwait = qwait + sysfd.net_wait(state, seen)
+                let stop: u64 = sysfd.sock_wait_error(state, me, fd_deadline)
+                if stop != 0 {
+                    return stop
+                }
+                let _slept: u64 = sysfd.net_wait(state, seen)
             }
             var k: u64 = 0
             while k < nfds {
@@ -1736,7 +1794,7 @@ fn sendmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
         }
     }
     let nonblock: bool = frame_nonblock(state, me, fd, flags)
-    var waits: u64 = 0
+    let send_deadline: u64 = sysfd.usock_deadline(state, si, true)
     while true {
         let seen: u64 = sched.poll_seq(state)
         if unixsock.write_closed(state, si) {
@@ -1772,10 +1830,14 @@ fn sendmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
             sched.poll_kick(state)
             return w
         }
-        if nonblock || waits >= sysconst.NET_ROUNDS {
+        if nonblock {
             return sysuser.neg(errno.E_AGAIN)
         }
-        waits = waits + sysfd.net_wait(state, seen)
+        let stop: u64 = sysfd.sock_wait_error(state, me, send_deadline)
+        if stop != 0 {
+            return stop
+        }
+        let _slept: u64 = sysfd.net_wait(state, seen)
     }
     return 0
 }
@@ -1787,16 +1849,20 @@ fn recvmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
         return sysuser.neg(errno.E_INVAL)
     }
     let nonblock: bool = frame_nonblock(state, me, fd, flags)
-    var waited: u64 = 0
+    let recv_deadline: u64 = sysfd.usock_deadline(state, si, false)
     while unixsock.waiting(state, si) < unixsock.DGRAM_HDR {
         let seen: u64 = sched.poll_seq(state)
         if unixsock.read_closed(state, si) {
             return 0
         }
-        if nonblock || waited >= sysconst.NET_ROUNDS {
+        if nonblock {
             return sysuser.neg(errno.E_AGAIN)
         }
-        waited = waited + sysfd.net_wait(state, seen)
+        let stop: u64 = sysfd.sock_wait_error(state, me, recv_deadline)
+        if stop != 0 {
+            return stop
+        }
+        let _slept: u64 = sysfd.net_wait(state, seen)
     }
     var cap: u64 = 0
     var v: u64 = 0
@@ -1905,7 +1971,7 @@ fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
     }
     let iov: u64 = sysuser.get64u(state, me, mh + sysconst.MH_IOV)
     let iovlen: u64 = sysuser.get64u(state, me, mh + sysconst.MH_IOVLEN)
-    var waited: u64 = 0
+    let stream_deadline: u64 = sysfd.usock_deadline(state, si, false)
     while unixsock.waiting(state, si) == 0 {
         let seen: u64 = sched.poll_seq(state)
         if unixsock.read_closed(state, si) {
@@ -1914,10 +1980,11 @@ fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
         if (flags & sysconst.MSG_DONTWAIT) != 0 {
             return sysuser.neg(errno.E_AGAIN)
         }
-        if waited >= sysconst.NET_ROUNDS {
-            return sysuser.neg(errno.E_AGAIN)
+        let stop: u64 = sysfd.sock_wait_error(state, me, stream_deadline)
+        if stop != 0 {
+            return stop
         }
-        waited = waited + sysfd.net_wait(state, seen)
+        let _slept: u64 = sysfd.net_wait(state, seen)
     }
     let avail: u64 = unixsock.waiting(state, si)
     var ctlout: u64 = 0
@@ -2030,6 +2097,10 @@ fn do_socketpair(state: u64, me: u64, domain: u64, kind: u64, protocol: u64, sv:
     if b >= unixsock.USOCK_MAX {
         unixsock.sock_free(state, a)
         return sysuser.neg(errno.E_NFILE)
+    }
+    if (kind & 0xFF) == SOCK_SEQPACKET {
+        unixsock.sock_set_stype(state, a, SOCK_SEQPACKET)
+        unixsock.sock_set_stype(state, b, SOCK_SEQPACKET)
     }
     let c: u64 = unixsock.connect_pair(state, a, b)
     if c != 0 {

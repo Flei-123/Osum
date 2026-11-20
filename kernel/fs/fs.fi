@@ -78,7 +78,7 @@ export {
     NAME_LEN, INODE_COUNT, version, directs, inode_mode, inode_uid,
     inode_gid, set_mode, set_owner, set_meta, parent_ino, OFS_V1,
     OFS_V2, S_ISUID, S_ISGID, S_ISVTX, inode_is_fifo, mark_fifo, inode_is_sock, mark_sock, SOCK_BIT, DIRECT_V1, DIRECT_V2,
-    rename_path, reclaim_locked,
+    rename_path, rename_path_mode, RENAME_NOREPLACE, RENAME_EXCHANGE, reclaim_locked,
     enter, leave, lock_only, unlock_only, flags_nested,
     // ---- RUNDE PROTOKOLL ----
     free, ready,
@@ -125,6 +125,16 @@ const T_FILE: u64 = 1
 const T_DIR: u64 = 2
 const NO_SLOT: u64 = 0xFFFFFFFFFFFFFFFF
 const T_LINK: u64 = 3
+const RENAME_NOREPLACE: u64 = 1
+const RENAME_EXCHANGE: u64 = 2
+const ENOENT: u64 = 2
+const EEXIST: u64 = 17
+const ENOTDIR: u64 = 20
+const EISDIR: u64 = 21
+const EINVAL: u64 = 22
+const ENOSPC: u64 = 28
+const ENOTEMPTY: u64 = 39
+const MAX_DEPTH: u64 = 64
 const MAX_HOPS: u64 = 8
 
 // ------------------------------------- ROUND K15, ZWEITER NACHTRAG
@@ -2849,9 +2859,13 @@ fn unlink_path(state: u64, p: u64) -> bool {
 }
 
 fn rename_path(state: u64, from: u64, to: u64) -> u64 {
+    return rename_path_mode(state, from, to, 0)
+}
+
+fn rename_path_mode(state: u64, from: u64, to: u64, mode: u64) -> u64 {
     let flags: u64 = lock_only(state)
     let scoped: bool = wbscope.begin(state)
-    let r: u64 = rename_path_run(state, from, to)
+    let r: u64 = rename_path_run(state, from, to, mode)
     let flushed: bool = wbscope.finish(state, scoped)
     unlock_only(state, flags)
     if r == 0 && !flushed {
@@ -2913,6 +2927,19 @@ fn dir_init(state: u64, ino: u64, parent: u64) -> bool {
     return dir_add(state, ino, (&dotdot[0]) as u64, parent)
 }
 
+fn dir_live_entries(state: u64, ino: u64) -> u64 {
+    var live: u64 = 0
+    let n: u64 = dir_entries(state, ino)
+    var i: u64 = 0
+    while i < n {
+        if entry_read(state, ino, i, buf_nm(state)) != 0 {
+            live = live + 1
+        }
+        i = i + 1
+    }
+    return live
+}
+
 fn unlink_path_run(state: u64, p: u64) -> bool {
     let flags: u64 = enter(state)
     reclaim_due(state)
@@ -2929,20 +2956,9 @@ fn unlink_path_run(state: u64, p: u64) -> bool {
     }
     // A directory only goes when nothing is in it any more -- apart from
     // `.` and `..`, which are itself and its parent.
-    if inode_type(state, ino) == T_DIR {
-        var live: u64 = 0
-        let n: u64 = dir_entries(state, ino)
-        var i: u64 = 0
-        while i < n {
-            if entry_read(state, ino, i, buf_nm(state)) != 0 {
-                live = live + 1
-            }
-            i = i + 1
-        }
-        if live > 2 {
-            leave(state, flags)
-            return false
-        }
+    if inode_type(state, ino) == T_DIR && dir_live_entries(state, ino) > 2 {
+        leave(state, flags)
+        return false
     }
     let nl: u64 = inode_get(state, ino, I_NLINK)
     let kind: u64 = inode_type(state, ino)
@@ -3031,53 +3047,144 @@ fn reclaim_locked(state: u64) -> bool {
 }
 
 // ------------------------------------------------- Runde K14: umbenennen
-fn rename_path_run(state: u64, from: u64, to: u64) -> u64 {
+fn dir_inside(state: u64, start: u64, ancestor: u64) -> bool {
+    var dotdot: [u8; 3] = "..\0"
+    var cur: u64 = start
+    var hops: u64 = 0
+    while hops < MAX_DEPTH {
+        if cur == ancestor {
+            return true
+        }
+        let up: u64 = dir_find(state, cur, (&dotdot[0]) as u64)
+        if up == 0 || up == cur {
+            return false
+        }
+        cur = up
+        hops = hops + 1
+    }
+    return false
+}
+
+fn replace_check(state: u64, ino: u64, ex: u64) -> u64 {
+    let exkind: u64 = inode_type(state, ex)
+    if inode_type(state, ino) == T_DIR {
+        if exkind != T_DIR {
+            return ENOTDIR
+        }
+        if dir_live_entries(state, ex) > 2 {
+            return ENOTEMPTY
+        }
+        return 0
+    }
+    if exkind == T_DIR {
+        return EISDIR
+    }
+    return 0
+}
+
+fn replace_remove(state: u64, ndir: u64, newname: u64, ex: u64) {
+    let exkind: u64 = inode_type(state, ex)
+    let exnl: u64 = inode_get(state, ex, I_NLINK)
+    if exnl > 1 && exkind == T_FILE {
+        inode_set(state, ex, I_NLINK, exnl - 1)
+        dir_remove_kind(state, ndir, newname, exkind)
+    } else if exkind != T_DIR && deferfree.enabled(state) {
+        dir_remove_kind(state, ndir, newname, exkind)
+        orphan_release(state, ex)
+    } else {
+        file_truncate(state, ex)
+        inode_release(state, ex)
+        inode_set(state, ex, I_NLINK, 0)
+        dir_remove_kind(state, ndir, newname, exkind)
+    }
+}
+
+fn reparent_dir(state: u64, dir: u64, parent: u64) {
+    var dotdot: [u8; 3] = "..\0"
+    dir_remove(state, dir, (&dotdot[0]) as u64)
+    dir_add(state, dir, (&dotdot[0]) as u64, parent)
+}
+
+fn rename_exchange(state: u64, odir: u64, oldname: u64, ino: u64, ndir: u64, newname: u64, ex: u64) -> u64 {
+    if ex == 0 {
+        return ENOENT
+    }
+    if ex == ino {
+        return 0
+    }
+    if inode_type(state, ino) == T_DIR && dir_inside(state, ndir, ino) {
+        return EINVAL
+    }
+    if inode_type(state, ex) == T_DIR && dir_inside(state, odir, ex) {
+        return EINVAL
+    }
+    dir_remove(state, odir, oldname)
+    dir_remove(state, ndir, newname)
+    if !dir_add(state, odir, oldname, ex) || !dir_add(state, ndir, newname, ino) {
+        dir_remove(state, odir, oldname)
+        dir_remove(state, ndir, newname)
+        dir_add(state, odir, oldname, ino)
+        dir_add(state, ndir, newname, ex)
+        return ENOSPC
+    }
+    if odir != ndir {
+        if inode_type(state, ino) == T_DIR {
+            reparent_dir(state, ino, ndir)
+        }
+        if inode_type(state, ex) == T_DIR {
+            reparent_dir(state, ex, odir)
+        }
+    }
+    return 0
+}
+
+fn rename_path_run(state: u64, from: u64, to: u64, mode: u64) -> u64 {
     let oldname: u64 = state + kstate.OFS3_OFF + kstate.OP_OLD
     let newname: u64 = state + kstate.OFS3_OFF + kstate.OP_NEW
-    var dotdot: [u8; 3] = "..\0"
     let flags: u64 = enter(state)
     reclaim_due(state)
     let odir: u64 = parent_of(state, from, oldname)
     if odir == 0 {
         leave(state, flags)
-        return 2 // ENOENT
+        return ENOENT
     }
     let ino: u64 = dir_find(state, odir, oldname)
     if ino == 0 {
         leave(state, flags)
-        return 2
+        return ENOENT
     }
     let ndir: u64 = parent_of(state, to, newname)
     if ndir == 0 {
         leave(state, flags)
-        return 2
+        return ENOENT
     }
-    // POSIX: rename() onto an existing FILE replaces it atomically (sed -i, git, every
-    // "write temp, rename over" program). Same inode (hard links): nothing to do.
-    // Directories keep the old answer (EEXIST) -- no silent directory replacement.
     let ex: u64 = dir_find(state, ndir, newname)
+    if mode == RENAME_EXCHANGE {
+        let xr: u64 = rename_exchange(state, odir, oldname, ino, ndir, newname, ex)
+        leave(state, flags)
+        return xr
+    }
     if ex != 0 {
         if ex == ino {
             leave(state, flags)
             return 0
         }
-        if inode_type(state, ex) != T_FILE || inode_type(state, ino) != T_FILE {
+        if (mode & RENAME_NOREPLACE) != 0 {
             leave(state, flags)
-            return 17 // EEXIST
+            return EEXIST
         }
-        let exnl: u64 = inode_get(state, ex, I_NLINK)
-        if exnl > 1 {
-            inode_set(state, ex, I_NLINK, exnl - 1)
-            dir_remove_kind(state, ndir, newname, T_FILE)
-        } else if deferfree.enabled(state) {
-            dir_remove_kind(state, ndir, newname, T_FILE)
-            orphan_release(state, ex)
-        } else {
-            file_truncate(state, ex)
-            inode_release(state, ex)
-            inode_set(state, ex, I_NLINK, 0)
-            dir_remove_kind(state, ndir, newname, T_FILE)
+    }
+    if inode_type(state, ino) == T_DIR && dir_inside(state, ndir, ino) {
+        leave(state, flags)
+        return EINVAL
+    }
+    if ex != 0 {
+        let bad: u64 = replace_check(state, ino, ex)
+        if bad != 0 {
+            leave(state, flags)
+            return bad
         }
+        replace_remove(state, ndir, newname, ex)
     }
     if odir == ndir && dir_rename_inplace(state, odir, oldname, newname) {
         leave(state, flags)
@@ -3085,7 +3192,7 @@ fn rename_path_run(state: u64, from: u64, to: u64) -> u64 {
     }
     if !dir_add(state, ndir, newname, ino) {
         leave(state, flags)
-        return 28 // ENOSPC
+        return ENOSPC
     }
     if rename_needs_barrier(state, odir, ndir, oldname) {
         wbscope.barrier(state)
@@ -3093,11 +3200,10 @@ fn rename_path_run(state: u64, from: u64, to: u64) -> u64 {
     if dir_remove(state, odir, oldname) == 0 {
         dir_remove(state, ndir, newname)
         leave(state, flags)
-        return 2
+        return ENOENT
     }
     if inode_type(state, ino) == T_DIR && odir != ndir {
-        dir_remove(state, ino, (&dotdot[0]) as u64)
-        dir_add(state, ino, (&dotdot[0]) as u64, ndir)
+        reparent_dir(state, ino, ndir)
     }
     leave(state, flags)
     return 0
