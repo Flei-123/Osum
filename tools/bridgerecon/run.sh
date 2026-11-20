@@ -24,8 +24,14 @@ BLACKHOLE_S=25
 RECOVER_S=60
 PEER=""
 BRPID=""
+PEER_SCRIPT=${BRIDGERECON_PEER:-tools/bridgerecon/fakebridge.py}
+KEEP_DIR=${BRIDGERECON_KEEP:-}
 
 cleanup() {
+    if [ -n "$KEEP_DIR" ]; then
+        mkdir -p "$KEEP_DIR/run-$$"
+        cp "$W"/s-*.txt "$W"/peer.log "$W"/peer.out "$W"/br.log "$KEEP_DIR/run-$$/" 2>/dev/null
+    fi
     [ -n "$PEER" ] && kill "$PEER" 2>/dev/null
     [ -n "$BRPID" ] && kill "$BRPID" 2>/dev/null
     pkill -f "qemu-system-x86_64.*$W" 2>/dev/null
@@ -84,7 +90,7 @@ sleep 0.5
 
 start_peer() {
     : > "$W/peer.log"; rm -f "$W/stall"
-    ip netns exec "$NS" python3 tools/bridgerecon/fakebridge.py \
+    ip netns exec "$NS" python3 "$PEER_SCRIPT" \
         --cert "$W/certs/good.pem" --key "$W/certs/good.key" \
         --bind "$HOST_IP" --log "$W/peer.log" --stall "$W/stall" \
         >"$W/peer.out" 2>&1 & PEER=$!
@@ -150,6 +156,7 @@ else
     bad "device did not come back within $RECOVER_S s after the link returned"
 fi
 kill $QPID 2>/dev/null; wait $QPID 2>/dev/null
+cp "$W/peer.log" "$W/s-peer4.txt"
 if grep -aq 'net recovered' "$W/s-new.txt"; then
     ok "log line for the reconnect is written"
     grep -a ' net ' "$W/s-new.txt" | head -6 | sed 's/^/        /'
