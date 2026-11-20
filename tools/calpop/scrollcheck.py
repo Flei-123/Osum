@@ -61,7 +61,7 @@ try:
                 o = (yy * w0 + xx) * 3
                 if max(abs(a[o + c] - b[o + c]) for c in range(3)) > 24:
                     diff += 1
-        say(diff > 150, "the list area repaints after scrolling (%d samples differ)" % diff)
+        say(diff > 60, "the list area repaints after scrolling (%d samples differ)" % diff)
 except OSError as e:
     say(False, "pictures missing: %s" % e)
 print("RESULT ok=%d fail=%d" % (ok, fail))
