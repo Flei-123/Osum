@@ -439,6 +439,86 @@ has "$TMPD/p.txt" "|aktuell|1" "... and hallo is now current without any call to
 
 fi
 
+if want apps; then
+echo "== 4d. catalog 2 (store.apps / store.app): signed view, honest levels, refusals =="
+python3 tools/storeapps/mkview.py gen "$TMPD/c2key" && ok "a test catalog key (Ed25519)" || bad "catalog key"
+python3 tools/storeapps/mkview.py gen "$TMPD/c2other"
+for v in good flip foreign; do cp -r "$TMPD/srv/good" "$TMPD/srv/c2$v"; done
+python3 tools/storeapps/mkview.py write "$TMPD/srv/c2good" "$TMPD/c2key/catalog.seed"
+python3 tools/storeapps/mkview.py write "$TMPD/srv/c2flip" "$TMPD/c2key/catalog.seed" flip
+python3 tools/storeapps/mkview.py write "$TMPD/srv/c2foreign" "$TMPD/c2other/catalog.seed"
+serve c2good $((P0+4)) && serve c2flip $((P0+5)) && serve c2foreign $((P0+6)) && ok "three catalog 2 sources: good, flipped octet, foreign key" || bad "a catalog 2 source does not start"
+cat > "$TMPD/sD.sh" <<'EOS'
+mkdir /users/justin
+orientbus serve 27000 &
+sleep -m 300
+stored serve 27000 &
+sleep 1
+setsess 1000
+echo ==D-BEFORE==
+act call store.apps
+echo ==D-REFRESH==
+act call store.refresh
+sleep 25
+echo ==D-LIST==
+act call store.apps lang=de
+act call store.apps lang=en
+ls /var/store
+echo ==D-APP==
+act call store.app name=com.test.partial lang=en
+act call store.app name=com.test.wine lang=de
+act call store.app name=com.test.mixed lang=en
+act call store.app name=com.test.nogate lang=en
+echo ==D-REFUSE==
+act call store.app name=com.test.phone
+act call store.app name=../etc
+act call store.app name=nosuch
+echo ==FERTIG==
+EOS
+EXTRA=("/etc/store.catalog.pub=$TMPD/c2key/catalog.pub")
+for v in good:4 flip:5 foreign:6; do
+    n=${v%%:*}; k=${v##*:}
+    image "$TMPD/D$n.img" "$TMPD/sD.sh" $((P0+k))
+    run "$TMPD/D$n.img" "d$n" 600
+done
+EXTRA=()
+D="$TMPD/dgood.klar"
+grep -qa '==FERTIG==' "$D" || { bad "the catalog 2 guest did not finish"; tail -25 "$D" | sed 's/^/        /'; }
+part "$D" D-BEFORE D-REFRESH > "$TMPD/p.txt"
+has "$TMPD/p.txt" "no_catalog2" "before any refresh there is no catalog 2 (old feeds show the old window)"
+part "$D" D-LIST D-APP > "$TMPD/p.txt"
+grep -q " apps " "$TMPD/p.txt" && ok "the verified view is stored as /var/store/apps" || bad "no /var/store/apps after refresh"
+has "$TMPD/p.txt" "cat=internet|Internet" "categories are listed (de)"
+has "$TMPD/p.txt" "cat=tools|Tools" "categories are listed (en)"
+has "$TMPD/p.txt" "app=com.test.native|Nativ|tools|Fleitec|works|n|1.0.0|opk:nativ" "native app: works with gate, kind n, package"
+has "$TMPD/p.txt" "app=com.test.partial|Teilweise|internet|Fleitec|partial|l|" "Linux app: partial, kind l"
+has "$TMPD/p.txt" "app=com.test.wine|Wein|tools|Fleitec|broken|w|" "Windows app: broken, kind w"
+has "$TMPD/p.txt" "app=com.test.mixed|Gemischt|tools|Fleitec|untested|n|" "mixed app: only the OrientOS variant counts (untested, not the broken Android one)"
+has "$TMPD/p.txt" "app=com.test.nogate|Ohne Beleg|tools|Fleitec|untested|n|" "works without a gate is shown as untested"
+hasnot "$TMPD/p.txt" "com.test.phone" "an Android-only app is not listed (wrong platform)"
+has "$TMPD/p.txt" "apps=5" "five apps are listed"
+has "$TMPD/p.txt" "app=com.test.native|Native|" "English names with lang=en"
+part "$D" D-APP D-REFUSE > "$TMPD/p.txt"
+has "$TMPD/p.txt" "variant=system|osum-linux-x86_64|1.0.0|0|0|0|1|partial|main test|QEMU|2026-11-20|tools/linux|Partly usable.|Unstable on the HP./One window only.|" "detail: variant with level, tested_on, gate, notes and limitations"
+has "$TMPD/p.txt" "permissions=netz,disk" "detail: permissions"
+has "$TMPD/p.txt" "screenshots=2" "detail: two screenshots"
+has "$TMPD/p.txt" "variant=exe|osum-windows-x86_64|1.0.0|0|0|0|0|broken|" "detail: Windows variant is broken and not available"
+has "$TMPD/p.txt" "Startet nicht." "detail: German notes with lang=de"
+hasnot "$TMPD/p.txt" "android-arm64" "detail: the Android variant of a mixed app is dropped"
+has "$TMPD/p.txt" "|1|untested|main test|QEMU|2026-11-20||" "detail: works without gate is downgraded to untested"
+part "$D" D-REFUSE FERTIG > "$TMPD/p.txt"
+[ "$(grep -c '^err ' "$TMPD/p.txt")" -ge 3 ] && ok "an Android-only app, a bad name and an unknown app are refused" || { bad "refusals: $(grep -c '^err ' "$TMPD/p.txt") of 3"; sed 's/^/        /' "$TMPD/p.txt" | head -8; }
+has "$TMPD/p.txt" "err no_such_app com.test.phone" "the Android-only app is refused with no_such_app"
+for n in flip foreign; do
+    X="$TMPD/d$n.klar"
+    grep -qa '==FERTIG==' "$X" || bad "the $n guest did not finish"
+    part "$X" D-LIST D-APP > "$TMPD/p.txt"
+    has "$TMPD/p.txt" "no_catalog2" "$n: the signature check refuses the view, store.apps has no catalog"
+    hasnot "$TMPD/p.txt" "com.test.native" "$n: nothing of the refused view is shown"
+    grep -q " apps " "$TMPD/p.txt" && bad "$n: an apps file was installed" || ok "$n: no apps file was installed"
+done
+fi
+
 if want window; then
 echo "== 5. the window (/bin/store) on a screen: grid, detail page, install, update, remove, search, keys =="
 # STORE_RES=WxH (default 1024x768)  STORE_MODE=light|dark  STORE_SHOTS=<dir> keeps the pictures as PNG

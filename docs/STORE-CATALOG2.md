@@ -35,3 +35,19 @@ Platform words: `android-arm64|arm|x86|x86_64`, `osum-x86_64`, `osum-any` (every
 
 `python3 tests/t40_unified.py` (37 checks): schema, old-client view identity, platform filter, Certus on both sides, icons, system apps, plus counter-proofs: legacy catalog, missing required field, unknown category, bad sha256, missing icon, bad platform word, tampered catalog, foreign key.
 `store verify` runs the schema check automatically; `store apps --platform <word>` shows the filtered view.
+
+## Compatibility levels (per variant)
+
+Every variant carries `compat`: `level` (`works|partial|broken|untested`, default `untested`), `tested_on {build, device}`, `tested_at` (YYYY-MM-DD), `notes {de,en}`, `limitations [{de,en}]`, `gate` (name of the test that backs the level). The publisher sets it (`werkzeug/compat.json` in `/root/orientstore`), never the user.
+
+Rules checked by `unified_check` (and again by the client): `works` needs a `gate` plus `tested_on` and `tested_at`; `partial` needs notes and a limitations list; `broken` needs notes; `untested` carries no gate and no `tested_on`. A client shows a `works` variant without a gate as `untested`.
+
+Platform words added: `osum-linux-x86_64` (Linux program over the Linux ABI) and `osum-windows-x86_64` (Windows program over Wine). A variant without payload yet has `available: false`.
+
+## OrientOS client view (`apps.tsv`)
+
+`stored` has no JSON parser and no heap, so the publisher writes a flat, signed view next to `index.json`: `apps.tsv` + `apps.tsv.sig` (Ed25519 by the catalog key, tab separated: `C` category, `A` app, `V` variant lines; `osview.py`). It is served from `/osum/aktuell/` (symlinks into `/srv/store`). `stored` fetches it on `store.refresh`, verifies it against the pinned catalog key (override: `/etc/store.catalog.pub`), and keeps it as `/var/store/apps`. A failed check removes the file, so nothing unverified is shown. Variants whose platforms are not OrientOS words are dropped.
+
+Actions: `store.apps lang=` (categories, one `app=` line per app) and `store.app name=<id> lang=` (detail with one `variant=` line per platform).
+
+Gate: `STORE_PART=apps bash tools/store/run.sh` (good view, flipped octet, foreign key, Android-only app, works without gate, bad names).

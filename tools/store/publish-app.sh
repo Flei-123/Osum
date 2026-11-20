@@ -36,7 +36,12 @@ T0=$EPOCHREALTIME
 WORK=$(mktemp -d) || exit 1
 trap 'rm -rf "$WORK"' EXIT
 . tools/lib/firnenv.sh
-bash tools/sync/build.sh "$WORK" 0 "$APP" > "$WORK/build.log" 2>&1 || { tail -15 "$WORK/build.log"; echo "publish-app: build failed" >&2; exit 1; }
+BUILDER=tools/store/builders/$APP.sh
+if [ -x "$BUILDER" ]; then
+    bash "$BUILDER" "$WORK/$APP.elf" > "$WORK/build.log" 2>&1
+else
+    bash tools/sync/build.sh "$WORK" 0 "$APP" > "$WORK/build.log" 2>&1
+fi || { tail -15 "$WORK/build.log"; echo "publish-app: build failed" >&2; exit 1; }
 ELF=$WORK/$APP.elf
 [ -s "$ELF" ] || { echo "publish-app: $APP.elf missing" >&2; exit 1; }
 T1=$EPOCHREALTIME
