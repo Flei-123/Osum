@@ -1,0 +1,215 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import mm.mmframe
+import gfx.fb
+import gpu.intel.ggtt
+import gpu.intel.engine
+import gpu.intel.ring
+import gpu.intel.elsp
+import gpu.intel.blit
+import gpu.intel.blitpool
+import drv.gpu.intel.mmio
+import drv.gpu.intel.probe
+import drv.gpu.intel.igflip
+import drv.gpu.intel.igflush
+
+export {
+    stage, status, ready, verified, engine_status, submits, fills, copies, rejects, errors, hangs, resets, fill_rect, copy_rect,
+    S_OFF, S_NO_FLIP, S_NO_MEM, S_MAP, S_ENGINE, S_BLIT, S_VERIFY, S_OK
+}
+
+const S_OFF: u64 = 0
+const S_NO_FLIP: u64 = 1
+const S_NO_MEM: u64 = 2
+const S_MAP: u64 = 3
+const S_ENGINE: u64 = 4
+const S_BLIT: u64 = 5
+const S_VERIFY: u64 = 6
+const S_OK: u64 = 7
+const PAGE: u64 = 0x1000
+const MARK_ROWS: u64 = 48
+const MARK_COLOR: u64 = 0xff00ff
+const TILE_COLOR: u64 = 0x00ffff
+const TILE_WIDTH: u64 = 96
+const PIXEL_BYTES: u64 = 4
+const PIXEL_MASK: u64 = 0xffffffff
+const HOLD_STEPS: u64 = 300
+const ZERO_STEP: u64 = 8
+
+static mut g_status: u64 = 0
+static mut g_verified: u64 = 0
+static mut g_pool_cpu: u64 = 0
+static mut g_width: u64 = 0
+static mut g_pitch: u64 = 0
+static mut g_engine: engine.Engine = engine.Engine {
+    lay: engine.Layout { base: 0, domain: 0, ring_cpu: 0, ring_ggtt: 0, ring_bytes: 0, ctx_cpu: 0, ctx_ggtt: 0, hws_cpu: 0, hws_ggtt: 0 },
+    ring: ring.Ring { cpu: 0, ggtt: 0, bytes: 0, tail: 0 },
+    csb: elsp.Csb { read: 0, completes: 0, events: 0 },
+    status: 0, seqno: 0, submits: 0, hangs: 0, resets: 0
+}
+static mut g_blit: blit.Blit = blit.Blit {
+    dst: blit.Surface { ggtt: 0, pitch: 0, bytes: 0 },
+    scratch: 0, buf: 0, fills: 0, copies: 0, rejects: 0, errors: 0
+}
+
+static mut s_say: [u8; 17] = "intelgpublit: ok\0"
+static mut s_fail: [u8; 22] = "intelgpublit: failed \0"
+
+fn status() -> u64 {
+    return g_status
+}
+
+fn ready() -> bool {
+    return g_status == S_OK
+}
+
+fn verified() -> u64 {
+    return g_verified
+}
+
+fn engine_status() -> u64 {
+    return g_engine.status
+}
+
+fn submits() -> u64 {
+    return g_engine.submits
+}
+
+fn fills() -> u64 {
+    return g_blit.fills
+}
+
+fn copies() -> u64 {
+    return g_blit.copies
+}
+
+fn rejects() -> u64 {
+    return g_blit.rejects
+}
+
+fn errors() -> u64 {
+    return g_blit.errors
+}
+
+fn hangs() -> u64 {
+    return g_engine.hangs
+}
+
+fn resets() -> u64 {
+    return g_engine.resets
+}
+
+fn engine_wr(off: u64, value: u64) -> u64 {
+    if blitpool.is_elsp(off) {
+        igflush.settle(g_pool_cpu, blitpool.POOL_BYTES, true)
+    }
+    return mmio.wr(off, value)
+}
+
+fn engine_us(n: u64) -> u64 {
+    igflush.settle(g_pool_cpu + blitpool.HWS_AT + engine.SEQNO_OFFSET, blitpool.SEQNO_FLUSH_BYTES, true)
+    return mmio.us(n)
+}
+
+fn fill_rect(x1: u64, y1: u64, x2: u64, y2: u64, color: u64) -> u64 {
+    if !ready() {
+        return engine.S_DEAD
+    }
+    return blit.fill_rect(mmio.rd, engine_wr, engine_us, &g_engine, &g_blit, x1, y1, x2, y2, color)
+}
+
+fn copy_rect(dx: u64, dy: u64, sx: u64, sy: u64, w: u64, h: u64) -> u64 {
+    if !ready() {
+        return engine.S_DEAD
+    }
+    return blit.copy_rect(mmio.rd, engine_wr, engine_us, &g_engine, &g_blit, dx, dy, sx, sy, w, h)
+}
+
+fn fail(code: u64) {
+    g_status = code
+    serial.puts((&s_fail[0]) as u64)
+    serial.dec(code)
+    serial.nl()
+}
+
+fn zero_pool() {
+    var i: u64 = 0
+    while i < blitpool.POOL_BYTES {
+        __mmio_write64((g_pool_cpu + i) as *mut u64, 0)
+        i = i + ZERO_STEP
+    }
+}
+
+fn back_pixel(x: u64, y: u64) -> u64 {
+    let off: u64 = y * g_pitch + x * PIXEL_BYTES
+    return __mmio_read64((igflip.back_addr() + off) as *mut u64) & PIXEL_MASK
+}
+
+fn check_pixels() -> bool {
+    let half: u64 = g_width / 2
+    return back_pixel(0, 0) == TILE_COLOR && back_pixel(TILE_WIDTH - 1, MARK_ROWS - 1) == TILE_COLOR
+        && back_pixel(TILE_WIDTH, 0) == MARK_COLOR && back_pixel(half, 0) == TILE_COLOR
+        && back_pixel(half + TILE_WIDTH - 1, MARK_ROWS - 1) == TILE_COLOR && back_pixel(half + TILE_WIDTH, 0) == MARK_COLOR
+}
+
+fn paint() -> bool {
+    let half: u64 = g_width / 2
+    if fill_rect(0, 0, g_width, MARK_ROWS, MARK_COLOR) != engine.S_OK {
+        return false
+    }
+    if fill_rect(0, 0, TILE_WIDTH, MARK_ROWS, TILE_COLOR) != engine.S_OK {
+        return false
+    }
+    return copy_rect(half, 0, 0, 0, TILE_WIDTH, MARK_ROWS) == engine.S_OK
+}
+
+fn stage(ks: u64) {
+    if !probe.blit_wanted(ks) || probe.result() != probe.R_OK {
+        return
+    }
+    if !igflip.ready() {
+        fail(S_NO_FLIP)
+        return
+    }
+    let phys: u64 = mmframe.frame_run(ks, blitpool.POOL_PAGES)
+    if phys == 0 {
+        fail(S_NO_MEM)
+        return
+    }
+    g_pool_cpu = mmframe.kva(phys)
+    zero_pool()
+    let ggtt_off: u64 = igflip.pool_ggtt_offset()
+    if ggtt.map_linear(mmio.rd64, mmio.wr64, ggtt_off, phys, blitpool.POOL_PAGES) != ggtt.G_OK {
+        fail(S_MAP)
+        return
+    }
+    mmio.permit_engine()
+    g_width = fb.width(ks)
+    g_pitch = fb.pitch(ks)
+    let pitch: u64 = g_pitch
+    g_engine = engine.engine_new(blitpool.layout(g_pool_cpu, ggtt_off))
+    g_blit = blit.blit_new(blit.surface_new(igflip.back_ggtt_offset(), pitch, pitch * fb.height(ks)), blitpool.scratch_ggtt(ggtt_off), blitpool.cmd_cpu(g_pool_cpu))
+    igflush.settle(g_pool_cpu, blitpool.POOL_BYTES, true)
+    if engine.setup(mmio.rd, engine_wr, engine_us, &g_engine) != engine.S_OK {
+        fail(S_ENGINE)
+        return
+    }
+    g_status = S_OK
+    if !paint() {
+        fail(S_BLIT)
+        return
+    }
+    if check_pixels() {
+        g_verified = 1
+    } else {
+        g_verified = 0
+        fail(S_VERIFY)
+        return
+    }
+    serial.puts((&s_say[0]) as u64)
+    serial.nl()
+    igflip.selftest_hold(HOLD_STEPS)
+}
