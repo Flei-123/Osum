@@ -95,8 +95,8 @@ run_oracle() {
     pass=$((pass+nok))
 }
 
-run_oracle rcs tools/intelgpu/rcs.fi 33
-run_oracle vblank tools/intelgpu/vblank.fi 32
+run_oracle rcs tools/intelgpu/rcs.fi 36
+run_oracle vblank tools/intelgpu/vblank.fi 33
 
 ORACLE=tools/intelgpu/oracle.fi
 
