@@ -52,6 +52,7 @@ if [ -s "$TMPD/mems.gnu.txt" ] && cmp -s "$TMPD/mems.gnu.txt" "$TMPD/mems.fas.tx
 mkdir -p "$TMPD/old"
 cp kernel/user/*.fi "$TMPD/old/"
 git show 9e965032:kernel/user/fas.fi > "$TMPD/old/fas.fi"
+sed -i -e 's/ulib\.size_of(/io.size_of(/' -e 's/^import libc.mem$/import libc.mem\nimport libc.io/' "$TMPD/old/fas.fi"
 if FIRNLIB="$ROOT/lib" "$FIRNC" -c -o "$TMPD/old/fas.o" "$TMPD/old/fas.fi" > "$TMPD/old/err" 2>&1 \
    && ld -T "$ULD" --defsym=USER_ENTRY=_F0.u_start -o "$TMPD/old/fas.host" "$TMPD/hostcrt.o" "$TMPD/old/fas.o"; then
     "$TMPD/old/fas.host" "$TMPD/regs.s" -o "$TMPD/old/regs.elf" > "$TMPD/old/regs.out" 2>&1
