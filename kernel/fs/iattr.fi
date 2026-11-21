@@ -3,23 +3,28 @@ profile kernel
 import lib.kstate
 import arch.arch
 
-export { MISS, which_of, get, put, put_directs, perm_get, attr_get, attr_get_stable, drop, drop_range, flush }
+export { MISS, KIND_TYPE_MASK, KIND_MODE_SHIFT, which_of, get, put, put_pointers, perm_get, attr_get, attr_get_stable, kind_get, drop, drop_range, flush }
 
 const MISS: u64 = 0xFFFFFFFFFFFFFFFF
-const LINES: u64 = 128
-const LINE_WORDS: u64 = 130
-const SLOTS: u64 = 8
-const SLOT_WORDS: u64 = 16
+const KIND_TYPE_MASK: u64 = 0xFF
+const KIND_MODE_SHIFT: u64 = 8
+const LINES: u64 = 512
+const LINE_WORDS: u64 = 82
+const SLOTS: u64 = 4
+const SLOT_WORDS: u64 = 20
 const DIRECT_WORDS: u64 = 8
 const DIRECT_WHICH: u64 = 8
+const INDIRECT_WHICH: u64 = 16
+const INDIRECT_WORDS: u64 = 3
 const F_DIRECT: u64 = 24
+const F_INDIRECT: u64 = 112
 const SLOT_AT: u64 = 2
 const TAG_VALID: u64 = 0x8000000000000000
 const TAG_LBA_MASK: u64 = 0xFFFFFFFFFF
 const TAG_VOL_MASK: u64 = 0xFFFFFF
 const TAG_VOL_SHIFT: u64 = 40
 const LINE_MUL: u64 = 0x9E3779B97F4A7C15
-const LINE_SHIFT: u64 = 57
+const LINE_SHIFT: u64 = 55
 const VOLUME_MUL: u64 = 1000003
 const F_TYPE: u64 = 0
 const F_SIZE: u64 = 8
@@ -30,9 +35,9 @@ const F_CTIME: u64 = 136
 const F_MTIME: u64 = 144
 const F_ATIME: u64 = 152
 
-const SEQ_AT: u64 = 16640
+const SEQ_AT: u64 = 41984
 const STABLE_TRIES: u64 = 4
-static mut cells: [u64; 16641] = [0 as u64; 16641]
+static mut cells: [u64; 41985] = [0 as u64; 41985]
 static mut held_low: u64 = 0xFFFFFFFFFFFFFFFF
 static mut held_high: u64 = 0
 
@@ -83,6 +88,9 @@ fn which_of(field: u64) -> u64 {
     }
     if field >= F_DIRECT && field < F_DIRECT + DIRECT_WORDS * 8 && (field - F_DIRECT) % 8 == 0 {
         return DIRECT_WHICH + (field - F_DIRECT) / 8
+    }
+    if field >= F_INDIRECT && field < F_INDIRECT + INDIRECT_WORDS * 8 && (field - F_INDIRECT) % 8 == 0 {
+        return INDIRECT_WHICH + (field - F_INDIRECT) / 8
     }
     return MISS
 }
@@ -143,6 +151,18 @@ fn attr_get(state: u64, lba: u64, idx: u64, out: u64) -> bool {
     return true
 }
 
+fn kind_get(state: u64, lba: u64, idx: u64) -> u64 {
+    if idx >= SLOTS {
+        return MISS
+    }
+    let base: u64 = line_of(lba) * LINE_WORDS
+    if cells[base as usize] != tag_of(state, lba) || (cells[(base + 1) as usize] & (1 << idx)) == 0 {
+        return MISS
+    }
+    let at: u64 = base + SLOT_AT + idx * SLOT_WORDS
+    return (cells[(at + 2) as usize] << KIND_MODE_SHIFT) | (cells[at as usize] & KIND_TYPE_MASK)
+}
+
 fn put(state: u64, lba: u64, idx: u64, kind: u64, size: u64, mode: u64, uid: u64, gid: u64,
     mtime: u64, ctime: u64, atime: u64) {
     if idx >= SLOTS {
@@ -174,15 +194,20 @@ fn put(state: u64, lba: u64, idx: u64, kind: u64, size: u64, mode: u64, uid: u64
     seq_flip()
 }
 
-fn put_directs(lba: u64, idx: u64, src: u64) {
+fn put_pointers(lba: u64, idx: u64, src: u64) {
     if idx >= SLOTS {
         return
     }
-    let at: u64 = line_of(lba) * LINE_WORDS + SLOT_AT + idx * SLOT_WORDS + DIRECT_WHICH
+    let at: u64 = line_of(lba) * LINE_WORDS + SLOT_AT + idx * SLOT_WORDS
     seq_flip()
     var i: u64 = 0
     while i < DIRECT_WORDS {
-        cells[(at + i) as usize] = kstate.get(src, F_DIRECT + i * 8)
+        cells[(at + DIRECT_WHICH + i) as usize] = kstate.get(src, F_DIRECT + i * 8)
+        i = i + 1
+    }
+    i = 0
+    while i < INDIRECT_WORDS {
+        cells[(at + INDIRECT_WHICH + i) as usize] = kstate.get(src, F_INDIRECT + i * 8)
         i = i + 1
     }
     seq_flip()
