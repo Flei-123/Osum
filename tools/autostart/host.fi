@@ -1,0 +1,111 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import autostart.model
+
+struct T {
+    fails: i32,
+    checks: i32,
+}
+
+static mut cbuf: [u8; 4096] = [0 as u8; 4096]
+static mut cslot: usize = 0
+
+fn c(s: str) -> u64 {
+    let base: usize = (cslot % 32) * 128
+    cslot = cslot + 1
+    var i: usize = 0
+    while i < s.length() && i < 127 {
+        cbuf[base + i] = *((s.p as u64 + i as u64) as *mut u8)
+        i = i + 1
+    }
+    cbuf[base + i] = 0 as u8
+    return ((&cbuf[0 as usize]) as u64) + base as u64
+}
+
+fn len(s: str) -> u64 {
+    return s.length() as u64
+}
+
+fn check(t: *mut T, ok: bool, what: str) {
+    (*t).checks = (*t).checks + 1
+    if ok {
+        io.fmt_print(f"ok   {what}\n")
+    } else {
+        io.fmt_print(f"FAIL {what}\n")
+        (*t).fails = (*t).fails + 1
+    }
+}
+
+fn is_text(p: u64, s: str) -> bool {
+    var i: usize = 0
+    while i < s.length() {
+        if rt.ld8(p, i) != rt.ld8(s.p as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return rt.ld8(p, i) == 0 as u8
+}
+
+fn idx(s: str) -> u64 {
+    return model.find(c(s), len(s))
+}
+
+fn main() -> i32 {
+    var t: T = T { fails: 0, checks: 0 }
+    let none: u64 = model.MAX_ENTRIES
+    let list: str = "# list\nhotkey\nscreenreader serve  # trailing\n\n  jmini --hidden --as-app\nBad!Name x\nhotkey again\n"
+    model.reset()
+    check(&t, model.load_list(c(list), len(list)) == 3, "list: three entries, bad name and duplicate dropped")
+    check(&t, model.count() == 3, "list: count")
+    check(&t, idx("hotkey") != none && idx("screenreader") != none && idx("jmini") != none, "list: names found")
+    check(&t, is_text(model.args(idx("screenreader")), "serve"), "list: args keep word, comment stripped")
+    check(&t, is_text(model.args(idx("jmini")), "--hidden --as-app"), "list: args keep several words")
+    check(&t, is_text(model.args(idx("hotkey")), ""), "list: no args")
+    check(&t, model.enabled(idx("hotkey")) && model.should_start(c("jmini"), 5), "default: enabled")
+    check(&t, model.should_start(c("unknown"), 7), "unknown name still starts")
+
+    let state: str = "jmini=off\nbogus=off\nhotkey=maybe\nscreenreader=on\n"
+    check(&t, model.load_state(c(state), len(state)) == 2, "state: two valid lines applied")
+    check(&t, !model.enabled(idx("jmini")) && !model.should_start(c("jmini"), 5), "state: off blocks start")
+    check(&t, model.enabled(idx("hotkey")), "state: invalid value ignored")
+    check(&t, model.set_enabled(idx("jmini"), true) && model.should_start(c("jmini"), 5), "toggle back on")
+    check(&t, model.set_enabled(idx("jmini"), false) && !model.enabled(idx("jmini")), "toggle off")
+    check(&t, is_text(model.state_value(idx("jmini")), "off") && is_text(model.state_value(idx("hotkey")), "on"), "state value words")
+
+    check(&t, model.add_package(c("store"), 5, c(""), 0, c("default-off"), 11) != none, "package: default-off added")
+    check(&t, !model.enabled(idx("store")), "package: default-off starts disabled")
+    check(&t, model.set_enabled(idx("store"), true) && model.enabled(idx("store")), "package: user can switch it on")
+    check(&t, model.add_package(c("calc"), 4, c(""), 0, c("never"), 5) != none, "package: never added")
+    check(&t, !model.visible(idx("calc")) && !model.enabled(idx("calc")), "package: never is hidden and off")
+    check(&t, !model.set_enabled(idx("calc"), true), "package: never cannot be switched on")
+    check(&t, model.add_package(c("edit"), 4, c(""), 0, c("default-on"), 10) != none && model.enabled(idx("edit")), "package: default-on")
+    check(&t, model.policy_from_word(c("garbage"), 7) == model.POLICY_ON, "policy: unknown word falls back to default-on")
+
+    let inittab: str = "# services\nnetd:respawn:/bin/netd\njarvisd:respawn:/bin/jarvisd\n"
+    check(&t, model.load_services(c(inittab), len(inittab)) == 2, "services: two init entries")
+    check(&t, model.locked(idx("netd")) && model.enabled(idx("netd")), "services: locked and on")
+    check(&t, !model.set_enabled(idx("netd"), false) && model.enabled(idx("netd")), "services: cannot be switched off")
+    let svc_state: str = "netd=off\n"
+    check(&t, model.load_state(c(svc_state), len(svc_state)) == 1 && model.enabled(idx("netd")), "services: state file cannot disable")
+
+    model.reset()
+    check(&t, model.count() == 0 && idx("hotkey") == none, "reset clears registry")
+    model.load_list(c("a1\n"), 3)
+    check(&t, model.should_start(c("a1"), 2), "after reset: fresh entry starts")
+    var big: u64 = 0
+    var added: u64 = 0
+    while big < 40 {
+        var nm: [u8; 8] = [97 as u8, (48 + big / 10) as u8, (48 + big % 10) as u8, 10 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8]
+        added = added + model.load_list((&nm[0 as usize]) as u64, 4)
+        big = big + 1
+    }
+    check(&t, model.count() == model.MAX_ENTRIES, "registry is capped at MAX_ENTRIES")
+
+    io.fmt_print(f"checks={t.checks} fails={t.fails}\n")
+    if t.fails != 0 {
+        return 1
+    }
+    return 0
+}

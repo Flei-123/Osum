@@ -1,0 +1,168 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import msg
+import fui.searchrank
+import libc.octets
+import libc.text
+import deeplink
+
+export { init, count, query, title_at, path_at, uri_at, exec_at, open_at, LINK_BASE, MAX_DEEP }
+
+const LINK_BASE: u64 = 1000
+const MAX_DEEP: u64 = 16
+const FIELDS: u64 = 5
+const POOL_BYTES: u64 = 2048
+const SPACE: u64 = 32
+const NEWLINE: u64 = 10
+const HASH: u64 = 35
+const DEEP_TXT: str = __include_str("deeplinks.d/builtin.links")
+
+static mut pool: [u8; 2048] = [0 as u8; 2048]
+static mut slots: [u64; 80] = [0 as u64; 80]
+static mut link_n: u64 = 0
+static mut pool_at: u64 = 0
+static mut ready: bool = false
+static mut word_link: [u8; 5] = "link\0"
+static mut empty: [u8; 1] = [0 as u8; 1]
+static mut arg: [u8; 112] = [0 as u8; 112]
+static mut argv: [u64; 2] = [0 as u64; 2]
+
+fn pool_base() -> u64 {
+    return (&pool[0 as usize]) as u64
+}
+
+fn word_equals(p: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if octets.ld8(p, i) != octets.ld8((&word_link[0 as usize]) as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return octets.ld8((&word_link[0 as usize]) as u64, n) == 0
+}
+
+fn store_word(p: u64, n: u64) -> u64 {
+    if pool_at + n + 1 > POOL_BYTES {
+        return 0
+    }
+    let at: u64 = pool_base() + pool_at
+    var i: u64 = 0
+    while i < n {
+        octets.st8(at, i, octets.ld8(p, i))
+        i = i + 1
+    }
+    octets.st8(at, n, 0)
+    pool_at = pool_at + n + 1
+    return at
+}
+
+fn add_link(words: u64, count_words: u64, starts: u64, lens: u64) {
+    if count_words < FIELDS + 1 || link_n >= MAX_DEEP {
+        return
+    }
+    var f: u64 = 0
+    while f < FIELDS {
+        let w: u64 = store_word(*((starts + (f + 1) * 8) as *mut u64), *((lens + (f + 1) * 8) as *mut u64))
+        if w == 0 {
+            return
+        }
+        slots[(link_n * FIELDS + f) as usize] = w
+        f = f + 1
+    }
+    link_n = link_n + 1
+}
+
+fn parse_line(p: u64, n: u64) {
+    var starts: [u64; 8] = [0 as u64; 8]
+    var lens: [u64; 8] = [0 as u64; 8]
+    var w: u64 = 0
+    var i: u64 = 0
+    while i < n && w < 8 {
+        while i < n && octets.ld8(p, i) == SPACE {
+            i = i + 1
+        }
+        let s: u64 = i
+        while i < n && octets.ld8(p, i) != SPACE {
+            i = i + 1
+        }
+        if i > s {
+            starts[w as usize] = p + s
+            lens[w as usize] = i - s
+            w = w + 1
+        }
+    }
+    if w > 0 && octets.ld8(starts[0 as usize], 0) != HASH && word_equals(starts[0 as usize], lens[0 as usize]) {
+        add_link(0, w, (&starts[0 as usize]) as u64, (&lens[0 as usize]) as u64)
+    }
+}
+
+fn init() {
+    if ready {
+        return
+    }
+    ready = true
+    let t: str = DEEP_TXT
+    let p: u64 = t.p as u64
+    let n: u64 = t.n as u64
+    var at: u64 = 0
+    while at < n {
+        var e: u64 = at
+        while e < n && octets.ld8(p, e) != NEWLINE {
+            e = e + 1
+        }
+        parse_line(p + at, e - at)
+        at = e + 1
+    }
+}
+
+fn count() -> u64 {
+    init()
+    return link_n
+}
+
+fn field(i: u64, f: u64) -> u64 {
+    return slots[(i * FIELDS + f) as usize]
+}
+
+fn uri_at(i: u64) -> u64 {
+    return field(i, 0)
+}
+
+fn exec_at(i: u64) -> u64 {
+    return field(i, 1)
+}
+
+fn title_at(i: u64) -> u64 {
+    return msg.get(field(i, 2))
+}
+
+fn path_at(i: u64) -> u64 {
+    return msg.get(field(i, 3))
+}
+
+fn query(term: u64, out: u64, max: u64) -> u64 {
+    init()
+    let allow_fuzzy: bool = text.length(term) >= searchrank.PAGE_FUZZY_MIN_LEN
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < link_n && n < max {
+        let tier: u64 = searchrank.fields_tier(title_at(i), (&empty[0 as usize]) as u64, msg.get(field(i, 4)), term, allow_fuzzy)
+        if tier != searchrank.NO_MATCH {
+            __mmio_write64((out + n * 8) as *mut u64, LINK_BASE + i)
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn open_at(i: u64) -> u64 {
+    let exec: u64 = field(i, 1)
+    let _n: u64 = deeplink.build_arg(field(i, 0), (&arg[0 as usize]) as u64, 112)
+    argv[0 as usize] = exec
+    argv[1 as usize] = (&arg[0 as usize]) as u64
+    return ulib.spawn_app(exec, (&argv[0 as usize]) as u64, 2)
+}
