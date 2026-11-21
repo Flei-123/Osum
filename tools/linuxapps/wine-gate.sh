@@ -8,7 +8,7 @@ osum_tmp_guard "${2:-}" "$OUT"
 EXPECT=${EXPECT:-tools/linuxapps/wine-expected-red.txt}
 mkdir -p "$OUT"
 if [ -z "${KERNEL:-}" ]; then
-    ./tools/build-kernel.sh "$OUT/k0.img" --stufe 0 --base "${WIDE_KERNEL_BASE:-0x3000000}" > "$OUT/kernel.log" 2>&1 || { echo "  FAIL  wide kernel build"; tail -5 "$OUT/kernel.log"; exit 1; }
+    ./tools/build-kernel.sh "$OUT/k0.img" --stufe 0 --base "${WIDE_KERNEL_BASE:-0x4000000}" > "$OUT/kernel.log" 2>&1 || { echo "  FAIL  wide kernel build"; tail -5 "$OUT/kernel.log"; exit 1; }
     export KERNEL=$OUT/k0.img
 fi
 SPEC=${SPEC:-$WD/run/spec.txt} BLOCKS=${BLOCKS:-2400000} INODES=${INODES:-20000} TMO=${TMO:-2700} DONE=FX-END \

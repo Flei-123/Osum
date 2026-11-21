@@ -161,7 +161,6 @@ t lsmem-run RANGE lsmem
 t unshare-user ok sh -c 'unshare -r echo ok'
 t bwrap-run hi bwrap --bind / / --dev /dev echo hi
 echo APPS-END
-echo FX-END
 t proc-iomem 'System RAM' cat /proc/iomem
 t proc-zoneinfo 'Node 0, zone' cat /proc/zoneinfo
 t proc-softirqs TIMER cat /proc/softirqs
@@ -170,3 +169,11 @@ t perl-creat-syscall ok perl -e 'my $p="/tmp/cr.pl"; my $fd=syscall(85,$p,420); 
 t proc-smaps VmFlags cat /proc/self/smaps
 t proc-pressure 'some avg10' cat /proc/pressure/cpu
 t futex-waitv-einval '^-1:22' perl -e 'my ($a,$b,$c,$d,$e)=(0,0,0,0,0); my $r=syscall(449,$a,$b,$c,$d,$e); print "$r:".($!+0)."\n"'
+APP_TMO=400
+t gcc-static-hello hello-static sh -c 'cd /tmp && printf "#include <stdio.h>\nint main(){puts(\"hello-static\");return 0;}\n" > hs.c && gcc -static -o hs hs.c && ./hs'
+t gcc-static-pthread 8 sh -c 'cd /tmp && printf "#include <pthread.h>\n#include <stdio.h>\nint c;pthread_mutex_t m=PTHREAD_MUTEX_INITIALIZER;void*w(void*a){pthread_mutex_lock(&m);c++;pthread_mutex_unlock(&m);return 0;}\nint main(){pthread_t t[8];for(int i=0;i<8;i++)pthread_create(&t[i],0,w,0);for(int i=0;i<8;i++)pthread_join(t[i],0);printf(\"%%d\",c);return 0;}\n" > st.c && gcc -static -O2 -pthread -o st st.c && ./st; echo'
+t gpp-hello hello-cpp sh -c 'cd /tmp && printf "#include <iostream>\nint main(){std::cout<<\"hello-cpp\"<<std::endl;return 0;}\n" > h.cc && g++ -o hcc h.cc && ./hcc'
+t gpp-stl 5:15 sh -c 'cd /tmp && printf "#include <vector>\n#include <map>\n#include <string>\n#include <algorithm>\n#include <iostream>\nint main(){std::vector<int> v{5,3,1,4,2};std::sort(v.begin(),v.end());std::map<std::string,int> m;m[\"a\"]=v[0];int s=0;for(int x:v)s+=x;std::cout<<v.size()<<\":\"<<s<<std::endl;return 0;}\n" > stl.cc && g++ -std=c++17 -O2 -o stl stl.cc && ./stl'
+t gpp-threads 8 sh -c 'cd /tmp && printf "#include <thread>\n#include <mutex>\n#include <vector>\n#include <iostream>\nint main(){std::mutex m;int c=0;std::vector<std::thread> t;for(int i=0;i<8;i++)t.emplace_back([&]{std::lock_guard<std::mutex> g(m);c++;});for(auto&x:t)x.join();std::cout<<c<<std::endl;return 0;}\n" > th.cc && g++ -std=c++17 -pthread -o th th.cc && ./th'
+t gpp-static-exceptions caught sh -c 'cd /tmp && printf "#include <stdexcept>\n#include <iostream>\nint main(){try{throw std::runtime_error(\"x\");}catch(std::exception&e){std::cout<<\"caught\"<<std::endl;}return 0;}\n" > ex.cc && g++ -static -o ex ex.cc && ./ex'
+echo FX-END
