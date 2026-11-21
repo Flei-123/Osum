@@ -66,7 +66,7 @@ grep -aq 'qsnet: link failed' "$S" && ok "scale $SCALE: no link after the timeou
 if [ -s "$D/badpw.ppm" ] && ocr "$D/badpw.ppm" | grep -qi "failed"; then ok "scale $SCALE: the picture shows the failure message"; else bad "scale $SCALE: no failure message in the picture"; fi
 r=$(python3 -I tools/qsfui/netcheck.py "$S" "$SCALE" 2>&1)
 nfail=$(printf '%s\n' "$r" | grep -c '^FAIL'); nok=$(printf '%s\n' "$r" | grep -c '^OK')
-if [ "$nfail" -eq 0 ] && [ "$nok" -ge 12 ]; then ok "scale $SCALE: network page layout -- $nok points hold (header, rows, footer, no empty space)"
+if [ "$nfail" -eq 0 ] && [ "$nok" -ge 14 ]; then ok "scale $SCALE: network page layout -- $nok points hold (header, rows, footer, no empty space)"
 else bad "scale $SCALE: network page layout: $nfail failed, $nok ok"; printf '%s\n' "$r" | grep '^FAIL' | head -8 | sed 's/^/        /'; fi
 if grep -aqE 'CRASH|EXCEPTION' "$S"; then bad "scale $SCALE: crash lines in serial"; else ok "scale $SCALE: no crash lines"; fi
 echo "QSNETWIFI: $pass passed, $fail failed"

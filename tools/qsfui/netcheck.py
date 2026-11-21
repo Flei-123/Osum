@@ -46,6 +46,7 @@ def main():
         x, y, w, h = b[40]
         ok(x == PAD * sc and y == PAD * sc, "header: back button at the padding corner (%d,%d)" % (x, y))
         ok(h == HEAD_H * sc, "header: back button is %d px high (%d points)" % (h, HEAD_H))
+    ok(55 in b, "header: the Wi-Fi switch is on the page")
     if 55 in b:
         x, y, w, h = b[55]
         ok(x + w == (PANEL_W - PAD) * sc, "header: the Wi-Fi switch ends at the right padding edge (%d)" % (x + w))
