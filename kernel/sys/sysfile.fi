@@ -1498,7 +1498,36 @@ fn do_fchown(state: u64, me: u64, fd: u64, uid: u64, gid: u64) -> u64 {
     return chown_ino(state, me, ino, uid, gid)
 }
 
+const ACCESS_NOT_VFS: u64 = 0xFFFFFFFFFFFFFFFF
+const ACCESS_WRITE: u64 = 2
+
+fn vfs_access(state: u64, me: u64, name: u64, want: u64) -> u64 {
+    if !vfs.ready(state) {
+        return ACCESS_NOT_VFS
+    }
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = sysuser.fetch_path(state, me, name, buf, sysconst.MAX_NAME)
+    if errno.is_error(len) {
+        return ACCESS_NOT_VFS
+    }
+    let m: u64 = vfs.mount_for(state, buf)
+    if m >= vfs.MAX_MNT || (m == 0 && !vfs.all_mode(state)) {
+        return ACCESS_NOT_VFS
+    }
+    if vfs.node_for(state, m, buf) == 0 {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    if (want & ACCESS_WRITE) != 0 && (mnt.flags(state, m) & mnt.F_RDONLY) != 0 {
+        return sysuser.neg(errno.E_ROFS)
+    }
+    return 0
+}
+
 fn do_access(state: u64, me: u64, name: u64, want: u64) -> u64 {
+    let on_vfs: u64 = vfs_access(state, me, name, want)
+    if on_vfs != ACCESS_NOT_VFS {
+        return on_vfs
+    }
     let ino: u64 = sysuser.ino_of_path(state, me, name)
     if errno.is_error(ino) {
         return ino
