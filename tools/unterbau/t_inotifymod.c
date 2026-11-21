@@ -68,7 +68,7 @@ int main(void)
     CHECK("file_watch_poll_ready", ready == 1, "poll -> %d", ready);
     CHECK("file_watch_modify", n == 1 && s[0].mask == IN_MODIFY && s[0].wd == fwd && s[0].name[0] == 0, "n=%d mask %x name '%s'", n, n ? s[0].mask : 0, n ? s[0].name : "");
     errno = 0;
-    char b[8];
+    char b[EVENT_BUF];
     CHECK("file_watch_idle_after_drain", read(in, b, sizeof b) == -1 && errno == EAGAIN, "events left");
 
     int rd = open(WORK_FILE, O_RDONLY);
