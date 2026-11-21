@@ -73,6 +73,20 @@ paket() { # verzeichnis
     python3 "$OPK" bauen "$d/rezept" -o "$OUT/$nm-$fs.opk" | sed 's/^/   /'
 }
 
+# a service built with the app profile: own entry, no crt, no start file
+service_elf() { # source dir name
+    local quelle=$1 paket=$2 name=$3
+    mkdir -p "$paket/bau"
+    "$FIRNC" --profile=app -c "$quelle" -o "$paket/bau/$name.o" || return 1
+    ld -T kernel/user/user.ld -o "$paket/bau/$name.elf" "$paket/bau/$name.o" || return 1
+    strip --strip-all "$paket/bau/$name.elf"
+    mv "$paket/bau/$name.elf" "$paket/bau/$name"
+    rm -f "$paket/bau/$name.o"
+    python3 tools/sdk/osdk.py check "$paket/INFO" --strict | sed 's/^/   /' || return 1
+    python3 tools/k15/mksymbol.py "$paket" "$paket/bau/symbol" | sed 's/^/   /'
+    echo "   $name $(stat -c%s "$paket/bau/$name") Oktette"
+}
+
 # a BUNDLE app (start + INFO + symbol, like tools/loader/pakete.sh): ELF, lint, symbol
 app() { # source dir name
     local quelle=$1 paket=$2 name=$3
@@ -90,6 +104,7 @@ elf kernel/user/stickwr.fi  pakete/stickwr         stickwr
 app kernel/user/fvviewer.fi pakete/fvviewer        fvviewer
 app kernel/user/mail.fi     pakete/mail            mail
 app kernel/user/jarvismini.fi pakete/jarvismini    jarvismini
+service_elf kernel/app/jarvisd.fi pakete/jarvisd   jarvisd
 # every package carries an action manifest (docs/ACTION-BUS.md, section 3)
 for d in pakete/*/; do
     [ -f "$d/ACTIONS" ] || continue
@@ -110,7 +125,7 @@ else
 fi
 
 echo "== die Pakete =="
-for d in pakete/wmplug-werkzeug pakete/wmplug-uhr pakete/wmplug-regel pakete/notes pakete/stickwr pakete/fvviewer pakete/mail pakete/jarvismini pakete/xremote; do
+for d in pakete/wmplug-werkzeug pakete/wmplug-uhr pakete/wmplug-regel pakete/notes pakete/stickwr pakete/fvviewer pakete/mail pakete/jarvismini pakete/jarvisd pakete/xremote; do
     if [ -d "$d/bau" ]; then
         paket "$d"
     else
