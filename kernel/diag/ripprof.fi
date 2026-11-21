@@ -1,0 +1,204 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.ksymtab
+import lib.procw
+import sched.time
+
+export { sample, sub_note, render }
+
+const SLOTS: u64 = 256
+const SLOT_MASK: u64 = 255
+const PROBE_MAX: u64 = 16
+const HASH_MUL: u64 = 0x9E3779B1
+const SUB_MAX: u64 = 40
+const TOP_LINES: u64 = 32
+const CS_RING_MASK: u64 = 3
+const NO_LINE_FLAG: u64 = 0x8000000000000000
+
+static mut slot_key: [u64; 256] = [0 as u64; 256]
+static mut slot_pid: [u64; 256] = [0 as u64; 256]
+static mut slot_rip: [u64; 256] = [0 as u64; 256]
+static mut slot_count: [u64; 256] = [0 as u64; 256]
+static mut slot_taken: [u8; 256] = [0 as u8; 256]
+static mut sub_cycles: [u64; 40] = [0 as u64; 40]
+static mut sub_peak: [u64; 40] = [0 as u64; 40]
+static mut sub_calls: [u64; 40] = [0 as u64; 40]
+static mut total_samples: u64 = 0
+static mut kernel_samples: u64 = 0
+static mut user_samples: u64 = 0
+static mut dropped_samples: u64 = 0
+
+static mut s_total: [u8; 7] = "total=\0"
+static mut s_kernel: [u8; 9] = " kernel=\0"
+static mut s_user: [u8; 7] = " user=\0"
+static mut s_dropped: [u8; 10] = " dropped=\0"
+static mut s_khz: [u8; 10] = " tsc_khz=\0"
+static mut s_n: [u8; 3] = "n=\0"
+static mut s_pid: [u8; 6] = " pid=\0"
+static mut s_rip: [u8; 6] = " rip=\0"
+static mut s_sub: [u8; 5] = "sub \0"
+static mut s_cyc: [u8; 9] = " cycles=\0"
+static mut s_peak: [u8; 7] = " peak=\0"
+static mut s_calls: [u8; 8] = " calls=\0"
+static mut s_plus: [u8; 2] = "+\0"
+static mut s_open: [u8; 3] = " (\0"
+static mut s_colon: [u8; 2] = ":\0"
+static mut s_close: [u8; 2] = ")\0"
+static mut s_user_tag: [u8; 5] = "user\0"
+
+fn slot_for(key: u64, pid: u64) -> u64 {
+    var at: u64 = (((key ^ (pid << 7)) *% HASH_MUL) >> 8) & SLOT_MASK
+    var step: u64 = 0
+    while step < PROBE_MAX {
+        if slot_count[at as usize] == 0 || (slot_key[at as usize] == key && slot_pid[at as usize] == pid) {
+            return at
+        }
+        at = (at + 1) & SLOT_MASK
+        step = step + 1
+    }
+    return SLOTS
+}
+
+fn sample(state: u64, rip: u64, cs: u64, pid: u64) {
+    total_samples = total_samples + 1
+    var key: u64 = rip | NO_LINE_FLAG
+    if (cs & CS_RING_MASK) == 0 {
+        kernel_samples = kernel_samples + 1
+        let packed: u64 = ksymtab.line_of(rip)
+        if packed != 0 {
+            key = packed
+        }
+    } else {
+        user_samples = user_samples + 1
+        key = NO_LINE_FLAG
+    }
+    let at: u64 = slot_for(key, pid)
+    if at >= SLOTS {
+        dropped_samples = dropped_samples + 1
+        return
+    }
+    slot_key[at as usize] = key
+    slot_pid[at as usize] = pid
+    slot_rip[at as usize] = rip
+    slot_count[at as usize] = slot_count[at as usize] + 1
+}
+
+fn sub_note(k: u64, cycles: u64) {
+    if k >= SUB_MAX {
+        return
+    }
+    sub_cycles[k as usize] = sub_cycles[k as usize] + cycles
+    sub_calls[k as usize] = sub_calls[k as usize] + 1
+    if cycles > sub_peak[k as usize] {
+        sub_peak[k as usize] = cycles
+    }
+}
+
+fn put_place(rip: u64, user: bool) {
+    if user {
+        procw.put_s((&s_user_tag[0]) as u64)
+        return
+    }
+    let i: u64 = ksymtab.resolve(rip)
+    if i >= ksymtab.n_sym() {
+        return
+    }
+    procw.put_s(ksymtab.sym_name(i))
+    procw.put_s((&s_plus[0]) as u64)
+    procw.put_hex(rip - ksymtab.sym_addr(i), 4)
+    let packed: u64 = ksymtab.line_of(rip)
+    if packed == 0 {
+        return
+    }
+    let name: u64 = ksymtab.file_name(ksymtab.line_file(packed))
+    if name == 0 {
+        return
+    }
+    procw.put_s((&s_open[0]) as u64)
+    procw.put_s(name)
+    procw.put_s((&s_colon[0]) as u64)
+    procw.put_dec(ksymtab.line_nr(packed))
+    procw.put_s((&s_close[0]) as u64)
+}
+
+fn put_header(state: u64) {
+    procw.put_s((&s_total[0]) as u64)
+    procw.put_dec(total_samples)
+    procw.put_s((&s_kernel[0]) as u64)
+    procw.put_dec(kernel_samples)
+    procw.put_s((&s_user[0]) as u64)
+    procw.put_dec(user_samples)
+    procw.put_s((&s_dropped[0]) as u64)
+    procw.put_dec(dropped_samples)
+    procw.put_s((&s_khz[0]) as u64)
+    procw.put_dec(time.khz(state))
+    procw.put_c(10)
+}
+
+fn best_slot() -> u64 {
+    var best: u64 = SLOTS
+    var best_count: u64 = 0
+    var i: u64 = 0
+    while i < SLOTS {
+        if slot_taken[i as usize] == 0 && slot_count[i as usize] > best_count {
+            best = i
+            best_count = slot_count[i as usize]
+        }
+        i = i + 1
+    }
+    return best
+}
+
+fn put_top() {
+    var i: u64 = 0
+    while i < SLOTS {
+        slot_taken[i as usize] = 0
+        i = i + 1
+    }
+    var line: u64 = 0
+    while line < TOP_LINES {
+        let at: u64 = best_slot()
+        if at >= SLOTS {
+            return
+        }
+        slot_taken[at as usize] = 1
+        procw.put_s((&s_n[0]) as u64)
+        procw.put_dec(slot_count[at as usize])
+        procw.put_s((&s_pid[0]) as u64)
+        procw.put_dec(slot_pid[at as usize])
+        procw.put_s((&s_rip[0]) as u64)
+        procw.put_hex(slot_rip[at as usize], 16)
+        procw.put_c(32)
+        put_place(slot_rip[at as usize], slot_key[at as usize] == NO_LINE_FLAG)
+        procw.put_c(10)
+        line = line + 1
+    }
+}
+
+fn put_subs() {
+    var k: u64 = 0
+    while k < SUB_MAX {
+        if sub_calls[k as usize] != 0 {
+            procw.put_s((&s_sub[0]) as u64)
+            procw.put_dec(k)
+            procw.put_s((&s_cyc[0]) as u64)
+            procw.put_dec(sub_cycles[k as usize])
+            procw.put_s((&s_peak[0]) as u64)
+            procw.put_dec(sub_peak[k as usize])
+            procw.put_s((&s_calls[0]) as u64)
+            procw.put_dec(sub_calls[k as usize])
+            procw.put_c(10)
+        }
+        k = k + 1
+    }
+}
+
+fn render(state: u64, out: u64, cap: u64) -> u64 {
+    procw.begin(out, cap)
+    put_header(state)
+    put_top()
+    put_subs()
+    return procw.used()
+}
