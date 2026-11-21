@@ -28,6 +28,8 @@ import ldr.bigpie
 import libc.regio
 import libc.numeric
 import ldr.elfstack
+import ldr.shebang
+import ldr.argpage
 
 export {
     spawn, build, lock_enter, lock_leave, load, load_at, say_reason, errno_of,
@@ -107,8 +109,6 @@ const PAGE: u64 = 4096
 const PAGE_MASK: u64 = 4095
 
 const POISON: u64 = 0xAAAAAAAAAAAAAAAA
-
-const STR_OFF: u64 = 544
 
 fn head(state: u64) -> u64 {
     return state + kstate.ELF_OFF
@@ -511,91 +511,6 @@ fn say_segment(state: u64, t: u64, ph: u64, bias: u64) {
     serial.nl()
 }
 
-const ENV_OFF: u64 = 2048
-const ENV_MAXN: u64 = 16
-const ENV_STR: u64 = 2192
-
-fn write_env(state: u64, frame: u64) {
-    let n0: u64 = kstate.get(state, kstate.K11_OFF + kstate.ENV_N)
-    var n: u64 = n0
-    if n > ENV_MAXN {
-        n = ENV_MAXN
-    }
-    regio.write64(frame + ENV_OFF, n)
-    var src: u64 = state + kstate.K11_OFF + kstate.ENV_BUF
-    var at: u64 = ENV_STR
-    var k: u64 = 0
-    while k < n {
-        regio.write64(frame + ENV_OFF + 8 + k * 8, procspace.ARGS_BASE + at)
-        var going: bool = true
-        while going {
-            if at >= PAGE - 1 {
-                regio.write64(frame + ENV_OFF, k)
-                return
-            }
-            let c: u64 = kstate.get8(src)
-            kstate.set8(frame + at, c as u8)
-            at = at + 1
-            src = src + 1
-            if c == 0 {
-                going = false
-            }
-        }
-        k = k + 1
-    }
-    regio.write64(frame + ENV_OFF + 8 + n * 8, 0)
-}
-
-fn write_args(state: u64, t: u64, args: u64, argc_all: u64, lossy: bool) -> bool {
-    var argc: u64 = argc_all
-    if argc > procbase.MAX_ARGS {
-        if !lossy {
-            return false
-        }
-        argc = procbase.MAX_ARGS
-    }
-    if procmap.page_free(state, t, procspace.ARGS_BASE) {
-        if procmap.map_page_zero(state, t, procspace.ARGS_BASE, true, false) == 0 {
-            return false
-        }
-    }
-    let frame: u64 = procmap.translate(state, t, procspace.ARGS_BASE)
-    if frame == 0 {
-        return false
-    }
-    fill_bytes(frame, PAGE, 0)
-    regio.write64(frame, argc)
-    var at: u64 = STR_OFF
-    var src: u64 = args
-    var k: u64 = 0
-    while k < argc {
-        regio.write64(frame + 8 + k * 8, procspace.ARGS_BASE + at)
-        var going: bool = true
-        while going {
-            if at >= ENV_OFF - 1 {
-                if !lossy {
-                    return false
-                }
-                regio.write64(frame, k)
-                regio.write64(frame + 8 + k * 8, 0)
-                write_env(state, frame)
-                return true
-            }
-            let c: u64 = kstate.get8(src)
-            kstate.set8(frame + at, c as u8)
-            at = at + 1
-            src = src + 1
-            if c == 0 {
-                going = false
-            }
-        }
-        k = k + 1
-    }
-    regio.write64(frame + 8 + argc * 8, 0)
-    write_env(state, frame)
-    return true
-}
-
 fn spawn(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     let lk: u64 = lock_enter(state)
     let t: u64 = build(state, path, args, argc, prio)
@@ -614,116 +529,6 @@ fn spawn(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     sched.start(state, t)
     sched.irq_restore(flags)
     return t
-}
-
-const MAX_INTERP: u64 = 4
-const IPATH_MAX: u64 = 128
-const IARGS_MAX: u64 = 2048
-const IWORD_MAX: u64 = 256
-
-fn is_gap(c: u64) -> bool {
-    return c == 32 || c == 9
-}
-
-fn read_shebang(state: u64, ino: u64, dst_path: u64, dst_arg: u64) -> u64 {
-    let buf: u64 = state + kstate.K16_OFF + kstate.FT_SB
-    var i: u64 = 0
-    while i < 256 {
-        kstate.set8(buf + i, 0 as u8)
-        i = i + 1
-    }
-    let n: u64 = fs.read_at(state, ino, 0, buf, 255)
-    if n < 3 {
-        return 0
-    }
-    if kstate.get8(buf) != 35 {
-        return 0
-    }
-    if kstate.get8(buf + 1) != 33 {
-        return 0
-    }
-    var ende: u64 = 2
-    var lookup: bool = true
-    while lookup {
-        if ende >= n {
-            lookup = false
-        } else {
-            let c: u64 = kstate.get8(buf + ende)
-            if c == 10 || c == 13 || c == 0 {
-                lookup = false
-            } else {
-                ende = ende + 1
-            }
-        }
-    }
-    var p: u64 = 2
-    while p < ende && is_gap(kstate.get8(buf + p)) {
-        p = p + 1
-    }
-    if p >= ende {
-        return 0 -% 1
-    }
-    var k: u64 = 0
-    while p < ende && !is_gap(kstate.get8(buf + p)) {
-        if k + 1 >= IPATH_MAX {
-            return 0 -% 1
-        }
-        kstate.set8(dst_path + k, kstate.get8(buf + p) as u8)
-        k = k + 1
-        p = p + 1
-    }
-    kstate.set8(dst_path + k, 0 as u8)
-    if k == 0 {
-        return 0 -% 1
-    }
-    while p < ende && is_gap(kstate.get8(buf + p)) {
-        p = p + 1
-    }
-    if p >= ende {
-        return 1
-    }
-    var e2: u64 = ende
-    while e2 > p && is_gap(kstate.get8(buf + e2 - 1)) {
-        e2 = e2 - 1
-    }
-    k = 0
-    while p < e2 {
-        if k + 1 >= IPATH_MAX {
-            return 0 -% 1
-        }
-        kstate.set8(dst_arg + k, kstate.get8(buf + p) as u8)
-        k = k + 1
-        p = p + 1
-    }
-    kstate.set8(dst_arg + k, 0 as u8)
-    return 2
-}
-
-fn copy_word(dst: u64, src: u64, max: u64) -> u64 {
-    var i: u64 = 0
-    while i < max {
-        let c: u64 = kstate.get8(src + i)
-        kstate.set8(dst + i, c as u8)
-        if c == 0 {
-            return i + 1
-        }
-        i = i + 1
-    }
-    kstate.set8(dst + max - 1, 0 as u8)
-    return max
-}
-
-fn word_at(args: u64, k: u64) -> u64 {
-    var at: u64 = 0
-    var i: u64 = 0
-    while i < k {
-        while kstate.get8(args + at) != 0 {
-            at = at + 1
-        }
-        at = at + 1
-        i = i + 1
-    }
-    return args + at
 }
 
 const IPATH_SLOT: u64 = 0x40
@@ -752,7 +557,7 @@ fn read_interp(state: u64, ino: u64, dst: u64) -> u64 {
             if len == 0 {
                 return R_IPATH
             }
-            if len > IPATH_MAX {
+            if len > shebang.IPATH_MAX {
                 return R_IPATH
             }
             if off > size {
@@ -780,13 +585,13 @@ fn jail_ipath(state: u64, ip: u64) -> bool {
         return true
     }
     var n: u64 = 0
-    while n < IPATH_MAX && kstate.get8(ip + n) != 0 {
+    while n < shebang.IPATH_MAX && kstate.get8(ip + n) != 0 {
         n = n + 1
     }
-    if n == 0 || n >= IPATH_MAX || kstate.get8(ip) != 47 {
+    if n == 0 || n >= shebang.IPATH_MAX || kstate.get8(ip) != 47 {
         return false
     }
-    return ctr.jail(state, t, ip, n, IPATH_MAX) != 0
+    return ctr.jail(state, t, ip, n, shebang.IPATH_MAX) != 0
 }
 
 fn aufloesen(state: u64, path: u64, args: u64, argc: u64) -> u64 {
@@ -807,45 +612,35 @@ fn aufloesen(state: u64, path: u64, args: u64, argc: u64) -> u64 {
             return errno.neg(errno.E_ISDIR)
         }
         let k16: u64 = state + kstate.K16_OFF
-        let ip: u64 = k16 + kstate.FT_IPATH + page * IPATH_MAX
-        let ia: u64 = k16 + kstate.FT_IPATH + 2 * IPATH_MAX + page * IPATH_MAX
-        let w: u64 = read_shebang(state, ino, ip, ia)
-        if w == 0 {
+        let ip: u64 = k16 + kstate.FT_IPATH + page * shebang.IPATH_MAX
+        let ia: u64 = k16 + kstate.FT_IPATH + 2 * shebang.IPATH_MAX + page * shebang.IPATH_MAX
+        let w: u64 = shebang.parse(state, ino, ip, ia)
+        if w == shebang.NOT_SCRIPT {
             search = false
         } else {
-            if w == (0 -% 1) {
+            if w == shebang.BAD_LINE || level >= shebang.MAX_INTERP {
                 fail(state, R_INTERP)
                 return errno.neg(errno.E_LOOP)
             }
-            if level >= MAX_INTERP {
-                fail(state, R_INTERP)
-                return errno.neg(errno.E_LOOP)
+            var fresh: u64 = w + 1
+            if n > 1 {
+                fresh = fresh + n - 1
             }
-            let na: u64 = k16 + kstate.FT_ARGS + page * IARGS_MAX
-            var at: u64 = 0
-            var fresh: u64 = 0
-            at = at + copy_word(na + at, ip, IWORD_MAX)
-            fresh = fresh + 1
-            if w == 2 {
-                at = at + copy_word(na + at, ia, IWORD_MAX)
-                fresh = fresh + 1
-            }
-            at = at + copy_word(na + at, p + ctr.prefix_len(state, sched.current(state), p), IWORD_MAX)
-            fresh = fresh + 1
-            var k: u64 = 1
-            while k < n {
-                if at + IWORD_MAX > IARGS_MAX {
-                    fail(state, R_ARGS)
-                    return errno.neg(errno.E_2BIG)
-                }
-                at = at + copy_word(na + at, word_at(a, k), IWORD_MAX)
-                fresh = fresh + 1
-                k = k + 1
-            }
-            if fresh > procbase.MAX_ARGS {
+            if fresh > procbase.MAX_EXEC_ARGS {
                 fail(state, R_ARGS)
                 return errno.neg(errno.E_2BIG)
             }
+            let script: u64 = p + ctr.prefix_len(state, sched.current(state), p)
+            let na: u64 = shebang.rewrite(state, ip, ia, w, script, a, n)
+            if na == shebang.TOO_BIG {
+                fail(state, R_ARGS)
+                return errno.neg(errno.E_2BIG)
+            }
+            if na == 0 {
+                fail(state, R_NOMEM)
+                return errno.neg(errno.E_NOMEM)
+            }
+            shebang.commit(state)
             let z: u64 = kstate.K16_OFF + kstate.FT_SCALARS
                 + kstate.FT_SHEBANGS
             kstate.set(state, z, kstate.get(state, z) + 1)
@@ -900,6 +695,12 @@ fn say_lock_stuck() {
 }
 
 fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
+    let t: u64 = build_image(state, path, args, argc, prio)
+    shebang.release(state)
+    return t
+}
+
+fn build_image(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     fail(state, R_OK)
     if kstate.get(state, kstate.FS_READY) == 0 {
         fail(state, R_NOFILE)
@@ -944,7 +745,7 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     let h0: u64 = head(state)
     let ist_dyn: bool = regio.read16(h0 + E_TYPE) == ET_DYN
     let ipath: u64 = state + kstate.K16_OFF + kstate.FT_IPATH
-        + 3 * IPATH_MAX
+        + 3 * shebang.IPATH_MAX
     let ir: u64 = read_interp(state, ino, ipath)
     if ir != R_KEINER {
         if ir != R_OK {
@@ -1019,7 +820,7 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
             return 0
         }
         let chain: u64 = state + kstate.K16_OFF + kstate.FT_IPATH
-            + 4 * IPATH_MAX
+            + 4 * shebang.IPATH_MAX
         if read_interp(state, iino, chain) != R_KEINER {
             procswap.discard(state, t)
             sched.irq_restore(flags)
@@ -1039,7 +840,8 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
             + kstate.FT_SCALARS + DYN_ENTRY)
     }
     perm.apply_exec(state, t, ino)
-    if !write_args(state, t, a, n, braucht_lader || ist_dyn || low_exec) {
+    var ustack: u64 = argpage.write(state, t, a, n, braucht_lader || ist_dyn || low_exec)
+    if ustack == 0 {
         procswap.discard(state, t)
         sched.irq_restore(flags)
         fail(state, R_ARGS)
@@ -1058,7 +860,6 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
         return 0
     }
     taskslot.tset(state, t, taskconst.T_ENTRY, eentry)
-    var ustack: u64 = procspace.ARGS_BASE
     if braucht_lader || ist_dyn || low_exec {
         let sp: u64 = elfstack.build(state, t, a, n, at_phdr, at_phnum,
             PHENTSIZE, at_entry, at_base, path)

@@ -84,9 +84,9 @@ fn set_mask" "    return P_ALL
 fn set_mask"
 mutate revoke-all policy.fi "return set_mask(name, get_mask(name) & (P_ALL - (bits & P_ALL)))" "return set_mask(name, 0)"
 mutate manifest-all conf.fi "ceil = ceil | (parse_rights(buf + at + 5, e - at - 5) & policy.P_ALL)" "ceil = policy.P_ALL"
-mutate manifest-prefix conf.fi "&& rd(buf, at + 3) == 109 && rd(buf, at + 4) == 61" "&& rd(buf, at + 3) == 109"
+mutate manifest-prefix conf.fi "&& octets.ld8(buf, at + 3) == 109 && octets.ld8(buf, at + 4) == 61" "&& octets.ld8(buf, at + 3) == 109"
 mutate bad-right-kept conf.fi "if (m & BAD_RIGHT) != 0 || m == 0 {" "if m == 0 {"
-mutate comment-kept conf.fi "if s < e && rd(buf, s) != 35 {" "if s < e {"
+mutate comment-kept conf.fi "if s < e && octets.ld8(buf, s) != 35 {" "if s < e {"
 mutate update-keeps-old conf.fi "if !same_name(cur_name(), app) {" "if true {"
 mutate update-no-append conf.fi "    if mask != 0 {
         n = put_line(out, n, outmax, app, mask)" "    if false {
@@ -100,7 +100,7 @@ mutate auto-all-rights conf.fi "let safe: u64 = ceil & policy.P_SAFE" "let safe:
 mutate find-first-line conf.fi "        if same_name(cur_name(), app) {
             return cur_mask()" "        if true {
             return cur_mask()"
-mutate plan-no-tab conf.fi "while q < e && rd(buf, q) != 9 {" "while q < e {"
+mutate plan-no-tab conf.fi "while q < e && octets.ld8(buf, q) != 9 {" "while q < e {"
 mutate acct-field-shared policy.fi "return ((&acct[0]) as u64) + (s * 4 + field) * 8" "return ((&acct[0]) as u64) + (s * 4) * 8"
 mutate acct-slot-shared policy.fi "return ((&acct[0]) as u64) + (s * 4 + field) * 8" "return ((&acct[0]) as u64) + field * 8"
 mutate acct-unbound-app policy.fi "    let s: u64 = app_slot(app)
@@ -130,10 +130,10 @@ mutate fs-read-all fspolicy.fi "    if under_data(app, path, plen) {
     }
     return tbl_match(path, plen)" "    return true"
 mutate fs-write-all fspolicy.fi "    return under_data(app, path, slen(path))" "    return true"
-mutate fs-name-prefix fspolicy.fi "    return rd(path, 6 + an) == 47" "    return true"
+mutate fs-name-prefix fspolicy.fi "    return octets.ld8(path, 6 + an) == 47" "    return true"
 mutate fs-other-data fspolicy.fi "    var i: u64 = 0
     while i < an {
-        if rd(path, 6 + i) != rd(app, i) {
+        if octets.ld8(path, 6 + i) != octets.ld8(app, i) {
             return false
         }
         i = i + 1
@@ -156,6 +156,6 @@ mutate fs-exact-loose fspolicy.fi "            if plen != n {
                 same = false
             }" ""
 mutate fs-sandbox-manifest conf.fi "            return policy.F_SANDBOX" "            return 0"
-mutate fs-sandbox-trim conf.fi "while te > at && (rd(buf, te - 1) == 13 || rd(buf, te - 1) == 32) {" "while false {"
+mutate fs-sandbox-trim conf.fi "while te > at && (octets.ld8(buf, te - 1) == 13 || octets.ld8(buf, te - 1) == 32) {" "while false {"
 echo "APPRIGHTS-HOST: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -10,7 +10,7 @@ import sys.sysuser
 import libc.regio
 
 export {
-    fetch, release, buf, argc, WORDS
+    fetch, fetch_n, release, buf, argc, WORDS
 }
 
 const WORDS: u64 = 3
@@ -18,6 +18,7 @@ const W_BUF: u64 = 0
 const W_ARGC: u64 = 1
 const W_BIG: u64 = 2
 const WORD_BYTES: u64 = 8
+const UNTIL_NULL: u64 = 0xFFFFFFFFFFFFFFFF
 const BIG_FRAMES: u64 = procbase.EXEC_TOTAL_MAX / mmframe.FRAME_SIZE
 
 fn buf(st: u64) -> u64 {
@@ -93,21 +94,25 @@ fn fetch_one(state: u64, me: u64, st: u64, p: u64, at: u64) -> u64 {
     return n
 }
 
-fn fetch(state: u64, me: u64, argv: u64, st: u64) -> u64 {
+fn gather(state: u64, me: u64, argv: u64, st: u64, declared: u64) -> u64 {
     regio.write64_at(st, W_BUF * WORD_BYTES, cpu.earg_buf(state))
     regio.write64_at(st, W_ARGC * WORD_BYTES, 0)
     regio.write64_at(st, W_BIG * WORD_BYTES, 0)
-    if argv == 0 {
+    if (argv == 0 && declared == UNTIL_NULL) || declared == 0 {
         return 0
     }
     var at: u64 = 0
     var count: u64 = 0
     while count <= procbase.MAX_EXEC_ARGS {
+        if count == declared {
+            regio.write64_at(st, W_ARGC * WORD_BYTES, count)
+            return 0
+        }
         if !procfault.user_ok(state, me, argv + count * WORD_BYTES, WORD_BYTES) {
             return fail(state, st, sysuser.neg(errno.E_FAULT))
         }
         let p: u64 = sysuser.user_word(state, me, argv + count * WORD_BYTES)
-        if p == 0 {
+        if p == 0 && declared == UNTIL_NULL {
             regio.write64_at(st, W_ARGC * WORD_BYTES, count)
             return 0
         }
@@ -122,4 +127,12 @@ fn fetch(state: u64, me: u64, argv: u64, st: u64) -> u64 {
         count = count + 1
     }
     return too_big(state, st)
+}
+
+fn fetch(state: u64, me: u64, argv: u64, st: u64) -> u64 {
+    return gather(state, me, argv, st, UNTIL_NULL)
+}
+
+fn fetch_n(state: u64, me: u64, argv: u64, declared: u64, st: u64) -> u64 {
+    return gather(state, me, argv, st, declared)
 }
