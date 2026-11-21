@@ -175,7 +175,7 @@ static void run_pipe_stream(long n)
     (void)n;
     while (got < SBP_PIPE_TOTAL && (r = read(sbp_b, sink, sizeof sink)) > 0)
         got += r;
-    if (got != SBP_PIPE_TOTAL)
+    if (got < SBP_PIPE_TOTAL)
         exit(18);
 }
 
@@ -190,13 +190,9 @@ static void sbp_pipe_stream(void)
     }
     sbp_child = fork();
     if (sbp_child == 0) {
-        long sent = 0;
         close(fds[0]);
-        while (sent < SBP_PIPE_TOTAL) {
-            if (write(fds[1], io_buf, SBP_STREAM_BLOCK) != SBP_STREAM_BLOCK)
-                _exit(1);
-            sent += SBP_STREAM_BLOCK;
-        }
+        while (write(fds[1], io_buf, SBP_STREAM_BLOCK) == SBP_STREAM_BLOCK)
+            ;
         _exit(0);
     }
     close(fds[1]);
