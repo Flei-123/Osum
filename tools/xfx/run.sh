@@ -147,6 +147,13 @@ echo rc=$?
 /bin/xfxt procs
 /bin/xfxt exists /run/xfx-1000/wayland-0
 /bin/xfxt exists /home/justin/.xfx/profile/user.js
+echo @@theme
+/bin/cat /home/justin/.xfx/profile/user.js
+/bin/xfx stop
+echo mode=light > /etc/theme.conf
+/bin/xfx start
+echo rc=$?
+/bin/cat /home/justin/.xfx/profile/user.js
 echo @@twice
 /bin/xfx start
 echo rc=$?
@@ -201,7 +208,8 @@ for p in sh echo cat sleep tar xfx xfxt; do
     SPEC="$SPEC /bin/$p=$TMPD/$p.elf"
 done
 SPEC="$SPEC /bin/wayd=$TMPD/xfxstub.elf"
-BASE="$SPEC /etc/passwd=$TMPD/passwd@644:0:0 /etc/group=$TMPD/group@644:0:0 /usr/share/xfx/user.js=$TMPD/user.js@644:0:0"
+printf 'scheme=default\nmode=dark\naccent=blue\n' > "$TMPD/theme.conf"
+BASE="$SPEC /etc/theme.conf=$TMPD/theme.conf@644:0:0 /etc/passwd=$TMPD/passwd@644:0:0 /etc/group=$TMPD/group@644:0:0 /usr/share/xfx/user.js=$TMPD/user.js@644:0:0"
 
 build_parts_img() {
     local name=$1 script=$2 plist="" src=${PARTS_SRC:-good} blocks=${PARTS_BLOCKS:-16384}
@@ -318,6 +326,11 @@ has "$M" start 'proc firefox +uid=1000' "PSTAT shows firefox uid 1000"
 has "$M" start 'proc wayd +uid=1000' "PSTAT shows wayd uid 1000"
 hasnot "$M" start 'proc (firefox|wayd) +uid=0' "no firefox/wayd as root"
 [ "$(seg "$M" start | grep -ac 'exists=yes')" = 2 ] && ok "socket and profile user.js exist" || bad "socket or profile user.js missing"
+[ "$(seg "$M" theme | grep -ac 'systemUsesDarkTheme", 1')" = 1 ] && ok "profile user.js is dark while theme.conf says dark" || bad "dark prefs missing for mode=dark"
+[ "$(seg "$M" theme | grep -ac 'systemUsesDarkTheme", 0')" = 1 ] && ok "profile user.js turns light after theme.conf says light and a restart" || bad "light prefs missing for mode=light"
+has "$M" theme 'firefox-compact-dark@mozilla.org' "dark Firefox theme requested"
+has "$M" theme 'firefox-compact-light@mozilla.org' "light Firefox theme requested"
+has "$M" theme 'checkDefaultBrowser' "base user.js prefs kept"
 has "$M" twice 'already running' "second start refused"
 has "$M" nonroot 'root only' "non-root install refused"
 [ "$(seg "$M" nonroot | grep -ac 'xfx: root only')" = 1 ] && ok "install refused for uid 1000" || bad "install not refused exactly once for uid 1000"
