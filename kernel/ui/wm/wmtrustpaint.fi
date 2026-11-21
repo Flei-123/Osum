@@ -1,0 +1,281 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import gfx.fb
+import lib.kstate
+import ui.wm.wmdraw
+import ui.wm.wmtrust
+import ui.wm.wmtruststate
+import ui.wm.wmtrustgeom
+import ui.wm.wmtrustpal
+import ui.wm.wmtrusttxt
+
+const SCRIM_ALPHA: u64 = 120
+const SCRIM_COLOUR: u64 = 0
+const BUTTON_RADIUS: u64 = 4
+const RING_GROW: u64 = 2
+const CHECK_SIDE: u64 = 18
+const CHECK_INSET: u64 = 4
+const CHECK_GAP: u64 = 10
+const INFO_GAP: u64 = 8
+const FALLBACK_ICON_PCT: u64 = 80
+
+fn colour(state: u64, role: u64) -> u64 {
+    return wmtrustpal.colour(state, role)
+}
+
+fn shield(state: u64, cx: u64, top: u64, size: u64, color: u64) {
+    let shoulder: u64 = size * 55 / 100
+    let half: u64 = size * 40 / 100
+    var r: u64 = 0
+    while r < size {
+        var hw: u64 = half
+        if r > shoulder {
+            hw = half * (size - r) / (size - shoulder)
+        }
+        if hw > 0 {
+            fb.fill(state, cx - hw, top + r, 2 * hw, 1, color)
+        }
+        r = r + 1
+    }
+}
+
+fn paint_frame(state: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    let k: u64 = wmtrustgeom.scale(state)
+    let x: u64 = wmtrustgeom.dx(state)
+    let y: u64 = wmtrustgeom.dy(state)
+    let w: u64 = wmtrustgeom.dw(state)
+    let h: u64 = wmtrustgeom.dh(state)
+    let r: u64 = wmtrustgeom.RADIUS * k
+    let head_b: u64 = wmtrustgeom.head_bottom(state)
+    let foot_t: u64 = wmtrustgeom.foot_top(state)
+    wmdraw.fill_round(state, x as i64, y as i64, w as i64, h as i64, r, colour(state, wmtrustpal.P_BORDER), 255, cx0, cy0, cx1, cy1)
+    wmdraw.fill_round(state, (x + k) as i64, (y + k) as i64, (w - 2 * k) as i64, (h - 2 * k) as i64, r - k, colour(state, wmtrustpal.P_HEAD), 255, cx0, cy0, cx1, cy1)
+    wmdraw.fill_clip(state, (x + k) as i64, head_b as i64, (w - 2 * k) as i64, (foot_t - head_b) as i64, colour(state, wmtrustpal.P_BODY), 255, cx0, cy0, cx1, cy1)
+    wmdraw.fill_round(state, (x + k) as i64, foot_t as i64, (w - 2 * k) as i64, (y + h - k - foot_t) as i64, r - k, colour(state, wmtrustpal.P_FOOT), 255, cx0, cy0, cx1, cy1)
+    wmdraw.fill_clip(state, (x + k) as i64, foot_t as i64, (w - 2 * k) as i64, r as i64, colour(state, wmtrustpal.P_FOOT), 255, cx0, cy0, cx1, cy1)
+}
+
+fn paint_close_glyph(state: u64, ink: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    let k: u64 = wmtrustgeom.scale(state)
+    let size: u64 = wmtrustgeom.CLOSE_GLYPH * k
+    let left: u64 = wmtrustgeom.close_x(state) + (wmtrustgeom.CLOSE_W * k - size) / 2
+    let top: u64 = wmtrustgeom.dy(state) + (wmtrustgeom.SMALL_H * k - size) / 2
+    var i: u64 = 0
+    while i < size {
+        wmdraw.fill_clip(state, (left + i) as i64, (top + i) as i64, k as i64, k as i64, ink, 255, cx0, cy0, cx1, cy1)
+        wmdraw.fill_clip(state, (left + size - 1 - i) as i64, (top + i) as i64, k as i64, k as i64, ink, 255, cx0, cy0, cx1, cy1)
+        i = i + 1
+    }
+}
+
+fn paint_head(state: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    let k: u64 = wmtrustgeom.scale(state)
+    let ink: u64 = colour(state, wmtrustpal.P_TEXT)
+    wmtrusttxt.draw(state, wmtrustgeom.text_x(state), wmtrustgeom.dy(state), wmtrustgeom.SMALL_H * k,
+        (&wmtruststate.td_title[0]) as u64, ink, wmtrustgeom.SMALL_PX * k, k)
+    paint_close_glyph(state, ink, cx0, cy0, cx1, cy1)
+    var l: u64 = 0
+    while l < wmtruststate.td_nq {
+        wmtrusttxt.draw(state, wmtrustgeom.text_x(state), wmtrustgeom.q_top(state, l), wmtrustgeom.Q_LINE * k,
+            wmtruststate.td_line(wmtruststate.TD_Q_AT + l), ink, wmtrustgeom.Q_PX * k, k)
+        l = l + 1
+    }
+}
+
+fn icon_sample(state: u64, sx0: u64, sx1: u64, sy0: u64, sy1: u64, out_x: u64, out_y: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    var sr: u64 = 0
+    var sg: u64 = 0
+    var sb: u64 = 0
+    var sa: u64 = 0
+    var n: u64 = 0
+    var sy: u64 = sy0
+    while sy < sy1 {
+        var sx: u64 = sx0
+        while sx < sx1 {
+            let at: u64 = wmtruststate.td_icon_ptr() + wmtruststate.TD_ICON_HEAD + (sy * wmtruststate.TD_ICON_SIDE + sx) * 4
+            let a: u64 = kstate.get8(at + 3)
+            sr = sr + kstate.get8(at) * a
+            sg = sg + kstate.get8(at + 1) * a
+            sb = sb + kstate.get8(at + 2) * a
+            sa = sa + a
+            n = n + 1
+            sx = sx + 1
+        }
+        sy = sy + 1
+    }
+    if sa == 0 {
+        return
+    }
+    wmdraw.px_clip(state, out_x as i64, out_y as i64, fb.rgb(state, sr / sa, sg / sa, sb / sa), sa / n, cx0, cy0, cx1, cy1)
+}
+
+fn paint_icon_pixels(state: u64, left: u64, top: u64, size: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    let side: u64 = wmtruststate.TD_ICON_SIDE
+    var dy: u64 = 0
+    while dy < size {
+        let py: i64 = (top + dy) as i64
+        if py >= cy0 && py < cy1 {
+            let sy0: u64 = dy * side / size
+            var sy1: u64 = ((dy + 1) * side + size - 1) / size
+            if sy1 <= sy0 {
+                sy1 = sy0 + 1
+            }
+            var dx: u64 = 0
+            while dx < size {
+                let sx0: u64 = dx * side / size
+                var sx1: u64 = ((dx + 1) * side + size - 1) / size
+                if sx1 <= sx0 {
+                    sx1 = sx0 + 1
+                }
+                icon_sample(state, sx0, sx1, sy0, sy1, left + dx, top + dy, cx0, cy0, cx1, cy1)
+                dx = dx + 1
+            }
+        }
+        dy = dy + 1
+    }
+}
+
+fn paint_icon_fallback(state: u64, left: u64, top: u64, size: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    let k: u64 = wmtrustgeom.scale(state)
+    let inner: u64 = size * FALLBACK_ICON_PCT / 100
+    let off: u64 = (size - inner) / 2
+    wmdraw.fill_round(state, (left + off) as i64, (top + off) as i64, inner as i64, inner as i64, 4 * k, colour(state, wmtrustpal.P_MUTED), 255, cx0, cy0, cx1, cy1)
+    wmdraw.fill_round(state, (left + off + 2 * k) as i64, (top + off + 8 * k) as i64, (inner - 4 * k) as i64, (inner - 10 * k) as i64, 2 * k, colour(state, wmtrustpal.P_BODY), 255, cx0, cy0, cx1, cy1)
+}
+
+fn paint_app(state: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    let k: u64 = wmtrustgeom.scale(state)
+    let size: u64 = wmtrustgeom.ICON * k
+    if wmtruststate.td_icon_ready() {
+        paint_icon_pixels(state, wmtrustgeom.text_x(state), wmtrustgeom.icon_top(state), size, cx0, cy0, cx1, cy1)
+    } else {
+        paint_icon_fallback(state, wmtrustgeom.text_x(state), wmtrustgeom.icon_top(state), size, cx0, cy0, cx1, cy1)
+    }
+    let ink: u64 = colour(state, wmtrustpal.P_TEXT)
+    var l: u64 = 0
+    while l < wmtrustgeom.name_rows() {
+        wmtrusttxt.draw(state, wmtrustgeom.name_x(state), wmtrustgeom.name_top(state) + l * wmtrustgeom.NAME_LINE * k,
+            wmtrustgeom.NAME_LINE * k, wmtruststate.td_line(wmtruststate.TD_NAME_AT + l), ink, wmtrustgeom.NAME_PX * k, k)
+        l = l + 1
+    }
+}
+
+fn paint_publisher(state: u64) {
+    let k: u64 = wmtrustgeom.scale(state)
+    let size: u64 = wmtrustgeom.SHIELD * k
+    let row: u64 = wmtrustgeom.ROW * k
+    var shield_role: u64 = wmtrustpal.P_WARN
+    var text_role: u64 = wmtrustpal.P_WARN_TEXT
+    if wmtruststate.td_verified != 0 {
+        shield_role = wmtrustpal.P_ACCENT
+        text_role = wmtrustpal.P_TEXT
+    }
+    let info_x: u64 = wmtrustgeom.text_x(state) + size + INFO_GAP * k
+    shield(state, wmtrustgeom.text_x(state) + size / 2, wmtrustgeom.pub_top(state) + (row - size) / 2, size, colour(state, shield_role))
+    wmtrusttxt.draw(state, info_x, wmtrustgeom.pub_top(state), row, (&wmtruststate.td_pub[0]) as u64, colour(state, text_role), wmtrustgeom.ROW_PX * k, k)
+    wmtrusttxt.draw(state, info_x, wmtrustgeom.origin_top(state), row, (&wmtruststate.td_origin[0]) as u64, colour(state, wmtrustpal.P_TEXT), wmtrustgeom.ROW_PX * k, k)
+}
+
+fn paint_details(state: u64) {
+    let k: u64 = wmtrustgeom.scale(state)
+    let muted: u64 = colour(state, wmtrustpal.P_MUTED)
+    var desc_ink: u64 = muted
+    if wmtruststate.td_plain != 0 {
+        desc_ink = colour(state, wmtrustpal.P_TEXT)
+    }
+    var l: u64 = 0
+    while l < wmtruststate.td_ndesc {
+        wmtrusttxt.draw(state, wmtrustgeom.text_x(state), wmtrustgeom.desc_top(state, l), wmtrustgeom.ROW * k,
+            wmtruststate.td_line(wmtruststate.TD_DESC_AT + l), desc_ink, wmtrustgeom.ROW_PX * k, k)
+        l = l + 1
+    }
+    if wmtruststate.td_ndet == 0 {
+        return
+    }
+    var label: u64 = (&wmtruststate.td_link[0]) as u64
+    if wmtruststate.td_open != 0 {
+        label = (&wmtruststate.td_hide[0]) as u64
+    }
+    wmtrusttxt.draw(state, wmtrustgeom.text_x(state), wmtrustgeom.link_top(state), wmtrustgeom.ROW * k, label,
+        colour(state, wmtrustpal.P_ACCENT), wmtrustgeom.ROW_PX * k, k)
+    if wmtruststate.td_open == 0 {
+        return
+    }
+    var d: u64 = 0
+    while d < wmtruststate.td_ndet {
+        wmtrusttxt.draw(state, wmtrustgeom.text_x(state) + wmtrustgeom.DETAIL_INDENT * k, wmtrustgeom.det_top(state, d), wmtrustgeom.DET_ROW * k,
+            wmtruststate.td_line(wmtruststate.TD_DET_AT + d), muted, wmtrustgeom.DET_PX * k, k)
+        d = d + 1
+    }
+}
+
+fn paint_remember(state: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if wmtruststate.td_rem == 0 {
+        return
+    }
+    let k: u64 = wmtrustgeom.scale(state)
+    let side: u64 = CHECK_SIDE * k
+    let left: u64 = wmtrustgeom.text_x(state)
+    let top: u64 = wmtrustgeom.rem_top(state) + (wmtrustgeom.REM_H * k - side) / 2
+    wmdraw.fill_round(state, left as i64, top as i64, side as i64, side as i64, 2 * k, colour(state, wmtrustpal.P_BORDER), 255, cx0, cy0, cx1, cy1)
+    wmdraw.fill_round(state, (left + k) as i64, (top + k) as i64, (side - 2 * k) as i64, (side - 2 * k) as i64, k, colour(state, wmtrustpal.P_FOOT), 255, cx0, cy0, cx1, cy1)
+    if wmtruststate.td_rem_on != 0 {
+        wmdraw.fill_round(state, (left + CHECK_INSET * k) as i64, (top + CHECK_INSET * k) as i64, (side - 2 * CHECK_INSET * k) as i64, (side - 2 * CHECK_INSET * k) as i64, k, colour(state, wmtrustpal.P_ACCENT), 255, cx0, cy0, cx1, cy1)
+    }
+    wmtrusttxt.draw(state, left + side + CHECK_GAP * k, wmtrustgeom.rem_top(state), wmtrustgeom.REM_H * k,
+        (&wmtruststate.td_rlab[0]) as u64, colour(state, wmtrustpal.P_TEXT), wmtrustgeom.ROW_PX * k, k)
+}
+
+fn paint_button(state: u64, b: u64, fill: u64, edge: u64, ink: u64, label: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    let k: u64 = wmtrustgeom.scale(state)
+    let bx: u64 = wmtrustgeom.btn_x(state, b)
+    let by: u64 = wmtrustgeom.btn_top(state)
+    let bw: u64 = wmtrustgeom.btn_w(state)
+    let bh: u64 = wmtrustgeom.btn_h(state)
+    wmdraw.fill_round(state, bx as i64, by as i64, bw as i64, bh as i64, BUTTON_RADIUS * k, edge, 255, cx0, cy0, cx1, cy1)
+    wmdraw.fill_round(state, (bx + k) as i64, (by + k) as i64, (bw - 2 * k) as i64, (bh - 2 * k) as i64, (BUTTON_RADIUS - 1) * k, fill, 255, cx0, cy0, cx1, cy1)
+    let tw: u64 = wmtrusttxt.width(state, label, wmtrustgeom.BTN_PX * k, k)
+    var tx: u64 = bx + k
+    if tw < bw {
+        tx = bx + (bw - tw) / 2
+    }
+    wmtrusttxt.draw(state, tx, by, bh, label, ink, wmtrustgeom.BTN_PX * k, k)
+}
+
+fn paint_buttons(state: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    let k: u64 = wmtrustgeom.scale(state)
+    let grow: u64 = RING_GROW * k
+    wmdraw.fill_round(state, (wmtrustgeom.btn_x(state, wmtruststate.td_focus) - grow) as i64, (wmtrustgeom.btn_top(state) - grow) as i64,
+        (wmtrustgeom.btn_w(state) + 2 * grow) as i64, (wmtrustgeom.btn_h(state) + 2 * grow) as i64, (BUTTON_RADIUS + RING_GROW) * k,
+        colour(state, wmtrustpal.P_RING), 255, cx0, cy0, cx1, cy1)
+    let accent: u64 = colour(state, wmtrustpal.P_ACCENT)
+    paint_button(state, 0, colour(state, wmtrustpal.P_BUTTON), colour(state, wmtrustpal.P_BUTTON_EDGE), colour(state, wmtrustpal.P_TEXT),
+        (&wmtruststate.td_yes[0]) as u64, cx0, cy0, cx1, cy1)
+    paint_button(state, 1, accent, accent, colour(state, wmtrustpal.P_ON_ACCENT), (&wmtruststate.td_nol[0]) as u64, cx0, cy0, cx1, cy1)
+}
+
+fn td_paint(state: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
+    if !wmtrust.td_live(state) {
+        return
+    }
+    let cx0: i64 = x0 as i64
+    let cy0: i64 = y0 as i64
+    let cx1: i64 = x1 as i64
+    let cy1: i64 = y1 as i64
+    wmdraw.fill_clip(state, cx0, cy0, (x1 - x0) as i64, (y1 - y0) as i64, SCRIM_COLOUR, SCRIM_ALPHA, cx0, cy0, cx1, cy1)
+    let x: u64 = wmtrustgeom.dx(state)
+    let y: u64 = wmtrustgeom.dy(state)
+    if x1 <= x || x0 >= x + wmtrustgeom.dw(state) || y1 <= y || y0 >= y + wmtrustgeom.dh(state) {
+        return
+    }
+    paint_frame(state, cx0, cy0, cx1, cy1)
+    paint_head(state, cx0, cy0, cx1, cy1)
+    if wmtruststate.td_plain == 0 {
+        paint_app(state, cx0, cy0, cx1, cy1)
+        paint_publisher(state)
+    }
+    paint_details(state)
+    paint_remember(state, cx0, cy0, cx1, cy1)
+    paint_buttons(state, cx0, cy0, cx1, cy1)
+}

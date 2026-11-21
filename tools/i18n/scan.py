@@ -75,6 +75,8 @@ OBERFLAECHE = [
     "kernel/user/msg.fi",
     "kernel/ui/wm.fi",
     "kernel/ui/wm/wmtrust.fi",
+    "kernel/ui/wm/wmtrustmsg.fi",
+    "kernel/ui/wm/wmtrustpaint.fi",
 ]
 
 QUELLEN = ["kernel"]

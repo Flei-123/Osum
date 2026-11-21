@@ -1,0 +1,222 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import ui.wm.wmtruststate
+import ui.wm.wmtrustgeom
+import ui.wm.wmtrusttxt
+
+const FIELD_QUESTION: u64 = 0
+const FIELD_TITLE: u64 = 1
+const FIELD_NAME: u64 = 2
+const FIELD_PUBLISHER: u64 = 3
+const FIELD_VERIFIED: u64 = 4
+const FIELD_ORIGIN: u64 = 5
+const FIELD_DESCRIPTION: u64 = 6
+const FIELD_DETAILS: u64 = 7
+const FIELD_HIDE: u64 = 8
+const FIELD_YES: u64 = 9
+const FIELD_NO: u64 = 10
+const FIELD_REMEMBER: u64 = 11
+
+const SEPARATOR: u64 = 30
+const VERIFIED_FLAG: u64 = 49
+const PLAIN_FLAG: u64 = 45
+
+static mut D_QUESTION: [u8; 62] = "Do you want to allow this app to make changes to your device?\0"
+static mut D_TITLE: [u8; 21] = "User Account Control\0"
+static mut D_LINK: [u8; 18] = "Show more details\0"
+static mut D_HIDE: [u8; 13] = "Hide details\0"
+static mut D_YES: [u8; 4] = "Yes\0"
+static mut D_NO: [u8; 3] = "No\0"
+static mut D_PUB: [u8; 18] = "Unknown publisher\0"
+static mut D_ORIGIN: [u8; 41] = "File origin: Hard drive on this computer\0"
+
+fn norm(p: u64, n: u64) -> u64 {
+    var o: u64 = 0
+    var k: u64 = 0
+    while k < n && o + 2 < wmtruststate.TD_IN_BYTES {
+        let ch: u64 = kstate.get8(p + k)
+        k = k + 1
+        if ch == 0 {
+            k = n
+        } else if ch == SEPARATOR || ch == 10 || (ch >= 32 && ch != 127) {
+            kstate.set8(wmtruststate.td_inp() + o, ch as u8)
+            o = o + 1
+        } else {
+            kstate.set8(wmtruststate.td_inp() + o, 63 as u8)
+            o = o + 1
+        }
+    }
+    kstate.set8(wmtruststate.td_inp() + o, 0 as u8)
+    return o
+}
+
+fn seps(n: u64) -> u64 {
+    var c: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        if kstate.get8(wmtruststate.td_inp() + i) == SEPARATOR {
+            c = c + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
+fn fstart(n: u64, idx: u64) -> u64 {
+    var f: u64 = 0
+    var i: u64 = 0
+    while f < idx && i < n {
+        if kstate.get8(wmtruststate.td_inp() + i) == SEPARATOR {
+            f = f + 1
+        }
+        i = i + 1
+    }
+    if f < idx {
+        return n + 1
+    }
+    return i
+}
+
+fn fend(n: u64, s: u64) -> u64 {
+    var i: u64 = s
+    while i < n && kstate.get8(wmtruststate.td_inp() + i) != SEPARATOR {
+        i = i + 1
+    }
+    return i
+}
+
+fn copy_z(dst: u64, src: u64, max: u64) {
+    var i: u64 = 0
+    while i + 1 < max && kstate.get8(src + i) != 0 {
+        kstate.set8(dst + i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(dst + i, 0 as u8)
+}
+
+fn copy_range(dst: u64, a: u64, b: u64, max: u64) {
+    var i: u64 = 0
+    while a + i < b && i + 1 < max {
+        let ch: u64 = kstate.get8(wmtruststate.td_inp() + a + i)
+        if ch == 10 {
+            kstate.set8(dst + i, 32 as u8)
+        } else {
+            kstate.set8(dst + i, ch as u8)
+        }
+        i = i + 1
+    }
+    kstate.set8(dst + i, 0 as u8)
+}
+
+fn pick(n: u64, idx: u64, dst: u64, max: u64, def: u64) {
+    let s: u64 = fstart(n, idx)
+    if s <= n {
+        let e: u64 = fend(n, s)
+        if e > s {
+            copy_range(dst, s, e, max)
+            return
+        }
+    }
+    copy_z(dst, def, max)
+}
+
+fn field_wrap(state: u64, n: u64, idx: u64, at: u64, max_lines: u64, px: u64, max_w: u64) -> u64 {
+    let s: u64 = fstart(n, idx)
+    if s > n {
+        return 0
+    }
+    let k: u64 = wmtrustgeom.scale(state)
+    return wmtrusttxt.wrap(state, s, fend(n, s), at, max_lines, px * k, k, max_w * k)
+}
+
+fn clear_lines() {
+    var i: u64 = 0
+    while i < wmtruststate.TD_LINES * wmtruststate.TD_LINE_BYTES {
+        kstate.set8(wmtruststate.td_line(0) + i, 0 as u8)
+        i = i + 1
+    }
+}
+
+fn details(state: u64, n: u64) {
+    wmtruststate.td_ndet = 0
+    let ds: u64 = fstart(n, FIELD_DETAILS)
+    if ds > n {
+        return
+    }
+    let de: u64 = fend(n, ds)
+    var le: u64 = ds
+    while le < de && kstate.get8(wmtruststate.td_inp() + le) != 10 {
+        le = le + 1
+    }
+    if le > ds {
+        copy_range((&wmtruststate.td_link[0]) as u64, ds, le, 48)
+    }
+    if le + 1 < de {
+        let k: u64 = wmtrustgeom.scale(state)
+        wmtruststate.td_ndet = wmtrusttxt.wrap(state, le + 1, de, wmtruststate.TD_DET_AT, wmtruststate.TD_DET_MAX,
+            wmtrustgeom.DET_PX * k, k, (wmtrustgeom.W - 2 * wmtrustgeom.PAD - wmtrustgeom.DETAIL_INDENT) * k)
+    }
+}
+
+fn plain_fallback(state: u64, m: u64) {
+    let k: u64 = wmtrustgeom.scale(state)
+    wmtruststate.td_nname = wmtrusttxt.wrap(state, 0, m, wmtruststate.TD_NAME_AT, wmtruststate.TD_NAME_MAX,
+        wmtrustgeom.NAME_PX * k, k, wmtrustgeom.name_wrap_w(state))
+}
+
+fn parse(state: u64, p: u64, n: u64) {
+    let m: u64 = norm(p, n)
+    clear_lines()
+    wmtruststate.td_open = 0
+    wmtruststate.td_rem = 0
+    wmtruststate.td_rem_on = 0
+    wmtruststate.td_ndet = 0
+    wmtruststate.td_ndesc = 0
+    wmtruststate.td_nname = 0
+    wmtruststate.td_verified = 0
+    wmtruststate.td_plain = 0
+    copy_z((&wmtruststate.td_link[0]) as u64, (&D_LINK[0]) as u64, 48)
+    let full_w: u64 = wmtrustgeom.W - 2 * wmtrustgeom.PAD
+    if seps(m) == 0 {
+        copy_z((&wmtruststate.td_title[0]) as u64, (&D_TITLE[0]) as u64, 72)
+        copy_z((&wmtruststate.td_yes[0]) as u64, (&D_YES[0]) as u64, 24)
+        copy_z((&wmtruststate.td_nol[0]) as u64, (&D_NO[0]) as u64, 24)
+        copy_z((&wmtruststate.td_pub[0]) as u64, (&D_PUB[0]) as u64, 96)
+        copy_z((&wmtruststate.td_origin[0]) as u64, (&D_ORIGIN[0]) as u64, 96)
+        copy_z((&wmtruststate.td_hide[0]) as u64, (&D_HIDE[0]) as u64, 48)
+        copy_z(wmtruststate.td_line(0), (&D_QUESTION[0]) as u64, 64)
+        wmtruststate.td_nq = 1
+        plain_fallback(state, m)
+        return
+    }
+    pick(m, FIELD_TITLE, (&wmtruststate.td_title[0]) as u64, 72, (&D_TITLE[0]) as u64)
+    pick(m, FIELD_PUBLISHER, (&wmtruststate.td_pub[0]) as u64, 96, (&D_PUB[0]) as u64)
+    pick(m, FIELD_ORIGIN, (&wmtruststate.td_origin[0]) as u64, 96, (&D_ORIGIN[0]) as u64)
+    pick(m, FIELD_HIDE, (&wmtruststate.td_hide[0]) as u64, 48, (&D_HIDE[0]) as u64)
+    pick(m, FIELD_YES, (&wmtruststate.td_yes[0]) as u64, 24, (&D_YES[0]) as u64)
+    pick(m, FIELD_NO, (&wmtruststate.td_nol[0]) as u64, 24, (&D_NO[0]) as u64)
+    let vs: u64 = fstart(m, FIELD_VERIFIED)
+    if vs < m && kstate.get8(wmtruststate.td_inp() + vs) == VERIFIED_FLAG {
+        wmtruststate.td_verified = 1
+    }
+    if vs < m && kstate.get8(wmtruststate.td_inp() + vs) == PLAIN_FLAG {
+        wmtruststate.td_plain = 1
+    }
+    let rs: u64 = fstart(m, FIELD_REMEMBER)
+    if rs <= m && fend(m, rs) > rs {
+        copy_range((&wmtruststate.td_rlab[0]) as u64, rs, fend(m, rs), 48)
+        wmtruststate.td_rem = 1
+    }
+    wmtruststate.td_nq = field_wrap(state, m, FIELD_QUESTION, wmtruststate.TD_Q_AT, wmtruststate.TD_Q_MAX, wmtrustgeom.Q_PX, full_w)
+    if wmtruststate.td_nq == 0 {
+        copy_z(wmtruststate.td_line(0), (&D_QUESTION[0]) as u64, 64)
+        wmtruststate.td_nq = 1
+    }
+    wmtruststate.td_nname = field_wrap(state, m, FIELD_NAME, wmtruststate.TD_NAME_AT, wmtruststate.TD_NAME_MAX,
+        wmtrustgeom.NAME_PX, wmtrustgeom.W - 2 * wmtrustgeom.PAD - wmtrustgeom.ICON - wmtrustgeom.ICON_GAP)
+    wmtruststate.td_ndesc = field_wrap(state, m, FIELD_DESCRIPTION, wmtruststate.TD_DESC_AT, wmtruststate.TD_DESC_MAX,
+        wmtrustgeom.ROW_PX, full_w)
+    details(state, m)
+}
