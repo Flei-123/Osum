@@ -39,7 +39,17 @@ osb_bus() {
         ide) echo "-device ide-hd,drive=stick,bus=ide.0,bootindex=0" ;;
         ahci) echo "-device ide-hd,drive=stick,bus=ide.0,bootindex=0" ;;
         nvme) echo "-device nvme,drive=stick,serial=osbstick,bootindex=0" ;;
+        twohc) echo "-device qemu-xhci,id=xa -device qemu-xhci,id=xb -device usb-storage,bus=xb.0,drive=stick" ;;
+        manypci) osb_many_pci_args ;;
     esac
+}
+
+osb_many_pci_args() {
+    local i args=""
+    for i in $(seq 1 ${OSB_FILLER_PORTS:-20}); do
+        args="$args -device pcie-root-port,id=fp$i,chassis=$i,slot=$i -device virtio-rng-pci,bus=fp$i"
+    done
+    echo "$args -device pcie-root-port,id=lastport,chassis=60,slot=60 -device qemu-xhci,id=xl,bus=lastport -device usb-storage,bus=xl.0,drive=stick"
 }
 
 osb_boot() {
