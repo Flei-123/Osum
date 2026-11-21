@@ -40,6 +40,7 @@ import drv.wdt.wdtview
 import net.wltrace
 import fs.procfs.pfbase
 import fs.procfs.pfgroup
+import fs.procfs.pfns
 import fs.procfs.pfnum
 import fs.procfs.pfproc
 import fs.procfs.pfreg
@@ -228,9 +229,11 @@ const F_MMAPLOG: u64 = 10
 
 const F_LAST: u64 = 10
 
-const F_TASK: u64 = 28
+const F_TASK: u64 = 29
 
-const F_END: u64 = 28
+const F_NS: u64 = 30
+
+const F_END: u64 = 30
 
 const TID_FILES: u64 = 5
 
@@ -448,6 +451,9 @@ fn build(state: u64, n: u64) -> u64 {
             return 0
         }
         return pfproc.make_fdfile(state, slot, sub)
+    }
+    if art == pfns.K_NSLINK {
+        return pfns.render(state, sub)
     }
     return 0
 }
@@ -676,6 +682,7 @@ fn pidfile_of(name: u64) -> u64 {
     var cw: [u8; 4] = "cwd\0"
     var ml: [u8; 8] = "mmaplog\0"
     var tk: [u8; 5] = "task\0"
+    var ns: [u8; 3] = "ns\0"
     if pfsys.streq(name, (&tk[0]) as u64) {
         return F_TASK
     }
@@ -708,6 +715,9 @@ fn pidfile_of(name: u64) -> u64 {
     }
     if pfsys.streq(name, (&e[0]) as u64) {
         return F_FD
+    }
+    if pfsys.streq(name, (&ns[0]) as u64) {
+        return F_NS
     }
     return pfreg.pid_id(name)
 }
@@ -744,7 +754,7 @@ fn tid_file_of(name: u64) -> u64 {
 }
 
 fn is_dir_art(art: u64) -> bool {
-    return art == pfbase.K_ROOT || art == K_PIDDIR || art == K_FDDIR || art == K_TASKDIR || art == K_TIDDIR
+    return art == pfbase.K_ROOT || art == K_PIDDIR || art == K_FDDIR || art == K_TASKDIR || art == K_TIDDIR || art == pfns.K_NSDIR
 }
 
 fn task_lookup(state: u64, path: u64, at: u64, slot: u64) -> u64 {
@@ -842,6 +852,9 @@ fn p_lookup(state: u64, m: u64, path: u64) -> u64 {
     }
     if f == F_TASK {
         return task_lookup(state, path, at, slot)
+    }
+    if f == F_NS {
+        return pfns.lookup(path, at, slot)
     }
     var seg3: [u8; 24] = [0 as u8; 24]
     at = pathseg.segment(path, at, (&seg3[0]) as u64, 24)
@@ -1060,6 +1073,11 @@ fn pidfile_name(state: u64, sub: u64, out: u64) {
         pfsys.copy_z(out, (&tk[0]) as u64)
         return
     }
+    if sub == F_NS {
+        var nsn: [u8; 3] = "ns\0"
+        pfsys.copy_z(out, (&nsn[0]) as u64)
+        return
+    }
     if sub > F_LAST {
         pfreg.pid_name(sub, out)
         return
@@ -1152,9 +1170,15 @@ fn p_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
             if i + 1 == F_TASK {
                 return pfproc.node(K_TASKDIR, slot, 0)
             }
+            if i + 1 == F_NS {
+                return pfns.dir_node(slot)
+            }
             return pfproc.node(K_PIDFILE, slot, i + 1)
         }
         return 0
+    }
+    if art == pfns.K_NSDIR {
+        return pfns.child(i, out)
     }
     if art == K_TASKDIR {
         let t: u64 = pfgroup.nth(state, slot, i)
@@ -1214,7 +1238,7 @@ fn p_attr(state: u64, m: u64, n: u64, what: u64) -> u64 {
             }
             return vfsops.N_FILE
         }
-        if art == K_PIDFILE && (pfproc.n_sub(n) == F_EXE || pfproc.n_sub(n) == F_CWD) {
+        if art == pfns.K_NSLINK || (art == K_PIDFILE && (pfproc.n_sub(n) == F_EXE || pfproc.n_sub(n) == F_CWD)) {
             return vfsops.N_LNK
         }
         if art == K_GLOBAL || art == K_PIDFILE || art == K_FDFILE {
@@ -1246,7 +1270,7 @@ fn p_attr(state: u64, m: u64, n: u64, what: u64) -> u64 {
         if is_dir_art(art) || (art == K_SYS && pfsysreg.is_dir(pfsysreg.id_of(n))) {
             return 365
         }
-        if art == K_PIDFILE && (pfproc.n_sub(n) == F_EXE || pfproc.n_sub(n) == F_CWD) {
+        if art == pfns.K_NSLINK || (art == K_PIDFILE && (pfproc.n_sub(n) == F_EXE || pfproc.n_sub(n) == F_CWD)) {
             return 511
         }
         return 292
@@ -1317,7 +1341,7 @@ fn sfs_count(state: u64, sub: u64) -> u64 {
         return 1
     }
     if sub == SF_SYSTEM {
-        return 2
+        return 3
     }
     if sub == SF_CPU {
         return 4 + sfs_ncpu(state)
@@ -1357,7 +1381,10 @@ fn sfs_child(state: u64, sub: u64, slot: u64, i: u64) -> u64 {
         if i == 0 {
             return pfproc.node(pfbase.K_SFS, 0, SF_CPU)
         }
-        return pfproc.node(K_SYS, 0, pfsysreg.node_root())
+        if i == 1 {
+            return pfproc.node(K_SYS, 0, pfsysreg.node_root())
+        }
+        return pfproc.node(K_SYS, 0, pfsysreg.memory_root())
     }
     if sub == SF_CPU {
         if i < 3 {

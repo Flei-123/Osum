@@ -20,6 +20,7 @@ import fs.devdri
 import gfx.drm.drmclient
 import fs.evfd
 import fs.fanotify
+import fs.infire
 import ipc.uio
 import fs.nidx
 import fs.ftype
@@ -1497,7 +1498,36 @@ fn do_fchown(state: u64, me: u64, fd: u64, uid: u64, gid: u64) -> u64 {
     return chown_ino(state, me, ino, uid, gid)
 }
 
+const ACCESS_NOT_VFS: u64 = 0xFFFFFFFFFFFFFFFF
+const ACCESS_WRITE: u64 = 2
+
+fn vfs_access(state: u64, me: u64, name: u64, want: u64) -> u64 {
+    if !vfs.ready(state) {
+        return ACCESS_NOT_VFS
+    }
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = sysuser.fetch_path(state, me, name, buf, sysconst.MAX_NAME)
+    if errno.is_error(len) {
+        return ACCESS_NOT_VFS
+    }
+    let m: u64 = vfs.mount_for(state, buf)
+    if m >= vfs.MAX_MNT || (m == 0 && !vfs.all_mode(state)) {
+        return ACCESS_NOT_VFS
+    }
+    if vfs.node_for(state, m, buf) == 0 {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    if (want & ACCESS_WRITE) != 0 && (mnt.flags(state, m) & mnt.F_RDONLY) != 0 {
+        return sysuser.neg(errno.E_ROFS)
+    }
+    return 0
+}
+
 fn do_access(state: u64, me: u64, name: u64, want: u64) -> u64 {
+    let on_vfs: u64 = vfs_access(state, me, name, want)
+    if on_vfs != ACCESS_NOT_VFS {
+        return on_vfs
+    }
     let ino: u64 = sysuser.ino_of_path(state, me, name)
     if errno.is_error(ino) {
         return ino
@@ -1816,41 +1846,6 @@ fn ev_in_any(state: u64) -> bool {
     return fanotify.live() || file.inotify_live()
 }
 
-// Tell every inotify instance that watches the PARENT directory of `buf` (absolute path in kernel memory, `len` octets) about event `ev`.
-fn ev_in_fire(state: u64, buf: u64, len: u64, ev: u64, cookie: u64) {
-    var s: u64 = len
-    while s > 0 {
-        if kstate.get8(buf + s - 1) == 47 {
-            break
-        }
-        s = s - 1
-    }
-    if s == 0 || s >= len {
-        return
-    }
-    var dlen: u64 = s - 1
-    if dlen == 0 {
-        dlen = 1
-    }
-    let name: u64 = buf + s
-    let nlen: u64 = len - s
-    var o: u64 = 0
-    while o < file.MAX_OPEN {
-        if file.open_kind(state, o) == file.K_INOTIFY {
-            let fr: u64 = file.open_off(state, o)
-            var i: u64 = 0
-            while i < evfd.IN_WMAX {
-                let mask: u64 = evfd.in_match(fr, i, buf, dlen)
-                if mask != 0 && (mask & ev & 0xFFF) != 0 {
-                    evfd.in_push(state, fr, evfd.in_wd_of(fr, i), ev, cookie, name, nlen)
-                }
-                i = i + 1
-            }
-        }
-        o = o + 1
-    }
-}
-
 // The path the user pointer names, as the file system call just saw it.
 fn ev_in_path(state: u64, me: u64, addr: u64, ev: u64, cookie: u64) {
     if !ev_in_any(state) {
@@ -1862,7 +1857,7 @@ fn ev_in_path(state: u64, me: u64, addr: u64, ev: u64, cookie: u64) {
         return
     }
     fanotify.emit_entry(state, ev & fanotify.FAN_EVENTS_SUPPORTED, fanotify.pid_of(state, me), buf, len)
-    ev_in_fire(state, buf, len, ev, cookie)
+    infire.fire_entry(state, buf, len, ev, cookie)
 }
 
 fn ev_in_rename(state: u64, me: u64, from: u64, to: u64) {
