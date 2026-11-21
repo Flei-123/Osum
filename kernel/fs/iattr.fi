@@ -2,13 +2,16 @@ profile kernel
 
 import lib.kstate
 
-export { MISS, which_of, get, put, perm_get, attr_get, drop, drop_range, flush }
+export { MISS, which_of, get, put, put_directs, perm_get, attr_get, drop, drop_range, flush }
 
 const MISS: u64 = 0xFFFFFFFFFFFFFFFF
 const LINES: u64 = 128
-const LINE_WORDS: u64 = 66
+const LINE_WORDS: u64 = 130
 const SLOTS: u64 = 8
-const SLOT_WORDS: u64 = 8
+const SLOT_WORDS: u64 = 16
+const DIRECT_WORDS: u64 = 8
+const DIRECT_WHICH: u64 = 8
+const F_DIRECT: u64 = 24
 const SLOT_AT: u64 = 2
 const TAG_VALID: u64 = 0x8000000000000000
 const TAG_LBA_MASK: u64 = 0xFFFFFFFFFF
@@ -26,7 +29,7 @@ const F_CTIME: u64 = 136
 const F_MTIME: u64 = 144
 const F_ATIME: u64 = 152
 
-static mut cells: [u64; 8448] = [0 as u64; 8448]
+static mut cells: [u64; 16640] = [0 as u64; 16640]
 static mut held_low: u64 = 0xFFFFFFFFFFFFFFFF
 static mut held_high: u64 = 0
 
@@ -54,6 +57,9 @@ fn which_of(field: u64) -> u64 {
     }
     if field == F_ATIME {
         return 7
+    }
+    if field >= F_DIRECT && field < F_DIRECT + DIRECT_WORDS * 8 && (field - F_DIRECT) % 8 == 0 {
+        return DIRECT_WHICH + (field - F_DIRECT) / 8
     }
     return MISS
 }
@@ -141,6 +147,18 @@ fn put(state: u64, lba: u64, idx: u64, kind: u64, size: u64, mode: u64, uid: u64
     cells[(at + 6) as usize] = ctime
     cells[(at + 7) as usize] = atime
     cells[(base + 1) as usize] = cells[(base + 1) as usize] | (1 << idx)
+}
+
+fn put_directs(lba: u64, idx: u64, src: u64) {
+    if idx >= SLOTS {
+        return
+    }
+    let at: u64 = line_of(lba) * LINE_WORDS + SLOT_AT + idx * SLOT_WORDS + DIRECT_WHICH
+    var i: u64 = 0
+    while i < DIRECT_WORDS {
+        cells[(at + i) as usize] = kstate.get(src, F_DIRECT + i * 8)
+        i = i + 1
+    }
 }
 
 fn drop(state: u64, lba: u64) {
