@@ -1,0 +1,68 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import fs.file
+import sync.fqlock
+import mm.mmlock
+import sys.sysuser
+import sched.proc.procfault
+
+export { read_direct, write_direct }
+
+fn read_direct(state: u64, me: u64, p: u64, dst: u64, len: u64) -> u64 {
+    if !procfault.user_range_ok(state, me, dst, len) {
+        return sysuser.NO_MAP
+    }
+    let fl: u64 = fqlock.enter(state)
+    var n: u64 = file.pipe_bytes(state, p)
+    if n > len {
+        n = len
+    }
+    if n == 0 {
+        fqlock.leave(state, fl)
+        return 0
+    }
+    let first: u64 = file.pipe_read_run(state, p, n)
+    let mmfl: u64 = mmlock.mm_lock(state)
+    var moved: u64 = sysuser.copy_out_held(state, me, dst, file.pipe_read_ptr(state, p), first)
+    if moved == first && first < n {
+        moved = moved + sysuser.copy_out_held(state, me, dst + first, file.pipe_ring(state, p), n - first)
+    }
+    mmlock.mm_unlock(state, mmfl)
+    file.pipe_consume(state, p, moved)
+    fqlock.leave(state, fl)
+    if moved == 0 {
+        return sysuser.NO_MAP
+    }
+    return moved
+}
+
+fn write_direct(state: u64, me: u64, p: u64, src: u64, len: u64, atomic: bool) -> u64 {
+    if !procfault.user_range_ok(state, me, src, len) {
+        return sysuser.NO_MAP
+    }
+    let fl: u64 = fqlock.enter(state)
+    var n: u64 = file.pipe_room(state, p)
+    if n > len {
+        n = len
+    }
+    if n == 0 || (atomic && n < len) {
+        fqlock.leave(state, fl)
+        return 0
+    }
+    let first: u64 = file.pipe_write_run(state, p, n)
+    let mmfl: u64 = mmlock.mm_lock(state)
+    var moved: u64 = sysuser.copy_in_held(state, me, file.pipe_write_ptr(state, p), src, first)
+    if moved == first && first < n {
+        moved = moved + sysuser.copy_in_held(state, me, file.pipe_ring(state, p), src + first, n - first)
+    }
+    mmlock.mm_unlock(state, mmfl)
+    if atomic && moved < n {
+        moved = 0
+    }
+    file.pipe_produce(state, p, moved)
+    fqlock.leave(state, fl)
+    if moved == 0 {
+        return sysuser.NO_MAP
+    }
+    return moved
+}
