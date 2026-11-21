@@ -127,8 +127,8 @@ if osb_wait_text "$D" live "osboot" 60; then
     python3 -I tools/bootloader/shotcheck.py live "$D/l1.ppm,$D/l2.ppm,$D/l3.ppm" "$D/osboot.logo" && ok "live spinner: moved between all shots during the read" || bad "live spinner: frozen during the read"
     python3 -I tools/bootloader/shotcheck.py live "$D/l1.ppm,$D/l1.ppm,$D/l1.ppm" "$D/osboot.logo" && bad "live spinner: identical shots accepted as moving" || ok "live spinner: counter-proof, identical shots rejected"
     osb_wait_text "$D" live "osboot: frames" 90
-    frames=$(grep -a "osboot: frames" "$D/live.txt" | tail -1 | sed 's/.*frames //')
-    total=$(grep -a "osboot: read" "$D/live.txt" | tail -1 | sed 's/.*total //; s/ ms//')
+    frames=$(grep -a "osboot: frames" "$D/live.txt" | tail -1 | sed 's/.*frames //' | tr -dc '0-9')
+    total=$(grep -a "osboot: read" "$D/live.txt" | tail -1 | sed 's/.*total //' | tr -dc '0-9')
     [ -n "$frames" ] && [ -n "$total" ] && [ "$frames" -ge $((total / 160)) ] && ok "live spinner: $frames frames in $total ms of loading" || bad "live spinner: too few frames (${frames:-?} in ${total:-?} ms)"
 else
     bad "live spinner: osboot did not start"
