@@ -12,6 +12,7 @@ import libc.errno
 import libc.io
 import libc.stdio
 import libc.text
+import libc.clockapi
 import crypto.ed25519
 
 export { u_start }
@@ -20,6 +21,8 @@ const SEEDLEN: u64 = 32
 const PUBLEN: u64 = 32
 const SIGLEN: u64 = 64
 const MAXMSG: u64 = 512
+const STAT_RETRIES: u64 = 3
+const STAT_RETRY_MS: u64 = 200
 
 const FREMDBITS: u64 = 63
 
@@ -102,10 +105,26 @@ fn moan(t: u64) {
     ulib.esay_line((&pre[0 as usize]) as u64, t)
 }
 
+fn key_stat() -> u64 {
+    var tries: u64 = 0
+    var m: u64 = io.stat_mode(keypath())
+    while errno.failed(m) && errno.errno() != errno.E_NOENT && tries < STAT_RETRIES {
+        clockapi.sleep_ms(STAT_RETRY_MS)
+        m = io.stat_mode(keypath())
+        tries = tries + 1
+    }
+    return m
+}
+
 fn key_ensure() -> u64 {
-    let m: u64 = io.stat_mode(keypath())
+    let m: u64 = key_stat()
     if !errno.failed(m) {
         return 0
+    }
+    if errno.errno() != errno.E_NOENT {
+        var t0: [u8; 53] = "cannot stat /etc/jarvis/device.key, not replacing it\0"
+        moan((&t0[0 as usize]) as u64)
+        return 1
     }
     io.make_dir(dirpath())
     let r: u64 = kcall.sys3(kcall.SYS_GETRANDOM, (&seed[0 as usize]) as u64,

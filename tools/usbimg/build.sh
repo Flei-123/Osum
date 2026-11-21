@@ -138,7 +138,7 @@ grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp ping log host ota fsck jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown idlelock powerd init svc term termfull shasum noise \
-orientbus act settingsd axd sntp accountcli pdfview open certus store stored mediad presentlog sysinfo hwinv hwprofile massren privacy welcome elevate msgbox runbox cliphist xclip charmap vplay osk apprights wmplug hotkeyd jarvismini social soclocal melder freunde partyrun bench wlanpersist drvctl lspci pcicfg regdump prphread wlanctl dbgsrv backup recover resetsys screenreader xfx vaultd vaultctl vaultprompt vaultui dialogd"}
+orientbus act settingsd axd sntp accountcli pdfview open certus store stored mediad presentlog sysinfo hwinv hwprofile massren privacy welcome elevate msgbox runbox cliphist xclip charmap vplay osk apprights wmplug hotkeyd jarvismini social soclocal melder freunde partyrun bench wlanpersist drvctl lspci pcicfg regdump prphread wlanctl dbgsrv backup recover resetsys screenreader xfx xfxd vaultd vaultctl vaultprompt vaultui dialogd"}
 # ODB=1 (debug build): the debug agent is one more program in /bin
 [ "${ODB:-0}" = 1 ] && PROGS="$PROGS odbd"
 # the public image has no chat server to reach: no JARVIS Mini binary there
@@ -149,7 +149,7 @@ if [ "$IMAGE_PROFILE" = public ]; then
 fi
 # W-MINI2: the Mini's screenshot key runs /bin/snip (personal stick only)
 if [ "$IMAGE_PROFILE" = personal ]; then case " $PROGS " in *" snip "*) ;; *) PROGS="$PROGS snip" ;; esac; case " $PROGS " in *" snipt "*) ;; *) PROGS="$PROGS snipt" ;; esac; fi
-case " $PROGS " in *" xfx "*) case " $PROGS " in *" wayd "*) ;; *) PROGS="$PROGS wayd" ;; esac ;; esac
+case " $PROGS " in *" xfx "*) case " $PROGS " in *" wayd "*) ;; *) PROGS="$PROGS wayd" ;; esac; case " $PROGS " in *" xfxd "*) ;; *) PROGS="$PROGS xfxd" ;; esac ;; esac
 
 APPS=${APPS:-"fetch jarvisd ipprint socfleitec rootsctl smbctl netcheck"}
 # W-MINI2: the network half of the JARVIS Mini (TLS + login + WebSocket), personal stick only
@@ -727,12 +727,14 @@ ARGS+=(/etc/orientbus/ /etc/actions.d/
        # DAILY-DRIVER (P-007): the program store -- provider /bin/stored, window /bin/store
        "/etc/actions.d/store.actions=etc/actions.d/store.actions"
        "/etc/actions.d/media.actions=etc/actions.d/media.actions"
+       "/etc/actions.d/xfx.actions=etc/actions.d/xfx.actions"
        "/etc/store.conf=etc/store.conf")
 cp -f "${HANDLERS_CONF:-etc/handlers.conf}" "$OUT/handlers.conf"
 ARGS+=("/etc/handlers.conf=$OUT/handlers.conf@0644")
 ARGS+=("/etc/hotkeys.conf=$OUT/hotkeys.conf@0644"
        "/etc/wmplug.conf=$OUT/wmplug.conf@0644"
        "/etc/wmplug.autostart=$OUT/wmplug.autostart@0644"
+       "/etc/autostart.conf=$OUT/autostart.conf@0644"
        "/etc/apprights.conf=$OUT/apprights.conf@0644"
        "/etc/screenreader.conf=$OUT/screenreader.conf@0644"
        "/etc/actions.d/screenreader.actions=etc/actions.d/screenreader.actions")
@@ -916,6 +918,7 @@ fi
 #   Ctrl+Alt+J -> hotkeyd -> bus action jarvismini.toggle -> the box shows / hides
 { cat etc/wmplug.conf; printf 'screenreader rights=0x001 prog=/bin/screenreader\n'; } > "$OUT/wmplug.conf"
 printf 'hotkey\nscreenreader serve\n' > "$OUT/wmplug.autostart"
+: > "$OUT/autostart.conf"
 printf 'ctrl+alt+n screenreader.toggle\n' > "$OUT/hotkeys.conf"
 printf 'screenreader hotkey\n' > "$OUT/apprights.conf"
 printf 'autostart=0\nenabled=0\n' > "$OUT/screenreader.conf"

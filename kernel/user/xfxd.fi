@@ -1,0 +1,260 @@
+profile kernel
+
+import ulib
+import actwire
+import xfxio
+import xfxrun
+import libc.clockapi
+
+export { u_start }
+
+const SYS_WAIT4: u64 = 61
+const WNOHANG: u64 = 1
+const FILE_MODE: u64 = 420
+const BUS_WAIT_MS: u64 = 100
+const BUS_FIND_TICKS: u64 = 500
+const BUS_RECHECK_TICKS: u64 = 100
+const VERB_W: u64 = 16
+const NAME_W: u64 = 40
+const UID_W: u64 = 16
+const REPLY_W: u64 = 128
+const NO_SERVICE: u64 = 0xFFFFFFFF
+
+static mut reply_buf: [u8; 128] = [0 as u8; 128]
+static mut reply_len: u64 = 0
+static mut worker_pid: u64 = 0
+static mut last_rc: u64 = 0
+static mut bus_service: u64 = 0xFFFFFFFF
+static mut P_LAST: [u8; 14] = "/run/xfx.last\0"
+
+fn set_reply(text: u64) {
+    reply_len = ulib.strcpy((&reply_buf[0 as usize]) as u64, text)
+}
+
+fn add_reply(text: u64) {
+    reply_len = ulib.strcat((&reply_buf[0 as usize]) as u64, text)
+}
+
+fn add_reply_number(value: u64) {
+    var digits: [u8; 24] = [0 as u8; 24]
+    xfxio.num_text(value, (&digits[0 as usize]) as u64)
+    add_reply((&digits[0 as usize]) as u64)
+}
+
+fn reply_error(code: u64) {
+    var prefix: [u8; 5] = "err \0"
+    var eol: [u8; 2] = "\n\0"
+    set_reply((&prefix[0 as usize]) as u64)
+    add_reply(code)
+    add_reply((&eol[0 as usize]) as u64)
+}
+
+fn reply_ok() {
+    var line: [u8; 4] = "ok\n\0"
+    set_reply((&line[0 as usize]) as u64)
+}
+
+fn reap_worker() {
+    if worker_pid == 0 {
+        return
+    }
+    var status: [u64; 1] = [0 as u64; 1]
+    let done: u64 = ulib.sys(SYS_WAIT4, worker_pid, (&status[0 as usize]) as u64, WNOHANG)
+    if done == worker_pid {
+        last_rc = (status[0 as usize] >> 8) & 255
+        worker_pid = 0
+    }
+}
+
+fn requester_uid(msg: u64) -> u64 {
+    var key: [u8; 5] = "@uid\0"
+    var text: [u8; 16] = [0 as u8; 16]
+    if !actwire.kv_find(msg, (&key[0 as usize]) as u64, (&text[0 as usize]) as u64, UID_W) {
+        return ulib.EOF
+    }
+    return ulib.to_num((&text[0 as usize]) as u64)
+}
+
+fn requester_allowed(uid: u64) -> bool {
+    return uid != ulib.EOF && (uid == 0 || uid == ulib.session_owner())
+}
+
+fn log_request(word: u64, uid: u64) {
+    var head: [u8; 7] = "xfxd: \0"
+    var key: [u8; 6] = " uid=\0"
+    ulib.say((&head[0 as usize]) as u64)
+    ulib.say(word)
+    ulib.say((&key[0 as usize]) as u64)
+    ulib.sayu(uid)
+    ulib.nl()
+}
+
+fn run_worker() -> u64 {
+    ulib.sys(ulib.SYS_UNLINK, (&P_LAST[0 as usize]) as u64, 0, 0)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_LAST[0 as usize]) as u64, ulib.O_MAKE, FILE_MODE)
+    if !ulib.bad(fd) {
+        ulib.sys(ulib.SYS_DUP2, fd, 1, 0)
+        ulib.sys(ulib.SYS_DUP2, fd, 2, 0)
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    }
+    return xfxrun.start()
+}
+
+fn do_start() {
+    var e_busy: [u8; 5] = "busy\0"
+    var e_fork: [u8; 12] = "fork_failed\0"
+    var started: [u8; 11] = "started=1\n\0"
+    reap_worker()
+    if worker_pid != 0 {
+        reply_error((&e_busy[0 as usize]) as u64)
+        return
+    }
+    let pid: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+    if pid == 0 {
+        ulib.sys(ulib.SYS_EXIT, run_worker(), 0, 0)
+    }
+    if ulib.bad(pid) {
+        reply_error((&e_fork[0 as usize]) as u64)
+        return
+    }
+    worker_pid = pid
+    reply_ok()
+    add_reply((&started[0 as usize]) as u64)
+}
+
+fn do_result() {
+    var k_busy: [u8; 6] = "busy=\0"
+    var k_rc: [u8; 4] = "rc=\0"
+    var eol: [u8; 2] = "\n\0"
+    reap_worker()
+    reply_ok()
+    add_reply((&k_busy[0 as usize]) as u64)
+    if worker_pid != 0 {
+        add_reply_number(1)
+    } else {
+        add_reply_number(0)
+    }
+    add_reply((&eol[0 as usize]) as u64)
+    add_reply((&k_rc[0 as usize]) as u64)
+    add_reply_number(last_rc)
+    add_reply((&eol[0 as usize]) as u64)
+}
+
+fn do_stop() {
+    xfxrun.stop()
+    reply_ok()
+}
+
+fn handle(msg: u64) {
+    var verb: [u8; 16] = [0 as u8; 16]
+    var name: [u8; 40] = [0 as u8; 40]
+    var w_ping: [u8; 5] = "ping\0"
+    var w_pong: [u8; 6] = "pong\n\0"
+    var a_start: [u8; 10] = "xfx.start\0"
+    var a_stop: [u8; 9] = "xfx.stop\0"
+    var a_result: [u8; 11] = "xfx.result\0"
+    var e_denied: [u8; 7] = "denied\0"
+    var w_start: [u8; 6] = "start\0"
+    var e_unknown: [u8; 15] = "unknown_action\0"
+    let verb_ptr: u64 = (&verb[0 as usize]) as u64
+    let name_ptr: u64 = (&name[0 as usize]) as u64
+    let next: u64 = actwire.word_copy(msg, 0, verb_ptr, VERB_W)
+    actwire.word_copy(msg, next, name_ptr, NAME_W)
+    if actwire.str_eq(verb_ptr, (&w_ping[0 as usize]) as u64) {
+        set_reply((&w_pong[0 as usize]) as u64)
+        return
+    }
+    let uid: u64 = requester_uid(msg)
+    if !requester_allowed(uid) {
+        log_request((&e_denied[0 as usize]) as u64, uid)
+        reply_error((&e_denied[0 as usize]) as u64)
+        return
+    }
+    if actwire.str_eq(name_ptr, (&a_start[0 as usize]) as u64) {
+        log_request((&w_start[0 as usize]) as u64, uid)
+        do_start()
+        return
+    }
+    if actwire.str_eq(name_ptr, (&a_result[0 as usize]) as u64) {
+        do_result()
+        return
+    }
+    if actwire.str_eq(name_ptr, (&a_stop[0 as usize]) as u64) {
+        do_stop()
+        return
+    }
+    reply_error((&e_unknown[0 as usize]) as u64)
+}
+
+fn find_bus() -> bool {
+    var n_bus: [u8; 11] = "orient.bus\0"
+    let t0: u64 = clockapi.ticks()
+    bus_service = actwire.bus_find((&n_bus[0 as usize]) as u64)
+    while ulib.bad(bus_service) && clockapi.ticks() - t0 < BUS_FIND_TICKS {
+        clockapi.sleep_ms(10)
+        bus_service = actwire.bus_find((&n_bus[0 as usize]) as u64)
+    }
+    return !ulib.bad(bus_service)
+}
+
+fn serve() -> u64 {
+    var n_me: [u8; 6] = "a.xfx\0"
+    var e_taken: [u8; 19] = "xfxd: a.xfx taken\n\0"
+    var e_nobus: [u8; 26] = "xfxd: no orient.bus here\n\0"
+    var s_hello: [u8; 11] = "hello xfx\n\0"
+    var s_ready: [u8; 13] = "xfxd: ready\n\0"
+    var s_gone: [u8; 23] = "xfxd: orient-bus gone\n\0"
+    var n_bus: [u8; 11] = "orient.bus\0"
+    if ulib.bad(actwire.bus_reg((&n_me[0 as usize]) as u64, actwire.A_ROOT)) {
+        ulib.say((&e_taken[0 as usize]) as u64)
+        return 1
+    }
+    if !find_bus() {
+        ulib.say((&e_nobus[0 as usize]) as u64)
+        return 1
+    }
+    actwire.send_msg(bus_service, actwire.K_REQ, actwire.rnd() & 0xFFFFFFFF,
+        (&s_hello[0 as usize]) as u64, 10)
+    ulib.say((&s_ready[0 as usize]) as u64)
+    var frame: [u8; 64] = [0 as u8; 64]
+    var meta: [u64; 6] = [0 as u64; 6]
+    let frame_ptr: u64 = (&frame[0 as usize]) as u64
+    let meta_ptr: u64 = (&meta[0 as usize]) as u64
+    var last_check: u64 = clockapi.ticks()
+    var running: bool = true
+    while running {
+        let n: u64 = actwire.bus_wait(frame_ptr, meta_ptr, BUS_WAIT_MS)
+        if !ulib.bad(n) && n > 0 {
+            let slot: u64 = actwire.asm_feed(frame_ptr, meta_ptr)
+            if slot != actwire.NONE {
+                if actwire.asm_kind(slot) == actwire.K_REQ {
+                    let id: u64 = actwire.asm_id(slot)
+                    handle(actwire.asm_buf(slot))
+                    actwire.send_msg(bus_service, actwire.K_REP, id,
+                        (&reply_buf[0 as usize]) as u64, reply_len)
+                }
+                actwire.asm_free(slot)
+            }
+        } else {
+            reap_worker()
+            if clockapi.ticks() - last_check > BUS_RECHECK_TICKS {
+                last_check = clockapi.ticks()
+                if ulib.bad(actwire.bus_find((&n_bus[0 as usize]) as u64)) {
+                    ulib.say((&s_gone[0 as usize]) as u64)
+                    running = false
+                }
+            }
+        }
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var usage: [u8; 19] = "usage: xfxd serve\n\0"
+    var w_serve: [u8; 6] = "serve\0"
+    if ulib.arg_count(args) >= 2 && ulib.streq(ulib.arg_at(args, 1), (&w_serve[0 as usize]) as u64) {
+        return serve()
+    }
+    ulib.say((&usage[0 as usize]) as u64)
+    return 1
+}

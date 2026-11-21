@@ -16,6 +16,7 @@ def last_search(lines, query):
     apps = []
     files = []
     settings = []
+    paths = []
     stores = []
     for line in lines[start + 1:]:
         if line.startswith("launcher: suche ["):
@@ -26,16 +27,17 @@ def last_search(lines, query):
         m = re.match(r"launcher: best name=\[(.*)\]", line)
         if m:
             best = m.group(1)
-        m = re.match(r"launcher: setting \[(.*)\]", line)
+        m = re.match(r"launcher: setting \[(.*?)\](?: path=\[(.*)\])?$", line)
         if m:
             settings.append(m.group(1))
+            paths.append(m.group(2) or "")
         m = re.match(r"launcher: store \[(.*)\]", line)
         if m:
             stores.append(m.group(1))
         m = re.match(r"launcher: file i=(\d+) name=\[(.*)\]", line)
         if m:
             files.append(m.group(2))
-    return head, apps, files, best, settings, stores
+    return head, apps, files, best, settings, stores, paths
 
 
 def main():
@@ -45,13 +47,14 @@ def main():
     if found is None:
         print("missing")
         return 1
-    head, apps, files, best, settings, stores = found
+    head, apps, files, best, settings, stores, paths = found
     print("head=%s" % head)
     print("apps=%s" % "|".join(n for n, _ in apps))
     print("files=%s" % "|".join(files))
     print("best=%s" % best)
     print("settings=%s" % "|".join(settings))
     print("stores=%s" % "|".join(stores))
+    print("paths=%s" % "|".join(paths))
     print("first_app=%s" % (apps[0][0] if apps else ""))
     print("first_exec=%s" % (apps[0][1] if apps else ""))
     return 0

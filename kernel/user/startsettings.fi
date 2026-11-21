@@ -5,15 +5,24 @@ import msg
 import setroute
 import libc.text
 import ulib
+import deeplink
+import deepindex
+import fui.searchrank
+import nav.reg
+import libc.octets
 
-export { query, title_at, open_page }
+export { query, title_at, path_at, open_page }
 
 const MAX_PAGES: u64 = 8
+const MAX_ROUTE_PAGES: u64 = 48
 
 static mut hit_pages: [u64; 8] = [0 as u64; 8]
 static mut hit_count: u64 = 0
 static mut exec_path: [u8; 25] = "/apps/settings.osp/start\0"
 static mut arg_prefix: [u8; 6] = "page=\0"
+static mut key_app_title: [u8; 19] = "settings.app.title\0"
+static mut sep: [u8; 4] = " > \0"
+static mut path_buf: [u8; 96] = [0 as u8; 96]
 
 fn query(term: u64, out: u64, max: u64) -> u64 {
     hit_count = 0
@@ -32,7 +41,35 @@ fn query(term: u64, out: u64, max: u64) -> u64 {
         }
         i = i + 1
     }
+    if hit_count == 0 && text.length(term) >= searchrank.PAGE_FUZZY_MIN_LEN {
+        typo_pages(term, out, max)
+    }
+    add_deep_entries(term, out, max)
     return hit_count
+}
+
+fn typo_pages(term: u64, out: u64, max: u64) {
+    var empty: [u8; 1] = [0 as u8; 1]
+    var p: u64 = 0
+    while p < MAX_ROUTE_PAGES && hit_count < max && hit_count < MAX_PAGES {
+        let rt: u64 = setroute.page_route(p)
+        if rt != setroute.NONE {
+            let tier: u64 = searchrank.fields_tier(setroute.page_title(p), (&empty[0 as usize]) as u64, msg.get(reg.kw_key(rt)), term, true)
+            if tier != searchrank.NO_MATCH {
+                hit_pages[(hit_count) as usize] = p
+                __mmio_write64((out + hit_count * 8) as *mut u64, p)
+                hit_count = hit_count + 1
+            }
+        }
+        p = p + 1
+    }
+}
+
+fn add_deep_entries(term: u64, out: u64, max: u64) {
+    if hit_count >= max {
+        return
+    }
+    hit_count = hit_count + deepindex.query(term, out + hit_count * 8, max - hit_count)
 }
 
 fn contains(page: u64) -> bool {
@@ -47,10 +84,62 @@ fn contains(page: u64) -> bool {
 }
 
 fn title_at(page: u64) -> u64 {
+    if page >= deepindex.LINK_BASE {
+        return deepindex.title_at(page - deepindex.LINK_BASE)
+    }
     return setroute.page_title(page)
 }
 
+fn append(at: u64, src: u64) -> u64 {
+    var n: u64 = at
+    var i: u64 = 0
+    while octets.ld8(src, i) != 0 && n + 1 < 96 {
+        octets.st8((&path_buf[0 as usize]) as u64, n, octets.ld8(src, i))
+        n = n + 1
+        i = i + 1
+    }
+    octets.st8((&path_buf[0 as usize]) as u64, n, 0)
+    return n
+}
+
+fn path_at(page: u64) -> u64 {
+    if page >= deepindex.LINK_BASE {
+        return deepindex.path_at(page - deepindex.LINK_BASE)
+    }
+    var n: u64 = append(0, msg.get((&key_app_title[0 as usize]) as u64))
+    let rt: u64 = setroute.page_route(page)
+    if rt == setroute.NONE {
+        return (&path_buf[0 as usize]) as u64
+    }
+    let parent: u64 = reg.parent(rt)
+    if parent != reg.NONE {
+        n = append(n, (&sep[0 as usize]) as u64)
+        n = append(n, msg.get(reg.title_key(parent)))
+    }
+    return (&path_buf[0 as usize]) as u64
+}
+
 fn open_page(page: u64) -> u64 {
+    if page >= deepindex.LINK_BASE {
+        return deepindex.open_at(page - deepindex.LINK_BASE)
+    }
+    let rt: u64 = setroute.page_route(page)
+    if rt != setroute.NONE {
+        return open_target(rt)
+    }
+    return open_numbered(page)
+}
+
+fn open_target(rt: u64) -> u64 {
+    var arg: [u8; 112] = [0 as u8; 112]
+    var argv: [u64; 2] = [0 as u64; 2]
+    let n: u64 = deeplink.build_arg(reg.uri(rt), (&arg[0 as usize]) as u64, 112)
+    argv[0 as usize] = (&exec_path[0 as usize]) as u64
+    argv[1 as usize] = (&arg[0 as usize]) as u64
+    return ulib.spawn_app((&exec_path[0 as usize]) as u64, (&argv[0 as usize]) as u64, 2)
+}
+
+fn open_numbered(page: u64) -> u64 {
     var arg: [u8; 24] = [0 as u8; 24]
     var argv: [u64; 2] = [0 as u64; 2]
     ulib.strncpy((&arg[0 as usize]) as u64, (&arg_prefix[0 as usize]) as u64, 6)

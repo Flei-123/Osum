@@ -4,7 +4,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 TMPD=$(mktemp -d)
-cleanup() { git worktree remove --force "$TMPD/mut" > /dev/null 2>&1; git worktree remove --force "$TMPD/nol" > /dev/null 2>&1; rm -rf "$TMPD"; }
+cleanup() { git worktree remove --force "$TMPD/mut" > /dev/null 2>&1; git worktree remove --force "$TMPD/nol" > /dev/null 2>&1; git worktree remove --force "$TMPD/noi" > /dev/null 2>&1; rm -rf "$TMPD"; }
 trap cleanup EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
@@ -78,6 +78,17 @@ assert b.count(old) == 1
 open(q, "wb").write(b.replace(old, b"g_store_best = false && napp > 0 &&"))
 PY
 
+git worktree add --detach "$TMPD/noi" HEAD > /dev/null 2>&1 || bad "noindex worktree"
+python3 -I - "$TMPD/noi" <<'PY'
+import sys
+p = sys.argv[1] + "/kernel/user/startsettings.fi"
+s = open(p).read()
+for name in ("fn add_deep_entries(term: u64, out: u64, max: u64) {\n", "fn typo_pages(term: u64, out: u64, max: u64) {\n"):
+    assert s.count(name) == 1, name
+    s = s.replace(name, name + "    if term != 0 {\n        return\n    }\n")
+open(p, "w").write(s)
+PY
+
 run_tree() { # run_tree <tree> <name>
     ( cd "$1" && APPS_DIR="$TMPD/apps" EH_ETC_EXTRA="/etc/startuse.conf=$TMPD/startuse.conf@0644" EH_MKFS_EXTRA="$MKFS_EXTRA" \
         DESIGNBUILD="$TMPD/build-$2" bash tools/design/eh6.sh "$TMPD/$2" res=1920x1080 accel=kvm tafel=nein \
@@ -90,17 +101,19 @@ run_tree "$TMPD/mut" old &
 P2=$!
 run_tree "$TMPD/nol" nol &
 P3=$!
-wait $P1 $P2 $P3
+run_tree "$TMPD/noi" noi &
+P4=$!
+wait $P1 $P2 $P3 $P4
 
 if [ -n "${SEARCHRANKUI_SHOTS:-}" ]; then mkdir -p "$SEARCHRANKUI_SHOTS"; cp "$TMPD"/new/1*.ppm "$TMPD"/new/2*.ppm "$SEARCHRANKUI_SHOTS/" 2>/dev/null; cp "$TMPD/new/serial.txt" "$SEARCHRANKUI_SHOTS/serial.txt" 2>/dev/null; fi
 val() { sed -n "s/^$2=//p" "$1" | head -1; }
-for n in new old nol; do
+for n in new old nol noi; do
     S="$TMPD/$n/serial.txt"
     [ -s "$S" ] || { bad "$n: no serial output: $(tail -3 "$TMPD/$n.log" | tr '\n' ' ')"; continue; }
     python3 -I tools/searchrank/check.py "$S" certus > "$TMPD/$n.certus" 2>&1
     python3 -I tools/searchrank/check.py "$S" zzqq > "$TMPD/$n.zzqq" 2>&1
     python3 -I tools/searchrank/check.py "$S" notes > "$TMPD/$n.notes" 2>&1
-    for q in quokka xremote x-remote "X Remote" fernst firfox fire term einst te bluetooth long-file; do
+    for q in autostart autostrat netzwerk account wlan "data folder" freeviewer quokka xremote x-remote "X Remote" fernst firfox fire term einst te bluetooth long-file; do
         python3 -I tools/searchrank/check.py "$S" "$q" > "$TMPD/$n.q_${q// /_}" 2>&1
     done
 done
@@ -185,6 +198,24 @@ grep -aq 'launcher: settings page=[0-9]* pid=' "$D/serial.txt" && ok "Enter on a
 [ "$(val $D.q_long-file files)" = "/data/a-very-long-file-name-fo" ] && ok "a name longer than the slot is cut and terminated" \
     || bad "long name listed as '$(val $D.q_long-file files)'"
 grep -aq 'launcher: .*[Pp]anic\|#PF\|program died' "$D/serial.txt" && bad "launcher died during the run" || ok "launcher survived all queries"
+
+echo "== deep links: settings pages, typo, task manager pages =="
+case "$(val $D.q_autostart settings)" in *Autostart*) ok "'autostart': the Settings page Autostart is listed" ;; *) bad "'autostart': settings are '$(val $D.q_autostart settings)'" ;; esac
+case "$(val $D.q_autostart settings)" in *"Startup apps"*) ok "'autostart': the Task Manager page is listed from the deep link index" ;; *) bad "'autostart': no Task Manager deep link in '$(val $D.q_autostart settings)'" ;; esac
+case "$(val $D.q_autostart paths)" in *"> Apps"*) ok "'autostart': the card path reads '$(val $D.q_autostart paths | cut -d'|' -f1)'" ;; *) bad "'autostart': paths are '$(val $D.q_autostart paths)'" ;; esac
+case "$(val $D.q_autostart paths)" in *"Task Manager"*) ok "'autostart': the Task Manager link shows its own path" ;; *) bad "'autostart': Task Manager path missing in '$(val $D.q_autostart paths)'" ;; esac
+case "$(val $D.q_autostrat settings)" in *Autostart*) ok "'autostrat' (typo): the Settings page is still found" ;; *) bad "'autostrat': settings are '$(val $D.q_autostrat settings)'" ;; esac
+case "$(val $D.q_data_folder settings)" in *"Data folder"*) ok "'data folder': the Explorer deep link is listed" ;; *) bad "'data folder': settings are '$(val $D.q_data_folder settings)'" ;; esac
+case "$(val $D.q_data_folder paths)" in *Files*) ok "'data folder': its card path is Files" ;; *) bad "'data folder': paths are '$(val $D.q_data_folder paths)'" ;; esac
+case "$(val $D.q_freeviewer settings)" in *"in the Store"*) ok "'freeviewer': the Store deep link is listed" ;; *) bad "'freeviewer': settings are '$(val $D.q_freeviewer settings)'" ;; esac
+for q in netzwerk account wlan; do
+    [ -n "$(val $D.q_$q settings)" ] && ok "'$q': a Settings page is listed ($(val $D.q_$q settings | cut -c1-40))" || bad "'$q': no Settings page"
+done
+grep -aq 'launcher: settings page=[0-9]* pid=' "$D/serial.txt" && ok "Enter on 'autostart' starts Settings" || bad "no Settings start line"
+grep -aq 'settings: autostart page entries=' "$D/serial.txt" && ok "Settings opened the Autostart page (page 37) from the search hit" || bad "Settings never built the Autostart page"
+N2="$TMPD/noi"
+case "$(val $N2.q_autostart settings)" in *"Startup apps"*) bad "no-index tree still lists the Task Manager page -- the test is blind" ;; *) ok "no-index tree: the Task Manager deep link is gone" ;; esac
+case "$(val $N2.q_autostrat settings)" in *Autostart*) bad "no-index tree still finds the typo -- the test is blind" ;; *) ok "no-index tree: the typo 'autostrat' finds nothing" ;; esac
 
 echo "== counter-proof: old ranking =="
 O="$TMPD/old"
