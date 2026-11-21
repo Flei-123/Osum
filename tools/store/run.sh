@@ -550,6 +550,7 @@ EXTRA+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/de/ /usr/share/lo
 [ -f assets/osum-icons.ttf ] && EXTRA+=("/lib/icons.ttf=assets/osum-icons.ttf")
 [ -f assets/osum-sans-bold.ttf ] && EXTRA+=("/lib/bold.ttf=assets/osum-sans-bold.ttf")
 PROGS_SAVE=$PROGS; PROGS="$PROGS store"
+[ -z "${STORE_FIT:-}" ] || sed -i "s|^store &\$|store --size ${STORE_FIT} \&|" "$TMPD/sW.sh"
 image "$TMPD/W.img" "$TMPD/sW.sh" $((P0+7))
 PROGS=$PROGS_SAVE
 SCALE_WORD=${STORE_SCALE:+uiscale=$STORE_SCALE}
@@ -620,6 +621,15 @@ if waitfor "==S-WAIT==" 150; then
     [ "$(lastn)" = 4 ] && ok "the window fetched the signed catalog by itself (first start): four tiles (two packages, two entries without a package)" || bad "no catalog tiles after the first start"
     sawt "store." && bad "raw locale keys painted" || ok "no raw locale keys"
     sleep 3; shot s1-grid
+    if [ -n "${STORE_FIT:-}" ]; then
+        sleep 6; shot s2-fit
+        wclean | grep -a "store: geom " | tail -1 > "$TMPD/geom.txt"
+        wclean | awk '/store: rect /' > "$TMPD/rects.txt"
+        python3 -I tools/storefit/check.py "$RES" "${STORE_SCALE:-1}" "${STORE_FIT}" "$TMPD/geom.txt" "$TMPD/rects.txt" > "$TMPD/fit.txt" 2>&1
+        while IFS= read -r l; do case "$l" in OK*) ok "${l#OK }";; INFO*) note "${l#INFO }";; *) bad "${l#FAIL }";; esac; done < "$TMPD/fit.txt"
+        kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null
+        echo "STORE: $pass passed, $fail failed"; [ "$fail" = 0 ]; exit
+    fi
     MARK=1
     for t in "Updates" "Installiert" "Installieren" "Neue Fassung"; do sawt "$t" && ok "the window shows '$t'" || bad "no '$t'"; done
     [ "$(lastn)" = 4 ] && ok "four tiles (gruss, hallo, Weinprogramm, Feuerfuchs) -- what the signed catalogs deliver, nothing made up" || bad "tiles: '$(lastn)'"
