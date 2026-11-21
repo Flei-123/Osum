@@ -46,7 +46,7 @@ trap cleanup EXIT
 OUT=${XR_OUT:-$T/out}
 mkdir -p "$OUT" "$T/relay" "$T/home" "$T/fx" "$T/wd/fxrun"
 musl-gcc -O2 -fPIE -pie -o "$T/xrprobe" tools/xremote/probe.c || { echo "XRFPS: probe build failed"; exit 1; }
-sed -e "s/@RELAYPORT@/$RELAYPORT/g" -e "s/@HOSTSECS@/$HOSTSECS/g" -e "s/@TAILSECS@/$TAILSECS/g" tools/xremote/guest-direct.sh > "$T/xrd.sh"
+sed -e "s/@RELAYPORT@/$RELAYPORT/g" -e "s/@HOSTSECS@/$HOSTSECS/g" -e "s/@TAILSECS@/$TAILSECS/g" tools/xremote/guest-direct.sh > "$T/xr3.sh"
 cp tools/xremote/guest-desktop.sh "$T/guest.sh"
 grep -E '/@755$|^/(bin|sbin)/|^/usr/(bin|sbin)/[a-z0-9_.-]*->/bin/busybox|^/lib/(ld-musl|libc\.musl)' "$WD/fxrun/spec.txt" > "$T/fx/spec.txt"
 {
@@ -76,7 +76,7 @@ kill -0 "$RP" 2>/dev/null && ok "relay up on port $RELAYPORT" || bad "relay did 
 ) &
 VP=$!
 BOOTARGS="gfx disp wm wmdauer wmshell osum vfs bus fremdtrace nic nip=10.0.2.15/24 ngw=10.0.2.2 script=sh /etc/fx.sh;exit"
-env GUI=1 "EXTRA=/etc/xrd.sh=$T/xrd.sh@755" KERNEL=${KERNEL:-} DONE=XR-END TMO=${XR_TMO:-900} MEM=1024 \
+env GUI=1 "EXTRA=/etc/xr3.sh=$T/xr3.sh@755" KERNEL=${KERNEL:-} DONE=XR-END TMO=${XR_TMO:-900} MEM=1024 \
     KARGS="$BOOTARGS" \
     QEMU_EXTRA="-vga std -netdev user,id=n0 -device virtio-net-pci,netdev=n0,mac=52:54:00:5b:1d:01" \
     SPEC="$T/wd/fxrun/spec.txt" bash tools/linuxapps/run.sh "$WD" "$T/guest.sh" "$OUT" > "$T/linuxapps.log" 2>&1
@@ -117,11 +117,10 @@ echo "        pictures sent over UDP: ${UDP:-none}"
 [ "${UDP:-0}" -ge 10 ] && ok "host sent $UDP tile batches over the direct path (>= 10)" || bad "host sent only ${UDP:-0} pictures over UDP"
 KB=$(grep -a '^XR-STATE kbps=' "$S" | grep -o '[0-9]*$' | sort -n | tail -1)
 echo "        peak host kbps: ${KB:-none}"
-T0=$(grep -a '^XR-THEME-BEFORE' "$S" | head -1 | cut -d' ' -f2-)
-TA=$(grep -a '^XR-THEME-APPEND' "$S" | head -1 | cut -d' ' -f2-)
-[ -n "$T0" ] && [ "$T0" = "$TA" ] && ok "/etc/theme.conf unchanged after appending to a new log file (12 s)" || bad "/etc/theme.conf changed by log appends: before '$T0' after '$TA'"
-T1=$(grep -a '^XR-THEME-AFTER' "$S" | head -1 | cut -d' ' -f2-)
-[ -n "$T0" ] && [ "$T0" = "$T1" ] && ok "/etc/theme.conf unchanged after the session ($T0)" || bad "/etc/theme.conf changed: before '$T0' after '$T1'"
+theme_lines() { grep -a "^XR-THEME-$1 " "$S" | sed "s/^XR-THEME-$1 //" | tr -d '\r'; }
+T0=$(theme_lines BEFORE); TA=$(theme_lines APPEND); T1=$(theme_lines AFTER)
+[ -n "$T0" ] && [ "$T0" = "$TA" ] && ok "/etc/theme.conf unchanged after appending to a new log file (12 s)" || bad "/etc/theme.conf changed by log appends: '$T0' vs '$TA'"
+[ -n "$T0" ] && [ "$T0" = "$T1" ] && ok "/etc/theme.conf unchanged after the session" || bad "/etc/theme.conf changed by the session: '$T0' vs '$T1'"
 echo "== $pass ok, $fail fail"
 if [ -n "${KEEP:-}" ]; then
     mkdir -p "${KEEP_DIR:-/tmp/xremote-fps-keep}"; cp -r "$OUT" "$T/perf.txt" "$T/relay.log" "${KEEP_DIR:-/tmp/xremote-fps-keep}/" 2>/dev/null

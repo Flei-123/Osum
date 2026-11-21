@@ -4,7 +4,7 @@ mkdir -p /root /tmp
 /opt/xr/xrprobe screen
 mkdir -p /etc
 echo scheme=probe > /etc/theme.conf
-echo "XR-THEME-BEFORE $(cksum < /etc/theme.conf)"
+sed 's/^/XR-THEME-BEFORE /' /etc/theme.conf
 mkdir -p /var/probe/.config/freeviewer
 n=0
 while [ $n -lt 12 ]; do
@@ -12,7 +12,7 @@ while [ $n -lt 12 ]; do
     sleep 1
     n=$((n + 1))
 done
-echo "XR-THEME-APPEND $(cksum < /etc/theme.conf)"
+sed 's/^/XR-THEME-APPEND /' /etc/theme.conf
 /opt/xr/xrprobe grabbench 10
 export FV_RELAY=ws://10.0.2.2:@RELAYPORT@/fv/ws FV_ALLOW_INSECURE_RELAY=1 FV_PASSWORD=xrpass
 /opt/xr/freeviewer-host --headless --state-file /tmp/state --home /root > /tmp/host.log 2>&1 &
@@ -40,5 +40,5 @@ cat /tmp/host.log
 echo "XR-HOSTLOG-END"
 kill $HP 2>/dev/null
 sleep 2
-echo "XR-THEME-AFTER $(cksum < /etc/theme.conf)"
+sed 's/^/XR-THEME-AFTER /' /etc/theme.conf
 echo XR-END
