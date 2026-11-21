@@ -22,8 +22,6 @@ cp "$D/stick.img" "$D/old.img"
 kernel_publish "$D/old.img@@$OSB_OFF" "$BASE_KERNEL" || { echo "MANYPCI: base kernel publish failed"; exit 1; }
 LOGIN="glogin: rect"
 
-pci_lines() { grep -ac "^pci: " "$1"; }
-
 run_case() {
     local name=$1 img=$2 bus=$3 want=$4
     osb_boot "$D" "$name" "$img" q35 "$bus" 120 "$LOGIN"
@@ -46,4 +44,10 @@ echo "== more than 32 PCI functions, stick behind the last root port =="
 run_case many_new "$D/new.img" manypci good
 run_case many_old "$D/old.img" manypci bad
 
-summary_emit "$pass" "$fail" 10
+echo "== no usable root device: the failure line names the counts =="
+osb_boot "$D" noroot "$D/new.img" q35 scsi "no device carries a root" "no device carries a root"
+t="$D/noroot.txt"
+grep -aq "no device carries a root" "$t" && ok "noroot: kernel stops at rootsel" || bad "noroot: kernel did not stop at rootsel"
+grep -aq "rootsel: pci functions=[0-9]* xhci=[0-9]*" "$t" && ok "noroot: pci and xhci counts reported" || bad "noroot: counts line missing"
+
+summary_emit "$pass" "$fail" 12

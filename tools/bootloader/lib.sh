@@ -41,6 +41,7 @@ osb_bus() {
         nvme) echo "-device nvme,drive=stick,serial=osbstick,bootindex=0" ;;
         twohc) echo "-device qemu-xhci,id=xa -device qemu-xhci,id=xb -device usb-storage,bus=xb.0,drive=stick" ;;
         manypci) osb_many_pci_args ;;
+        scsi) echo "-device virtio-scsi-pci,id=vs -device scsi-hd,drive=stick,bus=vs.0,bootindex=0" ;;
     esac
 }
 
