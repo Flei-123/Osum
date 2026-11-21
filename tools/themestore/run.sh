@@ -1802,12 +1802,13 @@ txt = open(sys.argv[1], 'rb').read().decode('latin1')
 pil = {}
 for m in re.finditer(r'taskbar: pille i=(\d+) x=(\d+) w=(\d+)'
                      r' tx=(\d+) tw=(\d+)', txt):
-    pil[int(m.group(1))] = tuple(int(g) for g in m.groups()[1:])
+    if int(m.group(1)) < 100:
+        pil[int(m.group(1))] = tuple(int(g) for g in m.groups()[1:])
 txts = {}
 for m in re.finditer(r'taskbar: text button x=(\d+) base=\d+ fg=\d+'
                      r' bg=\d+ tw=(\d+) t=', txt):
     txts[int(m.group(1))] = int(m.group(2))
-breit = [(i, v) for i, v in pil.items() if v[1] != 10]
+breit = [(i, v) for i, v in pil.items() if v[1] != 6]
 schlecht = []
 for i, (px, pw, tx, tw) in breit:
     if (px, pw) != (tx, tw):
