@@ -3,10 +3,14 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 
 #define BUF_BYTES 4096
 #define NS_COUNT 8
+#define NS_GET_USERNS 0xb701
+#define NS_GET_NSTYPE 0xb703
+#define CLONE_NEWNS_FLAG 0x00020000
 #define MIB (1024UL * 1024UL)
 
 static const char *const ns_names[NS_COUNT] = { "cgroup", "ipc", "mnt", "net", "pid", "time", "user", "uts" };
@@ -150,6 +154,15 @@ static void check_ns(void)
     snprintf(other, sizeof other, "/proc/%d/ns/mnt", (int)getppid());
     int same = stat("/proc/self/ns/mnt", &a) == 0 && stat(other, &b) == 0 && a.st_ino == b.st_ino && a.st_ino != 0;
     CHECK("ns_same_inode_across_processes", same, "ino %lu vs %lu", (unsigned long)a.st_ino, (unsigned long)b.st_ino);
+    int nsfd = open("/proc/self/ns/mnt", O_RDONLY);
+    errno = 0;
+    int type = nsfd >= 0 ? ioctl(nsfd, NS_GET_NSTYPE) : -1;
+    CHECK("ns_ioctl_nstype", type == CLONE_NEWNS_FLAG, "type %x errno=%d fd=%d", type, errno, nsfd);
+    errno = 0;
+    int owner = nsfd >= 0 ? ioctl(nsfd, NS_GET_USERNS) : -1;
+    CHECK("ns_ioctl_userns_eperm", owner == -1 && errno == EPERM, "rc %d errno=%d", owner, errno);
+    if (nsfd >= 0)
+        close(nsfd);
     errno = 0;
     char t[8];
     CHECK("ns_bad_name_enoent", readlink("/proc/self/ns/nope", t, sizeof t) < 0 && errno == ENOENT, "errno=%d", errno);
