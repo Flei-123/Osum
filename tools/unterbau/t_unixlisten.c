@@ -145,9 +145,22 @@ static void accept4_flag_call(void)
         GAP("a4_listen", "errno=%d", errno);
         return;
     }
+    int c1 = dial(SOCK_STREAM, path, 0);
+    int c2 = dial(SOCK_STREAM, path, 0);
+    int a1 = accept4(l, 0, 0, SOCK_NONBLOCK);
+    int a2 = accept4(l, 0, 0, 0);
+    int f1 = a1 >= 0 ? fcntl(a1, F_GETFL) : 0;
+    int f2 = a2 >= 0 ? fcntl(a2, F_GETFL) : 0;
+    CHECK("accept4_nonblock_flag_marks_socket", a1 >= 0 && (f1 & O_NONBLOCK), "a1=%d fl=%d", a1, f1);
+    CHECK("accept4_plain_socket_stays_blocking", a2 >= 0 && !(f2 & O_NONBLOCK), "a2=%d fl=%d", a2, f2);
+    char buf[4];
     long t0 = now_ms();
-    int r = accept4(l, 0, 0, SOCK_NONBLOCK);
-    CHECK("accept4_nonblock_flag_does_not_wait", r < 0 && errno == EAGAIN && now_ms() - t0 < 500, "r=%d errno=%d", r, errno);
+    int r = a1 >= 0 ? (int)read(a1, buf, sizeof buf) : 0;
+    CHECK("accept4_nonblock_socket_read_eagain", r < 0 && errno == EAGAIN && now_ms() - t0 < 500, "r=%d errno=%d", r, errno);
+    if (c1 >= 0) close(c1);
+    if (c2 >= 0) close(c2);
+    if (a1 >= 0) close(a1);
+    if (a2 >= 0) close(a2);
     close(l);
     unlink(path);
 }
