@@ -21,6 +21,10 @@ as --64 -o "$OUT/crt.o" kernel/user/crt.s
     && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" -o "$OUT/xfxt.elf" "$OUT/crt.o" "$OUT/xfxt.o" \
     && strip --strip-all "$OUT/xfxt.elf" || { echo "XFXLOOP: xfxt build failed"; exit 1; }
 
+if [ -n "${XL_PRESSURE:-}" ]; then
+    musl-gcc -O1 -static -o "$OUT/shmpress" tools/xfxloop/shmpress.c || { echo "XFXLOOP: shmpress build failed"; exit 1; }
+fi
+
 printf 'root:x:0:0:root:/:/bin/sh\njustin:x:1000:1000:Justin:/home/justin:/bin/sh\n' > "$OUT/passwd"
 printf 'root:x:0:\njustin:x:1000:\n' > "$OUT/group"
 head -c 128 /dev/zero | tr '\0' 'x' > "$OUT/installed"
@@ -31,6 +35,8 @@ cp "$OUT/spec.in" "$OUT/spec.base"
 {
     echo "echo XLBEGIN"
     echo "/bin/xfxt sess 1000"
+    [ -n "${XL_PRESSURE:-}" ] && echo "/bin/shmpress $XL_PRESSURE"
+    echo "grep -a -E 'FramesFreeLow|ShmFail' /proc/meminfo"
     echo "grep -a ShmObjects: /proc/meminfo"
     r=1
     while [ "$r" -le "$ROUNDS" ]; do
@@ -42,6 +48,7 @@ cp "$OUT/spec.in" "$OUT/spec.base"
         echo "cat /proc/loadavg"
         echo "/bin/xfx status"
         echo "grep -a ShmObjects: /proc/meminfo"
+        echo "grep -a -E 'FramesFreeLow|ShmFail' /proc/meminfo"
         echo "/bin/xfxt procs"
         echo "echo XLCHUNK"
         echo "grep -a -c failed.to.allocate /var/log/xfx.log"
@@ -69,7 +76,7 @@ cp "$OUT/spec.in" "$OUT/spec.base"
     echo "echo FX-END"
 } > "$OUT/guest.sh"
 
-EXTRA_SPEC="/bin/xfxt=$OUT/xfxt.elf@755 /usr/share/xfx/@755 /usr/share/xfx/installed=$OUT/installed@644 /usr/share/xfx/user.js=$OUT/user.js@644 /etc/passwd=$OUT/passwd@644 /etc/group=$OUT/group@644 /home/@755:0:0 /home/justin/@700:1000:1000 /run/@755 /var/log/@755 /tmp/@1777"
+EXTRA_SPEC="/bin/xfxt=$OUT/xfxt.elf@755 ${XL_PRESSURE:+/bin/shmpress=$OUT/shmpress@755} /usr/share/xfx/@755 /usr/share/xfx/installed=$OUT/installed@644 /usr/share/xfx/user.js=$OUT/user.js@644 /etc/passwd=$OUT/passwd@644 /etc/group=$OUT/group@644 /home/@755:0:0 /home/justin/@700:1000:1000 /run/@755 /var/log/@755 /tmp/@1777"
 grep -v -E '^(/usr/share/xfx/|/home/|/run/|/var/log/|/tmp/)' "$OUT/spec.base" > "$OUT/spec.in"
 SPEC=$OUT/spec.in GUI=1 GUI_EXTRA="xfx" DONE=FX-END BLOCKS=${BLOCKS:-1000000} TMO=${TMO:-1500} MEM=${MEM:-4096} SMP=${SMP:-4} \
     EXTRA="$EXTRA_SPEC" \
