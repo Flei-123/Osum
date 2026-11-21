@@ -14,7 +14,8 @@ while [ $n -lt 12 ]; do
 done
 sed 's/^/XR-THEME-APPEND /' /etc/theme.conf
 /opt/xr/xrprobe grabbench 10
-export FV_RELAY=ws://10.0.2.2:@RELAYPORT@/fv/ws FV_ALLOW_INSECURE_RELAY=1 FV_PASSWORD=xrpass
+echo xr-udp-probe | nc -u -w1 10.0.2.2 @UDPPORT@
+export FV_RELAY=ws://10.0.2.2:@RELAYPORT@/fv/ws FV_ALLOW_INSECURE_RELAY=1 FV_PASSWORD=xrpass FV_NOSTUN=1
 /opt/xr/freeviewer-host --headless --state-file /tmp/state --home /root > /tmp/host.log 2>&1 &
 HP=$!
 i=0

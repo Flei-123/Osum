@@ -325,7 +325,7 @@ has "$M" start 'installed=yes install=done firefox=running pid=[0-9]+ uid=1000' 
 has "$M" start 'proc firefox +uid=1000' "PSTAT shows firefox uid 1000"
 has "$M" start 'proc wayd +uid=1000' "PSTAT shows wayd uid 1000"
 hasnot "$M" start 'proc (firefox|wayd) +uid=0' "no firefox/wayd as root"
-[ "$(seg "$M" start | grep -ac 'exists=yes')" = 2 ] && ok "socket and profile user.js exist" || bad "socket or profile user.js missing"
+[ "$(seg "$M" start | grep -ac 'exists=yes')" = 2 ] && ok "socket and profile user.js exist" || { bad "socket or profile user.js missing"; seg "$M" start | tail -12; }
 [ "$(seg "$M" theme | grep -ac 'systemUsesDarkTheme", 1')" = 1 ] && ok "profile user.js is dark while theme.conf says dark" || bad "dark prefs missing for mode=dark"
 [ "$(seg "$M" theme | grep -ac 'systemUsesDarkTheme", 0')" = 1 ] && ok "profile user.js turns light after theme.conf says light and a restart" || bad "light prefs missing for mode=light"
 has "$M" theme 'firefox-compact-dark@mozilla.org' "dark Firefox theme requested"

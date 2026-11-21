@@ -9,11 +9,16 @@ from pathlib import Path
 from PIL import Image
 
 OCR_ZOOM = 3
-LAST_MODE = r"2560\s*[x×]\s*1600"
-DEPTH = r"32\s*bit"
-GLUED_DEPTH = "328"
-DETAILS_LABEL = r"Connection\s+details"
-DETAILS_PAGE_WORDS = ("Address", "Gateway", "MAC", "Speed")
+MODE = r"\d{3,4}\s*[x×]\s*\d{3,4}"
+PAGE_WORDS = (
+    r"System\s*>\s*Display",
+    r"Brightness",
+    r"Night\s+light",
+    r"Scale\s*&\s*layout",
+    r"Display\s+resolution",
+    r"Display\s+orientation",
+    r"Multiple\s+displays",
+)
 
 
 def ocr_text(path):
@@ -27,36 +32,59 @@ def ocr_text(path):
     return run.stdout
 
 
-def judge_display(text):
-    last_mode = re.search(LAST_MODE, text) is not None
-    depth = re.search(DEPTH, text, re.IGNORECASE) is not None
-    glued = GLUED_DEPTH in text
-    print("ocr last_mode=%s depth=%s glued=%s" % (last_mode, depth, glued))
-    return last_mode and depth and not glued
+def has(text, pattern):
+    return re.search(pattern, text, re.IGNORECASE) is not None
 
 
-def judge_network(text):
-    found = re.search(DETAILS_LABEL, text, re.IGNORECASE) is not None
-    print("ocr related_row=%s" % found)
-    return found
+def judge_page(text):
+    missing = [w for w in PAGE_WORDS if not has(text, w)]
+    readout = has(text, r"\b\d{2,3}\s*%")
+    print("ocr missing=%s readout=%s" % (",".join(missing) or "-", readout))
+    return not missing and readout
 
 
-def judge_details(text):
-    hits = [w for w in DETAILS_PAGE_WORDS if re.search(w, text, re.IGNORECASE)]
-    related_still = re.search(r"Related", text, re.IGNORECASE) is not None and \
-        re.search(DETAILS_LABEL, text, re.IGNORECASE) is not None
-    print("ocr details_words=%s related_still=%s" % (",".join(hits), related_still))
-    return len(hits) >= 2 and not related_still
+def judge_list(text):
+    modes = set(re.sub(r"\s", "", m).lower() for m in re.findall(MODE, text))
+    print("ocr modes=%d" % len(modes))
+    return len(modes) >= 3
 
 
-def judge_nocard(text):
-    empty_row = re.search(r"no\s+card\s+found", text, re.IGNORECASE) is not None
-    unprobed = re.search(r"not\s+probed", text, re.IGNORECASE) is not None
-    print("ocr empty_row=%s unprobed=%s" % (empty_row, unprobed))
-    return empty_row and unprobed
+def judge_keep(text):
+    card = has(text, r"Keep\s+these\s+display") and has(text, r"Revert")
+    print("ocr keep_card=%s" % card)
+    return card
 
 
-JUDGES = {"nocard": judge_nocard, "display": judge_display, "network": judge_network, "details": judge_details}
+def judge_back(text):
+    card = has(text, r"Keep\s+these\s+display")
+    mode = has(text, r"1280\s*[x×]\s*800")
+    print("ocr keep_card=%s mode_1280x800=%s" % (card, mode))
+    return mode and not card
+
+
+def judge_boot_page(text):
+    auto = has(text, r"Automatic")
+    boot = has(text, r"next\s+restart")
+    keep = has(text, r"Keep\s+these\s+display")
+    print("ocr automatic=%s next_restart=%s keep_card=%s" % (auto, boot, keep))
+    return auto and boot and not keep
+
+
+def judge_boot_saved(text):
+    saved = has(text, r"new\s+resolution\s+applies\s+after\s+the\s+next\s+restart")
+    keep = has(text, r"Keep\s+these\s+display")
+    print("ocr saved_note=%s keep_card=%s" % (saved, keep))
+    return saved and not keep
+
+
+JUDGES = {
+    "page": judge_page,
+    "list": judge_list,
+    "keep": judge_keep,
+    "back": judge_back,
+    "bootpage": judge_boot_page,
+    "bootsaved": judge_boot_saved,
+}
 
 
 def main():

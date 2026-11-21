@@ -25,6 +25,7 @@ MAX_GRAB_MS=${XR_MAX_GRAB_MS:-80}
 HOSTSECS=${XR_HOSTSECS:-240}
 TAILSECS=${XR_TAIL:-75}
 RELAYPORT=$((18000 + $$ % 1000))
+UDPPORT=$((RELAYPORT + 1000))
 FULLHD_PIXELS=2073600
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
@@ -40,13 +41,14 @@ RP=""; VP=""
 cleanup() {
     [ -n "$RP" ] && kill "$RP" 2>/dev/null
     [ -n "$VP" ] && kill "$VP" 2>/dev/null
+    [ -n "${UP:-}" ] && kill "$UP" 2>/dev/null
     rm -rf "$T"
 }
 trap cleanup EXIT
 OUT=${XR_OUT:-$T/out}
 mkdir -p "$OUT" "$T/relay" "$T/home" "$T/fx" "$T/wd/fxrun"
 musl-gcc -O2 -fPIE -pie -o "$T/xrprobe" tools/xremote/probe.c || { echo "XRFPS: probe build failed"; exit 1; }
-sed -e "s/@RELAYPORT@/$RELAYPORT/g" -e "s/@HOSTSECS@/$HOSTSECS/g" -e "s/@TAILSECS@/$TAILSECS/g" tools/xremote/guest-direct.sh > "$T/xr3.sh"
+sed -e "s/@RELAYPORT@/$RELAYPORT/g" -e "s/@UDPPORT@/$UDPPORT/g" -e "s/@HOSTSECS@/$HOSTSECS/g" -e "s/@TAILSECS@/$TAILSECS/g" tools/xremote/guest-direct.sh > "$T/xr3.sh"
 cp tools/xremote/guest-desktop.sh "$T/guest.sh"
 grep -E '/@755$|^/(bin|sbin)/|^/usr/(bin|sbin)/[a-z0-9_.-]*->/bin/busybox|^/lib/(ld-musl|libc\.musl)' "$WD/fxrun/spec.txt" > "$T/fx/spec.txt"
 {
@@ -59,6 +61,15 @@ cp "$T/fx/spec.txt" "$T/wd/fxrun/spec.txt"
 cp "$RELAYDIR"/*.js "$T/relay/"
 (cd "$T/relay" && NODE_PATH="$NODEPATH" FV_PORT=$RELAYPORT FV_DATA="$T/relay/hosts.json" FV_BUCH=0 exec node relay.js > "$T/relay.log" 2>&1) &
 RP=$!
+python3 -I - "$UDPPORT" "$T/udp.txt" <<'PY' &
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("0.0.0.0", int(sys.argv[1])))
+s.settimeout(600)
+data, peer = s.recvfrom(256)
+open(sys.argv[2], "w").write("%s from %s\n" % (data.decode("latin1").strip(), peer[0]))
+PY
+UP=$!
 sleep 2
 kill -0 "$RP" 2>/dev/null && ok "relay up on port $RELAYPORT" || bad "relay did not start"
 (
@@ -70,7 +81,7 @@ kill -0 "$RP" 2>/dev/null && ok "relay up on port $RELAYPORT" || bad "relay did 
     done
     [ -n "$ID" ] || exit 0
     echo "$ID" > "$T/hostid"
-    export HOME="$T/home" FV_RELAY="ws://127.0.0.1:$RELAYPORT/fv/ws" FV_ALLOW_INSECURE_RELAY=1
+    export FV_NOSTUN=1 FV_P2P_IP=10.0.2.2 HOME="$T/home" FV_RELAY="ws://127.0.0.1:$RELAYPORT/fv/ws" FV_ALLOW_INSECURE_RELAY=1
     sleep 15
     timeout 120 "$VIEWER" --perftest "$ID" xrpass > "$T/perf.txt" 2>&1
 ) &
@@ -83,6 +94,7 @@ env GUI=1 "EXTRA=/etc/xr3.sh=$T/xr3.sh@755" KERNEL=${KERNEL:-} DONE=XR-END TMO=$
 wait "$VP" 2>/dev/null; VP=""
 S="$OUT/ser.clean"
 tail -n 3 "$T/linuxapps.log" | sed 's/^/        /'
+grep -q "xr-udp-probe" "$T/udp.txt" 2>/dev/null && ok "guest UDP datagram reaches the server through 10.0.2.2" || bad "guest UDP datagram to 10.0.2.2:$UDPPORT never arrived"
 [ -s "$T/hostid" ] && ok "host registered at the relay (ID $(cat "$T/hostid"))" || bad "host never printed an ID"
 
 GB=$(grep -a '^XR-GRABBENCH' "$S" | head -1)
@@ -123,6 +135,6 @@ T0=$(theme_lines BEFORE); TA=$(theme_lines APPEND); T1=$(theme_lines AFTER)
 [ -n "$T0" ] && [ "$T0" = "$T1" ] && ok "/etc/theme.conf unchanged after the session" || bad "/etc/theme.conf changed by the session: '$T0' vs '$T1'"
 echo "== $pass ok, $fail fail"
 if [ -n "${KEEP:-}" ]; then
-    mkdir -p "${KEEP_DIR:-/tmp/xremote-fps-keep}"; cp -r "$OUT" "$T/perf.txt" "$T/relay.log" "${KEEP_DIR:-/tmp/xremote-fps-keep}/" 2>/dev/null
+    mkdir -p "${KEEP_DIR:-/tmp/xremote-fps-keep}"; cp -r "$OUT" "$T/perf.txt" "$T/relay.log" "$T/home" "${KEEP_DIR:-/tmp/xremote-fps-keep}/" 2>/dev/null
 fi
 [ "$fail" -eq 0 ]
