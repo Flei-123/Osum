@@ -171,9 +171,21 @@ const GLASS_TINT: u64 = 24
 
 const GLASS_MIN_PX: u64 = 262144
 
+const GLASS_TILE: u64 = 32
+
+const GLASS_TILE_MAX: u64 = 128
+
+const GLASS_NONE: u64 = 0xFFFFFFFF
+
+static mut gl_tiles: [u64; 128] = [0 as u64; 128]
+
 static mut gl_base: u64 = 0
 
 static mut gl_cap_px: u64 = 0
+
+fn glass_frames(px: u64) -> u64 {
+    return px *% 3 / 1024
+}
 
 static mut gl_test: [u32; 1024] = [0 as u32; 1024]
 
@@ -188,12 +200,12 @@ fn glass_bufs(state: u64, px: u64) -> bool {
     if want > GLASS_PX {
         want = GLASS_PX
     }
-    let run: u64 = mmframe.frame_run(state, want / 512)
+    let run: u64 = mmframe.frame_run(state, glass_frames(want))
     if run == 0 {
         return false
     }
     if gl_base != 0 {
-        mmframe.frame_free_run(state, gl_base, gl_cap_px / 512)
+        mmframe.frame_free_run(state, gl_base, glass_frames(gl_cap_px))
         wmlayout.ss(state, wmlayout.S_GLVALID, 0)
     }
     gl_base = run
@@ -209,12 +221,14 @@ fn gl_alt_addr() -> u64 {
     return gl_base +% gl_cap_px *% 4
 }
 
-fn glass_blur(w: u64, h: u64, r: u64) {
+fn gl_tmp_addr() -> u64 {
+    return gl_base +% gl_cap_px *% 8
+}
+
+fn glass_blur(a: u64, b: u64, w: u64, h: u64, r: u64) {
     if r == 0 {
         return
     }
-    let a: u64 = gl_puf_addr()
-    let b: u64 = gl_alt_addr()
     var y: u64 = 0
     while y < h {
         comp.blur_line(a +% y *% w *% 4, b +% y *% w *% 4, 4, w, r)
@@ -236,8 +250,6 @@ fn bright_of(c: u64) -> u64 {
     return (((c >> 16) & 0xFF) * 299 + ((c >> 8) & 0xFF) * 587
         + (c & 0xFF) * 114) / 1000
 }
-
-static mut gl_src_hash: u64 = 0
 
 fn glass_source_hash(state: u64, gx: u64, gy: u64, w: u64, h: u64,
     key: u64) -> u64 {
@@ -262,6 +274,106 @@ fn glass_source_hash(state: u64, gx: u64, gy: u64, w: u64, h: u64,
         row = row + 1
     }
     return acc
+}
+
+fn glass_scan(state: u64, gx: u64, gy: u64, w: u64, h: u64, key: u64,
+    keep: bool) -> u64 {
+    let n: u64 = (w + GLASS_TILE - 1) / GLASS_TILE
+    var first: u64 = GLASS_NONE
+    var last: u64 = 0
+    var t: u64 = 0
+    while t < n {
+        let x0: u64 = t * GLASS_TILE
+        var nx: u64 = w - x0
+        if nx > GLASS_TILE {
+            nx = GLASS_TILE
+        }
+        let hv: u64 = glass_source_hash(state, gx + x0, gy, nx, h, key)
+        if !keep || hv != gl_tiles[t as usize] {
+            if first == GLASS_NONE {
+                first = t
+            }
+            last = t
+            gl_tiles[t as usize] = hv
+        }
+        t = t + 1
+    }
+    if first == GLASS_NONE {
+        return GLASS_NONE
+    }
+    return first | (last << 32)
+}
+
+fn glass_tint(v: u64, dark: bool) -> u64 {
+    var cr: u64 = (v >> 16) & 0xFF
+    var cg: u64 = (v >> 8) & 0xFF
+    var cb: u64 = v & 0xFF
+    if dark {
+        cr = sat_sub(cr, GLASS_TINT)
+        cg = sat_sub(cg, GLASS_TINT)
+        cb = sat_sub(cb, GLASS_TINT)
+    } else {
+        cr = sat_add(cr, GLASS_TINT)
+        cg = sat_add(cg, GLASS_TINT)
+        cb = sat_add(cb, GLASS_TINT)
+    }
+    return (cr << 16) | (cg << 8) | cb
+}
+
+fn sat_sub(c: u64, d: u64) -> u64 {
+    if c > d {
+        return c - d
+    }
+    return 0
+}
+
+fn sat_add(c: u64, d: u64) -> u64 {
+    if c + d > 255 {
+        return 255
+    }
+    return c + d
+}
+
+fn glass_rebuild(state: u64, gx: u64, gy: u64, w: u64, h: u64, r: u64,
+    o0: u64, o1: u64) {
+    let reach: u64 = 2 * r
+    var i0: u64 = 0
+    if o0 > reach {
+        i0 = o0 - reach
+    }
+    var i1: u64 = o1 + reach
+    if i1 > w {
+        i1 = w
+    }
+    let sw: u64 = i1 - i0
+    let src: u64 = gl_tmp_addr()
+    let dst: u64 = gl_alt_addr()
+    let cache: u64 = gl_puf_addr()
+    var row: u64 = 0
+    while row < h {
+        let q: u64 = fb.draw_at(state) +% (gy + row) *% fb.pitch(state) +%
+            (gx + i0) *% 4
+        let z: u64 = src +% row *% sw *% 4
+        wmdraw.copy_words(z, q, sw *% 4 / 8)
+        if (sw & 1) != 0 {
+            __mmio_write32((z +% (sw - 1) *% 4) as *mut u32,
+                __mmio_read32((q +% (sw - 1) *% 4) as *mut u32))
+        }
+        row = row + 1
+    }
+    glass_blur(src, dst, sw, h, r)
+    let dark: bool = bright_of(wmgeom.form(state, wmlayout.FM_GLASS_KEY)) < 128
+    row = 0
+    while row < h {
+        var x: u64 = o0
+        while x < o1 {
+            let v: u64 = __mmio_read32((dst +% (row * sw + x - i0) * 4) as *mut u32) as u64
+            __mmio_write32((cache +% (row * w + x) * 4) as *mut u32,
+                glass_tint(v, dark) as u32)
+            x = x + 1
+        }
+        row = row + 1
+    }
 }
 
 fn glass_prepare(state: u64, x: i64, y: i64, w: u64, h: u64,
@@ -298,12 +410,12 @@ fn glass_prepare(state: u64, x: i64, y: i64, w: u64, h: u64,
         }
         return basis
     }
-    let src_hash: u64 = glass_source_hash(state, gx, gy, w, h,
-        wmgeom.form(state, wmlayout.FM_GLASS_KEY))
-    if wmlayout.gs(state, wmlayout.S_GLVALID) != 0 && wmlayout.gs(state, wmlayout.S_GLX) == gx
+    let key: u64 = wmgeom.form(state, wmlayout.FM_GLASS_KEY)
+    let same_form: bool = wmlayout.gs(state, wmlayout.S_GLVALID) != 0 && wmlayout.gs(state, wmlayout.S_GLX) == gx
         && wmlayout.gs(state, wmlayout.S_GLY) == gy && wmlayout.gs(state, wmlayout.S_GLW) == w
         && wmlayout.gs(state, wmlayout.S_GLH) == h && wmlayout.gs(state, wmlayout.S_GLR) == r
-        && src_hash == gl_src_hash {
+    let span: u64 = glass_scan(state, gx, gy, w, h, key, same_form)
+    if same_form && span == GLASS_NONE {
         wmlayout.ss(state, wmlayout.S_GLGEN, wmlayout.gs(state, wmlayout.S_GLASSGEN))
         wmlayout.ss(state, wmlayout.S_GLHIT, wmlayout.gs(state, wmlayout.S_GLHIT) + 1)
         if wmlayout.gs(state, wmlayout.S_GLHIT) == 1 {
@@ -312,67 +424,24 @@ fn glass_prepare(state: u64, x: i64, y: i64, w: u64, h: u64,
         return basis
     }
     let t_start: u64 = time.tsc()
-
-    let sbas: u64 = gl_puf_addr()
-    var row: u64 = 0
-    while row < h {
-        let q: u64 = fb.draw_at(state) +% (gy + row) *% fb.pitch(state) +%
-            gx *% 4
-
-        let z: u64 = sbas +% row *% w *% 4
-        wmdraw.copy_words(z, q, w *% 4 / 8)
-        if (w & 1) != 0 {
-            __mmio_write32((z +% (w - 1) *% 4) as *mut u32,
-                __mmio_read32((q +% (w - 1) *% 4) as *mut u32))
+    var o0: u64 = 0
+    var o1: u64 = w
+    if same_form {
+        let reach: u64 = 2 * r
+        let c0: u64 = (span & GLASS_NONE) * GLASS_TILE
+        var c1: u64 = ((span >> 32) + 1) * GLASS_TILE
+        if c1 > w {
+            c1 = w
         }
-        row = row + 1
-    }
-
-    glass_blur(w, h, r)
-
-    let dunkel: bool = bright_of(wmgeom.form(state, wmlayout.FM_GLASS_KEY)) < 128
-    let qbas: u64 = gl_alt_addr()
-    var p: u64 = 0
-    let n: u64 = w * h
-    while p < n {
-        let v: u64 = __mmio_read32((qbas +% p *% 4) as *mut u32) as u64
-        var cr: u64 = (v >> 16) & 0xFF
-        var cg: u64 = (v >> 8) & 0xFF
-        var cb: u64 = v & 0xFF
-        if dunkel {
-            if cr > GLASS_TINT {
-                cr = cr - GLASS_TINT
-            } else {
-                cr = 0
-            }
-            if cg > GLASS_TINT {
-                cg = cg - GLASS_TINT
-            } else {
-                cg = 0
-            }
-            if cb > GLASS_TINT {
-                cb = cb - GLASS_TINT
-            } else {
-                cb = 0
-            }
-        } else {
-            cr = cr + GLASS_TINT
-            cg = cg + GLASS_TINT
-            cb = cb + GLASS_TINT
-            if cr > 255 {
-                cr = 255
-            }
-            if cg > 255 {
-                cg = 255
-            }
-            if cb > 255 {
-                cb = 255
-            }
+        if c0 > reach {
+            o0 = c0 - reach
         }
-        __mmio_write32((sbas +% p *% 4) as *mut u32,
-            ((cr << 16) | (cg << 8) | cb) as u32)
-        p = p + 1
+        o1 = c1 + reach
+        if o1 > w {
+            o1 = w
+        }
     }
+    glass_rebuild(state, gx, gy, w, h, r, o0, o1)
 
     let new_form: bool = wmlayout.gs(state, wmlayout.S_GLVALID) == 0 || wmlayout.gs(state, wmlayout.S_GLW) != w
         || wmlayout.gs(state, wmlayout.S_GLH) != h || wmlayout.gs(state, wmlayout.S_GLR) != r
@@ -383,7 +452,6 @@ fn glass_prepare(state: u64, x: i64, y: i64, w: u64, h: u64,
     wmlayout.ss(state, wmlayout.S_GLR, r)
     wmlayout.ss(state, wmlayout.S_GLGEN, wmlayout.gs(state, wmlayout.S_GLASSGEN))
     wmlayout.ss(state, wmlayout.S_GLVALID, 1)
-    gl_src_hash = src_hash
     let kh: u64 = time.khz(state)
     if kh >= 1000 {
         let t_ende: u64 = time.tsc()

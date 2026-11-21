@@ -231,7 +231,7 @@ class Fahrer:
             time.sleep(0.5)
             nm = "%s-%02d" % (prefix, k + 1)
             self.photo(nm)
-            out.append((nm, cx, cy, "drag"))
+            out.append((nm, cx, cy, "drag lines=%d" % len(read_2(self.serial).splitlines())))
         self.x, self.y = cx, cy
         self.cmd("mouse_button 0")
         for k in range(nach):
@@ -1321,6 +1321,12 @@ def main():
             f.cmd("mouse_button 0")
             f.x, f.y = x0, y0
             print("schleppschnell: %d,%d x%d done" % (dx, dy, int(t[2])))
+        elif b == "ziehfotos":
+            t = arg.split()
+            x0, y0 = (int(v) for v in t[0].split(","))
+            dx, dy = (int(v) for v in t[1].split(","))
+            for nm, px, py, ph in f.schleppe_fotos(x0, y0, dx, dy, int(t[2]), t[3]):
+                print("ziehfotos: %s %d %d %s" % (nm, px, py, ph))
         elif b == "ziehfoto":
             t = arg.split()
             r = f.rechteck(t[0])
