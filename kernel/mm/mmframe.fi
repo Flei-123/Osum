@@ -21,6 +21,8 @@ export {
     frame_alloc_user_locked,
     frame_alloc_user_low,
     kva,
+    phys,
+    frame_run_stack,
     DM_BASE,
     DM_SLOT,
     GIB,
@@ -30,6 +32,7 @@ export {
     frame_free_run,
     frame_run,
     free_low,
+    low_free_at_least,
     frame_run_at,
     frame_run_inner,
     frames_free,
@@ -60,6 +63,13 @@ fn kva(p: u64) -> u64 {
         return DM_BASE + p
     }
     return p
+}
+
+fn phys(a: u64) -> u64 {
+    if a >= DM_BASE {
+        return a - DM_BASE
+    }
+    return a
 }
 
 fn low_limit(state: u64) -> u64 {
@@ -114,6 +124,30 @@ fn count_free(state: u64) -> u64 {
 
 fn free_low(state: u64) -> u64 {
     return count_free_below(state, low_limit(state))
+}
+
+fn low_free_at_least(state: u64, want: u64) -> bool {
+    let bitmap: u64 = kstate.get(state, kstate.BITMAP)
+    let frames: u64 = low_limit(state)
+    var free: u64 = 0
+    var f: u64 = 0
+    while f + 8 <= frames {
+        let o: u64 = kstate.get8(bitmap + f / 8)
+        if o != 0xFF {
+            var k: u64 = 0
+            while k < 8 {
+                if (o & (1 << k)) == 0 {
+                    free = free + 1
+                }
+                k = k + 1
+            }
+            if free >= want {
+                return true
+            }
+        }
+        f = f + 8
+    }
+    return false
 }
 
 fn count_free_below(state: u64, frames: u64) -> u64 {
@@ -446,11 +480,30 @@ fn frame_run_at_inner(state: u64, first: u64, n: u64) -> bool {
 }
 
 fn frame_run_inner(state: u64, n: u64) -> u64 {
+    return frame_run_range(state, n, 0, low_limit(state))
+}
+
+fn frame_run_stack(state: u64, n: u64) -> u64 {
+    let flags: u64 = lock(state)
+    var r: u64 = 0
+    let total: u64 = kstate.get(state, kstate.BITMAP_FRAMES)
+    if total > REACH_FRAMES {
+        r = frame_run_range(state, n, REACH_FRAMES, total)
+    }
+    if r != 0 {
+        r = kva(r)
+    } else {
+        r = frame_run_inner(state, n)
+    }
+    unlock(state, flags)
+    return r
+}
+
+fn frame_run_range(state: u64, n: u64, from: u64, to: u64) -> u64 {
     let bitmap: u64 = kstate.get(state, kstate.BITMAP)
-    let frames: u64 = low_limit(state)
-    var start: u64 = 0
-    while start + n <= frames {
-        if (start & 7) == 0 && start + RUN_SKIP_BITS <= frames && word_full(bitmap, start) {
+    var start: u64 = from
+    while start + n <= to {
+        if (start & 7) == 0 && start + RUN_SKIP_BITS <= to && word_full(bitmap, start) {
             start = start + RUN_SKIP_BITS
         } else {
             let busy: u64 = first_busy(bitmap, start, n)
