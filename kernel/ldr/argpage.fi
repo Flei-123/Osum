@@ -1,0 +1,174 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.kstate
+import arch.arch
+import sched.proc.procbase
+import sched.proc.procmap
+import sched.proc.procspace
+import ldr.elfstack
+import libc.regio
+
+export {
+    write
+}
+
+const PAGE: u64 = 4096
+const STR_OFF: u64 = 544
+const ENV_OFF: u64 = 2048
+const ENV_MAXN: u64 = 16
+const ENV_STR: u64 = 2192
+
+fn write_env(state: u64, frame: u64) {
+    let n0: u64 = kstate.get(state, kstate.K11_OFF + kstate.ENV_N)
+    var n: u64 = n0
+    if n > ENV_MAXN {
+        n = ENV_MAXN
+    }
+    regio.write64(frame + ENV_OFF, n)
+    var src: u64 = state + kstate.K11_OFF + kstate.ENV_BUF
+    var at: u64 = ENV_STR
+    var k: u64 = 0
+    while k < n {
+        regio.write64(frame + ENV_OFF + 8 + k * 8, procspace.ARGS_BASE + at)
+        var going: bool = true
+        while going {
+            if at >= PAGE - 1 {
+                regio.write64(frame + ENV_OFF, k)
+                return
+            }
+            let c: u64 = kstate.get8(src)
+            kstate.set8(frame + at, c as u8)
+            at = at + 1
+            src = src + 1
+            if c == 0 {
+                going = false
+            }
+        }
+        k = k + 1
+    }
+    regio.write64(frame + ENV_OFF + 8 + n * 8, 0)
+}
+
+fn args_frame(state: u64, t: u64) -> u64 {
+    if procmap.page_free(state, t, procspace.ARGS_BASE) {
+        if procmap.map_page_zero(state, t, procspace.ARGS_BASE, true, false) == 0 {
+            return 0
+        }
+    }
+    let frame: u64 = procmap.translate(state, t, procspace.ARGS_BASE)
+    if frame == 0 {
+        return 0
+    }
+    arch.fill_words(frame, 0, PAGE / 8)
+    return frame
+}
+
+fn write_in_page(frame: u64, args: u64, argc: u64, lossy: bool) -> bool {
+    regio.write64(frame, argc)
+    var at: u64 = STR_OFF
+    var src: u64 = args
+    var k: u64 = 0
+    while k < argc {
+        regio.write64(frame + 8 + k * 8, procspace.ARGS_BASE + at)
+        var going: bool = true
+        while going {
+            if at >= ENV_OFF - 1 {
+                if !lossy {
+                    return false
+                }
+                regio.write64(frame, k)
+                regio.write64(frame + 8 + k * 8, 0)
+                return true
+            }
+            let c: u64 = kstate.get8(src)
+            kstate.set8(frame + at, c as u8)
+            at = at + 1
+            src = src + 1
+            if c == 0 {
+                going = false
+            }
+        }
+        k = k + 1
+    }
+    regio.write64(frame + 8 + argc * 8, 0)
+    return true
+}
+
+fn map_spill(state: u64, t: u64, base: u64, pages: u64) -> bool {
+    var i: u64 = 0
+    while i < pages {
+        let at: u64 = base + i * PAGE
+        if !procmap.page_free(state, t, at) {
+            return false
+        }
+        if procmap.map_page_zero(state, t, at, true, false) == 0 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn write_spill(state: u64, t: u64, frame: u64, args: u64, argc: u64, total: u64) -> u64 {
+    let pages: u64 = (total + PAGE - 1) / PAGE
+    let base: u64 = procspace.ARGS_BASE - pages * PAGE
+    if !map_spill(state, t, base, pages) {
+        return 0
+    }
+    regio.write64(frame, argc)
+    var off: u64 = 0
+    var src: u64 = args
+    var k: u64 = 0
+    var page_frame: u64 = 0
+    while k < argc {
+        regio.write64(frame + 8 + k * 8, base + off)
+        var going: bool = true
+        while going {
+            if off % PAGE == 0 {
+                page_frame = procmap.translate(state, t, base + off)
+            }
+            let c: u64 = kstate.get8(src)
+            kstate.set8(page_frame + off % PAGE, c as u8)
+            off = off + 1
+            src = src + 1
+            if c == 0 {
+                going = false
+            }
+        }
+        k = k + 1
+    }
+    regio.write64(frame + 8 + argc * 8, 0)
+    return base
+}
+
+fn write(state: u64, t: u64, args: u64, argc_all: u64, lossy: bool) -> u64 {
+    var argc: u64 = argc_all
+    if argc > procbase.MAX_ARGS && lossy {
+        argc = procbase.MAX_ARGS
+    }
+    if argc > procbase.MAX_NATIVE_ARGS {
+        return 0
+    }
+    let frame: u64 = args_frame(state, t)
+    if frame == 0 {
+        return 0
+    }
+    let total: u64 = elfstack.strings_len(args, argc)
+    var top: u64 = procspace.ARGS_BASE
+    if argc <= procbase.MAX_ARGS && STR_OFF + total < ENV_OFF {
+        if !write_in_page(frame, args, argc, lossy) {
+            return 0
+        }
+    } else if lossy {
+        if !write_in_page(frame, args, argc, true) {
+            return 0
+        }
+    } else {
+        top = write_spill(state, t, frame, args, argc, total)
+        if top == 0 {
+            return 0
+        }
+    }
+    write_env(state, frame)
+    return top
+}
