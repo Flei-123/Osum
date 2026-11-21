@@ -734,6 +734,7 @@ ARGS+=("/etc/handlers.conf=$OUT/handlers.conf@0644")
 ARGS+=("/etc/hotkeys.conf=$OUT/hotkeys.conf@0644"
        "/etc/wmplug.conf=$OUT/wmplug.conf@0644"
        "/etc/wmplug.autostart=$OUT/wmplug.autostart@0644"
+       "/etc/autostart.conf=$OUT/autostart.conf@0644"
        "/etc/apprights.conf=$OUT/apprights.conf@0644"
        "/etc/screenreader.conf=$OUT/screenreader.conf@0644"
        "/etc/actions.d/screenreader.actions=etc/actions.d/screenreader.actions")
@@ -917,6 +918,7 @@ fi
 #   Ctrl+Alt+J -> hotkeyd -> bus action jarvismini.toggle -> the box shows / hides
 { cat etc/wmplug.conf; printf 'screenreader rights=0x001 prog=/bin/screenreader\n'; } > "$OUT/wmplug.conf"
 printf 'hotkey\nscreenreader serve\n' > "$OUT/wmplug.autostart"
+: > "$OUT/autostart.conf"
 printf 'ctrl+alt+n screenreader.toggle\n' > "$OUT/hotkeys.conf"
 printf 'screenreader hotkey\n' > "$OUT/apprights.conf"
 printf 'autostart=0\nenabled=0\n' > "$OUT/screenreader.conf"

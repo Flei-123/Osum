@@ -1,0 +1,189 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import actwire
+import libc.io
+import libc.octets
+import autostart.model
+
+export { load, save, STATE_PATH, LIST_PATH, TAB_PATH, APPS_DIR, package_start }
+
+const FILE_CAP: u64 = 4096
+const INFO_CAP: u64 = 2048
+const DIR_CAP: u64 = 1024
+const NEWLINE: u64 = 10
+const EQUALS: u64 = 61
+const BUNDLE_SUFFIX_LEN: u64 = 4
+const KEY_LEN: u64 = 10
+const AUTHOR_KEY_LEN: u64 = 7
+const SOURCE_STATE: u64 = 3
+
+static mut STATE_PATH: [u8; 20] = "/etc/autostart.conf\0"
+static mut LIST_PATH: [u8; 22] = "/etc/wmplug.autostart\0"
+static mut TAB_PATH: [u8; 13] = "/etc/inittab\0"
+static mut APPS_DIR: [u8; 7] = "/apps/\0"
+static mut INFO_NAME: [u8; 10] = ".osp/INFO\0"
+static mut START_NAME: [u8; 11] = ".osp/start\0"
+static mut KEY_AUTOSTART: [u8; 11] = "autostart=\0"
+static mut KEY_AUTHOR: [u8; 8] = "author=\0"
+static mut file_buf: [u8; 4097] = [0 as u8; 4097]
+static mut info_buf: [u8; 2049] = [0 as u8; 2049]
+static mut path_buf: [u8; 96] = [0 as u8; 96]
+static mut entries: [u8; 1024] = [0 as u8; 1024]
+
+fn read_file(path: u64, out: u64, cap: u64) -> u64 {
+    let fd: u64 = io.open(path, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let n: u64 = io.read_full(fd, out, cap)
+    io.close(fd)
+    if ulib.bad(n) {
+        return 0
+    }
+    return n
+}
+
+fn load_text(path: u64, kind: u64) -> u64 {
+    let buf: u64 = (&file_buf[0 as usize]) as u64
+    let n: u64 = read_file(path, buf, FILE_CAP)
+    if n == 0 {
+        return 0
+    }
+    if kind == model.KIND_SERVICE {
+        return model.load_services(buf, n)
+    }
+    if kind == model.KIND_LIST {
+        return model.load_list(buf, n)
+    }
+    return model.load_state(buf, n)
+}
+
+fn bundle_path(name: u64, name_len: u64, suffix: u64) -> u64 {
+    let out: u64 = (&path_buf[0 as usize]) as u64
+    var n: u64 = 0
+    var i: u64 = 0
+    while octets.ld8((&APPS_DIR[0 as usize]) as u64, i) != 0 {
+        octets.st8(out, n, octets.ld8((&APPS_DIR[0 as usize]) as u64, i))
+        n = n + 1
+        i = i + 1
+    }
+    i = 0
+    while i < name_len {
+        octets.st8(out, n, octets.ld8(name, i))
+        n = n + 1
+        i = i + 1
+    }
+    i = 0
+    while octets.ld8(suffix, i) != 0 {
+        octets.st8(out, n, octets.ld8(suffix, i))
+        n = n + 1
+        i = i + 1
+    }
+    octets.st8(out, n, 0)
+    return out
+}
+
+fn find_key(buf: u64, n: u64, key: u64, key_len: u64) -> u64 {
+    var at: u64 = 0
+    while at < n {
+        var e: u64 = at
+        while e < n && octets.ld8(buf, e) != NEWLINE {
+            e = e + 1
+        }
+        var hit: bool = e - at > key_len - 1
+        var i: u64 = 0
+        while hit && i < key_len {
+            if octets.ld8(buf, at + i) != octets.ld8(key, i) {
+                hit = false
+            }
+            i = i + 1
+        }
+        if hit {
+            return at + key_len
+        }
+        at = e + 1
+    }
+    return n
+}
+
+fn value_len(buf: u64, from: u64, n: u64) -> u64 {
+    var e: u64 = from
+    while e < n && octets.ld8(buf, e) != NEWLINE && octets.ld8(buf, e) != 13 {
+        e = e + 1
+    }
+    return e - from
+}
+
+fn add_bundle(name: u64, name_len: u64) {
+    let info: u64 = (&info_buf[0 as usize]) as u64
+    let n: u64 = read_file(bundle_path(name, name_len, (&INFO_NAME[0 as usize]) as u64), info, INFO_CAP)
+    if n == 0 {
+        return
+    }
+    let at: u64 = find_key(info, n, (&KEY_AUTOSTART[0 as usize]) as u64, KEY_LEN)
+    if at >= n {
+        return
+    }
+    let vl: u64 = value_len(info, at, n)
+    let by: u64 = find_key(info, n, (&KEY_AUTHOR[0 as usize]) as u64, AUTHOR_KEY_LEN)
+    var publisher_len: u64 = 0
+    if by < n {
+        publisher_len = value_len(info, by, n)
+    }
+    let _i: u64 = model.add_package(name, name_len, info + by, publisher_len, info + at, vl)
+}
+
+fn scan_packages() {
+    let fd: u64 = io.dir_open((&APPS_DIR[0 as usize]) as u64)
+    if ulib.bad(fd) {
+        return
+    }
+    let buf: u64 = (&entries[0 as usize]) as u64
+    var more: bool = true
+    while more {
+        let n: u64 = io.dir_read(fd, buf, DIR_CAP)
+        if ulib.bad(n) || n == 0 {
+            more = false
+        } else {
+            var at: u64 = 0
+            while at < n {
+                let rec: u64 = buf + at
+                let rl: u64 = io.dir_reclen(rec)
+                if rl == 0 {
+                    at = n
+                } else {
+                    let nm: u64 = io.dir_name(rec)
+                    let len: u64 = octets.cstr_len(nm)
+                    if len > BUNDLE_SUFFIX_LEN && octets.ld8(nm, len - 4) == 46 && octets.ld8(nm, len - 3) == 111 {
+                        add_bundle(nm, len - BUNDLE_SUFFIX_LEN)
+                    }
+                    at = at + rl
+                }
+            }
+        }
+    }
+    io.close(fd)
+}
+
+fn load() -> u64 {
+    model.reset()
+    let _s: u64 = load_text((&TAB_PATH[0 as usize]) as u64, model.KIND_SERVICE)
+    let _l: u64 = load_text((&LIST_PATH[0 as usize]) as u64, model.KIND_LIST)
+    scan_packages()
+    let _u: u64 = load_text((&STATE_PATH[0 as usize]) as u64, SOURCE_STATE)
+    return model.count()
+}
+
+fn save(i: u64) -> bool {
+    return actwire.kvfile_set((&STATE_PATH[0 as usize]) as u64, model.name(i), model.state_value(i))
+}
+
+fn package_start(i: u64) -> u64 {
+    if model.kind(i) != model.KIND_PACKAGE {
+        return 0
+    }
+    let name: u64 = model.name(i)
+    return bundle_path(name, octets.cstr_len(name), (&START_NAME[0 as usize]) as u64)
+}
