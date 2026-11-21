@@ -1,0 +1,101 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.octets
+
+export {
+    SYN0, SYN1, FRAME_DATA_SEQ, FRAME_DATA_NSQ, FRAME_ACK, FRAME_NAK, PLD_CMD,
+    FRAME_HDR_LEN, CMD_HDR_LEN, CTRL_FRAME_LEN, EVENT_RQID_MAX, TID_HOST, TID_SAM, TID_KIP,
+    crc16, put_ack, put_nak, put_cmd, frame_len, next_rqid, is_event_rqid
+}
+
+const SYN0: u64 = 0xAA
+const SYN1: u64 = 0x55
+const FRAME_DATA_SEQ: u64 = 0x80
+const FRAME_DATA_NSQ: u64 = 0x00
+const FRAME_ACK: u64 = 0x40
+const FRAME_NAK: u64 = 0x04
+const PLD_CMD: u64 = 0x80
+const FRAME_HDR_LEN: u64 = 8
+const CMD_HDR_LEN: u64 = 8
+const CTRL_FRAME_LEN: u64 = 10
+const EVENT_RQID_MAX: u64 = 38
+const FIRST_REQUEST_RQID: u64 = 39
+const TID_HOST: u64 = 0x00
+const TID_SAM: u64 = 0x01
+const TID_KIP: u64 = 0x02
+const CRC_INIT: u64 = 0xFFFF
+const CRC_POLY: u64 = 0x1021
+
+fn crc16(p: u64, n: u64) -> u64 {
+    var crc: u64 = CRC_INIT
+    var i: u64 = 0
+    while i < n {
+        crc = crc ^ (octets.ld8(p, i) << 8)
+        var bit: u64 = 0
+        while bit < 8 {
+            if (crc & 0x8000) != 0 {
+                crc = ((crc << 1) ^ CRC_POLY) & 0xFFFF
+            } else {
+                crc = (crc << 1) & 0xFFFF
+            }
+            bit = bit + 1
+        }
+        i = i + 1
+    }
+    return crc
+}
+
+fn put_header(dst: u64, kind: u64, len: u64, seq: u64) {
+    octets.st8(dst, 0, SYN0)
+    octets.st8(dst, 1, SYN1)
+    octets.st8(dst, 2, kind)
+    octets.st16(dst, 3, len)
+    octets.st8(dst, 5, seq)
+    octets.st16(dst, 6, crc16(dst + 2, 4))
+}
+
+fn put_ack(dst: u64, seq: u64) -> u64 {
+    put_header(dst, FRAME_ACK, 0, seq)
+    octets.st16(dst, 8, crc16(dst + 8, 0))
+    return CTRL_FRAME_LEN
+}
+
+fn put_nak(dst: u64) -> u64 {
+    put_header(dst, FRAME_NAK, 0, 0)
+    octets.st16(dst, 8, crc16(dst + 8, 0))
+    return CTRL_FRAME_LEN
+}
+
+fn put_cmd(dst: u64, seq: u64, rqid: u64, tc: u64, tid: u64, iid: u64, cid: u64, payload: u64, plen: u64) -> u64 {
+    let body: u64 = CMD_HDR_LEN + plen
+    put_header(dst, FRAME_DATA_SEQ, body, seq)
+    octets.st8(dst, 8, PLD_CMD)
+    octets.st8(dst, 9, tc)
+    octets.st8(dst, 10, tid)
+    octets.st8(dst, 11, TID_HOST)
+    octets.st8(dst, 12, iid)
+    octets.st16(dst, 13, rqid)
+    octets.st8(dst, 15, cid)
+    var i: u64 = 0
+    while i < plen {
+        octets.st8(dst, 16 + i, octets.ld8(payload, i))
+        i = i + 1
+    }
+    octets.st16(dst, 8 + body, crc16(dst + 8, body))
+    return FRAME_HDR_LEN + body + 2
+}
+
+fn frame_len(payload_len: u64) -> u64 {
+    return FRAME_HDR_LEN + payload_len + 2
+}
+
+fn next_rqid(rqid: u64) -> u64 {
+    let n: u64 = (rqid + 1) & 0xFFFF
+    if n <= EVENT_RQID_MAX {
+        return FIRST_REQUEST_RQID
+    }
+    return n
+}
+
+fn is_event_rqid(rqid: u64) -> bool {
+    return rqid >= 1 && rqid <= EVENT_RQID_MAX
+}

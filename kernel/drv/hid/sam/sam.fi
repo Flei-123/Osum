@@ -1,0 +1,548 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.procw
+import drv.hid.inputclass
+import drv.hid.hidrep
+import drv.hid.hidin
+import drv.hid.hidmode
+import drv.hid.inreg
+import drv.hid.sam.samuart
+import acpi.acpi
+import touchev.quirk
+import sched.time
+import libc.regio
+import libc.octets
+import serial
+import ssam.ssamlink
+import ssam.ssamhid
+import ssam.ssamwire
+
+export {
+    ST_OFF, ST_NOACPI, ST_DISABLED, ST_NOUART, ST_NOEC, ST_UP, ST_DEVICES,
+    stage, ops, state_of, ndev, render, say
+}
+
+const ST_OFF: u64 = 0
+const ST_NOACPI: u64 = 1
+const ST_DISABLED: u64 = 2
+const ST_NOUART: u64 = 3
+const ST_NOEC: u64 = 4
+const ST_UP: u64 = 5
+const ST_DEVICES: u64 = 6
+
+const DEV_FIELDS: u64 = 12
+
+const D_IID: u64 = 0
+const D_SLOT: u64 = 1
+const D_VID: u64 = 2
+const D_PID: u64 = 3
+const D_RDLEN: u64 = 4
+const D_REPORTS: u64 = 5
+const D_STATE: u64 = 6
+const D_KIND: u64 = 7
+const D_LAST: u64 = 8
+const D_STEP: u64 = 9
+
+const DS_NONE: u64 = 0
+const DS_OK: u64 = 1
+const DS_FAIL: u64 = 2
+
+const STEP_HIDDESC: u64 = 1
+const STEP_ATTRS: u64 = 2
+const STEP_REPORTDESC: u64 = 3
+const STEP_PARSE: u64 = 4
+const STEP_EVENTS: u64 = 5
+const STEP_TOOBIG: u64 = 6
+
+const G_STATE: u64 = 0
+const G_CAND: u64 = 1
+const G_FW: u64 = 2
+const G_ACPI: u64 = 3
+const G_NDEV: u64 = 4
+const G_DISPLAY: u64 = 5
+const G_PROBES: u64 = 6
+const G_NOW: u64 = 7
+
+const PROBE_FIRST_FRAME_MS: u64 = 300
+const PROBE_RESPONSE_MS: u64 = 1500
+const REQUEST_MS: u64 = 1500
+const IO_CHUNK: u64 = 256
+const NS_PER_MS: u64 = 1000000
+const AML_NEEDLE_LEN: u64 = 8
+
+static mut lk: [u8; 6144] = [0 as u8; 6144]
+static mut gs: [u64; 16] = [0 as u64; 16]
+static mut dv: [u64; 24] = [0 as u64; 24]
+static mut payload: [u8; 288] = [0 as u8; 288]
+static mut say_buf: [u8; 1536] = [0 as u8; 1536]
+
+fn l() -> u64 {
+    return (&lk[0]) as u64
+}
+
+fn pl() -> u64 {
+    return (&payload[0]) as u64
+}
+
+fn g(i: u64) -> u64 {
+    return gs[i as usize]
+}
+
+fn gset(i: u64, v: u64) {
+    gs[i as usize] = v
+}
+
+fn dg(j: u64, f: u64) -> u64 {
+    return dv[(j * DEV_FIELDS + f) as usize]
+}
+
+fn ds(j: u64, f: u64, v: u64) {
+    dv[(j * DEV_FIELDS + f) as usize] = v
+}
+
+fn state_of() -> u64 {
+    return g(G_STATE)
+}
+
+fn ndev() -> u64 {
+    return g(G_NDEV)
+}
+
+fn now_ms(state: u64) -> u64 {
+    return time.mono_ns(state) / NS_PER_MS
+}
+
+fn acpi_has_sam(state: u64) -> bool {
+    var needle: [u8; 9] = "MSHW0084\0"
+    let tn: u64 = acpi.table_count(state)
+    var t: u64 = 0
+    while t < tn {
+        let p: u64 = acpi.table_at(state, t)
+        if p != 0 {
+            let len: u64 = regio.read32(p + 4)
+            var i: u64 = 36
+            while i + AML_NEEDLE_LEN <= len {
+                var k: u64 = 0
+                while k < AML_NEEDLE_LEN && regio.read8(p + i + k) == (needle[k as usize] as u64) {
+                    k = k + 1
+                }
+                if k == AML_NEEDLE_LEN {
+                    return true
+                }
+                i = i + 1
+            }
+        }
+        t = t + 1
+    }
+    return false
+}
+
+fn pump(state: u64) {
+    var buf: [u8; 256] = [0 as u8; 256]
+    let b: u64 = (&buf[0]) as u64
+    let now: u64 = now_ms(state)
+    let n: u64 = samuart.rx_take(b, IO_CHUNK)
+    if n > 0 {
+        ssamlink.feed_all(l(), b, n, now)
+    }
+    ssamlink.tick(l(), now)
+    while ssamlink.tx_len(l()) > 0 {
+        let k: u64 = ssamlink.tx_take(l(), b, IO_CHUNK)
+        samuart.tx_put(b, k)
+    }
+}
+
+fn sync_request(state: u64, tc: u64, tid: u64, iid: u64, cid: u64, plen: u64, timeout_ms: u64) -> bool {
+    let start: u64 = now_ms(state)
+    if ssamlink.request(l(), tc, tid, iid, cid, pl(), plen, start) == 0 {
+        return false
+    }
+    while ssamlink.req_state(l()) == ssamlink.REQ_WAIT && now_ms(state) - start < timeout_ms {
+        pump(state)
+    }
+    pump(state)
+    let done: bool = ssamlink.req_state(l()) == ssamlink.REQ_DONE
+    if !done {
+        ssamlink.req_clear(l())
+    }
+    return done
+}
+
+fn finish_request() {
+    ssamlink.req_clear(l())
+}
+
+fn probe_candidate(state: u64, cand: u64) -> bool {
+    samuart.configure(cand)
+    ssamlink.init(l())
+    gset(G_PROBES, g(G_PROBES) + 1)
+    let start: u64 = now_ms(state)
+    if ssamlink.request(l(), ssamhid.TC_SAM, ssamwire.TID_SAM, 0, ssamhid.CID_FIRMWARE_VERSION, pl(), 0, start) == 0 {
+        return false
+    }
+    while now_ms(state) - start < PROBE_FIRST_FRAME_MS && ssamlink.counter(l(), ssamlink.C_FRAMES) == 0 {
+        pump(state)
+    }
+    if ssamlink.counter(l(), ssamlink.C_FRAMES) == 0 {
+        return false
+    }
+    while ssamlink.req_state(l()) == ssamlink.REQ_WAIT && now_ms(state) - start < PROBE_RESPONSE_MS {
+        pump(state)
+    }
+    if ssamlink.req_state(l()) != ssamlink.REQ_DONE || ssamlink.rsp_len(l()) < 4 {
+        return false
+    }
+    gset(G_FW, octets.ld32(ssamlink.rsp_ptr(l()), 0))
+    finish_request()
+    return true
+}
+
+fn bring_up_link(state: u64) -> bool {
+    var cand: u64 = 0
+    while cand < samuart.CAND_COUNT {
+        if probe_candidate(state, cand) {
+            gset(G_CAND, cand)
+            return true
+        }
+        cand = cand + 1
+    }
+    return false
+}
+
+fn fetch_descriptor(state: u64, j: u64, entry: u64, dst: u64, len: u64) -> bool {
+    var offset: u64 = 0
+    var end: bool = false
+    while !end && offset < len {
+        let plen: u64 = ssamhid.put_get_descriptor(pl(), entry, offset, ssamhid.SLICE_CHUNK)
+        if !sync_request(state, ssamhid.TC_HID, ssamhid.TID_KIP, dg(j, D_IID), ssamhid.CID_GET_DESCRIPTOR, plen, REQUEST_MS) {
+            return false
+        }
+        let rp: u64 = ssamlink.rsp_ptr(l())
+        if !ssamhid.slice_ok(rp, ssamlink.rsp_len(l())) || ssamhid.slice_length(rp) > ssamhid.SLICE_CHUNK {
+            finish_request()
+            return false
+        }
+        var take: u64 = ssamhid.slice_length(rp)
+        if offset + take > len {
+            take = len - offset
+        }
+        octets.copy(dst + offset, ssamhid.slice_data(rp), take)
+        offset = offset + take
+        end = ssamhid.slice_end(rp) || take == 0
+        finish_request()
+    }
+    return offset == len
+}
+
+fn fail_dev(j: u64, step: u64) -> bool {
+    ds(j, D_STATE, DS_FAIL)
+    ds(j, D_STEP, step)
+    return false
+}
+
+fn set_touchpad_modes(state: u64, j: u64, slot: u64) {
+    if (hidrep.kind(state, slot) & (hidrep.K_PAD | hidrep.K_TOUCH)) == 0 {
+        return
+    }
+    let n: u64 = hidmode.plan(state, slot)
+    var i: u64 = 0
+    while i < n {
+        let rid: u64 = hidmode.rid_at(i)
+        octets.st8(pl(), 0, rid)
+        let plen: u64 = hidmode.build(state, slot, i, pl() + 1)
+        if plen > 0 {
+            let _ok: bool = sync_request(state, ssamhid.TC_HID, ssamhid.TID_KIP, dg(j, D_IID), ssamhid.CID_SET_FEATURE, plen + 1, REQUEST_MS)
+            finish_request()
+        }
+        i = i + 1
+    }
+}
+
+fn enable_events(state: u64, j: u64) -> bool {
+    let plen: u64 = ssamhid.put_event_params(pl(), ssamhid.TC_HID, dg(j, D_IID), 0)
+    if !sync_request(state, ssamhid.TC_REG, ssamhid.TID_KIP, 0, ssamhid.CID_EVENT_ENABLE, plen, REQUEST_MS) {
+        return false
+    }
+    let ok: bool = ssamhid.event_status_ok(ssamlink.rsp_ptr(l()), ssamlink.rsp_len(l()))
+    finish_request()
+    return ok
+}
+
+fn setup_device(state: u64, j: u64, iid: u64) -> bool {
+    var small: [u8; 48] = [0 as u8; 48]
+    let sp: u64 = (&small[0]) as u64
+    let slot: u64 = hidrep.SAM_DEV_FIRST + j
+    ds(j, D_IID, iid)
+    ds(j, D_SLOT, slot)
+    ds(j, D_STATE, DS_NONE)
+    if !fetch_descriptor(state, j, ssamhid.DESC_HID, sp, ssamhid.HID_DESC_LEN) || !ssamhid.hid_desc_ok(sp, ssamhid.HID_DESC_LEN) {
+        return fail_dev(j, STEP_HIDDESC)
+    }
+    let rdlen: u64 = ssamhid.hid_desc_report_len(sp)
+    if rdlen == 0 || rdlen > hidrep.RAW_MAX {
+        return fail_dev(j, STEP_TOOBIG)
+    }
+    ds(j, D_RDLEN, rdlen)
+    if !fetch_descriptor(state, j, ssamhid.DESC_ATTRS, sp, ssamhid.ATTRS_LEN) {
+        return fail_dev(j, STEP_ATTRS)
+    }
+    ds(j, D_VID, ssamhid.attrs_vendor(sp))
+    ds(j, D_PID, ssamhid.attrs_product(sp))
+    let dst: u64 = hidrep.raw_of(state, slot)
+    if !fetch_descriptor(state, j, ssamhid.DESC_REPORT, dst, rdlen) {
+        return fail_dev(j, STEP_REPORTDESC)
+    }
+    if hidrep.parse(state, slot, dst, rdlen) != hidrep.E_OK {
+        return fail_dev(j, STEP_PARSE)
+    }
+    ds(j, D_KIND, hidrep.kind(state, slot))
+    let _q: u64 = inreg.register(slot, quirk.B_I2C, dg(j, D_VID), dg(j, D_PID))
+    set_touchpad_modes(state, j, slot)
+    if !enable_events(state, j) {
+        return fail_dev(j, STEP_EVENTS)
+    }
+    ds(j, D_STATE, DS_OK)
+    ds(j, D_STEP, 0)
+    return true
+}
+
+fn setup_devices(state: u64) {
+    var good: u64 = 0
+    if setup_device(state, 0, ssamhid.IID_KEYBOARD) {
+        good = good + 1
+    }
+    if setup_device(state, 1, ssamhid.IID_TOUCHPAD) {
+        good = good + 1
+    }
+    gset(G_NDEV, 2)
+    if good > 0 {
+        gset(G_STATE, ST_DEVICES)
+    }
+}
+
+fn present(state: u64) -> bool {
+    return g(G_STATE) >= ST_UP
+}
+
+fn find_device(iid: u64) -> u64 {
+    var j: u64 = 0
+    while j < ndev() {
+        if dg(j, D_IID) == iid && dg(j, D_STATE) == DS_OK {
+            return j
+        }
+        j = j + 1
+    }
+    return 0xFF
+}
+
+fn dispatch_events(state: u64) {
+    while ssamlink.ev_avail(l()) > 0 {
+        if ssamhid.is_input_report(ssamlink.ev_tc(l()), ssamlink.ev_cid(l())) {
+            let j: u64 = find_device(ssamlink.ev_iid(l()))
+            if j != 0xFF {
+                ds(j, D_REPORTS, dg(j, D_REPORTS) + 1)
+                ds(j, D_LAST, ssamlink.ev_len(l()))
+                let _r: bool = hidin.report(state, dg(j, D_SLOT), ssamlink.ev_data(l()), ssamlink.ev_len(l()))
+            }
+        }
+        ssamlink.ev_drop(l())
+    }
+}
+
+fn poll_tick(state: u64) {
+    if g(G_STATE) < ST_UP {
+        return
+    }
+    pump(state)
+    dispatch_events(state)
+}
+
+fn run(state: u64) {
+    gset(G_STATE, ST_OFF)
+    let sim: bool = kstate.mode_on(state, kstate.M_SAMSIM)
+    if kstate.mode_on(state, kstate.M_NOSAM) {
+        gset(G_STATE, ST_DISABLED)
+        return
+    }
+    var acpi_ok: bool = acpi_has_sam(state)
+    if acpi_ok {
+        gset(G_ACPI, 1)
+    }
+    if !acpi_ok && !sim && !kstate.mode_on(state, kstate.M_SAMFORCE) {
+        gset(G_STATE, ST_NOACPI)
+        return
+    }
+    if !samuart.find(state, sim) {
+        gset(G_STATE, ST_NOUART)
+        return
+    }
+    if !bring_up_link(state) {
+        gset(G_STATE, ST_NOEC)
+        return
+    }
+    gset(G_STATE, ST_UP)
+    setup_devices(state)
+}
+
+fn render_state() {
+    var k_state: [u8; 10] = "sam.state\0"
+    var k_acpi: [u8; 9] = "sam.acpi\0"
+    var k_probes: [u8; 11] = "sam.probes\0"
+    var k_cand: [u8; 9] = "sam.cand\0"
+    var k_fw: [u8; 7] = "sam.fw\0"
+    procw.line_num((&k_state[0]) as u64, g(G_STATE))
+    procw.line_num((&k_acpi[0]) as u64, g(G_ACPI))
+    procw.line_num((&k_probes[0]) as u64, g(G_PROBES))
+    procw.line_num((&k_cand[0]) as u64, g(G_CAND))
+    procw.line_hex((&k_fw[0]) as u64, g(G_FW), 8)
+}
+
+fn render_uart() {
+    var k_mode: [u8; 14] = "sam.uart.mode\0"
+    var k_ids: [u8; 13] = "sam.uart.ids\0"
+    var k_bdf: [u8; 13] = "sam.uart.bdf\0"
+    var k_mhz: [u8; 16] = "sam.uart.parent\0"
+    var k_clk: [u8; 13] = "sam.uart.clk\0"
+    var k_rst: [u8; 15] = "sam.uart.reset\0"
+    var k_msr: [u8; 13] = "sam.uart.msr\0"
+    var k_rx: [u8; 12] = "sam.uart.rx\0"
+    var k_tx: [u8; 12] = "sam.uart.tx\0"
+    var k_err: [u8; 13] = "sam.uart.err\0"
+    var k_drop: [u8; 14] = "sam.uart.drop\0"
+    procw.line_num((&k_mode[0]) as u64, samuart.mode())
+    procw.line_hex((&k_ids[0]) as u64, samuart.ids(), 8)
+    procw.line_hex((&k_bdf[0]) as u64, samuart.bdf(), 4)
+    procw.line_num((&k_mhz[0]) as u64, samuart.candidate_parent_mhz(g(G_CAND)))
+    procw.line_hex((&k_clk[0]) as u64, samuart.prv_clock(), 8)
+    procw.line_hex((&k_rst[0]) as u64, samuart.prv_resets(), 8)
+    procw.line_hex((&k_msr[0]) as u64, samuart.last_msr(), 2)
+    procw.line_num((&k_rx[0]) as u64, samuart.rx_total())
+    procw.line_num((&k_tx[0]) as u64, samuart.tx_total())
+    procw.line_num((&k_err[0]) as u64, samuart.lsr_errors())
+    procw.line_num((&k_drop[0]) as u64, samuart.tx_drops())
+}
+
+fn render_link() {
+    var k_frames: [u8; 16] = "sam.link.frames\0"
+    var k_bad: [u8; 16] = "sam.link.badcrc\0"
+    var k_sync: [u8; 16] = "sam.link.resync\0"
+    var k_ack: [u8; 15] = "sam.link.acktx\0"
+    var k_nak: [u8; 15] = "sam.link.nakrx\0"
+    var k_retry: [u8; 15] = "sam.link.retry\0"
+    var k_to: [u8; 17] = "sam.link.timeout\0"
+    var k_ev: [u8; 16] = "sam.link.events\0"
+    var k_drop: [u8; 17] = "sam.link.dropped\0"
+    procw.line_num((&k_frames[0]) as u64, ssamlink.counter(l(), ssamlink.C_FRAMES))
+    procw.line_num((&k_bad[0]) as u64, ssamlink.counter(l(), ssamlink.C_BADCRC))
+    procw.line_num((&k_sync[0]) as u64, ssamlink.counter(l(), ssamlink.C_RESYNC))
+    procw.line_num((&k_ack[0]) as u64, ssamlink.counter(l(), ssamlink.C_ACK_TX))
+    procw.line_num((&k_nak[0]) as u64, ssamlink.counter(l(), ssamlink.C_NAK_RX))
+    procw.line_num((&k_retry[0]) as u64, ssamlink.counter(l(), ssamlink.C_RETRY))
+    procw.line_num((&k_to[0]) as u64, ssamlink.counter(l(), ssamlink.C_TIMEOUT))
+    procw.line_num((&k_ev[0]) as u64, ssamlink.counter(l(), ssamlink.C_EVENTS))
+    procw.line_num((&k_drop[0]) as u64, ssamlink.counter(l(), ssamlink.C_DROPPED))
+}
+
+fn render_dev(j: u64) {
+    var k_iid: [u8; 9] = "sam.dev.\0"
+    var k_slot: [u8; 5] = "slot\0"
+    var k_state: [u8; 6] = "state\0"
+    var k_step: [u8; 5] = "step\0"
+    var k_vid: [u8; 4] = "vid\0"
+    var k_pid: [u8; 4] = "pid\0"
+    var k_rd: [u8; 6] = "rdlen\0"
+    var k_kind: [u8; 5] = "kind\0"
+    var k_rep: [u8; 8] = "reports\0"
+    procw.put_s((&k_iid[0]) as u64)
+    procw.put_dec(dg(j, D_IID))
+    procw.put_c(32)
+    procw.put_s((&k_slot[0]) as u64)
+    procw.put_c(61)
+    procw.put_dec(dg(j, D_SLOT))
+    procw.put_c(32)
+    procw.put_s((&k_state[0]) as u64)
+    procw.put_c(61)
+    procw.put_dec(dg(j, D_STATE))
+    procw.put_c(32)
+    procw.put_s((&k_step[0]) as u64)
+    procw.put_c(61)
+    procw.put_dec(dg(j, D_STEP))
+    procw.put_c(32)
+    procw.put_s((&k_vid[0]) as u64)
+    procw.put_c(61)
+    procw.put_hex(dg(j, D_VID), 4)
+    procw.put_c(32)
+    procw.put_s((&k_pid[0]) as u64)
+    procw.put_c(61)
+    procw.put_hex(dg(j, D_PID), 4)
+    procw.put_c(32)
+    procw.put_s((&k_rd[0]) as u64)
+    procw.put_c(61)
+    procw.put_dec(dg(j, D_RDLEN))
+    procw.put_c(32)
+    procw.put_s((&k_kind[0]) as u64)
+    procw.put_c(61)
+    procw.put_hex(dg(j, D_KIND), 2)
+    procw.put_c(32)
+    procw.put_s((&k_rep[0]) as u64)
+    procw.put_c(61)
+    procw.put_dec(dg(j, D_REPORTS))
+    procw.put_c(10)
+}
+
+fn render_body(state: u64) {
+    render_state()
+    if g(G_STATE) < ST_NOUART {
+        return
+    }
+    render_uart()
+    render_link()
+    var j: u64 = 0
+    while j < ndev() {
+        render_dev(j)
+        j = j + 1
+    }
+}
+
+fn render(state: u64, out: u64, cap: u64) -> u64 {
+    procw.begin(out, cap)
+    render_body(state)
+    return procw.used()
+}
+
+fn say(state: u64) {
+    var prefix: [u8; 6] = "sam: \0"
+    let n: u64 = render(state, (&say_buf[0]) as u64, 1536)
+    var i: u64 = 0
+    var fresh: bool = true
+    while i < n {
+        if fresh {
+            serial.puts((&prefix[0]) as u64)
+            fresh = false
+        }
+        let ch: u64 = regio.read8((&say_buf[0]) as u64 + i)
+        if ch == 10 {
+            serial.nl()
+            fresh = true
+        } else {
+            serial.put(ch as u8)
+        }
+        i = i + 1
+    }
+}
+
+fn stage(state: u64) {
+    run(state)
+    say(state)
+}
+
+fn ops() -> inputclass.InputOps {
+    var o: inputclass.InputOps = inputclass.null_ops()
+    o.present = present
+    o.poll = poll_tick
+    o.kind = inputclass.KIND_SAM
+    o.tag = 0x6D6173
+    return o
+}
