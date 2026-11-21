@@ -10,6 +10,7 @@ in `assets/icons/brand/`). `bash tools/svg/apps.sh [app...]` copies the SVG to `
 - Flat two-tone: body fill = hue 500, light detail = hue 200, outline = hue 800. No gradients, no alpha, no blur.
 - Outline stroke 1.5, detail strokes 1.7-2.4, round caps and joins, corner radius 2.5-3 on bodies, 1.2-1.8 on small parts.
 - Paper-like surfaces use `#f1f5f9` with the hue-800 outline; the terminal screen uses `#1e293b` with a `#64748b` outline.
+- Never let two shapes share an outer edge (two partially covered pixels composite twice and break the 22 px row check): draw fills first, the outline of the window/body LAST as one stroke-only shape.
 - The hue-800 outline keeps the silhouette on light backgrounds, the hue-500 body keeps it on dark backgrounds (checked with `tools/svg/contact.py`).
 - Allowed elements (renderer limits): `svg g path rect circle ellipse line polyline polygon linearGradient stop`, `fill-rule`, `transform`.
   Not available: `radialGradient`, `clipPath`, `mask`, `use`, `text`, `filter`. `tools/svg/bake` exits 5 on anything unsupported.
