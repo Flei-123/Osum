@@ -3,7 +3,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../../.."
 KERNEL=${1:?kernel image}
 OUT=${2:?outdir}
-RUNS=${3:-3}
+RUNS=${3:-6}
 DRIVE_KIND=${4:-ahci}
 export BLOCKS=1000000 TMO=${TMO:-900} FX_RUNS=$RUNS DRIVE=$DRIVE_KIND
 export "KARGS=osum vfs nokbd nosched noproc nofs gfx nic nip=10.0.2.15/24 ngw=10.0.2.2 ${KARGS_EXTRA:-}" "QEMU_EXTRA=-netdev user,id=n0 -device e1000,netdev=n0"
