@@ -4,8 +4,12 @@ import sync.fslock
 import block.blk
 import fs.ofsj
 import fs.fs
+import arch.arch
 
-export { sync, idle }
+export { sync, drain, idle }
+
+const DRAIN_SLOTS: u64 = 256
+const DRAIN_ROUNDS_MAX: u64 = 4096
 
 fn sync(state: u64) -> bool {
     let flags: u64 = fslock.enter(state)
@@ -20,6 +24,33 @@ fn sync(state: u64) -> bool {
     }
     fslock.leave(state, flags)
     return ok && table_ok
+}
+
+fn breathe() {
+    if !arch.irq_are_on() {
+        asm("sti\nnop\ncli")
+    }
+}
+
+fn drain(state: u64) -> bool {
+    if fslock.mine(state) {
+        return true
+    }
+    var round: u64 = 0
+    while round < DRAIN_ROUNDS_MAX {
+        let flags: u64 = fslock.enter(state)
+        let step: u64 = blk.wb_flush_some(state, DRAIN_SLOTS)
+        fslock.leave(state, flags)
+        if step == blk.FLUSH_FAILED {
+            return false
+        }
+        if step == blk.FLUSH_DONE {
+            return true
+        }
+        breathe()
+        round = round + 1
+    }
+    return true
 }
 
 fn idle_table(state: u64) {
