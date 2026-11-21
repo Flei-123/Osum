@@ -112,6 +112,22 @@ def main():
         ok(l["y"] >= p["y"] + p["h"] and l["y"] + l["h"] <= c["y"] + c["h"] + 1,
            "tile %d: the label (y %d..%d) is under the plate (bottom %d), inside the cell" %
            (n, l["y"], l["y"] + l["h"], p["y"] + p["h"]))
+    if 0 in fuss or 1 in fuss:
+        foot = max(f["y"] + f["h"] for f in fuss.values()) - qy
+        ok(abs(qh - (foot + 16 * sc)) <= 2 * sc,
+           "panel height %d equals content bottom %d plus 16 points of padding (no empty space below)" % (qh, foot))
+    chev = {}
+    for l in lines:
+        if l.startswith("qs: chev "):
+            d = kv(l)
+            g = re.search(r" g=(\d+)", l)
+            if d and g and "n" in d:
+                d["g"] = int(g.group(1))
+                chev[d["n"]] = d
+    ok(len(chev) >= 1, "%d tiles carry a chevron part" % len(chev))
+    for n, c in sorted(chev.items()):
+        ok(c["g"] >= 16 * sc, "tile %d: chevron glyph box %d px is at least 16 points" % (n, c["g"]))
+        ok(c["w"] >= 32 * sc and c["h"] >= 32 * sc, "tile %d: chevron hit area %dx%d px is at least 32 points" % (n, c["w"], c["h"]))
     def px(x, y):
         o = (y * pw + x) * 3
         return pix[o], pix[o + 1], pix[o + 2]
@@ -159,6 +175,21 @@ def main():
                     if 0 <= xx < pw and yy < ph and far(px(xx, yy), bg):
                         ink += 1
             ok(ink >= 12 * sc, "tile %d: the label has ink under its plate (%d pixels)" % (n, ink))
+    for n, c in sorted(chev.items()):
+        zx, zy, zw, zh = qx + c["x"] + dx, qy + c["y"], c["w"], c["h"]
+        if zy < free_top:
+            continue
+        ref = px(zx + zw // 2, zy + 3 * sc)
+        xs_, ys_ = [], []
+        for yy in range(zy + 4 * sc, zy + zh - 4 * sc):
+            for xx in range(zx + 3 * sc, zx + zw - 3 * sc):
+                if 0 <= xx < pw and yy < ph:
+                    a = px(xx, yy)
+                    if abs(a[0] - ref[0]) + abs(a[1] - ref[1]) + abs(a[2] - ref[2]) > 60:
+                        xs_.append(xx)
+                        ys_.append(yy)
+        hh = (max(ys_) - min(ys_) + 1) if ys_ else 0
+        ok(hh >= 8 * sc, "tile %d: the drawn chevron is %d px tall on the picture (at least 8 points)" % (n, hh))
     if False:
         m = med[0]
         mp = px(qx + m["x"] + m["w"] // 2, qy + m["y"] + 3 * sc)
