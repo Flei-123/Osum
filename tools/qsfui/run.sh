@@ -97,7 +97,7 @@ check_scale() {
     r=$(python3 -I tools/qsfui/check.py "$S" "$D/01-open.ppm" "$sc" 2>&1)
     nfail=$(printf '%s\n' "$r" | grep -c '^FAIL')
     nok=$(printf '%s\n' "$r" | grep -c '^OK')
-    if [ "$nfail" -eq 0 ] && [ "$nok" -ge 20 ]; then
+    if [ "$nfail" -eq 0 ] && [ "$nok" -ge 26 ]; then
         ok "scale $sc: layout check -- $nok points hold (equal cells, labels under the plates, everything inside the panel)"
     else
         bad "scale $sc: layout check: $nfail failed, $nok ok"

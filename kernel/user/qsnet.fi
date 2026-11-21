@@ -14,10 +14,12 @@ import uitheme
 import uikit.uiscale
 import uikit.uitext
 import uikit.uiglyph
+import qsmodes
+import qsnetdraw
 
 export {
     is_page, open_page, back, build, act, owns_key, poll, title, status_text, glyph, is_online, short_status, trace_boxes,
-    K_BACK, K_SETTINGS, MAX_ROWS, has_wifi
+    K_BACK, K_SETTINGS, MAX_ROWS, has_wifi, page_hp, K_CUR, K_DISCONNECT, K_REFRESH, K_SWITCH
 }
 
 const SYS_NETGET: u64 = 1300
@@ -48,18 +50,34 @@ const K_SETTINGS: u64 = 43
 const K_SHOW: u64 = 44
 const K_CANCEL: u64 = 45
 const K_ETH: u64 = 46
+const K_CUR: u64 = 47
+const K_DISCONNECT: u64 = 48
+const K_REFRESH: u64 = 49
+const K_SWITCH: u64 = 55
+const K_NOTE: u64 = 56
+const CUR_UD: u64 = 0xFE
 const ETH_UD: u64 = 0xFF
 const K_NET0: u64 = 50
 const MAX_ROWS: u64 = 4
-const ROW_H0: u64 = 30
-const ROW_PAD0: u64 = 10
-const BAR_W0: u64 = 3
-const BAR_GAP0: u64 = 2
-const BAR_STEP0: u64 = 3
-const BAR_MIN_H0: u64 = 4
-const BAR_COUNT: u64 = 4
-const BAR_AREA0: u64 = 22
-const LOCK_SIZE0: u64 = 14
+const ROW_H0: u64 = 48
+const ROW_PAD0: u64 = 12
+const HEAD_H0: u64 = 32
+const FOOT_H0: u64 = 32
+const CUR_TILE_H0: u64 = 44
+const CUR_BTN_H0: u64 = 32
+const CUR_PAD0: u64 = 12
+const CUR_GAP0: u64 = 8
+const NET_GAP0: u64 = 8
+const LIST_GAP0: u64 = 4
+const NOTE_H0: u64 = 32
+const SEP_H0: u64 = 1
+const CARD_PAD0: u64 = 16
+const LABEL_H0: u64 = 20
+const ENTRY_H0: u64 = 32
+const PW_SLACK0: u64 = 16
+const SWITCH_CELL_W0: u64 = 48
+const INFO_SIZE0: u64 = 18
+const LINE_GAP0: u64 = 2
 const CONNECT_WAIT_NS: u64 = 30000000000
 const CONN_ARMED: u64 = 1
 const NAME_GAP0: u64 = 8
@@ -91,6 +109,8 @@ static mut ssid_now: [u8; 40] = [0 as u8; 40]
 static mut title_buf: [u8; 72] = [0 as u8; 72]
 static mut rows_buf: [u8; 360] = [0 as u8; 360]
 static mut ip_buf: [u8; 24] = [0 as u8; 24]
+static mut note_ptr: u64 = 0
+static mut net_rank: [u64; 4] = [0 as u64; 4]
 static mut empty: [u8; 2] = "\0\0"
 static mut sp: [u8; 3] = "  \0"
 static mut dot: [u8; 2] = ".\0"
@@ -115,6 +135,13 @@ static mut k_offline: [u8; 15] = "qs.net.offline\0"
 static mut k_m_badpw: [u8; 15] = "qs.net.m.badpw\0"
 static mut k_m_nolink: [u8; 16] = "qs.net.m.nolink\0"
 static mut k_settings: [u8; 16] = "qs.net.settings\0"
+static mut k_secured: [u8; 15] = "qs.net.secured\0"
+static mut k_open: [u8; 12] = "qs.net.open\0"
+static mut k_disconnect: [u8; 18] = "qs.net.disconnect\0"
+static mut k_more: [u8; 12] = "qs.net.more\0"
+static mut k_refresh: [u8; 15] = "qs.net.refresh\0"
+static mut k_info: [u8; 12] = "qs.net.info\0"
+static mut k_switch: [u8; 14] = "qs.net.switch\0"
 static mut k_back: [u8; 12] = "qs.net.back\0"
 static mut k_st_off: [u8; 14] = "qs.net.st.off\0"
 static mut k_st_unplugged: [u8; 20] = "qs.net.st.unplugged\0"
@@ -145,6 +172,7 @@ static mut s_box_w: [u8; 4] = " w=\0"
 static mut s_box_h: [u8; 4] = " h=\0"
 static mut s_line_short: [u8; 22] = "qsnet: password short\0"
 static mut s_line_rc: [u8; 5] = " rc=\0"
+static mut s_line_size: [u8; 15] = "qsnet: page h=\0"
 static mut s_line_badpw: [u8; 19] = "qsnet: link failed\0"
 
 fn text_of(key: u64) -> u64 {
@@ -396,7 +424,7 @@ fn back() {
 }
 
 fn owns_key(key: u64) -> bool {
-    return key >= K_BACK && key < K_NET0 + MAX_ROWS
+    return key >= K_BACK && key <= K_NOTE
 }
 
 fn is_current(rank: u64) -> bool {
@@ -464,14 +492,6 @@ fn message_text() -> u64 {
     return 0
 }
 
-fn build_header(card: usize, inner_w: u64) {
-    let hd: usize = fuiscene.row(card)
-    fuiscene.set_gap(hd, 8)
-    let _b: usize = fuiscene.icon_button(hd, icons.CHEVRON_LEFT, text_of((&k_back[0 as usize]) as u64), K_BACK)
-    let _t: usize = fuiscene.label(hd, text_of((&k_title[0 as usize]) as u64))
-    let _s: usize = fuiscene.separator(card)
-}
-
 fn has_wired() -> bool {
     return up_kind() != 0 && up_kind() != KIND_WLAN
 }
@@ -486,16 +506,6 @@ fn eth_status() -> u64 {
     return status_text()
 }
 
-fn ROW_H() -> u64 {
-    return ROW_H0 * uiscale.ui_scale()
-}
-
-fn paint_text(x: u64, y: u64, w: u64, p: u64, rgb: u64) {
-    let px: u64 = uiscale.px_ui()
-    let base: u64 = y + (ROW_H() - uitext.text_h(px)) / 2 + uitext.ascent_of(uitext.F_UI, px) + TEXT_NUDGE0 * uiscale.ui_scale()
-    fuiscene.cv_text_rgb(x, base, w, p, px, false, rgb)
-}
-
 fn text_fit(p: u64, avail: u64) -> u64 {
     let px: u64 = uiscale.px_ui()
     let n: u64 = text.length(p)
@@ -505,115 +515,274 @@ fn text_fit(p: u64, avail: u64) -> u64 {
     return uiglyph.fit(uitext.F_UI, px, p, n, avail)
 }
 
-fn paint_bars(x: u64, y: u64, h: u64, lit: u64, fg: u64, dim: u64) {
-    let sc: u64 = uiscale.ui_scale()
-    var i: u64 = 0
-    while i < BAR_COUNT {
-        let bh: u64 = (BAR_MIN_H0 + i * BAR_STEP0) * sc
-        var rgb: u64 = dim
-        if i < lit {
-            rgb = fg
-        }
-        fuiscene.cv_round_rgb(x + i * (BAR_W0 + BAR_GAP0) * sc, y + h - bh, BAR_W0 * sc, bh, 1, rgb)
-        i = i + 1
-    }
+fn sc() -> u64 {
+    return uiscale.ui_scale()
 }
-
+fn ROW_H() -> u64 {
+    return ROW_H0 * sc()
+}
+fn wifi_enabled() -> bool {
+    return !qsmodes.on(qsmodes.T_AIRPLANE)
+}
+fn cur_rank() -> u64 {
+    var r: u64 = 0
+    while r < netui.list_count() {
+        if is_current(r) {
+            return r
+        }
+        r = r + 1
+    }
+    return NONE_PICK
+}
+fn n_other_rows() -> u64 {
+    var n: u64 = netui.list_count()
+    if cur_rank() != NONE_PICK {
+        n = n - 1
+    }
+    if n > MAX_ROWS {
+        n = MAX_ROWS
+    }
+    return n
+}
+fn list_note() -> u64 {
+    if !has_wifi() {
+        return text_of((&k_nowifi[0 as usize]) as u64)
+    }
+    if netui.list_count() == 0 {
+        return text_of((&k_empty[0 as usize]) as u64)
+    }
+    return 0
+}
+fn cur_block_hp() -> u64 {
+    return 2 * CUR_PAD0 + CUR_TILE_H0 + CUR_GAP0 + CUR_BTN_H0
+}
+fn list_children() -> u64 {
+    var n: u64 = n_other_rows()
+    if has_wired() {
+        n = n + 1
+    }
+    if cur_rank() != NONE_PICK {
+        n = n + 1
+    }
+    if list_note() != 0 {
+        n = n + 1
+    }
+    return n
+}
+fn list_hp() -> u64 {
+    var h: u64 = n_other_rows() * ROW_H0
+    if has_wired() {
+        h = h + ROW_H0
+    }
+    if cur_rank() != NONE_PICK {
+        h = h + cur_block_hp()
+    }
+    if list_note() != 0 {
+        h = h + NOTE_H0
+    }
+    let k: u64 = list_children()
+    if k > 1 {
+        h = h + (k - 1) * LIST_GAP0
+    }
+    return h
+}
+fn password_hp() -> u64 {
+    var h: u64 = LABEL_H0 + ENTRY_H0 + CUR_BTN_H0 + 2 * NET_GAP0 + PW_SLACK0
+    if message_text() != 0 {
+        h = h + LABEL_H0 + NET_GAP0
+    }
+    return h
+}
+fn footer_note_hp() -> u64 {
+    if message_text() != 0 {
+        return NOTE_H0 + NET_GAP0
+    }
+    return 0
+}
+fn page_hp() -> u64 {
+    var h: u64 = 2 * CARD_PAD0 + HEAD_H0 + NET_GAP0 + SEP_H0 + NET_GAP0
+    if picked != NONE_PICK {
+        return h + password_hp()
+    }
+    h = h + list_hp() + footer_note_hp() + NET_GAP0 + SEP_H0 + NET_GAP0 + FOOT_H0
+    return h
+}
+fn paint_text(x: u64, y: u64, h: u64, w: u64, p: u64, rgb: u64) {
+    let px: u64 = uiscale.px_ui()
+    let base: u64 = y + (h - uitext.text_h(px)) / 2 + uitext.ascent_of(uitext.F_UI, px) + TEXT_NUDGE0 * sc()
+    fuiscene.cv_text_rgb(x, base, w, p, px, false, rgb)
+}
 fn row_paint(ud: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
-    let sc: u64 = uiscale.ui_scale()
     let on: bool = (st & fuiscene.TS_ON) != 0
-    var plate: u64 = uitheme.theme(uitheme.T_BTN)
-    var fg: u64 = uitheme.theme(uitheme.T_FG)
+    let fg: u64 = qsnetdraw.paint_plate(x, y, w, h, st, on)
     var dim: u64 = uitheme.theme(uitheme.T_DIM)
     if on {
-        plate = uitheme.theme(uitheme.T_ACCENT)
-        fg = uitheme.theme(uitheme.T_SELFG)
         dim = fg
-    } else if (st & fuiscene.TS_DOWN) != 0 {
-        plate = uitheme.theme(uitheme.T_BTNDN)
-    } else if (st & fuiscene.TS_HOT) != 0 {
-        plate = uitheme.theme(uitheme.T_BTNHI)
     }
-    fuiscene.cv_round_rgb(x, y, w, h, fuiscene.rb_px(), plate)
-    if (st & fuiscene.TS_FOCUS) != 0 {
-        fuiscene.cv_ring_rgb(x, y, w, h, fuiscene.rb_px(), 2, uitheme.theme(uitheme.T_FOCUS))
-    }
-    let pad: u64 = ROW_PAD0 * sc
+    let pad: u64 = ROW_PAD0 * sc()
     var name: u64 = 0
     var word: u64 = 0
-    var lock: bool = false
     var left: u64 = x + pad
     if ud == ETH_UD {
-        fuiscene.cv_glyph(icons.NETWORK_WIRED, left, y + (h - 16 * sc) / 2, 16 * sc, fg)
+        let gs: u64 = 20 * sc()
+        fuiscene.cv_glyph(icons.NETWORK_WIRED, left, y + (h - gs) / 2, gs, fg)
         name = text_of((&k_eth[0 as usize]) as u64)
         word = eth_status()
     } else {
-        let bh: u64 = (BAR_MIN_H0 + (BAR_COUNT - 1) * BAR_STEP0) * sc
-        paint_bars(left, y + (h - bh) / 2, bh, netui.list_bars(ud), fg, dim)
+        qsnetdraw.paint_signal(left, y, h, netui.list_bars(ud), welcome_net.needs_password(ud), fg, dim)
         name = welcome_net.ssid_at(ud)
         word = word_of(ud)
-        lock = welcome_net.needs_password(ud)
     }
-    left = x + pad + BAR_AREA0 * sc
+    left = x + pad + qsnetdraw.SIGNAL_AREA0 * sc()
     var right: u64 = x + w - pad
     let px: u64 = uiscale.px_ui()
-    let ww: u64 = uitext.text_w(uitext.F_UI, px, word, text.length(word))
-    if ww > 0 {
-        let wmax: u64 = (w - 2 * pad) / 2
-        let wn: u64 = text_fit(word, wmax)
+    if text.length(word) > 0 {
+        let wn: u64 = text_fit(word, (w - 2 * pad) / 2)
         let wd: u64 = uitext.text_w(uitext.F_UI, px, word, wn)
-        paint_text(right - wd, y, wd + 2, word, dim)
-        right = right - wd - NAME_GAP0 * sc
-    }
-    if lock {
-        let ls: u64 = LOCK_SIZE0 * sc
-        right = right - ls
-        fuiscene.cv_glyph(icons.NET_LOCK, right, y + (h - ls) / 2, ls, dim)
-        right = right - NAME_GAP0 * sc
+        paint_text(right - wd, y, h, wd + 2, word, dim)
+        right = right - wd - NAME_GAP0 * sc()
     }
     if right > left {
         let nn: u64 = text_fit(name, right - left)
         let nw: u64 = uitext.text_w(uitext.F_UI, px, name, nn)
-        paint_text(left, y, nw + 2, name, fg)
+        paint_text(left, y, h, nw + 2, name, fg)
     }
 }
-
-fn add_row(card: usize, key: u64, label: u64, ud: u64, on: bool, inner_w: u64) {
-    let r: usize = fuiscene.row(card)
-    let _t: usize = fuiscene.flat_tile(r, key, label, inner_w, ROW_H() / uiscale.ui_scale(), on, ud, row_paint)
-}
-
-fn build_state(card: usize, inner_w: u64) {
+fn cur_status() -> u64 {
     if state_code() != ST_OK {
-        let _o: usize = fuiscene.label_muted(card, text_of((&k_offline[0 as usize]) as u64))
+        return status_text()
     }
-    if has_wired() {
-        add_row(card, K_ETH, text_of((&k_eth[0 as usize]) as u64), ETH_UD, !is_wifi_up() && state_code() != ST_OFF, inner_w)
+    if welcome_net.needs_password(cur_rank()) {
+        return text_of((&k_secured[0 as usize]) as u64)
+    }
+    return text_of((&k_open[0 as usize]) as u64)
+}
+fn cur_paint(ud: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
+    let fg: u64 = uitheme.theme(uitheme.T_FG)
+    let dim: u64 = uitheme.theme(uitheme.T_DIM)
+    let r: u64 = cur_rank()
+    if r == NONE_PICK {
+        return
+    }
+    let pad: u64 = ROW_PAD0 * sc()
+    qsnetdraw.paint_accent_bar(x, y, h)
+    qsnetdraw.paint_signal(x + pad, y, h, netui.list_bars(r), welcome_net.needs_password(r), fg, dim)
+    let isz: u64 = INFO_SIZE0 * sc()
+    fuiscene.cv_glyph(icons.INFO, x + w - isz - pad / 2, y + (h - isz) / 2, isz, dim)
+    let px: u64 = uiscale.px_ui()
+    let lh: u64 = uitext.text_h(px)
+    let top: u64 = y + (h - 2 * lh - LINE_GAP0 * sc()) / 2
+    let asc: u64 = uitext.ascent_of(uitext.F_UI, px)
+    let tx: u64 = x + pad + qsnetdraw.SIGNAL_AREA0 * sc()
+    let avail: u64 = x + w - isz - pad - tx
+    let name: u64 = welcome_net.ssid_at(r)
+    let nn: u64 = text_fit(name, avail)
+    fuiscene.cv_text_rgb(tx, top + asc, uitext.text_w(uitext.F_UI, px, name, nn) + 2, name, px, false, fg)
+    let stt: u64 = cur_status()
+    let sn: u64 = text_fit(stt, avail)
+    fuiscene.cv_text_rgb(tx, top + lh + LINE_GAP0 * sc() + asc, uitext.text_w(uitext.F_UI, px, stt, sn) + 2, stt, px,
+        false, dim)
+}
+fn switch_paint(ud: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
+    qsnetdraw.paint_switch(x, y, w, h, (st & fuiscene.TS_ON) != 0, (st & fuiscene.TS_HOT) != 0)
+}
+fn note_paint(x: u64, y: u64, w: u64, h: u64) {
+    let p: u64 = note_ptr
+    if p == 0 {
+        return
+    }
+    paint_text(x + ROW_PAD0 * sc(), y, h, w - 2 * ROW_PAD0 * sc(), p, uitheme.theme(uitheme.T_DIM))
+}
+fn add_note(parent: usize, p: u64, w: u64) {
+    note_ptr = p
+    let _n: usize = fuiscene.canvas(parent, K_NOTE, w, NOTE_H0, note_paint)
+}
+fn add_row(parent: usize, key: u64, label: u64, ud: u64, on: bool, inner_w: u64) {
+    let r: usize = fuiscene.row(parent)
+    let _t: usize = fuiscene.flat_tile(r, key, label, inner_w, ROW_H0, on, ud, row_paint)
+}
+fn build_header(card: usize, inner_w: u64) {
+    let hd: usize = fuiscene.row(card)
+    fuiscene.set_gap(hd, 8)
+    var left_w: u64 = inner_w
+    if has_wifi() {
+        left_w = inner_w - SWITCH_CELL_W0 - 8
+    }
+    fuiscene.set_size(hd, inner_w, HEAD_H0)
+    let left: usize = fuiscene.row(hd)
+    fuiscene.set_gap(left, 8)
+    fuiscene.set_size(left, left_w, HEAD_H0)
+    let b: usize = fuiscene.icon_button(left, icons.ARROW_LEFT, text_of((&k_back[0 as usize]) as u64), K_BACK)
+    fuiscene.set_size(b, HEAD_H0, HEAD_H0)
+    let _t: usize = fuiscene.label(left, text_of((&k_title[0 as usize]) as u64))
+    if has_wifi() {
+        let _s: usize = fuiscene.flat_tile(hd, K_SWITCH, text_of((&k_switch[0 as usize]) as u64), SWITCH_CELL_W0,
+            HEAD_H0, wifi_enabled(), 0, switch_paint)
     }
 }
-
+fn build_current(list: usize, inner_w: u64) {
+    let blk: usize = fuiscene.card_soft(list)
+    fuiscene.set_pad(blk, CUR_PAD0)
+    fuiscene.set_gap(blk, CUR_GAP0)
+    let w: u64 = inner_w - 2 * CUR_PAD0
+    let r1: usize = fuiscene.row(blk)
+    let _t: usize = fuiscene.flat_tile(r1, K_CUR, row_text(cur_rank()), w, CUR_TILE_H0, false, CUR_UD, cur_paint)
+    let r2: usize = fuiscene.row(blk)
+    let btn: usize = fuiscene.button(r2, text_of((&k_disconnect[0 as usize]) as u64), K_DISCONNECT)
+    fuiscene.set_size(btn, w, CUR_BTN_H0)
+}
 fn build_list(card: usize, inner_w: u64) {
-    let _h: usize = fuiscene.label_muted(card, text_of((&k_hdr[0 as usize]) as u64))
-    if !has_wifi() {
-        let _n: usize = fuiscene.label(card, text_of((&k_nowifi[0 as usize]) as u64))
-        return
+    let list: usize = fuiscene.column(card)
+    fuiscene.set_gap(list, LIST_GAP0)
+    if has_wired() {
+        add_row(list, K_ETH, text_of((&k_eth[0 as usize]) as u64), ETH_UD, !is_wifi_up() && state_code() != ST_OFF, inner_w)
     }
-    let n: u64 = netui.list_count()
-    if n == 0 {
-        let _e: usize = fuiscene.label(card, text_of((&k_empty[0 as usize]) as u64))
-        return
+    let cur: u64 = cur_rank()
+    if cur != NONE_PICK {
+        build_current(list, inner_w)
     }
-    var shown: u64 = n
-    if shown > MAX_ROWS {
-        shown = MAX_ROWS
+    let note: u64 = list_note()
+    if note != 0 {
+        add_note(list, note, inner_w)
+        return
     }
     var r: u64 = 0
-    while r < shown {
-        add_row(card, K_NET0 + r, row_text(r), r, is_current(r), inner_w)
+    var shown: u64 = 0
+    while r < netui.list_count() && shown < MAX_ROWS {
+        if r != cur {
+            add_row(list, K_NET0 + shown, row_text(r), r, false, inner_w)
+            net_rank[shown as usize] = r
+            shown = shown + 1
+        }
         r = r + 1
     }
 }
-
+fn build_footer(card: usize, inner_w: u64) {
+    let ft: usize = fuiscene.row(card)
+    fuiscene.set_gap(ft, 8)
+    fuiscene.set_size(ft, inner_w, FOOT_H0)
+    let left: usize = fuiscene.row(ft)
+    fuiscene.set_size(left, inner_w - FOOT_H0 - 8, FOOT_H0)
+    let _l: usize = fuiscene.link(left, text_of((&k_more[0 as usize]) as u64), K_SETTINGS, FOOT_H0)
+    let rb: usize = fuiscene.icon_button(ft, icons.NAV_REFRESH, text_of((&k_refresh[0 as usize]) as u64), K_REFRESH)
+    fuiscene.set_size(rb, FOOT_H0, FOOT_H0)
+}
+fn build(card: usize, inner_w: u64) {
+    fuiscene.set_gap(card, NET_GAP0)
+    build_header(card, inner_w)
+    let _s1: usize = fuiscene.separator(card)
+    if picked != NONE_PICK {
+        build_password(card, inner_w)
+        return
+    }
+    build_list(card, inner_w)
+    let m: u64 = message_text()
+    if m != 0 {
+        let _m: usize = fuiscene.label_muted(card, m)
+    }
+    let _s2: usize = fuiscene.separator(card)
+    build_footer(card, inner_w)
+}
 fn pw_title_text() -> u64 {
     let dst: u64 = (&pw_title[0 as usize]) as u64
     var at: u64 = ulib.strcpy(dst, text_of((&k_pw_for[0 as usize]) as u64))
@@ -642,22 +811,6 @@ fn build_password(card: usize, inner_w: u64) {
     fuiscene.set_gap(br, 8)
     let _c: usize = fuiscene.button(br, text_of((&k_cancel[0 as usize]) as u64), K_CANCEL)
     let _k: usize = fuiscene.button_main(br, text_of((&k_connect[0 as usize]) as u64), K_CONNECT)
-}
-
-fn build(card: usize, inner_w: u64) {
-    build_header(card, inner_w)
-    if picked != NONE_PICK {
-        build_password(card, inner_w)
-        return
-    }
-    build_state(card, inner_w)
-    build_list(card, inner_w)
-    let m: u64 = message_text()
-    if m != 0 {
-        let _m: usize = fuiscene.label_muted(card, m)
-    }
-    let _sep: usize = fuiscene.separator(card)
-    let _s: usize = fuiscene.button(card, text_of((&k_settings[0 as usize]) as u64), K_SETTINGS)
 }
 
 fn remember(rank: u64) {
@@ -752,8 +905,20 @@ fn act(key: u64) -> u64 {
     if key == K_ETH {
         return 1
     }
+    if key == K_CUR {
+        return 1
+    }
+    if key == K_DISCONNECT || key == K_SWITCH {
+        let _rc: u64 = qsmodes.click(qsmodes.T_AIRPLANE)
+        refresh_list()
+        return 1
+    }
+    if key == K_REFRESH {
+        refresh_list()
+        return 1
+    }
     if key >= K_NET0 && key < K_NET0 + MAX_ROWS {
-        return pick_row(key - K_NET0)
+        return pick_row(net_rank[(key - K_NET0) as usize])
     }
     return 0
 }
@@ -777,6 +942,14 @@ fn trace_box(key: u64) {
 }
 
 fn trace_boxes() {
+    let _a: u64 = lineout.add_text((&s_line_size[0 as usize]) as u64)
+    lineout.add_num(page_hp() * sc())
+    lineout.end_line()
+    trace_box(K_CUR)
+    trace_box(K_DISCONNECT)
+    trace_box(K_REFRESH)
+    trace_box(K_SWITCH)
+    trace_box(K_SETTINGS)
     trace_box(K_ETH)
     trace_box(K_SHOW)
     trace_box(K_CANCEL)
