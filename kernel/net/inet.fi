@@ -1249,6 +1249,27 @@ fn sock_free(state: u64, i: u64) {
     kstate.set(state, so_at(i) + SO_FLAGS, 0)
 }
 
+fn port_in_use(state: u64, port: u64) -> bool {
+    var j: u64 = 0
+    while j < SOCK_MAX {
+        if sock_kind(state, j) != SK_FREE && lport_of(state, j) == port {
+            return true
+        }
+        j = j + 1
+    }
+    return false
+}
+
+fn ephemeral_port(state: u64) -> u64 {
+    var tries: u64 = 0
+    var candidate: u64 = EPHEMERAL_BASE + (kstate.add(state, sc(S_SEQ), 1) & EPHEMERAL_MASK)
+    while tries < EPHEMERAL_MASK && port_in_use(state, candidate) {
+        candidate = EPHEMERAL_BASE + (kstate.add(state, sc(S_SEQ), 1) & EPHEMERAL_MASK)
+        tries = tries + 1
+    }
+    return candidate
+}
+
 fn sock_bind(state: u64, i: u64, port: u64) -> u64 {
     let k: u64 = sock_kind(state, i)
     if k == SK_FREE {
@@ -1258,6 +1279,9 @@ fn sock_bind(state: u64, i: u64, port: u64) -> u64 {
         return errno.neg(errno.E_INVAL)
     }
     var bound: u64 = port
+    if k == SK_TCP && port == 0 {
+        bound = ephemeral_port(state)
+    }
     if k == SK_UDP {
         let flags: u64 = hold(state)
         var h: i32 = 0 - 1
@@ -1287,9 +1311,11 @@ fn sock_listen(state: u64, i: u64, backlog: u64) -> u64 {
     if sock_kind(state, i) != SK_TCP {
         return errno.neg(errno.E_OPNOTSUPP)
     }
-    let port: u64 = lport_of(state, i)
+    var port: u64 = lport_of(state, i)
     if port == 0 {
-        return errno.neg(errno.E_INVAL)
+        port = ephemeral_port(state)
+        lport_set(state, i, port)
+        netmon.sset(state, i, netmon.S_LPORT, port)
     }
     if (sock_flags(state, i) & SF_LISTEN) != 0 && sock_handle(state, i) != NOHANDLE && !sock_stale(state, i) {
         return 0
