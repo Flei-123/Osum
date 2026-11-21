@@ -1,0 +1,192 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import settings.setcore
+
+export { saved, available, save, FIXED_COUNT, fixed_w, fixed_h }
+
+const CFG_CAP: u64 = 4096
+const LINE_GUARD: u64 = 64
+const FIXED_COUNT: u64 = 6
+const NEWLINE: u64 = 10
+const DIGIT_ZERO: u64 = 48
+const DIGIT_NINE: u64 = 57
+const LOWER_X: u64 = 120
+
+static mut p_cfg: [u8; 19] = "/sysesp/osboot.cfg\0"
+static mut p_tmp: [u8; 19] = "/sysesp/osboot.nw\0\0"
+static mut w_resolution: [u8; 12] = "resolution \0"
+static mut w_entry: [u8; 7] = "entry \0"
+static mut cfg_in: [u8; 4096] = [0 as u8; 4096]
+static mut cfg_out: [u8; 4160] = [0 as u8; 4160]
+
+fn fixed_w(i: u64) -> u64 {
+    if i == 1 { return 1920 }
+    if i == 2 { return 1600 }
+    if i == 3 { return 1366 }
+    if i == 4 { return 1280 }
+    if i == 5 { return 1024 }
+    return 0
+}
+
+fn fixed_h(i: u64) -> u64 {
+    if i == 1 { return 1080 }
+    if i == 2 { return 900 }
+    if i == 3 { return 768 }
+    if i == 4 { return 800 }
+    if i == 5 { return 768 }
+    return 0
+}
+
+fn at8(p: u64, i: u64) -> u64 {
+    return __mmio_read8((p + i) as *mut u8) as u64
+}
+
+fn put8(p: u64, i: u64, v: u64) {
+    __mmio_write8((p + i) as *mut u8, v as u8)
+}
+
+fn starts_at(p: u64, i: u64, n: u64, word: u64) -> bool {
+    var k: u64 = 0
+    while at8(word, k) != 0 {
+        if i + k >= n || at8(p, i + k) != at8(word, k) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn line_end(p: u64, i: u64, n: u64) -> u64 {
+    var e: u64 = i
+    while e < n && at8(p, e) != NEWLINE {
+        e = e + 1
+    }
+    if e < n {
+        e = e + 1
+    }
+    return e
+}
+
+fn read_cfg() -> u64 {
+    return setcore.file_read((&p_cfg[0 as usize]) as u64, (&cfg_in[0 as usize]) as u64, CFG_CAP)
+}
+
+fn available() -> bool {
+    return read_cfg() > 0
+}
+
+fn read_number(p: u64, i: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    var k: u64 = i
+    while k < n && at8(p, k) >= DIGIT_ZERO && at8(p, k) <= DIGIT_NINE {
+        v = v * 10 + (at8(p, k) - DIGIT_ZERO)
+        k = k + 1
+    }
+    return v
+}
+
+fn saved() -> u64 {
+    let n: u64 = read_cfg()
+    if n == 0 {
+        return 0
+    }
+    let base: u64 = (&cfg_in[0 as usize]) as u64
+    let word: u64 = (&w_resolution[0 as usize]) as u64
+    var i: u64 = 0
+    while i < n {
+        let e: u64 = line_end(base, i, n)
+        if starts_at(base, i, n, word) {
+            let at: u64 = i + 11
+            let w: u64 = read_number(base, at, n)
+            var k: u64 = at
+            while k < n && at8(base, k) >= DIGIT_ZERO && at8(base, k) <= DIGIT_NINE {
+                k = k + 1
+            }
+            if at8(base, k) != LOWER_X {
+                return 0
+            }
+            return (w << 16) | read_number(base, k + 1, n)
+        }
+        if starts_at(base, i, n, (&w_entry[0 as usize]) as u64) {
+            return 0
+        }
+        i = e
+    }
+    return 0
+}
+
+fn emit_bytes(at: u64, src: u64, from: u64, to: u64) -> u64 {
+    let out: u64 = (&cfg_out[0 as usize]) as u64
+    var a: u64 = at
+    var i: u64 = from
+    while i < to {
+        put8(out, a, at8(src, i))
+        a = a + 1
+        i = i + 1
+    }
+    return a
+}
+
+fn emit_resolution(at: u64, w: u64, h: u64) -> u64 {
+    let out: u64 = (&cfg_out[0 as usize]) as u64
+    var a: u64 = at
+    var k: u64 = 0
+    let word: u64 = (&w_resolution[0 as usize]) as u64
+    while at8(word, k) != 0 {
+        put8(out, a, at8(word, k))
+        a = a + 1
+        k = k + 1
+    }
+    a = setcore.num_at(out, a, w)
+    put8(out, a, LOWER_X)
+    a = setcore.num_at(out, a + 1, h)
+    put8(out, a, NEWLINE)
+    return a + 1
+}
+
+fn rebuild(n: u64, w: u64, h: u64) -> u64 {
+    let base: u64 = (&cfg_in[0 as usize]) as u64
+    let word: u64 = (&w_resolution[0 as usize]) as u64
+    let entry: u64 = (&w_entry[0 as usize]) as u64
+    var a: u64 = 0
+    var placed: bool = w == 0
+    var i: u64 = 0
+    while i < n {
+        let e: u64 = line_end(base, i, n)
+        if starts_at(base, i, n, entry) && !placed {
+            a = emit_resolution(a, w, h)
+            placed = true
+        }
+        if !starts_at(base, i, n, word) {
+            a = emit_bytes(a, base, i, e)
+        }
+        i = e
+    }
+    return a
+}
+
+fn save(w: u64, h: u64) -> bool {
+    let n: u64 = read_cfg()
+    if n == 0 || n + LINE_GUARD > CFG_CAP {
+        return false
+    }
+    let len: u64 = rebuild(n, w, h)
+    if len == 0 {
+        return false
+    }
+    let tmp: u64 = (&p_tmp[0 as usize]) as u64
+    if !setcore.file_write(tmp, (&cfg_out[0 as usize]) as u64, len) {
+        let _u0: u64 = ulib.sys(ulib.SYS_UNLINK, tmp, 0, 0)
+        return false
+    }
+    let cfg: u64 = (&p_cfg[0 as usize]) as u64
+    if ulib.bad(ulib.sys(ulib.SYS_RENAME, tmp, cfg, 0)) {
+        let direct: bool = setcore.file_write(cfg, (&cfg_out[0 as usize]) as u64, len)
+        let _u1: u64 = ulib.sys(ulib.SYS_UNLINK, tmp, 0, 0)
+        return direct
+    }
+    let _sy: u64 = ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    return true
+}
