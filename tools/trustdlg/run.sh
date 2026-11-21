@@ -5,11 +5,12 @@
 #   bash tools/trustdlg/run.sh [workdir]        KERNEL_REF=<git ref> builds the kernel from an older tree
 #
 # An agent (client "helper") asks for a critical change; the window server draws its own dialog.
-# Checks: the serial layout line (body end <= hint row < button row < dialog bottom: no overlap),
-# the default focus is "Ablehnen" (Enter alone = no), Tab moves the focus, Enter on "Erlauben" =
+# Checks: the serial layout line (head < body < footer < buttons < dialog bottom, Win11 width/height),
+# pixels (surfaces, accent No / neutral Yes of equal size, focus ring, dimmed desktop), the default focus is "No"
+# (Enter alone = no), Tab moves the focus, Enter on "Yes" =
 # yes, the change happens only after yes, a rejected one is not done. Photos in the workdir.
 # Injected input (jarvisctl input key) must be refused (serial line) and must not answer; a real key afterwards does.
-# SCALE=2 runs the dialog at uiscale=2. Counter-proof: KERNEL_REF=<commit before the guard> must FAIL (injection answers).
+# SCALE=2 runs the dialog at uiscale=2; MODE=light needs a pushed theme (the guest default decoration is dark). Counter-proof: KERNEL_REF=<commit before the guard> must FAIL (injection answers).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -43,7 +44,9 @@ fi
 printf '# /etc/sperre.conf\nleerlauf=300\n' > "$TMPD/sperre.conf"
 printf 'root:x:0:0:root:/:/bin/sh\n' > "$TMPD/passwd"
 printf 'lang=de\n' > "$TMPD/locale.conf"
-printf '# /etc/theme.conf\nscheme=day\nmode=light\naccent=\nshape=classic\n' > "$TMPD/theme.conf"
+MODE=${MODE:-dark}
+SCHEME=day; [ "$MODE" = dark ] && SCHEME=night
+printf '# /etc/theme.conf\nscheme=%s\nmode=%s\naccent=\nshape=classic\n' "$SCHEME" "$MODE" > "$TMPD/theme.conf"
 cat > "$TMPD/g.sh" <<'EOS'
 orientbus serve 0 &
 sleep -m 300
@@ -153,12 +156,17 @@ for q in "$TMPD"/*.ppm; do [ -s "$q" ] && python3 -c "from PIL import Image; Ima
 echo "== 3. checks =="
 n=$(grep -ac 'wm: trusted dialog up no=' "$G")
 [ "$n" -ge 2 ] && ok "dialog shown $n times" || bad "dialog shown $n times"
-L=$(grep -a 'wm: trusted dialog layout' "$G" | head -1)
-if [ -z "$L" ]; then bad "no layout line (old dialog)"; else
-  eval "$(echo "$L" | sed -E 's/.*layout y=([0-9]+) body=([0-9]+)-([0-9]+) hint=([0-9]+) btn=([0-9]+) h=([0-9]+).*/Y=\1 B0=\2 B1=\3 H=\4 BT=\5 HH=\6/')"
-  [ -n "${Y:-}" ] && echo "        $L"
-  [ "${B1:-0}" -le "${H:-0}" ] && [ "${H:-0}" -lt "${BT:-0}" ] && ok "layout: body end $B1 <= hint $H < buttons $BT (no overlap)" || bad "layout overlaps: $L"
-  [ "${BT:-0}" -lt $(( ${Y:-0} + ${HH:-0} )) ] && ok "buttons inside the dialog (bottom $((Y+HH)))" || bad "buttons outside the dialog: $L"
+L=$(grep -a 'wm: trusted dialog layout' "$G" | sed -n 2p)
+if [ -z "$L" ]; then bad "no layout line"; else
+  echo "        $L"
+  eval "$(echo "$L" | sed -E 's/.*layout y=([0-9]+) body=([0-9]+)-([0-9]+) foot=([0-9]+) btn=([0-9]+) bh=([0-9]+) h=([0-9]+) x=([0-9]+) w=([0-9]+) .*/Y=\1 B0=\2 B1=\3 FT=\4 BT=\5 BH=\6 HH=\7 DX=\8 DW=\9/')"
+  K=$(echo "$L" | sed -nE 's/.* k=([0-9]+).*/\1/p')
+  [ -n "${Y:-}" ] && [ "${B0:-0}" -gt "${Y:-0}" ] && [ "${B1:-0}" = "${FT:-1}" ] && [ "${FT:-0}" -lt "${BT:-0}" ] && ok "layout: head ends $B0, body $B0-$B1, footer $FT, buttons $BT (no overlap)" || bad "layout order wrong: $L"
+  [ "$(( ${BT:-0} + ${BH:-0} ))" -lt $(( ${Y:-0} + ${HH:-0} )) ] && ok "buttons inside the dialog (bottom $((Y+HH)))" || bad "buttons outside the dialog: $L"
+  [ "${DW:-0}" = $(( 456 * ${K:-1} )) ] && ok "dialog is $DW px wide (456 x scale $K)" || bad "dialog width $DW (want 456 x ${K:-1})"
+  [ "$(( ${DX:-0} * 2 + ${DW:-0} ))" -le $(( ${DX:-0} * 2 + ${DW:-0} + 2 )) ] && [ "${HH:-0}" -ge $(( 330 * ${K:-1} )) ] && [ "${HH:-0}" -le $(( 470 * ${K:-1} )) ] && ok "dialog height $HH px is Win11-like (330-470 x scale)" || bad "dialog height $HH"
+  python3 -I tools/trustdlg/pixels.py "$TMPD" "${MODE:-dark}" "$L" > "$TMPD/pix.txt" 2>&1; sed 's/^/        /' "$TMPD/pix.txt"
+  grep -q '^PIXELS-OK' "$TMPD/pix.txt" && ok "pixels: Win11 surfaces, buttons, ring, dimmed desktop (${MODE:-dark}, scale $SCALE)" || bad "pixel checks"
 fi
 part "$G" T1 T2 > "$TMPD/p1.txt"; part "$G" T2 TEND > "$TMPD/p2.txt"; part "$G" T4 T4MID > "$TMPD/p4a.txt"; part "$G" T4MID T4END > "$TMPD/p4b.txt"
 part "$G" TEND T3END > "$TMPD/p3.txt"

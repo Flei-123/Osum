@@ -119,10 +119,10 @@ run_cfg() {
     python3 tools/dialog/pixels.py "$W" "$scale" > "$W/pix.txt" 2>&1; cat "$W/pix.txt" | sed 's/^/        /'
     grep -q '^PIXELS-OK' "$W/pix.txt" && ok "[$tag] pixels: dialogs drawn, severities differ, identical dialogs identical" || bad "[$tag] pixel checks"
     local NL; NL=$(grep -ac 'wm: trusted dialog layout' "$G")
-    local NW; NW=$(grep -a 'wm: trusted dialog layout' "$G" | grep -ac " w=$((512 * scale)) title=")
-    [ "$NL" -ge 9 ] && [ "$NW" = "$NL" ] && ok "[$tag] all $NL dialogs are $((512 * scale)) px wide (scale $scale)" || bad "[$tag] dialog width wrong: $NW of $NL are $((512 * scale)) px"
-    local NT; NT=$(grep -a 'wm: trusted dialog layout' "$G" | grep -acE " title=[A-Za-z0-9]+ - ")
-    [ "$NT" = "$NL" ] && ok "[$tag] every title line starts with the product name" || bad "[$tag] title without product name: $NT of $NL"
+    local NW; NW=$(grep -a 'wm: trusted dialog layout' "$G" | grep -ac " w=$((456 * scale)) ")
+    [ "$NL" -ge 9 ] && [ "$NW" = "$NL" ] && ok "[$tag] all $NL dialogs are $((456 * scale)) px wide (scale $scale)" || bad "[$tag] dialog width wrong: $NW of $NL are $((456 * scale)) px"
+    local NT; NT=$(grep -a 'wm: trusted dialog layout' "$G" | grep -acE " title=[A-Za-z0-9]+")
+    [ "$NT" = "$NL" ] && ok "[$tag] every dialog header carries a title" || bad "[$tag] dialog without header title: $NT of $NL"
     for f in m1-message m2-confirm-default m3-confirm-yes m4-warning m5-error m6-critical m7-consent m8-wrongkey m9-error-again; do
         [ -s "$W/$f.png" ] && ok "[$tag] photo $W/$f.png" || bad "[$tag] no photo $f"; done
 }

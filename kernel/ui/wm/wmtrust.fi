@@ -1,412 +1,153 @@
 // SPDX-License-Identifier: GPL-2.0-only
 profile kernel
 
-import lib.brand
-import gfx.fb
-import gfx.font
 import lib.kstate
 import serial
 import sched.time
-import ui.wm.wmbase
-import ui.wm.wmdraw
-import ui.wm.wmgate
-import ui.wm.wmlayout
-import ui.wm.wmrole
-import gfx.ttf
-import utf8
 import ipc.tip
-
-const TD_COLS: u64 = 60
-
-const TD_HEAD_MAX: u64 = 6
-
-const TD_DET_MAX: u64 = 8
-
-const TD_BTN: u64 = 18
-
-const TD_IN: u64 = 1104
-
-const TD_RS: u64 = 30
-
-const TD_PX: u64 = 13
-
-const TD_BAND_ROWS: u64 = 3
-
-const TD_SCRIM_ALPHA: u64 = 120
-
-const TD_SCRIM_COLOUR: u64 = 0
-
-const TD_FOOTER_ROWS: u64 = 5
+import ui.wm.wmbase
+import ui.wm.wmgate
+import ui.wm.wmtruststate
+import ui.wm.wmtrustgeom
+import ui.wm.wmtrustmsg
 
 const TD_INJECT_GUARD_NS: u64 = 1500000000
-
+const TD_ARM_NS: u64 = 400000000
 const TD_ANSWER_YES: u64 = 1
-
+const TD_ANSWER_NO: u64 = 2
 const TD_ANSWER_YES_REMEMBER: u64 = 4
+const TD_POLL_NONE: u64 = 3
+const ICON_MAGIC: u64 = 0x4D59534F
 
-static mut td_on: u64 = 0
+static mut L_HEAD: [u8; 29] = "wm: trusted dialog layout y=\0"
+static mut L_BODY: [u8; 7] = " body=\0"
+static mut L_FOOT: [u8; 7] = " foot=\0"
+static mut L_BTN: [u8; 6] = " btn=\0"
+static mut L_BH: [u8; 5] = " bh=\0"
+static mut L_H: [u8; 4] = " h=\0"
+static mut L_X: [u8; 4] = " x=\0"
+static mut L_W: [u8; 4] = " w=\0"
+static mut L_YES: [u8; 6] = " yes=\0"
+static mut L_NO: [u8; 5] = " no=\0"
+static mut L_BW: [u8; 5] = " bw=\0"
+static mut L_K: [u8; 4] = " k=\0"
+static mut L_REM: [u8; 6] = " rem=\0"
+static mut L_TITLE: [u8; 8] = " title=\0"
+static mut L_UP: [u8; 26] = "wm: trusted dialog up no=\0"
+static mut L_DOWN: [u8; 28] = "wm: trusted dialog down no=\0"
+static mut L_ANS: [u8; 27] = "wm: trusted dialog answer=\0"
+static mut L_NOW: [u8; 5] = " no=\0"
+static mut L_DET: [u8; 33] = "wm: trusted dialog details open=\0"
+static mut L_REFUSE: [u8; 42] = "wm: trusted dialog refused injected input\0"
 
-static mut td_no: u64 = 0
-
-static mut td_ans: u64 = 0
-
-static mut td_ansno: u64 = 0
-
-static mut td_t0: u64 = 0
-
-static mut td_mb: u64 = 0
-
-static mut td_shown: u64 = 0
-
-static mut td_focus: u64 = 1
-
-static mut td_nhead: u64 = 0
-
-static mut td_ndet: u64 = 0
-
-static mut td_open: u64 = 0
-
-static mut td_rem: u64 = 0
-
-static mut td_rem_on: u64 = 0
-
-static mut td_rlab: [u8; 48] = [0 as u8; 48]
-
-static mut td_txt: [u8; 896] = [0 as u8; 896]
-
-static mut td_in: [u8; 1104] = [0 as u8; 1104]
-
-static mut td_title: [u8; 72] = [0 as u8; 72]
-
-static mut td_yes: [u8; 24] = [0 as u8; 24]
-
-static mut td_nol: [u8; 24] = [0 as u8; 24]
-
-static mut td_hint: [u8; 72] = [0 as u8; 72]
-
-static mut td_dlab: [u8; 48] = [0 as u8; 48]
-
-fn td_line(l: u64) -> u64 {
-    return ((&td_txt[0]) as u64) + l * 64
-}
-
-fn td_inp() -> u64 {
-    return (&td_in[0]) as u64
-}
-
-fn td_norm(p: u64, n: u64) -> u64 {
-    var o: u64 = 0
-    var k: u64 = 0
-    while k < n && o + 2 < TD_IN {
-        let ch: u64 = kstate.get8(p + k)
-        k = k + 1
-        if ch == 0 {
-            k = n
-        } else if ch == TD_RS || ch == 10 || (ch >= 32 && ch != 127) {
-            kstate.set8(td_inp() + o, ch as u8)
-            o = o + 1
-        } else {
-            kstate.set8(td_inp() + o, 63 as u8)
-            o = o + 1
-        }
-    }
-    kstate.set8(td_inp() + o, 0 as u8)
-    return o
-}
-
-fn td_seps(n: u64) -> u64 {
-    var c: u64 = 0
-    var i: u64 = 0
-    while i < n {
-        if kstate.get8(td_inp() + i) == TD_RS {
-            c = c + 1
-        }
-        i = i + 1
-    }
-    return c
-}
-
-fn td_fstart(n: u64, idx: u64) -> u64 {
-    var f: u64 = 0
-    var i: u64 = 0
-    while f < idx && i < n {
-        if kstate.get8(td_inp() + i) == TD_RS {
-            f = f + 1
-        }
-        i = i + 1
-    }
-    if f < idx {
-        return n + 1
-    }
-    return i
-}
-
-fn td_fend(n: u64, s: u64) -> u64 {
-    var i: u64 = s
-    while i < n && kstate.get8(td_inp() + i) != TD_RS {
-        i = i + 1
-    }
-    return i
-}
-
-fn td_cpz(dst: u64, src: u64, max: u64) {
-    var i: u64 = 0
-    while i + 1 < max && kstate.get8(src + i) != 0 {
-        kstate.set8(dst + i, kstate.get8(src + i) as u8)
-        i = i + 1
-    }
-    kstate.set8(dst + i, 0 as u8)
-}
-
-fn td_cpn(dst: u64, a: u64, b: u64, max: u64) {
-    var i: u64 = 0
-    while a + i < b && i + 1 < max {
-        let ch: u64 = kstate.get8(td_inp() + a + i)
-        if ch == 10 {
-            kstate.set8(dst + i, 32 as u8)
-        } else {
-            kstate.set8(dst + i, ch as u8)
-        }
-        i = i + 1
-    }
-    kstate.set8(dst + i, 0 as u8)
-}
-
-fn td_pick(n: u64, idx: u64, dst: u64, max: u64, def: u64) {
-    let s: u64 = td_fstart(n, idx)
-    if s <= n {
-        let e: u64 = td_fend(n, s)
-        if e > s {
-            td_cpn(dst, s, e, max)
-            return
-        }
-    }
-    td_cpz(dst, def, max)
-}
-
-fn td_wrap(a: u64, b: u64, l0: u64, maxl: u64) -> u64 {
-    var l: u64 = 0
-    var c: u64 = 0
-    var last: u64 = 0
-    var any: u64 = 0
-    var k: u64 = a
-    while k < b {
-        let ch: u64 = kstate.get8(td_inp() + k)
-        k = k + 1
-        if ch == 10 {
-            l = l + 1
-            c = 0
-        } else {
-            if c >= TD_COLS && (ch < 0x80 || ch >= 0xC0) {
-                var sp: u64 = TD_COLS
-                while sp > 0 && kstate.get8(td_line(l0 + l) + sp - 1) != 32 {
-                    sp = sp - 1
-                }
-                var nc: u64 = 0
-                if sp > TD_COLS / 2 && l + 1 < maxl {
-                    var q: u64 = sp
-                    while q < TD_COLS {
-                        kstate.set8(td_line(l0 + l + 1) + nc, kstate.get8(td_line(l0 + l) + q) as u8)
-                        kstate.set8(td_line(l0 + l) + q, 0 as u8)
-                        nc = nc + 1
-                        q = q + 1
-                    }
-                }
-                l = l + 1
-                c = nc
-            }
-            if l < maxl {
-                kstate.set8(td_line(l0 + l) + c, ch as u8)
-                c = c + 1
-                any = 1
-                last = l
-            }
-        }
-    }
-    if any == 0 {
-        return 0
-    }
-    return last + 1
-}
-
-fn td_body() -> u64 {
-    var b: u64 = td_nhead
-    if b == 0 {
-        b = 1
-    }
-    if td_ndet > 0 {
-        b = b + 1
-        if td_open != 0 {
-            b = b + td_ndet
-        }
-    }
-    if td_rem != 0 {
-        b = b + 1
-    }
-    return b
-}
-
-fn td_head_rows() -> u64 {
-    if td_nhead == 0 {
-        return 1
-    }
-    return td_nhead
+fn put_kv(label: u64, v: u64) {
+    serial.puts(label)
+    serial.dec(v)
 }
 
 fn td_layout_line(state: u64) {
-    var s_tl: [u8; 29] = "wm: trusted dialog layout y=\0"
-    var s_tl1: [u8; 7] = " hint=\0"
-    var s_tl2: [u8; 6] = " btn=\0"
-    var s_tl3: [u8; 4] = " h=\0"
-    var s_tl4: [u8; 7] = " body=\0"
-    var s_tl5: [u8; 4] = " x=\0"
-    var s_tl6: [u8; 4] = " w=\0"
-    var s_tl7: [u8; 8] = " title=\0"
-    serial.puts((&s_tl[0]) as u64)
-    serial.dec(td_y(state))
-    serial.puts((&s_tl4[0]) as u64)
-    serial.dec(td_row(state, 3))
+    put_kv((&L_HEAD[0]) as u64, wmtrustgeom.dy(state))
+    put_kv((&L_BODY[0]) as u64, wmtrustgeom.head_bottom(state))
     serial.put(45 as u8)
-    serial.dec(td_row(state, 3 + td_body()))
-    serial.puts((&s_tl1[0]) as u64)
-    serial.dec(td_row(state, td_body() + 4))
-    serial.puts((&s_tl2[0]) as u64)
-    serial.dec(td_by(state))
-    serial.puts((&s_tl3[0]) as u64)
-    serial.dec(td_h(state))
-    serial.puts((&s_tl5[0]) as u64)
-    serial.dec(td_x(state))
-    serial.puts((&s_tl6[0]) as u64)
-    serial.dec(td_w(state))
-    serial.puts((&s_tl7[0]) as u64)
-    serial.puts((&td_title[0]) as u64)
+    serial.dec(wmtrustgeom.foot_top(state))
+    put_kv((&L_FOOT[0]) as u64, wmtrustgeom.foot_top(state))
+    put_kv((&L_BTN[0]) as u64, wmtrustgeom.btn_top(state))
+    put_kv((&L_BH[0]) as u64, wmtrustgeom.btn_h(state))
+    put_kv((&L_H[0]) as u64, wmtrustgeom.dh(state))
+    put_kv((&L_X[0]) as u64, wmtrustgeom.dx(state))
+    put_kv((&L_W[0]) as u64, wmtrustgeom.dw(state))
+    put_kv((&L_YES[0]) as u64, wmtrustgeom.btn_x(state, 0))
+    put_kv((&L_NO[0]) as u64, wmtrustgeom.btn_x(state, 1))
+    put_kv((&L_BW[0]) as u64, wmtrustgeom.btn_w(state))
+    put_kv((&L_K[0]) as u64, wmtrustgeom.scale(state))
+    put_kv((&L_REM[0]) as u64, wmtruststate.td_rem)
+    serial.puts((&L_TITLE[0]) as u64)
+    serial.puts((&wmtruststate.td_title[0]) as u64)
     serial.nl()
 }
 
 fn trust_ask(state: u64, no: u64, p: u64, n: u64) -> bool {
-    if td_on != 0 || no == 0 {
+    if wmtruststate.td_on != 0 || no == 0 {
         return false
     }
-    var i: u64 = 0
-    while i < 896 {
-        kstate.set8(td_line(0) + i, 0 as u8)
-        i = i + 1
-    }
-    let m: u64 = td_norm(p, n)
-    var d_tit: [u8; 72] = [0 as u8; 72]
-    var d_tsf: [u8; 30] = " - Do you want to allow this?\0"
-    brand.append((&d_tit[0]) as u64, brand.append((&d_tit[0]) as u64, 0, brand.product(), 71), (&d_tsf[0]) as u64, 71)
-    var d_yes: [u8; 6] = "Allow\0"
-    var d_no: [u8; 7] = "Cancel\0"
-    var d_hnt: [u8; 64] = "Real keyboard/mouse only:  Y = Allow   N = Cancel   D = Details\0"
-    var d_det: [u8; 13] = "More details\0"
-    var hs: u64 = 0
-    var he: u64 = m
-    td_ndet = 0
-    td_open = 0
-    td_rem = 0
-    td_rem_on = 0
-    td_cpz((&td_dlab[0]) as u64, (&d_det[0]) as u64, 48)
-    if td_seps(m) > 0 {
-        td_pick(m, 0, (&td_title[0]) as u64, 72, (&d_tit[0]) as u64)
-        td_pick(m, 3, (&td_yes[0]) as u64, 24, (&d_yes[0]) as u64)
-        td_pick(m, 4, (&td_nol[0]) as u64, 24, (&d_no[0]) as u64)
-        td_pick(m, 5, (&td_hint[0]) as u64, 72, (&d_hnt[0]) as u64)
-        hs = td_fstart(m, 1)
-        if hs > m {
-            hs = m
-        }
-        he = td_fend(m, hs)
-        let rs: u64 = td_fstart(m, 6)
-        if rs <= m {
-            let re: u64 = td_fend(m, rs)
-            if re > rs {
-                td_cpn((&td_rlab[0]) as u64, rs, re, 48)
-                td_rem = 1
-            }
-        }
-        let ds: u64 = td_fstart(m, 2)
-        if ds <= m {
-            let de: u64 = td_fend(m, ds)
-            var le: u64 = ds
-            while le < de && kstate.get8(td_inp() + le) != 10 {
-                le = le + 1
-            }
-            if le > ds {
-                td_cpn((&td_dlab[0]) as u64, ds, le, 48)
-            }
-            if le + 1 < de {
-                td_ndet = td_wrap(le + 1, de, TD_HEAD_MAX, TD_DET_MAX)
-            }
-        }
-    } else {
-        td_cpz((&td_title[0]) as u64, (&d_tit[0]) as u64, 72)
-        td_cpz((&td_yes[0]) as u64, (&d_yes[0]) as u64, 24)
-        td_cpz((&td_nol[0]) as u64, (&d_no[0]) as u64, 24)
-        td_cpz((&td_hint[0]) as u64, (&d_hnt[0]) as u64, 72)
-    }
-    td_nhead = td_wrap(hs, he, 0, TD_HEAD_MAX)
-    td_no = no
-    td_ans = 0
-    td_ansno = 0
-    td_focus = 1
-    td_t0 = time.mono_ns(state)
-    td_on = 1
-    td_shown = td_shown + 1
+    wmtrustmsg.parse(state, p, n)
+    wmtruststate.td_no = no
+    wmtruststate.td_ans = 0
+    wmtruststate.td_ansno = 0
+    wmtruststate.td_focus = 1
+    wmtruststate.td_t0 = time.mono_ns(state)
+    wmtruststate.td_on = 1
+    wmtruststate.td_shown = wmtruststate.td_shown + 1
     wmbase.damage_all(state)
-    var s_td: [u8; 26] = "wm: trusted dialog up no=\0"
-    serial.puts((&s_td[0]) as u64)
-    serial.dec(no)
+    put_kv((&L_UP[0]) as u64, no)
     serial.nl()
     td_layout_line(state)
     return true
 }
 
+fn trust_icon_buf() -> u64 {
+    if wmtruststate.td_on != 0 {
+        return 0
+    }
+    return wmtruststate.td_icon_ptr()
+}
+
+fn trust_icon_done(no: u64, n: u64) {
+    let p: u64 = wmtruststate.td_icon_ptr()
+    var magic: u64 = 0
+    var i: u64 = 0
+    while i < 4 {
+        magic = magic | (kstate.get8(p + i) << (i * 8))
+        i = i + 1
+    }
+    wmtruststate.td_icon_no = no
+    wmtruststate.td_icon_len = n
+    if magic != ICON_MAGIC || n < wmtruststate.TD_ICON_BYTES {
+        wmtruststate.td_icon_len = 0
+    }
+}
+
 fn td_toggle(state: u64) {
-    if td_ndet == 0 {
+    if wmtruststate.td_ndet == 0 {
         return
     }
-    td_open = 1 - td_open
+    wmtruststate.td_open = 1 - wmtruststate.td_open
     wmbase.damage_all(state)
-    var s_tg: [u8; 33] = "wm: trusted dialog details open=\0"
-    serial.puts((&s_tg[0]) as u64)
-    serial.dec(td_open)
+    put_kv((&L_DET[0]) as u64, wmtruststate.td_open)
     serial.nl()
 }
 
 fn trust_poll(state: u64, no: u64) -> u64 {
-    if no != 0 && td_ansno == no && td_ans != 0 {
-        return td_ans
+    if no != 0 && wmtruststate.td_ansno == no && wmtruststate.td_ans != 0 {
+        return wmtruststate.td_ans
     }
-    if td_on != 0 && td_no == no {
+    if wmtruststate.td_on != 0 && wmtruststate.td_no == no {
         return 0
     }
-    return 3
+    return TD_POLL_NONE
 }
 
 fn trust_cancel(state: u64, no: u64) {
-    if td_on != 0 && td_no == no {
-        td_on = 0
+    if wmtruststate.td_on != 0 && wmtruststate.td_no == no {
+        wmtruststate.td_on = 0
         wmbase.damage_all(state)
-        var s_tc: [u8; 28] = "wm: trusted dialog down no=\0"
-        serial.puts((&s_tc[0]) as u64)
-        serial.dec(no)
+        put_kv((&L_DOWN[0]) as u64, no)
         serial.nl()
     }
 }
 
 fn td_pick_answer(v: u64) -> u64 {
-    if v == TD_ANSWER_YES && td_rem_on != 0 {
+    if v == TD_ANSWER_YES && wmtruststate.td_rem_on != 0 {
         return TD_ANSWER_YES_REMEMBER
     }
     return v
 }
 
 fn td_toggle_remember(state: u64) {
-    if td_rem == 0 {
+    if wmtruststate.td_rem == 0 {
         return
     }
-    td_rem_on = 1 - td_rem_on
+    wmtruststate.td_rem_on = 1 - wmtruststate.td_rem_on
     wmbase.damage_all(state)
 }
 
@@ -420,22 +161,18 @@ fn td_audit_remote(state: u64) {
 }
 
 fn td_answer(state: u64, v: u64) {
-    td_ans = td_pick_answer(v)
-    td_ansno = td_no
+    wmtruststate.td_ans = td_pick_answer(v)
+    wmtruststate.td_ansno = wmtruststate.td_no
     td_audit_remote(state)
-    td_on = 0
+    wmtruststate.td_on = 0
     wmbase.damage_all(state)
-    var s_ta: [u8; 27] = "wm: trusted dialog answer=\0"
-    var s_tn: [u8; 5] = " no=\0"
-    serial.puts((&s_ta[0]) as u64)
-    serial.dec(td_ans)
-    serial.puts((&s_tn[0]) as u64)
-    serial.dec(td_no)
+    put_kv((&L_ANS[0]) as u64, wmtruststate.td_ans)
+    put_kv((&L_NOW[0]) as u64, wmtruststate.td_no)
     serial.nl()
 }
 
 fn td_live(state: u64) -> bool {
-    return td_on != 0 && !wmgate.lock_active(state)
+    return wmtruststate.td_on != 0 && !wmgate.lock_active(state)
 }
 
 fn td_injected(state: u64) -> bool {
@@ -443,13 +180,12 @@ fn td_injected(state: u64) -> bool {
 }
 
 fn td_refuse(state: u64) {
-    var s_tr: [u8; 42] = "wm: trusted dialog refused injected input\0"
-    serial.puts((&s_tr[0]) as u64)
+    serial.puts((&L_REFUSE[0]) as u64)
     serial.nl()
 }
 
 fn td_armed(state: u64) -> bool {
-    return time.mono_ns(state) - td_t0 >= 400000000
+    return time.mono_ns(state) - wmtruststate.td_t0 >= TD_ARM_NS
 }
 
 fn trust_key(state: u64, c: u64) -> bool {
@@ -464,84 +200,33 @@ fn trust_key(state: u64, c: u64) -> bool {
         return true
     }
     if c == 106 || c == 74 || c == 121 || c == 89 {
-        td_answer(state, 1)
+        td_answer(state, TD_ANSWER_YES)
     } else if c == 110 || c == 78 || c == 27 {
-        td_answer(state, 2)
+        td_answer(state, TD_ANSWER_NO)
     } else if c == 100 || c == 68 {
         td_toggle(state)
     } else if c == 114 || c == 82 {
         td_toggle_remember(state)
     } else if c == 9 {
-        td_focus = 1 - td_focus
+        wmtruststate.td_focus = 1 - wmtruststate.td_focus
         wmbase.damage_all(state)
     } else if c == 13 || c == 10 || c == 32 {
-        td_answer(state, td_focus + 1)
+        td_answer(state, wmtruststate.td_focus + 1)
     }
     return true
 }
 
-fn td_k(state: u64) -> u64 {
-    var k: u64 = fb.uiscale(state)
-    while k > 1 && (TD_COLS + 8) * font.GLYPH_W * k > fb.width(state) {
-        k = k - 1
+fn td_click_buttons(state: u64, px: u64, py: u64) {
+    if !wmtrustgeom.in_box(px, py, wmtrustgeom.btn_x(state, 0), wmtrustgeom.btn_top(state), wmtrustgeom.btn_w(state), wmtrustgeom.btn_h(state)) {
+        if wmtrustgeom.in_box(px, py, wmtrustgeom.btn_x(state, 1), wmtrustgeom.btn_top(state), wmtrustgeom.btn_w(state), wmtrustgeom.btn_h(state)) {
+            td_answer(state, TD_ANSWER_NO)
+        }
+        return
     }
-    return k
+    td_answer(state, TD_ANSWER_YES)
 }
 
-fn td_gw(state: u64) -> u64 {
-    return font.GLYPH_W * td_k(state)
-}
-
-fn td_gh(state: u64) -> u64 {
-    return font.GLYPH_H * td_k(state)
-}
-
-fn td_w(state: u64) -> u64 {
-    return (TD_COLS + 4) * td_gw(state)
-}
-
-fn td_h(state: u64) -> u64 {
-    return (td_body() + 9 + 1) * td_gh(state)
-}
-
-fn td_x(state: u64) -> u64 {
-    if td_w(state) >= fb.width(state) {
-        return 0
-    }
-    return (fb.width(state) - td_w(state)) / 2
-}
-
-fn td_y(state: u64) -> u64 {
-    if td_h(state) >= fb.height(state) {
-        return 0
-    }
-    return (fb.height(state) - td_h(state)) / 3
-}
-
-fn td_row(state: u64, r: u64) -> u64 {
-    return td_y(state) + r * td_gh(state)
-}
-
-fn td_bx(state: u64, b: u64) -> u64 {
-    if b == 0 {
-        return td_x(state) + 2 * td_gw(state)
-    }
-    return td_x(state) + (TD_COLS + 2 - TD_BTN) * td_gw(state)
-}
-
-fn td_rem_row(state: u64) -> u64 {
-    return td_row(state, td_body() + 2)
-}
-
-fn td_by(state: u64) -> u64 {
-    return td_row(state, td_body() + 6)
-}
-
-fn td_bh(state: u64) -> u64 {
-    return 2 * td_gh(state)
-}
-
-fn td_click(state: u64, x: u64, y: u64) {
+fn td_click(state: u64, px: u64, py: u64) {
     if !td_armed(state) {
         return
     }
@@ -549,253 +234,19 @@ fn td_click(state: u64, x: u64, y: u64) {
         td_refuse(state)
         return
     }
-    let tr: u64 = td_row(state, 3 + td_head_rows())
-    if td_ndet > 0 && y >= tr && y < tr + td_gh(state) && x >= td_x(state) && x < td_x(state) + td_w(state) {
+    let k: u64 = wmtrustgeom.scale(state)
+    let full: u64 = wmtrustgeom.dw(state)
+    if wmtrustgeom.in_box(px, py, wmtrustgeom.close_x(state), wmtrustgeom.dy(state), wmtrustgeom.CLOSE_W * k, wmtrustgeom.SMALL_H * k) {
+        td_answer(state, TD_ANSWER_NO)
+        return
+    }
+    if wmtruststate.td_ndet > 0 && wmtrustgeom.in_box(px, py, wmtrustgeom.text_x(state), wmtrustgeom.link_top(state), full / 2, wmtrustgeom.ROW * k) {
         td_toggle(state)
         return
     }
-    let rr: u64 = td_rem_row(state)
-    if td_rem != 0 && y >= rr && y < rr + td_gh(state) && x >= td_x(state) && x < td_x(state) + td_w(state) {
+    if wmtruststate.td_rem != 0 && wmtrustgeom.in_box(px, py, wmtrustgeom.text_x(state), wmtrustgeom.rem_top(state), full / 2, wmtrustgeom.REM_H * k) {
         td_toggle_remember(state)
         return
     }
-    if y < td_by(state) || y >= td_by(state) + td_bh(state) {
-        return
-    }
-    var b: u64 = 0
-    while b < 2 {
-        let bx: u64 = td_bx(state, b)
-        if x >= bx && x < bx + TD_BTN * td_gw(state) {
-            td_answer(state, b + 1)
-            b = 2
-        } else {
-            b = b + 1
-        }
-    }
-}
-
-fn td_str(state: u64, x: u64, y: u64, p: u64, n: u64, fg: u64) {
-    let k: u64 = td_k(state)
-    let gw: u64 = td_gw(state)
-    var i: u64 = 0
-    var cx: u64 = x
-    while i < n && cx + gw <= fb.width(state) {
-        let ch: u64 = kstate.get8(p + i)
-        if ch == 0 {
-            i = n
-        } else {
-            var r: u64 = 0
-            while r < font.GLYPH_H {
-                let bits: u64 = font.row(state + fb.FONT_OFF, ch, r)
-                var c: u64 = 0
-                while c < font.GLYPH_W {
-                    if (bits & (1 << (7 - c))) != 0 {
-                        if k == 1 {
-                            fb.pixel(state, cx + c, y + r, fg)
-                        } else {
-                            fb.fill(state, cx + c * k, y + r * k, k, k, fg)
-                        }
-                    }
-                    c = c + 1
-                }
-                r = r + 1
-            }
-            cx = cx + gw
-            i = i + 1
-        }
-    }
-}
-
-fn td_role(state: u64, role: u64) -> u64 {
-    return fb.rgb(state, (role >> 16) & 255, (role >> 8) & 255, role & 255)
-}
-
-fn td_font(state: u64) -> u64 {
-    return wmlayout.gs(state, wmlayout.S_FONT_UI)
-}
-
-fn td_ttf(state: u64) -> bool {
-    return ttf.ready(state) && td_font(state) < ttf.MAX_FONTS
-}
-
-fn td_px(state: u64) -> u64 {
-    return TD_PX * td_k(state)
-}
-
-fn td_width(state: u64, p: u64) -> u64 {
-    var n: u64 = 0
-    while kstate.get8(p + n) != 0 && n < 72 {
-        n = n + 1
-    }
-    if !td_ttf(state) {
-        return n * td_gw(state)
-    }
-    return (ttf.text_width26(state, td_font(state), p, n, td_px(state)) >> 6) as u64
-}
-
-fn td_ttf_line(state: u64, x: u64, top: u64, p: u64, color: u64) {
-    let f: u64 = td_font(state)
-    let px: u64 = td_px(state)
-    let base: i64 = top as i64 + ((td_gh(state) - ttf.line_height(state, f, px)) / 2) as i64 + ttf.ascent(state, f, px)
-    let right: i64 = (fb.width(state)) as i64
-    let bottom: i64 = (fb.height(state)) as i64
-    var cx: i64 = (x * 64) as i64
-    var before: u64 = 0
-    var k: u64 = 0
-    while k < 72 {
-        let v: u64 = utf8.next(p, 72, k)
-        let l: u64 = utf8.len_of(v)
-        let c: u64 = utf8.cp_of(v)
-        if l == 0 || c == 0 {
-            return
-        }
-        let gid: u64 = ttf.glyph_of(state, f, c)
-        if before != 0 {
-            cx = cx + ttf.kern26(state, f, before, gid, px)
-        }
-        let slot: u64 = ttf.glyph(state, f, c, px)
-        if slot < ttf.SLOTS {
-            wmdraw.fb_glyph(state, slot, cx >> 6, base, color, 0, 0, right, bottom)
-            cx = cx + ttf.g_adv(state, slot)
-        } else {
-            cx = cx + ttf.advance26(state, f, gid, px)
-        }
-        before = gid
-        k = k + l
-    }
-}
-
-fn td_text(state: u64, x: u64, top: u64, p: u64, color: u64) {
-    if td_ttf(state) {
-        td_ttf_line(state, x, top, p, color)
-        return
-    }
-    td_str(state, x, top, p, 72, color)
-}
-
-fn td_shield(state: u64, cx: u64, top: u64, size: u64, color: u64) {
-    let shoulder: u64 = size * 55 / 100
-    let half: u64 = size * 40 / 100
-    var r: u64 = 0
-    while r < size {
-        var hw: u64 = half
-        if r > shoulder {
-            hw = half * (size - r) / (size - shoulder)
-        }
-        if hw > 0 {
-            fb.fill(state, cx - hw, top + r, 2 * hw, 1, color)
-        }
-        r = r + 1
-    }
-}
-
-fn td_button(state: u64, b: u64, fill: u64, ink: u64, label: u64) {
-    let k: u64 = td_k(state)
-    let gw: u64 = td_gw(state)
-    let bx: u64 = td_bx(state, b)
-    let bw: u64 = TD_BTN * gw
-    wmdraw.fill_round(state, bx as i64, td_by(state) as i64, bw as i64, td_bh(state) as i64, 4 * k, fill, 255, 0, 0, fb.width(state) as i64, fb.height(state) as i64)
-    let tw: u64 = td_width(state, label)
-    var tx: u64 = bx + gw
-    if tw < bw {
-        tx = bx + (bw - tw) / 2
-    }
-    td_text(state, tx, td_by(state) + td_gh(state) / 2, label, ink)
-}
-
-fn td_paint_remember(state: u64, x: u64, panel: u64, accent: u64, ink: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
-    if td_rem == 0 {
-        return
-    }
-    let k: u64 = td_k(state)
-    let gw: u64 = td_gw(state)
-    let gh: u64 = td_gh(state)
-    let top: u64 = td_rem_row(state)
-    let side: u64 = gh - 2 * k
-    let bx: u64 = x + 2 * gw
-    wmdraw.fill_round(state, bx as i64, top as i64, side as i64, side as i64, 2 * k, td_role(state, wmrole.ROLE_BORDER), 255, cx0, cy0, cx1, cy1)
-    wmdraw.fill_round(state, (bx + k) as i64, (top + k) as i64, (side - 2 * k) as i64, (side - 2 * k) as i64, k, panel, 255, cx0, cy0, cx1, cy1)
-    if td_rem_on != 0 {
-        wmdraw.fill_round(state, (bx + 3 * k) as i64, (top + 3 * k) as i64, (side - 6 * k) as i64, (side - 6 * k) as i64, k, accent, 255, cx0, cy0, cx1, cy1)
-    }
-    td_text(state, bx + side + gw, top, (&td_rlab[0]) as u64, ink)
-}
-
-fn td_paint(state: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
-    if !td_live(state) {
-        return
-    }
-    let x: u64 = td_x(state)
-    let y: u64 = td_y(state)
-    let w: u64 = td_w(state)
-    let h: u64 = td_h(state)
-    let k: u64 = td_k(state)
-    let gw: u64 = td_gw(state)
-    let gh: u64 = td_gh(state)
-    let cx0: i64 = x0 as i64
-    let cy0: i64 = y0 as i64
-    let cx1: i64 = x1 as i64
-    let cy1: i64 = y1 as i64
-    wmdraw.fill_clip(state, cx0, cy0, (x1 - x0) as i64, (y1 - y0) as i64, TD_SCRIM_COLOUR, TD_SCRIM_ALPHA, cx0, cy0, cx1, cy1)
-    if x1 <= x || x0 >= x + w || y1 <= y || y0 >= y + h {
-        return
-    }
-    let panel: u64 = td_role(state, wmrole.ROLE_SURFACE_RAISED)
-    let footer: u64 = td_role(state, wmrole.ROLE_SURFACE)
-    let accent: u64 = td_role(state, wmrole.ROLE_ACCENT)
-    let on_accent: u64 = td_role(state, wmrole.ROLE_TEXT_ON_ACCENT)
-    let ink: u64 = td_role(state, wmrole.ROLE_TEXT)
-    let muted: u64 = td_role(state, wmrole.ROLE_TEXT_MUTED)
-    let band: u64 = TD_BAND_ROWS * gh
-    let footer_top: u64 = td_row(state, td_body() + TD_FOOTER_ROWS - 1) - gh / 2
-    wmdraw.fill_round(state, x as i64, y as i64, w as i64, h as i64, 8 * k, td_role(state, wmrole.ROLE_BORDER), 255, cx0, cy0, cx1, cy1)
-    wmdraw.fill_round(state, (x + k) as i64, (y + k) as i64, (w - 2 * k) as i64, (h - 2 * k) as i64, 7 * k, panel, 255, cx0, cy0, cx1, cy1)
-    wmdraw.fill_round(state, (x + k) as i64, footer_top as i64, (w - 2 * k) as i64, (y + h - k - footer_top) as i64, 7 * k, footer, 255, cx0, cy0, cx1, cy1)
-    wmdraw.fill_clip(state, (x + k) as i64, footer_top as i64, (w - 2 * k) as i64, (8 * k) as i64, footer, 255, cx0, cy0, cx1, cy1)
-    wmdraw.fill_clip(state, (x + k) as i64, footer_top as i64, (w - 2 * k) as i64, k as i64, td_role(state, wmrole.ROLE_BORDER), 255, cx0, cy0, cx1, cy1)
-    let icon: u64 = 2 * gh
-    let icon_cx: u64 = x + 2 * gw + icon / 2
-    let icon_top: u64 = y + (band - icon) / 2
-    td_shield(state, icon_cx, icon_top, icon, accent)
-    td_shield(state, icon_cx, icon_top + 3 * k, icon - 6 * k, panel)
-    td_shield(state, icon_cx, icon_top + 6 * k, icon - 12 * k, accent)
-    td_text(state, x + 2 * gw + icon + 2 * gw, y + (band - gh) / 2, (&td_title[0]) as u64, ink)
-    let nh: u64 = td_head_rows()
-    var l: u64 = 0
-    while l < td_nhead {
-        td_text(state, x + 2 * gw, td_row(state, 3 + l), td_line(l), ink)
-        l = l + 1
-    }
-    if td_ndet > 0 {
-        var s_dm: [u8; 2] = "-\0"
-        var s_dp: [u8; 2] = "+\0"
-        let trow: u64 = td_row(state, 3 + nh)
-        td_text(state, x + 2 * gw, trow, (&td_dlab[0]) as u64, muted)
-        if td_open != 0 {
-            td_text(state, x + (TD_COLS - 1) * gw, trow, (&s_dm[0]) as u64, muted)
-        } else {
-            td_text(state, x + (TD_COLS - 1) * gw, trow, (&s_dp[0]) as u64, muted)
-        }
-        if td_open != 0 {
-            var d: u64 = 0
-            while d < td_ndet {
-                td_text(state, x + 4 * gw, td_row(state, 4 + nh + d), td_line(TD_HEAD_MAX + d), muted)
-                d = d + 1
-            }
-        }
-    }
-    td_paint_remember(state, x, panel, accent, ink, cx0, cy0, cx1, cy1)
-    var d_rhint: [u8; 39] = "Fernsitzung: J/Y = Ja/Yes  N = Nein/No\0"
-    if tip.remote_active(state) {
-        td_text(state, x + 2 * gw, td_row(state, td_body() + 4), (&d_rhint[0]) as u64, muted)
-    } else {
-        td_text(state, x + 2 * gw, td_row(state, td_body() + 4), (&td_hint[0]) as u64, muted)
-    }
-    let by: u64 = td_by(state)
-    let bh: u64 = td_bh(state)
-    let bw: u64 = TD_BTN * gw
-    wmdraw.fill_round(state, (td_bx(state, td_focus) - 2 * k) as i64, (by - 2 * k) as i64, (bw + 4 * k) as i64, (bh + 4 * k) as i64,
-        6 * k, td_role(state, wmrole.ROLE_RING), 255, cx0, cy0, cx1, cy1)
-    td_button(state, 0, accent, on_accent, (&td_yes[0]) as u64)
-    td_button(state, 1, td_role(state, wmrole.ROLE_BUTTON), ink, (&td_nol[0]) as u64)
+    td_click_buttons(state, px, py)
 }

@@ -1,0 +1,183 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import gfx.fb
+import gfx.font
+import gfx.ttf
+import lib.kstate
+import utf8
+import ui.wm.wmdraw
+import ui.wm.wmlayout
+import ui.wm.wmtruststate
+
+const TXT_MAX: u64 = 96
+const LINE_LIMIT: u64 = 62
+
+fn face(state: u64) -> u64 {
+    return wmlayout.gs(state, wmlayout.S_FONT_UI)
+}
+
+fn ttf_on(state: u64) -> bool {
+    return ttf.ready(state) && face(state) < ttf.MAX_FONTS
+}
+
+fn str_len(p: u64) -> u64 {
+    var n: u64 = 0
+    while n < TXT_MAX && kstate.get8(p + n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn width_n(state: u64, p: u64, n: u64, px: u64, k: u64) -> u64 {
+    if !ttf_on(state) {
+        return n * font.GLYPH_W * k
+    }
+    return (ttf.text_width26(state, face(state), p, n, px) >> 6) as u64
+}
+
+fn width(state: u64, p: u64, px: u64, k: u64) -> u64 {
+    return width_n(state, p, str_len(p), px, k)
+}
+
+fn bitmap_line(state: u64, x: u64, y: u64, p: u64, fg: u64, k: u64) {
+    let gw: u64 = font.GLYPH_W * k
+    var i: u64 = 0
+    var cx: u64 = x
+    while i < TXT_MAX && cx + gw <= fb.width(state) {
+        let ch: u64 = kstate.get8(p + i)
+        if ch == 0 {
+            return
+        }
+        var r: u64 = 0
+        while r < font.GLYPH_H {
+            let bits: u64 = font.row(state + fb.FONT_OFF, ch, r)
+            var c: u64 = 0
+            while c < font.GLYPH_W {
+                if (bits & (1 << (7 - c))) != 0 {
+                    fb.fill(state, cx + c * k, y + r * k, k, k, fg)
+                }
+                c = c + 1
+            }
+            r = r + 1
+        }
+        cx = cx + gw
+        i = i + 1
+    }
+}
+
+fn ttf_line(state: u64, x: u64, top: u64, row_h: u64, p: u64, color: u64, px: u64) {
+    let f: u64 = face(state)
+    let lh: u64 = ttf.line_height(state, f, px)
+    var slack: u64 = 0
+    if row_h > lh {
+        slack = (row_h - lh) / 2
+    }
+    let base: i64 = top as i64 + slack as i64 + ttf.ascent(state, f, px)
+    let right: i64 = fb.width(state) as i64
+    let bottom: i64 = fb.height(state) as i64
+    var cx: i64 = (x * 64) as i64
+    var before: u64 = 0
+    var at: u64 = 0
+    while at < TXT_MAX {
+        let v: u64 = utf8.next(p, TXT_MAX, at)
+        let l: u64 = utf8.len_of(v)
+        let c: u64 = utf8.cp_of(v)
+        if l == 0 || c == 0 {
+            return
+        }
+        let gid: u64 = ttf.glyph_of(state, f, c)
+        if before != 0 {
+            cx = cx + ttf.kern26(state, f, before, gid, px)
+        }
+        let slot: u64 = ttf.glyph(state, f, c, px)
+        if slot < ttf.SLOTS {
+            wmdraw.fb_glyph(state, slot, cx >> 6, base, color, 0, 0, right, bottom)
+            cx = cx + ttf.g_adv(state, slot)
+        } else {
+            cx = cx + ttf.advance26(state, f, gid, px)
+        }
+        before = gid
+        at = at + l
+    }
+}
+
+fn draw(state: u64, x: u64, top: u64, row_h: u64, p: u64, color: u64, px: u64, k: u64) {
+    if ttf_on(state) {
+        ttf_line(state, x, top, row_h, p, color, px)
+        return
+    }
+    var slack: u64 = 0
+    if row_h > font.GLYPH_H * k {
+        slack = (row_h - font.GLYPH_H * k) / 2
+    }
+    bitmap_line(state, x, top + slack, p, color, k)
+}
+
+fn put_word(dst: u64, at: u64, a: u64, n: u64, sep: u64) -> u64 {
+    var o: u64 = at
+    if sep != 0 && o < LINE_LIMIT {
+        kstate.set8(dst + o, 32 as u8)
+        o = o + 1
+    }
+    var i: u64 = 0
+    while i < n && o < LINE_LIMIT {
+        kstate.set8(dst + o, kstate.get8(wmtruststate.td_inp() + a + i) as u8)
+        o = o + 1
+        i = i + 1
+    }
+    kstate.set8(dst + o, 0 as u8)
+    return o
+}
+
+fn word_end(a: u64, b: u64) -> u64 {
+    var e: u64 = a
+    while e < b && kstate.get8(wmtruststate.td_inp() + e) != 32 && kstate.get8(wmtruststate.td_inp() + e) != 10 {
+        e = e + 1
+    }
+    return e
+}
+
+fn wrap(state: u64, a: u64, b: u64, l0: u64, max_lines: u64, px: u64, k: u64, max_w: u64) -> u64 {
+    var l: u64 = 0
+    var len: u64 = 0
+    var last: u64 = 0
+    var any: u64 = 0
+    var pos: u64 = a
+    while pos < b {
+        let c: u64 = kstate.get8(wmtruststate.td_inp() + pos)
+        if c == 10 {
+            if l + 1 >= max_lines {
+                pos = b
+            } else {
+                l = l + 1
+                len = 0
+                pos = pos + 1
+            }
+        } else if c == 32 {
+            pos = pos + 1
+        } else {
+            let we: u64 = word_end(pos, b)
+            var dst: u64 = wmtruststate.td_line(l0 + l)
+            var sep: u64 = 0
+            if len > 0 {
+                sep = 1
+            }
+            var nl: u64 = put_word(dst, len, pos, we - pos, sep)
+            if len > 0 && width_n(state, dst, nl, px, k) > max_w && l + 1 < max_lines {
+                kstate.set8(dst + len, 0 as u8)
+                l = l + 1
+                dst = wmtruststate.td_line(l0 + l)
+                nl = put_word(dst, 0, pos, we - pos, 0)
+            }
+            len = nl
+            last = l
+            any = 1
+            pos = we
+        }
+    }
+    if any == 0 {
+        return 0
+    }
+    return last + 1
+}

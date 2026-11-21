@@ -2,7 +2,8 @@
 import sys
 from PIL import Image, ImageChops
 
-PANEL = (32, 34, 44)
+PANELS = ((255, 255, 255), (32, 32, 32))
+DIALOG_WIDTH = 456
 
 
 def load(root, name):
@@ -16,7 +17,7 @@ def panel_box(im):
     ys = []
     for y in range(0, h, 2):
         for x in range(0, w, 2):
-            if px[x, y] == PANEL:
+            if px[x, y] in PANELS:
                 xs.append(x)
                 ys.append(y)
     if len(xs) < 500:
@@ -49,7 +50,7 @@ def main(root, scale):
     if bad:
         print("PIXELS-FAIL %d" % bad)
         return 1
-    want = 512 * scale - 2 * scale
+    want = DIALOG_WIDTH * scale - 2 * scale
     for n in names:
         box = panel_box(shots[n])
         width = box[2] - box[0]
