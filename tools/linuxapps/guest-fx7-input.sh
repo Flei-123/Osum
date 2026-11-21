@@ -7,6 +7,10 @@ mkdir -p /tmp/p
 echo 'user_pref("gfx.webrender.software", true);' > /tmp/p/user.js
 echo 'user_pref("browser.shell.checkDefaultBrowser", false);' >> /tmp/p/user.js
 echo 'user_pref("browser.dom.window.dump.enabled", true);' >> /tmp/p/user.js
+if [ -n "${FX7_SINGLE_TITLEBAR:-}" ]; then
+  export GTK_CSD=0 MOZ_GTK_TITLEBAR_DECORATION=system
+  echo 'user_pref("browser.tabs.inTitlebar", 0);' >> /tmp/p/user.js
+fi
 cat > /tmp/in.html <<'HTML'
 <html><body style="margin:0"><input id="i" autofocus style="font-size:30px;width:400px"><p id="t" style="position:absolute;top:60px;left:0;margin:0;font-size:30px;white-space:nowrap">alpha beta gamma delta</p><a id="l" href="in.html?nav&0,0" style="display:block;height:2000px;background:#eee">link</a><div id="b" style="position:fixed;right:0;bottom:0;width:600px;height:300px;display:none"></div><select id="s" style="display:none;position:absolute;left:560px;top:240px;font-size:30px;z-index:5"><option>a0</option><option>b1</option><option>c2</option><option>d3</option><option>e4</option><option>f5</option></select><div style="height:6000px;background:linear-gradient(#fff,#06c)">tall</div>
 <script>
