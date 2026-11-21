@@ -113,7 +113,7 @@ for n in new old nol noi; do
     python3 -I tools/searchrank/check.py "$S" certus > "$TMPD/$n.certus" 2>&1
     python3 -I tools/searchrank/check.py "$S" zzqq > "$TMPD/$n.zzqq" 2>&1
     python3 -I tools/searchrank/check.py "$S" notes > "$TMPD/$n.notes" 2>&1
-    for q in autostart autostrat netzwerk konto wlan quokka xremote x-remote "X Remote" fernst firfox fire term einst te bluetooth long-file; do
+    for q in autostart autostrat netzwerk account wlan "data folder" freeviewer quokka xremote x-remote "X Remote" fernst firfox fire term einst te bluetooth long-file; do
         python3 -I tools/searchrank/check.py "$S" "$q" > "$TMPD/$n.q_${q// /_}" 2>&1
     done
 done
@@ -205,7 +205,10 @@ case "$(val $D.q_autostart settings)" in *"Startup apps"*) ok "'autostart': the 
 case "$(val $D.q_autostart paths)" in *"> Apps"*) ok "'autostart': the card path reads '$(val $D.q_autostart paths | cut -d'|' -f1)'" ;; *) bad "'autostart': paths are '$(val $D.q_autostart paths)'" ;; esac
 case "$(val $D.q_autostart paths)" in *"Task Manager"*) ok "'autostart': the Task Manager link shows its own path" ;; *) bad "'autostart': Task Manager path missing in '$(val $D.q_autostart paths)'" ;; esac
 case "$(val $D.q_autostrat settings)" in *Autostart*) ok "'autostrat' (typo): the Settings page is still found" ;; *) bad "'autostrat': settings are '$(val $D.q_autostrat settings)'" ;; esac
-for q in netzwerk konto wlan; do
+case "$(val $D.q_data_folder settings)" in *"Data folder"*) ok "'data folder': the Explorer deep link is listed" ;; *) bad "'data folder': settings are '$(val $D.q_data_folder settings)'" ;; esac
+case "$(val $D.q_data_folder paths)" in *Files*) ok "'data folder': its card path is Files" ;; *) bad "'data folder': paths are '$(val $D.q_data_folder paths)'" ;; esac
+case "$(val $D.q_freeviewer settings)" in *"in the Store"*) ok "'freeviewer': the Store deep link is listed" ;; *) bad "'freeviewer': settings are '$(val $D.q_freeviewer settings)'" ;; esac
+for q in netzwerk account wlan; do
     [ -n "$(val $D.q_$q settings)" ] && ok "'$q': a Settings page is listed ($(val $D.q_$q settings | cut -c1-40))" || bad "'$q': no Settings page"
 done
 grep -aq 'launcher: settings page=[0-9]* pid=' "$D/serial.txt" && ok "Enter on 'autostart' starts Settings" || bad "no Settings start line"
