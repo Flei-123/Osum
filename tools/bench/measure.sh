@@ -25,6 +25,7 @@ ROOT=$(pwd)
 LIB="python3 -I $ROOT/tools/bench/lib.py"
 ODBC="python3 -I $ROOT/tools/odbc/odbc.py -t 90"
 IMG=""; RUNS=3; PORTIO=0; UI=0; OUT=$ROOT/bench/results; COMMIT=""; TOKEN=/root/abbilder/odb.token
+LOGIN_SETTLE=${LOGIN_SETTLE:-3}; LOGIN_RETRY_TICKS=${LOGIN_RETRY_TICKS:-30}
 DRIVE=ahci; SMP=2; MEM=1536; PW=startkennwort; READY='glogin: ready'; SETTLE=20; KEEP=""; WIN=20; PIOWIN=60
 while [ $# -gt 0 ]; do
     case $1 in
@@ -78,9 +79,13 @@ one_run() { # <n> <traced 0|1>  -> $T/r<n>[t].json
     [ -s "$d/agent.t" ] && ms_a=$(python3 -c "import sys;print(int((float(sys.argv[1])-float(sys.argv[2]))*1000))" "$(cat "$d/agent.t")" "$t0") || ms_a=0
     # log in (as tools/odb/loop.py does) and time Enter -> desktop process up; idle numbers are taken on the logged-in desktop
     local tl; tl=$(now)
-    $ODBC --port "$port" --token-file "$TOKEN" input text "$PW" >/dev/null 2>&1; $ODBC --port "$port" --token-file "$TOKEN" input key Enter >/dev/null 2>&1
-    tl=$(now); local up=0 ps_
-    for _ in $(seq 1 240); do
+    sleep "$LOGIN_SETTLE"
+    local up=0 ps_ i
+    tl=$(now)
+    for i in $(seq 1 240); do
+        if [ $(( (i - 1) % LOGIN_RETRY_TICKS )) = 0 ]; then
+            $ODBC --port "$port" --token-file "$TOKEN" input text "$PW" >/dev/null 2>&1; $ODBC --port "$port" --token-file "$TOKEN" input key Enter >/dev/null 2>&1
+        fi
         ps_=$($ODBC --port "$port" --token-file "$TOKEN" ps 2>/dev/null)
         if echo "$ps_" | grep -qw desktop && ! echo "$ps_" | grep -qw glogin; then up=1; break; fi
         sleep 0.5
