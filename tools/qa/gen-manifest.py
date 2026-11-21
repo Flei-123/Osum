@@ -4,7 +4,11 @@ import glob, os, re, sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 OUT = os.path.join(ROOT, "tools", "qa", "gates.tsv")
+RUNNERS = os.path.join(ROOT, "tools", "qa", "runners.tsv")
 HEADER = "gate\ttier\tneeds\tpaths\tsource\tnote"
+RUNNERS_HEADER = "gate\tcommand\trequires"
+SCRIPT_RE = re.compile(r"tools/[A-Za-z0-9_./-]+\.sh")
+NO_RUNNER = "-"
 
 AREAS = {
     "ui":     ["kernel/ui/*", "kernel/gfx/*", "lib/fui/*", "lib/font/*", "assets/schemes/*", "assets/shapes/*",
@@ -100,6 +104,48 @@ def measured_tiers():
     return {g: ("quick" if t <= QUICK_MAX_S else "full" if t <= FULL_MAX_S else "nightly") for g, t in best.items()}
 
 
+def read_runners():
+    rows = {}
+    if not os.path.exists(RUNNERS):
+        return rows
+    lines = open(RUNNERS, encoding="utf-8").read().splitlines()
+    for n, ln in enumerate(lines[1:], 2):
+        f = ln.split("\t")
+        rows.setdefault(f[0], []).append((n, f))
+    return rows
+
+
+def check_runners(old, cur):
+    problems = []
+    lines = open(RUNNERS, encoding="utf-8").read().splitlines() if os.path.exists(RUNNERS) else []
+    if not lines or lines[0] != RUNNERS_HEADER:
+        problems.append(f"runners.tsv: header must be '{RUNNERS_HEADER}'")
+    runners = read_runners()
+    for g, entries in runners.items():
+        if len(entries) > 1:
+            problems.append(f"runners.tsv: gate '{g}' listed {len(entries)} times")
+        n, f = entries[0]
+        if len(f) != 3 or not f[1] or not f[2]:
+            problems.append(f"runners.tsv:{n}: '{g}' needs gate<TAB>command<TAB>requires")
+            continue
+        if g not in old:
+            problems.append(f"runners.tsv:{n}: gate '{g}' has no row in gates.tsv")
+        if f[1] == NO_RUNNER:
+            continue
+        script = SCRIPT_RE.search(f[1])
+        if not script or not os.path.isfile(os.path.join(ROOT, script.group(0))):
+            problems.append(f"runners.tsv:{n}: '{g}' command names no existing tools/*.sh script")
+    for g, row in old.items():
+        if row[4] == "manual" and g not in cur and g not in runners:
+            problems.append(f"gates.tsv: manual gate '{g}' has no tools/{g}/run.sh and no runners.tsv row")
+    return problems
+
+
+def manifest_order(cur, old):
+    kept = [g for g in old if g in cur or old[g][4] == "manual"]
+    return kept + [g for g in cur if g not in old]
+
+
 def read_old():
     old = {}
     if os.path.exists(OUT):
@@ -120,12 +166,16 @@ def main():
             print(f"gates.tsv: no row for tools/{g}/run.sh -- run tools/qa/gen-manifest.py")
         for g in gone:
             print(f"gates.tsv: row '{g}' has no tools/{g}/run.sh")
-        print(f"gates.tsv: {len(cur)} gates, {len(miss)} missing, {len(gone)} stale")
-        sys.exit(1 if miss or gone else 0)
+        problems = check_runners(old, cur)
+        for p in problems:
+            print(p)
+        print(f"gates.tsv: {len(cur)} gates, {len(miss)} missing, {len(gone)} stale, {len(problems)} runner problems")
+        sys.exit(1 if miss or gone or problems else 0)
     meas = measured_tiers() if "--by-times" in sys.argv else {}
+    regenerate = "--refresh" in sys.argv or "--by-times" in sys.argv
     rows = []
-    for g in cur:
-        if g in old and old[g][4] == "manual":
+    for g in manifest_order(cur, old):
+        if g in old and (old[g][4] == "manual" or not regenerate):
             rows.append(old[g])
         else:
             r = row(g)
