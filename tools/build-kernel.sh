@@ -66,8 +66,8 @@ case "$TUNNEL" in on|off) ;; *) echo "tunnel takes on or off, not '$TUNNEL'" >&2
 OHNE_TUNNEL=0
 [[ $TUNNEL == off ]] && OHNE_TUNNEL=1
 
-export FIRNLIB="${KERNEL_FIRNLIB:-$ROOT/lib}"
 . "$ROOT/tools/lib/firnenv.sh"
+export FIRNLIB="${KERNEL_FIRNLIB:-$ROOT/lib}"
 firnenv_need_firnc1
 
 if [[ $STUFE == 0 ]]; then
