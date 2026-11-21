@@ -188,20 +188,20 @@ BARY48=$(grep -a '^taskbar: geom ' "$W" | tail -1 | grep -oE ' y=[0-9]+' | tail 
 pin_xy() { grep -a "^taskbar: pin $2 " "$1" | head -1 | sed 's/.* x=\([0-9]*\) y=\([0-9]*\) w=\([0-9]*\) h=\([0-9]*\) .*/\1 \2 \3 \4/'; }
 set -- $(pin_xy "$W" explorer); e1x=$1; e1y=$2; e1w=$3; e1h=$4
 set -- $(pin_xy "$W" calc); c1x=$1; c1y=$2; c1w=$3; c1h=$4
-mach "$T/g1" tbconf="$T/win11.conf" accel=$ACC uitrace=yes mode=dark scheme=night click=$((e1x + e1w / 2)),$((BARY48 + e1y + e1h / 2)) click=$((c1x + c1w / 2)),$((BARY48 + c1y + c1h / 2)) warten=40 > "$T/g1.log" 2>&1 &
+mach "$T/g1" tbconf="$T/win11.conf" accel=$ACC uitrace=yes mode=dark scheme=night extra="wighalt=45" click=$((e1x + e1w / 2)),$((BARY48 + e1y + e1h / 2)) click=$((c1x + c1w / 2)),$((BARY48 + c1y + c1h / 2)) warten=40 > "$T/g1.log" 2>&1 &
 PG1=$!
-mach "$T/g2" tbconf="$T/win11b.conf" accel=$ACC uitrace=yes mode=dark scheme=night click=$((ex + ew / 2)),$((BARY + ey + eh / 2)) warten=25 > "$T/g2.log" 2>&1 &
+mach "$T/g2" tbconf="$T/win11b.conf" accel=$ACC uitrace=yes mode=dark scheme=night extra="wighalt=45" click=$((ex + ew / 2)),$((BARY + ey + eh / 2)) warten=25 > "$T/g2.log" 2>&1 &
 PG2=$!
 wait $PG1 $PG2
 G1="$T/g1/serial.txt"; G2="$T/g2/serial.txt"
-grep -aE '^taskbar: (pille|sym btn=)' "$G1" | tail -6 | sed 's/^/        g1 /'
+grep -aE '^taskbar: (pille|sym btn=|pin starte|click )' "$G1" | tail -8 | sed 's/^/        g1 /'
 python3 -I "$PROP" "$G1" 1 24 > "$T/g1.res" 2>&1 && ok "48 px bar: every proportion matches Windows 11" || { bad "48 px bar proportions"; sed 's/^/        /' "$T/g1.res"; }
 python3 -I "$PROP" "$G2" 1 0 > "$T/g2.res" 2>&1 && ok "40 px bar: icon ratio, pill and gap keep the Windows 11 proportions" || { bad "40 px bar proportions"; sed 's/^/        /' "$T/g2.res"; }
 nres=$(grep -ac '^OK' "$T/g1.res")
 [ "$nres" -ge 5 ] && ok "the 48 px run was measured ($nres checks)" || bad "too few proportion checks ($nres)"
 if [ -n "${OLDROOT:-}" ]; then
     echo "== G2. COUNTER-PROOF: the tree at OLDROOT must fail the same checks"
-    (cd "$OLDROOT" && bash tools/alltag/build.sh "$T/g0" tbconf="$T/win11.conf" accel=$ACC uitrace=yes mode=dark scheme=night click=$((e1x + e1w / 2)),$((BARY48 + e1y + e1h / 2)) click=$((c1x + c1w / 2)),$((BARY48 + c1y + c1h / 2)) warten=40) > "$T/g0.log" 2>&1
+    (cd "$OLDROOT" && ALLTAGBUILD="$T/oldbuild" bash tools/alltag/build.sh "$T/g0" tbconf="$T/win11.conf" accel=$ACC uitrace=yes mode=dark scheme=night extra="wighalt=45" click=$((e1x + e1w / 2)),$((BARY48 + e1y + e1h / 2)) click=$((c1x + c1w / 2)),$((BARY48 + c1y + c1h / 2)) warten=40) > "$T/g0.log" 2>&1
     python3 -I "$PROP" "$T/g0/serial.txt" 1 24 > "$T/g0.res" 2>&1 && bad "the old tree passes the proportion checks" || { ok "the old tree fails the proportion checks ($(grep -c '^FAIL' "$T/g0.res") rows)"; grep '^FAIL' "$T/g0.res" | head -4 | sed 's/^/        /'; }
 fi
 echo

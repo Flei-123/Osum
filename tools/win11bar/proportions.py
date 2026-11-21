@@ -40,9 +40,12 @@ def check(path, scale):
     if not pills:
         return [("a running pin carries a pill", False, "pills=0")]
     widths = sorted(p["w"] for p in pills.values())
+    sizes = (PILL_IDLE_W * scale, PILL_ACTIVE_W * scale)
     if len(widths) > 1:
-        results.append(("idle pill is %d px wide" % (PILL_IDLE_W * scale), widths[0] == PILL_IDLE_W * scale, "w=%d" % widths[0]))
-    results.append(("active pill is %d px wide" % (PILL_ACTIVE_W * scale), widths[-1] == PILL_ACTIVE_W * scale, "w=%d" % widths[-1]))
+        results.append(("idle pill is %d px wide" % sizes[0], widths[0] == sizes[0], "w=%d" % widths[0]))
+        results.append(("active pill is %d px wide" % sizes[1], widths[-1] == sizes[1], "w=%d" % widths[-1]))
+    else:
+        results.append(("the pill is %d (idle) or %d (active) px wide" % sizes, widths[0] in sizes, "w=%d" % widths[0]))
     for i, s in syms.items():
         ratio_ok = s["gemalt"] * ICON_DEN <= s["button"] * ICON_NUM + ICON_DEN
         results.append(("pin %d icon is at most 3/5 of its tile" % i, ratio_ok, "icon=%d tile=%d" % (s["gemalt"], s["button"])))
