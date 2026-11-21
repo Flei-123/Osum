@@ -53,7 +53,7 @@ import bus.drvreg
 export {
     dev_flushes,
     ram_init, use_ata, use_nvme, read, write, blocks, present,
-    read_raw, read_stream, read_stream_span, S_SECTORS, S_SECTORS_WIDE, S_SEQ, write_raw, write_run, write_blocks, wb_begin, wb_begin_data, wb_set_big_runs, wb_struct, wb_struct_lazy, wb_mark_freed, wb_freed_pending, wb_epoch, wb_mark_pre, wb_set_meta, wb_due, wb_release, wb_end, wb_flush,
+    read_raw, read_stream, read_stream_span, S_SECTORS, S_SECTORS_WIDE, S_SEQ, write_raw, write_run, write_blocks, wb_begin, wb_begin_data, wb_hint, wb_set_big_runs, wb_struct, wb_struct_lazy, wb_mark_freed, wb_freed_pending, wb_epoch, wb_mark_pre, wb_set_meta, wb_due, wb_release, wb_end, wb_flush,
     BLOCK_SIZE, DEV_RAM, DEV_ATA, DEV_NVME, DEV_ATA1, DEV_USB,
     removable,
     // ---- Runde K14 ----
@@ -1373,6 +1373,10 @@ const W_FREED: u64 = 0x2A8 // 1 while freed blocks or inodes are not yet on the 
 const W_SLOTS: u64 = 0x2D0
 const W_USED: u64 = 0x2D8
 const W_EPOCH: u64 = 0x2E8
+const W_EVICTS: u64 = 0x2F0
+const W_HINT: u64 = 0x2F8
+const WB_EVICTS_GROW: u64 = 64
+const WB_HINT_HEADROOM: u64 = 4
 const WB_HOLD_TICKS: u64 = 300
 const WB_SLOTS_SMALL: u64 = 4096
 const WB_SLOTS_MID: u64 = 65536
@@ -1555,22 +1559,22 @@ fn wb_try(state: u64, frames: u64) -> u64 {
     return b
 }
 
-fn wb_grab(state: u64) -> u64 {
-    if mmframe.frames_free(state) >= WB_HUGE_MIN_FREE {
+fn wb_grab(state: u64, want: u64) -> u64 {
+    if want >= WB_SLOTS_HUGE && mmframe.frames_free(state) >= WB_HUGE_MIN_FREE {
         let huge: u64 = wb_try(state, WB_FRAMES_HUGE)
         if huge != 0 {
             cs(state, W_SLOTS, WB_SLOTS_HUGE)
             return huge
         }
     }
-    if mmframe.frames_free(state) >= WB_LARGE_MIN_FREE {
+    if want >= WB_SLOTS_LARGE && mmframe.frames_free(state) >= WB_LARGE_MIN_FREE {
         let big: u64 = wb_try(state, WB_FRAMES_LARGE)
         if big != 0 {
             cs(state, W_SLOTS, WB_SLOTS_LARGE)
             return big
         }
     }
-    if mmframe.frames_free(state) >= WB_MID_MIN_FREE {
+    if want >= WB_SLOTS_MID && mmframe.frames_free(state) >= WB_MID_MIN_FREE {
         let mid: u64 = wb_try(state, WB_FRAMES_MID)
         if mid != 0 {
             cs(state, W_SLOTS, WB_SLOTS_MID)
@@ -1598,10 +1602,52 @@ fn wb_frames(state: u64) -> u64 {
     return WB_FRAMES_SMALL
 }
 
+fn wb_tier_for(slots: u64) -> u64 {
+    if slots <= WB_SLOTS_SMALL {
+        return WB_SLOTS_SMALL
+    }
+    if slots <= WB_SLOTS_MID {
+        return WB_SLOTS_MID
+    }
+    if slots <= WB_SLOTS_LARGE {
+        return WB_SLOTS_LARGE
+    }
+    return WB_SLOTS_HUGE
+}
+
+fn wb_hint(state: u64, bytes: u64) {
+    cs(state, W_HINT, wb_tier_for(bytes / BLOCK_SIZE * WB_HINT_HEADROOM))
+}
+
+fn wb_want(state: u64) -> u64 {
+    var want: u64 = cg(state, W_HINT)
+    cs(state, W_HINT, 0)
+    if want < WB_SLOTS_SMALL {
+        want = WB_SLOTS_SMALL
+    }
+    if cg(state, W_BASE) != 0 && cg(state, W_EVICTS) >= WB_EVICTS_GROW && want <= wb_slots(state) && wb_slots(state) < WB_SLOTS_HUGE {
+        want = WB_SLOTS_HUGE
+    }
+    return want
+}
+
+fn wb_drop_table(state: u64) {
+    if !wb_flush(state) {
+        return
+    }
+    let b: u64 = cg(state, W_BASE)
+    cs(state, W_BASE, 0)
+    mmframe.frame_free_run(state, b, wb_frames(state))
+}
+
 fn wb_begin(state: u64) {
+    let want: u64 = wb_want(state)
+    if cg(state, W_BASE) != 0 && cg(state, W_DEPTH) == 0 && want > wb_slots(state) {
+        wb_drop_table(state)
+    }
     if cg(state, W_BASE) == 0 && kstate.get(state, kstate.BITMAP) != 0 {
         // 8 frames of slot keys + 512 frames of sector data
-        let b: u64 = wb_grab(state)
+        let b: u64 = wb_grab(state, want)
         if b != 0 {
             var i: u64 = 0
             while i < wb_slots(state) {
@@ -1610,10 +1656,13 @@ fn wb_begin(state: u64) {
             }
             cs(state, W_BASE, b)
             cs(state, W_DIRTY, 0)
+            cs(state, W_EVICTS, 0)
             wb_bounds_reset(state)
         }
     }
-    cs(state, W_USED, kstate.get(state, kstate.TICKS))
+    if want > WB_SLOTS_SMALL || wb_slots(state) <= WB_SLOTS_SMALL || cg(state, W_DIRTY) > WB_SLOTS_SMALL / 2 {
+        cs(state, W_USED, kstate.get(state, kstate.TICKS))
+    }
     cs(state, W_DEPTH, cg(state, W_DEPTH) + 1)
 }
 
@@ -1708,7 +1757,7 @@ fn wb_release(state: u64) {
     if b == 0 || cg(state, W_DEPTH) != 0 || cg(state, W_DIRTY) != 0 {
         return
     }
-    if wb_slots(state) > WB_SLOTS_SMALL && kstate.get(state, kstate.TICKS) -% cg(state, W_USED) < WB_HOLD_TICKS {
+    if wb_slots(state) <= WB_SLOTS_SMALL || kstate.get(state, kstate.TICKS) -% cg(state, W_USED) < WB_HOLD_TICKS {
         return
     }
     cs(state, W_BASE, 0)
@@ -1733,6 +1782,8 @@ fn wb_run_end(state: u64, sl: u64, m: u64, high: u64) -> u64 {
 }
 
 fn wb_evict_run(state: u64, sl: u64) -> bool {
+    cs(state, W_EVICTS, cg(state, W_EVICTS) + 1)
+    cs(state, W_USED, kstate.get(state, kstate.TICKS))
     let m: u64 = wb_meta(state, sl)
     let limit: u64 = cg(state, W_META)
     var high: u64 = WB_LBA_MASK + 1

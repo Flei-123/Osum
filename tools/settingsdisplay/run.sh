@@ -19,7 +19,7 @@ MAX_PARALLEL=3
 HALT_SECONDS=200
 WIDE_RES=1920x1080
 NARROW_RES=1280x800
-BASE_REF=${SETTINGSDISPLAY_BASE:-origin/main}
+BASE_REF=${SETTINGSDISPLAY_BASE:-6ef8003b2}
 pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "  OK    $1"; }
 bad() { fail=$((fail+1)); echo "  FAIL  $1"; }
