@@ -66,7 +66,7 @@ move onto the canonical file (tracked by `tools/uicheck`, ratchet only shrinks).
 | list row | scene: `fuiscene.table` (fsdraw `draw_ct`) ; long lists `rowlist.fi` | `navview.fi`, `store.fi`, `taskmgr.fi`, `disks.fi` hand-drawn rows | UI system owner |
 | button | `fuiscene.button` / `button_main` / `icon_button` (fsdraw `draw_btn_plate`) | `wlib` buttons, `fuib.rrect` buttons, `taskbar/tbhover.button` | UI system owner |
 | toggle / slider / segmented / check | `fuiscene.toggle` / `slider` / `segmented` / `check` (fsdraw `draw_toggle`, fsctl) | settings pages drawing own switches | w-settings-win11-confirm |
-| icon set (shell symbols) | icon font `lib/icons.fi` + `assets/icons/icons.list` (glyph takes text colour); app icons `assets/apps/*/symbol.svg` via `lib/appicon.fi` | `traypop.net_glyph/wlan_glyph/badge/slash` vector glyphs, `symvar.fi` | w-tray-icons |
+| icon set (shell symbols) | icon font `lib/icons.fi` + `assets/icons/icons.list` (glyph takes text colour); app icons `assets/apps/*/symbol.svg` (hand-built, `assets/icons/app/*.svg`, spec `docs/APP-ICONS.md`) via `lib/appicon.fi` | `traypop.net_glyph/wlan_glyph/badge/slash` vector glyphs, `symvar.fi` | w-tray-icons |
 | tray chip | `lib/fui/tray.fi` (model) + taskbar paint in `taskbar/tbpaint.fi` | `traypop` chips | w-tray-icons |
 | taskbar preview | `taskbar/tbhover.preview_*` (only place) on `uisurface` kind `FLYOUT` | - | w-taskbar-preview-ram |
 | window chrome (frame, title, buttons, shadow) | `kernel/ui/wm/wmchrome.fi`, `wmshadow.fi` | - | (stable) |

@@ -1,0 +1,175 @@
+profile app
+
+import ulib
+import libc.io
+import libc.text
+import libc.octets
+
+export { scan, count, name_at, version_at }
+
+const MAX_LOCAL: u64 = 64
+const NAME_CAP: u64 = 24
+const VERSION_CAP: u64 = 12
+const DIR_BUF: u64 = 1024
+const CATALOG_BUF: u64 = 8190
+const TAB: u64 = 9
+const NEWLINE: u64 = 10
+
+static mut P_APPS: [u8; 7] = "/apps/\0"
+static mut P_CATALOG: [u8; 19] = "/var/store/katalog\0"
+static mut SUFFIX_OSP: [u8; 5] = ".osp\0"
+static mut SUFFIX_PROG: [u8; 6] = ".prog\0"
+
+static mut names: [u8; 1536] = [0 as u8; 1536]
+static mut versions: [u8; 768] = [0 as u8; 768]
+static mut found: u64 = 0
+static mut catalog: [u8; 8192] = [0 as u8; 8192]
+
+fn count() -> u64 {
+    return found
+}
+
+fn name_at(i: u64) -> u64 {
+    return (&names[0 as usize]) as u64 + i * NAME_CAP
+}
+
+fn version_at(i: u64) -> u64 {
+    return (&versions[0 as usize]) as u64 + i * VERSION_CAP
+}
+
+fn ends_with(p: u64, suffix: u64) -> u64 {
+    let n: u64 = text.length(p)
+    let k: u64 = text.length(suffix)
+    if n <= k {
+        return 0
+    }
+    var i: u64 = 0
+    while i < k {
+        if octets.ld8(p, n - k + i) != octets.ld8(suffix, i) {
+            return 0
+        }
+        i = i + 1
+    }
+    return n - k
+}
+
+fn stem_of(file: u64) -> u64 {
+    var stem: u64 = ends_with(file, (&SUFFIX_OSP[0 as usize]) as u64)
+    if stem == 0 {
+        stem = ends_with(file, (&SUFFIX_PROG[0 as usize]) as u64)
+    }
+    return stem
+}
+
+fn insert_sorted(file: u64, stem: u64) {
+    if found >= MAX_LOCAL || stem >= NAME_CAP {
+        return
+    }
+    var tmp: [u8; 24] = [0 as u8; 24]
+    ulib.strncpy((&tmp[0 as usize]) as u64, file, stem + 1)
+    octets.st8((&tmp[0 as usize]) as u64, stem, 0)
+    var i: u64 = 0
+    while i < found {
+        if ulib.streq((&tmp[0 as usize]) as u64, name_at(i)) {
+            return
+        }
+        i = i + 1
+    }
+    ulib.strcpy(name_at(found), (&tmp[0 as usize]) as u64)
+    octets.st8(version_at(found), 0, 0)
+    found = found + 1
+}
+
+fn catalog_version(name: u64, out: u64) {
+    var at: u64 = 0
+    let base: u64 = (&catalog[0 as usize]) as u64
+    while octets.ld8(base, at) != 0 {
+        let line: u64 = at
+        var k: u64 = 0
+        while octets.ld8(base, line + k) != TAB && octets.ld8(base, line + k) != NEWLINE && octets.ld8(base, line + k) != 0 {
+            k = k + 1
+        }
+        var same: bool = octets.ld8(base, line + k) == TAB && k == text.length(name)
+        var j: u64 = 0
+        while same && j < k {
+            if octets.ld8(base, line + j) != octets.ld8(name, j) {
+                same = false
+            }
+            j = j + 1
+        }
+        if same {
+            var v: u64 = line + k + 1
+            var o: u64 = 0
+            while octets.ld8(base, v) != TAB && octets.ld8(base, v) != NEWLINE && octets.ld8(base, v) != 0 && o + 1 < VERSION_CAP {
+                octets.st8(out, o, octets.ld8(base, v))
+                o = o + 1
+                v = v + 1
+            }
+            octets.st8(out, o, 0)
+            return
+        }
+        while octets.ld8(base, at) != NEWLINE && octets.ld8(base, at) != 0 {
+            at = at + 1
+        }
+        if octets.ld8(base, at) == NEWLINE {
+            at = at + 1
+        }
+    }
+}
+
+fn read_catalog() {
+    octets.st8((&catalog[0 as usize]) as u64, 0, 0)
+    let fd: u64 = io.open((&P_CATALOG[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let n: u64 = io.read_full(fd, (&catalog[0 as usize]) as u64, CATALOG_BUF)
+    io.close(fd)
+    if !ulib.bad(n) {
+        octets.st8((&catalog[0 as usize]) as u64, n, 0)
+    }
+}
+
+fn scan_dir() {
+    var ents: [u8; 1024] = [0 as u8; 1024]
+    let fd: u64 = io.dir_open((&P_APPS[0 as usize]) as u64)
+    if ulib.bad(fd) {
+        return
+    }
+    var more: bool = true
+    while more {
+        let n: u64 = io.dir_read(fd, (&ents[0 as usize]) as u64, DIR_BUF)
+        if ulib.bad(n) || n == 0 {
+            more = false
+        } else {
+            var at: u64 = 0
+            while at < n {
+                let rec: u64 = (&ents[0 as usize]) as u64 + at
+                let rl: u64 = io.dir_reclen(rec)
+                if rl == 0 {
+                    at = n
+                } else {
+                    let nm: u64 = io.dir_name(rec)
+                    let stem: u64 = stem_of(nm)
+                    if stem != 0 {
+                        insert_sorted(nm, stem)
+                    }
+                    at = at + rl
+                }
+            }
+        }
+    }
+    io.close(fd)
+}
+
+fn scan() -> u64 {
+    found = 0
+    scan_dir()
+    read_catalog()
+    var i: u64 = 0
+    while i < found {
+        catalog_version(name_at(i), version_at(i))
+        i = i + 1
+    }
+    return found
+}

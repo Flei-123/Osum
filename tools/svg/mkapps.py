@@ -2,31 +2,11 @@
 # SPDX-License-Identifier: GPL-2.0-only
 import io
 import os
-import re
 import subprocess
 import sys
 
 SIZE = 72
 ROW_SIZES = (44, 64)
-PAD = 1.25
-STROKE = 2.2
-
-
-def glyph_inner(text):
-    return re.search(r"<svg[^>]*>(.*)</svg>", text, re.S).group(1).strip()
-
-
-def compose(inner, top, bottom, tint):
-    lo = -PAD
-    span = 24 + 2 * PAD
-    fill = 'fill="url(#g)" fill-opacity="0.38"' if tint else 'fill="none"'
-    return (
-        '<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="%g %g %g %g">\n'
-        '<defs><linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="%g" x2="0" y2="%g">'
-        '<stop offset="0" stop-color="#%s"/><stop offset="1" stop-color="#%s"/></linearGradient></defs>\n'
-        '<g %s stroke="url(#g)" stroke-width="%g" stroke-linecap="round" stroke-linejoin="round">%s</g>\n'
-        '</svg>\n'
-    ) % (SIZE, SIZE, lo, lo, span, span, lo, 24 + PAD, top, bottom, fill, STROKE, inner)
 
 
 def raster_osym(svg, size, out):
@@ -49,6 +29,18 @@ def bake_brand(root, name, d):
     print("%s: brand symbol rasterized %dx%d + rows %s" % (name, SIZE, SIZE, ROW_SIZES))
 
 
+def bake_svg(bake, src, d):
+    svg = os.path.join(d, "symbol.svg")
+    with open(src, encoding="ascii") as f, open(svg, "w", encoding="ascii") as g:
+        g.write(f.read())
+    for size, name in ((SIZE, "symbol.osym"),) + tuple((rs, "symbol%d.osym" % rs) for rs in ROW_SIZES):
+        rc = subprocess.run([bake, svg, os.path.join(d, name), str(size)]).returncode
+        if rc != 0:
+            print("bake failed", src, size, rc)
+            return False
+    return True
+
+
 def rows(table):
     for line in open(table, encoding="ascii").read().splitlines():
         if line.strip():
@@ -58,7 +50,7 @@ def rows(table):
 def main(argv):
     root, bake = argv[0], argv[1]
     only = set(argv[2:])
-    for app, glyph, top, bottom, tint, folder in rows(os.path.join(root, "tools/svg/apps.tsv")):
+    for app, glyph, folder in ((r[0], r[1], r[5]) for r in rows(os.path.join(root, "tools/svg/apps.tsv"))):
         if only and app not in only:
             continue
         d = os.path.join(root, folder)
@@ -68,19 +60,8 @@ def main(argv):
         if glyph.startswith("@"):
             bake_brand(root, glyph[1:], d)
             continue
-        inner = glyph_inner(open(os.path.join(root, "assets/icons/svg", glyph + ".svg"), encoding="utf-8").read())
-        svg = os.path.join(d, "symbol.svg")
-        with open(svg, "w", encoding="ascii") as f:
-            f.write(compose(inner, top, bottom, tint == "1"))
-        rc = subprocess.run([bake, svg, os.path.join(d, "symbol.osym"), str(SIZE)]).returncode
-        if rc != 0:
-            print("bake failed", app, rc)
+        if not bake_svg(bake, os.path.join(root, "assets/icons/app", glyph.lstrip("=") + ".svg"), d):
             return 1
-        for rs in ROW_SIZES:
-            rc = subprocess.run([bake, svg, os.path.join(d, "symbol%d.osym" % rs), str(rs)]).returncode
-            if rc != 0:
-                print("bake failed", app, rs, rc)
-                return 1
         print("%s: symbol.svg -> symbol.osym %dx%d + rows %s" % (app, SIZE, SIZE, ROW_SIZES))
     return 0
 

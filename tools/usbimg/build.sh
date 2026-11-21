@@ -138,7 +138,7 @@ grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp ping log host ota fsck jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown idlelock powerd init svc term termfull shasum noise \
-orientbus act settingsd axd sntp accountcli pdfview open certus store stored mediad presentlog sysinfo hwinv massren privacy welcome elevate msgbox runbox cliphist xclip charmap vplay osk apprights wmplug hotkeyd jarvismini social soclocal melder freunde partyrun bench wlanpersist drvctl lspci pcicfg regdump prphread wlanctl dbgsrv backup recover resetsys screenreader xfx vaultd vaultctl vaultprompt vaultui xremoted dialogd"}
+orientbus act settingsd axd sntp accountcli pdfview open certus store stored mediad presentlog sysinfo hwinv massren privacy welcome elevate msgbox runbox cliphist xclip charmap vplay osk apprights wmplug hotkeyd jarvismini social soclocal melder freunde partyrun bench wlanpersist drvctl lspci pcicfg regdump prphread wlanctl dbgsrv backup recover resetsys screenreader xfx vaultd vaultctl vaultprompt vaultui dialogd"}
 # ODB=1 (debug build): the debug agent is one more program in /bin
 [ "${ODB:-0}" = 1 ] && PROGS="$PROGS odbd"
 # the public image has no chat server to reach: no JARVIS Mini binary there
@@ -676,7 +676,6 @@ cat > "$OUT/inittab" <<'EOFTAB'
 sh:konsole:ctrl:/bin/sh
 hwinv:grafik:once:/bin/hwinv -d /var/jarvis/hwinv.txt
 vaultd:grafik:respawn:/bin/vaultd
-xremote:grafik:respawn:/bin/xremoted
 EOFTAB
 [ "$BBSH" = 1 ] && sed -i 's|^sh:konsole:ctrl:/bin/sh$|sh:konsole:ctrl:/bin/osh|' "$OUT/inittab"
 printf 'grafik
@@ -902,13 +901,13 @@ if [ -s "${XR_DIR:-/root/jarvis/data/orientos-xremote/system}/freeviewer-host" ]
     XR_ROOT="$OUT/xremote-root"
     bash tools/xremote/stage.sh "$XR_ROOT" > /dev/null || fehler "xremote stage failed"
     ARGS+=(/apps/xremote.osp/ /apps/xremote.osp/bin/ /apps/xremote.osp/lib/)
-    for f in INFO symbol SYSTEM lib/libgcc_s.so.1; do
+    for f in INFO INITTAB symbol SYSTEM lib/libgcc_s.so.1; do
         ARGS+=("/apps/xremote.osp/$f=$XR_ROOT/apps/xremote.osp/$f")
     done
-    for f in bin/freeviewer-host lib/ld-musl-x86_64.so.1; do
+    for f in bin/freeviewer-host bin/xremoted lib/ld-musl-x86_64.so.1; do
         ARGS+=("/apps/xremote.osp/$f=$XR_ROOT/apps/xremote.osp/$f@755")
     done
-    PFLICHT_XREMOTE="/apps/xremote.osp/INFO /apps/xremote.osp/SYSTEM /apps/xremote.osp/bin/freeviewer-host /apps/xremote.osp/lib/ld-musl-x86_64.so.1 /apps/xremote.osp/lib/libgcc_s.so.1"
+    PFLICHT_XREMOTE="/apps/xremote.osp/INFO /apps/xremote.osp/INITTAB /apps/xremote.osp/SYSTEM /apps/xremote.osp/bin/freeviewer-host /apps/xremote.osp/bin/xremoted /apps/xremote.osp/lib/ld-musl-x86_64.so.1 /apps/xremote.osp/lib/libgcc_s.so.1"
 fi
 # W-IMG2 (r921): JARVIS Mini + the global hotkey helper. Personal stick only (the box needs the chat server).
 #   /bin/hotkeyd   started by the desktop autostart line `hotkey` (only when /etc/hotkeys.conf exists)
@@ -1009,7 +1008,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages /usr/share/
 /bin/social /bin/soclocal /bin/melder /bin/freunde /bin/partyrun /bin/socfleitec /apps/social.prog/ACTIONS /apps/social.prog/SETTINGS /etc/social/providers /etc/social/fleitec.conf /etc/social/games.tsv /bin/sysinfo /bin/hwinv /bin/privacy /bin/welcome /bin/elevate /bin/msgbox /apps/welcome.osp/start /apps/welcome.osp/INFO /bin/runbox /apps/run.osp/start /apps/run.osp/INFO /apps/run.osp/symbol /bin/osk /apps/osk.osp/start /apps/osk.osp/INFO /apps/osk.osp/symbol /bin/charmap /apps/charmap.osp/start /apps/charmap.osp/INFO /apps/charmap.osp/symbol /bin/vplay /apps/vplay.osp/start /apps/vplay.osp/INFO /apps/vplay.osp/symbol /bin/xclip /bin/cliphist /apps/cliphist.osp/start /apps/cliphist.osp/INFO /apps/cliphist.osp/symbol \
 /users/$KONTO/ /users/$KONTO/config/"
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
-PFLICHT="$PFLICHT ${PFLICHT_XREMOTE:-} /bin/dialogd /bin/xremoted /bin/vaultd /bin/vaultctl /bin/vaultprompt /bin/vaultui /apps/vault.osp/start /apps/vault.osp/INFO /apps/vault.osp/symbol /bin/wlanpersist /bin/wmplug /bin/hotkeyd /etc/wmplug.conf /etc/wmplug.autostart /etc/hotkeys.conf /etc/apprights.conf /bin/apprights"
+PFLICHT="$PFLICHT ${PFLICHT_XREMOTE:-} /bin/dialogd /bin/vaultd /bin/vaultctl /bin/vaultprompt /bin/vaultui /apps/vault.osp/start /apps/vault.osp/INFO /apps/vault.osp/symbol /bin/wlanpersist /bin/wmplug /bin/hotkeyd /etc/wmplug.conf /etc/wmplug.autostart /etc/hotkeys.conf /etc/apprights.conf /bin/apprights"
 [ "$IMAGE_PROFILE" = personal ] && PFLICHT="$PFLICHT /bin/bench /apps/widgets.osp/start"
 [ "$IMAGE_PROFILE" = personal ] && PFLICHT="$PFLICHT /bin/jarvismini /apps/jarvismini.osp/start /apps/jarvismini.osp/INFO /etc/jarvismini.conf /etc/actions.d/jarvismini.actions /bin/jmlink /bin/snip /bin/snipt"
 [ "${ROOT_SLIM:-0}" = 1 ] || [ "${BOOT_KERNEL_COPY:-0}" != 1 ] && PFLICHT=${PFLICHT//\/boot\/osum.mb/}
