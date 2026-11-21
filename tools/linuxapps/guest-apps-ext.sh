@@ -76,6 +76,71 @@ t tcpdump-version tcpdump tcpdump --version
 t sshd-version OpenSSH sh -c 'sshd -V 2>&1 | head -1'
 t big-args 7 sh -c 'x=$(printf "%0400d" 0); sh -c "echo \$#" $x $x $x $x $x $x $x $x'
 t big-env 400 sh -c 'A=$(printf "%0400d" 0) B=$A C=$A D=$A E=$A sh -c "echo \${#E}"'
+cat > /tmp/p-nginx.sh <<'EOT'
+mkdir -p /tmp/logs /tmp/www /run/nginx /var/lib/nginx/tmp
+echo nginx-ok > /tmp/www/index.html
+cat > /tmp/ng2.conf <<'EOC'
+daemon off;
+error_log /tmp/logs/e.log;
+pid /tmp/ng.pid;
+events {}
+http {
+  access_log off;
+  server {
+    listen 127.0.0.1:8081;
+    root /tmp/www;
+  }
+}
+EOC
+nginx -c /tmp/ng2.conf -p /tmp > /tmp/ng2.out 2>&1 &
+sleep 4
+echo "ng out:"; cat /tmp/ng2.out
+curl -s -m 15 http://127.0.0.1:8081/
+r=$?
+echo "curl rc=$r"
+nginx -c /tmp/ng2.conf -p /tmp -s stop
+tail -5 /tmp/logs/e.log
+exit $r
+EOT
+cat > /tmp/p-cn.sh <<'EOT'
+cd /tmp && rm -rf cn && mkdir cn && cd cn
+printf 'cmake_minimum_required(VERSION 3.10)\nproject(p C)\nadd_executable(p p.c)\n' > CMakeLists.txt
+printf '#include <stdio.h>\nint main(){printf("7\\n");return 0;}\n' > p.c
+cmake -G Ninja -S . -B b > /dev/null
+ninja -C b -v 2>&1 | tail -20
+./b/p
+EOT
+cat > /tmp/p-ssh.sh <<'EOT'
+mkdir -p /var/empty /root/.ssh /tmp/sshd
+chown root:root /var/empty
+chmod 755 /var/empty
+chmod 700 /root/.ssh
+ssh-keygen -q -t ed25519 -N "" -f /tmp/sshd/host
+ssh-keygen -q -t ed25519 -N "" -f /tmp/sshd/id
+cp /tmp/sshd/id.pub /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+cat > /tmp/sshd/conf <<'EOC'
+Port 2222
+ListenAddress 127.0.0.1
+HostKey /tmp/sshd/host
+PermitRootLogin yes
+PasswordAuthentication no
+PidFile /tmp/sshd/pid
+EOC
+/usr/sbin/sshd -D -e -f /tmp/sshd/conf > /tmp/sshd/log 2>&1 &
+sleep 3
+ssh -p 2222 -i /tmp/sshd/id -o ConnectTimeout=20 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes root@127.0.0.1 echo hello
+r=$?
+echo "ssh rc=$r"
+tail -8 /tmp/sshd/log
+exit $r
+EOT
+t nginx-request nginx-ok sh /tmp/p-nginx.sh
+t cmake-ninja-build 7 sh /tmp/p-cn.sh
+t sshd-connect hello sh /tmp/p-ssh.sh
+t redis-tcp PONG sh -c 'redis-server --port 6390 --bind 127.0.0.1 --save "" > /tmp/r2.log 2>&1 & sleep 3; redis-cli -p 6390 ping; redis-cli -p 6390 set k v; redis-cli -p 6390 get k; redis-cli -p 6390 shutdown nosave'
+t redis-setget v sh -c 'redis-server --port 0 --unixsocket /tmp/r3.sock --save "" > /tmp/r3.log 2>&1 & sleep 3; redis-cli -s /tmp/r3.sock set k v; redis-cli -s /tmp/r3.sock get k; redis-cli -s /tmp/r3.sock shutdown nosave'
+t ninja-build built sh -c 'cd /tmp && rm -rf nj && mkdir nj && cd nj && printf "int main(){return 0;}\n" > a.c && printf "rule cc\n  command = gcc -o a a.c\nbuild a: cc a.c\n" > build.ninja && ninja && echo built'
 echo APPS-END
 echo FX-END
 t proc-iomem 'System RAM' cat /proc/iomem
@@ -83,3 +148,6 @@ t proc-zoneinfo 'Node 0, zone' cat /proc/zoneinfo
 t proc-softirqs TIMER cat /proc/softirqs
 t proc-buddyinfo 'Node 0' cat /proc/buddyinfo
 t perl-creat-syscall ok perl -e 'my $p="/tmp/cr.pl"; my $fd=syscall(85,$p,420); print $fd>=0 ? "ok\n" : "fail $!\n"'
+t proc-smaps VmFlags cat /proc/self/smaps
+t proc-pressure 'some avg10' cat /proc/pressure/cpu
+t futex-waitv-einval '^-1:22' perl -e 'my ($a,$b,$c,$d,$e)=(0,0,0,0,0); my $r=syscall(449,$a,$b,$c,$d,$e); print "$r:".($!+0)."\n"'
