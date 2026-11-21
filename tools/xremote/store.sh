@@ -14,7 +14,7 @@ has() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 hasnot() { grep -qaF -- "$2" "$1" && bad "$3 -- '$2' is present" || ok "$3"; }
 
 TOOLS=${XR_TOOLS:-/root/jarvis/data/orientos-xremote}
-HOSTBIN=${XR_HOST:-$TOOLS/v2/freeviewer-host}
+HOSTBIN=${XR_HOST:-$TOOLS/v3/freeviewer-host}
 LIBS=${XR_LIBS_DIR:-/root/fxhp/fx-root}
 OPK=$(python3 tools/lib/opkpfad.py)
 for t in qemu-system-x86_64 python3 musl-gcc curl; do

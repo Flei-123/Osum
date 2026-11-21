@@ -8,7 +8,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 chk() { if [ "$1" = 1 ]; then ok "$2"; else bad "$2"; fi; }
 
 TOOLS=${XR_TOOLS:-/root/jarvis/data/orientos-xremote}
-HOSTBIN=${XR_HOST:-$TOOLS/v2/freeviewer-host}
+HOSTBIN=${XR_HOST:-$TOOLS/v3/freeviewer-host}
 LIBS=${XR_LIBS_DIR:-/root/fxhp/fx-root}
 OPK=${OPK:-$(python3 tools/lib/opkpfad.py)}
 for f in "$HOSTBIN" "$LIBS/lib/ld-musl-x86_64.so.1" "$LIBS/usr/lib/libgcc_s.so.1" "$OPK"; do
