@@ -13,6 +13,7 @@ import sync.atomic
 import sync.fdlock
 import sync.fqlock
 import arch.cpu
+import arch.arch
 import ipc.handle
 import mm.mmframe
 import ipc.mqueue
@@ -27,7 +28,7 @@ export {
     fd_of, fd_set, fd_alloc, fd_free, fd_take, FD_RESERVED,
     open_alloc, open_ref, open_unref, open_kind, open_ino, open_off,
     open_set_off, open_flags, open_set_flags, open_used, open_refs,
-    pipe_new, pipe_get, pipe_put, pipe_put_block, pipe_cap, pipe_room, pipe_bytes, pipe_writers,
+    pipe_new, pipe_get, pipe_put, pipe_put_block, pipe_put_span, pipe_get_span, pipe_cap, pipe_room, pipe_bytes, pipe_writers,
     pipe_readers, pipe_open_named, pipe_attach, pipe_drop, pipe_owner, pipe_find,
     K_FREE, K_FILE, K_DIR, K_CONIN, K_CONOUT, K_PIPER, K_PIPEW, K_FB,
     K_TTY, K_SOCK, K_VFILE, K_VDIR, K_USOCK, K_SHM, K_DRM, K_SYNC,
@@ -952,19 +953,65 @@ fn pipe_put_block(state: u64, i: u64, src: u64, len: u64) -> bool {
     let lf: u64 = fqlock.enter(state)
     var done: bool = false
     if pipe_room(state, i) >= len {
-        let w: u64 = kstate.get(state, ph_at(i) + PH_WRITE)
-        let base: u64 = state + kstate.PIPEBUF_OFF + pipe_base(i)
-        let cap: u64 = pipe_cap(i)
-        var k: u64 = 0
-        while k < len {
-            kstate.set8(base + ((w + k) % cap), kstate.get8(src + k) as u8)
-            k = k + 1
-        }
-        kstate.set(state, ph_at(i) + PH_WRITE, w + len)
+        pipe_ring_in(state, i, src, len)
         done = true
     }
     fqlock.leave(state, lf)
     return done
+}
+
+fn pipe_ring_in(state: u64, i: u64, src: u64, len: u64) {
+    let w: u64 = kstate.get(state, ph_at(i) + PH_WRITE)
+    let base: u64 = state + kstate.PIPEBUF_OFF + pipe_base(i)
+    let cap: u64 = pipe_cap(i)
+    let at: u64 = w % cap
+    var first: u64 = cap - at
+    if first > len {
+        first = len
+    }
+    arch.copy_octets(base + at, src, first)
+    if first < len {
+        arch.copy_octets(base, src + first, len - first)
+    }
+    kstate.set(state, ph_at(i) + PH_WRITE, w + len)
+}
+
+fn pipe_put_span(state: u64, i: u64, src: u64, len: u64) -> u64 {
+    let lf: u64 = fqlock.enter(state)
+    var n: u64 = pipe_room(state, i)
+    if n > len {
+        n = len
+    }
+    if n != 0 {
+        pipe_ring_in(state, i, src, n)
+    }
+    fqlock.leave(state, lf)
+    return n
+}
+
+fn pipe_get_span(state: u64, i: u64, dst: u64, len: u64) -> u64 {
+    let lf: u64 = fqlock.enter(state)
+    var n: u64 = pipe_bytes(state, i)
+    if n > len {
+        n = len
+    }
+    if n != 0 {
+        let r: u64 = kstate.get(state, ph_at(i) + PH_READ)
+        let base: u64 = state + kstate.PIPEBUF_OFF + pipe_base(i)
+        let cap: u64 = pipe_cap(i)
+        let at: u64 = r % cap
+        var first: u64 = cap - at
+        if first > n {
+            first = n
+        }
+        arch.copy_octets(dst, base + at, first)
+        if first < n {
+            arch.copy_octets(dst + first, base, n - first)
+        }
+        kstate.set(state, ph_at(i) + PH_READ, r + n)
+    }
+    fqlock.leave(state, lf)
+    return n
 }
 
 fn pipe_get(state: u64, i: u64) -> u64 {

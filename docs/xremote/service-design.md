@@ -31,3 +31,12 @@ No Android FreeViewer source or build exists on this server (searched /root/proj
 
 ## 4. Keyboard and mouse from the Windows viewer
 The Windows viewer sends keys as `KeyVk{vk,ext,down}`. The Osum host maps the virtual key to a PS/2 set-1 scancode (`src/osum/vk.rs` in the host repo; navigation keys follow the extended flag like real hardware, OEM keys assume the German layout) and injects it with `osum_tipp`. Special buttons: Ctrl+Alt+Del and the Windows key open the start menu (Super), Task Manager is Ctrl+Shift+Esc, Alt+Tab and Lock (Super+L) as chords. Gate: `XR_DESKTOP=1 XR_KEYTEST=keys|mouse bash tools/xremote/run.sh` (exact stroke count in the guest, centre-of-screen pixels, counter-proof with the old host: 0 strokes).
+
+## 6. Remote administrator prompts (21.11.2026)
+- Setting `remote.admin` (bool, critical, `/etc/xremote.conf admin`, default off; `xremote admin on|off`; Settings > Remote desktop switch). Only meaningful together with an authenticated viewer.
+- xremoted decides: host running AND `peer` in `/run/xremote.state` non-empty (the host writes it only after the viewer proved the password) -> tells the kernel with `osum_tipp(TI_REMOTE, host_pid, mode)` (root only; mode 0 off, 1 authenticated, 2 authenticated + admin allowed). Mode 2 only when `admin=1`.
+- Kernel (`kernel/ipc/tip.fi`): input injected by exactly that pid in mode 2 is recorded as `remote-authenticated` (separate guard timestamp); every other injection (ODB, bridge, jarvisd, host without admin mode) still sets the synthetic guard and the trusted dialog refuses it. Dialog shows `Fernsitzung: J/Y = Ja/Yes  N = Nein/No` while mode 2 is active; each answer within the remote guard writes `wm: trusted dialog answered by authenticated remote`. Emergency stop (`input off`, `tip.lock`) unchanged: TI_ARM is refused, so no injection at all.
+- Not built yet: QEMU gate with counter-probes (switch off -> refused, on + authenticated -> accepted, on + ODB -> refused).
+
+## 7. Resolution (viewer/host)
+- Host side is the OrientOS grab of the panel (native mode reported by the host); the viewer's fixed `1920x1080` list and a "follow client window" resize hint live in the FreeViewer client repo, not in this repository. See the report of w-store-fs-xremote.

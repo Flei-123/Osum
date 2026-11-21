@@ -26,7 +26,7 @@ import gfx.drm.drmread
 import gfx.drm.drmsync
 
 export {
-    ev_put_ts, ev_ticks, aio_cancel, aio_info, aio_run, aio_submit, aio_wait, do_events, do_nlsocket, do_poll, do_select, ev_number, nl_bind, nl_getsockopt, nl_of, nl_recvmsg, nl_sendmsg, nl_sockname
+    ev_put_ts, ev_ticks, aio_cancel, aio_info, aio_run, aio_submit, aio_wait, do_events, do_nlsocket, do_poll, do_ppoll_masked, do_pselect, do_select, ev_number, nl_bind, nl_getsockopt, nl_of, nl_recvmsg, nl_sendmsg, nl_sockname
 }
 
 const POLLIN: u64 = 1
@@ -680,6 +680,24 @@ fn aio_run(state: u64, i: u64) {
     async.post(state, i)
 }
 
+fn do_pselect(state: u64, me: u64, nfds: u64, rp: u64, wp: u64, ep: u64, tp: u64, sigarg: u64) -> u64 {
+    var maskp: u64 = 0
+    if sigarg != 0 && procfault.user_ok(state, me, sigarg, 16) {
+        maskp = sysuser.user_word(state, me, sigarg)
+    }
+    let swapped: bool = signal.mask_swap(state, me, maskp)
+    let result: u64 = do_select(state, me, nfds, rp, wp, ep, tp, 1)
+    signal.mask_swap_end(state, me, swapped, result)
+    return result
+}
+
+fn do_ppoll_masked(state: u64, me: u64, fds: u64, nfds: u64, tmo: u64, maskp: u64) -> u64 {
+    let swapped: bool = signal.mask_swap(state, me, maskp)
+    let result: u64 = do_poll(state, me, fds, nfds, tmo)
+    signal.mask_swap_end(state, me, swapped, result)
+    return result
+}
+
 // select / pselect6 (`wide` = 1: the timeout is a timespec, not a timeval): three bit sets of descriptors, one answer. Only descriptors below
 // MAX_FD can exist, so a set bit beyond that is -EBADF. The result sets hold what is ready; the count is the number of ready bits.
 fn do_select(state: u64, me: u64, nfds: u64, rp: u64, wp: u64, ep: u64, tp: u64, wide: u64) -> u64 {
@@ -1284,8 +1302,14 @@ fn do_events(state: u64, me: u64, n: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4
     if n == EV_EPOLL_CTL {
         return do_epoll_ctl(state, me, a0, a1 & 0xFFFFFFFF, a2, a3)
     }
-    if n == EV_EPOLL_WAIT || n == EV_EPOLL_PWAIT {
+    if n == EV_EPOLL_WAIT {
         return do_epoll_wait(state, me, a0, a1, a2, a3)
+    }
+    if n == EV_EPOLL_PWAIT {
+        let swapped: bool = signal.mask_swap(state, me, a4)
+        let epr: u64 = do_epoll_wait(state, me, a0, a1, a2, a3)
+        signal.mask_swap_end(state, me, swapped, epr)
+        return epr
     }
     if n == EV_EVENTFD {
         return do_eventfd(state, me, a0, 0)
