@@ -3,6 +3,7 @@
 import lib.kstate
 import sched.ctr
 import mm.fileshare
+import mm.bounce
 import mm.mmframe
 import mm.mmswap
 import sched.sched
@@ -81,18 +82,55 @@ fn lazy_file_pg(e: u64) -> u64 {
     return (e >> PTE_FILE_PAGE_SHIFT) & PTE_FILE_FIELD_MASK
 }
 
-fn lazy_file_cache_page(state: u64, ino: u64, pg: u64, wide: bool) -> u64 {
-    let seen: u64 = fileshare.epoch()
-    let frame: u64 = mmframe.frame_alloc_user_low(state)
-    if frame == 0 {
-        return 0
+fn read_into_frame(state: u64, ino: u64, off: u64, frame: u64, wide: bool) -> u64 {
+    if frame < mmframe.GIB {
+        if wide {
+            return prochooks.read_at_wide(state, ino, off, frame, mmframe.FRAME_SIZE)
+        }
+        return prochooks.read_at(state, ino, off, frame, mmframe.FRAME_SIZE)
+    }
+    var b: u64 = bounce.take(state)
+    while b == 0 {
+        sched.yield_now(state)
+        b = bounce.take(state)
     }
     var got: u64 = 0
     if wide {
-        got = prochooks.read_at_wide(state, ino, pg * mmframe.FRAME_SIZE, frame, mmframe.FRAME_SIZE)
+        got = prochooks.read_at_wide(state, ino, off, b, mmframe.FRAME_SIZE)
     } else {
-        got = prochooks.read_at(state, ino, pg * mmframe.FRAME_SIZE, frame, mmframe.FRAME_SIZE)
+        got = prochooks.read_at(state, ino, off, b, mmframe.FRAME_SIZE)
     }
+    if got > mmframe.FRAME_SIZE {
+        got = 0
+    }
+    var o: u64 = 0
+    let dst: u64 = mmframe.kva(frame)
+    while o + 8 <= got {
+        __mmio_write64((dst + o) as *mut u64, __mmio_read64((b + o) as *mut u64))
+        o = o + 8
+    }
+    while o < got {
+        __mmio_write8((dst + o) as *mut u8, __mmio_read8((b + o) as *mut u8))
+        o = o + 1
+    }
+    bounce.give(state, b)
+    return got
+}
+
+fn alloc_file_frame(state: u64) -> u64 {
+    if bounce.usable(state) {
+        return mmframe.frame_alloc_user(state)
+    }
+    return mmframe.frame_alloc_user_low(state)
+}
+
+fn lazy_file_cache_page(state: u64, ino: u64, pg: u64, wide: bool) -> u64 {
+    let seen: u64 = fileshare.epoch()
+    let frame: u64 = alloc_file_frame(state)
+    if frame == 0 {
+        return 0
+    }
+    let got: u64 = read_into_frame(state, ino, pg * mmframe.FRAME_SIZE, frame, wide)
     procmap.zero_tail(frame, got)
     let kept: u64 = fileshare.insert(state, ino, pg, frame, seen)
     if kept != frame {
@@ -109,7 +147,7 @@ fn lazy_file_private_frame(state: u64, ino: u64, pg: u64) -> u64 {
     if cached == 0 {
         return 0
     }
-    let frame: u64 = mmframe.frame_alloc_user_low(state)
+    let frame: u64 = alloc_file_frame(state)
     if frame != 0 {
         procswap.copy_frame_words(mmframe.kva(frame), mmframe.kva(cached))
     }
@@ -132,12 +170,12 @@ fn lazy_file_page(state: u64, cur: u64, page: u64, pt: u64, s: u64, e0: u64) -> 
     }
     if frame == 0 {
         let seen: u64 = fileshare.epoch()
-        frame = mmframe.frame_alloc_user_low(state)
+        frame = alloc_file_frame(state)
         if frame == 0 {
             return 0
         }
         owned = true
-        let got: u64 = prochooks.read_at(state, ino, pg * mmframe.FRAME_SIZE, frame, mmframe.FRAME_SIZE)
+        let got: u64 = read_into_frame(state, ino, pg * mmframe.FRAME_SIZE, frame, false)
         procmap.zero_tail(frame, got)
         if share {
             let kept: u64 = fileshare.insert(state, ino, pg, frame, seen)
@@ -232,6 +270,14 @@ fn lazy_file_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -
     return r != 0
 }
 
+fn release_swap_buffer(state: u64, tmp: u64, pooled: bool) {
+    if pooled {
+        bounce.give(state, tmp)
+        return
+    }
+    mmframe.frame_free(state, tmp)
+}
+
 fn swap_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -> bool {
     let e0: u64 = procpt.read_entry(pt, s)
     if (e0 & procbase.PAGE_USER) == 0 {
@@ -244,12 +290,25 @@ fn swap_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -> boo
         return false
     }
     let slot: u64 = procmap.swap_slot_of(e0)
-    var tmp: u64 = mmframe.frame_alloc_user_low(state)
-    if tmp == 0 {
-        let _r: u64 = procswap.swap_reclaim(state, cur, (err & 4) != 0)
+    let pooled: bool = bounce.usable(state)
+    var tmp: u64 = 0
+    if pooled {
+        if mmframe.frames_free(state) <= kstate.get(state, kstate.RESERVE_FRAMES) {
+            let _r: u64 = procswap.swap_reclaim(state, cur, (err & 4) != 0)
+        }
+        tmp = bounce.take(state)
+        while tmp == 0 {
+            sched.yield_now(state)
+            tmp = bounce.take(state)
+        }
+    } else {
         tmp = mmframe.frame_alloc_user_low(state)
         if tmp == 0 {
-            return false
+            let _r: u64 = procswap.swap_reclaim(state, cur, (err & 4) != 0)
+            tmp = mmframe.frame_alloc_user_low(state)
+            if tmp == 0 {
+                return false
+            }
         }
     }
     while mmswap.busy(slot) {
@@ -258,7 +317,7 @@ fn swap_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -> boo
     let got: u64 = prochooks.read_at(state, mmswap.inode(), slot * mmswap.SLOT_BYTES, tmp, mmframe.FRAME_SIZE)
     if got != mmframe.FRAME_SIZE {
         mmswap.count_fail()
-        mmframe.frame_free(state, tmp)
+        release_swap_buffer(state, tmp, pooled)
         return false
     }
     var ok: bool = false
@@ -283,7 +342,7 @@ fn swap_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -> boo
         }
     }
     mmlock.demand_unlock(state)
-    mmframe.frame_free(state, tmp)
+    release_swap_buffer(state, tmp, pooled)
     if ok {
         procspace.tlb_flush_if_current(state, cur)
     }
