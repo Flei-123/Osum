@@ -12,6 +12,7 @@ import lib.errno
 import fs.file
 import fs.evfd
 import fs.fanotify
+import fs.infire
 import libc.regio
 import ipc.uio
 import ipc.handle
@@ -90,13 +91,18 @@ fn fan_modified(state: u64, me: u64, fd: u64) {
     }
     let kind: u64 = file.open_kind(state, of)
     if kind == file.K_FILE || kind == file.K_VFILE {
-        fanotify.wrote(state, of, fanotify.pid_of(state, me))
+        if fanotify.live() {
+            fanotify.wrote(state, of, fanotify.pid_of(state, me))
+        }
+        if infire.live() {
+            infire.wrote(state, of)
+        }
     }
 }
 
 fn do_write(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
     let r: u64 = write_checked(state, me, fd, buf, want)
-    if fanotify.live() && (r >> 63) == 0 && r != 0 {
+    if (fanotify.live() || infire.live()) && (r >> 63) == 0 && r != 0 {
         fan_modified(state, me, fd)
     }
     return r
@@ -251,13 +257,13 @@ fn shm_io(state: u64, me: u64, of: u64, buf: u64, len: u64, wr: bool) -> u64 {
             }
             var k: u64 = 0
             while k < chunk {
-                kstate.set8(fr + po + k, kstate.get8(bounce + k) as u8)
+                kstate.set8(mmframe.kva(fr) + po + k, kstate.get8(bounce + k) as u8)
                 k = k + 1
             }
         } else {
             var k: u64 = 0
             while k < chunk {
-                kstate.set8(bounce + k, kstate.get8(fr + po + k) as u8)
+                kstate.set8(bounce + k, kstate.get8(mmframe.kva(fr) + po + k) as u8)
                 k = k + 1
             }
             if !sysuser.copy_out(state, me, buf + done, bounce, chunk) {
@@ -1115,8 +1121,13 @@ fn do_open_mode(state: u64, me: u64, name: u64, flags: u64, mode: u64) -> u64 {
         return sysuser.neg(errno.E_NOENT)
     }
     let opened: u64 = open_named(state, me, buf, len, flags, mode)
-    if fanotify.live() && !errno.is_error(opened) {
-        fanotify.opened(state, sysuser.of_of(state, me, opened), fanotify.pid_of(state, me), buf, len, flags)
+    if !errno.is_error(opened) {
+        if fanotify.live() {
+            fanotify.opened(state, sysuser.of_of(state, me, opened), fanotify.pid_of(state, me), buf, len, flags)
+        }
+        if infire.live() {
+            infire.opened(state, sysuser.of_of(state, me, opened), buf, len, flags)
+        }
     }
     return opened
 }
@@ -1449,7 +1460,7 @@ fn do_writev(state: u64, me: u64, fd: u64, iov: u64, n: u64, writing: bool) -> u
         let of: u64 = file.fd_check(state, me, fd, handle.R_WRITE)
         if of < file.MAX_OPEN && file_like(file.open_kind(state, of)) {
             let staged: u64 = writev_staged(state, me, of, iov, n)
-            if fanotify.live() && (staged >> 63) == 0 && staged != 0 {
+            if (fanotify.live() || infire.live()) && (staged >> 63) == 0 && staged != 0 {
                 fan_modified(state, me, fd)
             }
             return staged

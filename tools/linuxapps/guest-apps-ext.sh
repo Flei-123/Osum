@@ -141,8 +141,26 @@ t sshd-connect hello sh /tmp/p-ssh.sh
 t redis-tcp PONG sh -c 'redis-server --port 6390 --bind 127.0.0.1 --save "" > /tmp/r2.log 2>&1 & sleep 3; redis-cli -p 6390 ping; redis-cli -p 6390 set k v; redis-cli -p 6390 get k; redis-cli -p 6390 shutdown nosave'
 t redis-setget v sh -c 'redis-server --port 0 --unixsocket /tmp/r3.sock --save "" > /tmp/r3.log 2>&1 & sleep 3; redis-cli -s /tmp/r3.sock set k v; redis-cli -s /tmp/r3.sock get k; redis-cli -s /tmp/r3.sock shutdown nosave'
 t ninja-build built sh -c 'cd /tmp && rm -rf nj && mkdir nj && cd nj && printf "int main(){return 0;}\n" > a.c && printf "rule cc\n  command = gcc -o a a.c\nbuild a: cc a.c\n" > build.ninja && ninja && echo built'
+t node-http ok node -e 'const h=require("http");const s=h.createServer((q,r)=>r.end("ok")).listen(0,"127.0.0.1",()=>{h.get({port:s.address().port,host:"127.0.0.1"},r=>{let d="";r.on("data",c=>d+=c);r.on("end",()=>{console.log(d);s.close()})})})'
+t node-child ok node -e 'const c=require("child_process");console.log(c.execSync("echo ok").toString().trim())'
+t node-worker ok sh -c 'printf "const w=require(\"worker_threads\");if(w.isMainThread){new w.Worker(__filename).on(\"exit\",()=>console.log(\"ok\"))}\n" > /tmp/wk.js && node /tmp/wk.js'
+t node-crypto ok node -e 'const c=require("crypto");console.log(c.createHash("sha256").update("a").digest("hex").length==64?"ok":"no")'
+t node-zlib ok node -e 'const z=require("zlib");console.log(z.gunzipSync(z.gzipSync("ok")).toString())'
+t node-watch ok node -e 'const fs=require("fs");fs.writeFileSync("/tmp/w.txt","a");const w=fs.watch("/tmp/w.txt",()=>{console.log("ok");w.close();process.exit(0)});setTimeout(()=>fs.appendFileSync("/tmp/w.txt","b"),100);setTimeout(()=>process.exit(1),3000)'
+t python-bind-zero ok python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));s.listen(511);print("ok" if s.getsockname()[1]>0 else "no")'
+t python-epoll ok python3 -c 'import select,os;e=select.epoll();r,w=os.pipe();e.register(r,select.EPOLLIN);os.write(w,b"x");print("ok" if e.poll(1) else "no")'
+t python-shm ok python3 -c 'from multiprocessing import shared_memory as s;m=s.SharedMemory(create=True,size=64);m.buf[0]=1;m.close();m.unlink();print("ok")'
+t python-mmap ok python3 -c 'import mmap;m=mmap.mmap(-1,8192);m[0:2]=b"ok";print(m[0:2].decode())'
+t gcc-openmp ok sh -c 'cd /tmp && printf "#include <omp.h>\n#include <stdio.h>\nint main(){\n#pragma omp parallel\n{}\nputs(\"ok\");return 0;}\n" > o.c && gcc -fopenmp o.c -o o && ./o'
+t sqlite-wal ok sh -c 'rm -f /tmp/w.db* && sqlite3 /tmp/w.db "pragma journal_mode=wal; create table t(a); insert into t values(1);" >/dev/null && sqlite3 /tmp/w.db "select count(*) from t" | grep -q 1 && echo ok'
+t make-parallel ok sh -c 'cd /tmp && printf "a:\n\t@echo ok\nb:\n\t@echo b\nall: a b\n" > Mk && make -j4 -f Mk all | grep -q ok && echo ok'
+t ipcs-all Semaphore ipcs -a
+t lscpu-run Architecture lscpu
+t lsns-run NS lsns
+t lsmem-run RANGE lsmem
+t unshare-user ok sh -c 'unshare -r echo ok'
+t bwrap-run hi bwrap --bind / / --dev /dev echo hi
 echo APPS-END
-echo FX-END
 t proc-iomem 'System RAM' cat /proc/iomem
 t proc-zoneinfo 'Node 0, zone' cat /proc/zoneinfo
 t proc-softirqs TIMER cat /proc/softirqs
@@ -151,3 +169,11 @@ t perl-creat-syscall ok perl -e 'my $p="/tmp/cr.pl"; my $fd=syscall(85,$p,420); 
 t proc-smaps VmFlags cat /proc/self/smaps
 t proc-pressure 'some avg10' cat /proc/pressure/cpu
 t futex-waitv-einval '^-1:22' perl -e 'my ($a,$b,$c,$d,$e)=(0,0,0,0,0); my $r=syscall(449,$a,$b,$c,$d,$e); print "$r:".($!+0)."\n"'
+APP_TMO=400
+t gcc-static-hello hello-static sh -c 'cd /tmp && printf "#include <stdio.h>\nint main(){puts(\"hello-static\");return 0;}\n" > hs.c && gcc -static -o hs hs.c && ./hs'
+t gcc-static-pthread 8 sh -c 'cd /tmp && printf "#include <pthread.h>\n#include <stdio.h>\nint c;pthread_mutex_t m=PTHREAD_MUTEX_INITIALIZER;void*w(void*a){pthread_mutex_lock(&m);c++;pthread_mutex_unlock(&m);return 0;}\nint main(){pthread_t t[8];for(int i=0;i<8;i++)pthread_create(&t[i],0,w,0);for(int i=0;i<8;i++)pthread_join(t[i],0);printf(\"%%d\",c);return 0;}\n" > st.c && gcc -static -O2 -pthread -o st st.c && ./st; echo'
+t gpp-hello hello-cpp sh -c 'cd /tmp && printf "#include <iostream>\nint main(){std::cout<<\"hello-cpp\"<<std::endl;return 0;}\n" > h.cc && g++ -o hcc h.cc && ./hcc'
+t gpp-stl 5:15 sh -c 'cd /tmp && printf "#include <vector>\n#include <map>\n#include <string>\n#include <algorithm>\n#include <iostream>\nint main(){std::vector<int> v{5,3,1,4,2};std::sort(v.begin(),v.end());std::map<std::string,int> m;m[\"a\"]=v[0];int s=0;for(int x:v)s+=x;std::cout<<v.size()<<\":\"<<s<<std::endl;return 0;}\n" > stl.cc && g++ -std=c++17 -O2 -o stl stl.cc && ./stl'
+t gpp-threads 8 sh -c 'cd /tmp && printf "#include <thread>\n#include <mutex>\n#include <vector>\n#include <iostream>\nint main(){std::mutex m;int c=0;std::vector<std::thread> t;for(int i=0;i<8;i++)t.emplace_back([&]{std::lock_guard<std::mutex> g(m);c++;});for(auto&x:t)x.join();std::cout<<c<<std::endl;return 0;}\n" > th.cc && g++ -std=c++17 -pthread -o th th.cc && ./th'
+t gpp-static-exceptions caught sh -c 'cd /tmp && printf "#include <stdexcept>\n#include <iostream>\nint main(){try{throw std::runtime_error(\"x\");}catch(std::exception&e){std::cout<<\"caught\"<<std::endl;}return 0;}\n" > ex.cc && g++ -static -o ex ex.cc && ./ex'
+echo FX-END

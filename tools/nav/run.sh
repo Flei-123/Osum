@@ -67,6 +67,7 @@ P
 echo "== 3. mutations =="
 mut() { # file old new label
     local d="$T/m"; rm -rf "$d"; mkdir -p "$d/nav"; cp lib/nav/*.fi "$d/nav/"
+    local e; for e in "$ROOT"/lib/*; do [ "$(basename "$e")" = nav ] || ln -s "$e" "$d/"; done
     if ! python3 -I - "$d/nav/$1" "$2" "$3" <<'P'
 import sys
 p,a,b=sys.argv[1:4]
@@ -84,7 +85,7 @@ mut reg.fi 'hit = route.is_prefix(ru, rl, p, n)' 'hit = route.same_path(ru, rl, 
 mut reg.fi '&& f / F_HIDDEN % 2 == 0' '' "hidden routes in sidebar"
 mut reg.fi 'if r_flags[(par) as usize] / F_DYNAMIC % 2 == 1 {' 'if false {' "child under dynamic route allowed"
 mut route.fi 'if l == 0 && e > st {' 'if l == 99 && e > st {' "empty segment accepted"
-mut route.fi 'if rd(b, ea) == 47 {' 'if rd(b, ea) != 0 {' "prefix without segment boundary"
+mut route.fi 'if octets.ld8(b, ea) == 47 {' 'if octets.ld8(b, ea) != 0 {' "prefix without segment boundary"
 mut stack.fi 'cnt[(h) as usize] = at + 1' 'cnt[(h) as usize] = cnt[(h) as usize] + 1' "forward tail kept on push"
 mut stack.fi 'at = CAP - 1' 'at = CAP - 2' "full stack drops wrong end"
 mut stack.fi 'if route.same_path(current(h), current_len(h), p, n) {' 'if false {' "same route pushed twice"
@@ -96,8 +97,8 @@ mut loader.fi 'if !dir_matches(1) {' 'if false {' "package may speak for another
 mut loader.fi '        reg.txn_rollback()
         return ERR' '        return ERR' "rejected file leaves routes behind"
 mut crumbs.fi 'if used + sep + w > avail {' 'if used + sep + w >= avail {' "crumb fit off by one"
-mut route.fi 'if !is_hex(rd(p, i + 1)) || !is_hex(rd(p, i + 2)) {
-                    return false' 'if !is_hex(rd(p, i + 1)) && !is_hex(rd(p, i + 2)) {
+mut route.fi 'if !is_hex(octets.ld8(p, i + 1)) || !is_hex(octets.ld8(p, i + 2)) {
+                    return false' 'if !is_hex(octets.ld8(p, i + 1)) && !is_hex(octets.ld8(p, i + 2)) {
                     return false' "half valid percent escape accepted"
 
 echo "NAV: $pass passed, $fail failed"

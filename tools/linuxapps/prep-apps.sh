@@ -15,4 +15,4 @@ python3 -I "$HERE/mkroot.py" "$WD/root" "$WD/run/spec.txt" --base \
     --tree /usr/lib --tree /usr/libexec --tree /usr/share/terminfo --tree /usr/share/vim --tree /usr/share/misc \
     --tree /usr/share/mime --tree /usr/share/icu --tree /usr/share/fonts --tree /usr/share/X11 --tree /usr/share/git-core \
     --tree /usr/share/perl5 --tree /usr/share/cmake --tree /usr/share/ImageMagick-7 --tree /usr/share/lua --tree /usr/share/screen --tree /usr/share/nginx --tree /usr/share/zoneinfo --tree /usr/share/foot --tree /usr/include --tree /etc/ssl $(for t in ${APP_TREES:-}; do printf -- '--tree %s ' "$t"; done) \
-    --skip /usr/lib/libc.a
+    --skip /usr/lib/gcc/x86_64-alpine-linux-musl/15.2.0/plugin

@@ -33,6 +33,7 @@ KVM=(); [ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)
 SMP=${SMP:-1}
 SMP_t_nopie_stress=${SMP_t_nopie_stress:-4}
 SMP_t_loopboot=${SMP_t_loopboot:-4}
+UB_MEM_t_shmhigh=${UB_MEM_t_shmhigh:-3072}
 TMO=${TMO:-150}
 export FIRNLIB="$ROOT/lib"
 
@@ -135,8 +136,8 @@ run_all() { # run_all <kernel> <disk> <tag>
     for t in $TESTS; do
         local ka="" na=""
         case "$t" in t_events|t_udpnet|t_netlink|t_tcploop) ka="nic nip=10.0.2.15/24 ngw=10.0.2.2"; na="-netdev user,id=n0 -device virtio-net-pci,netdev=n0";; t_wakelat|t_pollmulti|t_nbsock|t_procnet|t_ioctl) ka="nic nip=10.0.2.15/24 ngw=10.0.2.2"; na="-netdev user,id=n0,guestfwd=tcp:10.0.2.100:7777-cmd:cat -device virtio-net-pci,netdev=n0";; esac
-        local t0=$SECONDS tv="TMO_$t" sv="SMP_$t"
-        SMP=${!sv:-$SMP} TMO=${!tv:-$TMO} KARGS="$ka ${KARGS_EXTRA:-}" NETARGS="$na" boot "$1" "$2" "/bin/$t" "$D/$3-$t.ser"; rc=$?
+        local t0=$SECONDS tv="TMO_$t" sv="SMP_$t" mv="UB_MEM_$t"
+        UB_MEM=${!mv:-${UB_MEM:-512}} SMP=${!sv:-$SMP} TMO=${!tv:-$TMO} KARGS="$ka ${KARGS_EXTRA:-}" NETARGS="$na" boot "$1" "$2" "/bin/$t" "$D/$3-$t.ser"; rc=$?
         local el=$((SECONDS-t0))
         grep -a '^T ' "$D/$3-$t.ser" 2>/dev/null | awk '!seen[$2]++' > "$D/$3-$t.res" || : > "$D/$3-$t.res"
         printf '        %-12s %3d checks   (qemu rc=%s, %ss)\n' "$t" "$(wc -l < "$D/$3-$t.res")" "$rc" "$el"

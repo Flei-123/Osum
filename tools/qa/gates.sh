@@ -5,7 +5,7 @@
 #   gates.sh --changed [--base REF] [--level quick|full|nightly] [--run] [--jobs N] [--keep]
 #   gates.sh --changed --only tokens,softui --run     explicit gates, same runner + classification
 #   gates.sh --list [--level L]       manifest table (tools/qa/gates.tsv)
-#   gates.sh --check                  manifest vs tools/*/run.sh (new gate without a row = error)
+#   gates.sh --check                  manifest vs tools/*/run.sh + tools/qa/runners.tsv (new gate without a row = error)
 #   gates.sh --times                  last measured wall time per gate (from earlier --run)
 #
 # --changed prints the gates for the files changed against BASE (default
@@ -79,14 +79,54 @@ rm -f "$CH.eng"
 OUT=$(mktemp -d); mkdir -p "$(dirname "$TIMES")"
 trap 'rm -f "$CH"; [[ $KEEP -eq 1 ]] && echo "logs kept in $OUT" || rm -rf "$OUT"' EXIT
 
+RUNNERS=$QA/runners.tsv
+SKIP_RC=125
+
+runner_field() { # gate field(2=command,3=requires)
+    awk -F'\t' -v g="$1" -v f="$2" 'NR>1 && $1==g {print $f; exit}' "$RUNNERS"
+}
+
+runner_command() { # gate
+    local c; c=$(runner_field "$1" 2)
+    [[ -n $c ]] && printf '%s' "$c" || printf 'bash tools/%s/run.sh' "$1"
+}
+
+redcheck_key() { # gate: script path under tools/ without .sh
+    local k
+    k=$(runner_command "$1" | grep -oE 'tools/[A-Za-z0-9_./-]+\.sh' | head -1)
+    [[ -n $k ]] && k=${k#tools/} && printf '%s' "${k%.sh}" || printf '%s/run' "$1"
+}
+
+missing_input() { # gate: first unmet requirement or empty
+    local r; r=$(runner_field "$1" 3)
+    local item name
+    for item in ${r//,/ }; do
+        case $item in
+            -) ;;
+            env:*) name=${item#env:}; [[ -n ${!name:-} ]] || { printf '%s' "$item"; return; } ;;
+            *) [[ -e $item ]] || { printf '%s' "$item"; return; } ;;
+        esac
+    done
+}
+
 run_one() { # gate
-    local g=$1 t0 t1 rc
+    local g=$1 t0 t1 rc cmd miss
     t0=$(date +%s)
-    if [[ -x $HEAVY ]]; then "$HEAVY" bash "tools/$g/run.sh" > "$OUT/$g.log" 2>&1; rc=$?
-    else bash "tools/$g/run.sh" > "$OUT/$g.log" 2>&1; rc=$?; fi
+    cmd=$(runner_command "$g")
+    miss=$(missing_input "$g")
+    if [[ $cmd == "-" ]]; then
+        echo "no runner (documentation row)" > "$OUT/$g.log"; rc=$SKIP_RC
+    elif [[ -n $miss ]]; then
+        echo "missing input: $miss" > "$OUT/$g.log"; rc=$SKIP_RC
+    else
+        mkdir -p "$OUT/$g.dir"
+        cmd=${cmd//@OUT@/$OUT/$g.dir}
+        if [[ -x $HEAVY ]]; then "$HEAVY" bash -c "$cmd" > "$OUT/$g.log" 2>&1; rc=$?
+        else bash -c "$cmd" > "$OUT/$g.log" 2>&1; rc=$?; fi
+    fi
     t1=$(date +%s)
     echo "$rc" > "$OUT/$g.rc"
-    printf '%s\t%d\t%s\t%s\n' "$g" $((t1 - t0)) "$(date +%F)" "rc=$rc" >> "$TIMES"
+    [[ $rc -eq $SKIP_RC ]] || printf '%s\t%d\t%s\t%s\n' "$g" $((t1 - t0)) "$(date +%F)" "rc=$rc" >> "$TIMES"
 }
 for g in "${SEL[@]}"; do
     while (( $(jobs -rp | wc -l) >= JOBS )); do wait -n 2>/dev/null || break; done
@@ -94,12 +134,15 @@ for g in "${SEL[@]}"; do
 done
 wait
 
-new_total=0
+new_total=0; skipped=0
 for g in "${SEL[@]}"; do
     rc=$(cat "$OUT/$g.rc" 2>/dev/null || echo 99)
     echo "== $g (exit $rc) =="
-    bash $QA/redcheck.sh "$g/run" "$OUT/$g.log" "$rc" | sed 's/^/   /' || new_total=$((new_total + 1))
+    if [[ $rc -eq $SKIP_RC ]]; then
+        echo "   SKIP: $(head -1 "$OUT/$g.log")"; skipped=$((skipped + 1)); continue
+    fi
+    bash $QA/redcheck.sh "$(redcheck_key "$g")" "$OUT/$g.log" "$rc" | sed 's/^/   /' || new_total=$((new_total + 1))
     tail -2 "$OUT/$g.log" | sed 's/^/   | /'
 done
-echo "gates: ${#SEL[@]} run, $new_total with NEW red"
+echo "gates: ${#SEL[@]} selected, $skipped skipped, $new_total with NEW red"
 [[ $new_total -eq 0 ]]

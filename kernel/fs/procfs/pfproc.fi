@@ -10,6 +10,8 @@ import fs.file
 import fs.unixsock
 import arch.x86_64.guard
 import diag.hwid
+import diag.shmdiag
+import mm.mmframe
 import net.inet
 import klog
 import lib.kstate
@@ -249,6 +251,39 @@ fn make_meminfo(state: u64) -> u64 {
     p = w_str(state, p, (&t9[0]) as u64)
     p = w_num(state, p, unixsock.USOCK_MAX)
     p = w_nl(state, p)
+    return make_meminfo_shmfail(state, p)
+}
+
+fn make_meminfo_shmfail(state: u64, at: u64) -> u64 {
+    var f_free: [u8; 17] = "FramesFreeLow: \0\0"
+    var f_memfd: [u8; 17] = "ShmFailMemfd:  \0\0"
+    var f_trunc: [u8; 17] = "ShmFailTruncate:\0"
+    var f_mmap: [u8; 17] = "ShmFailMmap:   \0\0"
+    var f_scm: [u8; 17] = "ShmFailScm:    \0\0"
+    var f_errno: [u8; 17] = "ShmFailErrno:  \0\0"
+    var f_lowat: [u8; 17] = "ShmFailFreeLow:\0\0"
+    var p: u64 = at
+    p = w_str(state, p, (&f_free[0]) as u64)
+    p = w_num(state, p, mmframe.free_low(state))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&f_memfd[0]) as u64)
+    p = w_num(state, p, shmdiag.count(shmdiag.OP_MEMFD))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&f_trunc[0]) as u64)
+    p = w_num(state, p, shmdiag.count(shmdiag.OP_TRUNCATE))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&f_mmap[0]) as u64)
+    p = w_num(state, p, shmdiag.count(shmdiag.OP_MMAP))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&f_scm[0]) as u64)
+    p = w_num(state, p, shmdiag.count(shmdiag.OP_SCM))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&f_errno[0]) as u64)
+    p = w_num(state, p, shmdiag.last_errno())
+    p = w_nl(state, p)
+    p = w_str(state, p, (&f_lowat[0]) as u64)
+    p = w_num(state, p, shmdiag.last_free_low())
+    p = w_nl(state, p)
     return p
 }
 
@@ -461,8 +496,8 @@ fn make_uptime(state: u64) -> u64 {
 }
 
 fn source_text(state: u64, at: u64, m: u64) -> u64 {
-    var t_proc: [u8; 6] = "proc \0"
-    var t_dev: [u8; 7] = "devfs \0"
+    var t_proc: [u8; 6] = "proc\0\0"
+    var t_dev: [u8; 7] = "devfs\0\0"
     let t: u64 = mnt.fstype(state, m)
     if t == vfsops.FS_PROC {
         return w_str(state, at, (&t_proc[0]) as u64)
@@ -496,8 +531,8 @@ fn dev_text(state: u64, at: u64, dev: u64) -> u64 {
 
 fn type_text(state: u64, at: u64, t: u64) -> u64 {
     var t_ofs: [u8; 4] = "ofs\0"
-    var t_proc: [u8; 6] = "proc \0"
-    var t_dev: [u8; 7] = "devfs \0"
+    var t_proc: [u8; 6] = "proc\0\0"
+    var t_dev: [u8; 7] = "devfs\0\0"
     var t_fat: [u8; 6] = "vfat\0\0"
     var t_none: [u8; 5] = "none\0"
     if t == vfsops.FS_OFS {
@@ -1054,6 +1089,16 @@ fn make_pstat(state: u64, t: u64) -> u64 {
     return p
 }
 
+const CMD_NO_BYTE: u64 = 256
+
+fn cmd_byte(state: u64, t: u64, addr: u64) -> u64 {
+    let frame: u64 = procmap.translate(state, t, addr & 0xFFFFFFFFFFFFF000)
+    if frame == 0 {
+        return CMD_NO_BYTE
+    }
+    return kstate.get8(frame + (addr & 4095))
+}
+
 fn make_cmdline(state: u64, t: u64) -> u64 {
     var p: u64 = 0
     let frame: u64 = procmap.translate(state, t, procspace.ARGS_BASE)
@@ -1062,21 +1107,22 @@ fn make_cmdline(state: u64, t: u64) -> u64 {
     }
     guard.stac(state)
     let argc: u64 = __mmio_read64(frame as *mut u64)
-    if argc == 0 || argc > procbase.MAX_ARGS {
+    if argc == 0 || argc > procbase.MAX_NATIVE_ARGS {
         guard.clac(state)
         return 0
     }
+    let low: u64 = procspace.ARGS_BASE - procbase.EXEC_TOTAL_MAX
     var k: u64 = 0
     while k < argc {
         let ptr: u64 = __mmio_read64((frame + 8 + k * 8) as *mut u64)
-        if ptr < procspace.ARGS_BASE || ptr >= procspace.ARGS_BASE + 4096 {
+        if ptr < low || ptr >= procspace.ARGS_BASE + 4096 {
             k = argc
         } else {
-            var at: u64 = frame + (ptr - procspace.ARGS_BASE)
+            var at: u64 = ptr
             var going: bool = true
             while going {
-                let c: u64 = kstate.get8(at)
-                if c == 0 || at >= frame + 4096 {
+                let c: u64 = cmd_byte(state, t, at)
+                if c == 0 || c == CMD_NO_BYTE || at >= procspace.ARGS_BASE + 4096 {
                     going = false
                 } else {
                     p = w_ch(state, p, c)

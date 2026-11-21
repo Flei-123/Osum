@@ -1,0 +1,108 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import fs.pathseg
+import fs.procfs.pfproc
+import fs.procfs.pfsys
+
+export { K_NSDIR, K_NSLINK, COUNT, dir_node, child, lookup, render, nstype }
+
+const K_NSDIR: u64 = 11
+const K_NSLINK: u64 = 12
+const COUNT: u64 = 8
+const NAME_MAX: u64 = 24
+const NEWLINE: u64 = 10
+const COLON: u64 = 58
+const OPEN_BRACKET: u64 = 91
+const CLOSE_BRACKET: u64 = 93
+
+static mut ns_names: [u8; 37] = b"cgroup\x0aipc\x0amnt\x0anet\x0apid\x0atime\x0auser\x0auts\x0a"
+static mut ns_types: [u64; 8] = [0x02000000, 0x08000000, 0x00020000, 0x40000000, 0x20000000, 0x00000080, 0x10000000, 0x04000000]
+static mut ns_ids: [u64; 8] = [4026531835, 4026531839, 4026531840, 4026531992, 4026531836, 4026531834, 4026531837, 4026531838]
+
+fn link_node(index: u64) -> u64 {
+    return pfproc.node(K_NSLINK, 0, index)
+}
+
+fn dir_node(slot: u64) -> u64 {
+    return pfproc.node(K_NSDIR, slot, 0)
+}
+
+fn name_start(index: u64) -> u64 {
+    let table: u64 = (&ns_names[0]) as u64
+    var at: u64 = 0
+    var skip: u64 = index
+    while skip > 0 {
+        while kstate.get8(table + at) != NEWLINE {
+            at = at + 1
+        }
+        at = at + 1
+        skip = skip - 1
+    }
+    return table + at
+}
+
+fn copy_name(index: u64, out: u64) {
+    let src: u64 = name_start(index)
+    var i: u64 = 0
+    while kstate.get8(src + i) != NEWLINE {
+        kstate.set8(out + i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(out + i, 0 as u8)
+}
+
+fn child(index: u64, out: u64) -> u64 {
+    if index >= COUNT {
+        return 0
+    }
+    copy_name(index, out)
+    return link_node(index)
+}
+
+fn index_of(name: u64) -> u64 {
+    var tmp: [u8; 24] = [0 as u8; 24]
+    var i: u64 = 0
+    while i < COUNT {
+        copy_name(i, (&tmp[0]) as u64)
+        if pfsys.streq(name, (&tmp[0]) as u64) {
+            return i
+        }
+        i = i + 1
+    }
+    return COUNT
+}
+
+fn lookup(path: u64, at: u64, slot: u64) -> u64 {
+    var seg: [u8; 24] = [0 as u8; 24]
+    pathseg.segment(path, at, (&seg[0]) as u64, NAME_MAX)
+    if kstate.get8((&seg[0]) as u64) == 0 {
+        return dir_node(slot)
+    }
+    let index: u64 = index_of((&seg[0]) as u64)
+    if index >= COUNT {
+        return 0
+    }
+    return link_node(index)
+}
+
+fn render(state: u64, index: u64) -> u64 {
+    if index >= COUNT {
+        return 0
+    }
+    var tmp: [u8; 24] = [0 as u8; 24]
+    copy_name(index, (&tmp[0]) as u64)
+    var p: u64 = pfproc.w_str(state, 0, (&tmp[0]) as u64)
+    p = pfproc.w_ch(state, p, COLON)
+    p = pfproc.w_ch(state, p, OPEN_BRACKET)
+    p = pfproc.w_num(state, p, ns_ids[index as usize])
+    return pfproc.w_ch(state, p, CLOSE_BRACKET)
+}
+
+fn nstype(node: u64) -> u64 {
+    if pfproc.n_art(node) != K_NSLINK || pfproc.n_sub(node) >= COUNT {
+        return 0
+    }
+    return ns_types[pfproc.n_sub(node) as usize]
+}

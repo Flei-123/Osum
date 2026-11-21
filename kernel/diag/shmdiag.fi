@@ -1,0 +1,194 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import klog
+import lib.kstate
+import lib.errno
+import mm.mmframe
+import fs.file
+import fs.unixsock
+import libc.regio
+
+export { after, count, total, last_op, last_errno, last_free_low, OP_MEMFD, OP_TRUNCATE, OP_MMAP, OP_SCM, OP_COUNT }
+
+const OP_NONE: u64 = 99
+const OP_MEMFD: u64 = 0
+const OP_TRUNCATE: u64 = 1
+const OP_MMAP: u64 = 2
+const OP_SCM: u64 = 3
+const OP_COUNT: u64 = 4
+
+const SYS_MMAP: u64 = 9
+const SYS_FTRUNCATE: u64 = 77
+const SYS_RECVMSG: u64 = 47
+const SYS_SENDMSG: u64 = 46
+const SYS_MEMFD_CREATE: u64 = 319
+const SYS_SENDMMSG: u64 = 307
+const SYS_RECVMMSG: u64 = 299
+
+const F_RSI: u64 = 80
+const F_R10: u64 = 64
+const F_RDI: u64 = 88
+const MAP_TYPE_MASK: u64 = 3
+const MAP_SHARED: u64 = 1
+const ERR_BASE: u64 = 0xFFFFFFFFFFFFF000
+const ERRNO_RANGE: u64 = 4096
+const LOG_FIRST: u64 = 16
+const LOG_EVERY: u64 = 64
+const LINE_BYTES: u64 = 96
+
+static mut counts: [u64; 4] = [0 as u64; 4]
+static mut seen_total: u64 = 0
+static mut seen_op: u64 = 0
+static mut seen_errno: u64 = 0
+static mut seen_free_low: u64 = 0
+static mut q_src: [u8; 8] = "shmdiag\0"
+
+fn count(op: u64) -> u64 {
+    if op >= OP_COUNT {
+        return 0
+    }
+    return counts[op as usize]
+}
+
+fn total() -> u64 {
+    return seen_total
+}
+
+fn last_op() -> u64 {
+    return seen_op
+}
+
+fn last_errno() -> u64 {
+    return seen_errno
+}
+
+fn last_free_low() -> u64 {
+    return seen_free_low
+}
+
+fn resource_errno(e: u64) -> bool {
+    return e == errno.E_NOMEM || e == errno.E_NFILE || e == errno.E_MFILE || e == errno.E_FBIG || e == errno.E_NOSPC || e == 105
+}
+
+fn shm_fd(state: u64, me: u64, fd: u64) -> bool {
+    let of: u64 = file.fd_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return false
+    }
+    return file.open_kind(state, of) == file.K_SHM
+}
+
+fn classify(state: u64, me: u64, frame: u64, number: u64, e: u64) -> u64 {
+    if !resource_errno(e) {
+        return OP_NONE
+    }
+    if number == SYS_MEMFD_CREATE {
+        return OP_MEMFD
+    }
+    if number == SYS_FTRUNCATE && shm_fd(state, me, regio.read64_at(frame, F_RDI)) {
+        return OP_TRUNCATE
+    }
+    if number == SYS_MMAP {
+        let flags: u64 = regio.read64_at(frame, F_R10)
+        if (flags & MAP_TYPE_MASK) != MAP_SHARED {
+            return OP_NONE
+        }
+        return OP_MMAP
+    }
+    if number == SYS_SENDMSG || number == SYS_RECVMSG || number == SYS_SENDMMSG || number == SYS_RECVMMSG {
+        return OP_SCM
+    }
+    return OP_NONE
+}
+
+fn put_str(dst: u64, at: u64, s: u64) -> u64 {
+    var p: u64 = at
+    var i: u64 = 0
+    while i < LINE_BYTES {
+        let c: u64 = kstate.get8(s + i)
+        if c == 0 {
+            break
+        }
+        p = klog.put_ch(dst, p, c)
+        i = i + 1
+    }
+    return p
+}
+
+fn put_op_name(dst: u64, at: u64, op: u64) -> u64 {
+    var n_memfd: [u8; 6] = "memfd\0"
+    var n_trunc: [u8; 10] = "ftruncate\0"
+    var n_mmap: [u8; 5] = "mmap\0"
+    var n_scm: [u8; 4] = "scm\0"
+    if op == OP_MEMFD {
+        return put_str(dst, at, (&n_memfd[0]) as u64)
+    }
+    if op == OP_TRUNCATE {
+        return put_str(dst, at, (&n_trunc[0]) as u64)
+    }
+    if op == OP_MMAP {
+        return put_str(dst, at, (&n_mmap[0]) as u64)
+    }
+    return put_str(dst, at, (&n_scm[0]) as u64)
+}
+
+fn log_line(state: u64, op: u64, e: u64, len: u64, free_low: u64) {
+    var line: [u8; 96] = [0 as u8; 96]
+    var w_fail: [u8; 10] = "shm fail \0"
+    var w_e: [u8; 3] = " e\0"
+    var w_len: [u8; 6] = " len \0"
+    var w_shm: [u8; 6] = " shm \0"
+    var w_free: [u8; 7] = " free \0"
+    var w_low: [u8; 6] = " low \0"
+    let d: u64 = (&line[0]) as u64
+    var p: u64 = put_str(d, 0, (&w_fail[0]) as u64)
+    p = put_op_name(d, p, op)
+    p = put_str(d, p, (&w_e[0]) as u64)
+    p = klog.put_dec(d, p, e)
+    if len != 0 {
+        p = put_str(d, p, (&w_len[0]) as u64)
+        p = klog.put_dec(d, p, len)
+    }
+    p = put_str(d, p, (&w_shm[0]) as u64)
+    p = klog.put_dec(d, p, unixsock.shms_live(state))
+    p = klog.put_ch(d, p, 47)
+    p = klog.put_dec(d, p, unixsock.USHM_MAX)
+    p = put_str(d, p, (&w_free[0]) as u64)
+    p = klog.put_dec(d, p, mmframe.frames_free(state))
+    p = put_str(d, p, (&w_low[0]) as u64)
+    p = klog.put_dec(d, p, free_low)
+    klog.say(state, klog.L_WARN, (&q_src[0]) as u64, d)
+}
+
+fn record(state: u64, op: u64, e: u64, len: u64) {
+    __atomic_add((&counts[op as usize]) as *mut u64, 1)
+    __atomic_add((&seen_total) as *mut u64, 1)
+    let n: u64 = counts[op as usize]
+    let free_low: u64 = mmframe.free_low(state)
+    seen_op = op
+    seen_errno = e
+    seen_free_low = free_low
+    if n <= LOG_FIRST || (n % LOG_EVERY) == 0 {
+        log_line(state, op, e, len, free_low)
+    }
+}
+
+fn after(state: u64, me: u64, frame: u64, number: u64, r: u64) {
+    if r < ERR_BASE {
+        return
+    }
+    let e: u64 = ERRNO_RANGE - (r & 0xFFF)
+    let op: u64 = classify(state, me, frame, number, e)
+    if op == OP_NONE {
+        return
+    }
+    record(state, op, e, len_of(frame, op))
+}
+
+fn len_of(frame: u64, op: u64) -> u64 {
+    if op == OP_MMAP || op == OP_TRUNCATE {
+        return regio.read64_at(frame, F_RSI)
+    }
+    return 0
+}

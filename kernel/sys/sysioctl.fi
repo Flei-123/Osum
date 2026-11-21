@@ -10,6 +10,8 @@ import fs.file
 import fs.fs
 import fs.vfs
 import fs.vfsops
+import fs.mnt
+import fs.procfs.pfns
 import net.inet
 import net.tcp
 import fs.unixsock
@@ -26,6 +28,10 @@ const TIOCMGET: u64 = 0x5415
 const FIONREAD: u64 = 0x541B
 const FIONCLEX: u64 = 0x5450
 const FIOCLEX: u64 = 0x5451
+const NS_GET_USERNS: u64 = 0xB701
+const NS_GET_PARENT: u64 = 0xB702
+const NS_GET_NSTYPE: u64 = 0xB703
+const NS_GET_OWNER_UID: u64 = 0xB704
 
 const OFS_BLOCK_SIZE: u64 = 512
 const INT_BYTES: u64 = 4
@@ -47,7 +53,11 @@ const TIOCM_DSR: u64 = 0x100
 
 fn owns(req: u64) -> bool {
     return req == FIGETBSZ || req == TIOCOUTQ || req == TIOCMGET || req == FIONREAD
-        || req == FIONCLEX || req == FIOCLEX
+        || req == FIONCLEX || req == FIOCLEX || is_ns_request(req)
+}
+
+fn is_ns_request(req: u64) -> bool {
+    return req == NS_GET_USERNS || req == NS_GET_PARENT || req == NS_GET_NSTYPE || req == NS_GET_OWNER_UID
 }
 
 fn put_int(state: u64, me: u64, arg: u64, v: u64) -> u64 {
@@ -207,10 +217,27 @@ fn do_block_size(state: u64, me: u64, of: u64, arg: u64) -> u64 {
     return put_int(state, me, arg, size)
 }
 
+fn do_ns_ioctl(state: u64, of: u64, req: u64) -> u64 {
+    if file.open_kind(state, of) != file.K_VFILE || mnt.fstype(state, file.open_mnt(state, of)) != vfsops.FS_PROC {
+        return errno.neg(errno.E_NOTTY)
+    }
+    let ns_type: u64 = pfns.nstype(file.open_ino(state, of))
+    if ns_type == 0 {
+        return errno.neg(errno.E_NOTTY)
+    }
+    if req == NS_GET_NSTYPE {
+        return ns_type
+    }
+    return errno.neg(errno.E_PERM)
+}
+
 fn do_ioctl(state: u64, me: u64, fd: u64, req: u64, arg: u64) -> u64 {
     let of: u64 = sysuser.of_of(state, me, fd)
     if of >= file.MAX_OPEN {
         return sysuser.neg(errno.E_BADF)
+    }
+    if is_ns_request(req) {
+        return do_ns_ioctl(state, of, req)
     }
     if req == FIONREAD {
         return do_fionread(state, me, of, arg)

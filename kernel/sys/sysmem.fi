@@ -32,7 +32,7 @@ import sys.sysfd
 import sys.sysfile
 
 export {
-    big_bottom, brk_of, map_shm_obj, clear_child_tid, do_brk, do_madvise, do_map, do_mprotect, do_mremap, do_unmap, file_shm_flush_maps, map_bottom, mem_owner, reap_dead_threads, res_clear, vm_oom_after
+    big_bottom, brk_of, map_shm_obj, is_brk_guard_probe, clear_child_tid, do_brk, do_madvise, do_map, do_mprotect, do_mremap, do_unmap, file_shm_flush_maps, map_bottom, mem_owner, reap_dead_threads, res_clear, vm_oom_after
 }
 
 const PROT_READ: u64 = 1
@@ -73,6 +73,11 @@ fn mem_owner(state: u64, me: u64) -> u64 {
         return me
     }
     return l
+}
+
+fn is_brk_guard_probe(addr: u64, prot: u64, flags: u64) -> bool {
+    let want: u64 = MAP_FIXED | MAP_PRIVATE | sysconst.MAP_ANONYMOUS
+    return addr == BRK_BASE && prot == 0 && (flags & want) == want
 }
 
 fn brk_of(state: u64, me: u64) -> u64 {
@@ -470,13 +475,14 @@ fn file_shm_fill(state: u64, i: u64, ino: u64, first_pg: u64, from: u64, to: u64
         if n > sysconst.PAGE {
             n = 0
         }
+        let dst: u64 = mmframe.kva(frame)
         var o: u64 = 0
         while o + 8 <= n {
-            *((frame + o) as *mut u64) = *((bounce + o) as *mut u64)
+            *((dst + o) as *mut u64) = *((bounce + o) as *mut u64)
             o = o + 8
         }
         while o < n {
-            *((frame + o) as *mut u8) = *((bounce + o) as *mut u8)
+            *((dst + o) as *mut u8) = *((bounce + o) as *mut u8)
             o = o + 1
         }
         p = p + 1
@@ -505,7 +511,7 @@ fn file_shm_flush(state: u64, i: u64) {
         if n > sysconst.PAGE {
             n = sysconst.PAGE
         }
-        let frame: u64 = unixsock.shm_frame(state, i, p)
+        let frame: u64 = mmframe.kva(unixsock.shm_frame(state, i, p))
         if frame != 0 {
             let got: u64 = fs.read_at(state, ino, fo, bounce, n)
             var same: bool = got == n
