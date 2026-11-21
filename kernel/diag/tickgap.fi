@@ -8,12 +8,15 @@ import sync.atomic
 import sync.fslockstat
 import fs.procfs.pfproc
 import arch.cpu
+import fs.file
 
 export { note, lines, sys_begin }
 
 const GAP_MS: u64 = 20
 const RING: u64 = 32
-const WORDS: u64 = 8
+const WORDS: u64 = 12
+const READ_NR: u64 = 0
+const PREAD_NR: u64 = 17
 const MAX_CPUS: u64 = 8
 
 static mut last_tsc: u64 = 0
@@ -21,17 +24,33 @@ static mut gap_count: u64 = 0
 static mut gap_us_sum: u64 = 0
 static mut gap_us_max: u64 = 0
 static mut ring_head: u64 = 0
-static mut ring: [u64; 256] = [0 as u64; 256]
+static mut ring: [u64; 384] = [0 as u64; 384]
 static mut sys_nr: [u64; 8] = [0 as u64; 8]
 static mut sys_tsc: [u64; 8] = [0 as u64; 8]
+static mut sys_len: [u64; 8] = [0 as u64; 8]
+static mut sys_kind: [u64; 8] = [0 as u64; 8]
+static mut sys_ino: [u64; 8] = [0 as u64; 8]
+static mut sys_mnt: [u64; 8] = [0 as u64; 8]
 
-fn sys_begin(state: u64, number: u64, arg: u64) {
+fn sys_begin(state: u64, task: u64, number: u64, fd: u64, len: u64) {
     let me: u64 = cpu.here(state)
     if me >= MAX_CPUS {
         return
     }
-    sys_nr[me as usize] = number | (arg << 16)
+    sys_nr[me as usize] = number | (fd << 16)
     sys_tsc[me as usize] = time.tsc()
+    sys_len[me as usize] = len
+    if number != READ_NR && number != PREAD_NR {
+        return
+    }
+    let of: u64 = file.fd_of(state, task, fd)
+    if of >= file.MAX_OPEN {
+        return
+    }
+    let base: u64 = file.of_at(of)
+    sys_kind[me as usize] = kstate.get(state, base + file.OF_KIND)
+    sys_ino[me as usize] = kstate.get(state, base + file.OF_INO)
+    sys_mnt[me as usize] = kstate.get(state, base + file.OF_MNT)
 }
 
 fn us_of(state: u64, cycles: u64) -> u64 {
@@ -72,6 +91,10 @@ fn record(state: u64, gap_us: u64, rip: u64, cur: u64) {
     ring[(b + 5) as usize] = us_of(state, fslockstat.last_hold())
     ring[(b + 6) as usize] = sys_nr[0]
     ring[(b + 7) as usize] = us_of(state, time.tsc() - sys_tsc[0])
+    ring[(b + 8) as usize] = sys_len[0]
+    ring[(b + 9) as usize] = sys_kind[0]
+    ring[(b + 10) as usize] = sys_ino[0]
+    ring[(b + 11) as usize] = sys_mnt[0]
 }
 
 fn w_field(state: u64, at: u64, v: u64) -> u64 {
@@ -105,6 +128,10 @@ fn lines(state: u64, at: u64) -> u64 {
         p = w_field(state, p, ring[(b + 5) as usize])
         p = w_field(state, p, ring[(b + 6) as usize])
         p = w_field(state, p, ring[(b + 7) as usize])
+        p = w_field(state, p, ring[(b + 8) as usize])
+        p = w_field(state, p, ring[(b + 9) as usize])
+        p = w_field(state, p, ring[(b + 10) as usize])
+        p = w_field(state, p, ring[(b + 11) as usize])
         p = pfproc.w_nl(state, p)
         k = k + 1
     }
