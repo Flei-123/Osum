@@ -1,0 +1,137 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.text
+import libc.io
+import libc.errno
+import drvpkg
+import hwprof.hwp_out
+import hwprof.hwp_devs
+import hwprof.hwp_plan
+import hwprof.hwp_report
+
+export { run, stage_packages, n_staged, n_failed, n_pruned, PATH_PROFILE, PATH_UNKNOWN }
+
+static mut PATH_PROFILE: [u8; 16] = "/etc/hwprofile\0\0"
+static mut PATH_UNKNOWN: [u8; 16] = "/etc/hwunknown\0\0"
+static mut DRIVERS_ROOT: [u8; 16] = "/lib/drivers\0\0\0\0"
+static mut FIRMWARE_ROOT: [u8; 16] = "/lib/firmware\0\0\0"
+static mut ENTRY: [u8; 512] = [0 as u8; 512]
+static mut FILE: [u8; 192] = [0 as u8; 192]
+static mut TARGET: [u8; 192] = [0 as u8; 192]
+static mut staged: u64 = 0
+static mut failed: u64 = 0
+static mut pruned: u64 = 0
+
+fn n_staged() -> u64 {
+    return staged
+}
+
+fn n_failed() -> u64 {
+    return failed
+}
+
+fn n_pruned() -> u64 {
+    return pruned
+}
+
+fn stage_firmware(p: u64) -> bool {
+    if hwp_plan.pkg_fw_state(p) == hwp_plan.FW_NONE {
+        return true
+    }
+    drvpkg.join((&TARGET[0 as usize]) as u64, (&FIRMWARE_ROOT[0 as usize]) as u64, hwp_plan.pkg_fw_name(p))
+    if drvpkg.file_exists((&TARGET[0 as usize]) as u64) {
+        return true
+    }
+    drvpkg.join((&FILE[0 as usize]) as u64, hwp_plan.pool_root(), hwp_plan.pkg_name(p))
+    drvpkg.join((&FILE[0 as usize]) as u64, (&FILE[0 as usize]) as u64, hwp_plan.pkg_fw_name(p))
+    if !drvpkg.file_exists((&FILE[0 as usize]) as u64) {
+        return true
+    }
+    ulib.sys(ulib.SYS_MKDIR, (&FIRMWARE_ROOT[0 as usize]) as u64, 0, 0)
+    return drvpkg.copy_file((&FILE[0 as usize]) as u64, (&TARGET[0 as usize]) as u64)
+}
+
+fn stage_one(p: u64) -> bool {
+    var f_inf: [u8; 11] = "driver.inf\0"
+    var dir: [u8; 192] = [0 as u8; 192]
+    drvpkg.join((&dir[0 as usize]) as u64, hwp_plan.pool_root(), hwp_plan.pkg_name(p))
+    drvpkg.join((&TARGET[0 as usize]) as u64, (&DRIVERS_ROOT[0 as usize]) as u64, hwp_plan.pkg_name(p))
+    drvpkg.join((&TARGET[0 as usize]) as u64, (&TARGET[0 as usize]) as u64, (&f_inf[0 as usize]) as u64)
+    if !drvpkg.file_exists((&TARGET[0 as usize]) as u64) {
+        if drvpkg.install_dir((&dir[0 as usize]) as u64, (&DRIVERS_ROOT[0 as usize]) as u64) != drvpkg.INSTALL_OK {
+            return false
+        }
+    }
+    return stage_firmware(p)
+}
+
+fn stage_packages() -> u64 {
+    staged = 0
+    failed = 0
+    var p: u64 = 0
+    while p < hwp_plan.pkg_count() {
+        if hwp_plan.pkg_used(p) && hwp_plan.pkg_valid(p) {
+            if stage_one(p) {
+                staged = staged + 1
+            } else {
+                failed = failed + 1
+            }
+        }
+        p = p + 1
+    }
+    return staged
+}
+
+fn remove_dir_files(dir: u64) {
+    let fd: u64 = io.dir_open(dir)
+    if errno.failed(fd) {
+        return
+    }
+    let n: u64 = io.dir_read(fd, (&ENTRY[0 as usize]) as u64, 512)
+    var at: u64 = 0
+    while n != 0 && !ulib.bad(n) && at < n {
+        let rec: u64 = (&ENTRY[0 as usize]) as u64 + at
+        let name: u64 = io.dir_name(rec)
+        if drvpkg.byte_at(name) != 46 {
+            drvpkg.join((&FILE[0 as usize]) as u64, dir, name)
+            ulib.sys(ulib.SYS_UNLINK, (&FILE[0 as usize]) as u64, 0, 0)
+        }
+        at = at + io.dir_reclen(rec)
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+}
+
+fn prune_pool() {
+    var dir: [u8; 192] = [0 as u8; 192]
+    pruned = 0
+    var p: u64 = 0
+    while p < hwp_plan.pkg_count() {
+        drvpkg.join((&dir[0 as usize]) as u64, hwp_plan.pool_root(), hwp_plan.pkg_name(p))
+        remove_dir_files((&dir[0 as usize]) as u64)
+        ulib.sys(ulib.SYS_RMDIR, (&dir[0 as usize]) as u64, 0, 0)
+        pruned = pruned + 1
+        p = p + 1
+    }
+    ulib.sys(ulib.SYS_RMDIR, hwp_plan.pool_root(), 0, 0)
+}
+
+fn write_out(path: u64) -> bool {
+    return drvpkg.write_all(path, hwp_out.text_ptr(), hwp_out.text_len())
+}
+
+fn run(prune: bool) -> bool {
+    hwp_plan.build()
+    stage_packages()
+    hwp_report.profile_text()
+    var good: bool = write_out((&PATH_PROFILE[0 as usize]) as u64)
+    hwp_report.unknown_text()
+    if !write_out((&PATH_UNKNOWN[0 as usize]) as u64) {
+        good = false
+    }
+    if prune && failed == 0 {
+        prune_pool()
+    }
+    return good
+}

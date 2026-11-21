@@ -1,0 +1,298 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.text
+import drvpkg
+import hwprof.hwp_out
+import hwprof.hwp_devs
+import hwprof.hwp_kinds
+import hwprof.hwp_plan
+
+export { profile_text, unknown_text, count_status, wants_listing }
+
+const HWID_CAP: u64 = 2048
+const VALUE_CAP: u64 = 96
+
+static mut HWID: [u8; 2048] = [0 as u8; 2048]
+static mut VALUE: [u8; 96] = [0 as u8; 96]
+static mut hwid_len: u64 = 0
+
+fn load_hwid() {
+    var path: [u8; 11] = "/proc/hwid\0"
+    hwid_len = drvpkg.read_all((&path[0 as usize]) as u64, (&HWID[0 as usize]) as u64, HWID_CAP - 1)
+    HWID[hwid_len as usize] = 0 as u8
+}
+
+fn hwid_value(key: u64) -> u64 {
+    let klen: u64 = text.length(key)
+    let base: u64 = (&HWID[0 as usize]) as u64
+    var at: u64 = 0
+    VALUE[0 as usize] = 0 as u8
+    while at < hwid_len {
+        if ulib.strneq(base + at, key, klen) && drvpkg.byte_at(base + at + klen) == 58 {
+            var from: u64 = at + klen + 1
+            while drvpkg.byte_at(base + from) == 32 {
+                from = from + 1
+            }
+            var n: u64 = 0
+            while drvpkg.byte_at(base + from + n) != 10 && drvpkg.byte_at(base + from + n) != 0 && n + 1 < VALUE_CAP {
+                var c: u64 = drvpkg.byte_at(base + from + n)
+                if c == 32 {
+                    c = 95
+                }
+                VALUE[n as usize] = c as u8
+                n = n + 1
+            }
+            VALUE[n as usize] = 0 as u8
+            return (&VALUE[0 as usize]) as u64
+        }
+        while at < hwid_len && drvpkg.byte_at(base + at) != 10 {
+            at = at + 1
+        }
+        at = at + 1
+    }
+    return (&VALUE[0 as usize]) as u64
+}
+
+fn put_kv(key: u64, value: u64) {
+    var empty: [u8; 2] = "-\0"
+    hwp_out.put_ch(32)
+    hwp_out.put_str(key)
+    hwp_out.put_ch(61)
+    if drvpkg.byte_at(value) == 0 {
+        hwp_out.put_str((&empty[0 as usize]) as u64)
+    } else {
+        hwp_out.put_str(value)
+    }
+}
+
+fn machine_line() {
+    var l_machine: [u8; 8] = "machine\0"
+    var k_manuf: [u8; 13] = "manufacturer\0"
+    var k_product: [u8; 8] = "product\0"
+    var k_board: [u8; 6] = "board\0"
+    var h_manuf: [u8; 20] = "system_manufacturer\0"
+    var h_product: [u8; 15] = "system_product\0"
+    var h_board: [u8; 14] = "board_product\0"
+    load_hwid()
+    hwp_out.put_str((&l_machine[0 as usize]) as u64)
+    put_kv((&k_manuf[0 as usize]) as u64, hwid_value((&h_manuf[0 as usize]) as u64))
+    put_kv((&k_product[0 as usize]) as u64, hwid_value((&h_product[0 as usize]) as u64))
+    put_kv((&k_board[0 as usize]) as u64, hwid_value((&h_board[0 as usize]) as u64))
+    hwp_out.put_nl()
+}
+
+fn count_class(cls: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < hwp_devs.count() {
+        if hwp_devs.kind_of(i) == hwp_devs.KIND_PCI && ulib.strneq(hwp_devs.class_of(i), cls, 4) && drvpkg.byte_at(hwp_devs.class_of(i) + 3) == drvpkg.byte_at(cls + 3) {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn count_id(kind: u64, id: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < hwp_devs.count() {
+        if hwp_devs.kind_of(i) == kind && ulib.streq(hwp_devs.id_of(i), id) {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn storage_line() {
+    var l_storage: [u8; 8] = "storage\0"
+    var k_nvme: [u8; 5] = "nvme\0"
+    var k_ahci: [u8; 5] = "ahci\0"
+    var k_raid: [u8; 5] = "raid\0"
+    var k_vmd: [u8; 4] = "vmd\0"
+    var k_warn: [u8; 5] = "warn\0"
+    var c_nvme: [u8; 5] = "0108\0"
+    var c_ahci: [u8; 5] = "0106\0"
+    var c_raid: [u8; 5] = "0104\0"
+    var id_vmd: [u8; 10] = "8086:9a0b\0"
+    var w_rst: [u8; 17] = "set-sata-to-ahci\0"
+    var w_none: [u8; 5] = "none\0"
+    let raid: u64 = count_class((&c_raid[0 as usize]) as u64)
+    let vmd: u64 = count_id(hwp_devs.KIND_PCI, (&id_vmd[0 as usize]) as u64)
+    hwp_out.put_str((&l_storage[0 as usize]) as u64)
+    hwp_out.put_ch(32)
+    hwp_out.put_str((&k_nvme[0 as usize]) as u64)
+    hwp_out.put_ch(61)
+    hwp_out.put_num(count_class((&c_nvme[0 as usize]) as u64))
+    hwp_out.put_ch(32)
+    hwp_out.put_str((&k_ahci[0 as usize]) as u64)
+    hwp_out.put_ch(61)
+    hwp_out.put_num(count_class((&c_ahci[0 as usize]) as u64))
+    hwp_out.put_ch(32)
+    hwp_out.put_str((&k_raid[0 as usize]) as u64)
+    hwp_out.put_ch(61)
+    hwp_out.put_num(raid)
+    hwp_out.put_ch(32)
+    hwp_out.put_str((&k_vmd[0 as usize]) as u64)
+    hwp_out.put_ch(61)
+    hwp_out.put_num(vmd)
+    if raid > 0 || vmd > 0 {
+        put_kv((&k_warn[0 as usize]) as u64, (&w_rst[0 as usize]) as u64)
+    } else {
+        put_kv((&k_warn[0 as usize]) as u64, (&w_none[0 as usize]) as u64)
+    }
+    hwp_out.put_nl()
+}
+
+fn count_status(st: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < hwp_devs.count() {
+        if hwp_plan.status_of(i) == st {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn put_label(i: u64) {
+    var k_name: [u8; 5] = "name\0"
+    let lab: u64 = hwp_kinds.label(hwp_devs.kind_of(i), hwp_devs.id_of(i))
+    hwp_out.put_ch(32)
+    hwp_out.put_str((&k_name[0 as usize]) as u64)
+    hwp_out.put_ch(61)
+    if lab == 0 {
+        var none: [u8; 2] = "-\0"
+        hwp_out.put_str((&none[0 as usize]) as u64)
+        return
+    }
+    var n: u64 = 0
+    while drvpkg.byte_at(lab + n) != 10 && drvpkg.byte_at(lab + n) != 0 {
+        var c: u64 = drvpkg.byte_at(lab + n)
+        if c == 32 {
+            c = 95
+        }
+        hwp_out.put_ch(c)
+        n = n + 1
+    }
+}
+
+fn dev_line(i: u64) {
+    var l_dev: [u8; 4] = "dev\0"
+    var w_pci: [u8; 4] = "pci\0"
+    var w_usb: [u8; 4] = "usb\0"
+    var w_acpi: [u8; 5] = "acpi\0"
+    var k_sub: [u8; 4] = "sub\0"
+    var k_class: [u8; 6] = "class\0"
+    var k_cat: [u8; 4] = "cat\0"
+    var k_status: [u8; 7] = "status\0"
+    var k_drv: [u8; 4] = "drv\0"
+    var k_src: [u8; 4] = "src\0"
+    var k_pkg: [u8; 4] = "pkg\0"
+    var k_fw: [u8; 3] = "fw\0"
+    var s_builtin: [u8; 8] = "builtin\0"
+    var s_store: [u8; 6] = "store\0"
+    var s_none: [u8; 5] = "none\0"
+    hwp_out.put_str((&l_dev[0 as usize]) as u64)
+    hwp_out.put_ch(32)
+    if hwp_devs.kind_of(i) == hwp_devs.KIND_PCI {
+        hwp_out.put_str((&w_pci[0 as usize]) as u64)
+        hwp_out.put_ch(32)
+        hwp_out.put_str(hwp_devs.bdf_of(i))
+    } else if hwp_devs.kind_of(i) == hwp_devs.KIND_USB {
+        hwp_out.put_str((&w_usb[0 as usize]) as u64)
+    } else {
+        hwp_out.put_str((&w_acpi[0 as usize]) as u64)
+    }
+    hwp_out.put_ch(32)
+    hwp_out.put_str(hwp_devs.id_of(i))
+    put_kv((&k_sub[0 as usize]) as u64, hwp_devs.sub_of(i))
+    put_kv((&k_class[0 as usize]) as u64, hwp_devs.class_of(i))
+    put_kv((&k_cat[0 as usize]) as u64, hwp_kinds.category_name(hwp_kinds.category(i)))
+    put_kv((&k_status[0 as usize]) as u64, hwp_plan.status_word(hwp_plan.status_of(i)))
+    put_kv((&k_drv[0 as usize]) as u64, hwp_devs.drv_of(i))
+    if hwp_devs.src_of(i) == hwp_devs.SRC_BUILTIN {
+        put_kv((&k_src[0 as usize]) as u64, (&s_builtin[0 as usize]) as u64)
+    } else if hwp_devs.src_of(i) == hwp_devs.SRC_STORE {
+        put_kv((&k_src[0 as usize]) as u64, (&s_store[0 as usize]) as u64)
+    } else {
+        put_kv((&k_src[0 as usize]) as u64, (&s_none[0 as usize]) as u64)
+    }
+    let p: u64 = hwp_plan.pkg_of(i)
+    if p != hwp_plan.NO_PKG {
+        put_kv((&k_pkg[0 as usize]) as u64, hwp_plan.pkg_name(p))
+        if hwp_plan.pkg_fw_state(p) != hwp_plan.FW_NONE {
+            put_kv((&k_fw[0 as usize]) as u64, hwp_plan.pkg_fw_name(p))
+        }
+    }
+    put_label(i)
+    hwp_out.put_nl()
+}
+
+fn put_count(key: u64, v: u64) {
+    hwp_out.put_ch(32)
+    hwp_out.put_str(key)
+    hwp_out.put_ch(61)
+    hwp_out.put_num(v)
+}
+
+fn summary_line() {
+    var l_summary: [u8; 8] = "summary\0"
+    var k_devices: [u8; 8] = "devices\0"
+    var k_driver: [u8; 7] = "driver\0"
+    var k_staged: [u8; 7] = "staged\0"
+    var k_missing: [u8; 8] = "missing\0"
+    var k_fw: [u8; 17] = "firmware-missing\0"
+    var k_infra: [u8; 6] = "infra\0"
+    var k_unknown: [u8; 8] = "unknown\0"
+    var k_pool: [u8; 5] = "pool\0"
+    hwp_out.put_str((&l_summary[0 as usize]) as u64)
+    put_count((&k_devices[0 as usize]) as u64, hwp_devs.count())
+    put_count((&k_driver[0 as usize]) as u64, count_status(hwp_plan.ST_DRIVER))
+    put_count((&k_staged[0 as usize]) as u64, count_status(hwp_plan.ST_STAGED))
+    put_count((&k_missing[0 as usize]) as u64, count_status(hwp_plan.ST_MISSING))
+    put_count((&k_fw[0 as usize]) as u64, count_status(hwp_plan.ST_FWMISSING))
+    put_count((&k_infra[0 as usize]) as u64, count_status(hwp_plan.ST_INFRA))
+    put_count((&k_unknown[0 as usize]) as u64, count_status(hwp_plan.ST_UNKNOWN))
+    put_count((&k_pool[0 as usize]) as u64, hwp_plan.pkg_count())
+    hwp_out.put_nl()
+}
+
+fn wants_listing(st: u64) -> bool {
+    return st == hwp_plan.ST_MISSING || st == hwp_plan.ST_FWMISSING || st == hwp_plan.ST_UNKNOWN
+}
+
+fn profile_text() {
+    var head: [u8; 12] = "hwprofile 1\0"
+    hwp_out.reset()
+    hwp_out.put_str((&head[0 as usize]) as u64)
+    hwp_out.put_nl()
+    machine_line()
+    storage_line()
+    var i: u64 = 0
+    while i < hwp_devs.count() {
+        dev_line(i)
+        i = i + 1
+    }
+    summary_line()
+}
+
+fn unknown_text() {
+    var head: [u8; 12] = "hwunknown 1\0"
+    hwp_out.reset()
+    hwp_out.put_str((&head[0 as usize]) as u64)
+    hwp_out.put_nl()
+    machine_line()
+    var i: u64 = 0
+    while i < hwp_devs.count() {
+        if wants_listing(hwp_plan.status_of(i)) {
+            dev_line(i)
+        }
+        i = i + 1
+    }
+    summary_line()
+}

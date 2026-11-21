@@ -1,0 +1,283 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.text
+import drvpkg
+
+export {
+    load, count, kind_of, id_of, sub_of, class_of, bdf_of, drv_of, src_of,
+    KIND_PCI, KIND_USB, KIND_ACPI, SRC_NONE, SRC_BUILTIN, SRC_STORE, MAX_DEV, query_id
+}
+
+const MAX_DEV: u64 = 128
+const ID_W: u64 = 24
+const SUB_W: u64 = 12
+const CLASS_W: u64 = 8
+const BDF_W: u64 = 12
+const DRV_W: u64 = 24
+const LINE_CAP: u64 = 256
+const RAW_CAP: u64 = 49152
+const TOKEN_CAP: u64 = 64
+
+const KIND_PCI: u64 = 1
+const KIND_USB: u64 = 2
+const KIND_ACPI: u64 = 3
+const SRC_NONE: u64 = 0
+const SRC_BUILTIN: u64 = 1
+const SRC_STORE: u64 = 2
+
+static mut RAW: [u8; 49152] = [0 as u8; 49152]
+static mut LINE: [u8; 256] = [0 as u8; 256]
+static mut TOKEN: [u8; 64] = [0 as u8; 64]
+static mut IDS: [u8; 3072] = [0 as u8; 3072]
+static mut SUBS: [u8; 1536] = [0 as u8; 1536]
+static mut CLASSES: [u8; 1024] = [0 as u8; 1024]
+static mut BDFS: [u8; 1536] = [0 as u8; 1536]
+static mut DRVS: [u8; 3072] = [0 as u8; 3072]
+static mut KINDS: [u8; 128] = [0 as u8; 128]
+static mut SRCS: [u8; 128] = [0 as u8; 128]
+static mut QUERY: [u8; 40] = [0 as u8; 40]
+static mut total: u64 = 0
+static mut COLON: [u8; 2] = ":\0"
+static mut EMPTY: [u8; 2] = "\0\0"
+
+fn count() -> u64 {
+    return total
+}
+
+fn kind_of(i: u64) -> u64 {
+    return KINDS[i as usize] as u64
+}
+
+fn src_of(i: u64) -> u64 {
+    return SRCS[i as usize] as u64
+}
+
+fn id_of(i: u64) -> u64 {
+    return (&IDS[0 as usize]) as u64 + i * ID_W
+}
+
+fn sub_of(i: u64) -> u64 {
+    return (&SUBS[0 as usize]) as u64 + i * SUB_W
+}
+
+fn class_of(i: u64) -> u64 {
+    return (&CLASSES[0 as usize]) as u64 + i * CLASS_W
+}
+
+fn bdf_of(i: u64) -> u64 {
+    return (&BDFS[0 as usize]) as u64 + i * BDF_W
+}
+
+fn drv_of(i: u64) -> u64 {
+    return (&DRVS[0 as usize]) as u64 + i * DRV_W
+}
+
+fn query_id(i: u64) -> u64 {
+    let sub: u64 = sub_of(i)
+    ulib.strcpy((&QUERY[0 as usize]) as u64, id_of(i))
+    if kind_of(i) == KIND_PCI && drvpkg.byte_at(sub) != 0 {
+        ulib.strcat((&QUERY[0 as usize]) as u64, (&COLON[0 as usize]) as u64)
+        ulib.strcat((&QUERY[0 as usize]) as u64, sub)
+    }
+    return (&QUERY[0 as usize]) as u64
+}
+
+fn starts_with(p: u64, prefix: u64) -> bool {
+    let n: u64 = text.length(prefix)
+    return ulib.strneq(p, prefix, n)
+}
+
+fn copy_bounded(dst: u64, src: u64, cap: u64) {
+    ulib.strncpy(dst, src, cap)
+}
+
+fn is_separator(c: u64) -> bool {
+    return c == 58 || c == 46
+}
+
+fn token_end(src: u64, from: u64) -> u64 {
+    var end: u64 = from
+    while drvpkg.byte_at(src + end) != 0 && !is_separator(drvpkg.byte_at(src + end)) {
+        end = end + 1
+    }
+    return end
+}
+
+fn normalize(dst: u64, src: u64, cap: u64, width: u64, last_width: u64) {
+    var at: u64 = 0
+    var out: u64 = 0
+    var going: bool = true
+    while going && out + 1 < cap {
+        var from: u64 = at
+        if drvpkg.byte_at(src + from) == 48 && text.lower(drvpkg.byte_at(src + from + 1)) == 120 {
+            from = from + 2
+        }
+        let end: u64 = token_end(src, at)
+        let digits: u64 = end - from
+        let last: bool = drvpkg.byte_at(src + end) == 0
+        var want: u64 = width
+        if last {
+            want = last_width
+        }
+        var pad: u64 = 0
+        if want > digits {
+            pad = want - digits
+        }
+        while pad > 0 && out + 1 < cap {
+            *((dst + out) as *mut u8) = 48 as u8
+            out = out + 1
+            pad = pad - 1
+        }
+        var k: u64 = from
+        while k < end && out + 1 < cap {
+            *((dst + out) as *mut u8) = text.lower(drvpkg.byte_at(src + k)) as u8
+            out = out + 1
+            k = k + 1
+        }
+        if last {
+            going = false
+        } else {
+            *((dst + out) as *mut u8) = drvpkg.byte_at(src + end) as u8
+            out = out + 1
+            at = end + 1
+        }
+    }
+    *((dst + out) as *mut u8) = 0 as u8
+}
+
+fn take_normalized(dst: u64, tok: u64, cap: u64, width: u64, last_width: u64) {
+    var plain: [u8; 2] = "-\0"
+    if ulib.streq(tok, (&plain[0 as usize]) as u64) {
+        copy_bounded(dst, tok, cap)
+        return
+    }
+    normalize(dst, tok, cap, width, last_width)
+}
+
+fn line_at(start: u64, end: u64) -> bool {
+    let n: u64 = end - start
+    if n == 0 || n >= LINE_CAP {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        LINE[i as usize] = RAW[(start + i) as usize]
+        i = i + 1
+    }
+    LINE[n as usize] = 0 as u8
+    return true
+}
+
+fn src_code(value: u64) -> u64 {
+    var w_builtin: [u8; 8] = "builtin\0"
+    var w_store: [u8; 6] = "store\0"
+    if ulib.streq(value, (&w_builtin[0 as usize]) as u64) {
+        return SRC_BUILTIN
+    }
+    if ulib.streq(value, (&w_store[0 as usize]) as u64) {
+        return SRC_STORE
+    }
+    return SRC_NONE
+}
+
+fn class_width(slot: u64) -> u64 {
+    if kind_of(slot) == KIND_USB {
+        return 2
+    }
+    return 4
+}
+
+fn take_options(slot: u64, from: u64) {
+    var p_sub: [u8; 5] = "sub=\0"
+    var p_class: [u8; 7] = "class=\0"
+    var p_drv: [u8; 5] = "drv=\0"
+    var p_src: [u8; 5] = "src=\0"
+    var at: u64 = from
+    var going: bool = true
+    while going {
+        at = ulib.word((&LINE[0 as usize]) as u64, at, (&TOKEN[0 as usize]) as u64, TOKEN_CAP)
+        let tok: u64 = (&TOKEN[0 as usize]) as u64
+        if drvpkg.byte_at(tok) == 0 {
+            going = false
+        } else if starts_with(tok, (&p_sub[0 as usize]) as u64) {
+            take_normalized(sub_of(slot), tok + 4, SUB_W, 4, 4)
+        } else if starts_with(tok, (&p_class[0 as usize]) as u64) {
+            take_normalized(class_of(slot), tok + 6, CLASS_W, 4, class_width(slot))
+        } else if starts_with(tok, (&p_drv[0 as usize]) as u64) {
+            copy_bounded(drv_of(slot), tok + 4, DRV_W)
+        } else if starts_with(tok, (&p_src[0 as usize]) as u64) {
+            SRCS[slot as usize] = src_code(tok + 4) as u8
+        }
+    }
+}
+
+fn clear_slot(slot: u64) {
+    ulib.strcpy(id_of(slot), (&EMPTY[0 as usize]) as u64)
+    ulib.strcpy(sub_of(slot), (&EMPTY[0 as usize]) as u64)
+    ulib.strcpy(class_of(slot), (&EMPTY[0 as usize]) as u64)
+    ulib.strcpy(bdf_of(slot), (&EMPTY[0 as usize]) as u64)
+    ulib.strcpy(drv_of(slot), (&EMPTY[0 as usize]) as u64)
+    SRCS[slot as usize] = 0 as u8
+}
+
+fn parse_line() {
+    var k_pci: [u8; 4] = "pci\0"
+    var k_usb: [u8; 4] = "usb\0"
+    var k_acpi: [u8; 5] = "acpi\0"
+    if total >= MAX_DEV {
+        return
+    }
+    var at: u64 = ulib.word((&LINE[0 as usize]) as u64, 0, (&TOKEN[0 as usize]) as u64, TOKEN_CAP)
+    var kind: u64 = 0
+    if ulib.streq((&TOKEN[0 as usize]) as u64, (&k_pci[0 as usize]) as u64) {
+        kind = KIND_PCI
+    } else if ulib.streq((&TOKEN[0 as usize]) as u64, (&k_usb[0 as usize]) as u64) {
+        kind = KIND_USB
+    } else if ulib.streq((&TOKEN[0 as usize]) as u64, (&k_acpi[0 as usize]) as u64) {
+        kind = KIND_ACPI
+    }
+    if kind == 0 {
+        return
+    }
+    clear_slot(total)
+    KINDS[total as usize] = kind as u8
+    if kind == KIND_PCI {
+        at = ulib.word((&LINE[0 as usize]) as u64, at, (&TOKEN[0 as usize]) as u64, TOKEN_CAP)
+        take_normalized(bdf_of(total), (&TOKEN[0 as usize]) as u64, BDF_W, 2, 1)
+    }
+    at = ulib.word((&LINE[0 as usize]) as u64, at, (&TOKEN[0 as usize]) as u64, TOKEN_CAP)
+    if kind == KIND_ACPI {
+        copy_bounded(id_of(total), (&TOKEN[0 as usize]) as u64, ID_W)
+    } else {
+        take_normalized(id_of(total), (&TOKEN[0 as usize]) as u64, ID_W, 4, 4)
+    }
+    take_options(total, at)
+    total = total + 1
+}
+
+fn load() -> u64 {
+    var path: [u8; 14] = "/proc/drivers\0"
+    var head: [u8; 10] = "# devices\0"
+    total = 0
+    let n: u64 = drvpkg.read_all((&path[0 as usize]) as u64, (&RAW[0 as usize]) as u64, RAW_CAP - 1)
+    RAW[n as usize] = 0 as u8
+    var in_devices: bool = false
+    var start: u64 = 0
+    var i: u64 = 0
+    while i <= n {
+        if i == n || RAW[i as usize] == 10 as u8 {
+            if line_at(start, i) {
+                if starts_with((&LINE[0 as usize]) as u64, (&head[0 as usize]) as u64) {
+                    in_devices = true
+                } else if in_devices {
+                    parse_line()
+                }
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    return total
+}

@@ -1,0 +1,310 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.text
+import libc.io
+import libc.errno
+import drvpkg
+import drvmatch
+import hwprof.hwp_devs
+import hwprof.hwp_kinds
+
+export {
+    build, set_pool, pool_root, status_of, pkg_of, pkg_name, pkg_count, pkg_used, pkg_fw_name, pkg_fw_state,
+    status_word, pkg_valid,
+    ST_DRIVER, ST_STAGED, ST_MISSING, ST_FWMISSING, ST_INFRA, ST_UNKNOWN, NO_PKG, FW_NONE, FW_PRESENT, FW_MISSING
+}
+
+const MAX_PKG: u64 = 24
+const NAME_W: u64 = 24
+const FW_NAME_W: u64 = 40
+const NO_PKG: u64 = 255
+const POOL_CAP: u64 = 96
+
+const ST_UNDECIDED: u64 = 0
+const ST_DRIVER: u64 = 1
+const ST_STAGED: u64 = 2
+const ST_MISSING: u64 = 3
+const ST_FWMISSING: u64 = 4
+const ST_INFRA: u64 = 5
+const ST_UNKNOWN: u64 = 6
+
+const FW_NONE: u64 = 0
+const FW_PRESENT: u64 = 1
+const FW_MISSING: u64 = 2
+
+static mut POOL: [u8; 96] = [0 as u8; 96]
+static mut DEFAULT_POOL: [u8; 16] = "/lib/driverpool\0"
+static mut FW_ROOT: [u8; 15] = "/lib/firmware\0\0"
+static mut PKG_NAMES: [u8; 576] = [0 as u8; 576]
+static mut PKG_FW_NAMES: [u8; 960] = [0 as u8; 960]
+static mut PKG_FW: [u8; 24] = [0 as u8; 24]
+static mut PKG_OK: [u8; 24] = [0 as u8; 24]
+static mut PKG_USED: [u8; 24] = [0 as u8; 24]
+static mut PKG_RANK: [u64; 24] = [0 as u64; 24]
+static mut PKG_VER: [u64; 24] = [0 as u64; 24]
+static mut DEV_STATUS: [u8; 128] = [0 as u8; 128]
+static mut DEV_PKG: [u8; 128] = [0 as u8; 128]
+static mut DEV_SPEC: [u64; 128] = [0 as u64; 128]
+static mut ENTRY: [u8; 512] = [0 as u8; 512]
+static mut PATH: [u8; 192] = [0 as u8; 192]
+static mut VALUE: [u8; 96] = [0 as u8; 96]
+static mut pkgs: u64 = 0
+
+fn ensure_pool() {
+    if drvpkg.byte_at((&POOL[0 as usize]) as u64) == 0 {
+        ulib.strcpy((&POOL[0 as usize]) as u64, (&DEFAULT_POOL[0 as usize]) as u64)
+    }
+}
+
+fn set_pool(path: u64) {
+    ulib.strncpy((&POOL[0 as usize]) as u64, path, POOL_CAP)
+}
+
+fn pool_root() -> u64 {
+    ensure_pool()
+    return (&POOL[0 as usize]) as u64
+}
+
+fn status_of(i: u64) -> u64 {
+    return DEV_STATUS[i as usize] as u64
+}
+
+fn pkg_of(i: u64) -> u64 {
+    return DEV_PKG[i as usize] as u64
+}
+
+fn pkg_count() -> u64 {
+    return pkgs
+}
+
+fn pkg_name(p: u64) -> u64 {
+    return (&PKG_NAMES[0 as usize]) as u64 + p * NAME_W
+}
+
+fn pkg_fw_name(p: u64) -> u64 {
+    return (&PKG_FW_NAMES[0 as usize]) as u64 + p * FW_NAME_W
+}
+
+fn pkg_fw_state(p: u64) -> u64 {
+    return PKG_FW[p as usize] as u64
+}
+
+fn pkg_used(p: u64) -> bool {
+    return PKG_USED[p as usize] != 0
+}
+
+fn pkg_valid(p: u64) -> bool {
+    return PKG_OK[p as usize] != 0
+}
+
+static mut SW_w_driver: [u8; 7] = "driver\0"
+static mut SW_w_staged: [u8; 7] = "staged\0"
+static mut SW_w_missing: [u8; 8] = "missing\0"
+static mut SW_w_fw: [u8; 17] = "firmware-missing\0"
+static mut SW_w_infra: [u8; 6] = "infra\0"
+static mut SW_w_unknown: [u8; 8] = "unknown\0"
+
+fn status_word(st: u64) -> u64 {
+    if st == ST_DRIVER {
+        return (&SW_w_driver[0 as usize]) as u64
+    }
+    if st == ST_STAGED {
+        return (&SW_w_staged[0 as usize]) as u64
+    }
+    if st == ST_MISSING {
+        return (&SW_w_missing[0 as usize]) as u64
+    }
+    if st == ST_FWMISSING {
+        return (&SW_w_fw[0 as usize]) as u64
+    }
+    if st == ST_INFRA {
+        return (&SW_w_infra[0 as usize]) as u64
+    }
+    return (&SW_w_unknown[0 as usize]) as u64
+}
+
+fn list_pool() -> u64 {
+    ensure_pool()
+    pkgs = 0
+    let fd: u64 = io.dir_open((&POOL[0 as usize]) as u64)
+    if errno.failed(fd) {
+        return 0
+    }
+    var going: bool = true
+    while going {
+        let n: u64 = io.dir_read(fd, (&ENTRY[0 as usize]) as u64, 512)
+        if n == 0 || ulib.bad(n) {
+            going = false
+        } else {
+            var at: u64 = 0
+            while at < n {
+                let rec: u64 = (&ENTRY[0 as usize]) as u64 + at
+                let name: u64 = io.dir_name(rec)
+                if io.dir_kind(rec) == io.DT_DIR && drvpkg.byte_at(name) != 46
+                    && pkgs < MAX_PKG && text.length(name) < NAME_W {
+                    ulib.strcpy(pkg_name(pkgs), name)
+                    pkgs = pkgs + 1
+                }
+                at = at + io.dir_reclen(rec)
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return pkgs
+}
+
+fn number(key: u64) -> u64 {
+    if !drvpkg.field_nth(key, 0, (&VALUE[0 as usize]) as u64, 96) {
+        return 0
+    }
+    return ulib.to_num((&VALUE[0 as usize]) as u64)
+}
+
+fn fw_present(p: u64, dir: u64) -> bool {
+    drvpkg.join((&PATH[0 as usize]) as u64, dir, pkg_fw_name(p))
+    if drvpkg.file_exists((&PATH[0 as usize]) as u64) {
+        return true
+    }
+    drvpkg.join((&PATH[0 as usize]) as u64, (&FW_ROOT[0 as usize]) as u64, pkg_fw_name(p))
+    return drvpkg.file_exists((&PATH[0 as usize]) as u64)
+}
+
+fn read_fw(p: u64, dir: u64) {
+    var k_fw: [u8; 3] = "fw\0"
+    var raw: [u8; 96] = [0 as u8; 96]
+    PKG_FW[p as usize] = FW_NONE as u8
+    if !drvpkg.field_nth((&k_fw[0 as usize]) as u64, 0, (&raw[0 as usize]) as u64, 96) {
+        return
+    }
+    var n: u64 = 0
+    while n + 1 < FW_NAME_W && drvpkg.byte_at((&raw[0 as usize]) as u64 + n) != 0
+        && drvpkg.byte_at((&raw[0 as usize]) as u64 + n) != 58 {
+        *((pkg_fw_name(p) + n) as *mut u8) = drvpkg.byte_at((&raw[0 as usize]) as u64 + n) as u8
+        n = n + 1
+    }
+    *((pkg_fw_name(p) + n) as *mut u8) = 0 as u8
+    if fw_present(p, dir) {
+        PKG_FW[p as usize] = FW_PRESENT as u8
+    } else {
+        PKG_FW[p as usize] = FW_MISSING as u8
+    }
+}
+
+fn spec_for(d: u64) -> u64 {
+    var k_pci: [u8; 4] = "pci\0"
+    var k_class: [u8; 9] = "pciclass\0"
+    var k_usb: [u8; 4] = "usb\0"
+    var k_acpi: [u8; 5] = "acpi\0"
+    var k_match: [u8; 6] = "match\0"
+    var qkind: u64 = (&k_acpi[0 as usize]) as u64
+    if hwp_devs.kind_of(d) == hwp_devs.KIND_PCI {
+        qkind = (&k_pci[0 as usize]) as u64
+    } else if hwp_devs.kind_of(d) == hwp_devs.KIND_USB {
+        qkind = (&k_usb[0 as usize]) as u64
+    }
+    var top: u64 = 0
+    var m: u64 = 0
+    while drvpkg.field_nth((&k_match[0 as usize]) as u64, m, (&VALUE[0 as usize]) as u64, 96) {
+        var s: u64 = drvmatch.score((&VALUE[0 as usize]) as u64, qkind, hwp_devs.query_id(d))
+        if hwp_devs.kind_of(d) == hwp_devs.KIND_PCI {
+            let sc: u64 = drvmatch.score((&VALUE[0 as usize]) as u64, (&k_class[0 as usize]) as u64, hwp_devs.class_of(d))
+            if sc > s {
+                s = sc
+            }
+        }
+        if s > top {
+            top = s
+        }
+        m = m + 1
+    }
+    return top
+}
+
+fn consider(p: u64) {
+    var k_rank: [u8; 5] = "rank\0"
+    var k_ver: [u8; 8] = "version\0"
+    let dir: u64 = pkg_path(p)
+    PKG_OK[p as usize] = 0 as u8
+    if drvpkg.verify_dir(dir) != drvpkg.V_OK || !drvpkg.usable(dir) || drvpkg.banned(pkg_name(p)) {
+        return
+    }
+    PKG_OK[p as usize] = 1 as u8
+    PKG_RANK[p as usize] = number((&k_rank[0 as usize]) as u64)
+    PKG_VER[p as usize] = number((&k_ver[0 as usize]) as u64)
+    read_fw(p, dir)
+    var d: u64 = 0
+    while d < hwp_devs.count() {
+        if DEV_STATUS[d as usize] == ST_UNDECIDED as u8 {
+            let spec: u64 = spec_for(d)
+            let cur: u64 = DEV_PKG[d as usize] as u64
+            if spec > 0 && (cur == NO_PKG || drvmatch.better(spec, PKG_RANK[p as usize], PKG_VER[p as usize],
+                DEV_SPEC[d as usize], PKG_RANK[cur as usize], PKG_VER[cur as usize])) {
+                DEV_PKG[d as usize] = p as u8
+                DEV_SPEC[d as usize] = spec
+            }
+        }
+        d = d + 1
+    }
+}
+
+static mut DIR_BUF: [u8; 192] = [0 as u8; 192]
+
+fn pkg_path(p: u64) -> u64 {
+    drvpkg.join((&DIR_BUF[0 as usize]) as u64, (&POOL[0 as usize]) as u64, pkg_name(p))
+    return (&DIR_BUF[0 as usize]) as u64
+}
+
+fn settle(d: u64) {
+    if DEV_STATUS[d as usize] != ST_UNDECIDED as u8 {
+        return
+    }
+    let p: u64 = DEV_PKG[d as usize] as u64
+    if p != NO_PKG {
+        PKG_USED[p as usize] = 1 as u8
+        if PKG_FW[p as usize] == FW_MISSING as u8 {
+            DEV_STATUS[d as usize] = ST_FWMISSING as u8
+        } else {
+            DEV_STATUS[d as usize] = ST_STAGED as u8
+        }
+        return
+    }
+    let cat: u64 = hwp_kinds.category(d)
+    if cat == hwp_kinds.C_INFRA {
+        DEV_STATUS[d as usize] = ST_INFRA as u8
+    } else if hwp_kinds.needs_driver(cat) {
+        DEV_STATUS[d as usize] = ST_MISSING as u8
+    } else {
+        DEV_STATUS[d as usize] = ST_UNKNOWN as u8
+    }
+}
+
+fn build() -> u64 {
+    let total: u64 = hwp_devs.load()
+    list_pool()
+    var d: u64 = 0
+    while d < total {
+        DEV_PKG[d as usize] = NO_PKG as u8
+        DEV_SPEC[d as usize] = 0
+        if hwp_devs.src_of(d) != hwp_devs.SRC_NONE {
+            DEV_STATUS[d as usize] = ST_DRIVER as u8
+        } else {
+            DEV_STATUS[d as usize] = ST_UNDECIDED as u8
+        }
+        d = d + 1
+    }
+    var p: u64 = 0
+    while p < pkgs {
+        PKG_USED[p as usize] = 0 as u8
+        PKG_FW[p as usize] = FW_NONE as u8
+        consider(p)
+        p = p + 1
+    }
+    d = 0
+    while d < total {
+        settle(d)
+        d = d + 1
+    }
+    return total
+}
