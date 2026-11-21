@@ -21,9 +21,9 @@ bash tools/sync/build.sh "$T/bin" 0 $PROGS > "$T/b.txt" 2>&1 && ok "programs bui
 ./tools/build-kernel.sh "$T/k0.img" --stufe 0 > "$T/k.txt" 2>&1 && ok "kernel builds" || { bad "kernel build"; finish; }
 
 cp "$T/bin/explorer.elf" "$T/h/bau/explorer.elf"
-cp pakete/explorer/INFO "$T/h/INFO"
 python3 tools/k15/mksymbol.py pakete/explorer "$T/h/bau/symbol" > /dev/null
 for v in 2.0.0 2.0.1; do
+    sed "s/^version=.*/version=$v/" pakete/explorer/INFO > "$T/h/INFO"
     sed "s/^version=.*/version=$v/" pakete/explorer/rezept > "$T/h/rezept"
     sed -i "s#bau/#$T/h/bau/#; s#^datei=INFO INFO#datei=INFO $T/h/INFO#" "$T/h/rezept"
     python3 "$OPK" bauen "$T/h/rezept" -o "$T/src/explorer-$v.opk" > "$T/pk-$v.txt" 2>&1 || { bad "package $v builds"; cat "$T/pk-$v.txt"; finish; }
