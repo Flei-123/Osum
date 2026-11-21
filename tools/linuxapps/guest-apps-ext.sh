@@ -82,4 +82,4 @@ t proc-iomem 'System RAM' cat /proc/iomem
 t proc-zoneinfo 'Node 0, zone' cat /proc/zoneinfo
 t proc-softirqs TIMER cat /proc/softirqs
 t proc-buddyinfo 'Node 0' cat /proc/buddyinfo
-t perl-creat-syscall ok perl -e 'my $fd=syscall(85,"/tmp/cr.pl",420); print $fd>=0 ? "ok\n" : "fail $!\n"'
+t perl-creat-syscall ok perl -e 'my $p="/tmp/cr.pl"; my $fd=syscall(85,$p,420); print $fd>=0 ? "ok\n" : "fail $!\n"'
