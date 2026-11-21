@@ -23,7 +23,7 @@ import net.kodb
 import net.tcporphan
 import net.tcpreserve
 
-export { arp_flush, arp_ask, echoes, EPHEMERAL_BASE, EPHEMERAL_MASK,
+export { is_loopback, arp_flush, arp_ask, echoes, EPHEMERAL_BASE, EPHEMERAL_MASK,
     init, ready, pump, netd_body, wake, configure, readdr, us, set_task,
     ip, mask, gw, mac_at, stat, pumps, frames_in, frames_out,
     carrier, gw_known, gw_verified, link_speed, hwstat,
@@ -612,6 +612,7 @@ fn pump(state: u64) -> u64 {
     tcporphan.sweep(state, s, now)
 
     let out: u64 = kstate.get(state, sc(S_SCRATCH))
+    loop_arp_refresh(s, now)
     n = 0
     while n < PUMP_BATCH {
         if netdev.tx_room(state) == 0 {
@@ -621,6 +622,10 @@ fn pump(state: u64) -> u64 {
                 FRAME_CAP as usize, now)
             if len == 0 {
                 n = PUMP_BATCH
+            } else if loop_frame(s, out, len as u64) {
+                stack.net_input(s, out as *mut u8, len, now)
+                work = work + 1
+                n = n + 1
             } else {
                 netmon.frame_seen(state, out, len as u64, true)
                 if wg.tx_hook(state, out, len as u64) == 0 {
@@ -1269,9 +1274,40 @@ fn sock_ka_set(state: u64, i: u64, which: u64, v: u64) -> u64 {
     return 0
 }
 
+const LOOPBACK_NET: u64 = 127
+
+fn is_loopback(addr: u64) -> bool {
+    return ((addr >> 24) & 0xFF) == LOOPBACK_NET
+}
+
+fn loop_target(state: u64, addr: u64) -> u64 {
+    if is_loopback(addr) {
+        return ip(state)
+    }
+    return addr
+}
+
+fn loop_frame(s: *mut stack.Stack, f: u64, len: u64) -> bool {
+    if len < wire.ETH_HDR as u64 {
+        return false
+    }
+    if wire.eth_type(f as *mut u8) != wire.ETYPE_IP4 {
+        return false
+    }
+    return wire.eth_dst_is(f as *mut u8, stack.net_mac_at(s))
+}
+
+fn loop_arp_refresh(s: *mut stack.Stack, now: u64) {
+    let own: u32 = stack.net_ip(s)
+    if own == 0 || stack.net_arp_valid(s, own, now) {
+        return
+    }
+    stack.net_arp_learn(s, own, stack.net_mac_at(s), now)
+}
+
 fn connect_slot(state: u64, addr: u64, port: u64) -> i32 {
     let flags: u64 = hold(state)
-    let h: i32 = stack.net_connect(st(state), (addr & 0xFFFFFFFF) as u32,
+    let h: i32 = stack.net_connect(st(state), (loop_target(state, addr) & 0xFFFFFFFF) as u32,
         (port & 0xFFFF) as u16, now_us(state))
     drop_lock(state, flags)
     return h
@@ -1633,7 +1669,7 @@ fn sock_sendto(state: u64, i: u64, src: u64, n: u64, addr: u64,
     netmon.sset(state, i, netmon.S_RPORT, dst_port)
     let flags: u64 = hold(state)
     let ok: bool = stack.udp_send(st(state), (sport & 0xFFFF) as u16,
-        (dst_ip & 0xFFFFFFFF) as u32, (dst_port & 0xFFFF) as u16,
+        (loop_target(state, dst_ip) & 0xFFFFFFFF) as u32, (dst_port & 0xFFFF) as u16,
         src as *mut u8, n as usize, now_us(state))
     drop_lock(state, flags)
     if !ok {

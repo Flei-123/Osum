@@ -1,0 +1,198 @@
+#define TNAME "tcploop"
+#include "t.h"
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+
+#define PORT 5601
+#define BULK 262144
+
+static struct sockaddr_in loop_addr(int port)
+{
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+    return a;
+}
+
+static int make_listener(int port)
+{
+    struct sockaddr_in a = loop_addr(port);
+    int l = socket(AF_INET, SOCK_STREAM, 0);
+    if (l < 0) return -1;
+    if (bind(l, (struct sockaddr *)&a, sizeof a) != 0 || listen(l, 4) != 0) {
+        close(l);
+        return -1;
+    }
+    return l;
+}
+
+static int dial(int port)
+{
+    struct sockaddr_in a = loop_addr(port);
+    int c = socket(AF_INET, SOCK_STREAM, 0);
+    if (c < 0) return -1;
+    if (connect(c, (struct sockaddr *)&a, sizeof a) != 0) {
+        int e = errno;
+        close(c);
+        errno = e;
+        return -1;
+    }
+    return c;
+}
+
+static ssize_t read_full(int fd, char *buf, size_t n)
+{
+    size_t got = 0;
+    while (got < n) {
+        ssize_t r = read(fd, buf + got, n - got);
+        if (r <= 0) return got ? (ssize_t)got : r;
+        got += r;
+    }
+    return got;
+}
+
+static int write_full(int fd, const char *buf, size_t n)
+{
+    size_t put = 0;
+    while (put < n) {
+        ssize_t w = write(fd, buf + put, n - put);
+        if (w <= 0) return -1;
+        put += w;
+    }
+    return 0;
+}
+
+static void echo_roundtrip(void)
+{
+    int l = make_listener(PORT);
+    CHECK("loop_listen", l >= 0, "errno=%d", errno);
+    if (l < 0) return;
+    int c = dial(PORT);
+    CHECK("loop_connect", c >= 0, "errno=%d", errno);
+    if (c < 0) {
+        close(l);
+        return;
+    }
+    int a = accept(l, 0, 0);
+    CHECK("loop_accept", a >= 0, "errno=%d", errno);
+    char buf[16];
+    CHECK("loop_client_to_server", write(c, "ping", 4) == 4 && read_full(a, buf, 4) == 4 && memcmp(buf, "ping", 4) == 0, "errno=%d", errno);
+    CHECK("loop_server_to_client", write(a, "pong!", 5) == 5 && read_full(c, buf, 5) == 5 && memcmp(buf, "pong!", 5) == 0, "errno=%d", errno);
+    close(c);
+    ssize_t eof = read(a, buf, sizeof buf);
+    CHECK("loop_eof_after_peer_close", eof == 0, "r=%zd errno=%d", eof, errno);
+    close(a);
+    close(l);
+}
+
+static void bulk_transfer(void)
+{
+    int l = make_listener(PORT + 1);
+    if (l < 0) {
+        GAP("bulk_listen", "errno=%d", errno);
+        return;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        int c = dial(PORT + 1);
+        if (c < 0) _exit(2);
+        char chunk[4096];
+        for (size_t i = 0; i < sizeof chunk; i++) chunk[i] = (char)(i * 7);
+        for (int sent = 0; sent < BULK; sent += sizeof chunk)
+            if (write_full(c, chunk, sizeof chunk) != 0) _exit(3);
+        close(c);
+        _exit(0);
+    }
+    int a = accept(l, 0, 0);
+    CHECK("bulk_accept", a >= 0, "errno=%d", errno);
+    long total = 0;
+    long sum = 0;
+    char buf[4096];
+    ssize_t r;
+    while (a >= 0 && (r = read(a, buf, sizeof buf)) > 0) {
+        for (ssize_t i = 0; i < r; i++) sum += (unsigned char)buf[i];
+        total += r;
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    long expect = 0;
+    for (int i = 0; i < 4096; i++) expect += (unsigned char)(char)(i * 7);
+    expect *= BULK / 4096;
+    CHECK("bulk_all_bytes", total == BULK, "total=%ld", total);
+    CHECK("bulk_content_sum", sum == expect, "sum=%ld expect=%ld", sum, expect);
+    CHECK("bulk_sender_clean_exit", WIFEXITED(status) && WEXITSTATUS(status) == 0, "status=%d", status);
+    if (a >= 0) close(a);
+    close(l);
+}
+
+static void refused_and_nonblocking(void)
+{
+    int c = dial(PORT + 9);
+    CHECK("loop_refused", c < 0 && errno == ECONNREFUSED, "c=%d errno=%d", c, errno);
+    if (c >= 0) close(c);
+    int l = make_listener(PORT + 2);
+    if (l < 0) {
+        GAP("nb_listen", "errno=%d", errno);
+        return;
+    }
+    struct sockaddr_in a = loop_addr(PORT + 2);
+    int s = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    int r = connect(s, (struct sockaddr *)&a, sizeof a);
+    CHECK("nb_connect_inprogress_or_done", r == 0 || errno == EINPROGRESS, "r=%d errno=%d", r, errno);
+    struct pollfd pw = { s, POLLOUT, 0 };
+    CHECK("nb_connect_pollout", poll(&pw, 1, 3000) == 1 && (pw.revents & POLLOUT), "revents=%d", pw.revents);
+    struct pollfd pl = { l, POLLIN, 0 };
+    CHECK("nb_listener_pollin", poll(&pl, 1, 3000) == 1 && (pl.revents & POLLIN), "revents=%d", pl.revents);
+    int acc = accept4(l, 0, 0, SOCK_NONBLOCK);
+    int fl = acc >= 0 ? fcntl(acc, F_GETFL) : 0;
+    CHECK("nb_accept4_flag", acc >= 0 && (fl & O_NONBLOCK), "acc=%d fl=%d", acc, fl);
+    char buf[4];
+    ssize_t e = acc >= 0 ? read(acc, buf, sizeof buf) : 0;
+    CHECK("nb_read_eagain", e < 0 && errno == EAGAIN, "r=%zd errno=%d", e, errno);
+    close(s);
+    if (acc >= 0) close(acc);
+    close(l);
+}
+
+static void names_and_udp(void)
+{
+    int l = make_listener(PORT + 3);
+    if (l < 0) {
+        GAP("names_listen", "errno=%d", errno);
+        return;
+    }
+    int c = dial(PORT + 3);
+    struct sockaddr_in me;
+    socklen_t len = sizeof me;
+    int r = c >= 0 ? getsockname(c, (struct sockaddr *)&me, &len) : -1;
+    CHECK("loop_getsockname_port", r == 0 && ntohs(me.sin_port) != 0, "r=%d", r);
+    if (c >= 0) close(c);
+    close(l);
+
+    struct sockaddr_in ua = loop_addr(PORT + 4);
+    int us = socket(AF_INET, SOCK_DGRAM, 0);
+    int uc = socket(AF_INET, SOCK_DGRAM, 0);
+    int br = bind(us, (struct sockaddr *)&ua, sizeof ua);
+    ssize_t sn = sendto(uc, "dgram", 5, 0, (struct sockaddr *)&ua, sizeof ua);
+    struct pollfd p = { us, POLLIN, 0 };
+    char buf[16];
+    int got = poll(&p, 1, 3000) == 1 ? (int)recv(us, buf, sizeof buf, 0) : -1;
+    CHECK("loop_udp_roundtrip", br == 0 && sn == 5 && got == 5 && memcmp(buf, "dgram", 5) == 0, "bind=%d sent=%zd got=%d errno=%d", br, sn, got, errno);
+    close(us);
+    close(uc);
+}
+
+int main(void)
+{
+    echo_roundtrip();
+    bulk_transfer();
+    refused_and_nonblocking();
+    names_and_udp();
+    return 0;
+}
