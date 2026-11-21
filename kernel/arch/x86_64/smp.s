@@ -101,6 +101,7 @@ ap_prot32:
      * mode, and the far jump below makes it 64 bit. */
     movl %cr0, %eax
     orl  $0x80000001, %eax
+    andl $0x9FFFFFFF, %eax
     movl %eax, %cr0
     ljmp $0x08, $ABS_LONG64
 
