@@ -1,0 +1,117 @@
+profile kernel
+
+import lib.kstate
+import sched.time
+import sched.taskslot
+import sched.taskconst
+import sync.atomic
+import sync.fslockstat
+import fs.procfs.pfproc
+import arch.cpu
+
+export { note, lines, sys_begin }
+
+const GAP_MS: u64 = 20
+const RING: u64 = 32
+const WORDS: u64 = 8
+const MAX_CPUS: u64 = 8
+
+static mut last_tsc: u64 = 0
+static mut gap_count: u64 = 0
+static mut gap_us_sum: u64 = 0
+static mut gap_us_max: u64 = 0
+static mut ring_head: u64 = 0
+static mut ring: [u64; 256] = [0 as u64; 256]
+static mut sys_nr: [u64; 8] = [0 as u64; 8]
+static mut sys_tsc: [u64; 8] = [0 as u64; 8]
+
+fn sys_begin(state: u64, number: u64, arg: u64) {
+    let me: u64 = cpu.here(state)
+    if me >= MAX_CPUS {
+        return
+    }
+    sys_nr[me as usize] = number | (arg << 16)
+    sys_tsc[me as usize] = time.tsc()
+}
+
+fn us_of(state: u64, cycles: u64) -> u64 {
+    let khz: u64 = time.khz(state)
+    if khz < 1000 {
+        return 0
+    }
+    return cycles / (khz / 1000)
+}
+
+fn note(state: u64, rip: u64, cur: u64) {
+    let now: u64 = time.tsc()
+    let before: u64 = last_tsc
+    last_tsc = now
+    if before == 0 || now <= before {
+        return
+    }
+    let gap_us: u64 = us_of(state, now - before)
+    if gap_us < GAP_MS * 1000 {
+        return
+    }
+    gap_count = gap_count + 1
+    gap_us_sum = gap_us_sum + gap_us
+    if gap_us > gap_us_max {
+        gap_us_max = gap_us
+    }
+    record(state, gap_us, rip, cur)
+}
+
+fn record(state: u64, gap_us: u64, rip: u64, cur: u64) {
+    let b: u64 = (ring_head % RING) * WORDS
+    ring_head = ring_head + 1
+    ring[b as usize] = kstate.get(state, kstate.TICKS)
+    ring[(b + 1) as usize] = gap_us
+    ring[(b + 2) as usize] = rip
+    ring[(b + 3) as usize] = taskslot.tget(state, cur, taskconst.T_PID) | (taskslot.tget(state, cur, taskconst.T_KIND) << 32)
+    ring[(b + 4) as usize] = atomic.lock_owner(state, atomic.L_FS)
+    ring[(b + 5) as usize] = us_of(state, fslockstat.last_hold())
+    ring[(b + 6) as usize] = sys_nr[0]
+    ring[(b + 7) as usize] = us_of(state, time.tsc() - sys_tsc[0])
+}
+
+fn w_field(state: u64, at: u64, v: u64) -> u64 {
+    var sp: [u8; 2] = " \0"
+    let p: u64 = pfproc.w_str(state, at, (&sp[0]) as u64)
+    return pfproc.w_num(state, p, v)
+}
+
+fn lines(state: u64, at: u64) -> u64 {
+    var head: [u8; 13] = "tickgap.sum \0"
+    var item: [u8; 9] = "tickgap \0"
+    var p: u64 = pfproc.w_str(state, at, (&head[0]) as u64)
+    p = pfproc.w_num(state, p, gap_count)
+    p = w_field(state, p, gap_us_sum)
+    p = w_field(state, p, gap_us_max)
+    p = pfproc.w_nl(state, p)
+    var n: u64 = ring_head
+    if n > RING {
+        n = RING
+    }
+    var k: u64 = ring_head - n
+    while k < ring_head {
+        let b: u64 = (k % RING) * WORDS
+        p = pfproc.w_str(state, p, (&item[0]) as u64)
+        p = pfproc.w_num(state, p, ring[b as usize])
+        p = w_field(state, p, ring[(b + 1) as usize])
+        p = pfproc.w_hex16(state, w_space(state, p), ring[(b + 2) as usize])
+        p = w_field(state, p, ring[(b + 3) as usize] & 0xFFFFFFFF)
+        p = w_field(state, p, ring[(b + 3) as usize] >> 32)
+        p = w_field(state, p, ring[(b + 4) as usize])
+        p = w_field(state, p, ring[(b + 5) as usize])
+        p = w_field(state, p, ring[(b + 6) as usize])
+        p = w_field(state, p, ring[(b + 7) as usize])
+        p = pfproc.w_nl(state, p)
+        k = k + 1
+    }
+    return p
+}
+
+fn w_space(state: u64, at: u64) -> u64 {
+    var sp: [u8; 2] = " \0"
+    return pfproc.w_str(state, at, (&sp[0]) as u64)
+}
