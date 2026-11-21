@@ -40,15 +40,16 @@ done
 [ "$built" = "$(echo $PROGS | wc -w)" ] && ok "programs built ($built)" || bad "programs built: $built"
 
 echo "== 2. image =="
-printf 'mark:grafik:once:/bin/echo WMINIT-ALIVE\nstale:grafik:once:/bin/cat /run/autostart.done\nbundle:grafik:once:/apps/wm.osp/bin/hello BUNDLE-ALIVE\n' > "$T/inittab"
+printf 'mark:grafik:once:/bin/echo WMINIT-ALIVE\nstale:grafik:once:/bin/cat /run/autostart.done\n' > "$T/inittab"
 printf 'grafik\n' > "$T/ziel"
+printf 'wmpkg:grafik:once:/apps/wm.osp/bin/hello BUNDLE-ALIVE\n' > "$T/bundle-inittab"
 printf 'STALEMARK\n' > "$T/stale"
 spec=""
 for p in $PROGS; do spec="$spec /bin/$p=$T/$p.elf@755:0:0"; done
 cp "$T/echo.elf" "$T/hello.elf"
 bash tools/mkfsfi/mkfs.sh build "$T/a.img" $BLOCKS /bin/ /etc/ /run/ /var/ /var/log/ /apps/ /apps/wm.osp/ /apps/wm.osp/bin/ \
     $spec "/etc/inittab=$T/inittab@644:0:0" "/etc/ziel=$T/ziel@644:0:0" "/run/autostart.done=$T/stale@644:0:0" \
-    "/apps/wm.osp/bin/hello=$T/hello.elf@755:0:0" > "$T/mkfs.txt" 2>&1 && ok "image" || { bad "mkfs"; tail -3 "$T/mkfs.txt"; }
+    "/apps/wm.osp/bin/hello=$T/hello.elf@644:0:0" "/apps/wm.osp/INITTAB=$T/bundle-inittab@644:0:0" > "$T/mkfs.txt" 2>&1 && ok "image" || { bad "mkfs"; tail -3 "$T/mkfs.txt"; }
 
 run_case() {
     cp "$T/a.img" "$T/live-$1.img"
@@ -65,7 +66,7 @@ run_case new new
 has "init starts although wmshell owns the shell" "osum: pid1 init (wm)" "$T/new.txt"
 has "init mounted and parsed the table" "init: dienste=" "$T/new.txt"
 has "INITTAB service ran" "WMINIT-ALIVE" "$T/new.txt"
-has "package program from .osp/bin ran" "BUNDLE-ALIVE" "$T/new.txt"
+has "bundle INITTAB drop-in ran, 0644 binary made executable by init" "BUNDLE-ALIVE" "$T/new.txt"
 hasnt "stale /run marker was cleared at boot" "STALEMARK" "$T/new.txt"
 run_case old old
 hasnt "COUNTER-PROOF old kernel: init never starts under wmshell" "WMINIT-ALIVE" "$T/old.txt"
