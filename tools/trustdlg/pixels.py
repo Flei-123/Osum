@@ -36,13 +36,14 @@ def layout(line):
     return fields
 
 
-def run_len(px, x0, y, limit, foot):
-    n = 0
-    x = x0
-    while x < limit and not near(px[x, y], foot, 2):
-        n += 1
-        x += 1
-    return n
+def run_len(px, x_in, y, foot):
+    left = x_in
+    while not near(px[left - 1, y], foot, 2):
+        left -= 1
+    right = x_in
+    while not near(px[right + 1, y], foot, 2):
+        right += 1
+    return right - left + 1
 
 
 def main(root, mode, line):
@@ -75,8 +76,8 @@ def main(root, mode, line):
     no_p = up[f["no"] + 14 * k, mid]
     check(near(no_p, pal["accent"]), "No is the accent button %s (want %s)" % (no_p, pal["accent"]))
     check(near(yes_p, pal["button"]), "Yes is the neutral button %s (want %s)" % (yes_p, pal["button"]))
-    wy = run_len(up, f["yes"] - 2 * k, mid, f["x"] + f["w"], pal["foot"])
-    wn = run_len(up, f["no"] - 4 * k, mid, f["x"] + f["w"], pal["foot"])
+    wy = run_len(up, f["yes"] + 14 * k, mid, pal["foot"])
+    wn = run_len(up, f["no"] + 14 * k, mid, pal["foot"])
     check(abs(wy - f["bw"]) <= 3 * k, "Yes button width %d px (layout bw %d)" % (wy, f["bw"]))
     check(abs(wn - (f["bw"] + 4 * k)) <= 3 * k, "No button width incl. focus ring %d px (bw %d + ring)" % (wn, f["bw"]))
     check(near(up[f["no"] - k, mid], pal["ring"], 12), "default focus ring on No")
