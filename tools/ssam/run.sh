@@ -35,7 +35,7 @@ L0="$T/lib0"
 farm "$L0"
 for f in lib/ssam/*.fi; do ln -s "$ROOT/$f" "$L0/ssam/$(basename "$f")"; done
 
-printf 'import ssam.link\nimport ssam.hid\nimport ssam.wire\nfn main() -> i32 {\n    return 0\n}\n' > "$T/k.fi"
+printf 'import ssam.ssamlink\nimport ssam.ssamhid\nimport ssam.ssamwire\nfn main() -> i32 {\n    return 0\n}\n' > "$T/k.fi"
 FIRNLIB="$L0" "$FIRNC" --profile=kernel -c "$T/k.fi" -o "$T/k.o" 2> "$T/k.err" \
     && ok "lib compiles with --profile=kernel" \
     || { bad "lib does not compile with --profile=kernel"; head -5 "$T/k.err"; }
@@ -83,30 +83,30 @@ mutate() { # name file sed-expression
         bad "control $name: oracle stays green on a broken lib"
     fi
 }
-mutate crc_init       wire.fi 's/^const CRC_INIT: u64 = 0xFFFF/const CRC_INIT: u64 = 0/'
-mutate crc_poly       wire.fi 's/^const CRC_POLY: u64 = 0x1021/const CRC_POLY: u64 = 0x8005/'
-mutate syn_order      wire.fi 's/^const SYN0: u64 = 0xAA/const SYN0: u64 = 0x55/'
-mutate frame_ack      wire.fi 's/^const FRAME_ACK: u64 = 0x40/const FRAME_ACK: u64 = 0x04/'
-mutate rqid_skip      wire.fi 's/    if n <= EVENT_RQID_MAX {/    if false {/'
-mutate source_id      wire.fi 's/octets.st8(dst, 11, TID_HOST)/octets.st8(dst, 11, TID_SAM)/'
-mutate dup_check      link.fi 's/if g(l, L_LAST_OK) != 0 \&\& g(l, L_LAST_SEQ) == seq {/if false {/'
-mutate ack_seq        link.fi 's/queue_ack(l, seq)/queue_ack(l, 0)/'
-mutate payload_crc    link.fi 's/if wire.crc16(buf + wire.FRAME_HDR_LEN, len) != octets.ld16(buf, wire.FRAME_HDR_LEN + len) {/if false {/'
-mutate header_crc     link.fi 's/if wire.crc16(buf + 2, 4) != octets.ld16(buf, 6) {/if false {/'
-mutate nak_on_crc     link.fi 's/            queue_nak(l)//'
-mutate rqid_match     link.fi 's/ || octets.ld16(p, 5) != g(l, L_PEND_RQID)//'
-mutate ack_match      link.fi 's/ \&\& seq == g(l, L_PEND_SEQ)//'
-mutate max_tries      link.fi 's/^const MAX_TRIES: u64 = 3/const MAX_TRIES: u64 = 9/'
-mutate ack_timeout    link.fi 's/^const ACK_TIMEOUT_MS: u64 = 250/const ACK_TIMEOUT_MS: u64 = 25/'
-mutate event_overflow link.fi 's/if ev_avail(l) >= EV_SLOTS {/if false {/'
-mutate event_size     link.fi 's/if dlen > EV_DATA_MAX {/if false {/'
-mutate payload_max    link.fi 's/if len > PAYLOAD_MAX {/if false {/'
-mutate nak_resend     link.fi 's/            resend(l, now)\n        }\n        return\n    }\n    if kind == wire.FRAME_DATA_SEQ/XX/; s/bump(l, C_NAK_RX)/bump(l, C_NAK_RX)\n        return/'
-mutate hid_type       hid.fi 's/ \&\& octets.ld8(p, 1) == HID_DT_HID//'
-mutate hid_count      hid.fi 's/        \&\& octets.ld8(p, 5) == 1 \&\& octets.ld8(p, 6) == HID_DT_REPORT/        \&\& octets.ld8(p, 6) == HID_DT_REPORT/'
-mutate slice_bounds   hid.fi 's/ \&\& octets.ld32(p, 5) <= n - SLICE_HDR_LEN//'
-mutate event_rqid     hid.fi 's/octets.st16(dst, 2, tc)/octets.st16(dst, 2, 0)/'
-mutate status_ok      hid.fi 's/ \&\& octets.ld8(p, 0) == 0$/ \&\& true/'
+mutate crc_init       ssamwire.fi 's/^const CRC_INIT: u64 = 0xFFFF/const CRC_INIT: u64 = 0/'
+mutate crc_poly       ssamwire.fi 's/^const CRC_POLY: u64 = 0x1021/const CRC_POLY: u64 = 0x8005/'
+mutate syn_order      ssamwire.fi 's/^const SYN0: u64 = 0xAA/const SYN0: u64 = 0x55/'
+mutate frame_ack      ssamwire.fi 's/^const FRAME_ACK: u64 = 0x40/const FRAME_ACK: u64 = 0x04/'
+mutate rqid_skip      ssamwire.fi 's/    if n <= EVENT_RQID_MAX {/    if false {/'
+mutate source_id      ssamwire.fi 's/octets.st8(dst, 11, TID_HOST)/octets.st8(dst, 11, TID_SAM)/'
+mutate dup_check      ssamlink.fi 's/if g(l, L_LAST_OK) != 0 \&\& g(l, L_LAST_SEQ) == seq {/if false {/'
+mutate ack_seq        ssamlink.fi 's/queue_ack(l, seq)/queue_ack(l, 0)/'
+mutate payload_crc    ssamlink.fi 's/if wire.crc16(buf + wire.FRAME_HDR_LEN, len) != octets.ld16(buf, wire.FRAME_HDR_LEN + len) {/if false {/'
+mutate header_crc     ssamlink.fi 's/if wire.crc16(buf + 2, 4) != octets.ld16(buf, 6) {/if false {/'
+mutate nak_on_crc     ssamlink.fi 's/            queue_nak(l)//'
+mutate rqid_match     ssamlink.fi 's/ || octets.ld16(p, 5) != g(l, L_PEND_RQID)//'
+mutate ack_match      ssamlink.fi 's/ \&\& seq == g(l, L_PEND_SEQ)//'
+mutate max_tries      ssamlink.fi 's/^const MAX_TRIES: u64 = 3/const MAX_TRIES: u64 = 9/'
+mutate ack_timeout    ssamlink.fi 's/^const ACK_TIMEOUT_MS: u64 = 250/const ACK_TIMEOUT_MS: u64 = 25/'
+mutate event_overflow ssamlink.fi 's/if ev_avail(l) >= EV_SLOTS {/if false {/'
+mutate event_size     ssamlink.fi 's/if dlen > EV_DATA_MAX {/if false {/'
+mutate payload_max    ssamlink.fi 's/if len > PAYLOAD_MAX {/if false {/'
+mutate nak_resend     ssamlink.fi 's/            resend(l, now)\n        }\n        return\n    }\n    if kind == wire.FRAME_DATA_SEQ/XX/; s/bump(l, C_NAK_RX)/bump(l, C_NAK_RX)\n        return/'
+mutate hid_type       ssamhid.fi 's/ \&\& octets.ld8(p, 1) == HID_DT_HID//'
+mutate hid_count      ssamhid.fi 's/        \&\& octets.ld8(p, 5) == 1 \&\& octets.ld8(p, 6) == HID_DT_REPORT/        \&\& octets.ld8(p, 6) == HID_DT_REPORT/'
+mutate slice_bounds   ssamhid.fi 's/ \&\& octets.ld32(p, 5) <= n - SLICE_HDR_LEN//'
+mutate event_rqid     ssamhid.fi 's/octets.st16(dst, 2, tc)/octets.st16(dst, 2, 0)/'
+mutate status_ok      ssamhid.fi 's/ \&\& octets.ld8(p, 0) == 0$/ \&\& true/'
 
 echo "ssam: $pass promises, $fail errors"
 [ "$fail" = 0 ]

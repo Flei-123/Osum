@@ -1,0 +1,286 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import bus.pci
+import serial
+import libc.regio
+import arch.x86_64.apic
+
+export {
+    MODE_NONE, MODE_MMIO, MODE_PIO, CAND_COUNT,
+    find, configure, rx_take, tx_put, mode, bdf, ids, lsr_errors, tx_drops, rx_total, tx_total,
+    prv_clock, prv_resets, last_msr, candidate_afe, candidate_parent_mhz
+}
+
+const MODE_NONE: u64 = 0
+const MODE_MMIO: u64 = 1
+const MODE_PIO: u64 = 2
+
+const LPSS_VENDOR: u64 = 0x8086
+const TGL_UART_DEV: u64 = 0x1E
+const TGL_UART_FN: u64 = 0
+const CLASS_SIMPLE_COMM: u64 = 0x07
+const QEMU_VENDOR: u64 = 0x1B36
+const QEMU_PCI_SERIAL: u64 = 0x0002
+
+const REG_SHIFT: u64 = 2
+const R_DATA: u64 = 0
+const R_IER: u64 = 1
+const R_FCR: u64 = 2
+const R_LCR: u64 = 3
+const R_MCR: u64 = 4
+const R_LSR: u64 = 5
+const R_MSR: u64 = 6
+
+const LSR_DR: u64 = 0x01
+const LSR_ERRORS: u64 = 0x1E
+const LSR_THRE: u64 = 0x20
+const LCR_DLAB: u64 = 0x80
+const LCR_8N1: u64 = 0x03
+const FCR_ENABLE_CLEAR: u64 = 0x07
+const MCR_AFE: u64 = 0x20
+const MCR_DTR_RTS_OUT2: u64 = 0x0B
+
+const PRV_CLOCK: u64 = 0x200
+const PRV_RESETS: u64 = 0x204
+const PRV_RESETS_RELEASE: u64 = 0x3
+const PRV_CLK_EN: u64 = 0x1
+const PRV_CLK_UPDATE: u64 = 0x80000000
+const PCI_CAP_PM: u64 = 0x01
+const TX_SPIN: u64 = 200000
+const RX_FLUSH_MAX: u64 = 256
+
+const CAND_COUNT: u64 = 4
+
+const X_MODE: u64 = 0
+const X_MMIO: u64 = 1
+const X_IO: u64 = 2
+const X_BDF: u64 = 3
+const X_IDS: u64 = 4
+const X_ERRORS: u64 = 5
+const X_TXDROP: u64 = 6
+const X_RX: u64 = 7
+const X_TX: u64 = 8
+const X_MSR: u64 = 9
+
+static mut ux: [u64; 16] = [0 as u64; 16]
+
+fn mode() -> u64 {
+    return ux[X_MODE as usize]
+}
+
+fn bdf() -> u64 {
+    return ux[X_BDF as usize]
+}
+
+fn ids() -> u64 {
+    return ux[X_IDS as usize]
+}
+
+fn lsr_errors() -> u64 {
+    return ux[X_ERRORS as usize]
+}
+
+fn tx_drops() -> u64 {
+    return ux[X_TXDROP as usize]
+}
+
+fn rx_total() -> u64 {
+    return ux[X_RX as usize]
+}
+
+fn tx_total() -> u64 {
+    return ux[X_TX as usize]
+}
+
+fn last_msr() -> u64 {
+    return ux[X_MSR as usize]
+}
+
+fn prv_clock() -> u64 {
+    if ux[X_MODE as usize] != MODE_MMIO {
+        return 0
+    }
+    return regio.read32(ux[X_MMIO as usize] + PRV_CLOCK)
+}
+
+fn prv_resets() -> u64 {
+    if ux[X_MODE as usize] != MODE_MMIO {
+        return 0
+    }
+    return regio.read32(ux[X_MMIO as usize] + PRV_RESETS)
+}
+
+fn candidate_parent_mhz(cand: u64) -> u64 {
+    if cand == 1 {
+        return 120
+    }
+    if cand == 2 {
+        return 200
+    }
+    return 100
+}
+
+fn candidate_afe(cand: u64) -> bool {
+    return cand != 3
+}
+
+fn candidate_m(cand: u64) -> u64 {
+    if cand == 1 || cand == 2 {
+        return 8
+    }
+    return 16
+}
+
+fn candidate_n(cand: u64) -> u64 {
+    if cand == 1 {
+        return 15
+    }
+    return 25
+}
+
+fn rd(reg: u64) -> u64 {
+    if ux[X_MODE as usize] == MODE_MMIO {
+        return regio.read8(ux[X_MMIO as usize] + (reg << REG_SHIFT))
+    }
+    return serial.in8((ux[X_IO as usize] + reg) as u16) as u64
+}
+
+fn wr(reg: u64, v: u64) {
+    if ux[X_MODE as usize] == MODE_MMIO {
+        regio.write8(ux[X_MMIO as usize] + (reg << REG_SHIFT), v)
+        return
+    }
+    serial.out8((ux[X_IO as usize] + reg) as u16, v as u8)
+}
+
+fn wake(state: u64, i: u64) {
+    let b: u64 = pci.get(state, i, pci.E_BDF)
+    pci.enable_master(b)
+    let pm: u64 = pci.cap_find(b, PCI_CAP_PM)
+    if pm != 0 {
+        let pmcsr: u64 = pci.cfg_read16(b, pm + 4)
+        if (pmcsr & 3) != 0 {
+            pci.cfg_write16(b, pm + 4, pmcsr & 0xFFFC)
+        }
+    }
+}
+
+fn claim_lpss(state: u64, i: u64) -> bool {
+    let bar: u64 = pci.bar(state, i, 0)
+    if bar == 0 || pci.bar_is_io(state, i, 0) {
+        return false
+    }
+    let mm: u64 = apic.map_device(state, bar & 0xFFFFFFFFFFFFFFF0)
+    if mm == 0 {
+        return false
+    }
+    wake(state, i)
+    regio.write32(mm + PRV_RESETS, PRV_RESETS_RELEASE)
+    ux[X_MMIO as usize] = mm
+    ux[X_MODE as usize] = MODE_MMIO
+    return true
+}
+
+fn claim_pio(state: u64, i: u64) -> bool {
+    if !pci.bar_is_io(state, i, 0) {
+        return false
+    }
+    wake(state, i)
+    ux[X_IO as usize] = pci.bar(state, i, 0) & 0xFFFC
+    ux[X_MODE as usize] = MODE_PIO
+    return true
+}
+
+fn find(state: u64, sim: bool) -> bool {
+    ux[X_MODE as usize] = MODE_NONE
+    let n: u64 = pci.count(state)
+    var i: u64 = 0
+    while i < n {
+        let ven: u64 = pci.get(state, i, pci.E_VENDOR)
+        let dev: u64 = pci.get(state, i, pci.E_DEVICE)
+        let b: u64 = pci.get(state, i, pci.E_BDF)
+        var hit: bool = false
+        if !sim && ven == LPSS_VENDOR && pci.get(state, i, pci.E_CLASS) == CLASS_SIMPLE_COMM
+            && pci.bdf_dev(b) == TGL_UART_DEV && pci.bdf_fn(b) == TGL_UART_FN {
+            hit = claim_lpss(state, i)
+        }
+        if sim && ven == QEMU_VENDOR && dev == QEMU_PCI_SERIAL {
+            hit = claim_pio(state, i)
+        }
+        if hit {
+            ux[X_BDF as usize] = b
+            ux[X_IDS as usize] = (ven << 16) | dev
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn program_clock(cand: u64) {
+    if ux[X_MODE as usize] != MODE_MMIO {
+        return
+    }
+    let mm: u64 = ux[X_MMIO as usize]
+    let v: u64 = PRV_CLK_EN | (candidate_m(cand) << 1) | (candidate_n(cand) << 16)
+    regio.write32(mm + PRV_CLOCK, v)
+    regio.write32(mm + PRV_CLOCK, v | PRV_CLK_UPDATE)
+}
+
+fn configure(cand: u64) {
+    program_clock(cand)
+    wr(R_IER, 0)
+    wr(R_LCR, LCR_DLAB | LCR_8N1)
+    wr(R_DATA, 1)
+    wr(R_IER, 0)
+    wr(R_LCR, LCR_8N1)
+    wr(R_FCR, FCR_ENABLE_CLEAR)
+    var mcr: u64 = MCR_DTR_RTS_OUT2
+    if candidate_afe(cand) {
+        mcr = mcr | MCR_AFE
+    }
+    wr(R_MCR, mcr)
+    var k: u64 = 0
+    while k < RX_FLUSH_MAX && (rd(R_LSR) & LSR_DR) != 0 {
+        let _b: u64 = rd(R_DATA)
+        k = k + 1
+    }
+    ux[X_MSR as usize] = rd(R_MSR)
+}
+
+fn rx_take(dst: u64, max: u64) -> u64 {
+    var n: u64 = 0
+    while n < max {
+        let lsr: u64 = rd(R_LSR)
+        if (lsr & LSR_DR) == 0 {
+            break
+        }
+        if (lsr & LSR_ERRORS) != 0 {
+            ux[X_ERRORS as usize] = ux[X_ERRORS as usize] + 1
+        }
+        regio.write8(dst + n, rd(R_DATA))
+        n = n + 1
+    }
+    ux[X_RX as usize] = ux[X_RX as usize] + n
+    return n
+}
+
+fn tx_put(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        var spin: u64 = 0
+        while spin < TX_SPIN && (rd(R_LSR) & LSR_THRE) == 0 {
+            spin = spin + 1
+        }
+        if spin == TX_SPIN {
+            ux[X_TXDROP as usize] = ux[X_TXDROP as usize] + (n - i)
+            return
+        }
+        wr(R_DATA, regio.read8(p + i))
+        i = i + 1
+    }
+    ux[X_TX as usize] = ux[X_TX as usize] + n
+    ux[X_MSR as usize] = rd(R_MSR)
+}

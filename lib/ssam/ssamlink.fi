@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import libc.octets
-import ssam.wire
+import ssam.ssamwire
 
 export {
     LINK_BYTES, REQ_IDLE, REQ_WAIT, REQ_DONE, REQ_FAIL, EV_DATA_MAX,
@@ -86,7 +86,7 @@ fn counter(l: u64, c: u64) -> u64 {
 
 fn init(l: u64) {
     octets.zero(l, LINK_BYTES)
-    s(l, L_RQID, wire.next_rqid(wire.EVENT_RQID_MAX))
+    s(l, L_RQID, ssamwire.next_rqid(ssamwire.EVENT_RQID_MAX))
 }
 
 fn tx_queue(l: u64, src: u64, n: u64) -> bool {
@@ -102,7 +102,7 @@ fn tx_queue(l: u64, src: u64, n: u64) -> bool {
 
 fn queue_ack(l: u64, seq: u64) {
     var f: [u8; 16] = [0 as u8; 16]
-    let n: u64 = wire.put_ack((&f[0]) as u64, seq)
+    let n: u64 = ssamwire.put_ack((&f[0]) as u64, seq)
     if tx_queue(l, (&f[0]) as u64, n) {
         bump(l, C_ACK_TX)
     }
@@ -110,7 +110,7 @@ fn queue_ack(l: u64, seq: u64) {
 
 fn queue_nak(l: u64) {
     var f: [u8; 16] = [0 as u8; 16]
-    let n: u64 = wire.put_nak((&f[0]) as u64)
+    let n: u64 = ssamwire.put_nak((&f[0]) as u64)
     if tx_queue(l, (&f[0]) as u64, n) {
         bump(l, C_NAK_TX)
     }
@@ -142,9 +142,9 @@ fn request(l: u64, tc: u64, tid: u64, iid: u64, cid: u64, payload: u64, plen: u6
     }
     let seq: u64 = g(l, L_SEQ)
     let rqid: u64 = g(l, L_RQID)
-    let n: u64 = wire.put_cmd(l + PFR_BASE, seq, rqid, tc, tid, iid, cid, payload, plen)
+    let n: u64 = ssamwire.put_cmd(l + PFR_BASE, seq, rqid, tc, tid, iid, cid, payload, plen)
     s(l, L_SEQ, (seq + 1) & 0xFF)
-    s(l, L_RQID, wire.next_rqid(rqid))
+    s(l, L_RQID, ssamwire.next_rqid(rqid))
     s(l, L_PEND_SEQ, seq)
     s(l, L_PEND_RQID, rqid)
     s(l, L_PEND_LEN, n)
@@ -247,7 +247,7 @@ fn push_event(l: u64, p: u64, n: u64) {
         bump(l, C_DROPPED)
         return
     }
-    let dlen: u64 = n - wire.CMD_HDR_LEN
+    let dlen: u64 = n - ssamwire.CMD_HDR_LEN
     if dlen > EV_DATA_MAX {
         bump(l, C_DROPPED)
         return
@@ -258,29 +258,29 @@ fn push_event(l: u64, p: u64, n: u64) {
     octets.st8(slot, 2, octets.ld8(p, 4))
     octets.st8(slot, 3, octets.ld8(p, 7))
     octets.st16(slot, 4, dlen)
-    octets.copy(slot + EV_HDR, p + wire.CMD_HDR_LEN, dlen)
+    octets.copy(slot + EV_HDR, p + ssamwire.CMD_HDR_LEN, dlen)
     s(l, L_EV_TAIL, g(l, L_EV_TAIL) + 1)
     bump(l, C_EVENTS)
 }
 
 fn take_response(l: u64, p: u64, n: u64) {
-    let dlen: u64 = n - wire.CMD_HDR_LEN
+    let dlen: u64 = n - ssamwire.CMD_HDR_LEN
     if g(l, L_REQ) != REQ_WAIT || octets.ld16(p, 5) != g(l, L_PEND_RQID) || dlen > RSP_MAX {
         bump(l, C_DROPPED)
         return
     }
-    octets.copy(l + RSP_BASE, p + wire.CMD_HDR_LEN, dlen)
+    octets.copy(l + RSP_BASE, p + ssamwire.CMD_HDR_LEN, dlen)
     s(l, L_RSP_LEN, dlen)
     s(l, L_REQ, REQ_DONE)
     bump(l, C_RESPONSES)
 }
 
 fn handle_command(l: u64, p: u64, n: u64) {
-    if n < wire.CMD_HDR_LEN || octets.ld8(p, 0) != wire.PLD_CMD {
+    if n < ssamwire.CMD_HDR_LEN || octets.ld8(p, 0) != ssamwire.PLD_CMD {
         bump(l, C_DROPPED)
         return
     }
-    if wire.is_event_rqid(octets.ld16(p, 5)) {
+    if ssamwire.is_event_rqid(octets.ld16(p, 5)) {
         push_event(l, p, n)
         return
     }
@@ -289,21 +289,21 @@ fn handle_command(l: u64, p: u64, n: u64) {
 
 fn handle_frame(l: u64, kind: u64, seq: u64, p: u64, n: u64, now: u64) {
     bump(l, C_FRAMES)
-    if kind == wire.FRAME_ACK {
+    if kind == ssamwire.FRAME_ACK {
         bump(l, C_ACK_RX)
         if g(l, L_REQ) == REQ_WAIT && seq == g(l, L_PEND_SEQ) {
             s(l, L_ACKED, 1)
         }
         return
     }
-    if kind == wire.FRAME_NAK {
+    if kind == ssamwire.FRAME_NAK {
         bump(l, C_NAK_RX)
         if g(l, L_REQ) == REQ_WAIT && g(l, L_ACKED) == 0 {
             resend(l, now)
         }
         return
     }
-    if kind == wire.FRAME_DATA_SEQ {
+    if kind == ssamwire.FRAME_DATA_SEQ {
         queue_ack(l, seq)
         if g(l, L_LAST_OK) != 0 && g(l, L_LAST_SEQ) == seq {
             bump(l, C_DUP)
@@ -314,7 +314,7 @@ fn handle_frame(l: u64, kind: u64, seq: u64, p: u64, n: u64, now: u64) {
         handle_command(l, p, n)
         return
     }
-    if kind == wire.FRAME_DATA_NSQ {
+    if kind == ssamwire.FRAME_DATA_NSQ {
         handle_command(l, p, n)
         return
     }
@@ -338,15 +338,15 @@ fn scan(l: u64, now: u64) {
         if n == 0 {
             return
         }
-        if octets.ld8(buf, 0) != wire.SYN0 || (n >= 2 && octets.ld8(buf, 1) != wire.SYN1) {
+        if octets.ld8(buf, 0) != ssamwire.SYN0 || (n >= 2 && octets.ld8(buf, 1) != ssamwire.SYN1) {
             bump(l, C_RESYNC)
             rx_drop(l, 1)
             continue
         }
-        if n < wire.FRAME_HDR_LEN {
+        if n < ssamwire.FRAME_HDR_LEN {
             return
         }
-        if wire.crc16(buf + 2, 4) != octets.ld16(buf, 6) {
+        if ssamwire.crc16(buf + 2, 4) != octets.ld16(buf, 6) {
             bump(l, C_BADCRC)
             rx_drop(l, 1)
             continue
@@ -357,11 +357,11 @@ fn scan(l: u64, now: u64) {
             rx_drop(l, 2)
             continue
         }
-        let total: u64 = wire.frame_len(len)
+        let total: u64 = ssamwire.frame_len(len)
         if n < total {
             return
         }
-        if wire.crc16(buf + wire.FRAME_HDR_LEN, len) != octets.ld16(buf, wire.FRAME_HDR_LEN + len) {
+        if ssamwire.crc16(buf + ssamwire.FRAME_HDR_LEN, len) != octets.ld16(buf, ssamwire.FRAME_HDR_LEN + len) {
             bump(l, C_BADCRC)
             queue_nak(l)
             rx_drop(l, 2)
@@ -369,7 +369,7 @@ fn scan(l: u64, now: u64) {
         }
         let kind: u64 = octets.ld8(buf, 2)
         let seq: u64 = octets.ld8(buf, 5)
-        handle_frame(l, kind, seq, buf + wire.FRAME_HDR_LEN, len, now)
+        handle_frame(l, kind, seq, buf + ssamwire.FRAME_HDR_LEN, len, now)
         rx_drop(l, total)
     }
 }
