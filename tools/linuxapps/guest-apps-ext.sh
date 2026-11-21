@@ -78,3 +78,8 @@ t big-args 7 sh -c 'x=$(printf "%0400d" 0); sh -c "echo \$#" $x $x $x $x $x $x $
 t big-env 400 sh -c 'A=$(printf "%0400d" 0) B=$A C=$A D=$A E=$A sh -c "echo \${#E}"'
 echo APPS-END
 echo FX-END
+t proc-iomem 'System RAM' cat /proc/iomem
+t proc-zoneinfo 'Node 0, zone' cat /proc/zoneinfo
+t proc-softirqs TIMER cat /proc/softirqs
+t proc-buddyinfo 'Node 0' cat /proc/buddyinfo
+t perl-creat-syscall ok perl -e 'my $fd=syscall(85,"/tmp/cr.pl",420); print $fd>=0 ? "ok\n" : "fail $!\n"'

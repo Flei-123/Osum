@@ -1,0 +1,75 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.errno
+import sched.taskconst
+import sched.taskslot
+import sched.proc.procfault
+import sys.sysuser
+
+export {
+    handles, call
+}
+
+const SYS_MOVE_PAGES: u64 = 279
+const MPOL_MF_MOVE: u64 = 2
+const MPOL_MF_MOVE_ALL: u64 = 4
+const FLAGS_MASK: u64 = 6
+const WORD_BYTES: u64 = 8
+const INT_BYTES: u64 = 4
+const ONLY_NODE: u64 = 0
+const INT_MASK: u64 = 0xFFFFFFFF
+const SELF_PID: u64 = 0
+
+fn fail(e: u64) -> u64 {
+    return sysuser.neg(e)
+}
+
+fn handles(number: u64) -> bool {
+    return number == SYS_MOVE_PAGES
+}
+
+fn put_status(state: u64, me: u64, status: u64, i: u64, value: u64) -> bool {
+    return sysuser.put32(state, me, status + i * INT_BYTES, value & INT_MASK)
+}
+
+fn page_status(state: u64, me: u64, pages: u64, nodes: u64, i: u64) -> u64 {
+    if !procfault.user_ok(state, me, pages + i * WORD_BYTES, WORD_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    let page: u64 = sysuser.get_user64(state, me, pages + i * WORD_BYTES)
+    if !procfault.user_ok(state, me, page, 1) {
+        return fail(errno.E_FAULT)
+    }
+    if nodes == 0 {
+        return ONLY_NODE
+    }
+    if !procfault.user_ok(state, me, nodes + i * INT_BYTES, INT_BYTES) {
+        return fail(errno.E_FAULT)
+    }
+    if sysuser.get32(state, me, nodes + i * INT_BYTES) != ONLY_NODE {
+        return fail(errno.E_NODEV)
+    }
+    return ONLY_NODE
+}
+
+fn call(state: u64, me: u64, number: u64, pid: u64, count: u64, pages: u64, nodes: u64, status: u64, flags: u64) -> u64 {
+    if (flags & ~FLAGS_MASK) != 0 {
+        return fail(errno.E_INVAL)
+    }
+    let own: u64 = taskslot.tget(state, me, taskconst.T_PID)
+    if (pid & INT_MASK) != SELF_PID && (pid & INT_MASK) != own {
+        return fail(errno.E_SRCH)
+    }
+    var i: u64 = 0
+    while i < count {
+        if !procfault.user_ok(state, me, status + i * INT_BYTES, INT_BYTES) {
+            return fail(errno.E_FAULT)
+        }
+        let value: u64 = page_status(state, me, pages, nodes, i)
+        if !put_status(state, me, status, i, value) {
+            return fail(errno.E_FAULT)
+        }
+        i = i + 1
+    }
+    return 0
+}
