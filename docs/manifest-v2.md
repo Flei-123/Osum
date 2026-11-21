@@ -14,7 +14,7 @@ a capability list), Firn services contract v1 (docs/services-contract.md in the 
 | key | rule | launcher | notes |
 |---|---|---|---|
 | `name` `info` `keys` `revision` | name 1..31, info 1..80, keys = search words, revision = whole number per release | yes (first 1023 octets) | `fassung` is the old spelling of `revision`: accepted, refused by `--strict`, rewritten by `osdk migrate` |
-| `exec` `icon` `net` `menu` `hideif` | as before; `menu=show\|hidden` | yes | `exec` = JSON `native.entry` (default `start`); `icon` = file in the bundle (`symbol.svg` for web) |
+| `exec` `icon` `net` `menu` `hideif` `autostart` (`default-on\|default-off\|never`) | as before; `menu=show\|hidden` | yes | `exec` = JSON `native.entry` (default `start`); `icon` = file in the bundle (`symbol.svg` for web) |
 | `manifest=2` `id` `version` | reverse-DNS id (last part = bundle name), `X.Y.Z` | no | required |
 | `author` `license` `min_os` `needs` | free text, SPDX, `N[.N[.N]]`, `os>=N` / `app:<id>>=N` | no | strict needs non-empty author and license |
 | `kind` | `gui` window on the scene tree, `app` console/daemon, `service` bus service (needs `service=`) | no | strict: required; without it `service=` implies `service`, else `app` |
