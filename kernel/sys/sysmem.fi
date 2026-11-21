@@ -1268,23 +1268,13 @@ fn clear_child_tid(state: u64, me: u64) {
 }
 
 fn res_protect(state: u64, me: u64, addr: u64, pages: u64, prot: u64) -> u64 {
-    var k: u64 = 0
-    while k < pages {
-        let a: u64 = addr + k * sysconst.PAGE
-        if procspace.page_mapped(state, me, a) {
-            let r: u64 = set_range_prot(state, me, a, 1, prot)
-            if r == 2 {
-                return sysuser.neg(errno.E_ACCES)
-            }
-            if r != 0 {
-                return sysuser.neg(errno.E_NOMEM)
-            }
-        } else if prot != 0 {
-            if !procmap.lazy_mark(state, me, a, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0) {
-                return sysuser.neg(errno.E_NOMEM)
-            }
-        }
-        k = k + 1
+    let r: u64 = procrange.commit_run(state, me, addr, pages, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0)
+    procspace.tlb_flush_if_current(state, me)
+    if r == 2 {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if r != 0 {
+        return sysuser.neg(errno.E_NOMEM)
     }
     return 0
 }
@@ -1444,19 +1434,11 @@ fn do_madvise(state: u64, me: u64, addr: u64, len: u64, advice: u64) -> u64 {
         return sysuser.neg(errno.E_NOMEM)
     }
     let pages: u64 = sysfd.page_up(len) / sysconst.PAGE
-    var k: u64 = 0
-    while k < pages {
-        if !procspace.page_mapped(state, me, addr + k * sysconst.PAGE) {
-            return sysuser.neg(errno.E_NOMEM)
-        }
-        k = k + 1
+    if !procrange.all_mapped(state, me, addr, pages) {
+        return sysuser.neg(errno.E_NOMEM)
     }
     if advice == 4 {
-        k = 0
-        while k < pages {
-            let _z: bool = procspace.page_zero(state, me, addr + k * sysconst.PAGE)
-            k = k + 1
-        }
+        procrange.zero_run(state, me, addr, pages)
     }
     return 0
 }

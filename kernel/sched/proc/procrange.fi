@@ -163,3 +163,83 @@ fn protect_run(state: u64, i: u64, base: u64, pages: u64, readable: bool, writab
     }
     return 0
 }
+
+fn tile_next(a: u64) -> u64 {
+    return ((a >> 21) + 1) << 21
+}
+
+fn commit_run(state: u64, i: u64, base: u64, pages: u64, readable: bool, writable: bool, runnable: bool) -> u64 {
+    let end: u64 = base + pages * 4096
+    let wanted: bool = readable || writable || runnable
+    let bits: u64 = procmap.lazy_bits(readable, writable, runnable)
+    var a: u64 = base
+    while a < end {
+        let in_window: bool = procmap.lazy_window(a)
+        var pt: u64 = 0
+        if procpt.pt_slot(a) < 512 {
+            pt = procpt.pt_for(state, i, a, false)
+        }
+        if pt == 0 {
+            if !wanted {
+                a = tile_next(a)
+                continue
+            }
+            if !in_window {
+                return 1
+            }
+            pt = procpt.pt_for(state, i, a, true)
+            if pt == 0 {
+                return 1
+            }
+        }
+        let last: u64 = tile_slots(a, end)
+        var k: u64 = procpt.pt_slot(a)
+        while k < last {
+            let e: u64 = procpt.read_entry(pt, k)
+            if e == 0 {
+                let run: u64 = arch.zero_run(procpt.tab(pt) + k * 8, last - k)
+                if wanted {
+                    if !in_window {
+                        return 1
+                    }
+                    arch.fill_words(procpt.tab(pt) + k * 8, bits, run)
+                }
+                k = k + run
+                continue
+            }
+            if (e & (procbase.PAGE_PRESENT | procbase.PAGE_LAZY)) == 0 {
+                return 1
+            }
+            let r: u64 = procspace.protect_entry(state, i, pt, k, readable, writable, runnable)
+            if r != 0 {
+                return r
+            }
+            k = k + 1
+        }
+        a = tile_next(a)
+    }
+    return 0
+}
+
+fn zero_run(state: u64, i: u64, base: u64, pages: u64) {
+    let end: u64 = base + pages * 4096
+    var a: u64 = base
+    while a < end {
+        var pt: u64 = 0
+        if procpt.pt_slot(a) < 512 {
+            pt = procpt.pt_for(state, i, a, false)
+        }
+        if pt != 0 {
+            let last: u64 = tile_slots(a, end)
+            var k: u64 = procpt.pt_slot(a)
+            while k < last {
+                let e: u64 = procpt.read_entry(pt, k)
+                if (e & procbase.PAGE_PRESENT) != 0 && (e & procbase.PAGE_SHARED) == 0 {
+                    procpt.zero_frame(e & procbase.ADDR_MASK)
+                }
+                k = k + 1
+            }
+        }
+        a = tile_next(a)
+    }
+}

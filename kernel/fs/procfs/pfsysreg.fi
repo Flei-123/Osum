@@ -20,6 +20,11 @@ const NEWLINE: u64 = 10
 const KIND_NUMBER: u64 = 110
 const KIND_PROVIDER: u64 = 112
 const SEG_MAX: u64 = 40
+const CHILD_CACHE_SLOTS: u64 = 64
+const HASH_MASK: u64 = 0xFFFFFFFF
+
+static mut root_cache: [u64; 6] = [0 as u64; 6]
+static mut child_cache: [u64; 64] = [0 as u64; 64]
 
 fn tab(at: u64) -> u64 {
     return kstate.get8(pfsystab.base() + at)
@@ -64,28 +69,38 @@ fn tree_root(first: u64, second: u64) -> u64 {
     return 0
 }
 
+fn cached_root(slot: u64, first: u64, second: u64) -> u64 {
+    let known: u64 = root_cache[(slot) as usize]
+    if known != 0 {
+        return known
+    }
+    let found: u64 = tree_root(first, second)
+    root_cache[(slot) as usize] = found
+    return found
+}
+
 fn sys_root() -> u64 {
-    return tree_root(115, 121)
+    return cached_root(0, 115, 121)
 }
 
 fn net_root() -> u64 {
-    return tree_root(110, 101)
+    return cached_root(1, 110, 101)
 }
 
 fn pressure_root() -> u64 {
-    return tree_root(112, 114)
+    return cached_root(2, 112, 114)
 }
 
 fn sfs_root() -> u64 {
-    return tree_root(115, 102)
+    return cached_root(3, 115, 102)
 }
 
 fn node_root() -> u64 {
-    return tree_root(110, 111)
+    return cached_root(4, 110, 111)
 }
 
 fn memory_root() -> u64 {
-    return tree_root(109, 101)
+    return cached_root(5, 109, 101)
 }
 
 fn next_line(at: u64) -> u64 {
@@ -174,19 +189,43 @@ fn count(dir: u64) -> u64 {
     return n
 }
 
+fn child_slot(dir: u64, seg: u64, seg_len: u64) -> u64 {
+    var h: u64 = dir * 31 + seg_len
+    var i: u64 = 0
+    while i < seg_len {
+        h = (h * 31 + kstate.get8(seg + i)) & HASH_MASK
+        i = i + 1
+    }
+    return h & (CHILD_CACHE_SLOTS - 1)
+}
+
+fn line_matches(at: u64, ref: u64, plen: u64, seg: u64, seg_len: u64) -> bool {
+    if !has_prefix(at, ref, plen) || part_len(at, plen) != seg_len {
+        return false
+    }
+    var i: u64 = 0
+    while i < seg_len {
+        if tab(at + plen + i) != kstate.get8(seg + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
 fn find_child(dir: u64, seg: u64, seg_len: u64) -> u64 {
     let ref: u64 = offset_of(dir)
     let plen: u64 = plen_of(dir)
+    let slot: u64 = child_slot(dir, seg, seg_len)
+    let hint: u64 = child_cache[(slot) as usize]
+    if hint != 0 && hint < pfsystab.LEN && line_matches(hint, ref, plen, seg, seg_len) {
+        return child_id(hint, plen)
+    }
     var at: u64 = 0
     while at < pfsystab.LEN {
-        if has_prefix(at, ref, plen) && part_len(at, plen) == seg_len {
-            var i: u64 = 0
-            while i < seg_len && tab(at + plen + i) == kstate.get8(seg + i) {
-                i = i + 1
-            }
-            if i == seg_len {
-                return child_id(at, plen)
-            }
+        if line_matches(at, ref, plen, seg, seg_len) {
+            child_cache[(slot) as usize] = at
+            return child_id(at, plen)
         }
         at = next_line(at)
     }
