@@ -1091,45 +1091,74 @@ fn make_cmdline(state: u64, t: u64) -> u64 {
     return p
 }
 
-fn make_maps(state: u64, t: u64) -> u64 {
-    var p: u64 = 0
-    let low: u64 = procbase.USER_DATA
+static mut run_cell: [u64; 3] = [0 as u64; 3]
+
+fn run_start() -> u64 {
+    return run_cell[0 as usize]
+}
+
+fn run_end() -> u64 {
+    return run_cell[1 as usize]
+}
+
+fn run_rights() -> u64 {
+    return run_cell[2 as usize]
+}
+
+fn next_run(state: u64, t: u64, from: u64) -> bool {
     let high: u64 = procmap.LAZY_ATOP
-    var addr: u64 = low
-    var run_start: u64 = 0
+    var addr: u64 = from
+    var start: u64 = 0
     var run_r: u64 = 0
     var in_run: bool = false
-    while addr < high {
-        var r: u64 = 0
+    var going: bool = true
+    while going && addr < high {
         let k: u64 = procpt.pd_slot(addr)
         if k != 0 && procpt.pt_for(state, t, addr, false) == 0 {
             if in_run {
-                p = map_line(state, t, p, run_start, addr, run_r)
-                in_run = false
+                going = false
+            } else {
+                addr = (addr & 0xFFFFFFFFFFE00000) + 0x200000
             }
-            addr = (addr & 0xFFFFFFFFFFE00000) + 0x200000
         } else {
-            r = procspace.page_rights(state, t, addr)
-            if r != 0 && !in_run {
-                in_run = true
-                run_start = addr
-                run_r = r
-            } else if in_run {
+            let r: u64 = procspace.page_rights(state, t, addr)
+            if in_run {
                 if r != run_r {
-                    p = map_line(state, t, p, run_start, addr, run_r)
-                    in_run = r != 0
-                    run_start = addr
+                    going = false
+                } else {
+                    addr = addr + 4096
+                }
+            } else {
+                if r != 0 {
+                    in_run = true
+                    start = addr
                     run_r = r
                 }
+                addr = addr + 4096
             }
-            addr = addr + 4096
         }
+    }
+    if !in_run {
+        return false
+    }
+    if addr > high {
+        addr = high
+    }
+    run_cell[0 as usize] = start
+    run_cell[1 as usize] = addr
+    run_cell[2 as usize] = run_r
+    return true
+}
+
+fn make_maps(state: u64, t: u64) -> u64 {
+    var p: u64 = 0
+    var cursor: u64 = procbase.USER_DATA
+    while next_run(state, t, cursor) {
+        p = map_line(state, t, p, run_start(), run_end(), run_rights())
+        cursor = run_end()
         if p > maps_limit() {
             return p
         }
-    }
-    if in_run {
-        p = map_line(state, t, p, run_start, high, run_r)
     }
     return p
 }

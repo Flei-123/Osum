@@ -1,0 +1,175 @@
+profile kernel
+
+import lib.kstate
+import fs.procfs.pfproc
+import fs.procfs.pfwrite
+import sched.proc.procbase
+import sched.proc.procmap
+import sched.proc.procpt
+
+export { make }
+
+const LABEL_COUNT: u64 = 22
+const LABEL_MAX: u64 = 24
+const NEWLINE: u64 = 10
+const PAGE_BYTES: u64 = 4096
+const PAGE_KB: u64 = 4
+const HUGE_MASK: u64 = 0xFFFFFFFFFFE00000
+const HUGE_BYTES: u64 = 0x200000
+const PT_ENTRIES: u64 = 512
+const SWAP_SHIFT: u64 = 32
+const COUNT_MASK: u64 = 0xFFFFFFFF
+const RIGHT_READ: u64 = 2
+const RIGHT_WRITE: u64 = 4
+const RIGHT_EXEC: u64 = 8
+
+const IDX_SIZE: u64 = 0
+const IDX_KERNEL_PAGE: u64 = 1
+const IDX_MMU_PAGE: u64 = 2
+const IDX_RSS: u64 = 3
+const IDX_PSS: u64 = 4
+const IDX_PSS_DIRTY: u64 = 5
+const IDX_PRIVATE_CLEAN: u64 = 8
+const IDX_PRIVATE_DIRTY: u64 = 9
+const IDX_REFERENCED: u64 = 10
+const IDX_ANONYMOUS: u64 = 11
+const IDX_SWAP: u64 = 19
+const IDX_SWAP_PSS: u64 = 20
+
+static mut thp_line: [u8; 26] = b"THPeligible:           0\x0a\x00"
+
+static mut labels: [u8; 232] = b"Size\x0aKernelPageSize\x0aMMUPageSize\x0aRss\x0aPss\x0aPss_Dirty\x0aShared_Clean\x0aShared_Dirty\x0aPrivate_Clean\x0aPrivate_Dirty\x0aReferenced\x0aAnonymous\x0aKSM\x0aLazyFree\x0aAnonHugePages\x0aShmemPmdMapped\x0aFilePmdMapped\x0aShared_Hugetlb\x0aPrivate_Hugetlb\x0aSwap\x0aSwapPss\x0aLocked\x0a"
+
+fn label_start(index: u64) -> u64 {
+    var at: u64 = (&labels[0]) as u64
+    var skip: u64 = index
+    while skip > 0 {
+        while kstate.get8(at) != NEWLINE {
+            at = at + 1
+        }
+        at = at + 1
+        skip = skip - 1
+    }
+    return at
+}
+
+fn label_copy(index: u64, out: u64) {
+    let src: u64 = label_start(index)
+    var i: u64 = 0
+    while kstate.get8(src + i) != NEWLINE && i < LABEL_MAX {
+        kstate.set8(out + i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(out + i, 0 as u8)
+}
+
+fn scan(state: u64, t: u64, from: u64, to: u64) -> u64 {
+    var rss: u64 = 0
+    var swap: u64 = 0
+    var addr: u64 = from
+    while addr < to {
+        let pt: u64 = procpt.pt_for(state, t, addr, false)
+        if pt == 0 && procpt.pd_slot(addr) != 0 {
+            addr = (addr & HUGE_MASK) + HUGE_BYTES
+        } else {
+            let slot: u64 = procpt.pt_slot(addr)
+            if pt != 0 && slot < PT_ENTRIES {
+                let e: u64 = procpt.read_entry(pt, slot)
+                if (e & procbase.PAGE_PRESENT) != 0 {
+                    rss = rss + 1
+                } else if procmap.is_swap_entry(e) {
+                    swap = swap + 1
+                }
+            }
+            addr = addr + PAGE_BYTES
+        }
+    }
+    return rss | (swap << SWAP_SHIFT)
+}
+
+fn value_at(index: u64, size_kb: u64, rss_kb: u64, swap_kb: u64, file_backed: bool) -> u64 {
+    if index == IDX_SIZE {
+        return size_kb
+    }
+    if index == IDX_KERNEL_PAGE || index == IDX_MMU_PAGE {
+        return PAGE_KB
+    }
+    if index == IDX_RSS || index == IDX_PSS || index == IDX_REFERENCED {
+        return rss_kb
+    }
+    if index == IDX_PRIVATE_CLEAN && file_backed {
+        return rss_kb
+    }
+    if (index == IDX_PRIVATE_DIRTY || index == IDX_PSS_DIRTY || index == IDX_ANONYMOUS) && !file_backed {
+        return rss_kb
+    }
+    if index == IDX_SWAP || index == IDX_SWAP_PSS {
+        return swap_kb
+    }
+    return 0
+}
+
+fn w_flag(state: u64, at: u64, a: u64, b: u64) -> u64 {
+    var p: u64 = pfproc.w_ch(state, at, 32)
+    p = pfproc.w_ch(state, p, a)
+    return pfproc.w_ch(state, p, b)
+}
+
+fn w_vm_flags(state: u64, at: u64, rights: u64) -> u64 {
+    var head: [u8; 9] = "VmFlags:\0"
+    var p: u64 = pfproc.w_str(state, at, (&head[0]) as u64)
+    if (rights & RIGHT_READ) != 0 {
+        p = w_flag(state, p, 114, 100)
+    }
+    if (rights & RIGHT_WRITE) != 0 {
+        p = w_flag(state, p, 119, 114)
+    }
+    if (rights & RIGHT_EXEC) != 0 {
+        p = w_flag(state, p, 101, 120)
+    }
+    if (rights & RIGHT_READ) != 0 {
+        p = w_flag(state, p, 109, 114)
+    }
+    if (rights & RIGHT_WRITE) != 0 {
+        p = w_flag(state, p, 109, 119)
+    }
+    if (rights & RIGHT_EXEC) != 0 {
+        p = w_flag(state, p, 109, 101)
+    }
+    return pfproc.w_nl(state, p)
+}
+
+fn block(state: u64, t: u64, at: u64, from: u64, to: u64, rights: u64) -> u64 {
+    var name: [u8; 25] = [0 as u8; 25]
+    let counted: u64 = scan(state, t, from, to)
+    let file_backed: bool = from >= procmap.IMAGE_BASE && from < procmap.IMAGE_END
+    let size_kb: u64 = (to - from) / 1024
+    let rss_kb: u64 = (counted & COUNT_MASK) * PAGE_KB
+    let swap_kb: u64 = (counted >> SWAP_SHIFT) * PAGE_KB
+    var p: u64 = at
+    var i: u64 = 0
+    while i < LABEL_COUNT {
+        label_copy(i, (&name[0]) as u64)
+        p = pfwrite.w_kb_line(state, p, (&name[0]) as u64, value_at(i, size_kb, rss_kb, swap_kb, file_backed))
+        i = i + 1
+    }
+    p = pfproc.w_str(state, p, (&thp_line[0]) as u64)
+    return w_vm_flags(state, p, rights)
+}
+
+fn make(state: u64, t: u64) -> u64 {
+    var p: u64 = 0
+    var cursor: u64 = procbase.USER_DATA
+    while pfproc.next_run(state, t, cursor) {
+        let from: u64 = pfproc.run_start()
+        let to: u64 = pfproc.run_end()
+        let rights: u64 = pfproc.run_rights()
+        p = pfproc.map_line(state, t, p, from, to, rights)
+        p = block(state, t, p, from, to, rights)
+        cursor = to
+        if p > pfproc.maps_limit() {
+            return p
+        }
+    }
+    return p
+}

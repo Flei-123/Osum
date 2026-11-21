@@ -43,6 +43,7 @@ import fs.procfs.pfgroup
 import fs.procfs.pfnum
 import fs.procfs.pfproc
 import fs.procfs.pfreg
+import fs.procfs.pfsmaps
 import fs.procfs.pfsys
 import fs.procfs.pfsyscpu
 import fs.procfs.pfsysreg
@@ -200,9 +201,10 @@ const G_INTELGPU: u64 = 52
 const G_S3: u64 = 53
 
 const G_KBDLOCKS: u64 = 54
-const G_LAST: u64 = 54
+const G_PRESSUREDIR: u64 = 55
+const G_LAST: u64 = 55
 
-const G_END: u64 = 72
+const G_END: u64 = 74
 
 const F_STATUS: u64 = 1
 
@@ -226,9 +228,9 @@ const F_MMAPLOG: u64 = 10
 
 const F_LAST: u64 = 10
 
-const F_TASK: u64 = 27
+const F_TASK: u64 = 28
 
-const F_END: u64 = 27
+const F_END: u64 = 28
 
 const TID_FILES: u64 = 5
 
@@ -797,12 +799,17 @@ fn p_lookup(state: u64, m: u64, path: u64) -> u64 {
     }
     var w_sys: [u8; 4] = "sys\0"
     var w_net: [u8; 4] = "net\0"
+    var w_pressure: [u8; 9] = "pressure\0"
     let is_sys: bool = pfsys.streq((&seg[0]) as u64, (&w_sys[0]) as u64)
     let is_net: bool = pfsys.streq((&seg[0]) as u64, (&w_net[0]) as u64)
-    if is_sys || is_net {
+    let is_pressure: bool = pfsys.streq((&seg[0]) as u64, (&w_pressure[0]) as u64)
+    if is_sys || is_net || is_pressure {
         var root: u64 = pfsysreg.sys_root()
         if is_net {
             root = pfsysreg.net_root()
+        }
+        if is_pressure {
+            root = pfsysreg.pressure_root()
         }
         let found: u64 = pfsysreg.walk(path, at, root)
         if found == 0 {
@@ -884,6 +891,7 @@ fn global_name(state: u64, sub: u64, out: u64) {
     var k: [u8; 5] = "klog\0"
     var la2: [u8; 8] = "loadavg\0"
     var sy2: [u8; 4] = "sys\0"
+    var pr2: [u8; 9] = "pressure\0"
     var ne2: [u8; 4] = "net\0"
     var pc2: [u8; 4] = "pci\0"
     var us2: [u8; 4] = "usb\0"
@@ -1021,6 +1029,8 @@ fn global_name(state: u64, sub: u64, out: u64) {
         src = (&sy2[0]) as u64
     } else if sub == G_NETDIR {
         src = (&ne2[0]) as u64
+    } else if sub == G_PRESSUREDIR {
+        src = (&pr2[0]) as u64
     } else if sub == G_CPUINFO {
         src = (&b[0]) as u64
     } else if sub == G_UPTIME {
@@ -1112,6 +1122,9 @@ fn p_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
             }
             if i + 1 == G_NETDIR {
                 return pfproc.node(K_SYS, 0, pfsysreg.net_root())
+            }
+            if i + 1 == G_PRESSUREDIR {
+                return pfproc.node(K_SYS, 0, pfsysreg.pressure_root())
             }
             return pfproc.node(K_GLOBAL, 0, i + 1)
         }
@@ -1579,7 +1592,14 @@ fn sfs_build(state: u64, sub: u64) -> u64 {
 }
 
 fn is_maps(n: u64) -> bool {
-    return pfproc.n_art(n) == K_PIDFILE && pfproc.n_sub(n) == F_MAPS
+    return pfproc.n_art(n) == K_PIDFILE && (pfproc.n_sub(n) == F_MAPS || pfproc.n_sub(n) == pfreg.SMAPS_SUB)
+}
+
+fn maps_make(state: u64, n: u64, slot: u64) -> u64 {
+    if pfproc.n_sub(n) == pfreg.SMAPS_SUB {
+        return pfsmaps.make(state, slot)
+    }
+    return pfproc.make_maps(state, slot)
 }
 
 fn maps_size(state: u64, n: u64) -> u64 {
@@ -1588,7 +1608,7 @@ fn maps_size(state: u64, n: u64) -> u64 {
         return 0
     }
     pfbase.set_window(pfbase.COUNT_ONLY)
-    let total: u64 = pfproc.make_maps(state, slot)
+    let total: u64 = maps_make(state, n, slot)
     pfbase.set_window(0)
     return total
 }
@@ -1599,7 +1619,7 @@ fn maps_read(state: u64, n: u64, off: u64, dst: u64, len: u64) -> u64 {
         return 0
     }
     pfbase.set_window(off)
-    let end: u64 = pfproc.make_maps(state, slot)
+    let end: u64 = maps_make(state, n, slot)
     pfbase.set_window(0)
     if end <= off {
         return 0
