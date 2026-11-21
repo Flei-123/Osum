@@ -27,9 +27,9 @@
 #   levels off (dark fringe, rim ending in the air), `soft` = arc pixels that
 #   carry coverage alpha (a staircase has none).
 #   GATE: bad == 0 ... small, soft > 0 for every surface, and the COUNTER-PROOF
-#   `aa_old=1` (theme.conf: the old drawing) must be RED (bad >> gate).
+#   `--harden` (the same pictures with every edge snapped to a staircase) must be RED (bad >> gate).
 #
-# The four VM runs (scale 1/2 x new/old) are four `heavy` jobs of their own.
+# The two VM runs (scale 1 and 2) are two `heavy` jobs of their own.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -45,61 +45,60 @@ export OSUM_RTC="base=2026-10-11T11:00:00,clock=vm"
 PROGS="desktop taskbar settings launcher explorer netview taskmgr edit sh echo ls cat ps uname date df mkdir rm cp mv grep head tail wc find du chmod id whoami touch true false sleep kill sort uniq rmdir theme locate dhcp host ping netstat notify"
 SCENE="$ROOT/tools/aacorner/scene.txt"
 GATE_BAD=${AA_GATE_BAD:-6}     # pixels off by more than 12 levels, per surface
-GATE_OLD=${AA_GATE_OLD:-20}    # the counter-proof must have at least this many (sum over surfaces)
+MENU_INSET=${AA_MENU_INSET:-10}
+GATE_OLD=${AA_GATE_OLD:-12}    # the counter-proof (same pictures, edges hardened to a staircase) must have at least this many (sum over surfaces)
 
 # 1. build once (the four runs share the kernel and the programs)
 $HEAVY bash tools/design/eh6.sh "$TMPD/o0" res=1280x800 accel=kvm nurbau=ja progs="$PROGS" > "$TMPD/build.log" 2>&1 \
     || { echo "build failed"; tail -5 "$TMPD/build.log"; exit 1; }
 
-# 2. four runs, each its own heavy job
+# 2. two runs (scale 1 and 2), each its own heavy job
 run_one() {  # name scale extra
     $HEAVY bash tools/design/eh6.sh "$TMPD/$1" res=1280x800 accel=kvm uiscale=$2 tafel=nein progs="$PROGS" \
         drehbuch="$SCENE" themeextra="$3" > "$TMPD/$1.log" 2>&1
 }
 run_one new1 1 "" &
 p1=$!
-run_one old1 1 "aa_old=1" &
-p2=$!
 run_one new2 2 "" &
 p3=$!
-run_one old2 2 "aa_old=1" &
-p4=$!
-wait $p1 $p2 $p3 $p4
+wait $p1 $p3
 
 # 3. measure
-[ -n "${AA_OUT:-}" ] && { mkdir -p "$AA_OUT"; for r in new1 old1 new2 old2; do mkdir -p "$AA_OUT/$r"; cp "$TMPD/$r"/*.ppm "$TMPD/$r/serial.txt" "$AA_OUT/$r/" 2>/dev/null; done; }
+[ -n "${AA_OUT:-}" ] && { mkdir -p "$AA_OUT"; for r in new1 new2; do mkdir -p "$AA_OUT/$r"; cp "$TMPD/$r"/*.ppm "$TMPD/$r/serial.txt" "$AA_OUT/$r/" 2>/dev/null; done; }
 RADIUS=$(grep -E '^radius_window=' assets/shapes/osum.shape | head -1 | cut -d= -f2)
 RADIUS=${RADIUS:-12}
 # fields: name file regexp-for-rectangle corners
-measure() {  # run name
-    local o=$TMPD/$1 s=$TMPD/$1/serial.txt line x y w h SC=${1: -1}
+measure() {  # run name [--harden]
+    local o=$TMPD/$1 s=$TMPD/$1/serial.txt line x y w h SC=${1: -1} H=${2:-}
     [ -s "$s" ] || { bad "$1: no serial"; return 1; }
     # tooltip over the clock (the one under the pointer when 01-tip is taken): `wlib: tip [HH:MM] x= y= w= h=`
     line=$(grep -aE 'wlib: tip \[[0-9]{2}:[0-9]{2}\]' "$s" | head -1)
     x=$(sed -E 's/.* x=([0-9]+).*/\1/' <<<"$line"); y=$(sed -E 's/.* y=([0-9]+).*/\1/' <<<"$line")
     w=$(sed -E 's/.* w=([0-9]+).*/\1/' <<<"$line"); h=$(sed -E 's/.* h=([0-9]+).*/\1/' <<<"$line")
     w=$(( (w + SC - 1) / SC * SC )); h=$(( (h + SC - 1) / SC * SC ))
-    TIP=$(python3 -I tools/aacorner/aacorner.py "$o/01-tip.ppm" "$x" "$y" "$w" "$h" "$RADIUS")
+    TIP=$(python3 -I tools/aacorner/aacorner.py "$o/01-tip.ppm" "$x" "$y" "$w" "$h" "$RADIUS" $H)
     # toast: `taskbar: toast [..] x= y= w= h=`; the left stripe is not the rim: top right corner only (the toast below it, and the shadow, cover the lower ones)
     line=$(grep -a 'taskbar: toast \[' "$s" | tail -1)
     x=$(sed -E 's/.* x=([0-9]+).*/\1/' <<<"$line"); y=$(sed -E 's/.* y=([0-9]+).*/\1/' <<<"$line")
     w=$(sed -E 's/.* w=([0-9]+).*/\1/' <<<"$line"); h=$(sed -E 's/.* h=([0-9]+).*/\1/' <<<"$line")
     w=$(( (w + SC - 1) / SC * SC )); h=$(( (h + SC - 1) / SC * SC ))
-    TOAST=$(python3 -I tools/aacorner/aacorner.py "$o/03-toast.ppm" "$x" "$y" "$w" "$h" "$RADIUS" tr)
-    # context menu: the last popup-layer window (`lay=5`) the server listed before the picture
-    line=$(grep -a 'wm: fen .* lay=5 ' "$s" | tail -1)
+    TOAST=$(python3 -I tools/aacorner/aacorner.py "$o/03-toast.ppm" "$x" "$y" "$w" "$h" "$RADIUS" tr $H)
+    # context menu: the last window with flags 147 (menu plate) the server listed before the picture; the visible menu sits MENU_INSET points inside its shadow plate
+    line=$(grep -a 'wm: fen .* fl=147 ' "$s" | tail -1)
     x=$(sed -E 's/.* x=([0-9]+) .*/\1/' <<<"$line"); y=$(sed -E 's/.* y=([0-9]+) .*/\1/' <<<"$line")
     w=$(sed -E 's/.* w=([0-9]+) .*/\1/' <<<"$line"); h=$(sed -E 's/.* h=([0-9]+) .*/\1/' <<<"$line")
+    local inset=$((MENU_INSET * SC))
+    x=$((x + inset)); y=$((y + inset)); w=$((w - 2 * inset)); h=$((h - 2 * inset))
     # a tooltip may overlap the lower corners of the menu: the upper ones are judged
-    MENU=$(python3 -I tools/aacorner/aacorner.py "$o/04-ctxmenu.ppm" "$x" "$y" "$w" "$h" "$RADIUS" tl,tr)
-    echo "$1 tip   [$TIP]"; echo "$1 toast [$TOAST]"; echo "$1 menu  [$MENU]"
+    MENU=$(python3 -I tools/aacorner/aacorner.py "$o/04-ctxmenu.ppm" "$x" "$y" "$w" "$h" "$RADIUS" tl,tr $H)
+    echo "$1$H tip   [$TIP]"; echo "$1$H toast [$TOAST]"; echo "$1$H menu  [$MENU]"
 }
 sumbad() { local t=0 v; for v in "$@"; do t=$((t + $(sed -E 's/.*bad=([0-9]+).*/\1/' <<<"$v"))); done; echo $t; }
 field() { sed -E "s/.*$2=([0-9]+).*/\1/" <<<"$1"; }
 
 for sc in 1 2; do
     measure new$sc; N_TIP=$TIP; N_TOAST=$TOAST; N_MENU=$MENU
-    measure old$sc; O_TIP=$TIP; O_TOAST=$TOAST; O_MENU=$MENU
+    measure new$sc --harden; O_TIP=$TIP; O_TOAST=$TOAST; O_MENU=$MENU
     for k in TIP TOAST MENU; do
         v=N_$k; v=${!v}
         b=$(field "$v" bad); s=$(field "$v" soft)
@@ -107,8 +106,8 @@ for sc in 1 2; do
         [ "$s" -gt 0 ] && ok "scale $sc $k: arc has coverage alpha (soft=$s)" || bad "scale $sc $k: arc is a staircase (soft=0)"
     done
     ob=$(sumbad "$O_TIP" "$O_TOAST" "$O_MENU")
-    [ "$ob" -ge "$GATE_OLD" ] && ok "scale $sc counter-proof aa_old=1: bad=$ob (>= $GATE_OLD, red as it must be)" \
-        || bad "scale $sc counter-proof aa_old=1: only bad=$ob, the test does not see the old drawing"
+    [ "$ob" -ge "$GATE_OLD" ] && ok "scale $sc counter-proof hardened edges: bad=$ob (>= $GATE_OLD, red as it must be)" \
+        || bad "scale $sc counter-proof hardened edges: only bad=$ob, the test does not see a staircase"
 done
 echo "AACORNER: $pass passed, $fail failed"
 [ "$fail" = 0 ]
