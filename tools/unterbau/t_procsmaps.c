@@ -14,6 +14,7 @@
 #define MANY_VMAS 400
 #define WINDOW_BYTES 131072
 #define LAZY_BYTES (16 * 1024 * 1024)
+#define CHUNK_BYTES 1000
 
 static char maps_buf[BUF_BYTES];
 static char smaps_buf[BUF_BYTES];
@@ -174,6 +175,32 @@ static void test_many(void)
     munmap(base, MANY_VMAS * PAGE_BYTES);
 }
 
+static long slurp_chunked(const char *path, char *buf)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    long total = 0;
+    for (;;) {
+        long n = read(fd, buf + total, CHUNK_BYTES);
+        if (n <= 0)
+            break;
+        total += n;
+    }
+    close(fd);
+    buf[total] = 0;
+    return total;
+}
+
+static void test_chunked(void)
+{
+    long whole_len = slurp("/proc/self/smaps", smaps_buf);
+    long chunk_len = slurp_chunked("/proc/self/smaps", maps_buf);
+    CHECK("smaps_chunked_same_length", whole_len > 0 && whole_len == chunk_len, "whole=%ld chunked=%ld", whole_len, chunk_len);
+    CHECK("smaps_chunked_same_headers", count_headers(smaps_buf) == count_headers(maps_buf), "whole=%ld chunked=%ld", count_headers(smaps_buf), count_headers(maps_buf));
+    CHECK("smaps_chunked_blocks_complete", count_prefix(maps_buf, "VmFlags:") == count_headers(maps_buf), "vmflags=%ld headers=%ld", count_prefix(maps_buf, "VmFlags:"), count_headers(maps_buf));
+}
+
 static void test_other_process(void)
 {
     int fd[2];
@@ -218,6 +245,7 @@ int main(void)
     test_basic();
     test_lazy();
     test_many();
+    test_chunked();
     test_other_process();
     test_listing();
     return 0;
