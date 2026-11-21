@@ -6,7 +6,8 @@ GEOM = re.compile(r"geom cols=(\d+) rows=(\d+) width=(\d+) height=(\d+)")
 MIN_CARD_W = 224
 MIN_CARD_H = 112
 GAP = 12
-GRID_OVERHEAD = 204
+TILE_INSET = 24
+GRID_OVERHEAD = 236
 
 
 def widest_rects(path):
@@ -44,7 +45,7 @@ def main():
     while cols * exp_rows > 20:
         exp_rows -= 1
     print(("OK" if rows == exp_rows else "FAIL") + " rows follow the height: %d (expected %d)" % (rows, exp_rows))
-    cards = [r for r in rects if r[4] > 150 and MIN_CARD_H - 40 < r[5] < 200 and r[3] > 90]
+    cards = [r for r in rects if r[4] > 150 and 40 < r[5] < 200 and r[3] > 90]
     xs = sorted(set(r[2] for r in cards))
     first_row_y = min(r[3] for r in cards) if cards else 0
     first_row = [r for r in cards if abs(r[3] - first_row_y) < 4]
@@ -52,10 +53,10 @@ def main():
     card_w = (width - 76 - 32 - (cols - 1) * GAP) // cols
     left = min(r[2] for r in first_row) if first_row else 0
     right = max(r[2] + r[4] for r in first_row) if first_row else 0
-    want_right = left + len(first_row) * card_w + (len(first_row) - 1) * GAP
-    print(("OK" if abs(right - want_right) <= 32 else "FAIL") + " the cards share the width: right edge %d (expected %d, card width %d)" % (right, want_right, card_w))
+    want_right = left + len(first_row) * card_w + (len(first_row) - 1) * GAP - TILE_INSET
+    print(("OK" if abs(right - want_right) <= 12 else "FAIL") + " the cards share the width: right edge %d (expected %d, card width %d)" % (right, want_right, card_w))
     outside = [r for r in rects if r[2] + r[4] > width + 2 or r[3] + r[5] > height + 2]
-    print(("OK" if not outside else "FAIL") + " nothing sticks out of the window (%d rects outside)" % len(outside))
+    print(("OK" if not outside else "FAIL") + " nothing sticks out of the window (%d rects outside %s)" % (len(outside), outside[:3]))
     top = min(r[3] for r in rects)
     left = min(r[2] for r in rects)
     print(("OK" if top <= 24 and left <= 12 else "FAIL") + " the content starts at the top left (x0=%d y0=%d)" % (left, top))
