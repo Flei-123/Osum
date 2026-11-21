@@ -1825,37 +1825,43 @@ fn group_of(state: u64, i: u64) -> u64 {
     return g
 }
 
+fn slot_live(state: u64, j: u64) -> bool {
+    let st: u64 = taskslot.tget(state, j, taskconst.T_STATE)
+    return st != taskconst.S_FREE && st != taskconst.S_ZOMBIE && st != taskconst.S_REAPING
+}
+
 fn is_group_member(state: u64, i: u64, j: u64, g: u64) -> bool {
     if j == i || taskslot.tget(state, j, taskconst.T_KIND) != taskconst.K_USER || taskslot.tget(state, j, taskconst.T_TGID) != g {
         return false
     }
-    let st: u64 = taskslot.tget(state, j, taskconst.T_STATE)
-    return st != taskconst.S_FREE && st != taskconst.S_ZOMBIE && st != taskconst.S_REAPING
+    return slot_live(state, j)
 }
 
 fn vfork_child_live(state: u64, i: u64, j: u64) -> bool {
-    if taskslot.tget(state, j, taskconst.T_MMOWN) != i + 1 {
-        return false
-    }
-    let st: u64 = taskslot.tget(state, j, taskconst.T_STATE)
-    return st != taskconst.S_FREE && st != taskconst.S_ZOMBIE && st != taskconst.S_REAPING
+    return taskslot.tget(state, j, taskconst.T_MMOWN) == i + 1 && slot_live(state, j)
+}
+
+fn vfork_held(state: u64, child: u64, pid: u64) -> bool {
+    return taskslot.tget(state, child, taskconst.T_PID) == pid && taskslot.tget(state, child, taskconst.T_MMOWN) != 0
+        && slot_live(state, child)
 }
 
 fn vfork_wait(state: u64, child: u64, pid: u64) {
-    let flags: u64 = irq_save()
-    atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
-    let cur: u64 = current(state)
-    let st: u64 = taskslot.tget(state, child, taskconst.T_STATE)
-    if taskslot.tget(state, child, taskconst.T_PID) != pid || taskslot.tget(state, child, taskconst.T_MMOWN) == 0
-        || st == taskconst.S_ZOMBIE || st == taskconst.S_FREE || st == taskconst.S_REAPING {
-        atomic.lock_give(state, atomic.L_SCHED)
+    while true {
+        let flags: u64 = irq_save()
+        atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
+        let cur: u64 = current(state)
+        let killed: bool = kill_requested(state, cur) || (taskslot.tget(state, cur, taskconst.T_SIGPEND) & ptstate.KILL_BIT) != 0
+        if killed || !vfork_held(state, child, pid) {
+            atomic.lock_give(state, atomic.L_SCHED)
+            irq_restore(flags)
+            return
+        }
+        taskslot.tset(state, cur, taskconst.T_WAITPID, pid)
+        taskslot.tset(state, cur, taskconst.T_STATE, taskconst.S_WAIT)
+        schedule_locked(state)
         irq_restore(flags)
-        return
     }
-    taskslot.tset(state, cur, taskconst.T_WAITPID, pid)
-    taskslot.tset(state, cur, taskconst.T_STATE, taskconst.S_WAIT)
-    schedule_locked(state)
-    irq_restore(flags)
 }
 
 fn wake_vfork_owner(state: u64, i: u64) {
