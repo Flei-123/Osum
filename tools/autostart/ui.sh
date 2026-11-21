@@ -41,6 +41,9 @@ klick 981,193
 warteauf 'settings: autostart alpha=on' || 30
 warte 3
 klick 981,257
+warteauf 'settings: autostart yak=' || 30
+warte 3
+klick 981,289
 warteauf 'settings: autostart zed=' || 30
 warte 3
 S
@@ -90,7 +93,8 @@ entries=$(grep -a 'settings: autostart page entries=' "$S" | head -1 | sed 's/.*
 grep -aq 'settings: rect name=asw0 ' "$S" && ok "toggle rectangles are reported" || bad "no rectangle for the first toggle"
 grep -aq 'settings: autostart alpha=off' "$S" && ok "click 1: 'alpha' turned off and saved to the shared state file" || bad "click 1 did not turn 'alpha' off"
 grep -aq 'settings: autostart alpha=on' "$S" && ok "click 2: 'alpha' turned on again" || bad "click 2 did not turn 'alpha' on"
-grep -aq 'settings: autostart zed=off' "$S" && ok "click 3: the package 'zed' (default-on) turned off in the same file" || bad "click 3 did not turn 'zed' off"
+grep -aq 'settings: autostart yak=on' "$S" && ok "click 3: the package 'yak' (default-off) turned on in the same file" || bad "click 3 did not turn 'yak' on"
+grep -aq 'settings: autostart zed=off' "$S" && ok "click 4: the package 'zed' (default-on) turned off in the same file" || bad "click 4 did not turn 'zed' off"
 grep -aq 'settings: rect name=asw3 ' "$S" && ok "the default-off package gets a toggle too" || bad "no toggle for the default-off package"
 for f in 00-page 01-toggled; do [ -s "$TMPD/click/$f.ppm" ] || bad "missing picture $f"; done
 if [ -s "$TMPD/click/00-page.ppm" ] && [ -s "$TMPD/click/01-toggled.ppm" ]; then
