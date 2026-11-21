@@ -7,6 +7,7 @@ import libc.kcall
 import libc.clockapi
 import tools
 import pw
+import initdrop
 
 export { u_start }
 
@@ -24,11 +25,15 @@ const RB_POWEROFF: u64 = 0x4321FEDC
 const RB_RESTART: u64 = 0x01234567
 
 const O_LOG: u64 = 1089
+const SYS_CHMOD: u64 = 90
+const MODE_EXEC: u64 = 493
 
 const MAX_SVC: u64 = 16
 const NAME_W: u64 = 32
 const CMD_W: u64 = 128
 const LOG_W: u64 = 64
+const UNLESS_W: u64 = 64
+const DROP_RETIRED: u64 = 2
 
 const A_OFF: u64 = 0
 const A_ONCE: u64 = 1
@@ -74,6 +79,9 @@ static mut w_von: [u64; 16] = [0 as u64; 16]
 static mut w_num: [u64; 16] = [0 as u64; 16] // Starts in diesem Fenster
 static mut s_target: [u64; 16] = [0 as u64; 16]
 static mut s_net: [u64; 16] = [0 as u64; 16]
+static mut s_drop: [u64; 16] = [0 as u64; 16]
+static mut s_seen: [u64; 16] = [0 as u64; 16]
+static mut s_unless: [u8; 1024] = [0 as u8; 1024]
 static mut nsvc: u64 = 0
 static mut orphans: u64 = 0
 static mut reaped: u64 = 0
@@ -81,6 +89,7 @@ static mut going: u64 = 1
 static mut wie: u64 = 0 // 0 = ausschalten, 1 = neu starten
 static mut target: u64 = Z_KONSOLE
 static mut tab: [u8; 4096] = [0 as u8; 4096]
+static mut dtab: [u8; 4096] = [0 as u8; 4096]
 static mut argbuf: [u8; 256] = [0 as u8; 256]
 static mut f_tgt: [u8; 256] = [0 as u8; 256] // 4 * 64
 static mut nfs: u64 = 0
@@ -95,6 +104,10 @@ fn cm(i: u64) -> u64 {
 
 fn lg(i: u64) -> u64 {
     return (&s_log[(i * LOG_W) as usize]) as u64
+}
+
+fn ul(i: u64) -> u64 {
+    return (&s_unless[(i * UNLESS_W) as usize]) as u64
 }
 
 fn ft(i: u64) -> u64 {
@@ -190,6 +203,7 @@ fn target_of(p: u64) -> u64 {
 fn opts_of(p: u64, i: u64) {
     var w_net: [u8; 5] = "netz\0"
     var w_log: [u8; 5] = "log=\0"
+    var w_unless: [u8; 8] = "unless=\0"
     var one: [u8; 96] = [0 as u8; 96]
     var k: u64 = 0
     while k < 4 {
@@ -202,69 +216,145 @@ fn opts_of(p: u64, i: u64) {
             if ulib.strneq((&one[0]) as u64, (&w_log[0]) as u64, 4) {
                 ulib.strncpy(lg(i), (&one[4 as usize]) as u64, LOG_W - 1)
             }
+            if ulib.strneq((&one[0]) as u64, (&w_unless[0]) as u64, 7) {
+                ulib.strncpy(ul(i), (&one[7 as usize]) as u64, UNLESS_W - 1)
+            }
             k = k + 1
         }
     }
 }
 
-fn read_tab() -> u64 {
-    var path: [u8; 13] = "/etc/inittab\0"
-    var line: [u8; 256] = [0 as u8; 256]
+fn unless_exists(path: u64) -> bool {
+    if *(path as *mut u8) == 0 as u8 {
+        return false
+    }
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return true
+}
+
+fn parse_into(line: u64, slot: u64) -> bool {
     var f1: [u8; 128] = [0 as u8; 128]
     var f2: [u8; 128] = [0 as u8; 128]
     var f4: [u8; 128] = [0 as u8; 128]
-    let n: u64 = pw.read_all((&path[0]) as u64, (&tab[0]) as u64, 4096)
-    if n == ulib.EOF {
-        return 0
+    pw.field(line, 0, nm(slot), NAME_W)
+    pw.field(line, 1, (&f1[0]) as u64, 128)
+    __mmio_write8((lg(slot)) as *mut u8, 0 as u8)
+    __mmio_write8((ul(slot)) as *mut u8, 0 as u8)
+    s_net[slot as usize] = 0
+    var act: u64 = A_OFF
+    var zm: u64 = Z_ALL
+    if is_action((&f1[0]) as u64) {
+        act = action_of((&f1[0]) as u64)
+        pw.field(line, 2, cm(slot), CMD_W)
+    } else {
+        zm = target_of((&f1[0]) as u64)
+        pw.field(line, 2, (&f2[0]) as u64, 128)
+        act = action_of((&f2[0]) as u64)
+        pw.field(line, 3, cm(slot), CMD_W)
+        if pw.field(line, 4, (&f4[0]) as u64, 128) {
+            opts_of((&f4[0]) as u64, slot)
+        }
     }
-    let cnt: u64 = pw.lines_of((&tab[0]) as u64)
+    if *((nm(slot)) as *mut u8) == 0 as u8 || *((cm(slot)) as *mut u8) == 0 as u8 {
+        return false
+    }
+    s_act[slot as usize] = act
+    s_target[slot as usize] = zm
+    s_pid[slot as usize] = 0
+    s_starts[slot as usize] = 0
+    s_fail[slot as usize] = 0
+    s_t0[slot as usize] = 0
+    s_next[slot as usize] = 0
+    w_von[slot as usize] = 0
+    w_num[slot as usize] = 0
+    s_state[slot as usize] = S_STOP
+    s_want[slot as usize] = 0
+    if act != A_OFF && (zm & target) != 0 && !unless_exists(ul(slot)) {
+        s_want[slot as usize] = 1
+    }
+    return true
+}
+
+fn parse_text(text_p: u64, from_drop: u64, rescan: bool) {
+    var line: [u8; 256] = [0 as u8; 256]
+    var name: [u8; 32] = [0 as u8; 32]
+    let cnt: u64 = pw.lines_of(text_p)
     var i: u64 = 0
-    nsvc = 0
-    while i < cnt && nsvc < MAX_SVC {
-        if pw.line_at((&tab[0]) as u64, i, (&line[0]) as u64, 256)
-            != ulib.EOF {
-            if line[0 as usize] != 0 as u8 && line[0 as usize] != 35 as u8 {
-                pw.field((&line[0]) as u64, 0, nm(nsvc), NAME_W)
-                pw.field((&line[0]) as u64, 1, (&f1[0]) as u64, 128)
-                __mmio_write8((lg(nsvc)) as *mut u8, 0 as u8)
-                s_net[nsvc as usize] = 0
-                var act: u64 = A_OFF
-                var zm: u64 = Z_ALL
-                if is_action((&f1[0]) as u64) {
-                    act = action_of((&f1[0]) as u64)
-                    pw.field((&line[0]) as u64, 2, cm(nsvc), CMD_W)
-                } else {
-                    zm = target_of((&f1[0]) as u64)
-                    pw.field((&line[0]) as u64, 2, (&f2[0]) as u64, 128)
-                    act = action_of((&f2[0]) as u64)
-                    pw.field((&line[0]) as u64, 3, cm(nsvc), CMD_W)
-                    if pw.field((&line[0]) as u64, 4, (&f4[0]) as u64, 128) {
-                        opts_of((&f4[0]) as u64, nsvc)
+    while i < cnt {
+        if pw.line_at(text_p, i, (&line[0]) as u64, 256) != ulib.EOF
+            && line[0 as usize] != 0 as u8 && line[0 as usize] != 35 as u8 {
+            pw.field((&line[0]) as u64, 0, (&name[0]) as u64, NAME_W)
+            let known: u64 = find_svc((&name[0]) as u64)
+            if known < MAX_SVC {
+                s_seen[known as usize] = 1
+                if rescan && s_drop[known as usize] == DROP_RETIRED && s_state[known as usize] != S_RUN {
+                    if parse_into((&line[0]) as u64, known) {
+                        s_drop[known as usize] = from_drop
+                        activate(known)
                     }
                 }
-                if *((nm(nsvc)) as *mut u8) != 0 as u8
-                    && *((cm(nsvc)) as *mut u8) != 0 as u8 {
-                    s_act[nsvc as usize] = act
-                    s_target[nsvc as usize] = zm
-                    s_pid[nsvc as usize] = 0
-                    s_starts[nsvc as usize] = 0
-                    s_fail[nsvc as usize] = 0
-                    s_t0[nsvc as usize] = 0
-                    s_next[nsvc as usize] = 0
-                    w_von[nsvc as usize] = 0
-                    w_num[nsvc as usize] = 0
-                    s_state[nsvc as usize] = S_STOP
-                    s_want[nsvc as usize] = 0
-                    if act != A_OFF && (zm & target) != 0 {
-                        s_want[nsvc as usize] = 1
-                    }
-                    nsvc = nsvc + 1
+            } else if nsvc < MAX_SVC && parse_into((&line[0]) as u64, nsvc) {
+                s_drop[nsvc as usize] = from_drop
+                s_seen[nsvc as usize] = 1
+                nsvc = nsvc + 1
+                if rescan {
+                    activate(nsvc - 1)
                 }
             }
         }
         i = i + 1
     }
+}
+
+fn activate(i: u64) {
+    if s_want[i as usize] == 1 {
+        if s_net[i as usize] == 1 && !net_up() {
+            s_state[i as usize] = S_WAIT
+        } else {
+            start(i)
+        }
+    }
+    write_state()
+}
+
+fn read_tab() -> u64 {
+    var path: [u8; 13] = "/etc/inittab\0"
+    let n: u64 = pw.read_all((&path[0]) as u64, (&tab[0]) as u64, 4096)
+    if n == ulib.EOF {
+        return 0
+    }
+    nsvc = 0
+    parse_text((&tab[0]) as u64, 0, false)
+    initdrop.collect((&dtab[0]) as u64, 4096)
+    parse_text((&dtab[0]) as u64, 1, false)
     return nsvc
+}
+
+fn rescan_tab() {
+    var i: u64 = 0
+    while i < nsvc {
+        s_seen[i as usize] = 0
+        i = i + 1
+    }
+    initdrop.collect((&dtab[0]) as u64, 4096)
+    parse_text((&dtab[0]) as u64, 1, true)
+    i = 0
+    while i < nsvc {
+        if s_drop[i as usize] == 1 && s_seen[i as usize] == 0 {
+            s_drop[i as usize] = DROP_RETIRED
+            s_want[i as usize] = 0
+            stop_one(i, SIGTERM)
+            if s_state[i as usize] != S_RUN {
+                s_state[i as usize] = S_DONE
+            }
+        }
+        i = i + 1
+    }
+    write_state()
 }
 
 // ----------------------------------------------------------- das Ziel
@@ -424,6 +514,9 @@ fn start(i: u64) {
             }
         }
         argv[4] = 0
+        if s_drop[i as usize] == 1 {
+            ulib.sys(SYS_CHMOD, argv[0], MODE_EXEC, 0)
+        }
         ulib.sys(SYS_EXECVE, argv[0], (&argv[0]) as u64, 0)
         ulib.esay_line((&e_fail[0]) as u64, cm(i))
         ulib.sys(60, 127, 0, 0)
@@ -542,6 +635,7 @@ fn read_cmd() {
     var w_rest: [u8; 8] = "restart\0"
     var w_down: [u8; 9] = "shutdown\0"
     var w_boot: [u8; 7] = "reboot\0"
+    var w_rescan: [u8; 7] = "rescan\0"
     let n: u64 = pw.read_all((&path[0]) as u64, (&buf[0]) as u64, 256)
     if n == ulib.EOF || n == 0 {
         return
@@ -567,6 +661,10 @@ fn read_cmd() {
     if ulib.streq((&verb[0]) as u64, (&w_boot[0]) as u64) {
         going = 0
         wie = 1
+        return
+    }
+    if ulib.streq((&verb[0]) as u64, (&w_rescan[0]) as u64) {
+        rescan_tab()
         return
     }
     let i: u64 = find_svc((&who[0]) as u64)

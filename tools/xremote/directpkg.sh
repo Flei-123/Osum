@@ -20,8 +20,9 @@ mkdir -p "$OUT"
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bau"
-cp pakete/xremote/INFO pakete/xremote/rezept "$T/"
+cp pakete/xremote/INFO pakete/xremote/INITTAB pakete/xremote/rezept "$T/"
 cp "$HOSTBIN" "$T/bau/freeviewer-host"
+bash tools/xremote/build-daemon.sh "$T/bau/xremoted"
 cp "$LIBS/lib/ld-musl-x86_64.so.1" "$T/bau/ld-musl-x86_64.so.1"
 cp "$LIBS/usr/lib/libgcc_s.so.1" "$T/bau/libgcc_s.so.1"
 python3 tools/k15/mksymbol.py pakete/xremote "$T/bau/symbol" > /dev/null
