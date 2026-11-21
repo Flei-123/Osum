@@ -36,11 +36,13 @@ for v in 2.0.0 2.0.1; do python3 tools/update/signpak.py "$T/keys/geheim.key" "$
 cat > "$T/s0.sh" <<'EOS'
 echo ==A==
 opk install /t/explorer-2.0.0.opk
+opk trial ok
 opk rebuild
 ls /apps
 cat /apps/explorer.osp/INFO
 echo ==B==
 opk install /t/explorer-2.0.1.opk
+opk trial ok
 opk rebuild
 cat /apps/explorer.osp/INFO
 echo ==C==
@@ -65,6 +67,8 @@ sleep 3
 EOS
 cat > "$T/s2.sh" <<'EOS'
 echo ==E==
+opk install /t/explorer-2.0.1.opk
+opk remove explorer
 opk rebuild
 ls /apps
 echo ==END==
@@ -96,6 +100,7 @@ run_guest() {
         -drive "file=$T/$name.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
     tr -cd '\11\12\15\40-\176' < "$T/$name.txt" > "$T/$name.klar"
+    cp "$T/$name.klar" "${EXPLORERPKG_OUT:-/dev/null}.$name" 2>/dev/null
     rm -f "$T/$name.img"
 }
 part() { awk -v a="==$2==" -v b="==$3==" 'index($0,a){f=1;next} index($0,b){f=0} f' "$T/$1.klar" > "$T/$1.$2"; }
