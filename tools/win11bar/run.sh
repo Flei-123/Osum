@@ -185,18 +185,22 @@ mkdir -p docs/shots/win11bar
 echo "== G. proportions: icon, tile, pill, gap (Windows 11: 24 px icon in a 40 px tile on a 48 px bar, pill 6/16 x 3, 4 px below the icon)"
 PROP=tools/win11bar/proportions.py
 BARY48=$(grep -a '^taskbar: geom ' "$W" | tail -1 | grep -oE ' y=[0-9]+' | tail -1 | cut -d= -f2)
-pin_xy() { grep -a "^taskbar: pin $2 " "$1" | head -1 | sed 's/.* x=\([0-9]*\) y=\([0-9]*\) w=\([0-9]*\) h=\([0-9]*\) .*/\1 \2 \3 \4/'; }
+pin_xy() { grep -a "^taskbar: pin $2 " "$1" | tail -1 | sed 's/.* x=\([0-9]*\) y=\([0-9]*\) w=\([0-9]*\) h=\([0-9]*\) .*/\1 \2 \3 \4/'; }
 set -- $(pin_xy "$W" explorer); e1x=$1; e1y=$2; e1w=$3; e1h=$4
 set -- $(pin_xy "$W" calc); c1x=$1; c1y=$2; c1w=$3; c1h=$4
 mach "$T/g1" tbconf="$T/win11.conf" accel=$ACC uitrace=yes mode=dark scheme=night extra="wighalt=45" click=$((e1x + e1w / 2)),$((BARY48 + e1y + e1h / 2)) click=$((c1x + c1w / 2)),$((BARY48 + c1y + c1h / 2)) warten=40 > "$T/g1.log" 2>&1 &
 PG1=$!
 mach "$T/g2" tbconf="$T/win11b.conf" accel=$ACC uitrace=yes mode=dark scheme=night extra="wighalt=45" click=$((ex + ew / 2)),$((BARY + ey + eh / 2)) warten=25 > "$T/g2.log" 2>&1 &
 PG2=$!
-wait $PG1 $PG2
+mach "$T/g3" tbconf="$T/win11.conf" accel=$ACC uitrace=yes mode=light scheme=night uiscale=2 res=1920x1080 warten=25 > "$T/g3.log" 2>&1 &
+PG3=$!
+wait $PG1 $PG2 $PG3
+G3="$T/g3/serial.txt"
 G1="$T/g1/serial.txt"; G2="$T/g2/serial.txt"
 grep -aE '^taskbar: (pille|sym btn=|pin starte|click )' "$G1" | tail -8 | sed 's/^/        g1 /'
 python3 -I "$PROP" "$G1" 1 24 > "$T/g1.res" 2>&1 && ok "48 px bar: every proportion matches Windows 11" || { bad "48 px bar proportions"; sed 's/^/        /' "$T/g1.res"; }
 python3 -I "$PROP" "$G2" 1 0 > "$T/g2.res" 2>&1 && ok "40 px bar: icon ratio, pill and gap keep the Windows 11 proportions" || { bad "40 px bar proportions"; sed 's/^/        /' "$T/g2.res"; }
+python3 -I "$PROP" "$G3" 2 0 > "$T/g3.res" 2>&1 && ok "scale 2, light: icon ratio, pill and gap scale with the bar" || { bad "scale 2 proportions"; sed 's/^/        /' "$T/g3.res"; grep -aE '^taskbar: (pille|sym btn=|geom)' "$G3" | tail -3 | sed 's/^/        g3 /'; }
 nres=$(grep -ac '^OK' "$T/g1.res")
 [ "$nres" -ge 5 ] && ok "the 48 px run was measured ($nres checks)" || bad "too few proportion checks ($nres)"
 if [ -n "${OLDROOT:-}" ]; then
