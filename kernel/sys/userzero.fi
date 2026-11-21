@@ -11,6 +11,7 @@ export { zero_out }
 
 const PAGE_BYTES: u64 = 4096
 const WORD_BYTES: u64 = 8
+const FAST_ZERO_MAX: u64 = 16384
 
 fn zero_page_span(phys: u64, room: u64) {
     let words: u64 = room / WORD_BYTES
@@ -22,7 +23,33 @@ fn zero_page_span(phys: u64, room: u64) {
     }
 }
 
+fn zero_fast(state: u64, me: u64, dst: u64, len: u64) -> bool {
+    let mmfl: u64 = mmlock.mm_lock(state)
+    var n: u64 = 0
+    while n < len {
+        let phys: u64 = procmap.user_phys(state, me, dst + n)
+        if phys == 0 {
+            mmlock.mm_unlock(state, mmfl)
+            return false
+        }
+        var room: u64 = PAGE_BYTES - ((dst + n) & (PAGE_BYTES - 1))
+        if room > len - n {
+            room = len - n
+        }
+        guard.stac(state)
+        zero_page_span(phys, room)
+        guard.clac(state)
+        n = n + room
+    }
+    mmlock.mm_unlock(state, mmfl)
+    return true
+}
+
 fn zero_out(state: u64, me: u64, dst: u64, len: u64) -> bool {
+    if len != 0 && len <= FAST_ZERO_MAX && procfault.user_range_ok(state, me, dst, len)
+        && zero_fast(state, me, dst, len) {
+        return true
+    }
     if !procfault.user_ok(state, me, dst, len) {
         return false
     }

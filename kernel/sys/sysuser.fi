@@ -21,7 +21,7 @@ import sys.sysconst
 import libc.regio
 
 export {
-    blockb, copy_in, copy_out, copy_out_checked, fetch_name, fetch_path, get16, get32, get64u, get_user64, ino_of_fd, ino_of_path, ino_of_path_nofollow, kcopy_word, nameb, neg, of_of, ofs_ino_of_open, peek, poke, put16, put32, put64, put_pair64, put_half, put_word32, satzpuffer, user_half, user_word, user_word32
+    blockb, NO_MAP, peek_fast, copy_in, copy_out, copy_out_checked, fetch_name, fetch_path, get16, get32, get64u, get_user64, ino_of_fd, ino_of_path, ino_of_path_nofollow, kcopy_word, nameb, neg, of_of, ofs_ino_of_open, peek, poke, put16, put32, put64, put_pair64, put_half, put_word32, satzpuffer, user_half, user_word, user_word32
 }
 
 fn blockb(state: u64) -> u64 {
@@ -88,7 +88,36 @@ fn poke(state: u64, me: u64, addr: u64, v: u64) -> bool {
 // Out of the kernel into ring 3, and the other way round. Page by page:
 // `translate` is a walk of four tables, and doing it per octet is what
 // made round 62's `read` the slowest thing in the system.
+const FAST_COPY_MAX: u64 = 16384
+const NO_MAP: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn copy_out_fast(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
+    let mmfl: u64 = mmlock.mm_lock(state)
+    var n: u64 = 0
+    while n < len {
+        let phys: u64 = procmap.user_phys(state, me, dst + n)
+        if phys == 0 {
+            mmlock.mm_unlock(state, mmfl)
+            return false
+        }
+        var room: u64 = 4096 - ((dst + n) & 4095)
+        if room > len - n {
+            room = len - n
+        }
+        guard.stac(state)
+        arch.copy_octets(phys, src + n, room)
+        guard.clac(state)
+        n = n + room
+    }
+    mmlock.mm_unlock(state, mmfl)
+    return true
+}
+
 fn copy_out(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
+    if len != 0 && len <= FAST_COPY_MAX && procfault.user_range_ok(state, me, dst, len)
+        && copy_out_fast(state, me, dst, src, len) {
+        return true
+    }
     if !procfault.user_ok(state, me, dst, len) {
         return false
     }
@@ -146,15 +175,7 @@ fn copy_in(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
 const LOW_BYTES: u64 = 0x0101010101010101
 const HIGH_BITS: u64 = 0x8080808080808080
 
-fn copy_name_span(state: u64, me: u64, va: u64, dst: u64, span: u64) -> u64 {
-    let mmfl: u64 = mmlock.mm_lock(state)
-    let phys: u64 = procmap.translate(state, me, va)
-    if phys == 0 {
-        mmlock.mm_unlock(state, mmfl)
-        *(dst as *mut u8) = 0
-        return 0
-    }
-    guard.stac(state)
+fn copy_name_octets(phys: u64, dst: u64, span: u64) -> u64 {
     var i: u64 = 0
     var found: bool = false
     var wide: bool = true
@@ -176,9 +197,56 @@ fn copy_name_span(state: u64, me: u64, va: u64, dst: u64, span: u64) -> u64 {
             i = i + 1
         }
     }
+    return i
+}
+
+fn copy_name_span(state: u64, me: u64, va: u64, dst: u64, span: u64) -> u64 {
+    let mmfl: u64 = mmlock.mm_lock(state)
+    let phys: u64 = procmap.translate(state, me, va)
+    if phys == 0 {
+        mmlock.mm_unlock(state, mmfl)
+        *(dst as *mut u8) = 0
+        return 0
+    }
+    guard.stac(state)
+    let i: u64 = copy_name_octets(phys, dst, span)
     guard.clac(state)
     mmlock.mm_unlock(state, mmfl)
     return i
+}
+
+fn copy_name_fast(state: u64, me: u64, va: u64, dst: u64, span: u64) -> u64 {
+    if !procfault.user_range_ok(state, me, va, 1) {
+        return NO_MAP
+    }
+    let mmfl: u64 = mmlock.mm_lock(state)
+    let phys: u64 = procmap.user_phys(state, me, va)
+    if phys == 0 {
+        mmlock.mm_unlock(state, mmfl)
+        return NO_MAP
+    }
+    guard.stac(state)
+    let i: u64 = copy_name_octets(phys, dst, span)
+    guard.clac(state)
+    mmlock.mm_unlock(state, mmfl)
+    return i
+}
+
+fn peek_fast(state: u64, me: u64, addr: u64) -> u64 {
+    if !procfault.user_range_ok(state, me, addr, 1) {
+        return NO_MAP
+    }
+    let mmfl: u64 = mmlock.mm_lock(state)
+    let phys: u64 = procmap.user_phys(state, me, addr)
+    if phys == 0 {
+        mmlock.mm_unlock(state, mmfl)
+        return NO_MAP
+    }
+    guard.stac(state)
+    let v: u64 = kstate.get8(phys)
+    guard.clac(state)
+    mmlock.mm_unlock(state, mmfl)
+    return v
 }
 
 // A name out of ring 3 into the kernel's own buffer. Returns the length,
@@ -190,14 +258,17 @@ fn fetch_name(state: u64, me: u64, addr: u64, dst: u64, max: u64) -> u64 {
     var n: u64 = 0
     while n < max {
         let va: u64 = addr + n
-        if !procfault.user_ok(state, me, va, 1) {
-            return neg(errno.E_FAULT)
-        }
         var span: u64 = PAGE_BYTES - (va & (PAGE_BYTES - 1))
         if span > max - n {
             span = max - n
         }
-        let got: u64 = copy_name_span(state, me, va, dst + n, span)
+        var got: u64 = copy_name_fast(state, me, va, dst + n, span)
+        if got == NO_MAP {
+            if !procfault.user_ok(state, me, va, 1) {
+                return neg(errno.E_FAULT)
+            }
+            got = copy_name_span(state, me, va, dst + n, span)
+        }
         if got < span {
             return n + got
         }
