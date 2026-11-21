@@ -728,6 +728,78 @@ fi
 kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null
 fi
 
+if want offline; then
+echo "== 6. the window offline: no store service answers, the installed list comes from local state =="
+RES=${STORE_RES:-1024x768}; SHOTS=${STORE_SHOTS:-}
+printf 'lang=de\n' > "$TMPD/locale.conf"
+printf '# /etc/theme.conf\nscheme=day\nmode=light\naccent=\nshape=classic\n' > "$TMPD/theme.conf"
+cat > "$TMPD/sO.sh" <<'EOS'
+mkdir /users/justin
+opk install /quelle1/hallo-1.opk
+setsess 1000
+store &
+echo ==O-WAIT==
+sleep 400
+echo ==FERTIG==
+EOS
+EXTRA=("/etc/uitrace=$TMPD/locale.conf" "/etc/theme.conf=$TMPD/theme.conf" "/etc/locale.conf=$TMPD/locale.conf")
+EXTRA+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/de/ /usr/share/locale/en/ "/usr/share/locale/de/messages=locale/de/messages" "/usr/share/locale/en/messages=locale/en/messages")
+[ -f assets/osum-icons.ttf ] && EXTRA+=("/lib/icons.ttf=assets/osum-icons.ttf")
+[ -f assets/osum-bold.ttf ] && EXTRA+=("/lib/bold.ttf=assets/osum-bold.ttf")
+[ -f assets/osum-sans-bold.ttf ] && EXTRA+=("/lib/bold.ttf=assets/osum-sans-bold.ttf")
+PROGS_SAVE=$PROGS; PROGS="$PROGS store"
+image "$TMPD/O.img" "$TMPD/sO.sh" $P0
+PROGS=$PROGS_SAVE
+SOCK="$TMPD/mon.sock"; rm -f "$SOCK"
+timeout 600 $QEMU_X86 -cpu "$OSUM_CPU" -smp 1 -kernel "$TMPD/k0.img" -m 768 \
+    -append "gfx disp fbres=$RES wm wmdauer wmshell osum vfs bus nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0 script=sh /t/s.sh;exit" \
+    -serial "file:$TMPD/o.txt" -display none -no-reboot -device "VGA,edid=on,xres=${RES%x*},yres=${RES#*x},vgamem_mb=32" \
+    -monitor "unix:$SOCK,server,nowait" \
+    -netdev user,id=n0 -device e1000,netdev=n0,mac=52:54:00:0a:0b:0c \
+    -drive "file=$TMPD/O.img,format=raw,if=ide,index=0" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$TMPD/qemuo.txt" 2>&1 &
+QPID=$!; SRVPIDS="$SRVPIDS $QPID"
+oclean() { tr -cd '\11\12\15\40-\176\200-\377' < "$TMPD/o.txt"; }
+owait() { local i=0; while [ $i -lt $(( $2 * 5 )) ]; do oclean | tail -n +"$MARK" | grep -qaF -- "$1" && return 0; kill -0 "$QPID" 2>/dev/null || return 1; sleep 0.2; i=$((i + 1)); done; return 1; }
+oshot() { python3 tools/gfx/screenshot.py "$SOCK" "$TMPD/$1.ppm" 5 > /dev/null 2>&1
+    if [ -n "$SHOTS" ] && [ -s "$TMPD/$1.ppm" ]; then mkdir -p "$SHOTS"; python3 -c "import sys; from PIL import Image; Image.open(sys.argv[1]).save(sys.argv[2])" "$TMPD/$1.ppm" "$SHOTS/$1-$RES.png" 2>/dev/null; fi; }
+otap() { local xy
+    xy=$(oclean | awk -v want="$1" '
+        /wlib: text win=/ {
+            i = index($0, " t="); txt = substr($0, i + 3); if (txt != want) next
+            match($0, / x=[0-9]+/); x = substr($0, RSTART + 3, RLENGTH - 3)
+            match($0, / base=[0-9]+/); b = substr($0, RSTART + 6, RLENGTH - 6)
+            match($0, / tw=[0-9]+/); w = substr($0, RSTART + 4, RLENGTH - 4)
+            match($0, / ax=[0-9]+/); ax = substr($0, RSTART + 4, RLENGTH - 4)
+            match($0, / ay=[0-9]+/); ay = substr($0, RSTART + 4, RLENGTH - 4)
+            have = 1; cx = ax + x + w / 2; cy = ay + b - 6 }
+        END { if (have) printf "%d %d\n", cx, cy }')
+    [ -n "$xy" ] || return 1
+    set -- $xy
+    python3 tools/themestore/click.py "$1,$2" > "$TMPD/k.txt" 2>/dev/null; python3 tools/wm/monitor.py "$SOCK" "$TMPD/k.txt" > /dev/null 2>&1; sleep 1.5; }
+MARK=1
+if owait "==O-WAIT==" 150; then
+    ok "the script reached the window part"
+    MARK=1; owait "t=Installiert" 90 && ok "the window opened" || bad "no window"
+    sleep 8; oshot o1-first
+    MARK=$(oclean | wc -l); otap "Installiert" || bad "no 'Installiert' in the navigation"
+    sleep 3; oshot o2-installed
+    owait "t=Hallo" 20 && ok "Installiert lists the installed program offline (Hallo, from /apps)" || bad "Installiert does not list hallo offline"
+    retry_button_at() { python3 -c "
+import sys
+from PIL import Image
+r, g, b = Image.open(sys.argv[1]).convert('RGB').getpixel((300, 500))
+sys.exit(0 if b > 200 and r < 80 else 1)" "$TMPD/$1.ppm" 2>/dev/null; }
+    retry_button_at o2-installed && bad "Installiert shows the error state offline (retry button painted)" || ok "Installiert shows no error state (no retry button) offline"
+    MARK=$(oclean | wc -l); otap "Programme" || bad "no 'Programme' in the navigation"
+    sleep 3; oshot o3-all
+    retry_button_at o3-all && ok "the catalog page (Programme) shows the offline state with the retry button" || bad "the catalog page shows no offline state"
+else
+    bad "the script never reached the window part"; oclean | tail -20 | sed 's/^/        /'
+fi
+kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null
+fi
+
 echo
 echo "STORE: $pass passed, $fail failed"
 [ "$fail" = 0 ]
