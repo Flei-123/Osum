@@ -9,7 +9,7 @@ firnenv_need_firnc1
 
 ULD=kernel/user/user.ld
 BLOCKS=8192
-PROGS="init svc sh ls cat echo sleep cp mkdir rm true chmod"
+PROGS="init svc sh ls cat echo sleep cp mkdir rm true chmod opk"
 OPK=${OPK:-$(python3 tools/lib/opkpfad.py)}
 OLD_REF=${PKGSVC_OLD_REF:-origin/main}
 
@@ -171,7 +171,45 @@ run_case b "$T/b.img" /t/short.sh
 is "packaged jarvisd stays stopped when /bin/jarvisd exists" "$(col "$T/b.txt" jarvisd 2)" "stopped"
 is "and has zero starts" "$(col "$T/b.txt" jarvisd 4)" "0"
 
-echo "== 7. counter-probe: old init =="
+echo "== 7. opk install and remove in the guest =="
+mkdir -p "$T/key" "$T/q"
+python3 "$OPK" schluessel "$T/key" > "$T/key.log" 2>&1
+cp "$T/key/oeffentlich.key" "$T/key/schluessel.pub"
+cp "$T/out.opk" "$T/q/jarvisd-1.0.0.opk"
+python3 tools/update/signpak.py "$T/key/geheim.key" "$T/q/jarvisd-1.0.0.opk" > "$T/sign.log" 2>&1
+[ -s "$T/q/jarvisd-1.0.0.opk.sig" ] && ok "package signed with a test key" || { bad "signing failed"; cat "$T/sign.log"; }
+cat > "$T/inst.sh" <<'SCRIPT'
+echo ==BEGIN==
+sleep 2
+svc status
+echo --INSTALL--
+opk install /q/jarvisd-1.0.0.opk
+sleep 3
+svc status
+echo --REMOVE--
+opk remove jarvisd
+sleep 3
+svc status
+echo ==END==
+SCRIPT
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" $BLOCKS /bin/ /etc/ /run/ /var/ /var/log/ /t/ /apps/ /system/ /store/ /users/ /q/ \
+    $(for p in $PROGS; do printf '/bin/%s=%s@755:0:0 ' "$p" "$T/$p.elf"; done) \
+    "/etc/inittab=$T/inittab@644:0:0" "/etc/ziel=$T/ziel@644:0:0" "/t/inst.sh=$T/inst.sh@644:0:0" \
+    "/system/schluessel.pub=$T/key/schluessel.pub@644:0:0" \
+    "/q/jarvisd-1.0.0.opk=$T/q/jarvisd-1.0.0.opk@644:0:0" "/q/jarvisd-1.0.0.opk.sig=$T/q/jarvisd-1.0.0.opk.sig@644:0:0" \
+    > "$T/mkfs.txt" 2>&1 && ok "image D: base without any helper, signed package on board" || { bad "mkfs D failed"; tail -3 "$T/mkfs.txt"; }
+run_case d "$T/d.img" /t/inst.sh
+F="$T/d.txt"
+awk '/==BEGIN==/{f=1} /--INSTALL--/{f=0} f' "$F" > "$T/d0.txt"
+awk '/--INSTALL--/{f=1} /--REMOVE--/{f=0} f' "$F" > "$T/d1.txt"
+awk '/--REMOVE--/{f=1} f' "$F" > "$T/d2.txt"
+is "before the install there is no helper service" "$(grep -ac '^jarvisd ' "$T/d0.txt")" "0"
+has "$T/d1.txt" "opk: installed jarvisd" "opk installs the signed package"
+is "the installer rescans: the helper service exists without a reboot" "$(col "$T/d1.txt" jarvisd 2)" "waiting"
+has "$T/d2.txt" "opk: removed jarvisd" "opk removes the package"
+is "after the remove the helper service is stopped" "$(col "$T/d2.txt" jarvisd 2)" "done"
+
+echo "== 8. counter-probe: old init =="
 run_case c "$T/c.img" /t/short.sh
 has "$T/c.txt" "init: dienste=1" "old init sees only /etc/inittab"
 is "and starts no bundle service" "$(grep -ac '^demo ' "$T/c.txt")" "0"

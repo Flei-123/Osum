@@ -43,7 +43,7 @@ Totals (KiB): base 39119, dev 1234, package 15958
 | termfull | 992 | base | keep | boot, login, lock, power |
 | certus | 984 | package | plan | browser: needs real build 29 MB, package route open (r4) |
 | massren | 565 | package | plan | optional desktop tools, 1 MB each with the fUi runtime |
-| jarvisd | 357 | package | plan | JARVIS helper: package jarvisd (service INITTAB), Boss decision before removal from base |
+| jarvisd | 357 | package | built | package pakete/jarvisd (INITTAB service) works; base copy stays until the Boss decides |
 | socfleitec | 304 | package | plan | social app (base /apps/social.prog): package route planned, needs service INITTAB like jarvisd |
 | ipprint | 280 | package | plan | printing client, not needed for boot |
 | jmlink | 264 | package | plan | JARVIS helper: package jarvisd (service INITTAB), Boss decision before removal from base |
@@ -161,6 +161,7 @@ Totals (KiB): base 39119, dev 1234, package 15958
 | package | version | payload KiB | recipe |
 |---|---|---|---|
 | fvviewer | 1.0.0 | - | pakete/fvviewer |
+| jarvisd | 1.0.0 | 357 | pakete/jarvisd |
 | jarvismini | 1.0.0 | 1017 | pakete/jarvismini |
 | mail | 1.0.0 | - | pakete/mail |
 | notes | 0.1.0 | 1 | pakete/notes |
@@ -169,3 +170,14 @@ Totals (KiB): base 39119, dev 1234, package 15958
 | wmplug-uhr | 1.0.0 | - | pakete/wmplug-uhr |
 | wmplug | 1.0.0 | 2 | pakete/wmplug-werkzeug |
 | xremote | 0.1.2 | - | pakete/xremote |
+
+## Service packages
+
+A bundle in `/apps/<name>.osp` (or `.prog`) may carry an `INITTAB` file. `init` merges it with `/etc/inittab` at boot and on `svc rescan`; `opk install` and `opk remove` trigger the rescan, so a service starts and stops without a reboot.
+
+- Line format is the `/etc/inittab` format. Only lines whose command lies inside the bundle (`:/apps/<bundle>/`) are accepted; `ctrl` lines are refused.
+- Option `unless=<path>`: the service stays stopped while the path exists. `jarvisd` uses `unless=/bin/jarvisd`, so the packaged helper yields to the helper in the base image (no two helpers fighting for one key).
+- Packages are written 0644; `init` sets 0755 on the command of a bundle service before starting it.
+- Gate: `bash tools/pkgsvc/run.sh` (40 checks, counter-probe: old init). Build: `bash pakete/bauen.sh` (jarvisd needs `kernel/app/jarvisd.fi`).
+- Open: any signed package may now ship a root service inside its own directory; limit to packages from the OTA key or add a rights prompt (Boss decision).
+- Open: jarvisd from `/apps/jarvisd.osp` runs with the origin label `app:jarvisd`; the bridge connection must be proven on a VM/HP before the base copy is dropped.
