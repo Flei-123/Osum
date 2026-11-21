@@ -1,0 +1,168 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.procw
+import bus.pci
+import drv.hid.inputclass
+import drv.hid.hidin
+import drv.hid.sam.sam
+import drv.usb.usbdiag
+import libc.regio
+import serial
+
+export { render, stage, THC_VENDOR, THC_DEV_A, THC_DEV_B }
+
+const THC_VENDOR: u64 = 0x8086
+const THC_DEV_A: u64 = 0xA0D0
+const THC_DEV_B: u64 = 0xA0D1
+const LINE_BUF: u64 = 1024
+
+static mut s_ps2: [u8; 13] = "ps2 present=\0"
+static mut s_ps2i: [u8; 7] = " irqs=\0"
+static mut s_ps2p: [u8; 8] = " polls=\0"
+static mut s_usb: [u8; 8] = "usb hc=\0"
+static mut s_ust: [u8; 8] = " state=\0"
+static mut s_upo: [u8; 8] = " ports=\0"
+static mut s_usl: [u8; 8] = " slots=\0"
+static mut s_und: [u8; 7] = " ndev=\0"
+static mut s_uer: [u8; 9] = " errors=\0"
+static mut s_i2c: [u8; 13] = "i2c present=\0"
+static mut s_sam: [u8; 11] = "sam state=\0"
+static mut s_sfr: [u8; 9] = " frames=\0"
+static mut s_sev: [u8; 9] = " events=\0"
+static mut s_sbc: [u8; 9] = " badcrc=\0"
+static mut s_srp: [u8; 10] = " reports=\0"
+static mut s_srx: [u8; 5] = " rx=\0"
+static mut s_spl: [u8; 8] = " polls=\0"
+static mut s_sapr: [u8; 10] = " present=\0"
+static mut s_hid: [u8; 10] = "hid keys=\0"
+static mut s_mov: [u8; 8] = " moves=\0"
+static mut s_whl: [u8; 9] = " wheels=\0"
+static mut s_tch: [u8; 10] = " touches=\0"
+static mut s_rep: [u8; 10] = " reports=\0"
+static mut s_drp: [u8; 8] = " drops=\0"
+static mut s_thc: [u8; 9] = "thc bdf=\0"
+static mut s_ids: [u8; 6] = " ids=\0"
+static mut s_pre: [u8; 8] = "input: \0"
+static mut say_buf: [u8; 1024] = [0 as u8; 1024]
+
+fn key(k: u64, v: u64) {
+    procw.put_s(k)
+    procw.put_dec(v)
+}
+
+fn flag(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+fn render_class(state: u64, kind: u64, name: u64) {
+    let o: inputclass.InputOps = inputclass.ops_of(kind)
+    key(name, flag(o.present(state)))
+    key((&s_ps2i[0]) as u64, o.irqs(state))
+    key((&s_ps2p[0]) as u64, o.polls(state))
+    procw.put_c(10)
+}
+
+fn render_usb() {
+    var h: u64 = 0
+    while h < usbdiag.MAX_HC {
+        if usbdiag.info(h, usbdiag.I_STATE) != 0 || usbdiag.info(h, usbdiag.I_BDF) != 0 {
+            key((&s_usb[0]) as u64, h)
+            key((&s_ust[0]) as u64, usbdiag.info(h, usbdiag.I_STATE))
+            key((&s_upo[0]) as u64, usbdiag.info(h, usbdiag.I_PORTS))
+            key((&s_usl[0]) as u64, usbdiag.info(h, usbdiag.I_SLOTS))
+            key((&s_und[0]) as u64, usbdiag.info(h, usbdiag.I_NDEV))
+            key((&s_uer[0]) as u64, usbdiag.info(h, usbdiag.I_ERRORS))
+            procw.put_c(10)
+        }
+        h = h + 1
+    }
+}
+
+fn render_hid(state: u64) {
+    key((&s_hid[0]) as u64, hidin.keys(state))
+    key((&s_mov[0]) as u64, hidin.moves(state))
+    key((&s_whl[0]) as u64, hidin.wheels(state))
+    key((&s_tch[0]) as u64, hidin.touches(state))
+    key((&s_rep[0]) as u64, hidin.reports(state))
+    key((&s_drp[0]) as u64, hidin.drops(state))
+    procw.put_c(10)
+}
+
+fn is_thc(ven: u64, dev: u64) -> bool {
+    return ven == THC_VENDOR && (dev == THC_DEV_A || dev == THC_DEV_B)
+}
+
+fn render_thc(state: u64) {
+    let n: u64 = pci.count(state)
+    var i: u64 = 0
+    while i < n {
+        let ven: u64 = pci.get(state, i, pci.E_VENDOR)
+        let dev: u64 = pci.get(state, i, pci.E_DEVICE)
+        if is_thc(ven, dev) {
+            let b: u64 = pci.get(state, i, pci.E_BDF)
+            procw.put_s((&s_thc[0]) as u64)
+            procw.put_hex(pci.bdf_bus(b), 2)
+            procw.put_c(58)
+            procw.put_hex(pci.bdf_dev(b), 2)
+            procw.put_c(46)
+            procw.put_dec(pci.bdf_fn(b))
+            procw.put_s((&s_ids[0]) as u64)
+            procw.put_hex(ven, 4)
+            procw.put_c(58)
+            procw.put_hex(dev, 4)
+            procw.put_c(10)
+        }
+        i = i + 1
+    }
+}
+
+fn render(state: u64, out: u64, cap: u64) -> u64 {
+    procw.begin(out, cap)
+    render_class(state, inputclass.KIND_PS2, (&s_ps2[0]) as u64)
+    render_usb()
+    render_class(state, inputclass.KIND_I2C, (&s_i2c[0]) as u64)
+    key((&s_sam[0]) as u64, sam.state_of())
+    key((&s_sapr[0]) as u64, flag(inputclass.ops_of(inputclass.KIND_SAM).present(state)))
+    key((&s_sfr[0]) as u64, sam.diag_frames())
+    key((&s_sev[0]) as u64, sam.diag_events())
+    key((&s_sbc[0]) as u64, sam.diag_badcrc())
+    key((&s_srp[0]) as u64, sam.diag_reports())
+    key((&s_srx[0]) as u64, sam.diag_rx())
+    key((&s_spl[0]) as u64, sam.diag_polls())
+    procw.put_c(10)
+    render_hid(state)
+    render_thc(state)
+    return procw.used()
+}
+
+fn say(state: u64) {
+    let n: u64 = render(state, (&say_buf[0]) as u64, LINE_BUF)
+    var i: u64 = 0
+    var fresh: bool = true
+    while i < n {
+        if fresh {
+            serial.puts((&s_pre[0]) as u64)
+            fresh = false
+        }
+        let ch: u64 = regio.read8((&say_buf[0]) as u64 + i)
+        if ch == 10 {
+            serial.nl()
+            fresh = true
+        } else {
+            serial.put(ch as u8)
+        }
+        i = i + 1
+    }
+}
+
+fn stage(state: u64) {
+    say(state)
+    if kstate.mode_on(state, kstate.M_INPUTDIAG) {
+        sam.say(state)
+    }
+}

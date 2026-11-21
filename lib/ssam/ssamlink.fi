@@ -1,0 +1,395 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.octets
+import ssam.ssamwire
+
+export {
+    LINK_BYTES, REQ_IDLE, REQ_WAIT, REQ_DONE, REQ_FAIL, EV_DATA_MAX,
+    C_FRAMES, C_BADCRC, C_ACK_TX, C_NAK_TX, C_ACK_RX, C_NAK_RX, C_RETRY, C_TIMEOUT,
+    C_EVENTS, C_RESPONSES, C_DROPPED, C_RESYNC, C_DUP,
+    init, feed, feed_all, request, req_state, req_clear, rsp_ptr, rsp_len,
+    tick, tx_len, tx_take, ev_avail, ev_tc, ev_tid, ev_iid, ev_cid, ev_len, ev_data, ev_drop,
+    counter
+}
+
+const LINK_BYTES: u64 = 0x1800
+
+const L_SEQ: u64 = 0x00
+const L_RQID: u64 = 0x08
+const L_REQ: u64 = 0x10
+const L_PEND_SEQ: u64 = 0x18
+const L_PEND_RQID: u64 = 0x20
+const L_ACKED: u64 = 0x28
+const L_TRIES: u64 = 0x30
+const L_SENT_AT: u64 = 0x38
+const L_RSP_LEN: u64 = 0x40
+const L_TXN: u64 = 0x48
+const L_RXN: u64 = 0x50
+const L_LAST_SEQ: u64 = 0x58
+const L_LAST_OK: u64 = 0x60
+const L_EV_HEAD: u64 = 0x68
+const L_EV_TAIL: u64 = 0x70
+const L_PEND_LEN: u64 = 0x78
+const L_COUNTERS: u64 = 0x80
+
+const C_FRAMES: u64 = 0
+const C_BADCRC: u64 = 1
+const C_ACK_TX: u64 = 2
+const C_NAK_TX: u64 = 3
+const C_ACK_RX: u64 = 4
+const C_NAK_RX: u64 = 5
+const C_RETRY: u64 = 6
+const C_TIMEOUT: u64 = 7
+const C_EVENTS: u64 = 8
+const C_RESPONSES: u64 = 9
+const C_DROPPED: u64 = 10
+const C_RESYNC: u64 = 11
+const C_DUP: u64 = 12
+
+const EV_BASE: u64 = 0x100
+const EV_SLOTS: u64 = 8
+const EV_SLOT_BYTES: u64 = 0x120
+const EV_HDR: u64 = 8
+const EV_DATA_MAX: u64 = 0x118
+const RSP_BASE: u64 = 0xA00
+const RSP_MAX: u64 = 0x200
+const RX_BASE: u64 = 0xC00
+const RX_MAX: u64 = 0x400
+const TX_BASE: u64 = 0x1000
+const TX_MAX: u64 = 0x400
+const PFR_BASE: u64 = 0x1400
+const PAYLOAD_MAX: u64 = 0x300
+
+const REQ_IDLE: u64 = 0
+const REQ_WAIT: u64 = 1
+const REQ_DONE: u64 = 2
+const REQ_FAIL: u64 = 3
+
+const ACK_TIMEOUT_MS: u64 = 250
+const RSP_TIMEOUT_MS: u64 = 1500
+const MAX_TRIES: u64 = 3
+
+fn g(l: u64, off: u64) -> u64 {
+    return octets.ld64(l, off)
+}
+
+fn s(l: u64, off: u64, v: u64) {
+    octets.st64(l, off, v)
+}
+
+fn bump(l: u64, c: u64) {
+    s(l, L_COUNTERS + c * 8, g(l, L_COUNTERS + c * 8) + 1)
+}
+
+fn counter(l: u64, c: u64) -> u64 {
+    return g(l, L_COUNTERS + c * 8)
+}
+
+fn init(l: u64) {
+    octets.zero(l, LINK_BYTES)
+    s(l, L_RQID, ssamwire.next_rqid(ssamwire.EVENT_RQID_MAX))
+}
+
+fn tx_queue(l: u64, src: u64, n: u64) -> bool {
+    let at: u64 = g(l, L_TXN)
+    if at + n > TX_MAX {
+        bump(l, C_DROPPED)
+        return false
+    }
+    octets.copy(l + TX_BASE + at, src, n)
+    s(l, L_TXN, at + n)
+    return true
+}
+
+fn queue_ack(l: u64, seq: u64) {
+    var f: [u8; 16] = [0 as u8; 16]
+    let n: u64 = ssamwire.put_ack((&f[0]) as u64, seq)
+    if tx_queue(l, (&f[0]) as u64, n) {
+        bump(l, C_ACK_TX)
+    }
+}
+
+fn queue_nak(l: u64) {
+    var f: [u8; 16] = [0 as u8; 16]
+    let n: u64 = ssamwire.put_nak((&f[0]) as u64)
+    if tx_queue(l, (&f[0]) as u64, n) {
+        bump(l, C_NAK_TX)
+    }
+}
+
+fn tx_len(l: u64) -> u64 {
+    return g(l, L_TXN)
+}
+
+fn tx_take(l: u64, dst: u64, max: u64) -> u64 {
+    let n: u64 = g(l, L_TXN)
+    var take: u64 = n
+    if take > max {
+        take = max
+    }
+    octets.copy(dst, l + TX_BASE, take)
+    var i: u64 = take
+    while i < n {
+        octets.st8(l, TX_BASE + i - take, octets.ld8(l, TX_BASE + i))
+        i = i + 1
+    }
+    s(l, L_TXN, n - take)
+    return take
+}
+
+fn request(l: u64, tc: u64, tid: u64, iid: u64, cid: u64, payload: u64, plen: u64, now: u64) -> u64 {
+    if g(l, L_REQ) == REQ_WAIT || plen > 0x100 {
+        return 0
+    }
+    let seq: u64 = g(l, L_SEQ)
+    let rqid: u64 = g(l, L_RQID)
+    let n: u64 = ssamwire.put_cmd(l + PFR_BASE, seq, rqid, tc, tid, iid, cid, payload, plen)
+    s(l, L_SEQ, (seq + 1) & 0xFF)
+    s(l, L_RQID, ssamwire.next_rqid(rqid))
+    s(l, L_PEND_SEQ, seq)
+    s(l, L_PEND_RQID, rqid)
+    s(l, L_PEND_LEN, n)
+    s(l, L_ACKED, 0)
+    s(l, L_TRIES, 1)
+    s(l, L_SENT_AT, now)
+    s(l, L_RSP_LEN, 0)
+    s(l, L_REQ, REQ_WAIT)
+    if !tx_queue(l, l + PFR_BASE, n) {
+        s(l, L_REQ, REQ_FAIL)
+    }
+    return rqid
+}
+
+fn req_state(l: u64) -> u64 {
+    return g(l, L_REQ)
+}
+
+fn req_clear(l: u64) {
+    s(l, L_REQ, REQ_IDLE)
+}
+
+fn rsp_ptr(l: u64) -> u64 {
+    return l + RSP_BASE
+}
+
+fn rsp_len(l: u64) -> u64 {
+    return g(l, L_RSP_LEN)
+}
+
+fn resend(l: u64, now: u64) {
+    if g(l, L_TRIES) >= MAX_TRIES {
+        s(l, L_REQ, REQ_FAIL)
+        bump(l, C_TIMEOUT)
+        return
+    }
+    s(l, L_TRIES, g(l, L_TRIES) + 1)
+    s(l, L_SENT_AT, now)
+    bump(l, C_RETRY)
+    if !tx_queue(l, l + PFR_BASE, g(l, L_PEND_LEN)) {
+        s(l, L_REQ, REQ_FAIL)
+    }
+}
+
+fn tick(l: u64, now: u64) {
+    if g(l, L_REQ) != REQ_WAIT {
+        return
+    }
+    let age: u64 = now - g(l, L_SENT_AT)
+    if g(l, L_ACKED) == 0 && age >= ACK_TIMEOUT_MS {
+        resend(l, now)
+        return
+    }
+    if g(l, L_ACKED) != 0 && age >= RSP_TIMEOUT_MS {
+        s(l, L_REQ, REQ_FAIL)
+        bump(l, C_TIMEOUT)
+    }
+}
+
+fn ev_avail(l: u64) -> u64 {
+    return g(l, L_EV_TAIL) - g(l, L_EV_HEAD)
+}
+
+fn ev_slot(l: u64) -> u64 {
+    return l + EV_BASE + (g(l, L_EV_HEAD) % EV_SLOTS) * EV_SLOT_BYTES
+}
+
+fn ev_tc(l: u64) -> u64 {
+    return octets.ld8(ev_slot(l), 0)
+}
+
+fn ev_tid(l: u64) -> u64 {
+    return octets.ld8(ev_slot(l), 1)
+}
+
+fn ev_iid(l: u64) -> u64 {
+    return octets.ld8(ev_slot(l), 2)
+}
+
+fn ev_cid(l: u64) -> u64 {
+    return octets.ld8(ev_slot(l), 3)
+}
+
+fn ev_len(l: u64) -> u64 {
+    return octets.ld16(ev_slot(l), 4)
+}
+
+fn ev_data(l: u64) -> u64 {
+    return ev_slot(l) + EV_HDR
+}
+
+fn ev_drop(l: u64) {
+    if ev_avail(l) != 0 {
+        s(l, L_EV_HEAD, g(l, L_EV_HEAD) + 1)
+    }
+}
+
+fn push_event(l: u64, p: u64, n: u64) {
+    if ev_avail(l) >= EV_SLOTS {
+        bump(l, C_DROPPED)
+        return
+    }
+    let dlen: u64 = n - ssamwire.CMD_HDR_LEN
+    if dlen > EV_DATA_MAX {
+        bump(l, C_DROPPED)
+        return
+    }
+    let slot: u64 = l + EV_BASE + (g(l, L_EV_TAIL) % EV_SLOTS) * EV_SLOT_BYTES
+    octets.st8(slot, 0, octets.ld8(p, 1))
+    octets.st8(slot, 1, octets.ld8(p, 3))
+    octets.st8(slot, 2, octets.ld8(p, 4))
+    octets.st8(slot, 3, octets.ld8(p, 7))
+    octets.st16(slot, 4, dlen)
+    octets.copy(slot + EV_HDR, p + ssamwire.CMD_HDR_LEN, dlen)
+    s(l, L_EV_TAIL, g(l, L_EV_TAIL) + 1)
+    bump(l, C_EVENTS)
+}
+
+fn take_response(l: u64, p: u64, n: u64) {
+    let dlen: u64 = n - ssamwire.CMD_HDR_LEN
+    if g(l, L_REQ) != REQ_WAIT || octets.ld16(p, 5) != g(l, L_PEND_RQID) || dlen > RSP_MAX {
+        bump(l, C_DROPPED)
+        return
+    }
+    octets.copy(l + RSP_BASE, p + ssamwire.CMD_HDR_LEN, dlen)
+    s(l, L_RSP_LEN, dlen)
+    s(l, L_REQ, REQ_DONE)
+    bump(l, C_RESPONSES)
+}
+
+fn handle_command(l: u64, p: u64, n: u64) {
+    if n < ssamwire.CMD_HDR_LEN || octets.ld8(p, 0) != ssamwire.PLD_CMD {
+        bump(l, C_DROPPED)
+        return
+    }
+    if ssamwire.is_event_rqid(octets.ld16(p, 5)) {
+        push_event(l, p, n)
+        return
+    }
+    take_response(l, p, n)
+}
+
+fn handle_frame(l: u64, kind: u64, seq: u64, p: u64, n: u64, now: u64) {
+    bump(l, C_FRAMES)
+    if kind == ssamwire.FRAME_ACK {
+        bump(l, C_ACK_RX)
+        if g(l, L_REQ) == REQ_WAIT && seq == g(l, L_PEND_SEQ) {
+            s(l, L_ACKED, 1)
+        }
+        return
+    }
+    if kind == ssamwire.FRAME_NAK {
+        bump(l, C_NAK_RX)
+        if g(l, L_REQ) == REQ_WAIT && g(l, L_ACKED) == 0 {
+            resend(l, now)
+        }
+        return
+    }
+    if kind == ssamwire.FRAME_DATA_SEQ {
+        queue_ack(l, seq)
+        if g(l, L_LAST_OK) != 0 && g(l, L_LAST_SEQ) == seq {
+            bump(l, C_DUP)
+            return
+        }
+        s(l, L_LAST_OK, 1)
+        s(l, L_LAST_SEQ, seq)
+        handle_command(l, p, n)
+        return
+    }
+    if kind == ssamwire.FRAME_DATA_NSQ {
+        handle_command(l, p, n)
+        return
+    }
+    bump(l, C_DROPPED)
+}
+
+fn rx_drop(l: u64, k: u64) {
+    let n: u64 = g(l, L_RXN)
+    var i: u64 = k
+    while i < n {
+        octets.st8(l, RX_BASE + i - k, octets.ld8(l, RX_BASE + i))
+        i = i + 1
+    }
+    s(l, L_RXN, n - k)
+}
+
+fn scan(l: u64, now: u64) {
+    let buf: u64 = l + RX_BASE
+    while true {
+        let n: u64 = g(l, L_RXN)
+        if n == 0 {
+            return
+        }
+        if octets.ld8(buf, 0) != ssamwire.SYN0 || (n >= 2 && octets.ld8(buf, 1) != ssamwire.SYN1) {
+            bump(l, C_RESYNC)
+            rx_drop(l, 1)
+            continue
+        }
+        if n < ssamwire.FRAME_HDR_LEN {
+            return
+        }
+        if ssamwire.crc16(buf + 2, 4) != octets.ld16(buf, 6) {
+            bump(l, C_BADCRC)
+            rx_drop(l, 1)
+            continue
+        }
+        let len: u64 = octets.ld16(buf, 3)
+        if len > PAYLOAD_MAX {
+            bump(l, C_BADCRC)
+            rx_drop(l, 2)
+            continue
+        }
+        let total: u64 = ssamwire.frame_len(len)
+        if n < total {
+            return
+        }
+        if ssamwire.crc16(buf + ssamwire.FRAME_HDR_LEN, len) != octets.ld16(buf, ssamwire.FRAME_HDR_LEN + len) {
+            bump(l, C_BADCRC)
+            queue_nak(l)
+            rx_drop(l, 2)
+            continue
+        }
+        let kind: u64 = octets.ld8(buf, 2)
+        let seq: u64 = octets.ld8(buf, 5)
+        handle_frame(l, kind, seq, buf + ssamwire.FRAME_HDR_LEN, len, now)
+        rx_drop(l, total)
+    }
+}
+
+fn feed(l: u64, b: u64, now: u64) {
+    let n: u64 = g(l, L_RXN)
+    if n >= RX_MAX {
+        rx_drop(l, 1)
+        bump(l, C_DROPPED)
+    }
+    let at: u64 = g(l, L_RXN)
+    octets.st8(l, RX_BASE + at, b)
+    s(l, L_RXN, at + 1)
+    scan(l, now)
+}
+
+fn feed_all(l: u64, p: u64, n: u64, now: u64) {
+    var i: u64 = 0
+    while i < n {
+        feed(l, octets.ld8(p, i), now)
+        i = i + 1
+    }
+}
