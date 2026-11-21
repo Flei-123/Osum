@@ -181,3 +181,12 @@ A bundle in `/apps/<name>.osp` (or `.prog`) may carry an `INITTAB` file. `init` 
 - Gate: `bash tools/pkgsvc/run.sh` (40 checks, counter-probe: old init). Build: `bash pakete/bauen.sh` (jarvisd needs `kernel/app/jarvisd.fi`).
 - Open: any signed package may now ship a root service inside its own directory; limit to packages from the OTA key or add a rights prompt (Boss decision).
 - Open: jarvisd from `/apps/jarvisd.osp` runs with the origin label `app:jarvisd`; the bridge connection must be proven on a VM/HP before the base copy is dropped.
+
+## Explorer package (pakete/explorer, 2.0.0)
+
+- `pakete/explorer` builds `explorer-2.0.0.opk` (`bash pakete/bauen.sh`, lint with `osdk.py check --system` because the id collides with the shipped bundle on purpose).
+- Safe variant chosen: the image keeps `/apps/explorer.osp` as a SYSTEM bundle (second name of `/bin/explorer`), so a file manager exists even if the package is removed, the trash is misused or an update fails (xrkeep incident). `opk` never replaces or removes a SYSTEM bundle.
+- The package is the update vehicle for images and profiles WITHOUT the base bundle (slim or test images): install, update and remove work without a reboot.
+- Base image updates go through OTA (liveswap of `/bin/explorer`); the bundle INFO version follows the package version.
+- Gate: `bash tools/explorerpkg/run.sh` (install, update 2.0.0 -> 2.0.1, remove, system bundle survives, counter-proof without SYSTEM).
+- Open: a higher package version cannot overlay the SYSTEM bundle (needs a signed-by-OTA-key rule in `opk.fi`, Boss decision); `handlers.conf` has no folder kind, folders open in the explorer through the launcher path only.
