@@ -40,3 +40,12 @@ The Windows viewer sends keys as `KeyVk{vk,ext,down}`. The Osum host maps the vi
 
 ## 7. Resolution (viewer/host)
 - Host side is the OrientOS grab of the panel (native mode reported by the host); the viewer's fixed `1920x1080` list and a "follow client window" resize hint live in the FreeViewer client repo, not in this repository. See the report of w-store-fs-xremote.
+
+## 8. Stream path and quality (21.11.2026, w-xremote-perf)
+- Why "over relay": until now xremoted started the host with `--no-p2p`, and the direct UDP path only carried H.264 (`0x25`), which the OrientOS host never produces. Now the flag is gone and tile batches (`0x22`) ride the direct path too (`proto::is_udp_picture`); full JPEG frames (`0x21`), input and control stay on the relay. Needs a viewer with the matching change (FreeViewer branch `xrperf`, commit "stream: tile strips ...").
+- Whole-screen refreshes on the direct path go out as 96-row tile strips (independent, so one lost datagram costs one strip, not a 300-datagram frame); the first picture of a session and size changes still use one `Frame`. Tile encoding is spread over up to 4 threads. Admin profile JPEG quality is q82/q90 (was q68/q78), still native resolution (no downscale at 1920 wide).
+- The viewer asks for a refresh on every incomplete UDP picture (`NeedKeyframe`), host answers with strips.
+- `/run/xremote.state` now also carries `fps=`, `kbps=` and `path=direct|relay` (measure with `/bin/cat /run/xremote.state`).
+- Host log lines (`capture::log_line`) go to stderr (= `/var/log/xremote.log`) on the host-only build instead of appending to a file in the config dir (finding: a grabber line landed in `/etc/theme.conf` on the HP).
+- Resolution: the host reads `modes=WxH,...` from `/run/xremote.display` and writes the choice to `/run/xremote.dispreq` (`WxH` or `native`); the viewer combo box already shows the host's list and sends `SetResolution`. The kernel side (`xrdisplay` in xremoted) lives on the unmerged branch of w-xremote-rest.
+- Gate: `tools/xremote/direct.sh` (QEMU, host without `--no-p2p`, viewer `--perftest`): direct path reported, frame rate, delay, `/etc/theme.conf` checksum unchanged after a session and after 12 s of appends to a new log file.

@@ -6,7 +6,7 @@ OUT=${1:?usage: directpkg.sh <out-dir>}
 BUND=${OSUM_BUND:-/root/.secrets/osum-ota-bund.json}
 PASS_FILE=${OSUM_SIGN_PASS_FILE:-/root/.secrets/osum-ota-pass.txt}
 TOOLS=${XR_TOOLS:-/root/jarvis/data/orientos-xremote}
-HOSTBIN=${XR_HOST:-$TOOLS/v2/freeviewer-host}
+HOSTBIN=${XR_HOST:-$TOOLS/v3/freeviewer-host}
 LIBS=${XR_LIBS_DIR:-/root/fxhp/fx-root}
 OPK=$(python3 tools/lib/opkpfad.py)
 for f in "$HOSTBIN" "$LIBS/lib/ld-musl-x86_64.so.1" "$LIBS/usr/lib/libgcc_s.so.1" "$OPK" "$BUND"; do

@@ -13,7 +13,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 WD=${XR_WD:-/root/fxhp}
 XRTOOLS=${XR_TOOLS:-/root/jarvis/data/orientos-xremote}
-HOSTBIN=${XR_HOST:-$XRTOOLS/v2/freeviewer-host}
+HOSTBIN=${XR_HOST:-$XRTOOLS/v3/freeviewer-host}
 VIEWER=${XR_VIEWER:-$XRTOOLS/freeviewer-glibc}
 RELAYDIR=${XR_RELAY:-/root/projects/freeviewer/relay}
 NODEPATH=${XR_LIBS:-/root/jarvis/node_modules}

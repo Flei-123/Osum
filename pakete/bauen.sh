@@ -112,7 +112,7 @@ for d in pakete/*/; do
     python3 tools/actionbus/manifest.py check "$d/ACTIONS" | sed 's/^/   /' || exit 1
 done
 
-XR_HOST_DIR=${XR_HOST_DIR:-/root/jarvis/data/orientos-xremote/v2}
+XR_HOST_DIR=${XR_HOST_DIR:-/root/jarvis/data/orientos-xremote/v3}
 XR_LIBS_DIR=${XR_LIBS_DIR:-/root/fxhp/fx-root}
 if [ -f "$XR_HOST_DIR/freeviewer-host" ] && [ -f "$XR_LIBS_DIR/lib/ld-musl-x86_64.so.1" ]; then
     mkdir -p pakete/xremote/bau
