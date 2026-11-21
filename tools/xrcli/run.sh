@@ -77,7 +77,7 @@ image "$TMPD/without.img" 0 && ok "image without a bundle" || bad "mkfs without"
 echo "== 3. boot with the bundle =="
 run_case with
 W="$TMPD/with.txt"
-has "$W" "usage: xremote [status|id|password|fixed <pw>|random|on|off]" "a bare command name finds /apps/xremote.osp/bin/xremote"
+has "$W" "usage: xremote [status|id|password|fixed <pw>|random|on|off|admin on|admin off|display]" "a bare command name finds /apps/xremote.osp/bin/xremote"
 has "$W" "enabled:" "status prints the enabled line"
 has "$W" "service:" "status prints the service line"
 has "$W" "password needs 8-32" "a short fixed password is refused locally"
