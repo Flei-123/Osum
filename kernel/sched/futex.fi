@@ -6,6 +6,7 @@ import sched.taskslot
 import sched.proc.procfault
 import sched.proc.procmap
 import sched.signal
+import sched.futexpool
 import sched.time
 import sched.hrt
 import sync.atomic
@@ -13,7 +14,7 @@ import arch.cpu
 import arch.x86_64.guard
 
 export {
-    call, stats_waits, stats_wakes, queued_count, wake_cleared
+    call, waitv, stats_waits, stats_wakes, queued_count, wake_cleared
 }
 
 const FQ_MAX: u64 = 512
@@ -160,6 +161,9 @@ fn live(state: u64, j: u64) -> bool {
 }
 
 fn matches(j: u64, pkey: u64, vkey: u64, pass: u64) -> bool {
+    if fq_vkey[j as usize] == futexpool.MARK {
+        return futexpool.matching(j, pkey, vkey, pass) != 0
+    }
     if pass == 0 {
         return fq_vkey[j as usize] == vkey
     }
@@ -194,10 +198,13 @@ fn wake_some(state: u64, pkey: u64, vkey: u64, want: u64, bits: u64) -> u64 {
     while pass < 2 && done < want {
         var more: bool = true
         while more && done < want {
-            let j: u64 = oldest(state, pkey, vkey, bits, pass)
+            let j: u64 = oldest(state, pkey, vkey, bits | futexpool.WAITV_BITS, pass)
             if j >= FQ_MAX {
                 more = false
             } else {
+                if fq_vkey[j as usize] == futexpool.MARK {
+                    futexpool.record(j, pkey, vkey, pass)
+                }
                 wake_slot(state, j)
                 done = done + 1
             }
@@ -626,4 +633,161 @@ fn wake_cleared(state: u64, me: u64, addr: u64) -> u64 {
     let n: u64 = wake_some(state, phys, vkey, 1, BITS_ANY)
     unlock(state, flags)
     return n
+}
+
+const WAITV_MAX: u64 = 128
+const WAITV_BYTES: u64 = 24
+const WAITV_SIZE_MASK: u64 = 3
+const WAITV_SIZE_U32: u64 = 2
+const WAITV_NUMA: u64 = 4
+const WAITV_KNOWN: u64 = 135
+
+fn waitv_entry_ok(flags: u64, reserved: u64, uaddr: u64) -> bool {
+    return (flags & ~WAITV_KNOWN) == 0 && (flags & WAITV_NUMA) == 0
+        && (flags & WAITV_SIZE_MASK) == WAITV_SIZE_U32 && reserved == 0 && (uaddr & 3) == 0
+}
+
+fn waitv_enqueue(state: u64, me: u64, pid: u64, nr: u64, waiters: u64) -> u64 {
+    var i: u64 = 0
+    while i < nr {
+        let base: u64 = waiters + i * WAITV_BYTES
+        let val: u64 = rd64(state, me, base)
+        let uaddr: u64 = rd64(state, me, base + 8)
+        if !waitv_entry_ok(rd32(state, me, base + 16), rd32(state, me, base + 20), uaddr) {
+            return neg(errno.E_INVAL)
+        }
+        if !procfault.user_ok(state, me, uaddr, 4) {
+            return neg(errno.E_FAULT)
+        }
+        let phys: u64 = procmap.translate(state, me, uaddr)
+        if phys == 0 {
+            return neg(errno.E_FAULT)
+        }
+        let flags: u64 = lock(state)
+        var added: bool = futexpool.add(me, pid, vkey_of(state, me, uaddr), phys, val, i)
+        if !added {
+            futexpool.sweep(state)
+            added = futexpool.add(me, pid, vkey_of(state, me, uaddr), phys, val, i)
+        }
+        unlock(state, flags)
+        if !added {
+            return neg(errno.E_NOMEM)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn waitv_values_ok(state: u64, me: u64) -> bool {
+    var at: u64 = futexpool.first(me)
+    while at != 0 {
+        if rd32_phys(state, futexpool.pkey_at(at)) != futexpool.val_at(at) {
+            return false
+        }
+        at = futexpool.after(at)
+    }
+    return true
+}
+
+fn waitv_finish(state: u64, me: u64, pid: u64, failure: u64) -> u64 {
+    let flags: u64 = lock(state)
+    var result: u64 = futexpool.hit(me)
+    if fq_vkey[me as usize] == futexpool.MARK && fq_pid[me as usize] == pid {
+        fq_vkey[me as usize] = 0
+        result = failure
+    }
+    futexpool.release(me)
+    unlock(state, flags)
+    return result
+}
+
+fn waitv_abort(state: u64, me: u64, err: u64) -> u64 {
+    let flags: u64 = lock(state)
+    futexpool.release(me)
+    unlock(state, flags)
+    return err
+}
+
+fn waitv_sleep(state: u64, me: u64, pid: u64, deadline: u64, fine: u64) -> u64 {
+    var flags: u64 = lock(state)
+    if !waitv_values_ok(state, me) {
+        futexpool.release(me)
+        unlock(state, flags)
+        return neg(errno.E_AGAIN)
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if (deadline != 0 && deadline <= now) || (fine != 0 && time.mono_ns(state) >= fine) {
+        futexpool.release(me)
+        unlock(state, flags)
+        return neg(errno.E_TIMEDOUT)
+    }
+    fq_vkey[me as usize] = futexpool.MARK
+    fq_pkey[me as usize] = 0
+    fq_bits[me as usize] = futexpool.WAITV_BITS
+    fq_pid[me as usize] = pid
+    fq_ticket[me as usize] = fq_count[0 as usize]
+    fq_count[0 as usize] = fq_count[0 as usize] + 1
+    fq_count[1 as usize] = fq_count[1 as usize] + 1
+    while true {
+        var due: u64 = kstate.get(state, kstate.TICKS) + SLEEP_CAP
+        if deadline != 0 && deadline < due {
+            due = deadline
+        }
+        taskslot.tset(state, me, taskconst.T_WAKE, due)
+        hrt.set_wake(me, fine)
+        if fine != 0 {
+            hrt.arm_here(state)
+        }
+        taskslot.tset(state, me, taskconst.T_STATE, taskconst.S_SLEEP)
+        sched.schedule_locked(state)
+        sched.irq_restore(flags)
+        flags = lock(state)
+        if fq_vkey[me as usize] != futexpool.MARK || fq_pid[me as usize] != pid {
+            unlock(state, flags)
+            return waitv_finish(state, me, pid, 0)
+        }
+        unlock(state, flags)
+        if signal.interrupted(state, me) {
+            return waitv_finish(state, me, pid, neg(errno.E_INTR))
+        }
+        if (deadline != 0 || fine != 0) && hrt.expired(state, deadline, fine) {
+            return waitv_finish(state, me, pid, neg(errno.E_TIMEDOUT))
+        }
+        flags = lock(state)
+    }
+    return 0
+}
+
+fn waitv(state: u64, me: u64, waiters: u64, nr: u64, timeout: u64, clockid: u64) -> u64 {
+    if nr == 0 || nr > WAITV_MAX {
+        return neg(errno.E_INVAL)
+    }
+    var on_real: bool = false
+    if timeout != 0 {
+        if clockid == 0 {
+            on_real = true
+        } else if clockid != 1 {
+            return neg(errno.E_INVAL)
+        }
+    }
+    if !procfault.user_ok(state, me, waiters, nr * WAITV_BYTES) {
+        return neg(errno.E_FAULT)
+    }
+    let pid: u64 = taskslot.tget(state, me, taskconst.T_PID)
+    let flags: u64 = lock(state)
+    futexpool.release(me)
+    unlock(state, flags)
+    let queued: u64 = waitv_enqueue(state, me, pid, nr, waiters)
+    if queued != 0 {
+        return waitv_abort(state, me, queued)
+    }
+    if signal.interrupted(state, me) {
+        return waitv_abort(state, me, neg(errno.E_INTR))
+    }
+    var fine: u64 = 0
+    let deadline: u64 = deadline_of(state, me, timeout, true, on_real, &fine)
+    if deadline >= DL_ERR {
+        return waitv_abort(state, me, neg(deadline - DL_ERR))
+    }
+    return waitv_sleep(state, me, pid, deadline, fine)
 }

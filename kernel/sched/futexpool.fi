@@ -1,0 +1,113 @@
+import sched.taskslot
+import sched.taskconst
+
+export {
+    MARK, WAITV_BITS, add, release, matching, record, hit, first, after, pkey_at, val_at, sweep
+}
+
+const POOL_MAX: u64 = 1024
+const SLOT_MAX: u64 = 512
+const MARK: u64 = 0xFFFFFFFFFFFF0001
+const WAITV_BITS: u64 = 0x200000000
+
+static mut wp_head: [u64; 512] = [0 as u64; 512]
+static mut wp_hit: [u64; 512] = [0 as u64; 512]
+static mut wp_next: [u64; 1024] = [0 as u64; 1024]
+static mut wp_pid: [u64; 1024] = [0 as u64; 1024]
+static mut wp_vkey: [u64; 1024] = [0 as u64; 1024]
+static mut wp_pkey: [u64; 1024] = [0 as u64; 1024]
+static mut wp_val: [u64; 1024] = [0 as u64; 1024]
+static mut wp_index: [u64; 1024] = [0 as u64; 1024]
+
+fn free_entry() -> u64 {
+    var i: u64 = 0
+    while i < POOL_MAX {
+        if wp_pid[i as usize] == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return POOL_MAX
+}
+
+fn add(slot: u64, pid: u64, vkey: u64, pkey: u64, val: u64, index: u64) -> bool {
+    let i: u64 = free_entry()
+    if i >= POOL_MAX {
+        return false
+    }
+    wp_pid[i as usize] = pid
+    wp_vkey[i as usize] = vkey
+    wp_pkey[i as usize] = pkey
+    wp_val[i as usize] = val
+    wp_index[i as usize] = index
+    wp_next[i as usize] = wp_head[slot as usize]
+    wp_head[slot as usize] = i + 1
+    return true
+}
+
+fn release(slot: u64) {
+    var at: u64 = wp_head[slot as usize]
+    while at != 0 {
+        let i: u64 = at - 1
+        at = wp_next[i as usize]
+        wp_pid[i as usize] = 0
+    }
+    wp_head[slot as usize] = 0
+}
+
+fn entry_matches(i: u64, pkey: u64, vkey: u64, pass: u64) -> bool {
+    if pass == 0 {
+        return wp_vkey[i as usize] == vkey
+    }
+    return wp_pkey[i as usize] == pkey && wp_vkey[i as usize] != vkey
+}
+
+fn matching(slot: u64, pkey: u64, vkey: u64, pass: u64) -> u64 {
+    var at: u64 = wp_head[slot as usize]
+    while at != 0 {
+        let i: u64 = at - 1
+        if entry_matches(i, pkey, vkey, pass) {
+            return at
+        }
+        at = wp_next[i as usize]
+    }
+    return 0
+}
+
+fn record(slot: u64, pkey: u64, vkey: u64, pass: u64) {
+    let at: u64 = matching(slot, pkey, vkey, pass)
+    if at != 0 {
+        wp_hit[slot as usize] = wp_index[(at - 1) as usize]
+    }
+}
+
+fn hit(slot: u64) -> u64 {
+    return wp_hit[slot as usize]
+}
+
+fn first(slot: u64) -> u64 {
+    return wp_head[slot as usize]
+}
+
+fn after(at: u64) -> u64 {
+    return wp_next[(at - 1) as usize]
+}
+
+fn pkey_at(at: u64) -> u64 {
+    return wp_pkey[(at - 1) as usize]
+}
+
+fn val_at(at: u64) -> u64 {
+    return wp_val[(at - 1) as usize]
+}
+
+fn sweep(state: u64) {
+    var slot: u64 = 0
+    while slot < SLOT_MAX {
+        let head: u64 = wp_head[slot as usize]
+        if head != 0 && wp_pid[(head - 1) as usize] != taskslot.tget(state, slot, taskconst.T_PID) {
+            release(slot)
+        }
+        slot = slot + 1
+    }
+}
