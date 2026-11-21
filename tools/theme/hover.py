@@ -6,6 +6,7 @@ here = os.path.dirname(os.path.abspath(__file__))
 model = sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, "model.py")
 schemes = os.path.join(here, "..", "..", "assets", "schemes")
 MIN, MAX = 5, 18
+os.environ["MODEL_NO_PALETTE"] = "1"
 
 def sem(path, mode):
     out = subprocess.run([sys.executable, "-I", model, "semantic", path, mode],
