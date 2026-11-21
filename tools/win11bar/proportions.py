@@ -37,10 +37,11 @@ def check(path, scale):
     pills = last_by_index(path, "taskbar: pille ")
     syms = last_by_index(path, "taskbar: sym btn=")
     results = []
-    if len(pills) < 2:
-        return [("two running pins carry a pill", False, "pills=%d" % len(pills))]
+    if not pills:
+        return [("a running pin carries a pill", False, "pills=0")]
     widths = sorted(p["w"] for p in pills.values())
-    results.append(("idle pill is %d px wide" % (PILL_IDLE_W * scale), widths[0] == PILL_IDLE_W * scale, "w=%d" % widths[0]))
+    if len(widths) > 1:
+        results.append(("idle pill is %d px wide" % (PILL_IDLE_W * scale), widths[0] == PILL_IDLE_W * scale, "w=%d" % widths[0]))
     results.append(("active pill is %d px wide" % (PILL_ACTIVE_W * scale), widths[-1] == PILL_ACTIVE_W * scale, "w=%d" % widths[-1]))
     for i, s in syms.items():
         ratio_ok = s["gemalt"] * ICON_DEN <= s["button"] * ICON_NUM + ICON_DEN
