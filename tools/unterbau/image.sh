@@ -38,7 +38,7 @@ boot() { # boot <kernel> <disk> <script> <serial-out>
     cp -f "$2" "$2.live"
     local drive=(-drive "file=$2.live,format=raw,if=ide,index=0${UB_DRIVEX:-}")
     [ "${UB_DRIVE:-ide}" = ahci ] && drive=(-device ahci,id=ahci -drive "file=$2.live,format=raw,if=none,id=d0${UB_DRIVEX:-}" -device ide-hd,drive=d0,bus=ahci.0)
-    timeout "$TMO" $QEMU "${KVM[@]}" -smp "$SMP" -kernel "$1" -m 512 \
+    timeout "$TMO" $QEMU "${KVM[@]}" -smp "$SMP" -kernel "$1" -m "${UB_MEM:-512}" \
         -append "osum vfs nokbd nosched noproc nofs ${KARGS:-} script=$3;exit" -serial "file:$4" -display none -no-reboot \
         ${NETARGS:-} "${drive[@]}" -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
     local rc=$?; rm -f "$2.live"; return $rc
