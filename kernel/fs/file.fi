@@ -33,7 +33,7 @@ export {
     K_TTY, K_SOCK, K_VFILE, K_VDIR, K_USOCK, K_SHM, K_DRM, K_SYNC,
     K_EVENT, K_TIMER, K_SIGFD, K_EPOLL, K_INOTIFY, K_NETLINK, K_PIDFD, K_MQUEUE, K_FANOTIFY,
     inotify_live, open_x1, open_set_x1, open_x2, open_set_x2, open_addr, of_at, OF_OFF, OF_BYTES, OF_KIND, OF_INO, OF_FLAGS, OF_MNT,
-    open_mnt, open_set_mnt, open_settle,
+    open_mnt, open_set_mnt, open_settle, open_owner, open_set_owner,
     fd_handle, fd_rights, fd_may, fd_check, fd_set_rights, fd_pass,
     rights_of_open,
     MAX_FD, MAX_OPEN, MAX_PIPES, PIPE_CAP, CON_IN, CON_OUT, CON_ERR, open_count
@@ -47,6 +47,8 @@ const OF_INO: u64 = 8
 const OF_OFF: u64 = 16
 const OF_REF: u64 = 24
 const OF_FLAGS: u64 = 32
+const FLAGS_MASK: u64 = 0xFFFFFFFF
+const OWNER_SHIFT: u64 = 32
 const OF_MNT: u64 = 40
 
 const K_FREE: u64 = 0
@@ -202,7 +204,7 @@ fn fd_install_held(state: u64, task: u64, fd: u64, open: u64,
 }
 
 fn rights_of_open(state: u64, i: u64) -> u64 {
-    var r: u64 = handle.rights_for_flags(kstate.get(state, of_at(i) + OF_FLAGS))
+    var r: u64 = handle.rights_for_flags(open_flags(state, i))
     let kind: u64 = kstate.get(state, of_at(i) + OF_KIND)
     if kind == K_CONIN {
         r = r | handle.R_READ
@@ -558,7 +560,7 @@ fn open_alloc_held(state: u64, kind: u64, ino: u64, flags: u64) -> u64 {
             kstate.set(state, of_at(i) + OF_INO, ino)
             kstate.set(state, of_at(i) + OF_OFF, 0)
             kstate.set(state, of_at(i) + OF_REF, 1)
-            kstate.set(state, of_at(i) + OF_FLAGS, flags)
+            kstate.set(state, of_at(i) + OF_FLAGS, flags & FLAGS_MASK)
             kstate.set(state, of_at(i) + OF_MNT, 0)
             kstate.set(state, of_at(i) + OF_X1, 0)
             kstate.set(state, of_at(i) + OF_X2, 0)
@@ -624,7 +626,7 @@ fn open_teardown(state: u64, i: u64) {
     let kind: u64 = kstate.get(state, of_at(i) + OF_KIND)
     let p: u64 = kstate.get(state, of_at(i) + OF_INO)
     if kind == K_PIPER {
-        if pipe_owner(state, p) != 0 && (kstate.get(state, of_at(i) + OF_FLAGS) & 3) == 2 {
+        if pipe_owner(state, p) != 0 && (open_flags(state, i) & 3) == 2 {
             pipe_drop(state, p, false)
         }
         pipe_drop(state, p, true)
@@ -774,11 +776,21 @@ fn open_set_mnt(state: u64, i: u64, v: u64) {
 }
 
 fn open_flags(state: u64, i: u64) -> u64 {
-    return kstate.get(state, of_at(i) + OF_FLAGS)
+    return kstate.get(state, of_at(i) + OF_FLAGS) & FLAGS_MASK
 }
 
 fn open_set_flags(state: u64, i: u64, f: u64) {
-    kstate.set(state, of_at(i) + OF_FLAGS, f)
+    let keep: u64 = kstate.get(state, of_at(i) + OF_FLAGS) & (~FLAGS_MASK)
+    kstate.set(state, of_at(i) + OF_FLAGS, keep | (f & FLAGS_MASK))
+}
+
+fn open_owner(state: u64, i: u64) -> u64 {
+    return kstate.get(state, of_at(i) + OF_FLAGS) >> OWNER_SHIFT
+}
+
+fn open_set_owner(state: u64, i: u64, owner: u64) {
+    let low: u64 = kstate.get(state, of_at(i) + OF_FLAGS) & FLAGS_MASK
+    kstate.set(state, of_at(i) + OF_FLAGS, low | ((owner & FLAGS_MASK) << OWNER_SHIFT))
 }
 
 fn pipe_new(state: u64) -> u64 {

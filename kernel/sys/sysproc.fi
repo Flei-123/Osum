@@ -22,6 +22,7 @@ import arch.cpu
 import fs.fs
 import fs.syncall
 import ldr.elf
+import ldr.elfstack
 import lib.errno
 import fs.fszap
 import fs.file
@@ -51,6 +52,7 @@ import drv.wdt.wdt
 import sys.sysconst
 import sys.utsinfo
 import sys.sysuser
+import sys.execargs
 import sys.sysprctl
 import sys.seccomp.sysseccomp
 import sys.sysfd
@@ -868,39 +870,14 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64, envp: u64) -
     if len == 0 {
         return sysuser.neg(errno.E_NOENT)
     }
-    let abuf: u64 = cpu.earg_buf(state)
-    var at: u64 = 0
-    var argc: u64 = 0
-    if argv != 0 {
-        var going: bool = true
-        while going {
-            // the terminating 0 may sit in slot MAX_ARGS: eight words
-            // plus the end mark, not seven (a NULL-terminated argv)
-            if argc > procbase.MAX_ARGS {
-                return sysuser.neg(errno.E_2BIG)
-            }
-            if !procfault.user_ok(state, me, argv + argc * 8, 8) {
-                return sysuser.neg(errno.E_FAULT)
-            }
-            let p: u64 = sysuser.user_word(state, me, argv + argc * 8)
-            if p == 0 {
-                going = false
-            } else {
-                if argc >= procbase.MAX_ARGS {
-                    return sysuser.neg(errno.E_2BIG)
-                }
-                if at + MAX_ARG + 1 > kstate.EARG_MAX {
-                    return sysuser.neg(errno.E_2BIG)
-                }
-                let n: u64 = sysuser.fetch_name(state, me, p, abuf + at, MAX_ARG)
-                if errno.is_error(n) {
-                    return n
-                }
-                at = at + n + 1
-                argc = argc + 1
-            }
-        }
+    var arg_state: [u64; 3] = [0 as u64; 3]
+    let ast: u64 = (&arg_state[0]) as u64
+    let fetched: u64 = execargs.fetch(state, me, argv, ast)
+    if errno.is_error(fetched) {
+        return fetched
     }
+    let abuf: u64 = execargs.buf(ast)
+    let argc: u64 = execargs.argc(ast)
     // RUNDE UNTERBAU: THE ENVIRONMENT OF `execve`. The kernel holds ONE environment block (a shell fills it with SYS_OSUM_SETENV, every
     // program started afterwards finds it on its argument page) and `execve` ignored its third argument: a child started with
     // `execve(path, argv, envp)` never saw `envp` (measured: t_proc `exec_args_env_stdout`, WAYLAND_DISPLAY and XDG_RUNTIME_DIR would
@@ -923,7 +900,7 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64, envp: u64) -
             var eat: u64 = 0
             var ecnt: u64 = 0
             var egoing: bool = true
-            while egoing && ecnt < elf.STACK_ENV_MAXN {
+            while egoing && ecnt < elfstack.STACK_ENV_MAXN {
                 if !procfault.user_ok(state, me, envp + ecnt * 8, 8) {
                     egoing = false
                 } else {
@@ -951,6 +928,7 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64, envp: u64) -
     let t: u64 = elf.build(state, name, abuf, argc, taskslot.tget(state, me,
             taskconst.T_PRIO))
     elf.lock_leave(state, lk)
+    execargs.release(state, ast)
     if env_saved != 0 {
         // the new image has copied the block onto its argument page: the old block goes back
         let blk2: u64 = state + kstate.K11_OFF + kstate.ENV_BUF

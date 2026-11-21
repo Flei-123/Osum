@@ -27,9 +27,10 @@ import ui.ax
 import ldr.bigpie
 import libc.regio
 import libc.numeric
+import ldr.elfstack
 
 export {
-    spawn, build, STACK_ENV_MAXN, lock_enter, lock_leave, load, load_at, say_reason, errno_of,
+    spawn, build, lock_enter, lock_leave, load, load_at, say_reason, errno_of,
     R_OK, R_NOFILE, R_ISDIR, R_SHORT, R_MAGIC, R_CLASS, R_ENDIAN,
     R_VERSION, R_TYPE, R_MACHINE, R_SIZES, R_PHNUM, R_PHOFF, R_SEGFILE,
     R_MEMSZ, R_RANGE, R_ALIGN, R_OVERLAP, R_NOMEM, R_ENTRY, R_READ,
@@ -512,7 +513,6 @@ fn say_segment(state: u64, t: u64, ph: u64, bias: u64) {
 
 const ENV_OFF: u64 = 2048
 const ENV_MAXN: u64 = 16
-const STACK_ENV_MAXN: u64 = 64
 const ENV_STR: u64 = 2192
 
 fn write_env(state: u64, frame: u64) {
@@ -546,9 +546,13 @@ fn write_env(state: u64, frame: u64) {
     regio.write64(frame + ENV_OFF + 8 + n * 8, 0)
 }
 
-fn write_args(state: u64, t: u64, args: u64, argc: u64, lossy: bool) -> bool {
+fn write_args(state: u64, t: u64, args: u64, argc_all: u64, lossy: bool) -> bool {
+    var argc: u64 = argc_all
     if argc > procbase.MAX_ARGS {
-        return false
+        if !lossy {
+            return false
+        }
+        argc = procbase.MAX_ARGS
     }
     if procmap.page_free(state, t, procspace.ARGS_BASE) {
         if procmap.map_page_zero(state, t, procspace.ARGS_BASE, true, false) == 0 {
@@ -590,284 +594,6 @@ fn write_args(state: u64, t: u64, args: u64, argc: u64, lossy: bool) -> bool {
     regio.write64(frame + 8 + argc * 8, 0)
     write_env(state, frame)
     return true
-}
-
-const AT_NULL: u64 = 0
-const AT_PHDR: u64 = 3
-const AT_PHENT: u64 = 4
-const AT_PHNUM: u64 = 5
-const AT_PAGESZ: u64 = 6
-const AT_BASE: u64 = 7
-const AT_FLAGS: u64 = 8
-const AT_ENTRY: u64 = 9
-const AT_UID: u64 = 11
-const AT_EUID: u64 = 12
-const AT_GID: u64 = 13
-const AT_EGID: u64 = 14
-const AT_PLATFORM: u64 = 15
-const AT_HWCAP: u64 = 16
-const AT_CLKTCK: u64 = 17
-const AT_SECURE: u64 = 23
-const AT_RANDOM: u64 = 25
-const AT_HWCAP2: u64 = 26
-const AT_EXECFN: u64 = 31
-const AT_SYSINFO_EHDR: u64 = 33
-
-const SP_PAGE: u64 = procspace.STACK_START
-const STACK_BYTES: u64 = 2 * PAGE
-
-const AUXN: u64 = 40
-
-fn sv_put(frame: u64, at: u64, v: u64) {
-    regio.write64(frame + at, v)
-}
-
-fn map_vdso(state: u64, t: u64) -> u64 {
-    let vf: u64 = time.vdso_frame(state)
-    if vf == 0 {
-        return 0
-    }
-    if procmap.translate(state, t, vdso.VDSO_ADDR) == vf {
-        return vdso.VDSO_ADDR
-    }
-    if procmap.map_frame_exec(state, t, vdso.VDSO_ADDR, vf) {
-        return vdso.VDSO_ADDR
-    }
-    return 0
-}
-
-fn stack_frame(state: u64, t: u64, page: u64) -> u64 {
-    if procmap.page_free(state, t, page) {
-        if procmap.map_page_zero(state, t, page, true, false) == 0 {
-            return 0
-        }
-    }
-    let frame: u64 = procmap.translate(state, t, page)
-    if frame == 0 {
-        return 0
-    }
-    fill_bytes(frame, PAGE, 0)
-    return frame
-}
-
-fn stack_put8(frame: u64, frame2: u64, off: u64, c: u8) {
-    if off < PAGE {
-        kstate.set8(frame + off, c)
-        return
-    }
-    kstate.set8(frame2 + off - PAGE, c)
-}
-
-fn build_stack(state: u64, t: u64, args: u64, argc: u64,
-    phdr: u64, phnum: u64, entry: u64, ibase: u64, path: u64) -> u64 {
-    if argc > procbase.MAX_ARGS {
-        return 0
-    }
-    let frame: u64 = stack_frame(state, t, SP_PAGE)
-    let frame2: u64 = stack_frame(state, t, SP_PAGE + PAGE)
-    if frame == 0 || frame2 == 0 {
-        return 0
-    }
-    let vdso_at: u64 = map_vdso(state, t)
-
-    let e0: u64 = kstate.get(state, kstate.K11_OFF + kstate.ENV_N)
-    var envc: u64 = e0
-    if envc > STACK_ENV_MAXN {
-        envc = STACK_ENV_MAXN
-    }
-
-    let need: u64 = (1 + argc + 1 + envc + 1 + AUXN) * 8
-    let str_at: u64 = (need + 15) & 0xFFFFFFFFFFFFFFF0
-    if str_at > PAGE / 2 {
-        return 0
-    }
-
-    var at: u64 = 0
-    sv_put(frame, at, argc)
-    at = at + 8
-
-    var sp_str: u64 = str_at
-    var k: u64 = 0
-    var src: u64 = args
-    while k < argc {
-        sv_put(frame, at, SP_PAGE + sp_str)
-        at = at + 8
-        var going: bool = true
-        while going {
-            if sp_str >= STACK_BYTES - 24 {
-                return 0
-            }
-            let c: u64 = kstate.get8(src)
-            stack_put8(frame, frame2, sp_str, c as u8)
-            sp_str = sp_str + 1
-            src = src + 1
-            if c == 0 {
-                going = false
-            }
-        }
-        k = k + 1
-    }
-    sv_put(frame, at, 0)
-    at = at + 8
-
-    var esrc: u64 = state + kstate.K11_OFF + kstate.ENV_BUF
-    var j: u64 = 0
-    while j < envc {
-        sv_put(frame, at, SP_PAGE + sp_str)
-        at = at + 8
-        var going2: bool = true
-        while going2 {
-            if sp_str >= STACK_BYTES - 24 {
-                return 0
-            }
-            let c2: u64 = kstate.get8(esrc)
-            stack_put8(frame, frame2, sp_str, c2 as u8)
-            sp_str = sp_str + 1
-            esrc = esrc + 1
-            if c2 == 0 {
-                going2 = false
-            }
-        }
-        j = j + 1
-    }
-    sv_put(frame, at, 0)
-    at = at + 8
-
-    if sp_str + 16 >= STACK_BYTES {
-        return 0
-    }
-    let rnd: u64 = sp_str
-    var b: u64 = 0
-    let seed: u64 = kstate.get(state, kstate.TICKS) + t * 2654435761
-    while b < 16 {
-        let value: u64 = (seed >> ((b & 7) * 8)) + b * 31 + t
-        stack_put8(frame, frame2, rnd + b, (value & 255) as u8)
-        b = b + 1
-    }
-    sp_str = sp_str + 16
-
-    let plat: u64 = sp_str
-    if sp_str + 8 >= STACK_BYTES {
-        return 0
-    }
-    stack_put8(frame, frame2, plat, 120)
-    stack_put8(frame, frame2, plat + 1, 56)
-    stack_put8(frame, frame2, plat + 2, 54)
-    stack_put8(frame, frame2, plat + 3, 95)
-    stack_put8(frame, frame2, plat + 4, 54)
-    stack_put8(frame, frame2, plat + 5, 52)
-    stack_put8(frame, frame2, plat + 6, 0)
-    sp_str = sp_str + 8
-
-    let execfn: u64 = sp_str
-    var xi: u64 = 0
-    var xgoing: bool = path != 0
-    while xgoing {
-        if sp_str >= STACK_BYTES - 8 || xi >= 255 {
-            stack_put8(frame, frame2, sp_str, 0)
-            sp_str = sp_str + 1
-            xgoing = false
-        } else {
-            let xc: u64 = kstate.get8(path + xi)
-            stack_put8(frame, frame2, sp_str, xc as u8)
-            sp_str = sp_str + 1
-            xi = xi + 1
-            if xc == 0 {
-                xgoing = false
-            }
-        }
-    }
-    if path == 0 {
-        stack_put8(frame, frame2, sp_str, 0)
-        sp_str = sp_str + 1
-    }
-
-    sv_put(frame, at, AT_PHDR)
-    at = at + 8
-    sv_put(frame, at, phdr)
-    at = at + 8
-    sv_put(frame, at, AT_PHENT)
-    at = at + 8
-    sv_put(frame, at, PHENTSIZE)
-    at = at + 8
-    sv_put(frame, at, AT_PHNUM)
-    at = at + 8
-    sv_put(frame, at, phnum)
-    at = at + 8
-    sv_put(frame, at, AT_PAGESZ)
-    at = at + 8
-    sv_put(frame, at, PAGE)
-    at = at + 8
-    sv_put(frame, at, AT_BASE)
-    at = at + 8
-    sv_put(frame, at, ibase)
-    at = at + 8
-    sv_put(frame, at, AT_FLAGS)
-    at = at + 8
-    sv_put(frame, at, 0)
-    at = at + 8
-    sv_put(frame, at, AT_ENTRY)
-    at = at + 8
-    sv_put(frame, at, entry)
-    at = at + 8
-    sv_put(frame, at, AT_UID)
-    at = at + 8
-    sv_put(frame, at, taskslot.tget(state, t, taskconst.T_UID))
-    at = at + 8
-    sv_put(frame, at, AT_EUID)
-    at = at + 8
-    sv_put(frame, at, taskslot.tget(state, t, taskconst.T_EUID))
-    at = at + 8
-    sv_put(frame, at, AT_GID)
-    at = at + 8
-    sv_put(frame, at, taskslot.tget(state, t, taskconst.T_GID))
-    at = at + 8
-    sv_put(frame, at, AT_EGID)
-    at = at + 8
-    sv_put(frame, at, taskslot.tget(state, t, taskconst.T_EGID))
-    at = at + 8
-    sv_put(frame, at, AT_CLKTCK)
-    at = at + 8
-    sv_put(frame, at, 100)
-    at = at + 8
-    sv_put(frame, at, AT_SECURE)
-    at = at + 8
-    sv_put(frame, at, 0)
-    at = at + 8
-    sv_put(frame, at, AT_HWCAP)
-    at = at + 8
-    sv_put(frame, at, kstate.get(state, kstate.FPU_FEAT) & 0xFFFFFFFF)
-    at = at + 8
-    sv_put(frame, at, AT_HWCAP2)
-    at = at + 8
-    sv_put(frame, at, 0)
-    at = at + 8
-    sv_put(frame, at, AT_PLATFORM)
-    at = at + 8
-    sv_put(frame, at, SP_PAGE + plat)
-    at = at + 8
-    sv_put(frame, at, AT_EXECFN)
-    at = at + 8
-    sv_put(frame, at, SP_PAGE + execfn)
-    at = at + 8
-    sv_put(frame, at, AT_RANDOM)
-    at = at + 8
-    sv_put(frame, at, SP_PAGE + rnd)
-    at = at + 8
-    if vdso_at != 0 {
-        sv_put(frame, at, AT_SYSINFO_EHDR)
-        at = at + 8
-        sv_put(frame, at, vdso_at)
-        at = at + 8
-    }
-    sv_put(frame, at, AT_NULL)
-    at = at + 8
-    sv_put(frame, at, 0)
-    at = at + 8
-    if at > str_at {
-        return 0
-    }
-    return SP_PAGE
 }
 
 fn spawn(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
@@ -1334,8 +1060,8 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     taskslot.tset(state, t, taskconst.T_ENTRY, eentry)
     var ustack: u64 = procspace.ARGS_BASE
     if braucht_lader || ist_dyn || low_exec {
-        let sp: u64 = build_stack(state, t, a, n, at_phdr, at_phnum,
-            at_entry, at_base, path)
+        let sp: u64 = elfstack.build(state, t, a, n, at_phdr, at_phnum,
+            PHENTSIZE, at_entry, at_base, path)
         if sp == 0 {
             procswap.discard(state, t)
             sched.irq_restore(flags)
