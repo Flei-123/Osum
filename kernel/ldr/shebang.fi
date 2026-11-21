@@ -1,0 +1,188 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.kstate
+import fs.fs
+import mm.mmframe
+import sched.proc.procbase
+import ldr.elfstack
+
+export {
+    IPATH_MAX, MAX_INTERP, NOT_SCRIPT, BAD_LINE, TOO_BIG, parse, rewrite, commit, release
+}
+
+const IPATH_MAX: u64 = 256
+const LINE_MAX: u64 = 255
+const MAX_INTERP: u64 = 4
+const NOT_SCRIPT: u64 = 0
+const BAD_LINE: u64 = 0xFFFFFFFFFFFFFFFF
+const TOO_BIG: u64 = 0xFFFFFFFFFFFFFFFF
+const PAGE: u64 = 4096
+const LIVE_SLOT: u64 = 0x78
+const LIVE_FRAMES_SLOT: u64 = 0x80
+const NEXT_SLOT: u64 = 0x88
+const NEXT_FRAMES_SLOT: u64 = 0x90
+
+fn is_gap(c: u64) -> bool {
+    return c == 32 || c == 9
+}
+
+fn scalar(state: u64, slot: u64) -> u64 {
+    return kstate.get(state, kstate.K16_OFF + kstate.FT_SCALARS + slot)
+}
+
+fn scalar_set(state: u64, slot: u64, v: u64) {
+    kstate.set(state, kstate.K16_OFF + kstate.FT_SCALARS + slot, v)
+}
+
+fn free_pair(state: u64, addr_slot: u64, frames_slot: u64) {
+    let addr: u64 = scalar(state, addr_slot)
+    if addr != 0 {
+        mmframe.frame_free_run(state, addr, scalar(state, frames_slot))
+        scalar_set(state, addr_slot, 0)
+        scalar_set(state, frames_slot, 0)
+    }
+}
+
+fn commit(state: u64) {
+    free_pair(state, LIVE_SLOT, LIVE_FRAMES_SLOT)
+    scalar_set(state, LIVE_SLOT, scalar(state, NEXT_SLOT))
+    scalar_set(state, LIVE_FRAMES_SLOT, scalar(state, NEXT_FRAMES_SLOT))
+    scalar_set(state, NEXT_SLOT, 0)
+    scalar_set(state, NEXT_FRAMES_SLOT, 0)
+}
+
+fn release(state: u64) {
+    free_pair(state, NEXT_SLOT, NEXT_FRAMES_SLOT)
+    free_pair(state, LIVE_SLOT, LIVE_FRAMES_SLOT)
+}
+
+fn take(state: u64, bytes: u64) -> u64 {
+    var frames: u64 = (bytes + PAGE - 1) / PAGE
+    if frames == 0 {
+        frames = 1
+    }
+    let addr: u64 = mmframe.frame_run(state, frames)
+    if addr == 0 {
+        return 0
+    }
+    scalar_set(state, NEXT_SLOT, addr)
+    scalar_set(state, NEXT_FRAMES_SLOT, frames)
+    return addr
+}
+
+fn cstr_len(src: u64) -> u64 {
+    var n: u64 = 0
+    while kstate.get8(src + n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn put_word(dst: u64, src: u64) -> u64 {
+    var i: u64 = 0
+    var going: bool = true
+    while going {
+        let c: u64 = kstate.get8(src + i)
+        kstate.set8(dst + i, c as u8)
+        i = i + 1
+        if c == 0 {
+            going = false
+        }
+    }
+    return i
+}
+
+fn line_end(buf: u64, n: u64) -> u64 {
+    var end: u64 = 2
+    while end < n {
+        let c: u64 = kstate.get8(buf + end)
+        if c == 10 || c == 13 || c == 0 {
+            return end
+        }
+        end = end + 1
+    }
+    return end
+}
+
+fn parse(state: u64, ino: u64, dst_path: u64, dst_arg: u64) -> u64 {
+    let buf: u64 = state + kstate.K16_OFF + kstate.FT_SB
+    var i: u64 = 0
+    while i < LINE_MAX + 1 {
+        kstate.set8(buf + i, 0 as u8)
+        i = i + 1
+    }
+    let n: u64 = fs.read_at(state, ino, 0, buf, LINE_MAX)
+    if n < 3 || kstate.get8(buf) != 35 || kstate.get8(buf + 1) != 33 {
+        return NOT_SCRIPT
+    }
+    let end: u64 = line_end(buf, n)
+    var p: u64 = 2
+    while p < end && is_gap(kstate.get8(buf + p)) {
+        p = p + 1
+    }
+    if p >= end {
+        return BAD_LINE
+    }
+    var k: u64 = 0
+    while p < end && !is_gap(kstate.get8(buf + p)) {
+        if k + 1 >= IPATH_MAX {
+            return BAD_LINE
+        }
+        kstate.set8(dst_path + k, kstate.get8(buf + p) as u8)
+        k = k + 1
+        p = p + 1
+    }
+    kstate.set8(dst_path + k, 0 as u8)
+    while p < end && is_gap(kstate.get8(buf + p)) {
+        p = p + 1
+    }
+    if p >= end {
+        return 1
+    }
+    var tail: u64 = end
+    while tail > p && is_gap(kstate.get8(buf + tail - 1)) {
+        tail = tail - 1
+    }
+    k = 0
+    while p < tail {
+        if k + 1 >= IPATH_MAX {
+            return BAD_LINE
+        }
+        kstate.set8(dst_arg + k, kstate.get8(buf + p) as u8)
+        k = k + 1
+        p = p + 1
+    }
+    kstate.set8(dst_arg + k, 0 as u8)
+    return 2
+}
+
+fn rewrite(state: u64, interp: u64, interp_arg: u64, words: u64, script: u64, args: u64, argc: u64) -> u64 {
+    var rest: u64 = 0
+    var first: u64 = 0
+    if argc > 1 {
+        first = cstr_len(args) + 1
+        rest = elfstack.strings_len(args, argc) - first
+    }
+    var total: u64 = cstr_len(interp) + 1 + cstr_len(script) + 1 + rest
+    if words == 2 {
+        total = total + cstr_len(interp_arg) + 1
+    }
+    if total > procbase.EXEC_TOTAL_MAX {
+        return TOO_BIG
+    }
+    let dst: u64 = take(state, total)
+    if dst == 0 {
+        return 0
+    }
+    var at: u64 = put_word(dst, interp)
+    if words == 2 {
+        at = at + put_word(dst + at, interp_arg)
+    }
+    at = at + put_word(dst + at, script)
+    var i: u64 = 0
+    while i < rest {
+        kstate.set8(dst + at + i, kstate.get8(args + first + i) as u8)
+        i = i + 1
+    }
+    return dst
+}

@@ -1054,6 +1054,16 @@ fn make_pstat(state: u64, t: u64) -> u64 {
     return p
 }
 
+const CMD_NO_BYTE: u64 = 256
+
+fn cmd_byte(state: u64, t: u64, addr: u64) -> u64 {
+    let frame: u64 = procmap.translate(state, t, addr & 0xFFFFFFFFFFFFF000)
+    if frame == 0 {
+        return CMD_NO_BYTE
+    }
+    return kstate.get8(frame + (addr & 4095))
+}
+
 fn make_cmdline(state: u64, t: u64) -> u64 {
     var p: u64 = 0
     let frame: u64 = procmap.translate(state, t, procspace.ARGS_BASE)
@@ -1062,21 +1072,22 @@ fn make_cmdline(state: u64, t: u64) -> u64 {
     }
     guard.stac(state)
     let argc: u64 = __mmio_read64(frame as *mut u64)
-    if argc == 0 || argc > procbase.MAX_ARGS {
+    if argc == 0 || argc > procbase.MAX_NATIVE_ARGS {
         guard.clac(state)
         return 0
     }
+    let low: u64 = procspace.ARGS_BASE - procbase.EXEC_TOTAL_MAX
     var k: u64 = 0
     while k < argc {
         let ptr: u64 = __mmio_read64((frame + 8 + k * 8) as *mut u64)
-        if ptr < procspace.ARGS_BASE || ptr >= procspace.ARGS_BASE + 4096 {
+        if ptr < low || ptr >= procspace.ARGS_BASE + 4096 {
             k = argc
         } else {
-            var at: u64 = frame + (ptr - procspace.ARGS_BASE)
+            var at: u64 = ptr
             var going: bool = true
             while going {
-                let c: u64 = kstate.get8(at)
-                if c == 0 || at >= frame + 4096 {
+                let c: u64 = cmd_byte(state, t, at)
+                if c == 0 || c == CMD_NO_BYTE || at >= procspace.ARGS_BASE + 4096 {
                     going = false
                 } else {
                     p = w_ch(state, p, c)

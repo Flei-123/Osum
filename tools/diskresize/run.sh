@@ -49,12 +49,12 @@ PY
 }
 mutate wrong-array-lba disks/gptw.fi "mirror_header(hdr, bhdr, 1, total - 1, 2)" "mirror_header(hdr, bhdr, 1, total - 1, 3)"
 mutate wrong-backup-alt disks/gptw.fi "mirror_header(bhdr, hdr, total - 1, 1, at)" "mirror_header(bhdr, hdr, total - 1, 2, at)"
-mutate primary-wins disks/gptw.fi "if rp == E_OK && bytes.le32(hdr + 88) == bytes.le32(bhdr + 88) && bytes.le32(hdr + 80) == bytes.le32(bhdr + 80) {" "if rp == E_OK {"
-mutate no-overlap-check disks/gptw.fi "if i != target && slot_live(e) && start <= bytes.le64(e + 40) && last >= bytes.le64(e + 32) {" "if false {"
-mutate no-range-check disks/gptw.fi "if sectors == 0 || start + sectors - 1 > bytes.le64(hdr + 48) {" "if sectors == 0 {"
-mutate no-crc-in-side-read disks/gptw.fi "if table.crc32(a, nent * ENT_SIZE) != bytes.le32(h + 88) {" "if false {"
+mutate primary-wins disks/gptw.fi "if rp == E_OK && octets.le32(hdr + 88) == octets.le32(bhdr + 88) && octets.le32(hdr + 80) == octets.le32(bhdr + 80) {" "if rp == E_OK {"
+mutate no-overlap-check disks/gptw.fi "if i != target && slot_live(e) && start <= octets.le64(e + 40) && last >= octets.le64(e + 32) {" "if false {"
+mutate no-range-check disks/gptw.fi "if sectors == 0 || start + sectors - 1 > octets.le64(hdr + 48) {" "if sectors == 0 {"
+mutate no-crc-in-side-read disks/gptw.fi "if table.crc32(a, nent * ENT_SIZE) != octets.le32(h + 88) {" "if false {"
 mutate mbr-no-overlap disks/mbrw.fi "if start <= l && last >= s {" "if false {"
-mutate mbr-no-ext-guard disks/mbrw.fi "if is_extended(bytes.ld8(t, 4)) {" "if false {"
+mutate mbr-no-ext-guard disks/mbrw.fi "if is_extended(octets.ld8(t, 4)) {" "if false {"
 mutate mbr-no-chs disks/mbrw.fi "    put_chs(t + 5, last)
 " ""
 echo "DISKRESIZE: $pass passed, $fail failed"
