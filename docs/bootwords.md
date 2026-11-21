@@ -573,7 +573,7 @@ Total: 667
 | `tzrule=nz` | bootargs.fi |  |  |
 | `tzrule=us` | bootargs.fi |  |  |
 | `uiscale=` | bootargs.fi, fbpanel.fi | startsmall |  |
-| `unix` | bootargs.fi | unix |  |
+| `unix` | bootargs.fi | unix, linuxapps-ext |  |
 | `unplug` | bootargs.fi | usbhot, usbreplug, usbevents |  |
 | `usb` | bootargs.fi | nethot, info, netui, ps2hid | 10 broken-library controls |
 | `usbhold` | bootargs.fi | usbreplug |  |
