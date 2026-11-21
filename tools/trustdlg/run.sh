@@ -31,6 +31,9 @@ echo "== 1. build =="
 . tools/lib/firnenv.sh
 bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1 && ok "programs build" \
     || { bad "programs do not build"; tail -8 "$TMPD/b.txt"; echo "TRUSTDLG: $pass passed, $fail failed"; exit 1; }
+musl-gcc -static -O2 -nostartfiles -T tools/foreign/osum.ld -Wl,--build-id=none \
+    -o "$TMPD/bin/radmin" tools/foreign/start.s tools/foreign/osum_main.c tools/remoteadmin/radmin.c 2> "$TMPD/cc.txt" \
+    && ok "radmin builds" || { bad "radmin does not build"; head -5 "$TMPD/cc.txt"; echo "TRUSTDLG: $pass passed, $fail failed"; exit 1; }
 KSRC=$ROOT
 if [ -n "${KERNEL_REF:-}" ]; then
     KSRC="$TMPD/kref"; mkdir -p "$KSRC"
@@ -72,6 +75,11 @@ echo ==T4MID==
 sleep 14
 act call settings.get key=lock.idle
 echo ==T4END==
+radmin mark 2
+act call settings.set key=lock.idle value=1100 --as helper
+sleep 9
+radmin mark 0
+echo ==T5END==
 echo ==TEND==
 act call settings.set key=lock.idle value=1200 --as helper
 act call settings.set key=lock.idle value=1200 --as helper
@@ -91,7 +99,7 @@ A=(build "$TMPD/disk.img" 32768 /lib/ "/lib/mono.ttf=assets/osum-mono.ttf"
    /usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/de/ /usr/share/locale/en/
    "/usr/share/locale/de/messages=locale/de/messages"
    "/usr/share/locale/en/messages=locale/en/messages"
-   "/t/g.sh=$TMPD/g.sh")
+   "/t/g.sh=$TMPD/g.sh" "/bin/radmin=$TMPD/bin/radmin")
 [ -f assets/osum-icons.ttf ] && A+=("/lib/icons.ttf=assets/osum-icons.ttf")
 [ -f assets/osum-sans-bold.ttf ] && A+=("/lib/bold.ttf=assets/osum-sans-bold.ttf")
 cp assets/jarvis/rechte-justin.conf "$TMPD/permissions.conf"
@@ -147,6 +155,10 @@ if waitn 60 3; then
     key j
     sleep 1; shot "$TMPD/7-real-key.ppm"
 fi
+if waitn 60 4; then
+    sleep 1.5; shot "$TMPD/8-remote-up.ppm"
+    key n
+fi
 waitfor "==FERTIG==" 60 || echo "        no FERTIG before the time limit"
 printf 'quit\n' | socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
 wait "$QPID" 2>/dev/null
@@ -188,6 +200,12 @@ if [ -s "$TMPD/flicker.txt" ]; then
   O=$(echo "$FL" | sed -nE 's/.*odd=([0-9]+).*/\1/p'); S=$(echo "$FL" | sed -nE 's/.*samples=([0-9]+).*/\1/p')
   [ "${S:-0}" -ge 10 ] && [ "${O:-1}" -eq 0 ] && ok "no flicker: $S screendumps, dialog area identical" || bad "flicker / too few samples: $FL"
 else bad "no flicker measurement"; fi
-for f in 1-up 2-up 2d-open 3-tab 4-done 5-inject-up 6-inject-refused 7-real-key; do [ -s "$TMPD/$f.png" ] && ok "photo $TMPD/$f.png" || bad "no photo $f"; done
+has "$G" "RA-MARK mode=2 set=0" "remote admin session marked for the hint check"
+if [ -s "$TMPD/8-remote-up.ppm" ] && [ -n "${DX:-}" ]; then
+    python3 -I tools/trustdlg/remotehint.py "$TMPD/1-up.ppm" "$TMPD/2-up.ppm" "$TMPD/8-remote-up.ppm" "${DX:-0}" "${Y:-0}" "${K:-1}" > "$TMPD/hint.txt" 2>&1
+    sed 's/^/        /' "$TMPD/hint.txt"
+    grep -q '^HINT-OK' "$TMPD/hint.txt" && ok "remote session hint in the title bar (appears only in the remote dialog)" || bad "remote session hint pixels"
+else bad "no remote-session dialog photo"; fi
+for f in 1-up 2-up 2d-open 3-tab 4-done 5-inject-up 6-inject-refused 7-real-key 8-remote-up; do [ -s "$TMPD/$f.png" ] && ok "photo $TMPD/$f.png" || bad "no photo $f"; done
 echo "TRUSTDLG: $pass passed, $fail failed"
 [ "$fail" = 0 ]

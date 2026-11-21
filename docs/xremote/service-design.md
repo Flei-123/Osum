@@ -36,7 +36,8 @@ The Windows viewer sends keys as `KeyVk{vk,ext,down}`. The Osum host maps the vi
 - Setting `remote.admin` (bool, critical, `/etc/xremote.conf admin`, default off; `xremote admin on|off`; Settings > Remote desktop switch). Only meaningful together with an authenticated viewer.
 - xremoted decides: host running AND `peer` in `/run/xremote.state` non-empty (the host writes it only after the viewer proved the password) -> tells the kernel with `osum_tipp(TI_REMOTE, host_pid, mode)` (root only; mode 0 off, 1 authenticated, 2 authenticated + admin allowed). Mode 2 only when `admin=1`.
 - Kernel (`kernel/ipc/tip.fi`): input injected by exactly that pid in mode 2 is recorded as `remote-authenticated` (separate guard timestamp); every other injection (ODB, bridge, jarvisd, host without admin mode) still sets the synthetic guard and the trusted dialog refuses it. Dialog shows `Fernsitzung: J/Y = Ja/Yes  N = Nein/No` while mode 2 is active; each answer within the remote guard writes `wm: trusted dialog answered by authenticated remote`. Emergency stop (`input off`, `tip.lock`) unchanged: TI_ARM is refused, so no injection at all.
-- Not built yet: QEMU gate with counter-probes (switch off -> refused, on + authenticated -> accepted, on + ODB -> refused).
+- The session is matched by process id (`getpid`, tgid), not by task slot, so a threaded host matches. Gate `bash tools/remoteadmin/run.sh`: no session / authenticated without admin / admin but other pid / emergency stop -> refused; admin + authenticated pid -> accepted; three mutant kernels (authall, anypid, nolock) must turn it red.
+- The dialog shows `Fernsitzung` / `Remote session` in its title bar while `tip.remote_active` (field 12 of the trust message, `trusttext.fi`); pixel check in `tools/trustdlg`.
 
 ## 7. Resolution (viewer/host)
 - Host side is the OrientOS grab of the panel (native mode reported by the host); the viewer's fixed `1920x1080` list and a "follow client window" resize hint live in the FreeViewer client repo, not in this repository. See the report of w-store-fs-xremote.
@@ -49,3 +50,12 @@ The Windows viewer sends keys as `KeyVk{vk,ext,down}`. The Osum host maps the vi
 - Host log lines (`capture::log_line`) go to stderr (= `/var/log/xremote.log`) on the host-only build instead of appending to a file in the config dir (finding: a grabber line landed in `/etc/theme.conf` on the HP).
 - Resolution: the host reads `modes=WxH,...` from `/run/xremote.display` and writes the choice to `/run/xremote.dispreq` (`WxH` or `native`); the viewer combo box already shows the host's list and sends `SetResolution`. The kernel side (`xrdisplay` in xremoted) lives on the unmerged branch of w-xremote-rest.
 - Gate: `tools/xremote/direct.sh` (QEMU, host without `--no-p2p`, viewer `--perftest`): direct path reported, frame rate, delay, `/etc/theme.conf` checksum unchanged after a session and after 12 s of appends to a new log file.
+Host side (xremoted, `kernel/user/xrdisplay.fi`), files in /run (root only, 0600):
+- `/run/xremote.display`: `current=WxH`, `native=WxH`, `source=edid|largest`, `modes=WxH,WxH,...`, `last=none|pending|ok|rejected`. `native` is the EDID size, else the largest mode of the driver.
+- `/run/xremote.dispreq`: the host writes `native` or `WxH`; xremoted consumes it, accepts only listed modes, sets it with DISPSET (pending), confirms on the next poll when no peer is connected or the peer is still there, else the kernel reverts. CLI: `xremote display [set WxH|native]`.
+- Gate `bash tools/xrdisp/run.sh` (QEMU, bochs modes): grab size before/after, display file, screendump size, rejected size, counter-proof without xremoted.
+
+FreeViewer client tasks (other repo, not changed here):
+- Read `/run/xremote.display` over the host channel (new `DisplayInfo` message: current, native, modes).
+- Dropdown "Native" + the modes the host reports; choosing one sends a `DisplayRequest` the host writes to `/run/xremote.dispreq`.
+- Window size follows the host size after `last=ok`; scale with integer or bilinear steps only when the window is smaller; no blur at 1:1.

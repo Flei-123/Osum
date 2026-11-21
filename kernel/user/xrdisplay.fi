@@ -1,0 +1,285 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.text
+import xfxio
+import xrpath
+
+export { tick }
+
+const SYS_DISPGET: u64 = 1810
+const SYS_DISPSET: u64 = 1811
+const SYS_CHMOD: u64 = 90
+const DG_READY: u64 = 0
+const DG_COUNT: u64 = 1
+const DG_EDIDOK: u64 = 5
+const DG_NATW: u64 = 7
+const DG_NATH: u64 = 8
+const DG_PANELW: u64 = 10
+const DG_PANELH: u64 = 11
+const DG_PENDING: u64 = 20
+const DG_MODE: u64 = 1000
+const DS_MODE: u64 = 0
+const DS_CONFIRM: u64 = 7
+const FIELD_MASK: u64 = 65535
+const MODES_CAP: u64 = 48
+const REQUEST_CAP: u64 = 32
+const FILE_CAP: u64 = 1024
+const MODE_PRIVATE: u64 = 384
+const CHAR_X: u64 = 120
+const LAST_NONE: u64 = 0
+const LAST_OK: u64 = 1
+const LAST_REJECTED: u64 = 2
+const LAST_PENDING: u64 = 3
+const REQUEST_NONE: u64 = 0
+const REQUEST_NATIVE: u64 = 1
+const REQUEST_SIZE: u64 = 2
+
+static mut K_CURRENT: [u8; 9] = "current=\0"
+static mut K_NATIVE: [u8; 8] = "native=\0"
+static mut K_SOURCE: [u8; 8] = "source=\0"
+static mut K_MODES: [u8; 7] = "modes=\0"
+static mut K_LAST: [u8; 6] = "last=\0"
+static mut W_NATIVE: [u8; 7] = "native\0"
+static mut W_X: [u8; 2] = "x\0"
+static mut W_COMMA: [u8; 2] = ",\0"
+static mut W_NL: [u8; 2] = "\n\0"
+static mut W_NONE: [u8; 5] = "none\0"
+static mut W_OK: [u8; 3] = "ok\0"
+static mut W_REJECTED: [u8; 9] = "rejected\0"
+static mut W_PENDING: [u8; 8] = "pending\0"
+static mut W_EDID: [u8; 5] = "edid\0"
+static mut W_LARGEST: [u8; 8] = "largest\0"
+static mut last_state: u64 = LAST_NONE
+static mut want_w: u64 = 0
+static mut want_h: u64 = 0
+static mut published_sig: u64 = 0
+
+fn dget(field: u64) -> u64 {
+    return ulib.sys(SYS_DISPGET, field, 0, 0)
+}
+
+fn mode_w(m: u64) -> u64 {
+    return (m >> 32) & FIELD_MASK
+}
+
+fn mode_h(m: u64) -> u64 {
+    return (m >> 16) & FIELD_MASK
+}
+
+fn ready() -> bool {
+    let r: u64 = dget(DG_READY)
+    return !ulib.bad(r) && r == 1
+}
+
+fn mode_count() -> u64 {
+    let n: u64 = dget(DG_COUNT)
+    if ulib.bad(n) {
+        return 0
+    }
+    if n > MODES_CAP {
+        return MODES_CAP
+    }
+    return n
+}
+
+fn has_mode(w: u64, h: u64) -> bool {
+    let n: u64 = mode_count()
+    var i: u64 = 0
+    while i < n {
+        let m: u64 = dget(DG_MODE + i)
+        if !ulib.bad(m) && mode_w(m) == w && mode_h(m) == h {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn largest_mode() -> u64 {
+    let n: u64 = mode_count()
+    var best_w: u64 = 0
+    var best_h: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let m: u64 = dget(DG_MODE + i)
+        if !ulib.bad(m) && mode_w(m) * mode_h(m) > best_w * best_h {
+            best_w = mode_w(m)
+            best_h = mode_h(m)
+        }
+        i = i + 1
+    }
+    return (best_w << 16) | best_h
+}
+
+fn edid_native() -> bool {
+    let ok: u64 = dget(DG_EDIDOK)
+    return !ulib.bad(ok) && ok == 1 && dget(DG_NATW) > 0 && dget(DG_NATH) > 0
+}
+
+fn native_size() -> u64 {
+    if edid_native() {
+        return (dget(DG_NATW) << 16) | dget(DG_NATH)
+    }
+    return largest_mode()
+}
+
+fn append_num(out: u64, v: u64) {
+    var t: [u8; 24] = [0 as u8; 24]
+    xfxio.num_text(v, (&t[0 as usize]) as u64)
+    ulib.strcat(out, (&t[0 as usize]) as u64)
+}
+
+fn append_size(out: u64, w: u64, h: u64) {
+    append_num(out, w)
+    ulib.strcat(out, (&W_X[0 as usize]) as u64)
+    append_num(out, h)
+}
+
+fn append_modes(out: u64) {
+    let n: u64 = mode_count()
+    var i: u64 = 0
+    while i < n {
+        let m: u64 = dget(DG_MODE + i)
+        if !ulib.bad(m) {
+            if i > 0 {
+                ulib.strcat(out, (&W_COMMA[0 as usize]) as u64)
+            }
+            append_size(out, mode_w(m), mode_h(m))
+        }
+        i = i + 1
+    }
+}
+
+fn last_word() -> u64 {
+    if last_state == LAST_OK {
+        return (&W_OK[0 as usize]) as u64
+    }
+    if last_state == LAST_REJECTED {
+        return (&W_REJECTED[0 as usize]) as u64
+    }
+    if last_state == LAST_PENDING {
+        return (&W_PENDING[0 as usize]) as u64
+    }
+    return (&W_NONE[0 as usize]) as u64
+}
+
+fn signature() -> u64 {
+    return (dget(DG_PANELW) << 32) | (dget(DG_PANELH) << 16) | (last_state << 8) | mode_count()
+}
+
+fn render(out: u64) {
+    let nat: u64 = native_size()
+    ulib.strcat(out, (&K_CURRENT[0 as usize]) as u64)
+    append_size(out, dget(DG_PANELW), dget(DG_PANELH))
+    ulib.strcat(out, (&W_NL[0 as usize]) as u64)
+    ulib.strcat(out, (&K_NATIVE[0 as usize]) as u64)
+    append_size(out, nat >> 16, nat & FIELD_MASK)
+    ulib.strcat(out, (&W_NL[0 as usize]) as u64)
+    ulib.strcat(out, (&K_SOURCE[0 as usize]) as u64)
+    if edid_native() {
+        ulib.strcat(out, (&W_EDID[0 as usize]) as u64)
+    } else {
+        ulib.strcat(out, (&W_LARGEST[0 as usize]) as u64)
+    }
+    ulib.strcat(out, (&W_NL[0 as usize]) as u64)
+    ulib.strcat(out, (&K_MODES[0 as usize]) as u64)
+    append_modes(out)
+    ulib.strcat(out, (&W_NL[0 as usize]) as u64)
+    ulib.strcat(out, (&K_LAST[0 as usize]) as u64)
+    ulib.strcat(out, last_word())
+    ulib.strcat(out, (&W_NL[0 as usize]) as u64)
+}
+
+fn publish() {
+    let sig: u64 = signature()
+    if sig == published_sig {
+        return
+    }
+    var b: [u8; 1024] = [0 as u8; 1024]
+    let p: u64 = (&b[0 as usize]) as u64
+    render(p)
+    if xfxio.write_text(xrpath.p_display(), p, ulib.O_MAKE) {
+        ulib.sys(SYS_CHMOD, xrpath.p_display(), MODE_PRIVATE, 0)
+        published_sig = sig
+    }
+}
+
+fn parse_size(b: u64) -> bool {
+    let x: u64 = text.find(b, CHAR_X)
+    if x >= text.length(b) {
+        return false
+    }
+    want_w = text.number(b)
+    want_h = text.number(b + x + 1)
+    return want_w > 0 && want_h > 0
+}
+
+fn read_request() -> u64 {
+    var b: [u8; 32] = [0 as u8; 32]
+    let p: u64 = (&b[0 as usize]) as u64
+    if xfxio.read_text(xrpath.p_dispreq(), p, REQUEST_CAP) == ulib.EOF {
+        return REQUEST_NONE
+    }
+    ulib.sys(ulib.SYS_UNLINK, xrpath.p_dispreq(), 0, 0)
+    if ulib.strneq(p, (&W_NATIVE[0 as usize]) as u64, text.length((&W_NATIVE[0 as usize]) as u64)) {
+        let nat: u64 = native_size()
+        want_w = nat >> 16
+        want_h = nat & FIELD_MASK
+        return REQUEST_NATIVE
+    }
+    if parse_size(p) {
+        return REQUEST_SIZE
+    }
+    return REQUEST_NONE
+}
+
+fn apply_request() {
+    if !has_mode(want_w, want_h) {
+        last_state = LAST_REJECTED
+        return
+    }
+    if dget(DG_PANELW) == want_w && dget(DG_PANELH) == want_h {
+        last_state = LAST_OK
+        return
+    }
+    let r: u64 = ulib.sys(SYS_DISPSET, DS_MODE, (want_w << 16) | want_h, 0)
+    if ulib.bad(r) {
+        last_state = LAST_REJECTED
+        return
+    }
+    last_state = LAST_PENDING
+}
+
+fn reached_target() -> bool {
+    return dget(DG_PANELW) == want_w && dget(DG_PANELH) == want_h
+}
+
+fn settle(peer_ok: bool) {
+    if dget(DG_PENDING) == 0 {
+        if reached_target() {
+            last_state = LAST_OK
+        } else {
+            last_state = LAST_REJECTED
+        }
+        return
+    }
+    if peer_ok {
+        ulib.sys(SYS_DISPSET, DS_CONFIRM, 0, 0)
+        last_state = LAST_OK
+    }
+}
+
+fn tick(peer_ok: bool) {
+    if !ready() {
+        return
+    }
+    if last_state == LAST_PENDING {
+        settle(peer_ok)
+    }
+    if last_state != LAST_PENDING && read_request() != REQUEST_NONE {
+        apply_request()
+    }
+    publish()
+}
