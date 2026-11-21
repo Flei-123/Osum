@@ -8,9 +8,10 @@ import pwr.pwbright
 import arch.msr
 import arch.cpu
 import gfx.gfx
+import pwr.idlestat
 
 export {
-    probe, ready, cur_profile, set_profile, apply, caps, value,
+    probe, ready, cpuid_ecx, cur_profile, set_profile, apply, apply_here, mwait_hint, ENT_MWAIT, caps, value,
     idle_wait, note_activity, tick,
     set_bright, set_blank_after, blank, unblank, screen_tick, screen_work, scale_rgb,
     PW_BLANKED, PW_BLANKS, PW_LASTACT, PW_BLANKAFTER,
@@ -23,7 +24,7 @@ export {
     PW_HWPREQ, PW_HWPBACK, PW_MISC, PW_MISCBACK, PW_SWITCHES,
     PW_MWAITS, PW_HLTS, PW_IDLERUNS, PW_TEMP, PW_TEMPOK, PW_TJMAX,
     PW_THROTTLES, PW_THROTTLED, PW_RATIOS, PW_RATIOSRC, PW_APPLIES,
-    PW_CSTATE, PW_MWAITHINT, PW_TZRAW, PW_MISCORIG, PW_LIMIT
+    PW_CSTATE, PW_MWAITHINT, PW_TZRAW, PW_MISCORIG, PW_LIMIT, PW_MONLINE
 }
 
 const MSR_PLATFORM_INFO: u64 = 0xCE
@@ -296,6 +297,33 @@ fn misc_word(state: u64, prof: u64) -> u64 {
     return w
 }
 
+fn bias_of(prof: u64) -> u64 {
+    if prof == PROF_SAVE {
+        return 15
+    }
+    if prof == PROF_PERF {
+        return 0
+    }
+    return 8
+}
+
+fn write_thread(state: u64, prof: u64) {
+    if (g(state, PW_CAPS) & C_HWP) != 0 {
+        wrmsr(state, IA32_PM_ENABLE, 1)
+        wrmsr(state, IA32_HWP_REQUEST, hwp_word(state, prof))
+    } else {
+        wrmsr(state, IA32_PERF_CTL, perfctl_word(state, prof))
+    }
+    wrmsr(state, IA32_ENERGY_PERF_BIAS, bias_of(prof))
+}
+
+fn apply_here(state: u64) {
+    if g(state, PW_READY) == 0 {
+        return
+    }
+    write_thread(state, g(state, PW_PROFILE))
+}
+
 fn apply(state: u64) {
     let prof: u64 = g(state, PW_PROFILE)
 
@@ -304,27 +332,14 @@ fn apply(state: u64) {
     s(state, PW_MISC, mw)
     s(state, PW_MISCBACK, rdmsr(state, IA32_MISC_ENABLE))
 
+    write_thread(state, prof)
     if (g(state, PW_CAPS) & C_HWP) != 0 {
-        wrmsr(state, IA32_PM_ENABLE, 1)
-        let hw: u64 = hwp_word(state, prof)
-        wrmsr(state, IA32_HWP_REQUEST, hw)
-        s(state, PW_HWPREQ, hw)
+        s(state, PW_HWPREQ, hwp_word(state, prof))
         s(state, PW_HWPBACK, rdmsr(state, IA32_HWP_REQUEST))
     } else {
-        let pw: u64 = perfctl_word(state, prof)
-        wrmsr(state, IA32_PERF_CTL, pw)
-        s(state, PW_PERFCTL, pw)
+        s(state, PW_PERFCTL, perfctl_word(state, prof))
         s(state, PW_PERFBACK, rdmsr(state, IA32_PERF_CTL))
     }
-
-    var bias: u64 = 8
-    if prof == PROF_SAVE {
-        bias = 15
-    }
-    if prof == PROF_PERF {
-        bias = 0
-    }
-    wrmsr(state, IA32_ENERGY_PERF_BIAS, bias)
 
     if kstate.mode_on(state, kstate.M_NOBLANK) {
         s(state, PW_BLANKAFTER, 0)
@@ -434,37 +449,48 @@ fn throttle_check(state: u64) {
     }
 }
 
+fn mwait_hint(state: u64) -> u64 {
+    var want: u64 = 1
+    if g(state, PW_PROFILE) == PROF_SAVE {
+        want = g(state, PW_CSTATE)
+    }
+    if g(state, PW_PROFILE) == PROF_BALANCED {
+        want = 2
+        if want > g(state, PW_CSTATE) {
+            want = g(state, PW_CSTATE)
+        }
+    }
+    if (g(state, PW_CAPS) & C_ARAT) == 0 || want < 1 {
+        want = 1
+    }
+    return (want -% 1) << 4
+}
+
 fn idle_wait(state: u64, allow: bool) {
     bump(state, PW_IDLERUNS)
     tick(state)
     let me: u64 = cpu.here(state)
     if allow && (g(state, PW_CAPS) & C_MONITOR) != 0 {
         let line: u64 = state + kstate.K18_OFF + PW_MONLINE + me * 64
-        var hint: u64 = 0
-        var want: u64 = 1
-        if g(state, PW_PROFILE) == PROF_SAVE {
-            want = g(state, PW_CSTATE)
-        }
-        if g(state, PW_PROFILE) == PROF_BALANCED {
-            want = 2
-            if want > g(state, PW_CSTATE) {
-                want = g(state, PW_CSTATE)
-            }
-        }
-        if want < 1 {
-            want = 1
-        }
-        hint = (want -% 1) << 4
+        let hint: u64 = mwait_hint(state)
         s(state, PW_MWAITHINT, hint)
+        let began: u64 = idlestat.sleep_begin()
         asm("monitor", in("rax") line, in("rcx") 0, in("rdx") 0,
             clobber("memory"))
         asm("mwait", in("rax") hint, in("rcx") 0)
+        idlestat.sleep_end(me, began)
         bump(state, PW_MWAITS)
+        cpu.x_add(state, me, cpu.X_IDLEENT, ENT_MWAIT)
         return
     }
+    let began_hlt: u64 = idlestat.sleep_begin()
     asm("hlt")
+    idlestat.sleep_end(me, began_hlt)
     bump(state, PW_HLTS)
+    cpu.x_add(state, me, cpu.X_IDLEENT, 1)
 }
+
+const ENT_MWAIT: u64 = 4294967296
 
 fn note_activity(state: u64) {
     s(state, PW_LASTACT, kstate.get(state, kstate.TICKS))

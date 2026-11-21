@@ -5,6 +5,7 @@ import std.rt
 import std.io
 import power.policy
 import power.blstore
+import power.lowbatt
 import fui.traypower
 
 struct T {
@@ -138,6 +139,24 @@ fn main() -> i32 {
     check(&t, traypower.state_valid(1, 0, 0, 0, 1) == traypower.BV_UNKNOWN && traypower.state(1, 0, 0, 0) == traypower.BV_CRITICAL, "counter-proof: the old model calls the same data critical")
     check(&t, traypower.state_valid(1, 1, 62, 0, 0) == traypower.BV_DISCHARGING && same(tipv(1, 1, 62, 0, 0), "Battery 62 %, on battery"), "valid data is unchanged")
     check(&t, traypower.state_valid(0, 0, 0, 0, 0) == traypower.BV_NONE, "no battery stays no item")
+    // ---- low battery: warning at 10 %, shutdown at 5 %, only on battery with valid data
+    var seen: u64 = lowbatt.LEVEL_OK
+    check(&t, lowbatt.level(true, true, 50) == lowbatt.LEVEL_OK && lowbatt.level(true, true, 11) == lowbatt.LEVEL_OK, "above 10 %: no level")
+    check(&t, lowbatt.level(true, true, 10) == lowbatt.LEVEL_WARN && lowbatt.level(true, true, 6) == lowbatt.LEVEL_WARN, "10 % to 6 %: warn")
+    check(&t, lowbatt.level(true, true, 5) == lowbatt.LEVEL_CRITICAL && lowbatt.level(true, true, 0) == lowbatt.LEVEL_CRITICAL, "5 % and below: critical")
+    check(&t, lowbatt.level(true, false, 3) == lowbatt.LEVEL_OK, "mains or charging: never an alarm")
+    check(&t, lowbatt.level(false, true, 0) == lowbatt.LEVEL_OK, "invalid reading (0 %): never an alarm, never a shutdown")
+    check(&t, lowbatt.decide(lowbatt.LEVEL_OK, 40, true, &seen) == lowbatt.EVENT_NONE, "no event at 40 %")
+    check(&t, lowbatt.decide(lowbatt.LEVEL_WARN, 10, true, &seen) == lowbatt.EVENT_WARN, "first warn event")
+    check(&t, lowbatt.decide(lowbatt.LEVEL_WARN, 9, true, &seen) == lowbatt.EVENT_NONE, "warn is announced once")
+    check(&t, lowbatt.decide(lowbatt.LEVEL_CRITICAL, 5, true, &seen) == lowbatt.EVENT_SHUTDOWN, "critical after warn: shutdown event")
+    check(&t, lowbatt.decide(lowbatt.LEVEL_CRITICAL, 4, true, &seen) == lowbatt.EVENT_NONE, "shutdown event once")
+    check(&t, lowbatt.decide(lowbatt.LEVEL_OK, 12, true, &seen) == lowbatt.EVENT_NONE && seen == lowbatt.LEVEL_CRITICAL, "hysteresis: 12 % keeps the memory")
+    check(&t, lowbatt.decide(lowbatt.LEVEL_OK, 15, true, &seen) == lowbatt.EVENT_NONE && seen == lowbatt.LEVEL_OK, "15 % resets the memory")
+    seen = lowbatt.LEVEL_WARN
+    check(&t, lowbatt.decide(lowbatt.LEVEL_OK, 8, false, &seen) == lowbatt.EVENT_NONE && seen == lowbatt.LEVEL_OK, "plugging in resets the memory")
+    seen = lowbatt.LEVEL_OK
+    check(&t, lowbatt.decide(lowbatt.LEVEL_CRITICAL, 4, true, &seen) == lowbatt.EVENT_SHUTDOWN, "cold start at 4 %: straight to shutdown")
     io.fmt_print(f"checks={t.checks} fails={t.fails}\n")
     if t.fails != 0 {
         return 1

@@ -21,6 +21,7 @@ import lineout
 import libc.io
 import power.policy
 import power.blstore
+import power.lowbatt
 import fui.traypower
 
 export { u_start }
@@ -66,6 +67,9 @@ static mut m_sby: [u8; 34] = "powerd: standby after idle mains=\0"
 static mut m_rc: [u8; 27] = "powerd: standby result rc=\0"
 static mut m_inj: [u8; 19] = "powerd: inject rc=\0"
 static mut m_stat: [u8; 16] = "powerd: status \0"
+static mut m_lowwarn: [u8; 48] = "Battery low: plug in the charger (10 % or less)\0"
+static mut m_lowdown: [u8; 39] = "Battery critical: shutting down at 5 %\0"
+static mut m_lowlog: [u8; 30] = "powerd: battery low event at \0"
 static mut m_use: [u8; 39] = "powerd: usage: powerd [inject L P S A]\0"
 
 fn load(c: *mut policy.Conf, buf: u64) {
@@ -137,6 +141,38 @@ fn perform(a: u64) {
     } else if a == policy.ACT_SHUTDOWN {
         shutdown_now()
     }
+}
+
+static mut low_seen: u64 = 0
+
+fn battery_watch(mains: bool) {
+    let have: u64 = ulib.sys(SYS_PWRGET, PG_BATPRESENT, 0, 0)
+    if ulib.bad(have) || have == 0 {
+        return
+    }
+    let bv: u64 = ulib.sys(SYS_PWRGET, PG_BATVALID, 0, 0)
+    let pct: u64 = ulib.sys(SYS_PWRGET, PG_BATPERCENT, 0, 0)
+    let bs: u64 = ulib.sys(SYS_PWRGET, PG_BATSTATE, 0, 0)
+    if ulib.bad(pct) || ulib.bad(bs) {
+        return
+    }
+    let valid: bool = ulib.bad(bv) || bv != 0
+    let discharging: bool = !mains && (bs & 2) == 0
+    let lvl: u64 = lowbatt.level(valid, discharging, pct)
+    let ev: u64 = lowbatt.decide(lvl, pct, discharging, &low_seen)
+    if ev == lowbatt.EVENT_NONE {
+        return
+    }
+    lineout.add_text((&m_lowlog[0 as usize]) as u64)
+    lineout.add_num(pct)
+    lineout.end_line()
+    if ev == lowbatt.EVENT_WARN {
+        let _w: u64 = ulib.noti_post(1, (&m_lowwarn[0 as usize]) as u64, 47)
+        return
+    }
+    let _d: u64 = ulib.noti_post(1, (&m_lowdown[0 as usize]) as u64, 38)
+    let _s: u64 = clockapi.sleep_ms(1500)
+    shutdown_now()
 }
 
 static mut ap_src: u64 = 9
@@ -351,6 +387,7 @@ fn u_start(args: u64) -> u64 {
         }
         let mains: bool = on_mains()
         apply(&c, mains)
+        battery_watch(mains)
         bl_tick(&bls)
         var mi: u64 = 0
         if mains {

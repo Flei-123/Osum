@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import arch.cpu
+import lib.kstate
+import pwr.idlecpu
+import pwr.pwr
+import fs.procfs.pfproc
+
+const NAME_BUF: u64 = 24
+
+fn w_pair(state: u64, at: u64, name: u64, v: u64) -> u64 {
+    var p: u64 = pfproc.w_ch(state, at, 32)
+    p = pfproc.w_str(state, p, name)
+    p = pfproc.w_ch(state, p, 61)
+    return pfproc.w_num(state, p, v)
+}
+
+fn w_cpu_line(state: u64, at: u64, i: u64) -> u64 {
+    var k_head: [u8; 10] = "idle cpu=\0"
+    var k_hlt: [u8; 4] = "hlt\0"
+    var k_mw: [u8; 6] = "mwait\0"
+    var k_win: [u8; 6] = "awake\0"
+    var p: u64 = pfproc.w_str(state, at, (&k_head[0]) as u64)
+    p = pfproc.w_num(state, p, i)
+    p = w_pair(state, p, (&k_hlt[0]) as u64, idlecpu.entries_hlt(state, i))
+    p = w_pair(state, p, (&k_mw[0]) as u64, idlecpu.entries_mwait(state, i))
+    p = w_pair(state, p, (&k_win[0]) as u64, idlecpu.window_awake(i))
+    return pfproc.w_nl(state, p)
+}
+
+fn w_package_line(state: u64, at: u64) -> u64 {
+    var k_head: [u8; 6] = "power\0"
+    var k_prof: [u8; 8] = "profile\0"
+    var k_hint: [u8; 11] = "mwait_hint\0"
+    var name: [u8; 24] = [0 as u8; 24]
+    var p: u64 = pfproc.w_str(state, at, (&k_head[0]) as u64)
+    p = w_pair(state, p, (&k_prof[0]) as u64, pwr.cur_profile(state))
+    p = w_pair(state, p, (&k_hint[0]) as u64, pwr.value(state, pwr.PW_MWAITHINT))
+    var k: u64 = 0
+    while k < idlecpu.PKG_MSR_COUNT {
+        var v: u64 = 0
+        if idlecpu.msr_read(state, idlecpu.pkg_msr_index(k), (&v) as u64) {
+            idlecpu.pkg_msr_name(k, (&name[0]) as u64)
+            p = w_pair(state, p, (&name[0]) as u64, v)
+        }
+        k = k + 1
+    }
+    return pfproc.w_nl(state, p)
+}
+
+fn append(state: u64, at: u64) -> u64 {
+    var n: u64 = cpu.count(state)
+    if n == 0 {
+        n = 1
+    }
+    if n > kstate.MAX_CPUS {
+        n = kstate.MAX_CPUS
+    }
+    var p: u64 = at
+    var i: u64 = 0
+    while i < n {
+        p = w_cpu_line(state, p, i)
+        i = i + 1
+    }
+    return w_package_line(state, p)
+}

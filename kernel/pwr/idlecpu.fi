@@ -1,0 +1,202 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import arch.cpu
+import arch.msr
+import pwr.pwr
+import pwr.idlestat
+import sched.taskconst
+import sched.taskslot
+import serial
+
+export {
+    sleep_here, sync_here, watch, msr_read, window_awake, entries_hlt, entries_mwait,
+    PKG_MSR_COUNT, pkg_msr_index, pkg_msr_name,
+}
+
+const MAX_CPUS: u64 = 8
+const SPIN_ROUNDS: u64 = 20000
+const MWAIT_EXTENSIONS: u64 = 1
+const MWAIT_BREAK_ON_IRQ: u64 = 2
+const BREAK_STATE_UNKNOWN: u64 = 2
+const WINDOW_TICKS: u64 = 1000
+const AWAKE_PERCENT: u64 = 60
+const MAX_AWAKE_LINES: u64 = 32
+const REPORT_AFTER_TICKS: u64 = 6000
+const ENTRY_LOW_MASK: u64 = 4294967295
+const PKG_MSR_COUNT: u64 = 9
+const NEWLINE: u64 = 10
+
+static mut applied: [u64; 8] = [0 as u64; 8]
+static mut break_ok: u64 = 2
+static mut window_last: u64 = 0
+static mut window_cyc: [u64; 8] = [0 as u64; 8]
+static mut window_sleep: [u64; 8] = [0 as u64; 8]
+static mut awake_pct: [u64; 8] = [0 as u64; 8]
+static mut awake_lines: u64 = 0
+static mut pkg_names: [u8; 72] = b"pkg_c2\x0apkg_c3\x0apkg_c6\x0apkg_c7\x0apkg_c8\x0apkg_c9\x0apkg_c10\x0arapl_unit\x0arapl_energy\x0a"
+static mut pkg_index: [u64; 9] = [0x60D as u64, 0x3F8 as u64, 0x3F9 as u64, 0x3FA as u64, 0x630 as u64, 0x631 as u64, 0x632 as u64, 0x606 as u64, 0x611 as u64]
+static mut s_burn: [u8; 16] = "idle: awake cpu\0"
+static mut s_busy: [u8; 6] = " pct \0"
+static mut s_pid: [u8; 6] = " pid \0"
+
+fn cpuid5_ecx() -> u64 {
+    return pwr.cpuid_ecx(5)
+}
+
+fn break_on_irq(state: u64) -> bool {
+    if break_ok == BREAK_STATE_UNKNOWN {
+        let c: u64 = cpuid5_ecx()
+        break_ok = 0
+        if (c & MWAIT_EXTENSIONS) != 0 && (c & MWAIT_BREAK_ON_IRQ) != 0 {
+            break_ok = 1
+        }
+    }
+    return break_ok == 1
+}
+
+fn mwait_allowed(state: u64) -> bool {
+    if kstate.mode_on(state, kstate.M_NOCSTATES) || !pwr.ready(state) {
+        return false
+    }
+    return (pwr.caps(state) & pwr.C_MONITOR) != 0 && break_on_irq(state)
+}
+
+fn spin_here() {
+    asm("sti")
+    var k: u64 = 0
+    while k < SPIN_ROUNDS {
+        asm("pause")
+        k = k + 1
+    }
+}
+
+fn sleep_here(state: u64) {
+    let me: u64 = cpu.here(state)
+    if me >= MAX_CPUS {
+        asm("sti\nhlt")
+        return
+    }
+    if kstate.mode_on(state, kstate.M_IDLESPIN) {
+        spin_here()
+        return
+    }
+    if mwait_allowed(state) {
+        let line: u64 = state + kstate.K18_OFF + pwr.PW_MONLINE + me * 64
+        let hint: u64 = pwr.mwait_hint(state)
+        asm("monitor", in("rax") line, in("rcx") 0, in("rdx") 0, clobber("memory"))
+        let began: u64 = idlestat.sleep_begin()
+        asm("mwait", in("rax") hint, in("rcx") 1)
+        idlestat.sleep_end(me, began)
+        asm("sti")
+        cpu.x_add(state, me, cpu.X_IDLEENT, pwr.ENT_MWAIT)
+        return
+    }
+    let began_hlt: u64 = idlestat.sleep_begin()
+    asm("sti\nhlt")
+    idlestat.sleep_end(me, began_hlt)
+    cpu.x_add(state, me, cpu.X_IDLEENT, 1)
+}
+
+fn sync_here(state: u64) {
+    let me: u64 = cpu.here(state)
+    if me == 0 || me >= MAX_CPUS || !pwr.ready(state) {
+        return
+    }
+    let generation: u64 = pwr.value(state, pwr.PW_APPLIES) + 1
+    if applied[me as usize] == generation {
+        return
+    }
+    applied[me as usize] = generation
+    pwr.apply_here(state)
+}
+
+fn entries_hlt(state: u64, i: u64) -> u64 {
+    return cpu.x_get(state, i, cpu.X_IDLEENT) & ENTRY_LOW_MASK
+}
+
+fn entries_mwait(state: u64, i: u64) -> u64 {
+    return cpu.x_get(state, i, cpu.X_IDLEENT) >> 32
+}
+
+fn window_awake(i: u64) -> u64 {
+    if i >= MAX_CPUS {
+        return 0
+    }
+    return awake_pct[i as usize]
+}
+
+fn report_awake(state: u64, i: u64, pct: u64) {
+    if awake_lines >= MAX_AWAKE_LINES {
+        return
+    }
+    awake_lines = awake_lines + 1
+    var pid: u64 = 0
+    let t: u64 = cpu.get(state, i, cpu.C_CUR)
+    if t < kstate.MAX_TASKS {
+        pid = taskslot.tget(state, t, taskconst.T_PID)
+    }
+    serial.puts((&s_burn[0]) as u64)
+    serial.dec(i)
+    serial.puts((&s_busy[0]) as u64)
+    serial.dec(pct)
+    serial.puts((&s_pid[0]) as u64)
+    serial.dec(pid)
+    serial.nl()
+}
+
+fn watch(state: u64) {
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if now < window_last + WINDOW_TICKS {
+        return
+    }
+    window_last = now
+    var n: u64 = cpu.count(state)
+    if n > MAX_CPUS {
+        n = MAX_CPUS
+    }
+    var c: u64 = 0
+    while c < n {
+        let cyc: u64 = cpu.x_get(state, c, cpu.X_TOTCYC)
+        let slept: u64 = idlestat.sleep_cycles(c)
+        let dc: u64 = cyc -% window_cyc[c as usize]
+        let ds: u64 = slept -% window_sleep[c as usize]
+        window_cyc[c as usize] = cyc
+        window_sleep[c as usize] = slept
+        if dc > 0 && ds <= dc {
+            let pct: u64 = (dc - ds) * 100 / dc
+            awake_pct[c as usize] = pct
+            if pct >= AWAKE_PERCENT && now >= REPORT_AFTER_TICKS && cpu.get(state, c, cpu.C_ONLINE) != 0 {
+                report_awake(state, c, pct)
+            }
+        }
+        c = c + 1
+    }
+}
+
+fn msr_read(state: u64, index: u64, out: u64) -> bool {
+    return msr.rd(state, index, out)
+}
+
+fn pkg_msr_index(k: u64) -> u64 {
+    return pkg_index[k as usize]
+}
+
+fn pkg_msr_name(k: u64, out: u64) {
+    var at: u64 = 0
+    var skip: u64 = k
+    while skip > 0 {
+        while kstate.get8(((&pkg_names[0]) as u64) + at) != NEWLINE {
+            at = at + 1
+        }
+        at = at + 1
+        skip = skip - 1
+    }
+    var i: u64 = 0
+    while kstate.get8(((&pkg_names[0]) as u64) + at + i) != NEWLINE {
+        kstate.set8(out + i, kstate.get8(((&pkg_names[0]) as u64) + at + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(out + i, 0 as u8)
+}
