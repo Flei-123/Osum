@@ -45,7 +45,7 @@ run_case many_new "$D/new.img" manypci good
 run_case many_old "$D/old.img" manypci bad
 
 echo "== no usable root device: the failure line names the counts =="
-osb_boot "$D" noroot "$D/new.img" q35 scsi "no device carries a root" "no device carries a root"
+osb_boot "$D" noroot "$D/new.img" q35 scsi 90 "no device carries a root"
 t="$D/noroot.txt"
 grep -aq "no device carries a root" "$t" && ok "noroot: kernel stops at rootsel" || bad "noroot: kernel did not stop at rootsel"
 grep -aq "rootsel: pci functions=[0-9]* xhci=[0-9]*" "$t" && ok "noroot: pci and xhci counts reported" || bad "noroot: counts line missing"
