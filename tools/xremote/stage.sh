@@ -11,12 +11,14 @@ done
 mkdir -p "$BUNDLE/bin" "$BUNDLE/lib"
 cp pakete/xremote/INFO "$BUNDLE/INFO"
 cp pakete/xremote/INITTAB "$BUNDLE/INITTAB"
+cp pakete/xremote/DEFAULTS "$BUNDLE/DEFAULTS"
 cp pakete/xremote/start "$BUNDLE/start"
 python3 tools/k15/mksymbol.py pakete/xremote "$BUNDLE/symbol" > /dev/null
 printf 'shipped with the OrientOS image\n' > "$BUNDLE/SYSTEM"
 cp "$XR_DIR/freeviewer-host" "$BUNDLE/bin/freeviewer-host"
 bash tools/xremote/build-daemon.sh "$BUNDLE/bin/xremoted"
+bash tools/xremote/build-daemon.sh "$BUNDLE/bin/xremote" kernel/user/xrcli.fi
 cp "$XR_DIR/libgcc_s.so.1" "$BUNDLE/lib/libgcc_s.so.1"
 cp assets/musl/ld-musl-x86_64.so.1 "$BUNDLE/lib/ld-musl-x86_64.so.1"
-chmod 755 "$BUNDLE/start" "$BUNDLE/bin/xremoted" "$BUNDLE/bin/freeviewer-host" "$BUNDLE/lib/ld-musl-x86_64.so.1"
+chmod 755 "$BUNDLE/start" "$BUNDLE/bin/xremoted" "$BUNDLE/bin/xremote" "$BUNDLE/bin/freeviewer-host" "$BUNDLE/lib/ld-musl-x86_64.so.1"
 echo "xremote stage: $(find "$BUNDLE" -type f | wc -l) files in $BUNDLE"

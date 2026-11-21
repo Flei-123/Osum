@@ -1,0 +1,193 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import actcli
+import libc.text
+
+export { u_start }
+
+const TEXT_CAP: u64 = 72
+const REPLY_WAIT_TICKS: u64 = 300
+const PASSWORD_MIN: u64 = 8
+const PASSWORD_MAX: u64 = 32
+const EXIT_OK: u64 = 0
+const EXIT_FAIL: u64 = 1
+const EXIT_USAGE: u64 = 2
+const EXIT_CONFIRM: u64 = 3
+const EXIT_NOBUS: u64 = 4
+const ARGC_SETTINGS: u64 = 2
+
+static mut call_get: [u8; 18] = "call settings.get\0"
+static mut call_set: [u8; 18] = "call settings.set\0"
+static mut arg_key: [u8; 4] = "key\0"
+static mut arg_value: [u8; 6] = "value\0"
+static mut key_enabled: [u8; 15] = "remote.enabled\0"
+static mut key_fixed: [u8; 13] = "remote.fixed\0"
+static mut key_fixedpw: [u8; 15] = "remote.fixedpw\0"
+static mut key_mode: [u8; 12] = "remote.mode\0"
+static mut key_id: [u8; 10] = "remote.id\0"
+static mut key_password: [u8; 16] = "remote.password\0"
+static mut key_status: [u8; 14] = "remote.status\0"
+static mut key_peer: [u8; 12] = "remote.peer\0"
+static mut key_service: [u8; 15] = "remote.service\0"
+static mut v_true: [u8; 5] = "true\0"
+static mut v_false: [u8; 6] = "false\0"
+static mut c_status: [u8; 7] = "status\0"
+static mut c_id: [u8; 3] = "id\0"
+static mut c_password: [u8; 9] = "password\0"
+static mut c_fixed: [u8; 6] = "fixed\0"
+static mut c_random: [u8; 7] = "random\0"
+static mut c_on: [u8; 3] = "on\0"
+static mut c_off: [u8; 4] = "off\0"
+static mut l_id: [u8; 11] = "id:       \0"
+static mut l_password: [u8; 11] = "password: \0"
+static mut l_mode: [u8; 11] = "mode:     \0"
+static mut l_service: [u8; 11] = "service:  \0"
+static mut l_status: [u8; 11] = "status:   \0"
+static mut l_peer: [u8; 11] = "peer:     \0"
+static mut l_enabled: [u8; 11] = "enabled:  \0"
+static mut m_usage: [u8; 61] = "usage: xremote [status|id|password|fixed <pw>|random|on|off]\0"
+static mut m_short: [u8; 35] = "xremote: password needs 8-32 chars\0"
+static mut m_nobus: [u8; 32] = "xremote: action bus not running\0"
+static mut m_confirm: [u8; 53] = "xremote: needs a confirmation, run: act confirm last\0"
+static mut m_fail: [u8; 21] = "xremote: call failed\0"
+static mut a_settings: [u8; 9] = "settings\0"
+static mut a_page: [u8; 8] = "page=35\0"
+static mut p_settings: [u8; 14] = "/bin/settings\0"
+
+fn fetch(key: u64, out: u64) -> bool {
+    __mmio_write8(out as *mut u8, 0 as u8)
+    actcli.req((&call_get[0 as usize]) as u64)
+    actcli.arg((&arg_key[0 as usize]) as u64, key)
+    if actcli.send(REPLY_WAIT_TICKS) != actcli.R_OK {
+        return false
+    }
+    return actcli.field((&arg_value[0 as usize]) as u64, out, TEXT_CAP)
+}
+
+fn fail_text(rc: u64) -> u64 {
+    if rc == actcli.R_NOBUS {
+        ulib.say((&m_nobus[0 as usize]) as u64)
+        ulib.nl()
+        return EXIT_NOBUS
+    }
+    if rc == actcli.R_CONFIRM {
+        ulib.say((&m_confirm[0 as usize]) as u64)
+        ulib.nl()
+        return EXIT_CONFIRM
+    }
+    ulib.say((&m_fail[0 as usize]) as u64)
+    ulib.nl()
+    return EXIT_FAIL
+}
+
+fn put(key: u64, value: u64) -> u64 {
+    actcli.req((&call_set[0 as usize]) as u64)
+    actcli.arg((&arg_key[0 as usize]) as u64, key)
+    actcli.arg((&arg_value[0 as usize]) as u64, value)
+    let rc: u64 = actcli.send(REPLY_WAIT_TICKS)
+    if rc == actcli.R_OK {
+        return EXIT_OK
+    }
+    return fail_text(rc)
+}
+
+fn show(label: u64, key: u64) {
+    var v: [u8; 72] = [0 as u8; 72]
+    let _f: bool = fetch(key, (&v[0 as usize]) as u64)
+    ulib.say(label)
+    ulib.say((&v[0 as usize]) as u64)
+    ulib.nl()
+}
+
+fn cmd_status() -> u64 {
+    show((&l_enabled[0 as usize]) as u64, (&key_enabled[0 as usize]) as u64)
+    show((&l_service[0 as usize]) as u64, (&key_service[0 as usize]) as u64)
+    show((&l_status[0 as usize]) as u64, (&key_status[0 as usize]) as u64)
+    show((&l_mode[0 as usize]) as u64, (&key_mode[0 as usize]) as u64)
+    show((&l_id[0 as usize]) as u64, (&key_id[0 as usize]) as u64)
+    show((&l_password[0 as usize]) as u64, (&key_password[0 as usize]) as u64)
+    show((&l_peer[0 as usize]) as u64, (&key_peer[0 as usize]) as u64)
+    return EXIT_OK
+}
+
+fn cmd_single(key: u64) -> u64 {
+    var v: [u8; 72] = [0 as u8; 72]
+    if !fetch(key, (&v[0 as usize]) as u64) {
+        ulib.say((&m_fail[0 as usize]) as u64)
+        ulib.nl()
+        return EXIT_FAIL
+    }
+    ulib.say((&v[0 as usize]) as u64)
+    ulib.nl()
+    return EXIT_OK
+}
+
+fn cmd_fixed(pw: u64) -> u64 {
+    let n: u64 = text.length(pw)
+    if n < PASSWORD_MIN || n > PASSWORD_MAX {
+        ulib.say((&m_short[0 as usize]) as u64)
+        ulib.nl()
+        return EXIT_USAGE
+    }
+    var rc: u64 = put((&key_fixedpw[0 as usize]) as u64, pw)
+    if rc != EXIT_OK {
+        return rc
+    }
+    rc = put((&key_fixed[0 as usize]) as u64, (&v_true[0 as usize]) as u64)
+    if rc != EXIT_OK {
+        return rc
+    }
+    return put((&key_enabled[0 as usize]) as u64, (&v_true[0 as usize]) as u64)
+}
+
+fn cmd_window() -> u64 {
+    var av: [u64; 2] = [0 as u64; 2]
+    av[0 as usize] = (&a_settings[0 as usize]) as u64
+    av[1 as usize] = (&a_page[0 as usize]) as u64
+    let pid: u64 = ulib.spawn_app((&p_settings[0 as usize]) as u64, (&av[0 as usize]) as u64, ARGC_SETTINGS)
+    if ulib.bad(pid) {
+        return EXIT_FAIL
+    }
+    return EXIT_OK
+}
+
+fn dispatch(argc: u64, args: u64) -> u64 {
+    if argc < 2 {
+        return cmd_window()
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(cmd, (&c_status[0 as usize]) as u64) {
+        return cmd_status()
+    }
+    if ulib.streq(cmd, (&c_id[0 as usize]) as u64) {
+        return cmd_single((&key_id[0 as usize]) as u64)
+    }
+    if ulib.streq(cmd, (&c_password[0 as usize]) as u64) {
+        return cmd_single((&key_password[0 as usize]) as u64)
+    }
+    if ulib.streq(cmd, (&c_fixed[0 as usize]) as u64) && argc == 3 {
+        return cmd_fixed(ulib.arg_at(args, 2))
+    }
+    if ulib.streq(cmd, (&c_random[0 as usize]) as u64) {
+        return put((&key_fixed[0 as usize]) as u64, (&v_false[0 as usize]) as u64)
+    }
+    if ulib.streq(cmd, (&c_on[0 as usize]) as u64) {
+        return put((&key_enabled[0 as usize]) as u64, (&v_true[0 as usize]) as u64)
+    }
+    if ulib.streq(cmd, (&c_off[0 as usize]) as u64) {
+        return put((&key_enabled[0 as usize]) as u64, (&v_false[0 as usize]) as u64)
+    }
+    ulib.say((&m_usage[0 as usize]) as u64)
+    ulib.nl()
+    return EXIT_USAGE
+}
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    if argc >= 2 && !actcli.open() {
+        return fail_text(actcli.R_NOBUS)
+    }
+    return dispatch(argc, args)
+}
