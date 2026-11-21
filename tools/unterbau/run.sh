@@ -33,6 +33,7 @@ KVM=(); [ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)
 SMP=${SMP:-1}
 SMP_t_nopie_stress=${SMP_t_nopie_stress:-4}
 SMP_t_loopboot=${SMP_t_loopboot:-4}
+SMP_t_vforkedge=${SMP_t_vforkedge:-2}
 UB_MEM_t_shmhigh=${UB_MEM_t_shmhigh:-3072}
 UB_MEM_t_lazyhigh=${UB_MEM_t_lazyhigh:-3072}
 UB_MEM_t_kstackhigh=${UB_MEM_t_kstackhigh:-3072}
