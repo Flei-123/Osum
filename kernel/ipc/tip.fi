@@ -8,6 +8,7 @@ export {
     init, arm, armed, arm_pid, drop, may_inject, note,
     active, eingespeist, denied, deny, arms, last_pid, gebaut,
     locked, lock, unlock, recent, is_locked, mark, injected_within,
+    mark_by, note_by, remote_set, remote_mode, remote_within, remote_active, REMOTE_OFF, REMOTE_AUTH, REMOTE_ADMIN,
     TIPP_NS, MAX_ANSCHLAEGE
 }
 
@@ -30,6 +31,14 @@ const S_LASTPID: u64 = 0x38
 const S_LAST: u64 = 0x40
 const S_LOCK: u64 = 0x48
 const S_GUARD: u64 = 0x50
+const S_RPID: u64 = 0x58
+const S_RMODE: u64 = 0x60
+const S_RGUARD: u64 = 0x68
+const S_RCOUNT: u64 = 0x70
+
+const REMOTE_OFF: u64 = 0
+const REMOTE_AUTH: u64 = 1
+const REMOTE_ADMIN: u64 = 2
 
 const SHOW_NS: u64 = 6000000000
 
@@ -53,6 +62,10 @@ fn init(state: u64) {
     ss(state, S_LAST, 0)
     ss(state, S_LOCK, 0)
     ss(state, S_GUARD, 0)
+    ss(state, S_RPID, 0)
+    ss(state, S_RMODE, 0)
+    ss(state, S_RGUARD, 0)
+    ss(state, S_RCOUNT, 0)
 }
 
 fn arm(state: u64, pid: u64) {
@@ -179,4 +192,52 @@ fn is_locked(state: u64) -> u64 {
         return 1
     }
     return 0
+}
+
+fn remote_set(state: u64, pid: u64, mode: u64) {
+    if mode == REMOTE_OFF || pid == 0 {
+        ss(state, S_RPID, 0)
+        ss(state, S_RMODE, 0)
+        return
+    }
+    ss(state, S_RPID, pid)
+    ss(state, S_RMODE, mode)
+}
+
+fn remote_mode(state: u64, pid: u64) -> u64 {
+    if pid == 0 || gs(state, S_RPID) != pid {
+        return REMOTE_OFF
+    }
+    return gs(state, S_RMODE)
+}
+
+fn mark_by(state: u64, pid: u64) {
+    if remote_mode(state, pid) == REMOTE_ADMIN {
+        ss(state, S_RGUARD, time.mono_ns(state))
+        return
+    }
+    mark(state)
+}
+
+fn note_by(state: u64, pid: u64) {
+    mark_by(state, pid)
+    ss(state, S_LAST, time.mono_ns(state))
+    kstate.add(state, kstate.TIPP_OFF + S_USED, 1)
+    kstate.add(state, kstate.TIPP_OFF + S_TOTAL, 1)
+    if remote_mode(state, pid) == REMOTE_ADMIN {
+        kstate.add(state, kstate.TIPP_OFF + S_RCOUNT, 1)
+    }
+}
+
+fn remote_within(state: u64, window_ns: u64) -> bool {
+    let last: u64 = gs(state, S_RGUARD)
+    if last == 0 {
+        return false
+    }
+    let now: u64 = time.mono_ns(state)
+    return now >= last && now - last < window_ns
+}
+
+fn remote_active(state: u64) -> bool {
+    return gs(state, S_RPID) != 0 && gs(state, S_RMODE) == REMOTE_ADMIN
 }
