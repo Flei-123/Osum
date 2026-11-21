@@ -21,9 +21,10 @@ trap 'rm -rf "$T"' EXIT
 stage() {
     local dir=$1
     mkdir -p "$dir/bau"
-    cp pakete/xremote/INFO pakete/xremote/INITTAB pakete/xremote/rezept "$dir/"
+    cp pakete/xremote/INFO pakete/xremote/INITTAB pakete/xremote/DEFAULTS pakete/xremote/rezept pakete/xremote/start "$dir/"
     cp "$HOSTBIN" "$dir/bau/freeviewer-host"
     bash tools/xremote/build-daemon.sh "$dir/bau/xremoted"
+    bash tools/xremote/build-daemon.sh "$dir/bau/xremote" kernel/user/xrcli.fi
     cp "$LIBS/lib/ld-musl-x86_64.so.1" "$dir/bau/ld-musl-x86_64.so.1"
     cp "$LIBS/usr/lib/libgcc_s.so.1" "$dir/bau/libgcc_s.so.1"
     python3 tools/k15/mksymbol.py pakete/xremote "$dir/bau/symbol" > /dev/null
@@ -43,7 +44,7 @@ OUTD="$T/out"; mkdir -p "$OUTD"
 (cd "$T/pkg" && python3 "$OPK" bauen rezept -o "$OUTD/xremote.opk") > "$T/build.txt" 2>&1
 [ -s "$OUTD/xremote.opk" ] && ok "opk builds from the recipe" || { bad "opk build failed"; head -5 "$T/build.txt"; }
 python3 "$OPK" zeigen "$OUTD/xremote.opk" > "$T/show.txt" 2>&1
-for f in INFO INITTAB bin/freeviewer-host bin/xremoted lib/ld-musl-x86_64.so.1 lib/libgcc_s.so.1 symbol; do
+for f in INFO INITTAB DEFAULTS start bin/freeviewer-host bin/xremoted bin/xremote lib/ld-musl-x86_64.so.1 lib/libgcc_s.so.1 symbol; do
     grep -qE "^  f $f " "$T/show.txt" && ok "package holds $f" || bad "package misses $f"
 done
 mkdir -p "$T/root"

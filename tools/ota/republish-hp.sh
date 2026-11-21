@@ -85,7 +85,9 @@ for f in "$IMG"/*.elf; do n=$(basename "$f" .elf); [ "$n" = "osum.mb" ] || ALLPR
 python3 tools/k15/bundle.py assets/apps "$EXTRA.bundle" nur="${ALLPROGS[*]} term" > "$EXTRA.blist"
 python3 -I tools/ota/bundlefiles.py "$EXTRA.blist" "$HP_BASE/buendel" "$EXTRA"
 python3 tools/k15/bundle.py assets/apps "$EXTRA.bundle" nur="${PROGS[*]} term" \
-    | sed -n 's|^\(/apps/[A-Za-z0-9._-]*/start\)@\(/bin/[A-Za-z0-9._-]*\)$|\1 \2|p' > "$LINKS"
+    | sed -n 's|^\(/apps/[A-Za-z0-9._-]*/start\)@\(/bin/[A-Za-z0-9._-]*\)$|\1 \2|p' \
+    | grep -v '^/apps/terminal.osp/start ' > "$LINKS" || true
+echo "/apps/terminal.osp/start /bin/term" >> "$LINKS"
 rm -rf "$EXTRA.bundle" "$EXTRA.blist"
 echo "republish-hp: ${#PROGS[@]} overlay programs, $(wc -l < "$LINKS") app links"
 [ -n "${HP_SAME_KERNEL:-}" ] && export FEED_KERNEL="$HP_BASE/osum.mb"

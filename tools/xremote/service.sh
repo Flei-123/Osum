@@ -54,7 +54,8 @@ grep -E '/@755$|^/(bin|sbin)/|^/usr/(bin|sbin)/[a-z0-9_.-]*->/bin/busybox|^/lib/
 OPKPY=${OPK:-$(python3 tools/lib/opkpfad.py)}
 PKGSRC="$T/pkgsrc"; PKGROOT="$T/pkgroot"
 mkdir -p "$PKGSRC/bau" "$PKGROOT"
-cp pakete/xremote/INFO pakete/xremote/rezept "$PKGSRC/"
+cp pakete/xremote/INFO pakete/xremote/start "$PKGSRC/"
+grep -vE "^datei=(INITTAB|DEFAULTS|bin/xremoted?) " pakete/xremote/rezept > "$PKGSRC/rezept"
 cp "$HOSTBIN" "$PKGSRC/bau/freeviewer-host"
 cp "$LDMUSL" "$PKGSRC/bau/ld-musl-x86_64.so.1"
 cp "$LIBGCC" "$PKGSRC/bau/libgcc_s.so.1"

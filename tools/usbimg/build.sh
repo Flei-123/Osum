@@ -901,13 +901,13 @@ if [ -s "${XR_DIR:-/root/jarvis/data/orientos-xremote/system}/freeviewer-host" ]
     XR_ROOT="$OUT/xremote-root"
     bash tools/xremote/stage.sh "$XR_ROOT" > /dev/null || fehler "xremote stage failed"
     ARGS+=(/apps/xremote.osp/ /apps/xremote.osp/bin/ /apps/xremote.osp/lib/)
-    for f in INFO INITTAB symbol SYSTEM lib/libgcc_s.so.1; do
+    for f in INFO INITTAB DEFAULTS symbol SYSTEM lib/libgcc_s.so.1; do
         ARGS+=("/apps/xremote.osp/$f=$XR_ROOT/apps/xremote.osp/$f")
     done
-    for f in bin/freeviewer-host bin/xremoted lib/ld-musl-x86_64.so.1; do
+    for f in start bin/freeviewer-host bin/xremoted bin/xremote lib/ld-musl-x86_64.so.1; do
         ARGS+=("/apps/xremote.osp/$f=$XR_ROOT/apps/xremote.osp/$f@755")
     done
-    PFLICHT_XREMOTE="/apps/xremote.osp/INFO /apps/xremote.osp/INITTAB /apps/xremote.osp/SYSTEM /apps/xremote.osp/bin/freeviewer-host /apps/xremote.osp/bin/xremoted /apps/xremote.osp/lib/ld-musl-x86_64.so.1 /apps/xremote.osp/lib/libgcc_s.so.1"
+    PFLICHT_XREMOTE="/apps/xremote.osp/INFO /apps/xremote.osp/INITTAB /apps/xremote.osp/DEFAULTS /apps/xremote.osp/SYSTEM /apps/xremote.osp/start /apps/xremote.osp/bin/freeviewer-host /apps/xremote.osp/bin/xremoted /apps/xremote.osp/bin/xremote /apps/xremote.osp/lib/ld-musl-x86_64.so.1 /apps/xremote.osp/lib/libgcc_s.so.1"
 fi
 # W-IMG2 (r921): JARVIS Mini + the global hotkey helper. Personal stick only (the box needs the chat server).
 #   /bin/hotkeyd   started by the desktop autostart line `hotkey` (only when /etc/hotkeys.conf exists)

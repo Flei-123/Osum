@@ -52,8 +52,11 @@ stage() {
     sed "s/^version=.*/version=$version/" pakete/xremote/rezept > "$dir/rezept"
     sed "s/^version=.*/version=$version/" pakete/xremote/INFO > "$dir/INFO"
     cp pakete/xremote/INITTAB "$dir/INITTAB"
+    cp pakete/xremote/DEFAULTS "$dir/DEFAULTS"
+    cp pakete/xremote/start "$dir/start"
     cp "$HOSTBIN" "$dir/bau/freeviewer-host"
     bash tools/xremote/build-daemon.sh "$dir/bau/xremoted"
+    bash tools/xremote/build-daemon.sh "$dir/bau/xremote" kernel/user/xrcli.fi
     cp "$LIBS/lib/ld-musl-x86_64.so.1" "$dir/bau/ld-musl-x86_64.so.1"
     cp "$LIBS/usr/lib/libgcc_s.so.1" "$dir/bau/libgcc_s.so.1"
     python3 tools/k15/mksymbol.py pakete/xremote "$dir/bau/symbol" > /dev/null
