@@ -10,6 +10,7 @@ for f in freeviewer-host libgcc_s.so.1; do
 done
 mkdir -p "$BUNDLE/bin" "$BUNDLE/lib"
 cp pakete/xremote/INFO "$BUNDLE/INFO"
+cp pakete/xremote/INITTAB "$BUNDLE/INITTAB"
 python3 tools/k15/mksymbol.py pakete/xremote "$BUNDLE/symbol" > /dev/null
 printf 'shipped with the OrientOS image\n' > "$BUNDLE/SYSTEM"
 cp "$XR_DIR/freeviewer-host" "$BUNDLE/bin/freeviewer-host"

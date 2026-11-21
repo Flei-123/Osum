@@ -51,6 +51,7 @@ stage() {
     mkdir -p "$dir/bau"
     sed "s/^version=.*/version=$version/" pakete/xremote/rezept > "$dir/rezept"
     sed "s/^version=.*/version=$version/" pakete/xremote/INFO > "$dir/INFO"
+    cp pakete/xremote/INITTAB "$dir/INITTAB"
     cp "$HOSTBIN" "$dir/bau/freeviewer-host"
     bash tools/xremote/build-daemon.sh "$dir/bau/xremoted"
     cp "$LIBS/lib/ld-musl-x86_64.so.1" "$dir/bau/ld-musl-x86_64.so.1"

@@ -15,7 +15,7 @@ LAUNCHER_KEYS = ["name", "info", "keys", "revision", "fassung", "net", "exec", "
 KEYS_V1 = ["name", "info", "exec", "icon", "keys", "revision", "fassung", "net", "menu", "hideif"]
 KEYS_V2 = ["manifest", "id", "version", "author", "license", "min_os", "perm", "service", "actions",
            "opens", "needs", "sandbox", "kind", "outputs", "web.entry", "web.font", "web.memory",
-           "task1", "task2", "task3", "notices", "autostart"]
+           "task1", "task2", "task3", "notices"]
 REQUIRED = ["name", "info", "manifest", "id", "version"]
 STRICT_REQUIRED = ["kind", "outputs", "author", "license", "revision"]
 SPDX_EXPRESSION = re.compile(r"^(LicenseRef-[A-Za-z0-9.-]+|[A-Za-z0-9.+-]+)( (AND|OR|WITH) [A-Za-z0-9.+-]+)*$")
@@ -190,10 +190,6 @@ def check_kind_outputs(f, rep, project):
         rep.err(f["icon"][1], "icon: a relative path inside the bundle")
     if "icon" in f and ".." in f["icon"][0].split("/"):
         rep.err(f["icon"][1], "icon: a relative path inside the bundle")
-    if "autostart" in f and not re.fullmatch(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*", f["autostart"][0]):
-        rep.err(f["autostart"][1], "autostart: a relative path inside the bundle")
-    if "autostart" in f and ".." in f["autostart"][0].split("/"):
-        rep.err(f["autostart"][1], "autostart: a relative path inside the bundle")
 
 
 def check_web(f, rep, kind, project):
@@ -337,7 +333,7 @@ def normalize(f):
         "services": service_calls(perms),
     }
     for src, dst in (("author", "author"), ("license", "license"), ("min_os", "min_os"), ("icon", "icon"),
-                     ("hideif", "hide_if"), ("sandbox", "sandbox"), ("autostart", "autostart")):
+                     ("hideif", "hide_if"), ("sandbox", "sandbox")):
         if src in f:
             m[dst] = f[src]
     for key in ("service", "opens", "needs"):
