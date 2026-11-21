@@ -21,7 +21,7 @@ import sys.sysconst
 import libc.regio
 
 export {
-    blockb, NO_MAP, peek_fast, copy_in, copy_out, copy_out_checked, fetch_name, fetch_path, get16, get32, get64u, get_user64, ino_of_fd, ino_of_path, ino_of_path_nofollow, kcopy_word, nameb, neg, of_of, ofs_ino_of_open, peek, poke, put16, put32, put64, put_pair64, put_half, put_word32, satzpuffer, user_half, user_word, user_word32
+    blockb, NO_MAP, peek_fast, copy_in, copy_in_held, copy_out, copy_out_checked, copy_out_held, fetch_name, fetch_path, get16, get32, get64u, get_user64, ino_of_fd, ino_of_path, ino_of_path_nofollow, kcopy_word, nameb, neg, of_of, ofs_ino_of_open, peek, poke, put16, put32, put64, put_pair64, put_half, put_word32, satzpuffer, user_half, user_word, user_word32
 }
 
 fn blockb(state: u64) -> u64 {
@@ -91,14 +91,12 @@ fn poke(state: u64, me: u64, addr: u64, v: u64) -> bool {
 const FAST_COPY_MAX: u64 = 16384
 const NO_MAP: u64 = 0xFFFFFFFFFFFFFFFF
 
-fn copy_out_fast(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
-    let mmfl: u64 = mmlock.mm_lock(state)
+fn copy_out_held(state: u64, me: u64, dst: u64, src: u64, len: u64) -> u64 {
     var n: u64 = 0
     while n < len {
         let phys: u64 = procmap.user_phys(state, me, dst + n)
         if phys == 0 {
-            mmlock.mm_unlock(state, mmfl)
-            return false
+            return n
         }
         var room: u64 = 4096 - ((dst + n) & 4095)
         if room > len - n {
@@ -109,8 +107,33 @@ fn copy_out_fast(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
         guard.clac(state)
         n = n + room
     }
+    return n
+}
+
+fn copy_in_held(state: u64, me: u64, dst: u64, src: u64, len: u64) -> u64 {
+    var n: u64 = 0
+    while n < len {
+        let phys: u64 = procmap.user_phys(state, me, src + n)
+        if phys == 0 {
+            return n
+        }
+        var room: u64 = 4096 - ((src + n) & 4095)
+        if room > len - n {
+            room = len - n
+        }
+        guard.stac(state)
+        arch.copy_octets(dst + n, phys, room)
+        guard.clac(state)
+        n = n + room
+    }
+    return n
+}
+
+fn copy_out_fast(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
+    let mmfl: u64 = mmlock.mm_lock(state)
+    let done: u64 = copy_out_held(state, me, dst, src, len)
     mmlock.mm_unlock(state, mmfl)
-    return true
+    return done == len
 }
 
 fn copy_out(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {

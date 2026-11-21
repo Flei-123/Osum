@@ -53,7 +53,7 @@ import bus.drvreg
 export {
     dev_flushes,
     ram_init, use_ata, use_nvme, read, write, blocks, present,
-    read_raw, read_stream, read_stream_span, S_SECTORS, S_SECTORS_WIDE, S_SEQ, write_raw, write_run, write_blocks, wb_begin, wb_begin_data, wb_hint, wb_set_big_runs, wb_struct, wb_struct_lazy, wb_mark_freed, wb_freed_pending, wb_epoch, wb_mark_pre, wb_set_meta, wb_due, wb_release, wb_end, wb_flush,
+    read_raw, read_stream, read_stream_span, S_SECTORS, S_SECTORS_WIDE, S_SEQ, write_raw, write_run, write_blocks, wb_begin, wb_begin_data, wb_hint, wb_set_big_runs, wb_struct, wb_struct_lazy, wb_mark_freed, wb_freed_pending, wb_epoch, wb_mark_pre, wb_set_meta, wb_due, wb_release, wb_end, wb_flush, wb_flush_some, FLUSH_DONE, FLUSH_MORE, FLUSH_FAILED,
     BLOCK_SIZE, DEV_RAM, DEV_ATA, DEV_NVME, DEV_ATA1, DEV_USB,
     removable,
     // ---- Runde K14 ----
@@ -1890,7 +1890,7 @@ fn wb_flush_class(state: u64, low: u64, high: u64, cls: u64) -> bool {
     var ok: bool = true
     wb_batch_n[0] = 0
     var sl: u64 = cg(state, W_LO)
-    while sl <= cg(state, W_HI) {
+    while sl <= cg(state, W_HI) && !wb_budget_spent() {
         let m: u64 = wb_meta(state, sl)
         let lba: u64 = m & WB_LBA_MASK
         if m == 0 || lba < low || lba >= high || !wb_class_ok(m, cls) {
@@ -1900,6 +1900,7 @@ fn wb_flush_class(state: u64, low: u64, high: u64, cls: u64) -> bool {
             if !wb_flush_run(state, sl, e, lba, (m >> 48) & WB_DEV_MASK) {
                 ok = false
             }
+            wb_budget_take(e - sl)
             sl = e
         }
     }
@@ -1910,6 +1911,62 @@ fn wb_flush_class(state: u64, low: u64, high: u64, cls: u64) -> bool {
         wb_bounds_reset(state)
     }
     return ok
+}
+
+const FLUSH_DONE: u64 = 0
+const FLUSH_MORE: u64 = 1
+const FLUSH_FAILED: u64 = 2
+
+static mut wb_budget: [u64; 2] = [0 as u64; 2]
+
+fn wb_budget_spent() -> bool {
+    return wb_budget[1] != 0 && wb_budget[0] == 0
+}
+
+fn wb_budget_take(n: u64) {
+    if wb_budget[0] > n {
+        wb_budget[0] = wb_budget[0] - n
+    } else {
+        wb_budget[0] = 0
+    }
+}
+
+fn wb_flush_classes_from(state: u64, low: u64) -> bool {
+    let pre_ok: bool = wb_flush_class(state, low, WB_LBA_MASK, WC_PRE)
+    let plain_ok: bool = wb_flush_class(state, low, WB_LBA_MASK, WC_PLAIN)
+    return pre_ok && plain_ok
+}
+
+fn wb_flush_ordered_some(state: u64) -> bool {
+    let limit: u64 = cg(state, W_META)
+    if limit == 0 {
+        return wb_flush_classes_from(state, 0)
+    }
+    if cg(state, W_FREED) != 0 {
+        return wb_flush_classes_from(state, limit)
+    }
+    let meta_ok: bool = wb_flush_range(state, 0, limit)
+    return wb_flush_classes_from(state, limit) && meta_ok
+}
+
+fn wb_flush_some(state: u64, slots: u64) -> u64 {
+    dma_up(state)
+    if slots == 0 || cg(state, W_BASE) == 0 || cg(state, W_DIRTY) == 0 || cg(state, W_DEPTH) != 0 {
+        return FLUSH_DONE
+    }
+    wb_budget[0] = slots
+    wb_budget[1] = 1
+    let ok: bool = wb_flush_ordered_some(state)
+    let spent: bool = wb_budget[0] == 0
+    wb_budget[1] = 0
+    wb_budget[0] = 0
+    if !ok {
+        return FLUSH_FAILED
+    }
+    if spent && cg(state, W_DIRTY) != 0 {
+        return FLUSH_MORE
+    }
+    return FLUSH_DONE
 }
 
 fn wb_epoch(state: u64) -> u64 {

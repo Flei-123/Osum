@@ -28,6 +28,7 @@ import ipc.appfs
 import sched.ctr
 import fs.vfs
 import sys.readcache
+import sys.pipeio
 import fs.vfscreate
 import fs.mnt
 import fs.vfsops
@@ -118,6 +119,9 @@ fn write_checked(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
         return sysuser.neg(errno.E_BADF)
     }
     let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_PIPEW {
+        return pipe_write(state, me, of, buf, len)
+    }
     let validated_by_copy: bool = len <= sysconst.MAX_IO && file_like(kind)
     if !validated_by_copy && !procfault.user_ok(state, me, buf, len) {
         return sysuser.neg(errno.E_FAULT)
@@ -389,10 +393,13 @@ fn do_read(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
         len = MAX_FREAD
     }
     if len > sysconst.MAX_IO {
+        let of2: u64 = file.fd_check(state, me, fd, handle.R_READ)
+        if of2 < file.MAX_OPEN && file.open_kind(state, of2) == file.K_PIPER {
+            return pipe_read(state, me, of2, buf, len)
+        }
         if !procfault.user_ok(state, me, buf, len) {
             return sysuser.neg(errno.E_FAULT)
         }
-        let of2: u64 = file.fd_check(state, me, fd, handle.R_READ)
         if of2 >= file.MAX_OPEN {
             return sysuser.neg(errno.E_BADF)
         }
@@ -554,20 +561,18 @@ fn pipe_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
         sched.poll_sleep(state, seen, taskconst.POLL_FOREVER)
     }
     var n: u64 = 0
-    let bounce: u64 = sysuser.blockb(state)
     while n < len {
-        var want: u64 = len - n
-        if want > PIPE_BUF {
-            want = PIPE_BUF
+        var got: u64 = pipeio.read_direct(state, me, p, buf + n, len - n)
+        if got == sysuser.NO_MAP {
+            got = pipe_read_bounce(state, me, p, buf + n, len - n)
         }
-        let got: u64 = file.pipe_get_span(state, p, bounce, want)
-        if got == 0 {
-            break
-        }
-        if !sysuser.copy_out(state, me, buf + n, bounce, got) {
+        if got == sysuser.NO_MAP {
             if n == 0 {
                 return sysuser.neg(errno.E_FAULT)
             }
+            break
+        }
+        if got == 0 {
             break
         }
         n = n + got
@@ -576,6 +581,45 @@ fn pipe_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
         sched.poll_kick(state)
     }
     return n
+}
+
+fn pipe_read_bounce(state: u64, me: u64, p: u64, dst: u64, len: u64) -> u64 {
+    var want: u64 = len
+    if want > PIPE_BUF {
+        want = PIPE_BUF
+    }
+    let bounce: u64 = sysuser.blockb(state)
+    let got: u64 = file.pipe_get_span(state, p, bounce, want)
+    if got == 0 {
+        return 0
+    }
+    if !sysuser.copy_out(state, me, dst, bounce, got) {
+        return sysuser.NO_MAP
+    }
+    return got
+}
+
+fn pipe_write_block_bounce(state: u64, me: u64, p: u64, src: u64, len: u64) -> u64 {
+    let bounce: u64 = sysuser.blockb(state)
+    if !sysuser.copy_in(state, me, bounce, src, len) {
+        return sysuser.NO_MAP
+    }
+    if file.pipe_put_block(state, p, bounce, len) {
+        return len
+    }
+    return 0
+}
+
+fn pipe_write_bounce(state: u64, me: u64, p: u64, src: u64, len: u64) -> u64 {
+    var want: u64 = len
+    if want > PIPE_BUF {
+        want = PIPE_BUF
+    }
+    let bounce: u64 = sysuser.blockb(state)
+    if !sysuser.copy_in(state, me, bounce, src, want) {
+        return sysuser.NO_MAP
+    }
+    return file.pipe_put_span(state, p, bounce, want)
 }
 
 // A writer into a pipe nobody reads gets -EPIPE. On a full pipe it waits;
@@ -589,11 +633,14 @@ fn pipe_write_atomic(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
             return sysuser.neg(errno.E_PIPE)
         }
         if file.pipe_room(state, p) >= len {
-            let bounce: u64 = sysuser.blockb(state)
-            if !sysuser.copy_in(state, me, bounce, buf, len) {
+            var put: u64 = pipeio.write_direct(state, me, p, buf, len, true)
+            if put == sysuser.NO_MAP {
+                put = pipe_write_block_bounce(state, me, p, buf, len)
+            }
+            if put == sysuser.NO_MAP {
                 return sysuser.neg(errno.E_FAULT)
             }
-            if file.pipe_put_block(state, p, bounce, len) {
+            if put == len {
                 sched.poll_kick(state)
                 return len
             }
@@ -637,26 +684,22 @@ fn pipe_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
                     let _slept: u64 = net_wait(state, seen)
                 }
             } else {
-                var want: u64 = len - n
-                if want > PIPE_BUF {
-                    want = PIPE_BUF
+                let was_empty: bool = file.pipe_bytes(state, p) == 0
+                var put: u64 = pipeio.write_direct(state, me, p, buf + n, len - n, false)
+                if put == sysuser.NO_MAP {
+                    put = pipe_write_bounce(state, me, p, buf + n, len - n)
                 }
-                let bounce: u64 = sysuser.blockb(state)
-                if !sysuser.copy_in(state, me, bounce, buf + n, want) {
+                if put == sysuser.NO_MAP {
                     if n == 0 {
                         return sysuser.neg(errno.E_FAULT)
                     }
                     going = false
+                } else if put == 0 {
+                    going = false
                 } else {
-                    let was_empty: bool = file.pipe_bytes(state, p) == 0
-                    let put: u64 = file.pipe_put_span(state, p, bounce, want)
-                    if put == 0 {
-                        going = false
-                    } else {
-                        n = n + put
-                        if was_empty {
-                            sched.poll_kick(state)
-                        }
+                    n = n + put
+                    if was_empty {
+                        sched.poll_kick(state)
                     }
                 }
             }
@@ -1710,7 +1753,15 @@ fn do_fsync(state: u64, me: u64, fd: u64) -> u64 {
     if of >= file.MAX_OPEN {
         return sysuser.neg(errno.E_BADF)
     }
+    if fsync_drains(state, of) && !jsync.drain(state) {
+        return sysuser.neg(errno.E_IO)
+    }
     return fsync_of(state, of)
+}
+
+fn fsync_drains(state: u64, of: u64) -> bool {
+    let kind: u64 = file.open_kind(state, of)
+    return kind != file.K_PIPER && kind != file.K_PIPEW && kind != file.K_SOCK
 }
 
 // =====================================================================
