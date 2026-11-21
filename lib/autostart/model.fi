@@ -1,0 +1,330 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.octets
+
+export {
+    reset, count, load_list, load_services, add_package, load_state, find, name, args, kind, policy,
+    enabled, locked, visible, set_enabled, should_start, state_value, policy_from_word,
+    KIND_LIST, KIND_PACKAGE, KIND_SERVICE, POLICY_ON, POLICY_OFF, POLICY_NEVER, MAX_ENTRIES, NAME_BYTES,
+}
+
+const MAX_ENTRIES: u64 = 32
+const NAME_BYTES: u64 = 24
+const ARGS_BYTES: u64 = 96
+const KIND_LIST: u64 = 0
+const KIND_PACKAGE: u64 = 1
+const KIND_SERVICE: u64 = 2
+const POLICY_ON: u64 = 0
+const POLICY_OFF: u64 = 1
+const POLICY_NEVER: u64 = 2
+const STATE_UNSET: u64 = 0
+const STATE_ON: u64 = 1
+const STATE_OFF: u64 = 2
+const NEWLINE: u64 = 10
+const SPACE: u64 = 32
+const TAB: u64 = 9
+const HASH: u64 = 35
+const EQUALS: u64 = 61
+const COLON: u64 = 58
+const CR: u64 = 13
+
+static mut e_name: [u8; 768] = [0 as u8; 768]
+static mut e_args: [u8; 3072] = [0 as u8; 3072]
+static mut e_kind: [u8; 32] = [0 as u8; 32]
+static mut e_policy: [u8; 32] = [0 as u8; 32]
+static mut e_state: [u8; 32] = [0 as u8; 32]
+static mut e_n: u64 = 0
+static mut w_on: [u8; 3] = "on\0"
+static mut w_off: [u8; 4] = "off\0"
+static mut w_default_off: [u8; 12] = "default-off\0"
+static mut w_never: [u8; 6] = "never\0"
+
+fn name_base() -> u64 {
+    return (&e_name[0 as usize]) as u64
+}
+
+fn args_base() -> u64 {
+    return (&e_args[0 as usize]) as u64
+}
+
+fn reset() {
+    e_n = 0
+}
+
+fn count() -> u64 {
+    return e_n
+}
+
+fn name(i: u64) -> u64 {
+    return name_base() + i * NAME_BYTES
+}
+
+fn args(i: u64) -> u64 {
+    return args_base() + i * ARGS_BYTES
+}
+
+fn kind(i: u64) -> u64 {
+    return e_kind[i as usize] as u64
+}
+
+fn policy(i: u64) -> u64 {
+    return e_policy[i as usize] as u64
+}
+
+fn is_blank(c: u64) -> bool {
+    return c == SPACE || c == TAB || c == CR
+}
+
+fn word_end(p: u64, at: u64, end: u64) -> u64 {
+    var i: u64 = at
+    while i < end && !is_blank(octets.ld8(p, i)) {
+        i = i + 1
+    }
+    return i
+}
+
+fn skip_blank(p: u64, at: u64, end: u64) -> u64 {
+    var i: u64 = at
+    while i < end && is_blank(octets.ld8(p, i)) {
+        i = i + 1
+    }
+    return i
+}
+
+fn line_end(p: u64, at: u64, len: u64) -> u64 {
+    var i: u64 = at
+    while i < len && octets.ld8(p, i) != NEWLINE {
+        i = i + 1
+    }
+    return i
+}
+
+fn comment_start(p: u64, at: u64, end: u64) -> u64 {
+    var i: u64 = at
+    while i < end && octets.ld8(p, i) != HASH {
+        i = i + 1
+    }
+    return i
+}
+
+fn name_ok(p: u64, n: u64) -> bool {
+    if n == 0 || n >= NAME_BYTES {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = octets.ld8(p, i)
+        let good: bool = (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 45 || c == 95 || c == 46
+        if !good {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn same(p: u64, n: u64, i: u64) -> bool {
+    let q: u64 = name(i)
+    var k: u64 = 0
+    while k < n {
+        if octets.ld8(p, k) != octets.ld8(q, k) {
+            return false
+        }
+        k = k + 1
+    }
+    return octets.ld8(q, n) == 0
+}
+
+fn find(p: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < e_n {
+        if same(p, n, i) {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_ENTRIES
+}
+
+fn copy_into(dst: u64, src: u64, n: u64, cap: u64) {
+    var m: u64 = n
+    if m >= cap {
+        m = cap - 1
+    }
+    var j: u64 = 0
+    while j < m {
+        octets.st8(dst, j, octets.ld8(src, j))
+        j = j + 1
+    }
+    octets.st8(dst, m, 0)
+}
+
+fn add_entry(p: u64, n: u64, a: u64, an: u64, k: u64, pol: u64) -> u64 {
+    if !name_ok(p, n) || e_n >= MAX_ENTRIES || find(p, n) != MAX_ENTRIES {
+        return MAX_ENTRIES
+    }
+    let i: u64 = e_n
+    copy_into(name(i), p, n, NAME_BYTES)
+    copy_into(args(i), a, an, ARGS_BYTES)
+    e_kind[i as usize] = k as u8
+    e_policy[i as usize] = pol as u8
+    e_state[i as usize] = STATE_UNSET as u8
+    e_n = e_n + 1
+    return i
+}
+
+fn load_list(buf: u64, len: u64) -> u64 {
+    var added: u64 = 0
+    var at: u64 = 0
+    while at < len {
+        let e: u64 = line_end(buf, at, len)
+        let stop: u64 = comment_start(buf, at, e)
+        let ns: u64 = skip_blank(buf, at, stop)
+        let ne: u64 = word_end(buf, ns, stop)
+        if ne > ns {
+            var ae: u64 = stop
+            while ae > ne && is_blank(octets.ld8(buf, ae - 1)) {
+                ae = ae - 1
+            }
+            let args_at: u64 = skip_blank(buf, ne, ae)
+            if add_entry(buf + ns, ne - ns, buf + args_at, ae - args_at, KIND_LIST, POLICY_ON) != MAX_ENTRIES {
+                added = added + 1
+            }
+        }
+        at = e + 1
+    }
+    return added
+}
+
+fn load_services(buf: u64, len: u64) -> u64 {
+    var added: u64 = 0
+    var at: u64 = 0
+    while at < len {
+        let e: u64 = line_end(buf, at, len)
+        if octets.ld8(buf, at) != HASH {
+            var c: u64 = at
+            while c < e && octets.ld8(buf, c) != COLON {
+                c = c + 1
+            }
+            if c > at && c < e {
+                if add_entry(buf + at, c - at, buf, 0, KIND_SERVICE, POLICY_ON) != MAX_ENTRIES {
+                    added = added + 1
+                }
+            }
+        }
+        at = e + 1
+    }
+    return added
+}
+
+fn word_is(p: u64, n: u64, w: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if octets.ld8(p, i) != octets.ld8(w, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return octets.ld8(w, n) == 0
+}
+
+fn policy_from_word(p: u64, n: u64) -> u64 {
+    if word_is(p, n, (&w_default_off[0 as usize]) as u64) {
+        return POLICY_OFF
+    }
+    if word_is(p, n, (&w_never[0 as usize]) as u64) {
+        return POLICY_NEVER
+    }
+    return POLICY_ON
+}
+
+fn add_package(p: u64, n: u64, a: u64, an: u64, word: u64, wn: u64) -> u64 {
+    return add_entry(p, n, a, an, KIND_PACKAGE, policy_from_word(word, wn))
+}
+
+fn apply_state(i: u64, v: u64, vn: u64) -> bool {
+    if word_is(v, vn, (&w_off[0 as usize]) as u64) {
+        e_state[i as usize] = STATE_OFF as u8
+        return true
+    }
+    if word_is(v, vn, (&w_on[0 as usize]) as u64) {
+        e_state[i as usize] = STATE_ON as u8
+        return true
+    }
+    return false
+}
+
+fn load_state(buf: u64, len: u64) -> u64 {
+    var applied: u64 = 0
+    var at: u64 = 0
+    while at < len {
+        let e: u64 = line_end(buf, at, len)
+        var eq: u64 = at
+        while eq < e && octets.ld8(buf, eq) != EQUALS {
+            eq = eq + 1
+        }
+        if eq > at && eq < e {
+            let i: u64 = find(buf + at, eq - at)
+            var ve: u64 = e
+            while ve > eq + 1 && is_blank(octets.ld8(buf, ve - 1)) {
+                ve = ve - 1
+            }
+            if i != MAX_ENTRIES && apply_state(i, buf + eq + 1, ve - eq - 1) {
+                applied = applied + 1
+            }
+        }
+        at = e + 1
+    }
+    return applied
+}
+
+fn locked(i: u64) -> bool {
+    return kind(i) == KIND_SERVICE || policy(i) == POLICY_NEVER
+}
+
+fn visible(i: u64) -> bool {
+    return policy(i) != POLICY_NEVER
+}
+
+fn enabled(i: u64) -> bool {
+    if policy(i) == POLICY_NEVER {
+        return false
+    }
+    if kind(i) == KIND_SERVICE {
+        return true
+    }
+    let s: u64 = e_state[i as usize] as u64
+    if s == STATE_ON {
+        return true
+    }
+    if s == STATE_OFF {
+        return false
+    }
+    return policy(i) == POLICY_ON
+}
+
+fn set_enabled(i: u64, on: bool) -> bool {
+    if i >= e_n || locked(i) {
+        return false
+    }
+    if on {
+        e_state[i as usize] = STATE_ON as u8
+    } else {
+        e_state[i as usize] = STATE_OFF as u8
+    }
+    return true
+}
+
+fn should_start(p: u64, n: u64) -> bool {
+    let i: u64 = find(p, n)
+    if i == MAX_ENTRIES {
+        return true
+    }
+    return enabled(i)
+}
+
+fn state_value(i: u64) -> u64 {
+    if enabled(i) {
+        return (&w_on[0 as usize]) as u64
+    }
+    return (&w_off[0 as usize]) as u64
+}
