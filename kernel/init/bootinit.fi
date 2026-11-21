@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import sched.taskconst
+import sched.taskslot
+import fs.fs
+import ldr.elf
+
+static mut P_BIN_INIT: [u8; 10] = "/bin/init\0"
+static mut P_SBIN_INIT: [u8; 11] = "/sbin/init\0"
+
+fn spawn_detached(state: u64) -> bool {
+    var a_init: [u8; 5] = "init\0"
+    var s_pid1: [u8; 21] = "osum: pid1 init (wm)\0"
+    var s_fail: [u8; 24] = "osum: init did not load\0"
+    if kstate.mode_on(state, kstate.M_INITSH) {
+        return false
+    }
+    var path: u64 = (&P_BIN_INIT[0]) as u64
+    if fs.path(state, path) == 0 {
+        path = (&P_SBIN_INIT[0]) as u64
+        if fs.path(state, path) == 0 {
+            return false
+        }
+    }
+    let abuf: u64 = state + kstate.EARG_OFF
+    var k: u64 = 0
+    while k < 5 {
+        kstate.set8(abuf + k, a_init[k as usize])
+        k = k + 1
+    }
+    kstate.set(state, kstate.K13_OFF + kstate.U_INITOK, 1)
+    serial.puts((&s_pid1[0]) as u64)
+    serial.nl()
+    let keep: u64 = kstate.get(state, kstate.NEXT_PID)
+    taskslot.tset(state, 0, taskconst.T_PID, keep)
+    kstate.set(state, kstate.NEXT_PID, 1)
+    let t: u64 = elf.spawn(state, path, abuf, 1, 2)
+    kstate.set(state, kstate.NEXT_PID, keep + 1)
+    if t == 0 {
+        serial.puts((&s_fail[0]) as u64)
+        serial.nl()
+        return false
+    }
+    kstate.set(state, kstate.K13_OFF + kstate.U_INITSLOT, t + 1)
+    return true
+}
