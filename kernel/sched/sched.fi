@@ -475,6 +475,8 @@ fn ring3_foreign(state: u64) -> u64 {
     return c
 }
 
+const IF_FLAG: u64 = 0x200
+
 fn irq_save() -> u64 {
     return asm("pushfq\npop rax\ncli", out("rax"))
 }
@@ -1104,11 +1106,24 @@ fn budget_for(state: u64, t: u64) -> u64 {
 
 fn schedule_locked(state: u64) {
     let cur: u64 = current(state)
-    let next: u64 = pick(state)
+    run_locked(state, cur, pick(state))
+}
+
+fn keep_locked(state: u64, cur: u64) {
+    taskslot.tset(state, cur, taskconst.T_STATE, taskconst.S_RUN)
+    taskslot.tset(state, cur, taskconst.T_BUDGET, budget_for(state, cur))
+    atomic.lock_give(state, atomic.L_SCHED)
+}
+
+fn halt_until_irq(flags: u64) {
+    if (flags & IF_FLAG) != 0 {
+        asm("sti\nhlt\ncli")
+    }
+}
+
+fn run_locked(state: u64, cur: u64, next: u64) {
     if next == cur {
-        taskslot.tset(state, cur, taskconst.T_STATE, taskconst.S_RUN)
-        taskslot.tset(state, cur, taskconst.T_BUDGET, budget_for(state, cur))
-        atomic.lock_give(state, atomic.L_SCHED)
+        keep_locked(state, cur)
         return
     }
     let next_rsp: u64 = taskslot.tget(state, next, taskconst.T_RSP)
@@ -1465,7 +1480,14 @@ fn sleep_ticks(state: u64, ticks: u64) {
     taskslot.tset(state, cur, taskconst.T_WAKE, kstate.get(state, kstate.TICKS) + ticks)
     hrt.set_wake(cur, 0)
     taskslot.tset(state, cur, taskconst.T_STATE, taskconst.S_SLEEP)
-    schedule_locked(state)
+    let next: u64 = pick(state)
+    if next == cur {
+        keep_locked(state, cur)
+        halt_until_irq(flags)
+        irq_restore(flags)
+        return
+    }
+    run_locked(state, cur, next)
     irq_restore(flags)
 }
 
