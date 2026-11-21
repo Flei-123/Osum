@@ -15,6 +15,7 @@ cp -a assets/apps/settings.osp assets/apps/launcher.osp assets/apps/taskmgr.osp 
 make_bundle() { # make_bundle <dir> <name> <policy>
     cp -a assets/apps/trashbin.osp "$TMPD/apps/$1.osp"
     printf 'name=%s\ninfo=Test app\nkeys=%s\nrevision=1\nautostart=%s\n' "$2" "$1" "$3" > "$TMPD/apps/$1.osp/INFO"
+    printf '/bin/edit\n' > "$TMPD/apps/$1.osp/start.txt"
 }
 make_bundle zed Zed default-on
 make_bundle yak Yak default-off
@@ -32,12 +33,15 @@ taste ret
 warteauf 'settings: autostart page entries=' || 60
 warte 6
 foto 00-page
-klickauf srectasw0
+klick 981,193
 warteauf 'settings: autostart alpha=' || 30
 warte 3
 foto 01-toggled
-klickauf srectasw0
+klick 981,193
 warteauf 'settings: autostart alpha=on' || 30
+warte 3
+klick 981,257
+warteauf 'settings: autostart zed=' || 30
 warte 3
 S
 
@@ -82,10 +86,12 @@ echo "== settings page: one source, toggles write it =="
 S="$TMPD/click/serial.txt"
 grep -aq 'launcher: settings page=[0-9]* pid=' "$S" && ok "search hit 'autostart' starts Settings" || bad "no Settings start from the search"
 entries=$(grep -a 'settings: autostart page entries=' "$S" | head -1 | sed 's/.*entries=//')
-[ "${entries:-0}" -ge 3 ] && ok "the page lists the registry ($entries entries: list + package)" || bad "page entries=${entries:-none}"
+[ "${entries:-0}" -ge 4 ] && ok "the page lists the registry ($entries entries: list + package)" || bad "page entries=${entries:-none}"
 grep -aq 'settings: rect name=asw0 ' "$S" && ok "toggle rectangles are reported" || bad "no rectangle for the first toggle"
 grep -aq 'settings: autostart alpha=off' "$S" && ok "click 1: 'alpha' turned off and saved to the shared state file" || bad "click 1 did not turn 'alpha' off"
 grep -aq 'settings: autostart alpha=on' "$S" && ok "click 2: 'alpha' turned on again" || bad "click 2 did not turn 'alpha' on"
+grep -aq 'settings: autostart zed=off' "$S" && ok "click 3: the package 'zed' (default-on) turned off in the same file" || bad "click 3 did not turn 'zed' off"
+grep -aq 'settings: rect name=asw3 ' "$S" && ok "the default-off package gets a toggle too" || bad "no toggle for the default-off package"
 for f in 00-page 01-toggled; do [ -s "$TMPD/click/$f.ppm" ] || bad "missing picture $f"; done
 if [ -s "$TMPD/click/00-page.ppm" ] && [ -s "$TMPD/click/01-toggled.ppm" ]; then
     n=$(python3 -I tools/menualive/check.py diff "$TMPD/click/00-page.ppm" "$TMPD/click/01-toggled.ppm" 0 0 1280 800 | sed 's/changed=//')
