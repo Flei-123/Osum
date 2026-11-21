@@ -29,7 +29,7 @@ export {
     shm_ref, shm_ref_live, shm_unref, shm_refs, shm_size, shm_set_size,
     shm_seals, shm_add_seals, shm_wmaps, shm_wmap_take, shm_wmap_drop,
     socks_live, shms_live, bytes_moved, fds_moved,
-    USOCK_MAX, USHM_MAX, USHM_PAGED, USUN_MAX, RING_CAP, FDQ_MAX, SHM_PAGES_MAX, SHM_PAGES_LIMIT, SHM_PAGES_CONTIG, SMF_CONTIG, SMF_RO, SMF_KEEP, SMF_FILE, UM_PAGES_MASK, UMAP_MAX,
+    USOCK_MAX, USHM_MAX, USHM_PAGED, USUN_MAX, RING_CAP, FDQ_MAX, SHM_PAGES_MAX, SHM_PAGES_LIMIT, SHM_PAGES_CONTIG, SMF_CONTIG, SMF_RO, SMF_KEEP, SMF_FILE, UM_PAGES_MASK, UMAP_MAX, map_live,
     S_FREE, S_OPEN, S_LISTEN, S_CONNECTED, S_CLOSED,
     UK_FREE, UK_STREAM, UK_DGRAM, sock_tmo, sock_set_tmo, sock_stype, sock_set_stype, send_dgram, send_dgram_to, write_error, recv_dgram, dgram_len, dgram_room, bind_dgram, find_dgram, connect_dgram, fd_at_head, fd_deliverable, fd_limit, DGRAM_HDR
 }
@@ -128,6 +128,8 @@ const C_SOCKS: u64 = 0
 const C_SHMS: u64 = 8
 const C_BYTES: u64 = 16
 const C_FDS: u64 = 24
+const C_UMAPS: u64 = 72
+const DECREMENT: u64 = 0xFFFFFFFFFFFFFFFF
 
 fn sk_at(i: u64) -> u64 {
     return USOCK_OFF + i * USOCK_BYTES
@@ -209,6 +211,7 @@ fn reset_all(state: u64) {
     kstate.set(state, mmlock.LOCK_BASE + C_SHMS, 0)
     kstate.set(state, mmlock.LOCK_BASE + C_BYTES, 0)
     kstate.set(state, mmlock.LOCK_BASE + C_FDS, 0)
+    kstate.set(state, mmlock.LOCK_BASE + C_UMAPS, 0)
 }
 
 fn sock_used(state: u64, i: u64) -> u64 {
@@ -1209,6 +1212,7 @@ fn map_note(state: u64, task: u64, i: u64, base: u64, pages: u64, flags: u64) ->
     while k < UMAP_MAX {
         if kstate.get(state, um_at(k)) == 0 && atomic.cas(state + um_at(k), 0, base) == 0 {
             kstate.set(state, um_at(k) + 8, task | (i << 16) | (pages << 32) | flags)
+            kstate.add(state, mmlock.LOCK_BASE + C_UMAPS, 1)
             return true
         }
         k = k + 1
@@ -1216,7 +1220,14 @@ fn map_note(state: u64, task: u64, i: u64, base: u64, pages: u64, flags: u64) ->
     return false
 }
 
+fn map_live(state: u64) -> u64 {
+    return kstate.get(state, mmlock.LOCK_BASE + C_UMAPS)
+}
+
 fn map_release(state: u64, task: u64, addr: u64, len: u64) -> bool {
+    if map_live(state) == 0 {
+        return false
+    }
     var k: u64 = 0
     while k < UMAP_MAX {
         if kstate.get(state, um_at(k)) == addr && addr != 0 {
@@ -1224,6 +1235,7 @@ fn map_release(state: u64, task: u64, addr: u64, len: u64) -> bool {
             if (w & 0xFFFF) == task && (((w >> 32) & UM_PAGES_MASK) * mmframe.FRAME_SIZE) <= len {
                 kstate.set(state, um_at(k) + 8, 0)
                 kstate.set(state, um_at(k), 0)
+                kstate.add(state, mmlock.LOCK_BASE + C_UMAPS, DECREMENT)
                 if (w & UM_WRITE) != 0 {
                     shm_wmap_drop(state, (w >> 16) & 0xFFFF)
                 }
@@ -1237,6 +1249,9 @@ fn map_release(state: u64, task: u64, addr: u64, len: u64) -> bool {
 }
 
 fn map_release_all(state: u64, task: u64) -> u64 {
+    if map_live(state) == 0 {
+        return 0
+    }
     var n: u64 = 0
     var k: u64 = 0
     while k < UMAP_MAX {
@@ -1245,6 +1260,7 @@ fn map_release_all(state: u64, task: u64) -> u64 {
             if (w & 0xFFFF) == task {
                 kstate.set(state, um_at(k) + 8, 0)
                 kstate.set(state, um_at(k), 0)
+                kstate.add(state, mmlock.LOCK_BASE + C_UMAPS, DECREMENT)
                 if (w & UM_WRITE) != 0 {
                     shm_wmap_drop(state, (w >> 16) & 0xFFFF)
                 }
