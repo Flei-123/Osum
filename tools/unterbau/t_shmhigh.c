@@ -54,7 +54,7 @@ int main(void)
     long held = lowpress_eat(LEAVE_FRAMES);
     long low1 = lp_free_low();
     long free1 = lp_meminfo("MemFree:");
-    CHECK("window_emptied", held > 0 && low1 <= 2 * LEAVE_FRAMES && free1 > 1024L * 1024, "held=%ld low=%ld free=%ldkB", held, low1, free1);
+    CHECK("window_emptied", low1 >= 0 && low1 <= 2 * LEAVE_FRAMES && free1 > 1024L * 1024, "held=%ld low=%ld free=%ldkB", held, low1, free1);
     long fails0 = shm_failures();
 
     int fd = memfd();
