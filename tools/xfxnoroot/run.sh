@@ -46,6 +46,7 @@ grep -aq 'xfxd: ready' "$W/ser"; check $? "the start service is up (xfxd: ready)
 grep -aq 'xfxd: start uid=1000' "$W/ser"; check $? "the start request reached the service with the session uid (xfxd: start uid=1000)"
 ! grep -aq 'xfxd: denied' "$W/ser"; check $? "the service refused nobody"
 kill $QP 2>/dev/null; wait $QP 2>/dev/null
+[ -n "${KEEP:-}" ] && cp "$W/ser" "$KEEP"
 if [ "$COUNTER" = 1 ]; then
     echo "XFXNOROOT-COUNTERPROOF: $RED/$ALL red"
     [ "$RED" -ge 3 ]
