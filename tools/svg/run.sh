@@ -30,7 +30,7 @@ d = open(sys.argv[1], "rb").read()
 a = lambda x, y: d[12 + (y * 48 + x) * 4 + 3]
 assert a(24, 24) == 255 and a(2, 2) == 0 and a(8, 24) == 255 and a(7, 24) == 0 and a(39, 24) == 255 and a(40, 24) == 0
 PY
-mkdir -p "$T/tree/tools/svg" "$T/tree/assets/icons" "$T/tree/pakete"; cp tools/svg/apps.tsv "$T/tree/tools/svg/"; cp -r assets/icons/svg assets/icons/brand "$T/tree/assets/icons/"; cp -r assets/apps "$T/tree/assets/apps"; cp -r pakete/jarvismini "$T/tree/pakete/jarvismini"
+mkdir -p "$T/tree/tools/svg" "$T/tree/assets/icons" "$T/tree/pakete"; cp tools/svg/apps.tsv "$T/tree/tools/svg/"; cp -r assets/icons/svg assets/icons/brand assets/icons/app "$T/tree/assets/icons/"; cp -r assets/apps "$T/tree/assets/apps"; cp -r pakete/jarvismini "$T/tree/pakete/jarvismini"
 python3 -I tools/svg/mkapps.py "$T/tree" "$T/bake" > "$T/apps.log" 2>&1 && ok "mkapps bakes every bundle symbol" || bad "mkapps failed"
 bad_n=0; for f in $(cd "$T/tree" && ls assets/apps/*/symbol.osym pakete/jarvismini/symbol.osym); do cmp -s "$T/tree/$f" "$f" || bad_n=$((bad_n+1)); done
 [ "$bad_n" -eq 0 ] && ok "committed symbol.osym equals the rebake (SVG is the source of truth)" || bad "$bad_n symbol.osym differ from the rebake"
