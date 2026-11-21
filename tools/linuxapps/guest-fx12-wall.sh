@@ -2,7 +2,7 @@ echo "FX start"
 export HOME=/root XDG_RUNTIME_DIR=/tmp MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 MOZ_CRASHREPORTER_DISABLE=1
 up() { read u _ < /proc/uptime; echo $u; }
 n=1
-while [ $n -le ${FX_RUNS:-3} ]; do
+while [ $n -le ${FX_RUNS:-6} ]; do
     mkdir -p /tmp/p$n
     echo 'user_pref("gfx.webrender.software", true);' > /tmp/p$n/user.js
     echo "FX11 run $n begin t=$(up)"

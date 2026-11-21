@@ -11,8 +11,8 @@ import bench_parse as parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-DEFAULT_RAW = "/root/jarvis/data/projects_kb/orientos/reports/bench-raw-20261121-27e83af1b"
-DEFAULT_REPORT = "/root/jarvis/data/projects_kb/orientos/reports/bench-raw-20261121-27e83af1b/report.md"
+DEFAULT_RAW = "/root/jarvis/data/projects_kb/orientos/reports/bench-raw-20261121-949027260"
+DEFAULT_REPORT = "/root/jarvis/data/projects_kb/orientos/reports/bench-raw-20261121-949027260/report.md"
 DEFAULT_OUT = "/root/projects/osum-site/src/data"
 SMP_KEYS = ("smp1", "smp4")
 FIREFOX_ENTRIES = [
@@ -113,7 +113,8 @@ def boot_summary(raw, sources):
         sys.exit("benchfull.log: boot or idle RAM values missing")
     login_ms = [r[0] for r in runs]
     desktop_ms = [r[1] for r in runs]
-    return {
+    unmeasured = sources.get("boot_unmeasured", [])
+    summary = {
         "runs": len(runs),
         "login_s": round(statistics.median(login_ms) / 1000, 2),
         "login_s_range": [round(min(login_ms) / 1000, 2), round(max(login_ms) / 1000, 2)],
@@ -127,7 +128,11 @@ def boot_summary(raw, sources):
         "linux_image_mb": sources["references"]["debian13"]["image_mb"],
         "paired": sources["references"].get("paired", False),
         "vm": "QEMU KVM, 2 vCPU, 1536 MB, AHCI, -kernel direct",
+        "unmeasured": unmeasured,
     }
+    for key in unmeasured:
+        summary[key] = None
+    return summary
 
 
 def firefox_summary(entries):
