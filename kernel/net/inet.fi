@@ -39,7 +39,7 @@ export { is_loopback, arp_flush, arp_ask, echoes, EPHEMERAL_BASE, EPHEMERAL_MASK
     sock_acceptable, sock_hup,
     sock_nonblock, sock_set_nonblock, sock_put_nonblock, sock_tmo, sock_set_tmo, TMO_MASK,
     SK_FREE, SK_TCP, SK_UDP, SK_ICMP, SOCK_MAX,
-    SF_LISTEN, SF_NONBLOCK, SF_CONNECTED, SF_KEEPALIVE, SF_LOOPBIND, sock_mark_loopback,
+    SF_LISTEN, SF_NONBLOCK, SF_CONNECTED, SF_KEEPALIVE, SF_LOOPBIND, SF_LOOPCONN, sock_mark_loopback,
     sock_ka_set, sock_ka_get, KA_ON, KA_IDLE, KA_INTVL, KA_CNT, sock_stale
 , dhcp_set, dhcp_get}
 
@@ -72,6 +72,7 @@ const S_ARPSUP: u64 = 0x3C8
 const S_ARPTGT: u64 = 0x3D0
 const S_ARPTICK: u64 = 0x3D8
 const S_LOOPONLY: u64 = 0x3E0
+const S_LOOPBOOT: u64 = 0x3E8
 
 const TXK_ARP: u64 = 0
 const TXK_ICMP: u64 = 1
@@ -112,6 +113,7 @@ const SF_NONBLOCK: u64 = 2
 const SF_CONNECTED: u64 = 4
 const SF_KEEPALIVE: u64 = 8
 const SF_LOOPBIND: u64 = 16
+const SF_LOOPCONN: u64 = 32
 const LOOPBACK_ADDR: u64 = 0x7F000001
 const KA_MASK: u64 = 0x1FFFFFFFFF08
 const KA_IDLE_DEF: u64 = 7200
@@ -414,10 +416,37 @@ const LOOP_PREFIX_MASK: u64 = 0xFF000000
 const LOOP_MAC_LAST: u64 = 1
 const LOOP_MAC_FIRST: u64 = 2
 
+fn claim_loopback_boot(state: u64) -> bool {
+    let flags: u64 = hold(state)
+    var won: bool = false
+    if kstate.get(state, sc(S_LOOPBOOT)) == 0 && !stack_up(state) {
+        kstate.set(state, sc(S_LOOPBOOT), 1)
+        won = true
+    }
+    drop_lock(state, flags)
+    return won
+}
+
+fn wait_loopback_boot(state: u64) -> bool {
+    while kstate.get(state, sc(S_LOOPBOOT)) != 0 && !stack_up(state) {
+        sched.yield_now(state)
+    }
+    return stack_up(state)
+}
+
 fn loopback_up(state: u64) -> bool {
     if stack_up(state) {
         return true
     }
+    if !claim_loopback_boot(state) {
+        return wait_loopback_boot(state)
+    }
+    let up: bool = loopback_boot(state)
+    kstate.set(state, sc(S_LOOPBOOT), 0)
+    return up
+}
+
+fn loopback_boot(state: u64) -> bool {
     if !alloc_stack(state) {
         return false
     }
@@ -1274,6 +1303,18 @@ fn sock_listen(state: u64, i: u64, backlog: u64) -> u64 {
     return 0
 }
 
+fn dialed_via_loopback(state: u64, client_port: u64) -> bool {
+    var j: u64 = 0
+    while j < SOCK_MAX {
+        if sock_kind(state, j) == SK_TCP && (sock_flags(state, j) & SF_LOOPCONN) != 0
+            && lport_of(state, j) == client_port {
+            return true
+        }
+        j = j + 1
+    }
+    return false
+}
+
 fn sock_accept(state: u64, i: u64) -> u64 {
     if sock_kind(state, i) != SK_TCP {
         return errno.neg(errno.E_OPNOTSUPP)
@@ -1305,6 +1346,9 @@ fn sock_accept(state: u64, i: u64) -> u64 {
     let aip: u64 = tcp.tcp_peer_ip(t2, h) as u64
     let apt: u64 = tcp.tcp_peer_port(t2, h) as u64
     drop_lock(state, f3)
+    if dialed_via_loopback(state, apt) || (sock_flags(state, i) & SF_LOOPBIND) != 0 {
+        kstate.set(state, so_at(n) + SO_FLAGS, sock_flags(state, n) | SF_LOOPCONN)
+    }
     kstate.set(state, so_at(n) + SO_PORT, alp)
     netmon.sset(state, n, netmon.S_LPORT, alp)
     netmon.sset(state, n, netmon.S_RADDR, aip)
@@ -1506,6 +1550,9 @@ fn sock_connect(state: u64, i: u64, addr: u64, port: u64) -> u64 {
         return errno.neg(errno.E_NFILE)
     }
     h_store(state, i, h as u64, ep)
+    if is_loopback(addr) {
+        kstate.set(state, so_at(i) + SO_FLAGS, sock_flags(state, i) | SF_LOOPCONN)
+    }
     ka_apply(state, i)
     let f2: u64 = hold(state)
     let t: *mut tcp.Tcp = stack.net_tcp(st(state))
@@ -1837,7 +1884,14 @@ fn loop_view(state: u64, addr: u64) -> u64 {
 
 fn sock_peer(state: u64, i: u64, addr: *mut u64, port: *mut u64) -> u64 {
     let r: u64 = sock_peer_raw(state, i, addr, port)
-    if !errno.is_error(r) {
+    if errno.is_error(r) {
+        return r
+    }
+    if sock_kind(state, i) == SK_TCP {
+        if (sock_flags(state, i) & SF_LOOPCONN) != 0 && *addr == ip(state) {
+            *addr = LOOPBACK_ADDR
+        }
+    } else {
         *addr = loop_view(state, *addr)
     }
     return r
@@ -1872,9 +1926,9 @@ fn sock_peer_raw(state: u64, i: u64, addr: *mut u64, port: *mut u64) -> u64 {
 fn sock_local(state: u64, i: u64, addr: *mut u64, port: *mut u64) -> u64 {
     *addr = ip(state)
     *port = lport_of(state, i)
-    if (sock_flags(state, i) & SF_LOOPBIND) != 0 {
+    if (sock_flags(state, i) & (SF_LOOPBIND | SF_LOOPCONN)) != 0 {
         *addr = LOOPBACK_ADDR
-    } else if sock_connected_to_self(state, i) {
+    } else if sock_kind(state, i) != SK_TCP && sock_connected_to_self(state, i) {
         *addr = LOOPBACK_ADDR
     }
     if sock_kind(state, i) == SK_TCP {
@@ -1926,7 +1980,10 @@ fn sock_close(state: u64, i: u64) {
     let h: u64 = sock_handle(state, i)
     if h != NOHANDLE {
         let flags: u64 = hold(state)
-        if k == SK_TCP {
+        if k == SK_TCP && (sock_flags(state, i) & SF_LISTEN) != 0 {
+            tcporphan.reap_unaccepted(st(state), h as i32)
+            stack.net_close(st(state), h as i32)
+        } else if k == SK_TCP {
             stack.net_close(st(state), h as i32)
             tcporphan.add(h & H_MASK, now_us(state))
         } else if k == SK_UDP {

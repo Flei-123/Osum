@@ -232,12 +232,101 @@ static void blocking_send_full(void)
     close(done[1]);
 }
 
+static void stale_child_after_listener_close(void)
+{
+    int l = make_listener(PORT + 6);
+    if (l < 0) {
+        GAP("stale_listen", "errno=%d", errno);
+        return;
+    }
+    int c = dial(PORT + 6);
+    close(c);
+    close(l);
+    int l2 = make_listener(PORT + 7);
+    int c2 = dial(PORT + 7);
+    int a = accept(l2, 0, 0);
+    char buf[8];
+    CHECK("stale_child_not_inherited", a >= 0 && write(c2, "live", 4) == 4 && read_full(a, buf, 4) == 4 && memcmp(buf, "live", 4) == 0, "a=%d errno=%d", a, errno);
+    struct pollfd p = { l2, POLLIN, 0 };
+    CHECK("stale_listener_queue_empty", poll(&p, 1, 0) == 0, "revents=%d", p.revents);
+    if (a >= 0) close(a);
+    close(c2);
+    close(l2);
+}
+
+static int any_listener(int port)
+{
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    int l = socket(AF_INET, SOCK_STREAM, 0);
+    if (l < 0) return -1;
+    if (bind(l, (struct sockaddr *)&a, sizeof a) != 0 || listen(l, 4) != 0) {
+        close(l);
+        return -1;
+    }
+    return l;
+}
+
+static int dial_ip(const char *ip, int port)
+{
+    struct sockaddr_in a = loop_addr(port);
+    inet_pton(AF_INET, ip, &a.sin_addr);
+    int c = socket(AF_INET, SOCK_STREAM, 0);
+    if (c < 0) return -1;
+    if (connect(c, (struct sockaddr *)&a, sizeof a) != 0) {
+        close(c);
+        return -1;
+    }
+    return c;
+}
+
+static int name_is(int fd, int peer, const char *ip)
+{
+    struct sockaddr_in a;
+    socklen_t len = sizeof a;
+    int r = peer ? getpeername(fd, (struct sockaddr *)&a, &len) : getsockname(fd, (struct sockaddr *)&a, &len);
+    char text[32];
+    return r == 0 && inet_ntop(AF_INET, &a.sin_addr, text, sizeof text) && strcmp(text, ip) == 0;
+}
+
+static void accepted_names(void)
+{
+    int l = any_listener(PORT + 8);
+    if (l < 0) {
+        GAP("accnames_listen", "errno=%d", errno);
+        return;
+    }
+    int c = dial_ip("127.0.0.1", PORT + 8);
+    int a = c >= 0 ? accept(l, 0, 0) : -1;
+    CHECK("accnames_loop_accepted_peer", a >= 0 && name_is(a, 1, "127.0.0.1"), "a=%d", a);
+    CHECK("accnames_loop_accepted_local", a >= 0 && name_is(a, 0, "127.0.0.1"), "a=%d", a);
+    if (a >= 0) close(a);
+    if (c >= 0) close(c);
+    int c2 = dial_ip("10.0.2.15", PORT + 8);
+    int a2 = c2 >= 0 ? accept(l, 0, 0) : -1;
+    if (c2 < 0) {
+        GAP("accnames_ip_connect", "errno=%d", errno);
+        close(l);
+        return;
+    }
+    CHECK("accnames_ip_accepted_peer", a2 >= 0 && name_is(a2, 1, "10.0.2.15"), "a=%d", a2);
+    CHECK("accnames_ip_accepted_local", a2 >= 0 && name_is(a2, 0, "10.0.2.15"), "a=%d", a2);
+    CHECK("accnames_ip_client_peer", name_is(c2, 1, "10.0.2.15"), "c=%d", c2);
+    if (a2 >= 0) close(a2);
+    close(c2);
+    close(l);
+}
+
 int main(void)
 {
+    accepted_names();
     blocking_send_full();
     echo_roundtrip();
     bulk_transfer();
     refused_and_nonblocking();
     names_and_udp();
+    stale_child_after_listener_close();
     return 0;
 }

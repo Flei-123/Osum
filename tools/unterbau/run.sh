@@ -32,6 +32,7 @@ KVM=(); [ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)
 [ -z "${NOKVM:-}" ] || KVM=()
 SMP=${SMP:-1}
 SMP_t_nopie_stress=${SMP_t_nopie_stress:-4}
+SMP_t_loopboot=${SMP_t_loopboot:-4}
 TMO=${TMO:-150}
 export FIRNLIB="$ROOT/lib"
 

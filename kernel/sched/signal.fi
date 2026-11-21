@@ -14,6 +14,7 @@ import libc.regio
 import sched.ptrace
 import sched.ptstate
 import sched.sigrestart
+import sched.sigchldinfo
 import sched.sigsysinfo
 
 export {
@@ -468,7 +469,7 @@ fn send(state: u64, task: u64, sig: u64) -> bool {
     return send_task(state, task, sig)
 }
 
-fn exiting(state: u64, task: u64) {
+fn exiting(state: u64, task: u64, cld_code: u64, status: u64) {
     let p: u64 = taskslot.tget(state, task, taskconst.T_PARENT)
     if p >= kstate.MAX_TASKS || p == task {
         return
@@ -476,6 +477,8 @@ fn exiting(state: u64, task: u64) {
     if taskslot.tget(state, p, taskconst.T_KIND) != taskconst.K_USER {
         return
     }
+    sigchldinfo.put(p, taskslot.tget(state, task, taskconst.T_PID),
+        taskslot.tget(state, task, taskconst.T_UID), cld_code, status & 255)
     send_task(state, p, SIGCHLD)
 }
 
@@ -698,6 +701,11 @@ fn deliver(state: u64, task: u64, sig: u64, ctx: u64, restart_nr: u64) -> bool {
         info_addr = sigsysinfo.ip_of(task)
         poke64(state, task, base + SF_INFO + SI_CALL_NR_OFF, sigsysinfo.nr_of(task) | (AUDIT_ARCH_X86_64 << 32))
     }
+    if sig == SIGCHLD && sigchldinfo.take(task) {
+        code = sigchldinfo.code_of(task)
+        info_addr = sigchldinfo.pid_uid_of(task)
+        poke64(state, task, base + SF_INFO + sigchldinfo.SI_STATUS_OFF, sigchldinfo.status_of(task))
+    }
     poke64(state, task, base + SF_INFO, sig | (info_errno << 32))
     poke64(state, task, base + SF_INFO + 8, code)
     poke64(state, task, base + SF_INFO + 16, info_addr)
@@ -737,7 +745,7 @@ fn do_default(state: u64, task: u64, sig: u64) -> bool {
     if what == D_STOP {
         taskslot.tset(state, task, taskconst.T_STOPSIG, sig)
         kstate.add(state, kstate.SIG_STOPS, 1)
-        exiting(state, task)
+        exiting(state, task, sigchldinfo.CLD_STOPPED, sig)
         sched.wake_pid(state, taskslot.tget(state, task, taskconst.T_PID))
         sched.stop_sleep(state, bit(SIGCONT))
         return true
@@ -763,7 +771,11 @@ fn do_default(state: u64, task: u64, sig: u64) -> bool {
     if !sched.kill_requested(state, task) {
         sched.kill_group(state, task, 128 + sig)
     }
-    exiting(state, task)
+    if forced_plain {
+        exiting(state, task, sigchldinfo.CLD_EXITED, taskslot.tget(state, task, taskconst.T_KILLCODE))
+    } else {
+        exiting(state, task, sigchldinfo.CLD_KILLED, sig)
+    }
     var code: u64 = 128 + sig
     let forced: u64 = taskslot.tget(state, task, taskconst.T_KILLCODE)
     if forced != 0 {
