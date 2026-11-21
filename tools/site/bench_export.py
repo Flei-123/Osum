@@ -11,8 +11,8 @@ import bench_parse as parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-DEFAULT_RAW = "/root/jarvis/data/projects_kb/orientos/reports/bench-raw-20261121-ac2350222"
-DEFAULT_REPORT = "/root/jarvis/data/projects_kb/orientos/reports/bench-raw-20261121-ac2350222/report.md"
+DEFAULT_RAW = "/root/jarvis/data/projects_kb/orientos/reports/bench-raw-20261121-25bc00da8"
+DEFAULT_REPORT = "/root/jarvis/data/projects_kb/orientos/reports/bench-raw-20261121-25bc00da8/report.md"
 DEFAULT_OUT = "/root/projects/osum-site/src/data"
 SMP_KEYS = ("smp1", "smp4")
 FIREFOX_ENTRIES = [
