@@ -66,4 +66,11 @@ efi_call:
     popq %rbp
     ret
 
+    .globl osboot_tsc
+osboot_tsc:
+    rdtsc
+    shlq $32, %rdx
+    orq %rdx, %rax
+    ret
+
     .include "handoff.s"

@@ -26,7 +26,7 @@ osb_prepare() {
     fi
     mcopy -i "$dir/limine.img@@$OSB_OFF" -o "$dir/limine.conf" ::limine.conf || return 1
     python3 tools/bootloader/mkcfg.py "$dir/limine.conf" "$dir/osboot.cfg" --timeout 0 --logo /osboot.logo > /dev/null || return 1
-    python3 tools/bootloader/mklogo.py assets/marke/start-quelle.png "$dir/osboot.logo" > /dev/null || return 1
+    python3 tools/bootloader/mklogo.py assets/marke/signet-1024.png "$dir/osboot.logo" > /dev/null || return 1
     mcopy -i "$dir/stick.img@@$OSB_OFF" -o "$dir/osboot.logo" ::osboot.logo || return 1
     mcopy -i "$dir/stick.img@@$OSB_OFF" -o "$dir/BOOTX64.EFI" ::EFI/BOOT/BOOTX64.EFI || return 1
     mcopy -i "$dir/stick.img@@$OSB_OFF" -o "$dir/osboot.cfg" ::osboot.cfg
@@ -90,7 +90,7 @@ osb_start() {
     qemu-system-x86_64 "${OSB_KVM[@]}" -machine "$mach" -m 2048 -smp 2 \
         -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OSB_CODE" \
         -drive "if=pflash,format=raw,unit=1,file=$dir/$name.vars" \
-        -drive "file=$dir/$name.img,format=raw,if=none,id=stick" $(osb_bus "$bus") \
+        -drive "file=$dir/$name.img,format=raw,if=none,id=stick${OSB_DRIVE_OPTS:-}" $(osb_bus "$bus") ${OSB_QEMU_EXTRA:-} \
         -serial "file:$dir/$name.txt" -monitor "unix:$dir/$name.mon,server,nowait" \
         -display none -no-reboot -pidfile "$dir/$name.pid" &
     local i=0
@@ -136,7 +136,7 @@ bios_prepare() {
     mcopy -i "$dir/stick.img@@$OSB_OFF" ::limine.conf "$dir/limine.conf" || return 1
     sed -i 's/^timeout: .*/timeout: 0/' "$dir/limine.conf"
     python3 tools/bootloader/mkcfg.py "$dir/limine.conf" "$dir/osboot.cfg" --timeout 0 > /dev/null || return 1
-    python3 tools/bootloader/mklogo.py assets/marke/start-quelle.png "$dir/osboot.logo" > /dev/null || return 1
+    python3 tools/bootloader/mklogo.py assets/marke/signet-1024.png "$dir/osboot.logo" > /dev/null || return 1
     mcopy -i "$dir/stick.img@@$OSB_OFF" -o "$dir/osboot.logo" ::osboot.logo || return 1
 }
 

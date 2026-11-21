@@ -1,0 +1,97 @@
+import mem
+import ctx
+import efi
+import con
+import mbcore
+
+export { start, now, add_read, report, append_word }
+
+extern fn osboot_tsc() -> u64;
+
+const CALIBRATE_US: u64 = 5000
+const US_PER_MS: u64 = 1000
+const MIB: u64 = 1048576
+const DEC_DIGITS: u64 = 20
+
+fn now() -> u64 {
+    return osboot_tsc()
+}
+
+fn start(c: u64) {
+    let a: u64 = now()
+    efi.stall(c, CALIBRATE_US)
+    let b: u64 = now()
+    mem.set64(c + ctx.C_TSC_PER_MS, (b - a) * US_PER_MS / CALIBRATE_US)
+    mem.set64(c + ctx.C_T_START, a)
+}
+
+fn to_ms(c: u64, cycles: u64) -> u64 {
+    let per: u64 = mem.get64(c + ctx.C_TSC_PER_MS)
+    if per == 0 {
+        return 0
+    }
+    return cycles / per
+}
+
+fn add_read(c: u64, t0: u64, bytes: u64) {
+    mem.set64(c + ctx.C_READ_TSC, mem.get64(c + ctx.C_READ_TSC) + (now() - t0))
+    mem.set64(c + ctx.C_READ_BYTES, mem.get64(c + ctx.C_READ_BYTES) + bytes)
+}
+
+fn read_ms(c: u64) -> u64 {
+    return to_ms(c, mem.get64(c + ctx.C_READ_TSC))
+}
+
+fn total_ms(c: u64) -> u64 {
+    return to_ms(c, now() - mem.get64(c + ctx.C_T_START))
+}
+
+fn report(c: u64) {
+    var s_read: [u8; 14] = "osboot: read \0"
+    var s_mib: [u8; 9] = " MiB in \0"
+    var s_total: [u8; 19] = " ms, loader total \0"
+    var s_ms: [u8; 5] = " ms\n\0"
+    var s_frames: [u8; 16] = "osboot: frames \0"
+    var s_nl: [u8; 2] = "\n\0"
+    con.say(c, (&s_read[0]) as u64)
+    con.say_num(c, mem.get64(c + ctx.C_READ_BYTES) / MIB)
+    con.say(c, (&s_mib[0]) as u64)
+    con.say_num(c, read_ms(c))
+    con.say(c, (&s_total[0]) as u64)
+    con.say_num(c, total_ms(c))
+    con.say(c, (&s_ms[0]) as u64)
+    con.say(c, (&s_frames[0]) as u64)
+    con.say_num(c, mem.get64(c + ctx.C_FRAME))
+    con.say(c, (&s_nl[0]) as u64)
+}
+
+fn put_dec(at: u64, v: u64) -> u64 {
+    var digits: u64 = 1
+    var t: u64 = v
+    while t >= 10 && digits < DEC_DIGITS {
+        t = t / 10
+        digits = digits + 1
+    }
+    var i: u64 = digits
+    t = v
+    while i > 0 {
+        i = i - 1
+        mem.set8(at + i, 48 + t % 10)
+        t = t / 10
+    }
+    return digits
+}
+
+fn append_word(c: u64, mbi: u64) {
+    var buf: [u8; 64] = [0 as u8; 64]
+    let at: u64 = (&buf[0]) as u64
+    var pre: [u8; 7] = " osbl=\0"
+    mem.copy(at, (&pre[0]) as u64, 6)
+    var n: u64 = 6
+    n = n + put_dec(at + n, read_ms(c))
+    mem.set8(at + n, 44)
+    n = n + 1
+    n = n + put_dec(at + n, total_ms(c))
+    mem.set8(at + n, 0)
+    mbcore.append_cmdline(mbi, at)
+}

@@ -656,7 +656,7 @@ BOOT_LOADER_EFI="$LIMINE/BOOTX64.EFI"
 BOOTO=()
 if [ "${OSBOOT:-1}" = 1 ]; then
     bash tools/bootloader/build.sh "$OUT/osboot.efi" > "$OUT/osboot-build.txt" 2>&1 || fehler "osboot build failed"
-    python3 tools/bootloader/mklogo.py assets/marke/start-quelle.png "$OUT/osboot.logo" > /dev/null || fehler "osboot logo conversion failed"
+    python3 tools/bootloader/mklogo.py assets/marke/signet-1024.png "$OUT/osboot.logo" > /dev/null || fehler "osboot logo conversion failed"
     printf 'menu hidden\nkeywait 300\nlogo /osboot.logo\n' > "$OUT/osboot.cfg"
     BOOT_LOADER_EFI="$OUT/osboot.efi"
     bash tools/bootloader/build-bios.sh "$OUT/osboot-bios" > "$OUT/osboot-bios.log" 2>&1 \

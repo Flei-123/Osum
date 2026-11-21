@@ -1,6 +1,7 @@
 import mem
 import ctx
 import efi
+import con
 
 export { init }
 
@@ -22,29 +23,94 @@ fn bits(m: u64) -> u64 {
     return n
 }
 
-fn pick_mode(c: u64, gop: u64) {
-    let want_w: u64 = mem.get64(c + ctx.C_RES_W)
-    let want_h: u64 = mem.get64(c + ctx.C_RES_H)
-    if want_w == 0 {
-        return
+const NO_MODE: u64 = 0xFFFFFFFF
+const FORMAT_LIMIT: u64 = 3
+const EDID_MIN_BYTES: u64 = 128
+const EDID_TIMING_OFFSET: u64 = 54
+const EDID_PIXEL_CLOCK: u64 = 0
+
+fn mode_info(c: u64, gop: u64, index: u64) -> u64 {
+    if efi.call4(mem.get64(gop), gop, index, efi.out_addr(c, 2), efi.out_addr(c, 3)) != 0 {
+        return 0
     }
-    let cur: u64 = mem.get64(gop + 24)
-    let cur_info: u64 = mem.get64(cur + 8)
-    if mem.get32(cur_info + 4) == want_w && mem.get32(cur_info + 8) == want_h && mem.get32(cur_info + 12) < 3 {
-        return
+    let info: u64 = efi.out(c, 3)
+    if mem.get32(info + 12) >= FORMAT_LIMIT {
+        return 0
     }
+    return info
+}
+
+fn find_mode(c: u64, gop: u64, w: u64, h: u64) -> u64 {
     let max: u64 = mem.get32(mem.get64(gop + 24))
     var i: u64 = 0
     while i < max {
-        if efi.call4(mem.get64(gop), gop, i, efi.out_addr(c, 2), efi.out_addr(c, 3)) == 0 {
-            let info: u64 = efi.out(c, 3)
-            if mem.get32(info + 4) == want_w && mem.get32(info + 8) == want_h && mem.get32(info + 12) < 3 {
-                efi.call2(mem.get64(gop + 8), gop, i)
-                return
-            }
+        let info: u64 = mode_info(c, gop, i)
+        if info != 0 && mem.get32(info + 4) == w && mem.get32(info + 8) == h {
+            return i
         }
         i = i + 1
     }
+    return NO_MODE
+}
+
+fn edid_native(c: u64, lo: u64, hi: u64) -> u64 {
+    if efi.call3(efi.bs_fn(c, 320), efi.guid(c, lo, hi), 0, efi.out_addr(c, 4)) != 0 {
+        return 0
+    }
+    let proto: u64 = efi.out(c, 4)
+    let data: u64 = mem.get64(proto + 8)
+    if mem.get32(proto) < EDID_MIN_BYTES || data == 0 {
+        return 0
+    }
+    let timing: u64 = data + EDID_TIMING_OFFSET
+    if mem.get16(timing + EDID_PIXEL_CLOCK) == 0 {
+        return 0
+    }
+    let w: u64 = mem.get8(timing + 2) | ((mem.get8(timing + 4) & 0xF0) << 4)
+    let h: u64 = mem.get8(timing + 5) | ((mem.get8(timing + 7) & 0xF0) << 4)
+    return (w << 16) | h
+}
+
+fn native_size(c: u64) -> u64 {
+    let active: u64 = edid_native(c, 0x44ec9f36bd8c1056, 0x8679817f33a6a892)
+    if active != 0 {
+        return active
+    }
+    return edid_native(c, 0x41fad3801c0c34f6, 0xaa661a6cd08a49a0)
+}
+
+fn pick_mode(c: u64, gop: u64) {
+    let cur: u64 = mem.get64(gop + 24)
+    var want_w: u64 = mem.get64(c + ctx.C_RES_W)
+    var want_h: u64 = mem.get64(c + ctx.C_RES_H)
+    let automatic: bool = want_w == 0
+    if automatic {
+        let native: u64 = native_size(c)
+        want_w = native >> 16
+        want_h = native & 0xFFFF
+    }
+    var target: u64 = NO_MODE
+    if want_w != 0 {
+        target = find_mode(c, gop, want_w, want_h)
+    }
+    if target == NO_MODE || target == mem.get32(cur + 4) {
+        return
+    }
+    efi.call2(mem.get64(gop + 8), gop, target)
+}
+
+fn report(c: u64) {
+    var s_gop: [u8; 13] = "osboot: gop \0"
+    var s_x: [u8; 2] = "x\0"
+    var s_modes: [u8; 10] = ", modes: \0"
+    var s_nl: [u8; 2] = "\n\0"
+    con.say(c, (&s_gop[0]) as u64)
+    con.say_num(c, mem.get64(c + ctx.C_SW))
+    con.say(c, (&s_x[0]) as u64)
+    con.say_num(c, mem.get64(c + ctx.C_SH))
+    con.say(c, (&s_modes[0]) as u64)
+    con.say_num(c, mem.get32(mem.get64(mem.get64(c + ctx.C_GOP) + 24)))
+    con.say(c, (&s_nl[0]) as u64)
 }
 
 fn init(c: u64) -> bool {
@@ -80,5 +146,6 @@ fn init(c: u64) -> bool {
     mem.set64(c + ctx.C_RBITS, bits(r))
     mem.set64(c + ctx.C_GBITS, bits(g))
     mem.set64(c + ctx.C_BBITS, bits(b))
+    report(c)
     return true
 }

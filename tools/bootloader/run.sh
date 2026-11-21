@@ -22,6 +22,8 @@ login_case() {
     grep -aq "EXCEPTION\|kernel halted\|panic:" "$t" && bad "$label: fault: $(grep -a 'EXCEPTION\|kernel halted\|panic:' "$t" | head -1)" || ok "$label: no fault line"
     grep -aq "^smp: cpus=[0-9]*  acpi=1" "$t" && ok "$label: ACPI found via copied RSDP" || bad "$label: smp: acpi=1 missing"
     grep -aq "osum: mount=1" "$t" && ok "$label: root mounted from module" || bad "$label: osum: mount=1 missing"
+    grep -aq "osboot: read [0-9]* MiB in [0-9]* ms, loader total [0-9]* ms" "$t" && ok "$label: loader timing line: $(grep -a 'osboot: read' "$t" | head -1 | tr -d '\r')" || bad "$label: loader timing line missing"
+    grep -aq "osboot: gop [0-9]*x[0-9]*, modes: " "$t" && ok "$label: GOP mode logged: $(grep -a 'osboot: gop' "$t" | head -1 | tr -d '\r')" || bad "$label: GOP mode line missing"
     grep -aq "$LOGIN" "$t" && ok "$label: login screen reached (${OSB_MS} ms)" || bad "$label: login screen not reached"
     grep -aq "Boot entries" "$t" && bad "$label: menu shown without a key" || ok "$label: no menu without a key"
 }
@@ -86,22 +88,52 @@ grep -aq "kernel not found: /missing.mb" "$D/fb.txt" && ok "fallback: error repo
 grep -aq "Boot entries" "$D/fb.txt" && ok "fallback: menu shown after the failure" || bad "fallback: no menu"
 grep -aq "$LOGIN" "$D/fb.txt" && ok "fallback: second entry reached login" || bad "fallback: login not reached"
 
-echo "== splash: logo pixels, spinner, no menu =="
-python3 tools/bootloader/mkcfg.py "$D/limine.conf" "$D/hold.cfg" --timeout 0 --keywait 12000 --logo /osboot.logo > /dev/null
-osb_with_cfg "$D" hold "$D/hold.cfg"
-osb_start "$D" hold "$D/hold.base" q35 ehci
-if osb_wait_text "$D" hold "osboot" 60; then
-    sleep 4
-    osb_shot "$D" hold shotA
+splash_case() {
+    local name=$1 res=$2 label=$3
+    echo "== splash $label: logo pixels, sharpness, spinner, no menu =="
+    python3 tools/bootloader/mkcfg.py "$D/limine.conf" "$D/$name.cfg" --timeout 0 --keywait 12000 --logo /osboot.logo ${res:+--resolution $res} > /dev/null
+    osb_with_cfg "$D" "$name" "$D/$name.cfg"
+    osb_start "$D" "$name" "$D/$name.base" q35 ehci
+    if osb_wait_text "$D" "$name" "osboot" 60; then
+        sleep 4
+        osb_shot "$D" "$name" "${name}A"
+        sleep 1
+        osb_shot "$D" "$name" "${name}B"
+        [ -z "$res" ] || { grep -aq "osboot: gop $res," "$D/$name.txt" && ok "splash $label: GOP mode $res selected" || bad "splash $label: GOP mode $res not selected"; }
+        python3 -I tools/bootloader/shotcheck.py logo "$D/${name}A.ppm" "$D/osboot.logo" && ok "splash $label: logo centered, scaled to the screen height" || bad "splash $label: logo pixels do not match"
+        python3 -I tools/bootloader/shotcheck.py sharp "$D/${name}A.ppm" "$D/osboot.logo" && ok "splash $label: logo edges antialiased (blocky counter-proof rejected)" || bad "splash $label: logo edges not sharp"
+        python3 -I tools/bootloader/shotcheck.py spinner "$D/${name}A.ppm" "$D/osboot.logo" "$D/${name}B.ppm" && ok "splash $label: spinner drawn and animated" || bad "splash $label: spinner missing or frozen"
+        grep -aq "Boot entries" "$D/$name.txt" && bad "splash $label: menu visible without key" || ok "splash $label: no menu without key"
+    else
+        bad "splash $label: osboot did not start"
+    fi
+    osb_stop "$D" "$name"
+}
+
+splash_case hold "" "default mode"
+splash_case holdhi 1920x1080 "1920x1080"
+splash_case holdlo 1024x768 "1024x768"
+
+echo "== splash: spinner keeps moving while the kernel is read (throttled disk) =="
+python3 tools/bootloader/mkcfg.py "$D/limine.conf" "$D/live.cfg" --timeout 0 --logo /osboot.logo > /dev/null
+osb_with_cfg "$D" live "$D/live.cfg"
+OSB_DRIVE_OPTS=",throttling.bps-read=3000000" osb_start "$D" live "$D/live.base" q35 ehci
+if osb_wait_text "$D" live "osboot" 60; then
     sleep 1
-    osb_shot "$D" hold shotB
-    python3 -I tools/bootloader/shotcheck.py logo "$D/shotA.ppm" "$D/osboot.logo" && ok "splash: logo pixels centered and exact" || bad "splash: logo pixels do not match"
-    python3 -I tools/bootloader/shotcheck.py spinner "$D/shotA.ppm" "$D/osboot.logo" "$D/shotB.ppm" && ok "splash: spinner drawn and animated" || bad "splash: spinner missing or frozen"
-    grep -aq "Boot entries" "$D/hold.txt" && bad "splash: menu visible without key" || ok "splash: no menu without key"
+    osb_shot "$D" live l1
+    osb_shot "$D" live l2
+    osb_shot "$D" live l3
+    grep -aq "osboot: read" "$D/live.txt" && bad "live spinner: kernel read finished before the shots" || ok "live spinner: shots taken while the kernel was being read"
+    python3 -I tools/bootloader/shotcheck.py live "$D/l1.ppm,$D/l2.ppm,$D/l3.ppm" "$D/osboot.logo" && ok "live spinner: moved between all shots during the read" || bad "live spinner: frozen during the read"
+    python3 -I tools/bootloader/shotcheck.py live "$D/l1.ppm,$D/l1.ppm,$D/l1.ppm" "$D/osboot.logo" && bad "live spinner: identical shots accepted as moving" || ok "live spinner: counter-proof, identical shots rejected"
+    osb_wait_text "$D" live "osboot: frames" 90
+    frames=$(grep -a "osboot: frames" "$D/live.txt" | tail -1 | sed 's/.*frames //')
+    total=$(grep -a "osboot: read" "$D/live.txt" | tail -1 | sed 's/.*total //; s/ ms//')
+    [ -n "$frames" ] && [ -n "$total" ] && [ "$frames" -ge $((total / 160)) ] && ok "live spinner: $frames frames in $total ms of loading" || bad "live spinner: too few frames (${frames:-?} in ${total:-?} ms)"
 else
-    bad "splash: osboot did not start"
+    bad "live spinner: osboot did not start"
 fi
-osb_stop "$D" hold
+osb_stop "$D" live
 
 echo "== Esc opens the menu, Enter boots =="
 osb_start "$D" esc "$D/hold.base" q35 ehci

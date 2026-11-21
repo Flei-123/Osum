@@ -3,18 +3,55 @@ import ctx
 
 export { set_logo, paint, hide, step, active }
 
-const LOGO_MAGIC: u64 = 0x314C424F
+const LOGO_MAGIC_V1: u64 = 0x314C424F
+const LOGO_MAGIC_V2: u64 = 0x324C424F
 const LOGO_HEADER: u64 = 12
-const EVT_TIMER: u64 = 0x80000000
+const LOGO_MAX_SIDE: u64 = 2048
+const REF_HEIGHT: u64 = 1080
+const LOGO_REF_SIZE: u64 = 176
+const GAP_REF: u64 = 48
+const SPIN_BOX_REF: u64 = 40
+const SPIN_HALF_REF: u64 = 16
+const DOT_RADIUS_REF: u64 = 3
+const SUBPIXEL: u64 = 16
+const SAMPLE_STEP: u64 = 4
+const SAMPLE_OFFSET: u64 = 2
+const SAMPLE_COUNT: u64 = 16
+const AREA_ONE: u64 = 256
+const AREA_SHIFT: u64 = 8
+const DOT_COUNT: u64 = 8
+const LEVEL_MAX: u64 = 255
+const LEVEL_STEP: u64 = 30
 const DOT_X: u64 = 0x050005101B201B10
 const DOT_Y: u64 = 0x05101B201B100500
 
-fn scale(c: u64) -> u64 {
-    let s: u64 = (mem.get64(c + ctx.C_SH) + 540) / 1080
-    if s == 0 {
-        return 1
+fn min64(a: u64, b: u64) -> u64 {
+    if a < b {
+        return a
     }
-    return s
+    return b
+}
+
+fn max64(a: u64, b: u64) -> u64 {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+fn abs_diff(a: u64, b: u64) -> u64 {
+    if a >= b {
+        return a - b
+    }
+    return b - a
+}
+
+fn unit(c: u64, n: u64) -> u64 {
+    return max64(1, n * mem.get64(c + ctx.C_SH) / REF_HEIGHT)
+}
+
+fn unit_sub(c: u64, n: u64) -> u64 {
+    return n * mem.get64(c + ctx.C_SH) * SUBPIXEL / REF_HEIGHT
 }
 
 fn pack(c: u64, r: u64, g: u64, b: u64) -> u64 {
@@ -30,13 +67,18 @@ fn put(c: u64, x: u64, y: u64, v: u64) {
 fn fill_screen(c: u64, v: u64) {
     let w: u64 = mem.get64(c + ctx.C_SW)
     let h: u64 = mem.get64(c + ctx.C_SH)
+    let pairs: u64 = w / 2
+    let both: u64 = v | (v << 32)
     var y: u64 = 0
     while y < h {
-        var x: u64 = 0
         let row: u64 = mem.get64(c + ctx.C_FB) + y * mem.get64(c + ctx.C_PITCH) * 4
-        while x < w {
-            mem.set32(row + x * 4, v)
+        var x: u64 = 0
+        while x < pairs {
+            mem.set64(row + x * 8, both)
             x = x + 1
+        }
+        if (w & 1) != 0 {
+            mem.set32(row + (w - 1) * 4, v)
         }
         y = y + 1
     }
@@ -59,23 +101,40 @@ fn logo_h(c: u64) -> u64 {
 }
 
 fn set_logo(c: u64, buf: u64, size: u64) -> bool {
-    if buf == 0 || size < LOGO_HEADER || mem.get32(buf) != LOGO_MAGIC {
+    if buf == 0 || size < LOGO_HEADER {
+        return false
+    }
+    let magic: u64 = mem.get32(buf)
+    if magic != LOGO_MAGIC_V1 && magic != LOGO_MAGIC_V2 {
         return false
     }
     let w: u64 = mem.get32(buf + 4)
     let h: u64 = mem.get32(buf + 8)
-    if w == 0 || h == 0 || w > 2048 || h > 2048 || LOGO_HEADER + w * h * 4 > size {
+    if w == 0 || h == 0 || w > LOGO_MAX_SIDE || h > LOGO_MAX_SIDE || LOGO_HEADER + w * h * 4 > size {
         return false
     }
     mem.set64(c + ctx.C_LOGO, buf)
     return true
 }
 
+fn logo_dest_h(c: u64) -> u64 {
+    if logo_h(c) == 0 {
+        return 0
+    }
+    return unit(c, LOGO_REF_SIZE)
+}
+
+fn logo_dest_w(c: u64) -> u64 {
+    if logo_h(c) == 0 {
+        return 0
+    }
+    return max64(1, logo_w(c) * logo_dest_h(c) / logo_h(c))
+}
+
 fn block_top(c: u64) -> u64 {
-    let sc: u64 = scale(c)
-    var total: u64 = 40 * sc
+    var total: u64 = unit(c, SPIN_BOX_REF)
     if logo_h(c) != 0 {
-        total = total + logo_h(c) * sc + 48 * sc
+        total = total + logo_dest_h(c) + unit(c, GAP_REF)
     }
     let sh: u64 = mem.get64(c + ctx.C_SH)
     if total >= sh {
@@ -85,12 +144,44 @@ fn block_top(c: u64) -> u64 {
 }
 
 fn spinner_center_y(c: u64) -> u64 {
-    let sc: u64 = scale(c)
-    var y: u64 = block_top(c) + 20 * sc
+    var y: u64 = block_top(c) + unit(c, SPIN_BOX_REF) / 2
     if logo_h(c) != 0 {
-        y = y + logo_h(c) * sc + 48 * sc
+        y = y + logo_dest_h(c) + unit(c, GAP_REF)
     }
     return y
+}
+
+fn area_pixel(l: u64, w: u64, h: u64, dx: u64, dy: u64, dw: u64, dh: u64) -> u64 {
+    let fx0: u64 = dx * w * AREA_ONE / dw
+    let fx1: u64 = (dx + 1) * w * AREA_ONE / dw
+    let fy0: u64 = dy * h * AREA_ONE / dh
+    let fy1: u64 = (dy + 1) * h * AREA_ONE / dh
+    var sum_r: u64 = 0
+    var sum_g: u64 = 0
+    var sum_b: u64 = 0
+    var total: u64 = 0
+    var sy: u64 = fy0 >> AREA_SHIFT
+    while (sy << AREA_SHIFT) < fy1 && sy < h {
+        let wy: u64 = min64(fy1, (sy + 1) << AREA_SHIFT) - max64(fy0, sy << AREA_SHIFT)
+        var sx: u64 = fx0 >> AREA_SHIFT
+        while (sx << AREA_SHIFT) < fx1 && sx < w {
+            let wx: u64 = min64(fx1, (sx + 1) << AREA_SHIFT) - max64(fx0, sx << AREA_SHIFT)
+            let weight: u64 = wx * wy
+            let p: u64 = l + LOGO_HEADER + (sy * w + sx) * 4
+            let a: u64 = mem.get8(p + 3)
+            sum_r = sum_r + mem.get8(p) * a * weight
+            sum_g = sum_g + mem.get8(p + 1) * a * weight
+            sum_b = sum_b + mem.get8(p + 2) * a * weight
+            total = total + weight
+            sx = sx + 1
+        }
+        sy = sy + 1
+    }
+    if total == 0 {
+        return 0
+    }
+    let div: u64 = total * 255
+    return (sum_r / div) | ((sum_g / div) << 8) | ((sum_b / div) << 16)
 }
 
 fn draw_logo(c: u64) {
@@ -98,72 +189,77 @@ fn draw_logo(c: u64) {
     if l == 0 {
         return
     }
-    let sc: u64 = scale(c)
     let w: u64 = logo_w(c)
     let h: u64 = logo_h(c)
-    let left: u64 = (mem.get64(c + ctx.C_SW) - w * sc) / 2
+    let dw: u64 = logo_dest_w(c)
+    let dh: u64 = logo_dest_h(c)
+    let left: u64 = (mem.get64(c + ctx.C_SW) - dw) / 2
     let top: u64 = block_top(c)
-    var y: u64 = 0
-    while y < h {
-        var x: u64 = 0
-        while x < w {
-            let p: u64 = l + LOGO_HEADER + (y * w + x) * 4
-            let a: u64 = mem.get8(p + 3)
-            if a != 0 {
-                let v: u64 = pack(c, mem.get8(p) * a / 255, mem.get8(p + 1) * a / 255, mem.get8(p + 2) * a / 255)
-                var dy: u64 = 0
-                while dy < sc {
-                    var dx: u64 = 0
-                    while dx < sc {
-                        put(c, left + x * sc + dx, top + y * sc + dy, v)
-                        dx = dx + 1
-                    }
-                    dy = dy + 1
-                }
+    var dy: u64 = 0
+    while dy < dh {
+        var dx: u64 = 0
+        while dx < dw {
+            let px: u64 = area_pixel(l, w, h, dx, dy, dw, dh)
+            if px != 0 {
+                put(c, left + dx, top + dy, pack(c, px & 255, (px >> 8) & 255, (px >> 16) & 255))
             }
-            x = x + 1
+            dx = dx + 1
         }
-        y = y + 1
+        dy = dy + 1
     }
 }
 
-fn draw_dot(c: u64, cx: u64, cy: u64, r: u64, level: u64) {
-    let v: u64 = pack(c, level, level, level)
-    var yy: u64 = 0
-    while yy <= 2 * r {
-        var xx: u64 = 0
-        while xx <= 2 * r {
-            var ax: u64 = 0
-            if xx >= r {
-                ax = xx - r
-            } else {
-                ax = r - xx
+fn dot_coverage(px: u64, py: u64, cx: u64, cy: u64, r: u64) -> u64 {
+    var hit: u64 = 0
+    var sy: u64 = 0
+    while sy < 4 {
+        let y: u64 = py * SUBPIXEL + SAMPLE_OFFSET + sy * SAMPLE_STEP
+        var sx: u64 = 0
+        while sx < 4 {
+            let x: u64 = px * SUBPIXEL + SAMPLE_OFFSET + sx * SAMPLE_STEP
+            let ddx: u64 = abs_diff(x, cx)
+            let ddy: u64 = abs_diff(y, cy)
+            if ddx * ddx + ddy * ddy <= r * r {
+                hit = hit + 1
             }
-            var ay: u64 = 0
-            if yy >= r {
-                ay = yy - r
-            } else {
-                ay = r - yy
-            }
-            if ax * ax + ay * ay <= r * r + 1 {
-                put(c, cx + xx - r, cy + yy - r, v)
-            }
-            xx = xx + 1
+            sx = sx + 1
         }
-        yy = yy + 1
+        sy = sy + 1
+    }
+    return hit
+}
+
+fn draw_dot(c: u64, cx: u64, cy: u64, r: u64, level: u64) {
+    let x0: u64 = (cx - r) / SUBPIXEL
+    let x1: u64 = (cx + r) / SUBPIXEL + 1
+    let y0: u64 = (cy - r) / SUBPIXEL
+    let y1: u64 = (cy + r) / SUBPIXEL + 1
+    var py: u64 = y0
+    while py <= y1 {
+        var px: u64 = x0
+        while px <= x1 {
+            let hit: u64 = dot_coverage(px, py, cx, cy, r)
+            if hit != 0 {
+                let v: u64 = level * hit / SAMPLE_COUNT
+                put(c, px, py, pack(c, v, v, v))
+            }
+            px = px + 1
+        }
+        py = py + 1
     }
 }
 
 fn draw_spinner(c: u64, head: u64) {
-    let sc: u64 = scale(c)
-    let cx: u64 = mem.get64(c + ctx.C_SW) / 2
-    let cy: u64 = spinner_center_y(c)
+    let cx: u64 = mem.get64(c + ctx.C_SW) * SUBPIXEL / 2
+    let cy: u64 = spinner_center_y(c) * SUBPIXEL
+    let half: u64 = unit_sub(c, SPIN_HALF_REF)
+    let radius: u64 = unit_sub(c, DOT_RADIUS_REF)
     var i: u64 = 0
-    while i < 8 {
-        let d: u64 = (head + 8 - i) % 8
-        let ox: u64 = cx - 16 * sc + ((DOT_X >> (i * 8)) & 255) * sc
-        let oy: u64 = cy - 16 * sc + ((DOT_Y >> (i * 8)) & 255) * sc
-        draw_dot(c, ox, oy, 3 * sc, 255 - 30 * d)
+    while i < DOT_COUNT {
+        let d: u64 = (head + DOT_COUNT - i) % DOT_COUNT
+        let ox: u64 = cx + unit_sub(c, (DOT_X >> (i * 8)) & 255) - half
+        let oy: u64 = cy + unit_sub(c, (DOT_Y >> (i * 8)) & 255) - half
+        draw_dot(c, ox, oy, radius, LEVEL_MAX - LEVEL_STEP * d)
         i = i + 1
     }
 }
@@ -191,5 +287,5 @@ fn hide(c: u64) {
 fn step(c: u64) {
     let f: u64 = mem.get64(c + ctx.C_FRAME) + 1
     mem.set64(c + ctx.C_FRAME, f)
-    draw_spinner(c, f % 8)
+    draw_spinner(c, f % DOT_COUNT)
 }
