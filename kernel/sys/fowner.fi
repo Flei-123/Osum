@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.errno
+import fs.file
+import sched.proc.procfault
+import sys.sysconst
+import sys.sysuser
+
+export {
+    F_SETOWN, F_GETOWN, F_SETSIG, F_GETSIG, F_SETOWN_EX, F_GETOWN_EX,
+    set_owner, get_owner, set_owner_ex, get_owner_ex, ioctl_async
+}
+
+const F_SETOWN: u64 = 8
+const F_GETOWN: u64 = 9
+const F_SETSIG: u64 = 10
+const F_GETSIG: u64 = 11
+const F_SETOWN_EX: u64 = 15
+const F_GETOWN_EX: u64 = 16
+
+const OWNER_TID: u64 = 0
+const OWNER_PID: u64 = 1
+const OWNER_PGRP: u64 = 2
+const OWNER_TYPE_SHIFT: u64 = 30
+const OWNER_ID_MASK: u64 = 0x3FFFFFFF
+const OWNER_EX_BYTES: u64 = 8
+const INT_BITS: u64 = 32
+
+fn pack(kind: u64, id: u64) -> u64 {
+    return (kind << OWNER_TYPE_SHIFT) | id
+}
+
+fn sign_extend32(v: u64) -> u64 {
+    let low: u64 = v & 0xFFFFFFFF
+    if (low & 0x80000000) != 0 {
+        return low | 0xFFFFFFFF00000000
+    }
+    return low
+}
+
+fn set_owner(state: u64, of: u64, who: u64) -> u64 {
+    let who64: u64 = sign_extend32(who)
+    if who64 == 0 {
+        file.open_set_owner(state, of, 0)
+        return 0
+    }
+    if (who64 >> 63) != 0 {
+        let pgid: u64 = (0 -% who64) & 0xFFFFFFFF
+        if pgid > OWNER_ID_MASK {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        file.open_set_owner(state, of, pack(OWNER_PGRP, pgid))
+        return 0
+    }
+    if who64 > OWNER_ID_MASK {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    file.open_set_owner(state, of, pack(OWNER_PID, who64))
+    return 0
+}
+
+fn get_owner(state: u64, of: u64) -> u64 {
+    let owner: u64 = file.open_owner(state, of)
+    let id: u64 = owner & OWNER_ID_MASK
+    if (owner >> OWNER_TYPE_SHIFT) == OWNER_PGRP {
+        return sysuser.neg(id)
+    }
+    return id
+}
+
+fn set_owner_ex(state: u64, me: u64, of: u64, arg: u64) -> u64 {
+    if arg == 0 || !procfault.user_ok(state, me, arg, OWNER_EX_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let raw: u64 = sysuser.get64u(state, me, arg)
+    let kind: u64 = raw & 0xFFFFFFFF
+    let id: u64 = raw >> INT_BITS
+    if kind > OWNER_PGRP || id > OWNER_ID_MASK {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    file.open_set_owner(state, of, pack(kind, id))
+    return 0
+}
+
+fn get_owner_ex(state: u64, me: u64, of: u64, arg: u64) -> u64 {
+    if arg == 0 || !procfault.user_ok(state, me, arg, OWNER_EX_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let owner: u64 = file.open_owner(state, of)
+    let kind: u64 = owner >> OWNER_TYPE_SHIFT
+    let id: u64 = owner & OWNER_ID_MASK
+    if !sysuser.put64(state, me, arg, kind | (id << INT_BITS)) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return 0
+}
+
+fn ioctl_async(state: u64, me: u64, of: u64, arg: u64) -> u64 {
+    if arg == 0 || !procfault.user_ok(state, me, arg, 4) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let on: u64 = sysuser.get32(state, me, arg)
+    let flags: u64 = file.open_flags(state, of)
+    if on != 0 {
+        file.open_set_flags(state, of, flags | sysconst.UB_O_ASYNC)
+    } else {
+        file.open_set_flags(state, of, flags & (~sysconst.UB_O_ASYNC))
+    }
+    return 0
+}

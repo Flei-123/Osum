@@ -1,0 +1,340 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.kstate
+import sched.taskslot
+import sched.taskconst
+import sched.time
+import sched.vdso
+import sched.proc.procbase
+import sched.proc.procmap
+import sched.proc.procspace
+import arch.arch
+import libc.regio
+
+export {
+    build, STACK_ENV_MAXN
+}
+
+const PAGE: u64 = 4096
+const STACK_ENV_MAXN: u64 = 64
+const STACK_MIN_PAGES: u64 = 2
+const EXECFN_MAX: u64 = 256
+const TAIL_BYTES: u64 = 16 + 8 + EXECFN_MAX + 32
+
+const AT_NULL: u64 = 0
+const AT_PHDR: u64 = 3
+const AT_PHENT: u64 = 4
+const AT_PHNUM: u64 = 5
+const AT_PAGESZ: u64 = 6
+const AT_BASE: u64 = 7
+const AT_FLAGS: u64 = 8
+const AT_ENTRY: u64 = 9
+const AT_UID: u64 = 11
+const AT_EUID: u64 = 12
+const AT_GID: u64 = 13
+const AT_EGID: u64 = 14
+const AT_PLATFORM: u64 = 15
+const AT_HWCAP: u64 = 16
+const AT_CLKTCK: u64 = 17
+const AT_SECURE: u64 = 23
+const AT_RANDOM: u64 = 25
+const AT_HWCAP2: u64 = 26
+const AT_EXECFN: u64 = 31
+const AT_SYSINFO_EHDR: u64 = 33
+
+const AUXN: u64 = 40
+
+fn word_slot(ft: u64, off: u64) -> u64 {
+    return regio.read64_at(ft, (off / PAGE) * 8) + (off % PAGE)
+}
+
+fn sv_put(ft: u64, at: u64, v: u64) {
+    regio.write64(word_slot(ft, at), v)
+}
+
+fn stack_put8(ft: u64, off: u64, c: u8) {
+    kstate.set8(word_slot(ft, off), c)
+}
+
+fn strings_len(src: u64, count: u64) -> u64 {
+    var total: u64 = 0
+    var k: u64 = 0
+    while k < count {
+        var going: bool = true
+        while going {
+            let c: u64 = kstate.get8(src + total)
+            total = total + 1
+            if c == 0 {
+                going = false
+            }
+        }
+        k = k + 1
+    }
+    return total
+}
+
+fn stack_pages(total: u64) -> u64 {
+    let pages: u64 = (total + PAGE - 1) / PAGE
+    if pages < STACK_MIN_PAGES {
+        return STACK_MIN_PAGES
+    }
+    return pages
+}
+
+fn stack_frame(state: u64, t: u64, page: u64) -> u64 {
+    if procmap.page_free(state, t, page) {
+        if procmap.map_page_zero(state, t, page, true, false) == 0 {
+            return 0
+        }
+    }
+    let frame: u64 = procmap.translate(state, t, page)
+    if frame == 0 {
+        return 0
+    }
+    arch.fill_words(frame, 0, PAGE / 8)
+    return frame
+}
+
+fn map_stack(state: u64, t: u64, base: u64, pages: u64, ft: u64) -> bool {
+    var i: u64 = 0
+    while i < pages {
+        let frame: u64 = stack_frame(state, t, base + i * PAGE)
+        if frame == 0 {
+            return false
+        }
+        regio.write64(ft + i * 8, frame)
+        i = i + 1
+    }
+    return true
+}
+
+fn map_vdso(state: u64, t: u64) -> u64 {
+    let vf: u64 = time.vdso_frame(state)
+    if vf == 0 {
+        return 0
+    }
+    if procmap.translate(state, t, vdso.VDSO_ADDR) == vf {
+        return vdso.VDSO_ADDR
+    }
+    if procmap.map_frame_exec(state, t, vdso.VDSO_ADDR, vf) {
+        return vdso.VDSO_ADDR
+    }
+    return 0
+}
+
+fn build(state: u64, t: u64, args: u64, argc: u64,
+    phdr: u64, phnum: u64, phent: u64, entry: u64, ibase: u64, path: u64) -> u64 {
+    if argc > procbase.MAX_EXEC_ARGS {
+        return 0
+    }
+    let vdso_at: u64 = map_vdso(state, t)
+    let e0: u64 = kstate.get(state, kstate.K11_OFF + kstate.ENV_N)
+    var envc: u64 = e0
+    if envc > STACK_ENV_MAXN {
+        envc = STACK_ENV_MAXN
+    }
+    let envp: u64 = state + kstate.K11_OFF + kstate.ENV_BUF
+    let need: u64 = (1 + argc + 1 + envc + 1 + AUXN) * 8
+    let str_at: u64 = (need + 15) & 0xFFFFFFFFFFFFFFF0
+    if str_at > PAGE {
+        return 0
+    }
+    let total: u64 = str_at + strings_len(args, argc) + strings_len(envp, envc) + TAIL_BYTES
+    let pages: u64 = stack_pages(total)
+    if pages > procbase.EXEC_STACK_PAGES {
+        return 0
+    }
+    let limit: u64 = pages * PAGE
+    let base: u64 = procspace.ARGS_BASE - limit
+    var table: [u64; 48] = [0 as u64; 48]
+    let ft: u64 = (&table[0]) as u64
+    if !map_stack(state, t, base, pages, ft) {
+        return 0
+    }
+    var at: u64 = 0
+    sv_put(ft, at, argc)
+    at = at + 8
+
+    var sp_str: u64 = str_at
+    var k: u64 = 0
+    var src: u64 = args
+    while k < argc {
+        sv_put(ft, at, base + sp_str)
+        at = at + 8
+        var going: bool = true
+        while going {
+            if sp_str >= limit - 24 {
+                return 0
+            }
+            let c: u64 = kstate.get8(src)
+            stack_put8(ft, sp_str, c as u8)
+            sp_str = sp_str + 1
+            src = src + 1
+            if c == 0 {
+                going = false
+            }
+        }
+        k = k + 1
+    }
+    sv_put(ft, at, 0)
+    at = at + 8
+
+    var esrc: u64 = envp
+    var j: u64 = 0
+    while j < envc {
+        sv_put(ft, at, base + sp_str)
+        at = at + 8
+        var going2: bool = true
+        while going2 {
+            if sp_str >= limit - 24 {
+                return 0
+            }
+            let c2: u64 = kstate.get8(esrc)
+            stack_put8(ft, sp_str, c2 as u8)
+            sp_str = sp_str + 1
+            esrc = esrc + 1
+            if c2 == 0 {
+                going2 = false
+            }
+        }
+        j = j + 1
+    }
+    sv_put(ft, at, 0)
+    at = at + 8
+
+    if sp_str + 16 >= limit {
+        return 0
+    }
+    let rnd: u64 = sp_str
+    var b: u64 = 0
+    let seed: u64 = kstate.get(state, kstate.TICKS) + t * 2654435761
+    while b < 16 {
+        let value: u64 = (seed >> ((b & 7) * 8)) + b * 31 + t
+        stack_put8(ft, rnd + b, (value & 255) as u8)
+        b = b + 1
+    }
+    sp_str = sp_str + 16
+
+    let plat: u64 = sp_str
+    if sp_str + 8 >= limit {
+        return 0
+    }
+    stack_put8(ft, plat, 120)
+    stack_put8(ft, plat + 1, 56)
+    stack_put8(ft, plat + 2, 54)
+    stack_put8(ft, plat + 3, 95)
+    stack_put8(ft, plat + 4, 54)
+    stack_put8(ft, plat + 5, 52)
+    stack_put8(ft, plat + 6, 0)
+    sp_str = sp_str + 8
+
+    let execfn: u64 = sp_str
+    var xi: u64 = 0
+    var xgoing: bool = path != 0
+    while xgoing {
+        if sp_str >= limit - 8 || xi >= 255 {
+            stack_put8(ft, sp_str, 0)
+            sp_str = sp_str + 1
+            xgoing = false
+        } else {
+            let xc: u64 = kstate.get8(path + xi)
+            stack_put8(ft, sp_str, xc as u8)
+            sp_str = sp_str + 1
+            xi = xi + 1
+            if xc == 0 {
+                xgoing = false
+            }
+        }
+    }
+    if path == 0 {
+        stack_put8(ft, sp_str, 0)
+        sp_str = sp_str + 1
+    }
+
+    sv_put(ft, at, AT_PHDR)
+    at = at + 8
+    sv_put(ft, at, phdr)
+    at = at + 8
+    sv_put(ft, at, AT_PHENT)
+    at = at + 8
+    sv_put(ft, at, phent)
+    at = at + 8
+    sv_put(ft, at, AT_PHNUM)
+    at = at + 8
+    sv_put(ft, at, phnum)
+    at = at + 8
+    sv_put(ft, at, AT_PAGESZ)
+    at = at + 8
+    sv_put(ft, at, PAGE)
+    at = at + 8
+    sv_put(ft, at, AT_BASE)
+    at = at + 8
+    sv_put(ft, at, ibase)
+    at = at + 8
+    sv_put(ft, at, AT_FLAGS)
+    at = at + 8
+    sv_put(ft, at, 0)
+    at = at + 8
+    sv_put(ft, at, AT_ENTRY)
+    at = at + 8
+    sv_put(ft, at, entry)
+    at = at + 8
+    sv_put(ft, at, AT_UID)
+    at = at + 8
+    sv_put(ft, at, taskslot.tget(state, t, taskconst.T_UID))
+    at = at + 8
+    sv_put(ft, at, AT_EUID)
+    at = at + 8
+    sv_put(ft, at, taskslot.tget(state, t, taskconst.T_EUID))
+    at = at + 8
+    sv_put(ft, at, AT_GID)
+    at = at + 8
+    sv_put(ft, at, taskslot.tget(state, t, taskconst.T_GID))
+    at = at + 8
+    sv_put(ft, at, AT_EGID)
+    at = at + 8
+    sv_put(ft, at, taskslot.tget(state, t, taskconst.T_EGID))
+    at = at + 8
+    sv_put(ft, at, AT_CLKTCK)
+    at = at + 8
+    sv_put(ft, at, 100)
+    at = at + 8
+    sv_put(ft, at, AT_SECURE)
+    at = at + 8
+    sv_put(ft, at, 0)
+    at = at + 8
+    sv_put(ft, at, AT_HWCAP)
+    at = at + 8
+    sv_put(ft, at, kstate.get(state, kstate.FPU_FEAT) & 0xFFFFFFFF)
+    at = at + 8
+    sv_put(ft, at, AT_HWCAP2)
+    at = at + 8
+    sv_put(ft, at, 0)
+    at = at + 8
+    sv_put(ft, at, AT_PLATFORM)
+    at = at + 8
+    sv_put(ft, at, base + plat)
+    at = at + 8
+    sv_put(ft, at, AT_EXECFN)
+    at = at + 8
+    sv_put(ft, at, base + execfn)
+    at = at + 8
+    sv_put(ft, at, AT_RANDOM)
+    at = at + 8
+    sv_put(ft, at, base + rnd)
+    at = at + 8
+    if vdso_at != 0 {
+        sv_put(ft, at, AT_SYSINFO_EHDR)
+        at = at + 8
+        sv_put(ft, at, vdso_at)
+        at = at + 8
+    }
+    sv_put(ft, at, AT_NULL)
+    at = at + 8
+    sv_put(ft, at, 0)
+    at = at + 8
+    if at > str_at {
+        return 0
+    }
+    return base
+}
