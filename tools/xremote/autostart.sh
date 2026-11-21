@@ -4,11 +4,11 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 [ -w /dev/kvm ] && export OSUM_ACCEL=kvm
-OUT=$(mktemp -d)
+OUT=${XRAUTOSTART_OUT:-$(mktemp -d)}
 BASE_TREE=""
 cleanup() {
     [ -n "$BASE_TREE" ] && git -C "$ROOT" worktree remove --force "$BASE_TREE" >/dev/null 2>&1
-    rm -rf "$OUT"
+    [ -z "${XRAUTOSTART_OUT:-}" ] && rm -rf "$OUT"
 }
 trap cleanup EXIT
 pass=0; fail=0
@@ -40,7 +40,7 @@ sign_in() {
         export FIRNLIB="$tree/lib"
         eval bash tools/alltag/build.sh "$OUT/$name" kbd=yes uitrace=yes warten=14 bloecke=32768 \
             extra=\"wigapp=/bin/glogin wighalt=100\" progs=\"$PROGS\" \
-            xdir=/apps/xremote.osp xdir=/apps/xremote.osp/bin xfile=/apps/xremote.osp/INFO="$info" xfile=/apps/xremote.osp/bin/xremoted="$OUT/xremoted.elf" \
+            xdir=/apps xdir=/apps/xremote.osp xdir=/apps/xremote.osp/bin xfile=/apps/xremote.osp/INFO="$info" xfile=/apps/xremote.osp/bin/xremoted="$OUT/xremoted.elf" \
             xfile=/etc/shadow="$OUT/shadow" passwdfile="$OUT/passwd" $KEYS
     ) > "$OUT/$name.log" 2>&1
 }
