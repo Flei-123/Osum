@@ -14,9 +14,12 @@ const SETS: u64 = 512
 const ENTRY_BYTES: u64 = 128
 const ENTRIES_AT: u64 = 4096
 const ENTRY_COUNT: u64 = SETS * WAYS
-const NODEKEY_AT: u64 = ENTRIES_AT + ENTRY_COUNT * ENTRY_BYTES
-const TAGKEY_AT: u64 = NODEKEY_AT + ENTRY_COUNT * 8
-const FRAMES: u64 = 73
+const NODESNAP_AT: u64 = ENTRIES_AT + ENTRY_COUNT * ENTRY_BYTES
+const TAGSNAP_AT: u64 = NODESNAP_AT + ENTRY_COUNT * 8
+const BUCKETS: u64 = 512
+const NODEGEN_AT: u64 = TAGSNAP_AT + ENTRY_COUNT * 8
+const TAGGEN_AT: u64 = NODEGEN_AT + BUCKETS * 8
+const FRAMES: u64 = 75
 const PATH_AT: u64 = 40
 const PATH_MAX: u64 = 87
 const H_GEN: u64 = 8
@@ -124,11 +127,25 @@ fn path_same(entry: u64, path: u64, n: u64) -> bool {
     return true
 }
 
-fn entry_live(e: u64, gen: u64, neg_gen: u64) -> bool {
-    if kstate.get(e, E_NEG) != 0 {
-        return kstate.get(e, E_GEN) == neg_gen
+fn entry_index(b: u64, e: u64) -> u64 {
+    return (e - b - ENTRIES_AT) >> 7
+}
+
+fn node_gen(b: u64, node: u64) -> u64 {
+    return kstate.get(b, NODEGEN_AT + (node % BUCKETS) * 8)
+}
+
+fn tag_gen(b: u64, tag: u64) -> u64 {
+    return kstate.get(b, TAGGEN_AT + ((tag >> 1) % BUCKETS) * 8)
+}
+
+fn entry_live(b: u64, e: u64, gen: u64, neg_gen: u64) -> bool {
+    let tag: u64 = kstate.get(e, E_NEG)
+    let idx: u64 = entry_index(b, e)
+    if tag != 0 {
+        return kstate.get(e, E_GEN) == neg_gen && kstate.get(b, TAGSNAP_AT + idx * 8) == tag_gen(b, tag)
     }
-    return kstate.get(e, E_GEN) == gen
+    return kstate.get(e, E_GEN) == gen && kstate.get(b, NODESNAP_AT + idx * 8) == node_gen(b, kstate.get(e, E_NODE))
 }
 
 fn slot_at(b: u64, h: u64, way: u64) -> u64 {
@@ -159,18 +176,19 @@ fn probe(state: u64, m: u64, path: u64) -> u64 {
     var way: u64 = 0
     while way < WAYS {
         let e: u64 = slot_at(b, h, way)
-        if !entry_live(e, gen, neg_gen) && kstate.get(e, E_HASH) == h && kstate.get(e, E_MOUNT) == m && path_same(e, path, n) {
-            kstate.set(b, H_STALE, kstate.get(b, H_STALE) + 1)
-        }
-        if entry_live(e, gen, neg_gen) && kstate.get(e, E_HASH) == h && kstate.get(e, E_MOUNT) == m && path_same(e, path, n) {
-            var r: u64 = kstate.get(e, E_NODE)
-            kstate.set(b, H_HITS, kstate.get(b, H_HITS) + 1)
-            if kstate.get(e, E_NEG) != 0 {
-                r = NEG
-                kstate.set(b, H_NEGHITS, kstate.get(b, H_NEGHITS) + 1)
+        if kstate.get(e, E_HASH) == h && kstate.get(e, E_MOUNT) == m && path_same(e, path, n) {
+            if !entry_live(b, e, gen, neg_gen) {
+                kstate.set(b, H_STALE, kstate.get(b, H_STALE) + 1)
+            } else {
+                var r: u64 = kstate.get(e, E_NODE)
+                kstate.set(b, H_HITS, kstate.get(b, H_HITS) + 1)
+                if kstate.get(e, E_NEG) != 0 {
+                    r = NEG
+                    kstate.set(b, H_NEGHITS, kstate.get(b, H_NEGHITS) + 1)
+                }
+                cachelock.give(b, flags)
+                return r
             }
-            cachelock.give(b, flags)
-            return r
         }
         way = way + 1
     }
@@ -211,7 +229,7 @@ fn insert(state: u64, m: u64, path: u64, node: u64, stamp_at_start: u64) {
     var way: u64 = 0
     while way < WAYS {
         let e: u64 = slot_at(b, h, way)
-        if entry_live(e, gen, neg_gen) && kstate.get(e, E_HASH) == h && kstate.get(e, E_MOUNT) == m && path_same(e, path, n) {
+        if entry_live(b, e, gen, neg_gen) && kstate.get(e, E_HASH) == h && kstate.get(e, E_MOUNT) == m && path_same(e, path, n) {
             pick = e
         }
         way = way + 1
@@ -219,7 +237,7 @@ fn insert(state: u64, m: u64, path: u64, node: u64, stamp_at_start: u64) {
     way = 0
     while pick == 0 && way < WAYS {
         let e: u64 = slot_at(b, h, way)
-        if !entry_live(e, gen, neg_gen) {
+        if !entry_live(b, e, gen, neg_gen) {
             pick = e
         }
         way = way + 1
@@ -238,14 +256,12 @@ fn insert(state: u64, m: u64, path: u64, node: u64, stamp_at_start: u64) {
         kstate.set(pick, E_GEN, neg_gen)
         kstate.set(pick, E_NEG, tag)
         kstate.set(pick, E_NODE, 0)
-        kstate.set(b, NODEKEY_AT + idx * 8, 0)
-        kstate.set(b, TAGKEY_AT + idx * 8, tag)
+        kstate.set(b, TAGSNAP_AT + idx * 8, tag_gen(b, tag))
     } else {
         kstate.set(pick, E_GEN, gen)
         kstate.set(pick, E_NEG, 0)
         kstate.set(pick, E_NODE, node)
-        kstate.set(b, NODEKEY_AT + idx * 8, node)
-        kstate.set(b, TAGKEY_AT + idx * 8, 0)
+        kstate.set(b, NODESNAP_AT + idx * 8, node_gen(b, node))
     }
     var i: u64 = 0
     while i <= n {
@@ -299,17 +315,7 @@ fn forget_node(state: u64, node: u64) {
     }
     count_kind(b, 2)
     let flags: u64 = cachelock.take(b)
-    let gen: u64 = kstate.get(b, H_GEN)
-    var i: u64 = 0
-    while i < ENTRY_COUNT {
-        if kstate.get(b, NODEKEY_AT + i * 8) == node {
-            let e: u64 = b + ENTRIES_AT + i * ENTRY_BYTES
-            if kstate.get(e, E_NEG) == 0 && kstate.get(e, E_GEN) == gen && kstate.get(e, E_NODE) == node {
-                kstate.set(e, E_GEN, 0)
-            }
-        }
-        i = i + 1
-    }
+    kstate.set(b, NODEGEN_AT + (node % BUCKETS) * 8, node_gen(b, node) + 1)
     kstate.set(b, H_EPOCH, kstate.get(b, H_EPOCH) + 1)
     kstate.set(b, H_FLUSHES, kstate.get(b, H_FLUSHES) + 1)
     cachelock.give(b, flags)
@@ -363,17 +369,7 @@ fn forget_name(state: u64, name: u64) {
     let tag: u64 = leaf_tag(name, n)
     count_kind(b, 3)
     let flags: u64 = cachelock.take(b)
-    let neg_gen: u64 = kstate.get(b, H_NEG_GEN)
-    var i: u64 = 0
-    while i < ENTRY_COUNT {
-        if kstate.get(b, TAGKEY_AT + i * 8) == tag {
-            let e: u64 = b + ENTRIES_AT + i * ENTRY_BYTES
-            if kstate.get(e, E_NEG) == tag && kstate.get(e, E_GEN) == neg_gen {
-                kstate.set(e, E_GEN, 0)
-            }
-        }
-        i = i + 1
-    }
+    kstate.set(b, TAGGEN_AT + ((tag >> 1) % BUCKETS) * 8, tag_gen(b, tag) + 1)
     kstate.set(b, H_EPOCH, kstate.get(b, H_EPOCH) + 1)
     kstate.set(b, H_FLUSHES, kstate.get(b, H_FLUSHES) + 1)
     cachelock.give(b, flags)
