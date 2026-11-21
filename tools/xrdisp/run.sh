@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/xrdisp/run.sh -- X-Remote display requests: modes file, size request, native request, rejected size.
-#   bash tools/xrdisp/run.sh [workdir]     SET_SIZE=800x600 picks the middle size
+#   bash tools/xrdisp/run.sh [workdir]     SET_SIZE=1024x768 picks the requested size
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -18,7 +18,7 @@ TMPD=${1:-$(mktemp -d)}
 . tools/lib/tmpdir.sh
 osum_tmp_guard "${1:-}" "$TMPD"
 . tools/lib/firnenv.sh
-SET_SIZE=${SET_SIZE:-800x600}
+SET_SIZE=${SET_SIZE:-1024x768}
 PROGS="sh ls cat echo sleep xremoted xrcli desktop taskbar"
 mkdir -p "$TMPD/bin"
 bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1 && ok "programs build" \
@@ -135,7 +135,7 @@ has "$TMPD/p_t5.txt" "last=ok" "native request: last=ok"
 for pair in "t1:$S0" "t3:$SET_SIZE" "t5:$NAT"; do
     f="$TMPD/svc-${pair%%:*}.ppm"; sz=${pair#*:}
     if [ -s "$f" ]; then
-        python3 -I tools/xrdisp/check.py "$f" "${sz%x*}" "${sz#*x}" > "$TMPD/chk-${pair%%:*}.txt" 2>&1
+        python3 -W ignore -I tools/xrdisp/check.py "$f" "${sz%x*}" "${sz#*x}" > "$TMPD/chk-${pair%%:*}.txt" 2>&1
         [ $? = 0 ] && ok "screendump ${pair%%:*}: $(cat "$TMPD/chk-${pair%%:*}.txt")" || bad "screendump ${pair%%:*}: $(cat "$TMPD/chk-${pair%%:*}.txt")"
     else bad "no screendump ${pair%%:*}"; fi
 done

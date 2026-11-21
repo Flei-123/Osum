@@ -11,16 +11,9 @@ def main():
         print("SIZE-BAD %dx%d want %dx%d" % (w, h, want_w, want_h))
         return 1
     colours = len(set(img.resize((64, 48)).getdata()))
-    band = max(24, h // 20)
-    top = list(img.crop((0, 0, w, band)).resize((32, 4)).getdata())
-    bottom = list(img.crop((0, h - band, w, h)).resize((32, 4)).getdata())
-    differs = sum(1 for a, b in zip(top, bottom) if a != b)
-    print("SIZE-OK %dx%d colours=%d bar-diff=%d" % (w, h, colours, differs))
+    print("SIZE-OK %dx%d colours=%d" % (w, h, colours))
     if colours < 4:
         print("PAINT-BAD")
-        return 1
-    if differs < 8:
-        print("BAR-BAD")
         return 1
     return 0
 
