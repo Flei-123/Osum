@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/prctl.h>
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
@@ -26,6 +27,12 @@ static void nap(long ms)
 {
     struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
     nanosleep(&ts, 0);
+}
+
+static void reap_orphans(void)
+{
+    while (waitpid(-1, 0, WNOHANG) > 0) {
+    }
 }
 
 static int read_byte_within(int fd, int ms)
@@ -150,19 +157,25 @@ static void kill_parent_once(int exec_after, int *child_marker)
     if (exec_after) nap(200);
 }
 
-static int leak_rounds(int exec_after)
+static long leak_rounds(int exec_after)
 {
     kill_parent_once(exec_after, 0);
     nap(300);
+    reap_orphans();
     long before = mem_free_kb();
-    for (int i = 0; i < LEAK_ROUNDS; i++) kill_parent_once(exec_after, 0);
+    for (int i = 0; i < LEAK_ROUNDS; i++) {
+        kill_parent_once(exec_after, 0);
+        reap_orphans();
+    }
     nap(500);
+    reap_orphans();
     long after = mem_free_kb();
-    return before < 0 || after < 0 || before - after <= LEAK_LIMIT_KB;
+    return before < 0 || after < 0 ? 0 : before - after;
 }
 
 int main(void)
 {
+    prctl(PR_SET_CHILD_SUBREAPER, 1);
     int m[2] = { 0, 0 };
     kill_parent_once(0, m);
     CHECK("kill_parent_reaped", m[0], "not reaped as SIGKILL");
@@ -171,8 +184,10 @@ int main(void)
     m[0] = m[1] = 0;
     kill_parent_once(1, m);
     CHECK("kill_parent_then_child_exec", m[0], "not reaped as SIGKILL");
-    CHECK("kill_parent_no_leak_exit", leak_rounds(0), "free memory fell");
-    CHECK("kill_parent_no_leak_exec", leak_rounds(1), "free memory fell");
+    long lost_exit = leak_rounds(0);
+    CHECK("kill_parent_no_leak_exit", lost_exit <= LEAK_LIMIT_KB, "lost %ld kB", lost_exit);
+    long lost_exec = leak_rounds(1);
+    CHECK("kill_parent_no_leak_exec", lost_exec <= LEAK_LIMIT_KB, "lost %ld kB", lost_exec);
 
     int pi[2];
     CHECK("pipe", pipe(pi) == 0, "errno=%d", errno);
