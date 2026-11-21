@@ -7,6 +7,8 @@ export FIRNLIB="${FIRNLIB:-$(pwd)/lib}"
 WD=${1:?prepared firefox workdir}
 OUT=${2:?output dir}
 ROUNDS=${XL_ROUNDS:-10}
+XL_LOWWORD=lowhog
+[ "${XL_PRESSURE:-}" = tight ] && XL_LOWWORD=lowhogtight
 UP_SECONDS=${XL_UP:-25}
 mkdir -p "$OUT"
 pass=0; fail=0
@@ -75,7 +77,7 @@ EXTRA_SPEC="/bin/xfxt=$OUT/xfxt.elf@755 /usr/share/xfx/@755 /usr/share/xfx/insta
 grep -v -E '^(/usr/share/xfx/|/home/|/run/|/var/log/|/tmp/)' "$OUT/spec.base" > "$OUT/spec.in"
 SPEC=$OUT/spec.in GUI=1 GUI_EXTRA="xfx" DONE=FX-END BLOCKS=${BLOCKS:-1000000} TMO=${TMO:-1500} MEM=${MEM:-4096} SMP=${SMP:-4} \
     EXTRA="$EXTRA_SPEC" \
-    KARGS="gfx disp wm wmdauer wmshell osum vfs bus fremdtrace smpfrueh ${XL_PRESSURE:+lowhog} script=sh /etc/fx.sh;exit" \
+    KARGS="gfx disp wm wmdauer wmshell osum vfs bus fremdtrace smpfrueh ${XL_PRESSURE:+$XL_LOWWORD} script=sh /etc/fx.sh;exit" \
     bash tools/linuxapps/run.sh "$WD" "$OUT/guest.sh" "$OUT/run" > "$OUT/run.log" 2>&1
 
 S=$OUT/run/ser.clean
