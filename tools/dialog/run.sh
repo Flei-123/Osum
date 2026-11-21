@@ -119,7 +119,7 @@ run_cfg() {
     python3 tools/dialog/pixels.py "$W" "$scale" > "$W/pix.txt" 2>&1; cat "$W/pix.txt" | sed 's/^/        /'
     grep -q '^PIXELS-OK' "$W/pix.txt" && ok "[$tag] pixels: dialogs drawn, severities differ, identical dialogs identical" || bad "[$tag] pixel checks"
     local NL; NL=$(grep -ac 'wm: trusted dialog layout' "$G")
-    local NW; NW=$(grep -a 'wm: trusted dialog layout' "$G" | grep -ac " w=$((456 * scale)) title=")
+    local NW; NW=$(grep -a 'wm: trusted dialog layout' "$G" | grep -ac " w=$((456 * scale)) ")
     [ "$NL" -ge 9 ] && [ "$NW" = "$NL" ] && ok "[$tag] all $NL dialogs are $((456 * scale)) px wide (scale $scale)" || bad "[$tag] dialog width wrong: $NW of $NL are $((456 * scale)) px"
     local NT; NT=$(grep -a 'wm: trusted dialog layout' "$G" | grep -acE " title=[A-Za-z0-9]+")
     [ "$NT" = "$NL" ] && ok "[$tag] every dialog header carries a title" || bad "[$tag] dialog without header title: $NT of $NL"
