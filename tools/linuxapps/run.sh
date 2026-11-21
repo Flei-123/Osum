@@ -53,6 +53,7 @@ if [ -f "$WD/fx-root/usr/share/mime/mime.cache" ]; then
     grep -q "^/usr/share/mime/mime.cache=" "$OUT/spec.txt" || echo "/usr/share/mime/mime.cache=$WD/fx-root/usr/share/mime/mime.cache@644" >> "$OUT/spec.txt"
 fi
 for e in ${EXTRA:-}; do echo "$e" >> "$OUT/spec.txt"; done
+ulimit -s 65536
 mapfile -t SP < "$OUT/spec.txt"
 bash tools/mkfsfi/mkfs.sh build "$OUT/disk.img" "$BLOCKS" --v3 --inodes=${INODES:-4096} "${SP[@]}" "/etc/fx.sh=$OUT/fx.sh@755" "/etc/inittab=$OUT/inittab" > "$OUT/mkfs.log" 2>&1 \
     || { echo "LINUXAPPS: mkfs failed"; tail -5 "$OUT/mkfs.log"; exit 1; }
