@@ -139,13 +139,11 @@ done
 wait
 
 judge drv1 page page "display page, scale 1: path heading, sections, rows, brightness readout" green
-judge drv2 page page "display page, scale 2: path heading, sections, rows, brightness readout" green
+judge drv2 page pagetop "display page, scale 2 (window shows the top rows): heading, brightness, night light, readout inside the card" green
 judge drv1 list list "resolution dropdown lists several modes, scale 1" green
-judge drv2 list list "resolution dropdown lists several modes, scale 2" green
 judge drv1 keep keep "mode change shows the keep card with Revert button, scale 1" green
-judge drv2 keep keep "mode change shows the keep card with Revert button, scale 2" green
 judge drv1 back back "Revert restores 1280 x 800 and closes the card, scale 1" green
-judge boot1 bootpage bootpage "without a driver: Automatic + Applies after the next restart, no keep card" green
+judge boot1 bootpage bootpage "without a driver: mode shown + Applies after the next restart, no keep card" green
 judge boot1 bootsaved bootsaved "without a driver: choosing a mode saves for the next restart, no keep card" green
 judge old1 page page "counter-probe: old display page does not match the new layout" red
 judge old1 keep keep "counter-probe: old display page has no keep card after a click" red

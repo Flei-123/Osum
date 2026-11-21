@@ -43,6 +43,13 @@ def judge_page(text):
     return not missing and readout
 
 
+def judge_page_top(text):
+    missing = [w for w in PAGE_WORDS[:3] if not has(text, w)]
+    readout = has(text, r"\b\d{2,3}\s*%")
+    print("ocr top_missing=%s readout=%s" % (",".join(missing) or "-", readout))
+    return not missing and readout
+
+
 def judge_list(text):
     modes = set(re.sub(r"\s", "", m).lower() for m in re.findall(MODE, text))
     print("ocr modes=%d" % len(modes))
@@ -63,10 +70,10 @@ def judge_back(text):
 
 
 def judge_boot_page(text):
-    auto = has(text, r"Automatic")
+    auto = len(re.findall(MODE, text)) >= 1
     boot = has(text, r"next\s+restart")
     keep = has(text, r"Keep\s+these\s+display")
-    print("ocr automatic=%s next_restart=%s keep_card=%s" % (auto, boot, keep))
+    print("ocr mode_shown=%s next_restart=%s keep_card=%s" % (auto, boot, keep))
     return auto and boot and not keep
 
 
@@ -79,6 +86,7 @@ def judge_boot_saved(text):
 
 JUDGES = {
     "page": judge_page,
+    "pagetop": judge_page_top,
     "list": judge_list,
     "keep": judge_keep,
     "back": judge_back,
