@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
+import os
 import sys
 
 TOL = 3
@@ -119,11 +120,24 @@ def measure(img, x, y, w, h, r, which=None):
     return total, arc, soft, worst, bad
 
 
+def harden(img):
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "aapixels"))
+    import measure
+    w, h, raw = img
+    arr = measure.binarize(measure.np.frombuffer(raw, dtype=measure.np.uint8).reshape(h, w, 3))
+    return w, h, arr.tobytes()
+
+
 def main():
+    args = [a for a in sys.argv[1:] if a != "--harden"]
+    hard = len(args) != len(sys.argv) - 1
+    sys.argv = [sys.argv[0]] + args
     if len(sys.argv) < 7:
         print(__doc__)
         sys.exit(2)
     img = read_ppm(sys.argv[1])
+    if hard:
+        img = harden(img)
     x, y, w, h, r = (int(v) for v in sys.argv[2:7])
     which = sys.argv[7].split(",") if len(sys.argv) > 7 else None
     total, arc, soft, worst, bad = measure(img, x, y, w, h, r, which)
