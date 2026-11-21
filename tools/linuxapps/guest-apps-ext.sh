@@ -61,7 +61,8 @@ t screen-version Screen screen -v
 t tmux-version tmux tmux -V
 t tmux-session ok sh -c 'tmux -f /dev/null new-session -d -s s "sleep 5" && tmux -f /dev/null has-session -t s && echo ok; tmux -f /dev/null kill-server'
 t strace-version strace strace -V
-t strace-run write sh -c 'strace -o /tmp/st.out -e trace=write echo hi; cat /tmp/st.out'
+t strace-run writev sh -c 'strace -o /tmp/st.out -e trace=write,writev echo hi; cat /tmp/st.out'
+t strace-attach exit_group sh -c 'sleep 4 & p=$!; sleep 1; strace -p $p -o /tmp/st5.out & sleep 1; wait; cat /tmp/st5.out'
 t e2fs-mkfs '11/2048 files' sh -c 'truncate -s 8M /tmp/e.img && mke2fs -q /tmp/e.img && e2fsck -fn /tmp/e.img'
 t redis-version Redis redis-server --version
 t redis-unix PONG sh -c 'redis-server --port 0 --unixsocket /tmp/r.sock --save "" > /tmp/r.log 2>&1 & sleep 3; tail -3 /tmp/r.log; redis-cli -s /tmp/r.sock ping; redis-cli -s /tmp/r.sock shutdown nosave'

@@ -421,11 +421,63 @@ static void check_process_vm(void)
     waitpid(pid, &st, 0);
 }
 
+#ifndef PTRACE_GET_SYSCALL_INFO
+#define PTRACE_GET_SYSCALL_INFO 0x420e
+#endif
+
+struct sysinfo_blob {
+    unsigned char op;
+    unsigned char pad[3];
+    unsigned int arch;
+    unsigned long long ip;
+    unsigned long long sp;
+    unsigned long long a;
+    unsigned long long b[6];
+};
+
+static void check_syscall_info(void)
+{
+    int st = 0, entry_ok = 0, exit_ok = 0, pid_ok = 0, order_ok = 1, none_ok = 0, inside = 0;
+    long size_ok = 0;
+    pid_t pid = spawn_traced(body_getpid);
+    waitpid(pid, &st, 0);
+    struct sysinfo_blob blob;
+    memset(&blob, 0xAA, sizeof blob);
+    long first = ptrace(PTRACE_GET_SYSCALL_INFO, pid, sizeof blob, &blob);
+    none_ok = first >= 24 && blob.op == 0 && blob.arch == 0xC000003E && blob.ip != 0;
+    for (int guard = 0; guard < 200; guard++) {
+        if (ptrace(PTRACE_SYSCALL, pid, 0, 0) != 0 || waitpid(pid, &st, 0) != pid || !WIFSTOPPED(st))
+            break;
+        struct user_regs_struct regs;
+        memset(&blob, 0, sizeof blob);
+        long n = ptrace(PTRACE_GET_SYSCALL_INFO, pid, sizeof blob, &blob);
+        if (ptrace(PTRACE_GETREGS, pid, 0, &regs) != 0 || n < 0)
+            break;
+        if (!inside) {
+            if (blob.op != 1) order_ok = 0;
+            if (blob.op == 1 && n == 80 && blob.a == regs.orig_rax) entry_ok = 1;
+            if (n == 80) size_ok++;
+        } else {
+            if (blob.op != 2) order_ok = 0;
+            if (blob.op == 2 && n == 40) exit_ok = 1;
+            if (blob.op == 2 && (long long)blob.a == (long long)regs.rax && blob.b[0] == 0) pid_ok = 1;
+        }
+        inside = !inside;
+    }
+    CHECK("syscall_info_none_at_signal_stop", none_ok, "first %ld op %d", first, blob.op);
+    CHECK("syscall_info_entry", entry_ok && size_ok > 0, "size_ok %ld", size_ok);
+    CHECK("syscall_info_exit", exit_ok && pid_ok, "exit_ok %d pid_ok %d", exit_ok, pid_ok);
+    CHECK("syscall_info_order", order_ok, "entry/exit order broken");
+    kill(pid, SIGKILL);
+    waitpid(pid, &st, 0);
+}
+
 int main(void)
 {
     alarm(60);
     check_traceme_stop();
     check_syscall_loop();
+    check_syscall_info();
     check_peek_poke();
     check_singlestep();
     check_kill();

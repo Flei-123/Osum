@@ -46,9 +46,25 @@ const PT_SETSIGINFO: u64 = 0x4203
 const PT_GETREGSET: u64 = 0x4204
 const PT_SETREGSET: u64 = 0x4205
 const PT_SEIZE: u64 = 0x4206
+const PT_GET_SYSCALL_INFO: u64 = 0x420e
 const PT_INTERRUPT: u64 = 0x4207
 const PT_LISTEN: u64 = 0x4208
 const NT_PRSTATUS: u64 = 1
+const SYSCALL_INFO_NONE: u64 = 0
+const SYSCALL_INFO_ENTRY: u64 = 1
+const SYSCALL_INFO_EXIT: u64 = 2
+const SYSCALL_INFO_WORDS: u64 = 11
+const SYSCALL_INFO_HEAD_BYTES: u64 = 24
+const SYSCALL_INFO_ENTRY_BYTES: u64 = 80
+const SYSCALL_INFO_EXIT_BYTES: u64 = 40
+const AUDIT_ARCH_X86_64: u64 = 0xC000003E
+const ERRNO_MAX: u64 = 4095
+const R_R10: u64 = 7
+const R_R9: u64 = 8
+const R_R8: u64 = 9
+const R_RDX: u64 = 12
+const R_RSI: u64 = 13
+const R_RDI: u64 = 14
 const SIGCONT_NUM: u64 = 18
 const IOVEC_BYTES: u64 = 16
 
@@ -446,6 +462,51 @@ fn attach(state: u64, me: u64, pid: u64, seize: bool, options: u64) -> u64 {
     return 0
 }
 
+fn syscall_arg_register(index: u64) -> u64 {
+    if index == 0 { return R_RDI }
+    if index == 1 { return R_RSI }
+    if index == 2 { return R_RDX }
+    if index == 3 { return R_R10 }
+    if index == 4 { return R_R8 }
+    return R_R9
+}
+
+fn get_syscall_info(state: u64, me: u64, tracee: u64, size: u64, data: u64) -> u64 {
+    var words: [u64; 11] = [0 as u64; 11]
+    let kind: u64 = ptstate.get(tracee, ptstate.F_KIND)
+    var op: u64 = SYSCALL_INFO_NONE
+    var actual: u64 = SYSCALL_INFO_HEAD_BYTES
+    if kind == ptstate.KIND_ENTER {
+        op = SYSCALL_INFO_ENTRY
+        actual = SYSCALL_INFO_ENTRY_BYTES
+        words[3] = ptstate.get(tracee, ptstate.F_ORIG)
+        var i: u64 = 0
+        while i < 6 {
+            words[(4 + i) as usize] = read_register(state, tracee, syscall_arg_register(i))
+            i = i + 1
+        }
+    } else if kind == ptstate.KIND_EXIT {
+        op = SYSCALL_INFO_EXIT
+        actual = SYSCALL_INFO_EXIT_BYTES
+        let rval: u64 = read_register(state, tracee, R_RAX)
+        words[3] = rval
+        if rval >= 0xFFFFFFFFFFFFFFFF - ERRNO_MAX + 1 {
+            words[4] = 1
+        }
+    }
+    words[0] = op | (AUDIT_ARCH_X86_64 << 32)
+    words[1] = read_register(state, tracee, R_RIP)
+    words[2] = read_register(state, tracee, R_RSP)
+    var copy: u64 = size
+    if copy > actual {
+        copy = actual
+    }
+    if copy != 0 && !sysuser.copy_out(state, me, data, (&words[0]) as u64, copy) {
+        return fail(errno.E_FAULT)
+    }
+    return actual
+}
+
 fn stopped_request(state: u64, me: u64, tracee: u64, req: u64, addr: u64, data: u64) -> u64 {
     if req == PT_PEEKTEXT || req == PT_PEEKDATA {
         return peek_word(state, me, tracee, addr, data)
@@ -476,6 +537,9 @@ fn stopped_request(state: u64, me: u64, tracee: u64, req: u64, addr: u64, data: 
     }
     if req == PT_SETREGSET {
         return set_regset(state, me, tracee, addr, data)
+    }
+    if req == PT_GET_SYSCALL_INFO {
+        return get_syscall_info(state, me, tracee, addr, data)
     }
     if req == PT_GETEVENTMSG {
         var message: u64 = ptstate.get(tracee, ptstate.F_EVENT)
