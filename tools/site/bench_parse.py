@@ -108,7 +108,9 @@ def read_report_meta(path):
     text = open(path).read()
     commit = re.search(r"Gemessen auf origin/main (\w+)", text)
     load = re.search(r"Serverlast (\d+)-(\d+) \((\d+) Kerne\)", text)
+    stamp = re.search(r"Datum (\d{4}-\d{2}-\d{2})", text)
     return {
+        "date": stamp[1] if stamp else None,
         "commit": commit[1] if commit else None,
         "load_min": int(load[1]) if load else None,
         "load_max": int(load[2]) if load else None,

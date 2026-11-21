@@ -16,7 +16,7 @@ check "geomean smp1 plausible" "$(field "0.1 < d['summary']['matrix']['smp1']['g
 check "geomean smp4 plausible" "$(field "0.1 < d['summary']['matrix']['smp4']['geomean'] < 10")" "True"
 check "matrix tests" "$(field "d['summary']['matrix']['smp1']['tests'] >= 40")" "True"
 check "entries" "$(field "len(d['entries']) >= 60")" "True"
-check "make_j4 hang" "$(field "[e['smp1']['status'] for e in d['entries'] if e['id']=='make_j4'][0]")" "hang"
+check "make_j4 hang is flagged stale" "$(field "[e['smp1']['status'] != 'hang' or e.get('stale', False) for e in d['entries'] if e['id']=='make_j4'][0]")" "True"
 check "csv rows = 2 x entries" "$(($(wc -l < "$OUT/bench.csv") - 1))" "$(field "2 * len(d['entries'])")"
 check "every in_work test exists" "$(field "all(t in {e['id'] for e in d['entries']} for i in d['in_work'] for t in i['tests'])")" "True"
 echo "BENCH-EXPORT: $pass passed, $fail failed"

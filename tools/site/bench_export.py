@@ -11,8 +11,8 @@ import bench_parse as parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-DEFAULT_RAW = "/root/jarvis/data/projects_kb/orientos/reports/w-speed-vs-linux-real-files"
-DEFAULT_REPORT = "/root/jarvis/data/projects_kb/orientos/reports/20261121-092506_w-speed-vs-linux-real.md"
+DEFAULT_RAW = "/root/jarvis/data/projects_kb/orientos/reports/bench-raw-20261121-27e83af1b"
+DEFAULT_REPORT = "/root/jarvis/data/projects_kb/orientos/reports/bench-raw-20261121-27e83af1b/report.md"
 DEFAULT_OUT = "/root/projects/osum-site/src/data"
 SMP_KEYS = ("smp1", "smp4")
 FIREFOX_ENTRIES = [
@@ -125,7 +125,7 @@ def boot_summary(raw, sources):
         "linux_login_s": sources["references"]["debian13"]["boot_to_login_s"],
         "linux_idle_ram_mb": sources["references"]["debian13"]["idle_ram_mb"],
         "linux_image_mb": sources["references"]["debian13"]["image_mb"],
-        "paired": False,
+        "paired": sources["references"].get("paired", False),
         "vm": "QEMU KVM, 2 vCPU, 1536 MB, AHCI, -kernel direct",
     }
 
@@ -159,8 +159,12 @@ def build(args):
     meta = parse.read_report_meta(args.report)
     entries = matrix_entries(args.raw, tests) + app_entries(args.raw) + firefox_entries(args.raw)
     attach_in_work(entries, sources["in_work"])
+    stale = {t for item in sources.get("carried_over", []) for t in item.get("stale_tests", [])}
+    for entry in entries:
+        if entry["id"] in stale:
+            entry["stale"] = True
     commit = args.commit or meta["commit"]
-    date = args.date or os.path.basename(args.report)[:8]
+    date = args.date or meta["date"] or os.path.basename(args.report)[:8]
     date = "%s-%s-%s" % (date[:4], date[4:6], date[6:8]) if "-" not in date else date
     measurement = {
         "id": "%s-%s" % (date, commit),
@@ -168,6 +172,7 @@ def build(args):
         "osum_commit": commit,
         "osum_commit_note": "origin/main, kernel stage 0",
         "server_load": {"min": meta["load_min"], "max": meta["load_max"], "cores": meta["server_cores"]},
+        "carried_over": sources.get("carried_over", []),
     }
     return {
         "schema_version": sources["schema_version"],
