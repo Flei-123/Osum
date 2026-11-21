@@ -108,10 +108,10 @@ word_counter_proofs() {
     TESTS=$tests_save
 }
 pinned_counter_proofs() {
-    local ref pinned_tests t name pinned line wt
+    local ref pinned_tests t name pinned line wt all_tests=$TESTS
     for ref in $(awk '$1!~/^#/ && $2!=""{print $2}' "$HERE/fixed.txt" | sort -u); do
         pinned_tests=""
-        for t in $TESTS; do
+        for t in $all_tests; do
             awk -v t="${t#t_}." -v r="$ref" 'index($1,t)==1 && $2==r{f=1} END{exit !f}' "$HERE/fixed.txt" && pinned_tests="$pinned_tests $t"
         done
         [ -n "$pinned_tests" ] || continue
@@ -129,6 +129,7 @@ pinned_counter_proofs() {
             case "$line" in *" PASS"*) bad "counter-proof: $name PASSES on $ref -- the check measures nothing" ;; *) ok "counter-proof: $name does not pass on $ref (${line:-no line})" ;; esac
         done < "$HERE/fixed.txt"
     done
+    TESTS=$all_tests
 }
 run_all() { # run_all <kernel> <disk> <tag>
     for t in $TESTS; do
