@@ -9,7 +9,7 @@ GAP = 12
 GRID_OVERHEAD = 204
 
 
-def last_rects(path):
+def widest_rects(path):
     groups = []
     prev = -1
     for line in open(path, errors="replace"):
@@ -21,7 +21,7 @@ def last_rects(path):
             groups.append([])
         prev = rid
         groups[-1].append(tuple(int(v) for v in m.groups()))
-    return groups[-1] if groups else []
+    return max(groups, key=len) if groups else []
 
 
 def main():
@@ -31,7 +31,7 @@ def main():
     dp_w = want_w // scale
     dp_h = want_h // scale
     geom = GEOM.search(open(geom_path, errors="replace").read())
-    rects = last_rects(rect_path)
+    rects = [(r[0], r[1], r[2] // scale, r[3] // scale, r[4] // scale, r[5] // scale) for r in widest_rects(rect_path)]
     if not geom or not rects:
         print("FAIL no geometry or rect dump (geom=%s rects=%d)" % (bool(geom), len(rects)))
         return

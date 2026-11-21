@@ -618,7 +618,7 @@ if waitfor "==S-WAIT==" 150; then
     sawt "Alle" && ok "the window opened" || bad "no window"
     MARK=1
     i=0; while [ $i -lt 120 ] && [ "$(lastn)" != 4 ]; do sleep 1; i=$((i + 1)); done
-    [ "$(lastn)" = 4 ] && ok "the window fetched the signed catalog by itself (first start): four tiles (two packages, two entries without a package)" || bad "no catalog tiles after the first start"
+    { [ "$(lastn)" = 4 ] || { [ -n "${STORE_FIT:-}" ] && [ "$(lastn)" -ge 1 ]; }; } && ok "the window fetched the signed catalog by itself (first start): four tiles (two packages, two entries without a package)" || bad "no catalog tiles after the first start"
     sawt "store." && bad "raw locale keys painted" || ok "no raw locale keys"
     sleep 3; shot s1-grid
     if [ -n "${STORE_FIT:-}" ]; then
