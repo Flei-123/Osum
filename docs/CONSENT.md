@@ -19,7 +19,7 @@ Difference: elevate was a normal window of a root helper (can be covered, is cli
 - Title: "<product> - Do you want to allow this?" / "<Produkt> - Möchtest du das zulassen?". Buttons Allow/Cancel (message: OK/Close, question: Yes/No). Hint: real keyboard/mouse only, J/Y = allow, N = cancel, D = details.
 - Injected input is refused: `tip.mark` stamps every `jarvisctl input` injection (key, scancode, move, button, OSK); `tip.injected_within` makes the dialog drop keys and clicks for 1.5 s after one and log `wm: trusted dialog refused injected input`. Gate `tools/trustdlg/run.sh` (counter-proof: kernel before the guard answers by injection).
 - Text builder `kernel/user/trusttext.fi` has two registries: `META` (action pattern -> rights, publisher/signature phrase) and `RIGHTS` (id -> de/en text); action `system.elevate`.
-- Programmes that need root (`ulib.needs_root`): settings page tools, installer, diskctl, drvctl. The Task Manager runs as the session user (read-only for other users' processes; the kernel `kill_allowed` check refuses foreign kills).
+- Programmes that need root (`ulib.needs_root`): installer, diskctl, drvctl only. Settings, Task Manager, Store and Firefox open as the session user without a dialog; privileged work of those runs in services the broker reaches (`/bin/settingsd`, `/bin/stored`, `/bin/xfxd`).
 - Serial markers of elevate kept: `elevate: ready|allowed|denied|start`.
 - Orphan locale keys `elevate.*` removed.
 
@@ -30,3 +30,14 @@ Difference: elevate was a normal window of a root helper (can be covered, is cli
 - Generic dialog API: done, see docs/ui/dialog-api.md (dialog.fi, menu.fi, /bin/msgbox, gate tools/dialog).
 - Store opens as the session user (no elevate); the privileged work runs in the store daemon, so install/update/remove ask exactly ONCE through the bus dialog.
 - Dialog scale follows `uiscale` (reduced step by step until the 68-column panel fits the screen); every title starts with the product name.
+
+## needs_root audit (Firefox, 21.11.)
+| Entry | Needs root? | Why / how |
+|---|---|---|
+| installer | yes | writes partition tables, the ESP and the root filesystem of another disk |
+| diskctl | yes | raw access to block devices of other disks (later stages write sectors) |
+| drvctl | yes | installs, bans and unloads drivers in `/lib/drivers` and the kernel |
+| settings | no | was never returned by `needs_root` (dead name removed); critical keys ask through the bus dialog |
+| firefox, xfx | no (removed) | Firefox itself runs as the session uid; only the setup (display server socket dir, profile directory, setuid of the children) is privileged |
+
+Firefox start without a dialog: `/bin/xfx start` as the session user sends `call xfx.start` over the action bus (`etc/actions.d/xfx.actions`, level write, `noask`) to `/bin/xfxd` (root, started with the session services next to `stored`). The service accepts only the uid of the signed-in person (or root), forks a worker that runs the same `xfxrun.start` as before and writes its messages to `/run/xfx.last`; the client polls `xfx.result` and prints the file. `xfx install` stays root-only (the store daemon does it). Gate: `tools/xfxnoroot/run.sh <build dir> [old build dir]` (counter-proof: an image from before the change shows the consent window).
