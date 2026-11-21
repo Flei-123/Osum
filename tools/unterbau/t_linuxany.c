@@ -2,6 +2,8 @@
 #include "t.h"
 #include <fcntl.h>
 #include <stdlib.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 
@@ -57,6 +59,30 @@ static void test_move_pages(void)
     free(mem);
 }
 
+#define IOCTL_FIOASYNC 0x5452
+
+static void test_fioasync(void)
+{
+    int pair[2];
+    int on = 1;
+    CHECK("fioasync_socketpair_open", socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0, "errno=%d", errno);
+    CHECK("fioasync_unix_socket", ioctl(pair[0], IOCTL_FIOASYNC, &on) == 0, "errno=%d", errno);
+    on = 0;
+    CHECK("fioasync_unix_socket_off", ioctl(pair[1], IOCTL_FIOASYNC, &on) == 0, "errno=%d", errno);
+    int pipefd[2];
+    CHECK("fioasync_pipe_open", pipe(pipefd) == 0, "errno=%d", errno);
+    on = 1;
+    CHECK("fioasync_pipe", ioctl(pipefd[0], IOCTL_FIOASYNC, &on) == 0, "errno=%d", errno);
+    errno = 0;
+    CHECK("fioasync_fault", ioctl(pair[0], IOCTL_FIOASYNC, (void *)1) == -1 && errno == EFAULT, "errno=%d", errno);
+    errno = 0;
+    CHECK("fioasync_badfd", ioctl(-1, IOCTL_FIOASYNC, &on) == -1 && errno == EBADF, "errno=%d", errno);
+    close(pair[0]);
+    close(pair[1]);
+    close(pipefd[0]);
+    close(pipefd[1]);
+}
+
 static int slurp(const char *path, char *buf, size_t len)
 {
     int fd = open(path, O_RDONLY);
@@ -90,6 +116,7 @@ int main(void)
 {
     test_creat();
     test_move_pages();
+    test_fioasync();
     test_proc();
     return 0;
 }
