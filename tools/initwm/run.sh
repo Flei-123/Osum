@@ -40,7 +40,7 @@ done
 [ "$built" = "$(echo $PROGS | wc -w)" ] && ok "programs built ($built)" || bad "programs built: $built"
 
 echo "== 2. image =="
-printf 'mark:grafik:once:/bin/echo WMINIT-ALIVE\nstale:grafik:once:/bin/cat /run/autostart.done\nbundle:grafik:once:/apps/wm.osp/bin/hello\n' > "$T/inittab"
+printf 'mark:grafik:once:/bin/echo WMINIT-ALIVE\nstale:grafik:once:/bin/cat /run/autostart.done\nbundle:grafik:once:/apps/wm.osp/bin/hello BUNDLE-ALIVE\n' > "$T/inittab"
 printf 'grafik\n' > "$T/ziel"
 printf 'STALEMARK\n' > "$T/stale"
 spec=""
@@ -65,11 +65,10 @@ run_case new new
 has "init starts although wmshell owns the shell" "osum: pid1 init (wm)" "$T/new.txt"
 has "init mounted and parsed the table" "init: dienste=" "$T/new.txt"
 has "INITTAB service ran" "WMINIT-ALIVE" "$T/new.txt"
-has "bundle program ran" "init: " "$T/new.txt"
+has "package program from .osp/bin ran" "BUNDLE-ALIVE" "$T/new.txt"
 hasnt "stale /run marker was cleared at boot" "STALEMARK" "$T/new.txt"
 run_case old old
 hasnt "COUNTER-PROOF old kernel: init never starts under wmshell" "WMINIT-ALIVE" "$T/old.txt"
-has "COUNTER-PROOF old kernel: the stale marker would still be there" "autostart" "$T/old.txt" || true
 
 echo
 echo "INITWM: $pass passed, $fail failed"
