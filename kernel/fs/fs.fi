@@ -1442,21 +1442,55 @@ fn file_truncate(state: u64, ino: u64) {
     dirindex.touch(state, ino)
 }
 
-fn file_truncate_run(state: u64, ino: u64) {
-    let vk_flags: u64 = enter(state)
-    reclaim_due(state)
-    deferfree.scope_begin(state)
-    free_batch_begin()
+fn truncate_directs(state: u64, ino: u64) -> bool {
+    if ino == 0 || ino > inode_count(state) {
+        return false
+    }
+    let count: u64 = directs(state)
+    let lba: u64 = inode_block_of(state, ino)
+    var ptrs: [u64; 16] = [0 as u64; 16]
+    if !ofsj.read(state, lba, buf_in(state)) {
+        return false
+    }
+    let base: u64 = buf_in(state) + inode_off(state, ino)
+    let at: u64 = base + I_DIRECT
+    var more: bool = regio.read64(base + I_INDIRECT) != 0 || regio.read64(base + I_DINDIRECT) != 0
+    if version(state) >= OFS_V3 {
+        more = more || regio.read64(base + I_TINDIRECT) != 0 || regio.read64(base + I_QINDIRECT) != 0
+    }
+    var used: bool = false
     var i: u64 = 0
-    let dn: u64 = directs(state)
-    while i < dn {
-        let b: u64 = inode_get(state, ino, I_DIRECT + i * 8)
+    while i < count {
+        let b: u64 = regio.read64(at + i * 8)
+        ptrs[i as usize] = b
         if b != 0 {
-            block_free(state, b)
-            inode_set(state, ino, I_DIRECT + i * 8, 0)
+            used = true
         }
         i = i + 1
     }
+    if !used {
+        return more
+    }
+    i = 0
+    while i < count {
+        if ptrs[i as usize] != 0 {
+            block_free(state, ptrs[i as usize])
+        }
+        i = i + 1
+    }
+    if !ofsj.read(state, lba, buf_in(state)) {
+        return more
+    }
+    i = 0
+    while i < count {
+        regio.write64(at + i * 8, 0)
+        i = i + 1
+    }
+    let _ok: bool = ofsj.write(state, lba, buf_in(state))
+    return more
+}
+
+fn truncate_indirects(state: u64, ino: u64) {
     let ib: u64 = inode_get(state, ino, I_INDIRECT)
     if ib != 0 {
         free_pointers(state, ib)
@@ -1520,6 +1554,16 @@ fn file_truncate_run(state: u64, ino: u64) {
             free_quad(state, qr)
             inode_set(state, ino, I_QINDIRECT, 0)
         }
+    }
+}
+
+fn file_truncate_run(state: u64, ino: u64) {
+    let vk_flags: u64 = enter(state)
+    reclaim_due(state)
+    deferfree.scope_begin(state)
+    free_batch_begin()
+    if truncate_directs(state, ino) {
+        truncate_indirects(state, ino)
     }
     free_batch_end(state)
     size_write(state, ino, 0, false)
@@ -1910,9 +1954,80 @@ fn leaf_ptr_block(state: u64, ino: u64, k: u64, grow: bool) -> u64 {
     return walk_level(state, t2, (t / PER_BLOCK) % PER_BLOCK, grow)
 }
 
+static mut dp_active: u64 = 0
+static mut dp_loaded: u64 = 0
+static mut dp_ino: u64 = 0
+static mut dp_dirty: u64 = 0
+static mut dp_ptr: [u64; 16] = [0 as u64; 16]
+
+fn dp_flush(state: u64) -> bool {
+    if dp_dirty == 0 {
+        return true
+    }
+    dp_dirty = 0
+    let lba: u64 = inode_block_of(state, dp_ino)
+    if !ofsj.read(state, lba, buf_in(state)) {
+        return false
+    }
+    let at: u64 = buf_in(state) + inode_off(state, dp_ino) + I_DIRECT
+    let count: u64 = directs(state)
+    var i: u64 = 0
+    while i < count {
+        regio.write64(at + i * 8, dp_ptr[i as usize])
+        i = i + 1
+    }
+    return ofsj.write(state, lba, buf_in(state))
+}
+
+fn dp_load(state: u64, ino: u64) -> bool {
+    if dp_loaded != 0 && dp_ino == ino {
+        return true
+    }
+    if !dp_flush(state) {
+        return false
+    }
+    dp_loaded = 0
+    if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
+        return false
+    }
+    let at: u64 = buf_in(state) + inode_off(state, ino) + I_DIRECT
+    let count: u64 = directs(state)
+    var i: u64 = 0
+    while i < count {
+        dp_ptr[i as usize] = regio.read64(at + i * 8)
+        i = i + 1
+    }
+    dp_ino = ino
+    dp_loaded = 1
+    return true
+}
+
+fn dp_block(state: u64, ino: u64, index: u64) -> u64 {
+    if !dp_load(state, ino) {
+        return 0
+    }
+    let b: u64 = dp_ptr[index as usize]
+    if b != 0 {
+        return b
+    }
+    if dp_dirty != 0 && blk.wb_freed_pending(state) && !dp_flush(state) {
+        return 0
+    }
+    let fresh: u64 = block_alloc_leaf(state)
+    if fresh == 0 {
+        return 0
+    }
+    dp_ptr[index as usize] = fresh
+    dp_dirty = 1
+    return fresh
+}
+
 fn file_block_cached(state: u64, ino: u64, index: u64) -> u64 {
     let dn: u64 = directs(state)
     if index < dn {
+        if dp_active != 0 && !ofsj.enabled(state) && ino != 0 && ino <= inode_count(state) {
+            return dp_block(state, ino, index)
+        }
         return file_block(state, ino, index, true)
     }
     let k: u64 = index - dn
@@ -1951,7 +2066,20 @@ fn write_at_scoped(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
     free_batch_begin()
     lp_lba = 0
     lp_dirty = 0
+    let outer: bool = dp_active == 0
+    if outer {
+        dp_active = 1
+        dp_loaded = 0
+        dp_dirty = 0
+    }
     var n: u64 = write_at_blocks(state, ino, off, src, len)
+    if outer {
+        if !dp_flush(state) {
+            n = 0
+        }
+        dp_active = 0
+        dp_loaded = 0
+    }
     if !lp_drop(state) {
         n = 0
     }
