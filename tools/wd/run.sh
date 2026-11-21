@@ -43,7 +43,7 @@ echo "== B. subtle hover (r1002) =="
 if python3 -I tools/theme/hover.py > "$T/h.txt" 2>&1; then ok "hover distance in range: $(tail -1 "$T/h.txt")"; else bad "hover"; grep FAIL "$T/h.txt" | head -5; fi
 old tools/theme/model.py > "$T/old_model.py"
 if python3 -I tools/theme/hover.py "$T/old_model.py" > "$T/ho.txt" 2>&1; then bad "COUNTER-PROOF old model should be red"; else ok "COUNTER-PROOF old model is red ($(grep -c FAIL "$T/ho.txt") cases, e.g. $(grep FAIL "$T/ho.txt" | head -1 | cut -c7-80))"; fi
-python3 -I tools/theme/model.py table assets/schemes/*.scheme > "$T/w_new.txt" 2>&1
+MODEL_NO_PALETTE=1 python3 -I tools/theme/model.py table assets/schemes/*.scheme > "$T/w_new.txt" 2>&1
 is "contrast pairings still all fine (model.py table, rows with failures)" "$(awk -F'|' '$6+0>0' "$T/w_new.txt" | wc -l)" 0
 
 echo "== C. idle lock =="

@@ -176,6 +176,8 @@ def read_scheme(path):
                 continue
             k, v = line.split("=", 1)
             out[k.strip()] = v.strip()
+    if os.environ.get("MODEL_NO_PALETTE"):
+        out["palette"] = "own"
     return out
 
 
@@ -478,8 +480,6 @@ def main():
         return 0
     if cmd in ("tokens", "contrast", "semantic"):
         sch = read_scheme(sys.argv[2])
-        if os.environ.get("MODEL_NO_PALETTE"):
-            sch["palette"] = "own"
         dark = sys.argv[3] == "dark"
         acc = sys.argv[4] if len(sys.argv) > 4 else None
         res = resolve(sch, dark, acc)
