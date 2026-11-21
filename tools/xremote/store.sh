@@ -51,7 +51,9 @@ stage() {
     mkdir -p "$dir/bau"
     sed "s/^version=.*/version=$version/" pakete/xremote/rezept > "$dir/rezept"
     sed "s/^version=.*/version=$version/" pakete/xremote/INFO > "$dir/INFO"
+    cp pakete/xremote/INITTAB "$dir/INITTAB"
     cp "$HOSTBIN" "$dir/bau/freeviewer-host"
+    bash tools/xremote/build-daemon.sh "$dir/bau/xremoted"
     cp "$LIBS/lib/ld-musl-x86_64.so.1" "$dir/bau/ld-musl-x86_64.so.1"
     cp "$LIBS/usr/lib/libgcc_s.so.1" "$dir/bau/libgcc_s.so.1"
     python3 tools/k15/mksymbol.py pakete/xremote "$dir/bau/symbol" > /dev/null
@@ -198,6 +200,7 @@ has "$AFTER" "xremote -> " "opk list shows xremote after the install"
 has "$AFTER" "apprights: xremote mask=4 net" "apprights grants net (perm=net from the package INFO)"
 has "$AFTER" "symbol" "the package ships its Store icon (symbol)"
 has "$AFTER" "freeviewer-host" "the host binary is under /apps/xremote.osp/bin"
+has "$AFTER" "xremoted" "the supervisor is under /apps/xremote.osp/bin"
 has "$AFTER" "|aktuell" "the store lists xremote as up to date"
 
 echo "== 4. upgrade from the store =="

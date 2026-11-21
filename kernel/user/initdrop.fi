@@ -1,0 +1,147 @@
+profile kernel
+
+import ulib
+import libc.text
+import pw
+
+export { collect }
+
+const SYS_GETDENTS: u64 = 217
+const DIRENT_BUF: u64 = 4096
+const DIRENT_HEADER: u64 = 19
+const DIRENT_RECLEN_AT: u64 = 16
+const BLOB_MAX: u64 = 1536
+const NEEDLE_MAX: u64 = 96
+const PATH_MAX: u64 = 128
+const NEWLINE: u64 = 10
+const HASH: u64 = 35
+
+static mut P_APPS: [u8; 7] = "/apps/\0"
+static mut P_FILE: [u8; 9] = "/INITTAB\0"
+static mut P_SLASH: [u8; 2] = "/\0"
+static mut P_COLON_APPS: [u8; 8] = ":/apps/\0"
+static mut P_CTRL: [u8; 7] = ":ctrl:\0"
+static mut P_SUFFIX_OSP: [u8; 5] = ".osp\0"
+static mut P_SUFFIX_PROG: [u8; 6] = ".prog\0"
+static mut blob: [u8; 1536] = [0 as u8; 1536]
+
+fn byte_at(p: u64) -> u64 {
+    let value: u8 = *(p as *mut u8)
+    return value as u64
+}
+
+fn ends_with(name: u64, suffix: u64) -> bool {
+    let name_len: u64 = text.length(name)
+    let suffix_len: u64 = text.length(suffix)
+    if name_len <= suffix_len {
+        return false
+    }
+    return ulib.streq(name + name_len - suffix_len, suffix)
+}
+
+fn is_bundle(name: u64) -> bool {
+    return ends_with(name, (&P_SUFFIX_OSP[0]) as u64) || ends_with(name, (&P_SUFFIX_PROG[0]) as u64)
+}
+
+fn contains(hay: u64, needle: u64) -> bool {
+    let need_len: u64 = text.length(needle)
+    var at: u64 = 0
+    while byte_at(hay + at) != 0 {
+        if ulib.strneq(hay + at, needle, need_len) {
+            return true
+        }
+        at = at + 1
+    }
+    return false
+}
+
+fn line_allowed(line: u64, needle: u64) -> bool {
+    if byte_at(line) == 0 || byte_at(line) == HASH {
+        return false
+    }
+    if contains(line, (&P_CTRL[0]) as u64) {
+        return false
+    }
+    return contains(line, needle)
+}
+
+fn build_needle(name: u64, needle: u64) {
+    ulib.strcpy(needle, (&P_COLON_APPS[0]) as u64)
+    ulib.strcat(needle, name)
+    ulib.strcat(needle, (&P_SLASH[0]) as u64)
+}
+
+fn build_path(name: u64, path: u64) {
+    ulib.strcpy(path, (&P_APPS[0]) as u64)
+    ulib.strcat(path, name)
+    ulib.strcat(path, (&P_FILE[0]) as u64)
+}
+
+fn copy_line(line: u64, out: u64, room: u64) -> u64 {
+    let line_len: u64 = text.length(line)
+    if line_len + 2 > room {
+        return 0
+    }
+    ulib.strcpy(out, line)
+    __mmio_write8((out + line_len) as *mut u8, NEWLINE as u8)
+    __mmio_write8((out + line_len + 1) as *mut u8, 0 as u8)
+    return line_len + 1
+}
+
+fn append_bundle(name: u64, out: u64, room: u64) -> u64 {
+    var path: [u8; 128] = [0 as u8; 128]
+    var needle: [u8; 96] = [0 as u8; 96]
+    if text.length(name) + 16 >= PATH_MAX || text.length(name) + 12 >= NEEDLE_MAX {
+        return 0
+    }
+    build_path(name, (&path[0]) as u64)
+    build_needle(name, (&needle[0]) as u64)
+    let len: u64 = pw.read_all((&path[0]) as u64, (&blob[0]) as u64, BLOB_MAX)
+    if len == ulib.EOF || len == 0 {
+        return 0
+    }
+    var added: u64 = 0
+    var start: u64 = 0
+    var at: u64 = 0
+    while at <= len {
+        if byte_at((&blob[0]) as u64 + at) == NEWLINE || at == len {
+            __mmio_write8(((&blob[0]) as u64 + at) as *mut u8, 0 as u8)
+            let line: u64 = (&blob[0]) as u64 + start
+            if line_allowed(line, (&needle[0]) as u64) {
+                added = added + copy_line(line, out + added, room - added)
+            }
+            start = at + 1
+        }
+        at = at + 1
+    }
+    return added
+}
+
+fn collect(out: u64, cap: u64) -> u64 {
+    var ents: [u8; 4096] = [0 as u8; 4096]
+    var path: [u8; 6] = "/apps\0"
+    __mmio_write8(out as *mut u8, 0 as u8)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let n: u64 = ulib.sys(SYS_GETDENTS, fd, (&ents[0]) as u64, DIRENT_BUF)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return 0
+    }
+    var total: u64 = 0
+    var pos: u64 = 0
+    while pos + DIRENT_HEADER < n {
+        let base: u64 = (&ents[0]) as u64 + pos
+        let reclen: u64 = byte_at(base + DIRENT_RECLEN_AT) | (byte_at(base + DIRENT_RECLEN_AT + 1) << 8)
+        if reclen == 0 {
+            return total
+        }
+        if is_bundle(base + DIRENT_HEADER) {
+            total = total + append_bundle(base + DIRENT_HEADER, out + total, cap - total)
+        }
+        pos = pos + reclen
+    }
+    return total
+}
