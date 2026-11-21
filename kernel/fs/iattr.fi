@@ -1,8 +1,9 @@
 profile kernel
 
 import lib.kstate
+import arch.arch
 
-export { MISS, which_of, get, put, put_directs, perm_get, attr_get, drop, drop_range, flush }
+export { MISS, which_of, get, put, put_directs, perm_get, attr_get, attr_get_stable, drop, drop_range, flush }
 
 const MISS: u64 = 0xFFFFFFFFFFFFFFFF
 const LINES: u64 = 128
@@ -29,9 +30,31 @@ const F_CTIME: u64 = 136
 const F_MTIME: u64 = 144
 const F_ATIME: u64 = 152
 
-static mut cells: [u64; 16640] = [0 as u64; 16640]
+const SEQ_AT: u64 = 16640
+const STABLE_TRIES: u64 = 4
+static mut cells: [u64; 16641] = [0 as u64; 16641]
 static mut held_low: u64 = 0xFFFFFFFFFFFFFFFF
 static mut held_high: u64 = 0
+
+fn seq_flip() {
+    cells[SEQ_AT as usize] = cells[SEQ_AT as usize] + 1
+}
+
+fn attr_get_stable(state: u64, lba: u64, idx: u64, out: u64) -> bool {
+    let seq_addr: u64 = (&cells[SEQ_AT as usize]) as u64
+    var tries: u64 = 0
+    while tries < STABLE_TRIES {
+        let before: u64 = arch.atomic_load(seq_addr)
+        if (before & 1) == 0 {
+            let hit: bool = attr_get(state, lba, idx, out)
+            if arch.atomic_load(seq_addr) == before {
+                return hit
+            }
+        }
+        tries = tries + 1
+    }
+    return false
+}
 
 fn which_of(field: u64) -> u64 {
     if field == F_TYPE {
@@ -125,6 +148,7 @@ fn put(state: u64, lba: u64, idx: u64, kind: u64, size: u64, mode: u64, uid: u64
     if idx >= SLOTS {
         return
     }
+    seq_flip()
     let base: u64 = line_of(lba) * LINE_WORDS
     let tag: u64 = tag_of(state, lba)
     if lba < held_low {
@@ -147,6 +171,7 @@ fn put(state: u64, lba: u64, idx: u64, kind: u64, size: u64, mode: u64, uid: u64
     cells[(at + 6) as usize] = ctime
     cells[(at + 7) as usize] = atime
     cells[(base + 1) as usize] = cells[(base + 1) as usize] | (1 << idx)
+    seq_flip()
 }
 
 fn put_directs(lba: u64, idx: u64, src: u64) {
@@ -154,18 +179,22 @@ fn put_directs(lba: u64, idx: u64, src: u64) {
         return
     }
     let at: u64 = line_of(lba) * LINE_WORDS + SLOT_AT + idx * SLOT_WORDS + DIRECT_WHICH
+    seq_flip()
     var i: u64 = 0
     while i < DIRECT_WORDS {
         cells[(at + i) as usize] = kstate.get(src, F_DIRECT + i * 8)
         i = i + 1
     }
+    seq_flip()
 }
 
 fn drop(state: u64, lba: u64) {
     let base: u64 = line_of(lba) * LINE_WORDS
     if cells[base as usize] == tag_of(state, lba) {
+        seq_flip()
         cells[base as usize] = 0
         cells[(base + 1) as usize] = 0
+        seq_flip()
     }
 }
 
@@ -181,6 +210,7 @@ fn drop_range(state: u64, lba: u64, n: u64) {
 }
 
 fn flush() {
+    seq_flip()
     held_low = 0xFFFFFFFFFFFFFFFF
     held_high = 0
     var i: u64 = 0
@@ -189,4 +219,5 @@ fn flush() {
         cells[(i * LINE_WORDS + 1) as usize] = 0
         i = i + 1
     }
+    seq_flip()
 }
