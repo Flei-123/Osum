@@ -1,0 +1,131 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import libc.regio
+import fs.file
+import fs.evfd
+import fs.opentrack
+
+export { live, watching, fire_entry, fire_file, opened, wrote }
+
+const IN_ACCESS: u64 = 0x1
+const IN_MODIFY: u64 = 0x2
+const IN_OPEN: u64 = 0x20
+const IN_MOVED_FROM: u64 = 0x40
+const IN_DELETE: u64 = 0x200
+const IN_DELETE_SELF: u64 = 0x400
+const IN_MOVE_SELF: u64 = 0x800
+const IN_EVENT_MASK: u64 = 0xFFF
+const ACCMODE: u64 = 3
+const SLASH: u64 = 47
+
+fn live() -> bool {
+    return file.inotify_live()
+}
+
+fn parent_end(buf: u64, len: u64) -> u64 {
+    var s: u64 = len
+    while s > 0 {
+        if kstate.get8(buf + s - 1) == SLASH {
+            return s
+        }
+        s = s - 1
+    }
+    return 0
+}
+
+fn deliver(state: u64, path: u64, plen: u64, ev: u64, cookie: u64, name: u64, nlen: u64) {
+    var o: u64 = 0
+    while o < file.MAX_OPEN {
+        if file.open_kind(state, o) == file.K_INOTIFY {
+            let fr: u64 = file.open_off(state, o)
+            var i: u64 = 0
+            while i < evfd.IN_WMAX {
+                let mask: u64 = evfd.in_match(fr, i, path, plen)
+                if mask != 0 && (mask & ev & IN_EVENT_MASK) != 0 {
+                    evfd.in_push(state, fr, evfd.in_wd_of(fr, i), ev, cookie, name, nlen)
+                }
+                i = i + 1
+            }
+        }
+        o = o + 1
+    }
+}
+
+fn fire_parent(state: u64, buf: u64, len: u64, ev: u64, cookie: u64) {
+    let s: u64 = parent_end(buf, len)
+    if s == 0 || s >= len {
+        return
+    }
+    var dlen: u64 = s - 1
+    if dlen == 0 {
+        dlen = 1
+    }
+    deliver(state, buf, dlen, ev, cookie, buf + s, len - s)
+}
+
+fn fire_entry(state: u64, buf: u64, len: u64, ev: u64, cookie: u64) {
+    fire_parent(state, buf, len, ev, cookie)
+    if (ev & IN_DELETE) != 0 {
+        deliver(state, buf, len, IN_DELETE_SELF, cookie, 0, 0)
+    }
+    if (ev & IN_MOVED_FROM) != 0 {
+        deliver(state, buf, len, IN_MOVE_SELF, cookie, 0, 0)
+    }
+}
+
+fn fire_file(state: u64, buf: u64, len: u64, ev: u64) {
+    fire_parent(state, buf, len, ev, 0)
+    deliver(state, buf, len, ev, 0, 0, 0)
+}
+
+fn watching(state: u64, buf: u64, len: u64) -> bool {
+    var o: u64 = 0
+    while o < file.MAX_OPEN {
+        if file.open_kind(state, o) == file.K_INOTIFY {
+            let fr: u64 = file.open_off(state, o)
+            var i: u64 = 0
+            while i < evfd.IN_WMAX {
+                if evfd.in_match(fr, i, buf, len) != 0 {
+                    return true
+                }
+                i = i + 1
+            }
+        }
+        o = o + 1
+    }
+    return false
+}
+
+fn parent_watched(state: u64, buf: u64, len: u64) -> bool {
+    let s: u64 = parent_end(buf, len)
+    if s == 0 || s >= len {
+        return false
+    }
+    var dlen: u64 = s - 1
+    if dlen == 0 {
+        dlen = 1
+    }
+    return watching(state, buf, dlen)
+}
+
+fn opened(state: u64, of: u64, buf: u64, len: u64, flags: u64) {
+    let kind: u64 = file.open_kind(state, of)
+    if kind != file.K_FILE && kind != file.K_VFILE {
+        return
+    }
+    if !watching(state, buf, len) && !parent_watched(state, buf, len) {
+        return
+    }
+    opentrack.add(of, buf, len, (flags & ACCMODE) != 0)
+    fire_file(state, buf, len, IN_OPEN)
+}
+
+fn wrote(state: u64, of: u64) {
+    let i: u64 = opentrack.find(of)
+    if i == opentrack.MAX || !opentrack.writable_at(i) {
+        return
+    }
+    fire_file(state, opentrack.path_at(i), opentrack.len_at(i), IN_MODIFY)
+}

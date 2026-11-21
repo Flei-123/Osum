@@ -20,6 +20,7 @@ import fs.devdri
 import gfx.drm.drmclient
 import fs.evfd
 import fs.fanotify
+import fs.infire
 import ipc.uio
 import fs.nidx
 import fs.ftype
@@ -1816,41 +1817,6 @@ fn ev_in_any(state: u64) -> bool {
     return fanotify.live() || file.inotify_live()
 }
 
-// Tell every inotify instance that watches the PARENT directory of `buf` (absolute path in kernel memory, `len` octets) about event `ev`.
-fn ev_in_fire(state: u64, buf: u64, len: u64, ev: u64, cookie: u64) {
-    var s: u64 = len
-    while s > 0 {
-        if kstate.get8(buf + s - 1) == 47 {
-            break
-        }
-        s = s - 1
-    }
-    if s == 0 || s >= len {
-        return
-    }
-    var dlen: u64 = s - 1
-    if dlen == 0 {
-        dlen = 1
-    }
-    let name: u64 = buf + s
-    let nlen: u64 = len - s
-    var o: u64 = 0
-    while o < file.MAX_OPEN {
-        if file.open_kind(state, o) == file.K_INOTIFY {
-            let fr: u64 = file.open_off(state, o)
-            var i: u64 = 0
-            while i < evfd.IN_WMAX {
-                let mask: u64 = evfd.in_match(fr, i, buf, dlen)
-                if mask != 0 && (mask & ev & 0xFFF) != 0 {
-                    evfd.in_push(state, fr, evfd.in_wd_of(fr, i), ev, cookie, name, nlen)
-                }
-                i = i + 1
-            }
-        }
-        o = o + 1
-    }
-}
-
 // The path the user pointer names, as the file system call just saw it.
 fn ev_in_path(state: u64, me: u64, addr: u64, ev: u64, cookie: u64) {
     if !ev_in_any(state) {
@@ -1862,7 +1828,7 @@ fn ev_in_path(state: u64, me: u64, addr: u64, ev: u64, cookie: u64) {
         return
     }
     fanotify.emit_entry(state, ev & fanotify.FAN_EVENTS_SUPPORTED, fanotify.pid_of(state, me), buf, len)
-    ev_in_fire(state, buf, len, ev, cookie)
+    infire.fire_entry(state, buf, len, ev, cookie)
 }
 
 fn ev_in_rename(state: u64, me: u64, from: u64, to: u64) {

@@ -2,6 +2,7 @@
 profile kernel
 
 import libc.regio
+import fs.opentrack
 import sched.sched
 import sched.taskconst
 import sched.taskslot
@@ -69,17 +70,11 @@ const M_PATH: u64 = 32
 const KIND_PATH: u64 = 0
 const KIND_TREE: u64 = 1
 
-const TRACK_MAX: u64 = 64
-const TRACK_PATH_BYTES: u64 = 112
 const ACCMODE: u64 = 3
 
 static mut groups: [u64; 8] = [0 as u64; 8]
 static mut live_count: [u64; 1] = [0 as u64; 1]
 static mut actor_pid: [u64; 1] = [0 as u64; 1]
-static mut track_of: [u64; 64] = [0 as u64; 64]
-static mut track_len: [u64; 64] = [0 as u64; 64]
-static mut track_write: [u64; 64] = [0 as u64; 64]
-static mut track_path: [u8; 7168] = [0 as u8; 7168]
 
 fn pid_of(state: u64, me: u64) -> u64 {
     let tgid: u64 = taskslot.tget(state, me, taskconst.T_TGID)
@@ -95,10 +90,6 @@ fn live() -> bool {
 
 fn set_actor(pid: u64) {
     actor_pid[0] = pid
-}
-
-fn track_at(i: u64) -> u64 {
-    return (&track_path[0]) as u64 + i * TRACK_PATH_BYTES
 }
 
 fn mark_at(fr: u64, i: u64) -> u64 {
@@ -370,70 +361,33 @@ fn watched(path: u64, len: u64) -> bool {
     return false
 }
 
-fn track_find(of: u64) -> u64 {
-    var i: u64 = 0
-    while i < TRACK_MAX {
-        if track_of[i as usize] == of + 1 {
-            return i
-        }
-        i = i + 1
-    }
-    return TRACK_MAX
-}
-
-fn track_add(of: u64, path: u64, len: u64, writable: bool) {
-    if len > EVENT_PATH_MAX {
-        return
-    }
-    var i: u64 = 0
-    while i < TRACK_MAX {
-        if track_of[i as usize] == 0 {
-            track_of[i as usize] = of + 1
-            track_len[i as usize] = len
-            track_write[i as usize] = 0
-            if writable {
-                track_write[i as usize] = 1
-            }
-            var o: u64 = 0
-            while o < len {
-                regio.write8(track_at(i) + o, regio.read8(path + o))
-                o = o + 1
-            }
-            return
-        }
-        i = i + 1
-    }
-}
-
 fn opened(state: u64, of: u64, pid: u64, path: u64, len: u64, flags: u64) {
     if !watched(path, len) {
         return
     }
     emit(state, FAN_OPEN, pid, path, len, false)
-    if track_find(of) == TRACK_MAX {
-        track_add(of, path, len, (flags & ACCMODE) != 0)
-    }
+    opentrack.add(of, path, len, (flags & ACCMODE) != 0)
 }
 
 fn wrote(state: u64, of: u64, pid: u64) {
-    let i: u64 = track_find(of)
-    if i == TRACK_MAX || track_write[i as usize] == 0 {
+    let i: u64 = opentrack.find(of)
+    if i == opentrack.MAX || !opentrack.writable_at(i) {
         return
     }
-    emit(state, FAN_MODIFY, pid, track_at(i), track_len[i as usize], false)
+    emit(state, FAN_MODIFY, pid, opentrack.path_at(i), opentrack.len_at(i), false)
 }
 
 fn closed(state: u64, of: u64) {
-    let i: u64 = track_find(of)
-    if i == TRACK_MAX {
+    let i: u64 = opentrack.find(of)
+    if i == opentrack.MAX {
         return
     }
     var mask: u64 = FAN_CLOSE_NOWRITE
-    if track_write[i as usize] != 0 {
+    if opentrack.writable_at(i) {
         mask = FAN_CLOSE_WRITE
     }
-    emit(state, mask, actor_pid[0], track_at(i), track_len[i as usize], false)
-    track_of[i as usize] = 0
+    emit(state, mask, actor_pid[0], opentrack.path_at(i), opentrack.len_at(i), false)
+    opentrack.release(i)
 }
 
 fn queue_pop(fr: u64, dst: u64) -> u64 {
