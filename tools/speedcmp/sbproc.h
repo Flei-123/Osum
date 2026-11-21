@@ -165,11 +165,49 @@ static void sbp_tcp_run(const char *name, bench_fn fn, long batch, int echo)
     waitpid(sbp_child, 0, 0);
 }
 
+#define SBP_PIPE_TOTAL (64L << 20)
+
+static void run_pipe_stream(long n)
+{
+    char sink[SBP_STREAM_BLOCK];
+    long got = 0;
+    ssize_t r;
+    (void)n;
+    while (got < SBP_PIPE_TOTAL && (r = read(sbp_b, sink, sizeof sink)) > 0)
+        got += r;
+    if (got < SBP_PIPE_TOTAL)
+        exit(18);
+}
+
+static void sbp_pipe_stream(void)
+{
+    int fds[2];
+    if (!sb_wanted("pipe_throughput_64mib"))
+        return;
+    if (pipe(fds)) {
+        emit_fail("pipe_throughput_64mib");
+        return;
+    }
+    sbp_child = fork();
+    if (sbp_child == 0) {
+        close(fds[0]);
+        while (write(fds[1], io_buf, SBP_STREAM_BLOCK) == SBP_STREAM_BLOCK)
+            ;
+        _exit(0);
+    }
+    close(fds[1]);
+    sbp_b = fds[0];
+    measure("pipe_throughput_64mib", run_pipe_stream, 1, 1, 1);
+    close(fds[0]);
+    waitpid(sbp_child, 0, 0);
+}
+
 static void sbp_run_all(void)
 {
     measure("vfork_exit_wait", run_vfork, 50, 1, 1);
     measure("nanosleep_1ms", run_nanosleep, 20, 1, 1);
     sbp_socketpair();
+    sbp_pipe_stream();
     sbp_epoll();
     sbp_tcp_run("tcp_loopback_roundtrip", run_sock_roundtrip, 2000, 1);
     sbp_tcp_run("tcp_loopback_write_64kib", run_tcp_stream, 256, 0);

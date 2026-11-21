@@ -535,21 +535,23 @@ fn pipe_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
         sched.poll_sleep(state, seen, taskconst.POLL_FOREVER)
     }
     var n: u64 = 0
-    var going: bool = true
-    while going {
-        if n >= len {
-            going = false
-        } else {
-            let c: u64 = file.pipe_get(state, p)
-            if c > 255 {
-                going = false
-            } else {
-                if !sysuser.poke(state, me, buf + n, c) {
-                    return sysuser.neg(errno.E_FAULT)
-                }
-                n = n + 1
-            }
+    let bounce: u64 = sysuser.blockb(state)
+    while n < len {
+        var want: u64 = len - n
+        if want > PIPE_BUF {
+            want = PIPE_BUF
         }
+        let got: u64 = file.pipe_get_span(state, p, bounce, want)
+        if got == 0 {
+            break
+        }
+        if !sysuser.copy_out(state, me, buf + n, bounce, got) {
+            if n == 0 {
+                return sysuser.neg(errno.E_FAULT)
+            }
+            break
+        }
+        n = n + got
     }
     if n != 0 {
         sched.poll_kick(state)
@@ -616,10 +618,27 @@ fn pipe_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
                     let _slept: u64 = net_wait(state, seen)
                 }
             } else {
-                if !file.pipe_put(state, p, sysuser.peek(state, me, buf + n)) {
+                var want: u64 = len - n
+                if want > PIPE_BUF {
+                    want = PIPE_BUF
+                }
+                let bounce: u64 = sysuser.blockb(state)
+                if !sysuser.copy_in(state, me, bounce, buf + n, want) {
+                    if n == 0 {
+                        return sysuser.neg(errno.E_FAULT)
+                    }
                     going = false
                 } else {
-                    n = n + 1
+                    let was_empty: bool = file.pipe_bytes(state, p) == 0
+                    let put: u64 = file.pipe_put_span(state, p, bounce, want)
+                    if put == 0 {
+                        going = false
+                    } else {
+                        n = n + put
+                        if was_empty {
+                            sched.poll_kick(state)
+                        }
+                    }
                 }
             }
         }
