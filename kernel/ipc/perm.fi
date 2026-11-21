@@ -16,7 +16,7 @@ export {
     R_READ, R_WRITE, R_EXEC,
     checks, denied, report,
     may_attr, may_fetched,
-    walk, walk_stat, mu_report
+    walk, walk_leaf, walk_stat, mu_report
 }
 
 const R_EXEC: u64 = 1
@@ -201,6 +201,20 @@ fn prefix_node(state: u64, path: u64, slash: u64) -> u64 {
 }
 
 fn walk(state: u64, t: u64, path: u64) -> bool {
+    return walk_leaf(state, t, path, 0)
+}
+
+fn prefix_key(hash: u64, len: u64, dotted: bool) -> dcache.Key {
+    if len > dcache.PATH_MAX {
+        return dcache.Key { hash: hash, len: len, skip: dcache.SKIP_LONG }
+    }
+    if dotted {
+        return dcache.Key { hash: hash, len: len, skip: dcache.SKIP_DOT }
+    }
+    return dcache.Key { hash: hash, len: len, skip: dcache.SKIP_NONE }
+}
+
+fn walk_leaf(state: u64, t: u64, path: u64, leaf_out: u64) -> bool {
     if !appfs.read_ok(state, t, path) {
         return false
     }
@@ -210,6 +224,9 @@ fn walk(state: u64, t: u64, path: u64) -> bool {
     let flags: u64 = fs.enter(state)
     var cur: u64 = fs.root(state)
     var fast: bool = true
+    var hash: u64 = dcache.FNV_OFFSET
+    var dotted: bool = false
+    var ended: bool = false
     var i: u64 = 0
     var erlaubt: bool = true
     var more: bool = true
@@ -217,6 +234,7 @@ fn walk(state: u64, t: u64, path: u64) -> bool {
         let c: u64 = kstate.get8(path + i)
         if c == 0 {
             more = false
+            ended = true
         } else {
             if c == 47 {
                 let before: u64 = kstate.get8(path + i + 1)
@@ -225,11 +243,9 @@ fn walk(state: u64, t: u64, path: u64) -> bool {
                     if i == 0 {
                         ino = cur
                     } else {
+                        let key: dcache.Key = prefix_key(hash, i, dotted)
                         let stamp: u64 = dcache.stamp(state)
-                        let saved: u64 = kstate.get8(path + i)
-                        kstate.set8(path + i, 0 as u8)
-                        let hit: u64 = dcache.probe(state, 0, path)
-                        kstate.set8(path + i, saved as u8)
+                        let hit: u64 = dcache.probe_key(state, 0, path, key)
                         if hit != dcache.MISS && hit != dcache.NEG {
                             ino = hit
                         } else {
@@ -243,16 +259,14 @@ fn walk(state: u64, t: u64, path: u64) -> bool {
                                 ino = prefix_node(state, path, i)
                             }
                             if ino != 0 {
-                                kstate.set8(path + i, 0 as u8)
-                                dcache.insert(state, 0, path, ino, stamp)
-                                kstate.set8(path + i, saved as u8)
+                                dcache.insert_key(state, 0, path, key, ino, stamp)
                             }
                         }
                     }
                     if ino == 0 {
                         more = false
                     } else {
-                        fs.inode_perm(state, ino, at)
+                        fs.inode_perm_locked(state, ino, at)
                         if kstate.get(at, 0) != fs.T_DIR {
                             more = false
                         } else {
@@ -264,8 +278,18 @@ fn walk(state: u64, t: u64, path: u64) -> bool {
                         }
                     }
                 }
+                if dcache.dot_follows(path + i + 1) {
+                    dotted = true
+                }
             }
+            hash = dcache.extend(hash, c)
             i = i + 1
+        }
+    }
+    if leaf_out != 0 {
+        *(leaf_out as *mut u64) = dcache.MISS
+        if ended && erlaubt {
+            *(leaf_out as *mut u64) = dcache.probe_key(state, 0, path, prefix_key(hash, i, dotted))
         }
     }
     fs.leave(state, flags)
