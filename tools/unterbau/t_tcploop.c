@@ -172,6 +172,11 @@ static void names_and_udp(void)
     socklen_t len = sizeof me;
     int r = c >= 0 ? getsockname(c, (struct sockaddr *)&me, &len) : -1;
     CHECK("loop_getsockname_port", r == 0 && ntohs(me.sin_port) != 0, "r=%d", r);
+    CHECK("loop_getsockname_addr", r == 0 && me.sin_addr.s_addr == htonl(INADDR_LOOPBACK), "r=%d", r);
+    struct sockaddr_in peer;
+    socklen_t plen = sizeof peer;
+    int pr = c >= 0 ? getpeername(c, (struct sockaddr *)&peer, &plen) : -1;
+    CHECK("loop_getpeername_addr", pr == 0 && peer.sin_addr.s_addr == htonl(INADDR_LOOPBACK) && ntohs(peer.sin_port) == PORT + 3, "r=%d", pr);
     if (c >= 0) close(c);
     close(l);
 
@@ -188,8 +193,48 @@ static void names_and_udp(void)
     close(uc);
 }
 
+static void blocking_send_full(void)
+{
+    int l = make_listener(PORT + 5);
+    if (l < 0) {
+        GAP("send_listen", "errno=%d", errno);
+        return;
+    }
+    int done[2];
+    if (pipe(done) != 0) {
+        close(l);
+        return;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        int c = dial(PORT + 5);
+        if (c < 0) _exit(2);
+        static char big[BULK];
+        memset(big, 'y', sizeof big);
+        ssize_t w = send(c, big, sizeof big, 0);
+        char go;
+        if (read(done[0], &go, 1) < 0) _exit(4);
+        _exit(w == (ssize_t)sizeof big ? 0 : 3);
+    }
+    int a = accept(l, 0, 0);
+    long total = 0;
+    char buf[4096];
+    ssize_t r = 0;
+    while (a >= 0 && total < BULK && (r = read(a, buf, sizeof buf)) > 0) total += r;
+    if (write(done[1], "g", 1) != 1) total = -1;
+    int status = 0;
+    waitpid(pid, &status, 0);
+    CHECK("send_blocking_full_count", WIFEXITED(status) && WEXITSTATUS(status) == 0, "status=%d", status);
+    CHECK("send_blocking_all_bytes", total == BULK, "total=%ld a=%d errno=%d r=%zd", total, a, errno, r);
+    if (a >= 0) close(a);
+    close(l);
+    close(done[0]);
+    close(done[1]);
+}
+
 int main(void)
 {
+    blocking_send_full();
     echo_roundtrip();
     bulk_transfer();
     refused_and_nonblocking();

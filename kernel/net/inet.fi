@@ -24,7 +24,7 @@ import net.tcporphan
 import net.tcpreserve
 
 export { is_loopback, arp_flush, arp_ask, echoes, EPHEMERAL_BASE, EPHEMERAL_MASK,
-    init, ready, pump, netd_body, wake, configure, readdr, us, set_task,
+    init, ready, stack_up, loop_only, loopback_up, pump, netd_body, wake, configure, readdr, us, set_task,
     ip, mask, gw, mac_at, stat, pumps, frames_in, frames_out,
     carrier, gw_known, gw_verified, link_speed, hwstat,
     bounce, saddr,
@@ -39,7 +39,7 @@ export { is_loopback, arp_flush, arp_ask, echoes, EPHEMERAL_BASE, EPHEMERAL_MASK
     sock_acceptable, sock_hup,
     sock_nonblock, sock_set_nonblock, sock_put_nonblock, sock_tmo, sock_set_tmo, TMO_MASK,
     SK_FREE, SK_TCP, SK_UDP, SK_ICMP, SOCK_MAX,
-    SF_LISTEN, SF_NONBLOCK, SF_CONNECTED, SF_KEEPALIVE,
+    SF_LISTEN, SF_NONBLOCK, SF_CONNECTED, SF_KEEPALIVE, SF_LOOPBIND, sock_mark_loopback,
     sock_ka_set, sock_ka_get, KA_ON, KA_IDLE, KA_INTVL, KA_CNT, sock_stale
 , dhcp_set, dhcp_get}
 
@@ -71,6 +71,7 @@ const S_TXOTHER: u64 = 0x3C0
 const S_ARPSUP: u64 = 0x3C8
 const S_ARPTGT: u64 = 0x3D0
 const S_ARPTICK: u64 = 0x3D8
+const S_LOOPONLY: u64 = 0x3E0
 
 const TXK_ARP: u64 = 0
 const TXK_ICMP: u64 = 1
@@ -110,6 +111,8 @@ const SF_LISTEN: u64 = 1
 const SF_NONBLOCK: u64 = 2
 const SF_CONNECTED: u64 = 4
 const SF_KEEPALIVE: u64 = 8
+const SF_LOOPBIND: u64 = 16
+const LOOPBACK_ADDR: u64 = 0x7F000001
 const KA_MASK: u64 = 0x1FFFFFFFFF08
 const KA_IDLE_DEF: u64 = 7200
 const KA_INTVL_DEF: u64 = 75
@@ -154,8 +157,16 @@ fn sc(off: u64) -> u64 {
     return pci.K2_SCALARS + off
 }
 
-fn ready(state: u64) -> bool {
+fn stack_up(state: u64) -> bool {
     return kstate.get(state, sc(S_READY)) != 0
+}
+
+fn loop_only(state: u64) -> bool {
+    return kstate.get(state, sc(S_LOOPONLY)) != 0
+}
+
+fn ready(state: u64) -> bool {
+    return stack_up(state) && !loop_only(state)
 }
 
 fn ip(state: u64) -> u64 {
@@ -326,7 +337,7 @@ fn st(state: u64) -> *mut stack.Stack {
 }
 
 fn stat(state: u64, which: u64) -> u64 {
-    if !ready(state) {
+    if !stack_up(state) {
         return 0
     }
     return stack.net_stat(st(state), (which & 0xFFFFFFFF) as u32)
@@ -347,7 +358,7 @@ fn nzp_options(state: u64) {
 }
 
 fn sock_dbg(state: u64, i: u64, which: u64) -> u64 {
-    if !ready(state) {
+    if !stack_up(state) {
         return 0
     }
     let h: u64 = sock_handle(state, i)
@@ -358,7 +369,7 @@ fn sock_dbg(state: u64, i: u64, which: u64) -> u64 {
 }
 
 fn tcp_stat(state: u64, which: u64) -> u64 {
-    if !ready(state) {
+    if !stack_up(state) {
         return 0
     }
     return tcp.tcp_stat(stack.net_tcp(st(state)), (which & 0xFFFFFFFF) as u32)
@@ -379,12 +390,7 @@ fn drop_lock(state: u64, flags: u64) {
     sched.irq_restore(flags)
 }
 
-fn init(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
-    gateway: u64) -> bool {
-    kstate.set(state, sc(S_READY), 0)
-    if !netdev.ready(state) {
-        return false
-    }
+fn alloc_stack(state: u64) -> bool {
     let pages: u64 = (stack.net_size() as u64 + mmframe.FRAME_SIZE - 1)
         / mmframe.FRAME_SIZE
     let base: u64 = mmframe.frame_run(state, pages + 3)
@@ -399,6 +405,68 @@ fn init(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     while z < (pages + 3) * mmframe.FRAME_SIZE {
         __mmio_write64((base + z) as *mut u64, 0)
         z = z + 8
+    }
+    return true
+}
+
+const LOOP_IP_A: u64 = 127
+const LOOP_PREFIX_MASK: u64 = 0xFF000000
+const LOOP_MAC_LAST: u64 = 1
+const LOOP_MAC_FIRST: u64 = 2
+
+fn loopback_up(state: u64) -> bool {
+    if stack_up(state) {
+        return true
+    }
+    if !alloc_stack(state) {
+        return false
+    }
+    var m: [u8; 6] = [0 as u8; 6]
+    m[0] = LOOP_MAC_FIRST as u8
+    m[5] = LOOP_MAC_LAST as u8
+    let own: u32 = wire.ip4(LOOP_IP_A as u8, 0 as u8, 0 as u8, 1 as u8)
+    var seed: u64 = apic.tsc()
+    if seed == 0 {
+        seed = 20261121
+    }
+    stack.net_init(st(state), own, LOOP_PREFIX_MASK as u32, 0 as u32, &m[0], seed)
+    nzp_options(state)
+    kstate.set(state, sc(S_IP), own as u64)
+    kstate.set(state, sc(S_MASK), LOOP_PREFIX_MASK)
+    kstate.set(state, sc(S_GW), 0)
+    kstate.set(state, sc(S_SEQ), 1)
+    kstate.set(state, sc(S_LOOPONLY), 1)
+    kstate.set(state, sc(S_READY), 1)
+    return start_netd(state)
+}
+
+fn start_netd(state: u64) -> bool {
+    if task_slot(state) != 0 {
+        return true
+    }
+    let t: u64 = sched.create(state, taskconst.K_NETD, 2, 0, 0)
+    if t == 0 {
+        return false
+    }
+    sched.start(state, t)
+    set_task(state, t)
+    return true
+}
+
+fn init(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
+    gateway: u64) -> bool {
+    if !netdev.ready(state) {
+        if !loop_only(state) {
+            kstate.set(state, sc(S_READY), 0)
+        }
+        return false
+    }
+    if loop_only(state) {
+        return readdr(state, a, b, c, d, prefix, gateway)
+    }
+    kstate.set(state, sc(S_READY), 0)
+    if !alloc_stack(state) {
+        return false
     }
 
     var m: [u8; 6] = [0 as u8; 6]
@@ -436,7 +504,7 @@ fn configure(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
 
 fn readdr(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     gateway: u64) -> bool {
-    if !ready(state) {
+    if !stack_up(state) || (loop_only(state) && !netdev.ready(state)) {
         return false
     }
     var m: [u8; 6] = [0 as u8; 6]
@@ -466,6 +534,7 @@ fn readdr(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     nzp_options(state)
     kstate.set(state, sc(S_IP), own as u64)
     kstate.set(state, sc(S_MASK), netmask as u64)
+    kstate.set(state, sc(S_LOOPONLY), 0)
     kstate.set(state, sc(S_GW), gateway)
     in_epoch = (in_epoch + 1) & H_MASK
     let rebound: u64 = rebind_all(state)
@@ -567,9 +636,42 @@ fn rx_snapshot(state: u64, src: u64, n: u64) -> u64 {
     return dst
 }
 
+fn loop_pump(state: u64) -> u64 {
+    let flags: u64 = hold(state)
+    let s: *mut stack.Stack = st(state)
+    let now: u64 = now_us(state)
+    var work: u64 = 0
+    stack.net_poll(s, now)
+    tcporphan.sweep(state, s, now)
+    let out: u64 = kstate.get(state, sc(S_SCRATCH))
+    loop_arp_refresh(s, now)
+    var n: u64 = 0
+    while n < PUMP_BATCH {
+        let len: usize = stack.net_output(s, out as *mut u8, FRAME_CAP as usize, now)
+        if len == 0 {
+            n = PUMP_BATCH
+        } else {
+            if loop_frame(s, out, len as u64) {
+                stack.net_input(s, out as *mut u8, len, now)
+            }
+            work = work + 1
+            n = n + 1
+        }
+    }
+    kstate.add(state, sc(S_PUMPS), 1)
+    drop_lock(state, flags)
+    if work != 0 {
+        sched.poll_kick(state)
+    }
+    return work
+}
+
 fn pump(state: u64) -> u64 {
-    if !ready(state) {
+    if !stack_up(state) {
         return 0
+    }
+    if loop_only(state) {
+        return loop_pump(state)
     }
     let flags: u64 = hold(state)
     let s: *mut stack.Stack = st(state)
@@ -675,8 +777,10 @@ fn netd_body(state: u64, index: u64) {
     while true {
         let kick_before: u64 = kstate.get(state, sc(S_KICK))
         var w: u64 = pump(state)
-        kodb.service(state, ip(state))
-        w = w + sharebind.pump(state)
+        if !loop_only(state) {
+            kodb.service(state, ip(state))
+            w = w + sharebind.pump(state)
+        }
         let kick: u64 = kstate.get(state, sc(S_KICK))
         if w > 0 || kick != seen {
             hot = HOT_TURNS
@@ -1720,7 +1824,26 @@ fn sock_recvfrom(state: u64, i: u64, dst: u64, n: u64, addr: *mut u64,
     return got as u64
 }
 
+fn sock_mark_loopback(state: u64, i: u64) {
+    kstate.set(state, so_at(i) + SO_FLAGS, sock_flags(state, i) | SF_LOOPBIND)
+}
+
+fn loop_view(state: u64, addr: u64) -> u64 {
+    if addr != 0 && addr == ip(state) {
+        return LOOPBACK_ADDR
+    }
+    return addr
+}
+
 fn sock_peer(state: u64, i: u64, addr: *mut u64, port: *mut u64) -> u64 {
+    let r: u64 = sock_peer_raw(state, i, addr, port)
+    if !errno.is_error(r) {
+        *addr = loop_view(state, *addr)
+    }
+    return r
+}
+
+fn sock_peer_raw(state: u64, i: u64, addr: *mut u64, port: *mut u64) -> u64 {
     *addr = 0
     *port = 0
     if sock_kind(state, i) == SK_UDP {
@@ -1749,6 +1872,11 @@ fn sock_peer(state: u64, i: u64, addr: *mut u64, port: *mut u64) -> u64 {
 fn sock_local(state: u64, i: u64, addr: *mut u64, port: *mut u64) -> u64 {
     *addr = ip(state)
     *port = lport_of(state, i)
+    if (sock_flags(state, i) & SF_LOOPBIND) != 0 {
+        *addr = LOOPBACK_ADDR
+    } else if sock_connected_to_self(state, i) {
+        *addr = LOOPBACK_ADDR
+    }
     if sock_kind(state, i) == SK_TCP {
         let h: u64 = sock_handle(state, i)
         if h != NOHANDLE {
@@ -1762,6 +1890,15 @@ fn sock_local(state: u64, i: u64, addr: *mut u64, port: *mut u64) -> u64 {
         }
     }
     return 0
+}
+
+fn sock_connected_to_self(state: u64, i: u64) -> bool {
+    var pa: u64 = 0
+    var pp: u64 = 0
+    if errno.is_error(sock_peer_raw(state, i, &pa, &pp)) {
+        return false
+    }
+    return pa != 0 && pa == ip(state)
 }
 
 fn sock_shutdown(state: u64, i: u64, how: u64) -> u64 {

@@ -1815,6 +1815,35 @@ fn sa_out(state: u64, me: u64, addr: u64, lenp: u64, a: u64,
 // `send` and `recv` are these two with a null address -- that is what
 // glibc does on x86-64, and copying it is what makes a Linux program
 // work here without a translation table.
+fn blocking_stream(state: u64, si: u64, flags: u64) -> bool {
+    if netview.is_fake(state, si) || inet.sock_kind(state, si) != inet.SK_TCP {
+        return false
+    }
+    return !inet.sock_nonblock(state, si) && (flags & sysconst.MSG_DONTWAIT) == 0
+}
+
+fn send_stream_steps(state: u64, me: u64, fd: u64, buf: u64, want: u64, flags: u64) -> u64 {
+    var put: u64 = 0
+    while put < want {
+        var step: u64 = want - put
+        if step > sysconst.MAX_IO {
+            step = sysconst.MAX_IO
+        }
+        let r: u64 = do_sendto(state, me, fd, buf + put, step, 0, 0, flags)
+        if errno.is_error(r) {
+            if put == 0 {
+                return r
+            }
+            return put
+        }
+        if r == 0 {
+            return put
+        }
+        put = put + r
+    }
+    return put
+}
+
 fn do_sendto(state: u64, me: u64, fd: u64, buf: u64, want: u64,
     addr: u64, alen: u64, flags: u64) -> u64 {
     // RUNDE EVENTS: send() on a local socket (socketpair, AF_UNIX) is a write
@@ -1831,6 +1860,9 @@ fn do_sendto(state: u64, me: u64, fd: u64, buf: u64, want: u64,
     let si: u64 = sock_of(state, me, fd)
     if si >= inet.SOCK_MAX {
         return sysuser.neg(errno.E_BADF)
+    }
+    if want > sysconst.MAX_IO && addr == 0 && blocking_stream(state, si, flags) {
+        return send_stream_steps(state, me, fd, buf, want, flags)
     }
     var len: u64 = want
     if len > sysconst.MAX_IO {
