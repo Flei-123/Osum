@@ -101,6 +101,7 @@ XR_LIBS_DIR=${XR_LIBS_DIR:-/root/fxhp/fx-root}
 if [ -f "$XR_HOST_DIR/freeviewer-host" ] && [ -f "$XR_LIBS_DIR/lib/ld-musl-x86_64.so.1" ]; then
     mkdir -p pakete/xremote/bau
     cp "$XR_HOST_DIR/freeviewer-host" pakete/xremote/bau/freeviewer-host
+    bash tools/xremote/build-daemon.sh pakete/xremote/bau/xremoted
     cp "$XR_LIBS_DIR/lib/ld-musl-x86_64.so.1" pakete/xremote/bau/ld-musl-x86_64.so.1
     cp "$XR_LIBS_DIR/usr/lib/libgcc_s.so.1" pakete/xremote/bau/libgcc_s.so.1
     python3 tools/sdk/osdk.py check pakete/xremote/INFO --strict | sed 's/^/   /' || exit 1

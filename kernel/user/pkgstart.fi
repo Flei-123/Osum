@@ -1,0 +1,95 @@
+profile kernel
+
+import ulib
+import libc.io
+import libc.text
+import xfxproc
+import actwire
+
+export { start_all }
+
+const LIST_CAP: u64 = 4096
+const PATH_CAP: u64 = 128
+const ENTRY_CAP: u64 = 64
+const SUFFIX_LEN: u64 = 4
+const SLASH: u64 = 47
+const EXEC_FLAGS: u64 = 1
+
+static mut P_ROOT: [u8; 7] = "/apps/\0"
+static mut S_INFO: [u8; 6] = "/INFO\0"
+static mut S_SLASH: [u8; 2] = "/\0"
+static mut S_BUNDLE: [u8; 5] = ".osp\0"
+static mut F_AUTOSTART: [u8; 10] = "autostart\0"
+static mut P_APPS: [u8; 6] = "/apps\0"
+static mut list_buf: [u8; 4096] = [0 as u8; 4096]
+
+fn append(dst: u64, at: u64, src: u64) -> u64 {
+    return at + text.copy_text(dst + at, src, PATH_CAP - at)
+}
+
+fn is_bundle(name: u64) -> bool {
+    let len: u64 = text.length(name)
+    if len <= SUFFIX_LEN {
+        return false
+    }
+    return text.equal(name + len - SUFFIX_LEN, (&S_BUNDLE[0 as usize]) as u64)
+}
+
+fn basename(path: u64) -> u64 {
+    var at: u64 = text.length(path)
+    while at > 0 && (*((path + at - 1) as *mut u8)) as u64 != SLASH {
+        at = at - 1
+    }
+    return path + at
+}
+
+fn start_bundle(name: u64) -> bool {
+    var info: [u8; 128] = [0 as u8; 128]
+    var at: u64 = append((&info[0 as usize]) as u64, 0, (&P_ROOT[0 as usize]) as u64)
+    at = append((&info[0 as usize]) as u64, at, name)
+    at = append((&info[0 as usize]) as u64, at, (&S_INFO[0 as usize]) as u64)
+    var entry: [u8; 64] = [0 as u8; 64]
+    if !actwire.kvfile_get((&info[0 as usize]) as u64, (&F_AUTOSTART[0 as usize]) as u64, (&entry[0 as usize]) as u64, ENTRY_CAP) {
+        return false
+    }
+    if entry[0 as usize] == 0 as u8 {
+        return false
+    }
+    var exe: [u8; 128] = [0 as u8; 128]
+    at = append((&exe[0 as usize]) as u64, 0, (&P_ROOT[0 as usize]) as u64)
+    at = append((&exe[0 as usize]) as u64, at, name)
+    at = append((&exe[0 as usize]) as u64, at, (&S_SLASH[0 as usize]) as u64)
+    at = append((&exe[0 as usize]) as u64, at, (&entry[0 as usize]) as u64)
+    let argv0: u64 = basename((&exe[0 as usize]) as u64)
+    if xfxproc.any_named(argv0) {
+        return false
+    }
+    var argv: [u64; 2] = [0 as u64; 2]
+    argv[0 as usize] = argv0
+    argv[1 as usize] = 0
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&exe[0 as usize]) as u64, (&argv[0 as usize]) as u64, EXEC_FLAGS)
+    return !ulib.bad(pid)
+}
+
+fn start_all() -> u64 {
+    let fd: u64 = io.dir_open((&P_APPS[0 as usize]) as u64)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var started: u64 = 0
+    var n: u64 = io.dir_read(fd, (&list_buf[0 as usize]) as u64, LIST_CAP)
+    while !ulib.bad(n) && n > 0 {
+        var at: u64 = 0
+        while at < n {
+            let rec: u64 = (&list_buf[0 as usize]) as u64 + at
+            let name: u64 = io.dir_name(rec)
+            if is_bundle(name) && start_bundle(name) {
+                started = started + 1
+            }
+            at = at + io.dir_reclen(rec)
+        }
+        n = io.dir_read(fd, (&list_buf[0 as usize]) as u64, LIST_CAP)
+    }
+    io.close(fd)
+    return started
+}

@@ -22,6 +22,7 @@ a capability list), Firn services contract v1 (docs/services-contract.md in the 
 | `perm` | catalogue below | no | ceiling of the app |
 | `service` `actions` `opens` `sandbox` | bus names (<=16 octets, app namespace), ACTIONS file, extensions, `files` | no | unchanged |
 | `web.entry` `web.font` `web.memory` | `<name>.wasm`, `<name>.ttf`, MiB 16..4096 (default 256) | no | only with `outputs` containing `web`; project must hold an SVG icon (`symbol.svg`) |
+| `autostart` | path inside the bundle of a program that `glogin` starts at the sign-in screen and after sign-in (once, skipped while a process of the same name runs; no `..`) | no | package daemons without an inittab line (xremote) |
 | `x-...` | custom | no | kept under `custom` in JSON |
 
 Launcher keys stay on top (<1023 octets); v2 keys go behind. Unknown/duplicate keys are errors.
