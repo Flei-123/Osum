@@ -46,7 +46,10 @@ def package_problems(root, tab):
     return
 
 
-NOT_STORE_APPS = {"nedit": "internal twin of the editor"}
+NOT_STORE_APPS = {"nedit": "internal twin of the editor", "linuxrt": "runtime dependency of the Linux apps"}
+LINUX_APPS = "tools/linuxapps/store-apps.tsv"
+LINUX_RUNTIME = "linuxrt"
+STORE_CATEGORIES = {"System", "Productivity", "Media", "Internet", "Tools", "Development"}
 
 
 def catalog_problems(root, tab, view):
@@ -61,8 +64,26 @@ def catalog_problems(root, tab, view):
             yield "catalog shows %s (%s) in the app grid" % (short, NOT_STORE_APPS[short])
 
 
-def feed_problems(tab, feed):
-    packages = {r[0] for r in rows(tab, "|")}
+def linux_app_names(root):
+    path = os.path.join(root, LINUX_APPS)
+    if not os.path.isfile(path):
+        return set()
+    return {r[0] for r in rows(path, "\t")} | {LINUX_RUNTIME}
+
+
+def linux_app_problems(root):
+    path = os.path.join(root, LINUX_APPS)
+    if not os.path.isfile(path):
+        return
+    for r in rows(path, "\t"):
+        if len(r) < 7 or not r[6].strip():
+            yield "linux app %s has no launch command" % r[0]
+        if r[3] not in STORE_CATEGORIES:
+            yield "linux app %s has unknown category %s" % (r[0], r[3])
+
+
+def feed_problems(tab, feed, root=""):
+    packages = {r[0] for r in rows(tab, "|")} | linux_app_names(root)
     index = [r[0] for r in rows(os.path.join(feed, "INDEX"), "\t")]
     for name in index:
         if name not in packages:
@@ -81,9 +102,9 @@ def feed_problems(tab, feed):
 def main(argv):
     root, tab = argv[0], argv[1]
     feed = argv[2] if len(argv) > 2 else ""
-    problems = list(package_problems(root, tab))
+    problems = list(package_problems(root, tab)) + list(linux_app_problems(root))
     if feed:
-        problems += list(feed_problems(tab, feed))
+        problems += list(feed_problems(tab, feed, root))
         view = os.path.join(feed, "apps.tsv")
         if os.path.isfile(view):
             problems += list(catalog_problems(root, tab, view))

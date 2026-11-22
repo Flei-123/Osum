@@ -29,6 +29,11 @@ if [ -f "$FEED/INDEX" ]; then
     $CHECK "$ROOT" tools/loader/apps.tab "$T/feed" > "$T/hid.txt" && bad "mutant: internal app in catalog not caught" || { grep -q 'catalog shows nedit' "$T/hid.txt" && ok "mutant: internal app in catalog is caught" || bad "mutant: wrong message"; }
     printf 'trash\t1.0.0\t0\t1\ttrash-1.opk\tx86_64\n' >> "$T/feed/INDEX"
     $CHECK "$ROOT" tools/loader/apps.tab "$T/feed" > "$T/feed.txt" && bad "mutant: stale trash in INDEX not caught" || { grep -q 'feed package trash' "$T/feed.txt" && ok "mutant: stale trash in INDEX is caught" || bad "mutant: wrong message"; }
+    mkdir -p "$T/feed2"; cp "$FEED/INDEX" "$T/feed2/INDEX"; [ -f "$FEED/apps.tsv" ] && cp "$FEED/apps.tsv" "$T/feed2/apps.tsv"
+    printf 'foot\t1.0.0\t0\t1\tfoot-1.opk\tx86_64\n' | tee -a "$T/feed2/INDEX" >/dev/null
+    $CHECK "$ROOT" tools/loader/apps.tab "$T/feed2" > "$T/lx.txt" && ok "linux app package foot in INDEX is accepted" || { bad "linux app package foot rejected"; cat "$T/lx.txt"; }
+    printf 'A\tcom.fleitec.linuxrt\tLinux runtime\tLinux runtime\tsystem\n' >> "$T/feed2/apps.tsv"
+    $CHECK "$ROOT" tools/loader/apps.tab "$T/feed2" > "$T/rt.txt" && bad "mutant: linuxrt in catalog not caught" || { grep -q 'catalog shows linuxrt' "$T/rt.txt" && ok "mutant: linuxrt in catalog is caught" || bad "mutant: wrong message"; }
 else
     echo "  SKIP  live feed not present ($FEED)"
 fi
