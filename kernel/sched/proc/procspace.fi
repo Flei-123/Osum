@@ -5,6 +5,7 @@ import ipc.cap
 import sched.ctr
 import ipc.handle
 import lib.kstate
+import mm.frameref
 import mm.mmframe
 import mm.mmswap
 import sched.sched
@@ -139,16 +140,20 @@ fn page_drop(state: u64, i: u64, addr: u64) -> bool {
     let mmfl: u64 = mmlock.mm_lock(state)
     let e2: u64 = procpt.read_entry(pt, s)
     procpt.write_entry(pt, s, 0)
-    if (e2 & procbase.PAGE_PRESENT) != 0 && (e2 & procbase.PAGE_SHARED) == 0 {
-        mmframe.frame_free(state, e2 & procbase.ADDR_MASK)
-    }
     mmlock.mm_unlock(state, mmfl)
     let had: u64 = taskslot.tget(state, i, taskconst.T_UPAGES)
     if had > 0 {
         taskslot.tset(state, i, taskconst.T_UPAGES, had - 1)
     }
     tlb_flush_shared(state, i)
+    if (e2 & procbase.PAGE_PRESENT) != 0 && (e2 & procbase.PAGE_SHARED) == 0 && owner_last(e2) {
+        mmframe.frame_free(state, e2 & procbase.ADDR_MASK)
+    }
     return true
+}
+
+fn owner_last(e: u64) -> bool {
+    return (e & procbase.PAGE_COW) == 0 || frameref.put(e & procbase.ADDR_MASK)
 }
 
 fn page_mapped(state: u64, i: u64, addr: u64) -> bool {
@@ -163,7 +168,39 @@ fn page_mapped(state: u64, i: u64, addr: u64) -> bool {
     return (procpt.read_entry(pt, s) & (procbase.PAGE_PRESENT | procbase.PAGE_LAZY)) != 0
 }
 
+fn is_anon_cow(e: u64) -> bool {
+    return (e & (procbase.PAGE_PRESENT | procbase.PAGE_COW | procbase.PAGE_SHARED)) == (procbase.PAGE_PRESENT | procbase.PAGE_COW)
+}
+
+fn break_anon_cow(state: u64, pt: u64, s: u64, e: u64) -> u64 {
+    let frame: u64 = e & procbase.ADDR_MASK
+    var ne: u64 = e & (~(procbase.PAGE_COW | procbase.PAGE_COWW))
+    if (e & procbase.PAGE_COWW) != 0 {
+        ne = ne | procbase.PAGE_WRITE
+    }
+    if frameref.extra(frame) == 0 {
+        procpt.write_entry(pt, s, ne)
+        frameref.note_reuse()
+        return ne
+    }
+    let f: u64 = mmframe.frame_alloc_user(state)
+    if f == 0 {
+        return 0
+    }
+    procswap.copy_frame_words(mmframe.kva(f), mmframe.kva(frame))
+    ne = (ne & (~procbase.ADDR_MASK)) | f
+    procpt.write_entry(pt, s, ne)
+    frameref.note_copy()
+    if frameref.put(frame) {
+        mmframe.frame_free(state, frame)
+    }
+    return ne
+}
+
 fn unshare_page(state: u64, i: u64, pt: u64, s: u64, e: u64) -> u64 {
+    if is_anon_cow(e) {
+        return break_anon_cow(state, pt, s, e)
+    }
     if !ctr.mem_charge(state, ctr.ctr_of(state, i), 1) {
         return 0
     }
@@ -195,6 +232,41 @@ fn unshare_cached(state: u64, i: u64, addr: u64) -> bool {
     return true
 }
 
+fn unshare_anon(state: u64, i: u64, addr: u64) -> bool {
+    let s: u64 = procpt.pt_slot(addr)
+    let pt: u64 = procpt.pt_for(state, i, addr, false)
+    if s >= 512 || pt == 0 {
+        return true
+    }
+    mmlock.demand_lock(state)
+    let e: u64 = procpt.read_entry(pt, s)
+    let shared: bool = is_anon_cow(e)
+    var ok: bool = true
+    if shared {
+        ok = break_anon_cow(state, pt, s, e) != 0
+    }
+    mmlock.demand_unlock(state)
+    if shared && ok {
+        tlb_flush_shared(state, i)
+    }
+    return ok
+}
+
+const COW_AROUND: u64 = 32
+
+fn reuse_around(pt: u64, s: u64) {
+    var k: u64 = s & (~(COW_AROUND - 1))
+    let end: u64 = k + COW_AROUND
+    while k < end {
+        let e: u64 = procpt.read_entry(pt, k)
+        if k != s && is_anon_cow(e) && (e & procbase.PAGE_COWW) != 0 && frameref.extra(e & procbase.ADDR_MASK) == 0 {
+            procpt.write_entry(pt, k, (e & (~(procbase.PAGE_COW | procbase.PAGE_COWW))) | procbase.PAGE_WRITE)
+            frameref.note_reuse()
+        }
+        k = k + 1
+    }
+}
+
 fn cow_write(state: u64, i: u64, addr: u64) -> bool {
     let page: u64 = addr & 0xFFFFFFFFFFFFF000
     let s: u64 = procpt.pt_slot(page)
@@ -215,6 +287,7 @@ fn cow_write(state: u64, i: u64, addr: u64) -> bool {
             let ne: u64 = unshare_page(state, i, pt, s, e)
             if ne != 0 {
                 procpt.write_entry(pt, s, ne | procbase.PAGE_WRITE)
+                reuse_around(pt, s)
                 ok = true
             }
         }

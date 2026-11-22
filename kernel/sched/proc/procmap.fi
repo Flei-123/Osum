@@ -3,6 +3,7 @@
 import arch.arch
 import sched.ctr
 import lib.kstate
+import mm.frameref
 import mm.mmframe
 import mm.mmswap
 import libc.octets
@@ -32,7 +33,7 @@ fn free_pt(state: u64, pt: u64) -> u64 {
         }
         let e: u64 = __mmio_read64((pt_tab + k * 8) as *mut u64)
         if (e & procbase.PAGE_PRESENT) != 0 {
-            if (e & procbase.PAGE_SHARED) == 0 {
+            if (e & procbase.PAGE_SHARED) == 0 && ((e & procbase.PAGE_COW) == 0 || frameref.put(e & procbase.ADDR_MASK)) {
                 mmframe.frame_free_inner(state, e & procbase.ADDR_MASK)
                 freed = freed + 1
             }
@@ -405,6 +406,10 @@ fn page_exec(state: u64, i: u64, addr: u64) -> bool {
 }
 
 fn translate(state: u64, i: u64, addr: u64) -> u64 {
+    return translate_leaf(state, i, addr, false)
+}
+
+fn translate_leaf(state: u64, i: u64, addr: u64, for_write: bool) -> u64 {
     let pml4: u64 = taskslot.tget(state, i, taskconst.T_CR3)
     if pml4 == 0 {
         return 0
@@ -425,13 +430,33 @@ fn translate(state: u64, i: u64, addr: u64) -> u64 {
         return mmframe.kva((e2 & procbase.ADDR_MASK) + (addr & 0x1FFFFF))
     }
     let e1: u64 = procpt.read_entry(e2 & procbase.ADDR_MASK, (addr >> 12) & 0x1FF)
-    if (e1 & procbase.PAGE_PRESENT) == 0 {
+    if (e1 & procbase.PAGE_PRESENT) == 0 || (for_write && entry_cow_pending(e1)) {
         return 0
     }
     return mmframe.kva((e1 & procbase.ADDR_MASK) + (addr & 0xFFF))
 }
 
 fn user_phys(state: u64, i: u64, addr: u64) -> u64 {
+    return user_leaf_phys(state, i, addr, false)
+}
+
+fn user_phys_w(state: u64, i: u64, addr: u64) -> u64 {
+    return user_leaf_phys(state, i, addr, true)
+}
+
+fn cow_pending(state: u64, i: u64, addr: u64) -> bool {
+    return translate_w(state, i, addr) == 0 && translate(state, i, addr) != 0
+}
+
+fn entry_cow_pending(e: u64) -> bool {
+    return (e & (procbase.PAGE_PRESENT | procbase.PAGE_COW | procbase.PAGE_WRITE)) == (procbase.PAGE_PRESENT | procbase.PAGE_COW)
+}
+
+fn translate_w(state: u64, i: u64, addr: u64) -> u64 {
+    return translate_leaf(state, i, addr, true)
+}
+
+fn user_leaf_phys(state: u64, i: u64, addr: u64, for_write: bool) -> u64 {
     let pml4: u64 = taskslot.tget(state, i, taskconst.T_CR3)
     if pml4 == 0 {
         return 0
@@ -453,7 +478,7 @@ fn user_phys(state: u64, i: u64, addr: u64) -> u64 {
         return mmframe.kva((e2 & procbase.ADDR_MASK) + (addr & 0x1FFFFF))
     }
     let e1: u64 = procpt.read_entry(e2 & procbase.ADDR_MASK, (addr >> 12) & 0x1FF)
-    if (e1 & user) != user {
+    if (e1 & user) != user || (for_write && entry_cow_pending(e1)) {
         return 0
     }
     return mmframe.kva((e1 & procbase.ADDR_MASK) + (addr & 0xFFF))
