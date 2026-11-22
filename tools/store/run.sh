@@ -106,6 +106,7 @@ CV=$(curl -s --cacert "$TMPD/certs/ca.pem" --resolve "ota.test:$P0:127.0.0.1" -o
 printf 'root:x:0:0:root:/:/bin/sh\njustin:x:1000:1000:Justin:/:/bin/sh\nmara:x:1001:1001:Mara:/:/bin/sh\n' > "$TMPD/passwd"
 printf 'root:x:0:\njustin:x:1000:\nmara:x:1001:\n' > "$TMPD/group"
 printf 'installieren=admin\nentfernen=admin\nadmins=1000\nautoapps=nein\n' > "$TMPD/conf.admin"
+for i in $(seq 1 40); do printf 'STALE-TAIL-%s padding padding padding padding padding\n' "$i"; done > "$TMPD/stalecat.pad"
 printf 'installieren=admin\nentfernen=admin\nadmins=1000\nautointervall=10\n' > "$TMPD/conf.auto"
 printf 'installieren=benutzer\nentfernen=benutzer\nautoapps=nein\n' > "$TMPD/conf.benutzer"
 printf 'installieren=aus\nentfernen=aus\nautoapps=nein\n' > "$TMPD/conf.aus"
@@ -127,7 +128,7 @@ image() { # <image> <script> <port>
         "/etc/passwd=$TMPD/passwd" "/etc/group=$TMPD/group"
         "/etc/actions.d/store.actions=etc/actions.d/store.actions"
         "/etc/orientbus/policy=$TMPD/policy"
-        "/etc/store.conf=${STORE_CONF:-$TMPD/conf.admin}" "/etc/store.admin=$TMPD/conf.admin" "/etc/store.benutzer=$TMPD/conf.benutzer"
+        "/etc/store.conf=${STORE_CONF:-$TMPD/conf.admin}" "/etc/store.admin=$TMPD/conf.admin" "/etc/store.benutzer=$TMPD/conf.benutzer" "/etc/stalecat.pad=$TMPD/stalecat.pad"
         "/etc/store.aus=$TMPD/conf.aus" "/etc/store.admins=$TMPD/conf.admins"
         "/etc/ota.conf=$TMPD/ota.conf" "/etc/ssl/roots.pem=$TMPD/certs/ca.pem"
         "/system/schluessel.pub=$TMPD/pk/schluessel.pub"
@@ -170,6 +171,8 @@ echo ==A-NOCAT==
 act call store.install name=gruss
 act confirm last
 echo ==A-REF==
+mkdir /var/store
+cp /etc/stalecat.pad /var/store/katalog
 act call store.refresh
 sleep 30
 act call store.status
@@ -258,6 +261,7 @@ has "$TMPD/p.txt" "phase=done" "the refresh is done (phase=done)"
 has "$TMPD/p.txt" "verb=refresh" "... and says what it was"
 part "$A" A-L1 A-BADNAME > "$TMPD/p.txt"
 has "$TMPD/p.txt" "count=2" "the verified catalog lists two programs"
+hasnot "$TMPD/p.txt" "STALE-TAIL" "a shorter catalog rewrite leaves no tail of the old file"
 has "$TMPD/p.txt" "item=gruss|1.0.0|" "gruss 1.0.0 is in it"
 has "$TMPD/p.txt" "|neu" "gruss is new on this device (state neu)"
 has "$TMPD/p.txt" "item=hallo|2.0.0|" "hallo 2.0.0 is in it"
