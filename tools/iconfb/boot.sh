@@ -16,7 +16,7 @@ run_case() {
     unset DESIGNBUILD
 }
 run_case clean explorer,terminal,settings
-run_case control certus,explorer,terminal,settings
+run_case control nosuchapp,explorer,terminal,settings
 C=$(count "$OUT/clean")
 K=$(count "$OUT/control")
 if [ -s "$OUT/clean/serial.txt" ] && grep -a -q 'taskbar: ' "$OUT/clean/serial.txt"; then
@@ -24,6 +24,6 @@ if [ -s "$OUT/clean/serial.txt" ] && grep -a -q 'taskbar: ' "$OUT/clean/serial.t
 else
     echo "  FAIL  desktop boot produced no taskbar output"; FAIL=1
 fi
-[ "$K" -ge 1 ] && echo "  OK    control (absent bundle) reports $K fallback line(s)" || { echo "  FAIL  control did not report the absent bundle"; FAIL=1; }
+[ "$K" -ge 1 ] && echo "  OK    control (pin without registry entry) reports $K fallback line(s)" || { echo "  FAIL  control did not report the absent bundle"; FAIL=1; }
 rm -rf "$OUT"/*/uitrace "$OUT"/*/disk.img
 exit "$FAIL"
