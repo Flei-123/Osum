@@ -100,6 +100,11 @@ def split_with_manifest(tar_path, out_dir, limit):
     return "\n".join(lines) + "\n", len(parts)
 
 
+def member_list(tar_path):
+    listing = subprocess.run(["tar", "-tf", tar_path], check=True, capture_output=True, text=True).stdout
+    return "".join(line + "\n" for line in listing.splitlines() if line and not line.endswith("/"))
+
+
 def write(path, text):
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(text)
@@ -108,7 +113,8 @@ def write(path, text):
 def recipe_text(fields, files, needs):
     lines = ["name=%s" % fields["name"], "version=%s" % fields["version"], "titel=%s" % fields["title"],
              "info=%s" % fields["summary"], "keys=%s" % fields["keys"], "handle=konsole"]
-    lines += ["braucht=%s" % need for need in needs]
+    if needs:
+        lines.append("deps=%s" % ",".join(needs))
     lines += ["datei=%s %s" % (name, path) for name, path in files]
     return "\n".join(lines) + "\n"
 
@@ -132,7 +138,7 @@ def build_package(fields, config, needs, tar_path, args, work, out_dir):
     pkg_work = os.path.join(work, fields["name"])
     os.makedirs(pkg_work)
     manifest, count = split_with_manifest(tar_path, out_dir, args.limit)
-    texts = {"lx.manifest": manifest, "store.meta": meta_text(fields), "lx.app": config}
+    texts = {"lx.manifest": manifest, "lx.files": member_list(tar_path), "store.meta": meta_text(fields), "lx.app": config}
     files = [("start", args.launcher)]
     for name, text in texts.items():
         write(os.path.join(pkg_work, name), text)

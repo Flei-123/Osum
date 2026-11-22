@@ -1,0 +1,102 @@
+profile kernel
+
+import ulib
+import xfxio
+import xfxpath
+
+export { remove_payload }
+
+const LIST_CAP: u64 = 262144
+const PATH_CAP: u64 = 400
+const NEWLINE: u8 = 10
+const SLASH: u8 = 47
+const MIN_DIR_DEPTH: u64 = 3
+static mut list_buf: [u8; 262144] = [0 as u8; 262144]
+static mut path_buf: [u8; 400] = [0 as u8; 400]
+static mut s_apps: [u8; 7] = "/apps/\0"
+static mut s_files: [u8; 14] = ".osp/lx.files\0"
+
+fn put(at: u64, c: u8) {
+    __mmio_write8(((&path_buf[0 as usize]) as u64 + at) as *mut u8, c)
+}
+
+fn depth_of(len: u64) -> u64 {
+    var depth: u64 = 0
+    var i: u64 = 0
+    while i < len {
+        if path_buf[i as usize] == SLASH {
+            depth = depth + 1
+        }
+        i = i + 1
+    }
+    return depth
+}
+
+fn drop_empty_parents(len_in: u64) {
+    var len: u64 = len_in
+    var going: bool = true
+    while going && len > 1 {
+        while len > 1 && path_buf[(len - 1) as usize] != SLASH {
+            len = len - 1
+        }
+        if len <= 1 {
+            going = false
+        } else {
+            len = len - 1
+            put(len, 0 as u8)
+            if depth_of(len) < MIN_DIR_DEPTH || ulib.bad(ulib.sys(ulib.SYS_RMDIR, (&path_buf[0 as usize]) as u64, 0, 0)) {
+                going = false
+            }
+        }
+    }
+}
+
+fn remove_entry(line: u64, line_len: u64) -> u64 {
+    if line_len == 0 || line_len + 2 > PATH_CAP {
+        return 0
+    }
+    put(0, SLASH)
+    var i: u64 = 0
+    while i < line_len {
+        put(1 + i, *((line + i) as *mut u8))
+        i = i + 1
+    }
+    put(1 + line_len, 0 as u8)
+    var removed: u64 = 0
+    if !ulib.bad(ulib.sys(ulib.SYS_UNLINK, (&path_buf[0 as usize]) as u64, 0, 0)) {
+        removed = 1
+    }
+    drop_empty_parents(1 + line_len)
+    return removed
+}
+
+fn list_path(name: u64) -> u64 {
+    ulib.strcpy((&path_buf[0 as usize]) as u64, (&s_apps[0 as usize]) as u64)
+    ulib.strcat((&path_buf[0 as usize]) as u64, name)
+    ulib.strcat((&path_buf[0 as usize]) as u64, (&s_files[0 as usize]) as u64)
+    return (&path_buf[0 as usize]) as u64
+}
+
+fn remove_payload(name: u64) -> u64 {
+    var e_list: [u8; 28] = "lx: no lx.files for package\0"
+    let got: u64 = xfxio.read_text(list_path(name), (&list_buf[0 as usize]) as u64, LIST_CAP)
+    if got == ulib.EOF {
+        xfxio.msg((&e_list[0 as usize]) as u64)
+        return 1
+    }
+    var removed: u64 = 0
+    var start: u64 = 0
+    var i: u64 = 0
+    while i <= got {
+        let c: u8 = list_buf[i as usize]
+        if c == NEWLINE || c == 0 as u8 {
+            removed = removed + remove_entry((&list_buf[0 as usize]) as u64 + start, i - start)
+            start = i + 1
+        }
+        i = i + 1
+    }
+    ulib.sys(ulib.SYS_UNLINK, xfxpath.p_mark(), 0, 0)
+    ulib.sys(ulib.SYS_UNLINK, xfxpath.p_tar(), 0, 0)
+    ulib.sys(ulib.SYS_UNLINK, xfxpath.p_man(), 0, 0)
+    return 0
+}
