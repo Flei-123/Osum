@@ -18,17 +18,17 @@ static long read_text(const char *path, char *buf, long cap)
     int fd = open(path, O_RDONLY);
     if (fd < 0)
         return -1;
-    long len = read(fd, buf, cap - 1);
+    long len = 0, got;
+    while (len < cap - 1 && (got = read(fd, buf + len, cap - 1 - len)) > 0)
+        len += got;
     close(fd);
-    if (len < 0)
-        return -1;
     buf[len] = 0;
     return len;
 }
 
 static void report_cpus(void)
 {
-    static char buf[16384];
+    static char buf[65536];
     long n = -1;
     if (read_text("/proc/cpus", buf, sizeof buf) > 0)
         n = count_cpus_osum(buf);
