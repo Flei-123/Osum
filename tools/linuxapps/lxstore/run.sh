@@ -24,7 +24,9 @@ if [ -f "$LXROOT/lib/apk/db/installed" ]; then
     for p in linuxrt foot galculator; do [ -s "$T/out/$p-1.opk" ] && ok "$p-1.opk exists" || bad "$p-1.opk missing"; done
     OPK=$(python3 -I -c 'import sys; sys.path.insert(0,"tools/lib"); import opkpfad; print(opkpfad.path_2())')
     python3 -I "$OPK" zeigen "$T/out/foot-1.opk" > "$T/info.txt" 2>&1
-    grep -q 'linuxrt' "$T/info.txt" && ok "foot depends on linuxrt" || { bad "foot has no dependency on linuxrt"; head -5 "$T/info.txt"; }
+    grep -aq 'deps=linuxrt' "$T/out/foot-1.opk" && ok "foot depends on linuxrt (deps=)" || bad "foot has no deps=linuxrt"
+    grep -aq 'lx.files' "$T/out/foot-1.opk" && ok "foot carries lx.files" || bad "foot has no lx.files"
+
     grep -q '^category=System' "$T/out/foot.store.meta" && grep -q '^icon=terminal' "$T/out/foot.store.meta" && ok "foot meta: category + icon from registry" || bad "foot meta wrong"
     n=$(ls "$T/out" | grep -c '^foot.tar.part'); [ "$n" -ge 1 ] && ok "foot payload split into $n part(s)" || bad "foot has no parts"
 else
