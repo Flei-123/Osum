@@ -9,8 +9,17 @@ def ks(a):
     i=bisect.bisect_right(addrs,a)-1
     return syms[i][1].replace("_F0.","") if i>=0 else "?"
 inc=collections.Counter(); leaf=collections.Counter(); n=0; nu=0
-for l in open(f):
+win=len(sys.argv)>5
+marks={}
+lines=open(f).read().splitlines()
+for l in lines:
+    if l.startswith("#"):
+        _,t,run,kind=l.split(); marks[(int(run),kind)]=float(t)
+spans=[(marks[(r,sys.argv[5])],marks[(r,"rc")]) for r in range(2,99) if win and (r,sys.argv[5]) in marks and (r,"rc") in marks]
+for l in lines:
+    if l.startswith("#"): continue
     p=l.split()
+    if win and not any(a<=float(p[0])<=b for a,b in spans): continue
     if len(p)<3 or float(p[0])<t0: continue
     if int(p[1],16)&3: nu+=1; continue
     n+=1
