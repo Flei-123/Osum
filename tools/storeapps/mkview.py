@@ -20,9 +20,12 @@ def variant(app, art, platforms, level, gate="", build="", device="", at="", not
                notes[0], notes[1], limits[0], limits[1], "")
 
 
-def app(app_id, name_de, name_en, category="tools"):
-    return row("A", app_id, name_de, name_en, category, "Fleitec", "GPL-2.0-only", "Kurz " + name_de,
-               "Short " + name_en, "Lang " + name_de, "Long " + name_en, "netz,disk", "", "a.png,b.png")
+def app(app_id, name_de, name_en, category="tools", kind="", requires=""):
+    cells = ["A", app_id, name_de, name_en, category, "Fleitec", "GPL-2.0-only", "Kurz " + name_de,
+             "Short " + name_en, "Lang " + name_de, "Long " + name_en, "netz,disk", "", "a.png,b.png"]
+    if kind or requires:
+        cells += [kind, requires]
+    return row(*cells)
 
 
 def good_rows():
@@ -64,6 +67,24 @@ def window_rows():
     return rows
 
 
+def tabs_rows():
+    tested = dict(build="main test", device="QEMU", at="2026-11-20")
+
+    def entry(app_id, name, **extra):
+        return [app(app_id, name, name, **extra),
+                variant(app_id, "opk", "osum-x86_64", "works", gate="tools/test", pkg="opk:" + app_id.split(".")[-1], **tested)]
+
+    rows = ["#apps\t2\t8"]
+    rows += [row("C", cid, de, en) for cid, de, en in CATEGORIES]
+    rows += entry("com.fleitec.hallo", "Hallo")
+    rows += entry("com.test.tabnative", "Tabnativ")
+    rows += entry("com.test.sysbox", "Sysbox", kind="system")
+    rows += entry("org.test.winert", "Weinlauf", kind="runtime")
+    rows += entry("org.test.clitool", "Klitool", kind="cli")
+    rows += entry("org.test.winapp", "Weinapp", requires="winert>=9.0")
+    return rows
+
+
 def sign(seed_path, data):
     seed = open(seed_path, "rb").read()
     return Ed25519PrivateKey.from_private_bytes(seed).sign(data)
@@ -92,6 +113,8 @@ def main(argv):
         gen(argv[2])
     elif argv[1] == "write":
         write(argv[2], argv[3], len(argv) > 4 and argv[4] == "flip")
+    elif argv[1] == "tabs":
+        write(argv[2], argv[3], False, tabs_rows())
     elif argv[1] == "window":
         write(argv[2], argv[3], False, window_rows())
     else:

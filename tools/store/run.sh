@@ -538,7 +538,7 @@ sleep -m 300
 stored serve 0 &
 sleep 1
 setsess 1000
-store &
+store --show-installed &
 echo ==S-WAIT==
 EOS
     # the guest only has to stay alive and answer after the last key: snapshots every 40 s
@@ -550,7 +550,7 @@ EXTRA+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/de/ /usr/share/lo
 [ -f assets/osum-icons.ttf ] && EXTRA+=("/lib/icons.ttf=assets/osum-icons.ttf")
 [ -f assets/osum-sans-bold.ttf ] && EXTRA+=("/lib/bold.ttf=assets/osum-sans-bold.ttf")
 PROGS_SAVE=$PROGS; PROGS="$PROGS store"
-[ -z "${STORE_FIT:-}" ] || sed -i "s|^store &\$|store --size ${STORE_FIT} \&|" "$TMPD/sW.sh"
+[ -z "${STORE_FIT:-}" ] || sed -i "s|^store --show-installed &\$|store --size ${STORE_FIT} --show-installed \&|" "$TMPD/sW.sh"
 image "$TMPD/W.img" "$TMPD/sW.sh" $((P0+7))
 PROGS=$PROGS_SAVE
 SCALE_WORD=${STORE_SCALE:+uiscale=$STORE_SCALE}
@@ -563,55 +563,7 @@ timeout 2200 $QEMU_X86 -cpu "$OSUM_CPU" -smp 1 -kernel "$TMPD/k0.img" -m 768 \
     -drive "file=$TMPD/W.img,format=raw,if=ide,index=0" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$TMPD/qemuw.txt" 2>&1 &
 QPID=$!; SRVPIDS="$SRVPIDS $QPID"
-wclean() { tr -cd '\11\12\15\40-\176\200-\377' < "$TMPD/w.txt"; }
-waitfor() { local i=0; while [ $i -lt $(( $2 * 5 )) ]; do grep -qaF -- "$1" "$TMPD/w.txt" 2>/dev/null && return 0; kill -0 "$QPID" 2>/dev/null || return 1; sleep 0.2; i=$((i + 1)); done; return 1; }
-shot() { # <name>: a PPM for the checks, a PNG for the eyes
-    python3 tools/gfx/screenshot.py "$SOCK" "$TMPD/$1.ppm" 5 > /dev/null 2>&1
-    if [ -n "$SHOTS" ] && [ -s "$TMPD/$1.ppm" ]; then
-        mkdir -p "$SHOTS"; python3 -c "import sys; from PIL import Image; Image.open(sys.argv[1]).save(sys.argv[2])" "$TMPD/$1.ppm" "$SHOTS/$1-$MODE-$RES.png" 2>/dev/null
-    fi
-}
-tap() { python3 tools/themestore/click.py "$1,$2" > "$TMPD/k.txt" 2>/dev/null; python3 tools/wm/monitor.py "$SOCK" "$TMPD/k.txt" > /dev/null 2>&1; sleep 1.5; }
-key() { local k; for k in "$@"; do echo "sendkey $k" > "$TMPD/t.txt"; python3 tools/wm/monitor.py "$SOCK" "$TMPD/t.txt" 0.15 > /dev/null 2>&1; sleep 0.6; done; sleep 1; }
-# the critical call of the window is answered in the SYSTEM dialog (SETBROKER2): wait for it, say yes with J
-dlgn() { wclean | grep -ac 'wm: trusted dialog up no='; }
-dlgyes() { # <dialogs shown before the question>
-    local i=0; while [ $i -lt 20 ]; do [ "$(dlgn)" -gt "$1" ] && break; sleep 1; i=$((i + 1)); done
-    sleep 1; key j
-}
-typetext() { local c; for c in $(echo "$1" | sed 's/./& /g'); do key "$c"; done; }
-mark() { MARK=$(wclean | wc -l); }
-# a text the window painted AFTER the mark (the trace: `wlib: text ... t=<text>`)
-sawlog() { [ "$(wclean | tail -n +"$MARK" | grep -acF -- "store: status $1")" -gt 0 ]; }
-waitlog() { local i=0; while [ $i -lt $2 ]; do sawlog "$1" && return 0; sleep 1; i=$((i + 1)); done; return 1; }
-sawjob() { [ "$(wclean | tail -n +"$MARK" | grep -acE 't=[0-9]+ %$')" -gt 0 ]; }
-sawt() { [ "$(wclean | tail -n +"$MARK" | grep -acF -- "t=$1")" -gt 0 ]; }
-waitt() { local i=0; while [ $i -lt $2 ]; do sawt "$1" && return 0; sleep 1; i=$((i + 1)); done; return 1; }
-# click the label of the LAST text of that name the window painted (the trace gives its place: x, base line, width)
-tapt() {
-    local xy
-    xy=$(wclean | awk -v want="$1" '
-        /wlib: text win=/ {
-            i = index($0, " t="); txt = substr($0, i + 3); if (txt != want) next
-            match($0, / x=[0-9]+/); x = substr($0, RSTART + 3, RLENGTH - 3)
-            match($0, / base=[0-9]+/); b = substr($0, RSTART + 6, RLENGTH - 6)
-            match($0, / tw=[0-9]+/); w = substr($0, RSTART + 4, RLENGTH - 4)
-            match($0, / ax=[0-9]+/); ax = substr($0, RSTART + 4, RLENGTH - 4)
-            match($0, / ay=[0-9]+/); ay = substr($0, RSTART + 4, RLENGTH - 4)
-            have = 1; cx = ax + x + w / 2; cy = ay + b - 6 }
-        END { if (have) printf "%d %d\n", cx, cy }')
-    [ -n "$xy" ] || return 1
-    set -- $xy; tap "$1" "$2"
-}
-# two pictures differ in many points (a dialog is open: its text is not in the trace, its picture is)
-differs() { python3 -c "
-import sys
-from PIL import Image, ImageChops
-a = Image.open(sys.argv[1]).convert('RGB'); b = Image.open(sys.argv[2]).convert('RGB')
-n = sum(1 for p in ImageChops.difference(a, b).convert('L').getdata() if p > 24)
-sys.exit(0 if n > int(sys.argv[3]) else 1)" "$TMPD/$1.ppm" "$TMPD/$2.ppm" "${3:-4000}" 2>/dev/null; }
-lastn() { wclean | grep -ao "store: tiles=[0-9]*" | tail -1 | tr -cd '0-9'; }
-lasth() { wclean | grep -ao " hits=[0-9]*" | tail -1 | tr -cd '0-9'; }
+. tools/store/winlib.sh
 if waitfor "==S-WAIT==" 150; then
     ok "the script reached the window part"
     MARK=1; i=0; while [ $i -lt 60 ]; do sawt "Alle" && break; sleep 1; i=$((i + 1)); done
@@ -738,6 +690,155 @@ fi
 kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null
 fi
 
+if want deps; then
+echo "== 4e. requires: dependencies install first, are skipped when present, stay on removal =="
+DSTAGE="$TMPD/dep"; mkdir -p "$DSTAGE"
+mk_dep_pkg() { # name version deps
+    local rz="$DSTAGE/$1-$2.rezept"
+    sed -e "s/^name=hallo/name=$1/" -e "s/^version=.*/version=$2/" -e "s/^titel=.*/titel=$1/" -e "s#H1ELF#$TMPD/pk/h1.elf#" tools/install/hallo1.rezept > "$rz"
+    [ -z "$3" ] || printf 'deps=%s\n' "$3" >> "$rz"
+    python3 "$OPK" bauen "$rz" -o "$DSTAGE/$1-$2.opk" > "$DSTAGE/$1-$2.log" 2>&1 || { bad "build $1 $2"; tail -3 "$DSTAGE/$1-$2.log"; }
+}
+mk_dep_pkg wine 8.0.0 ""; mk_dep_pkg wine 9.1.0 ""; mk_dep_pkg winapp 1.0.0 "wine>=9.0"
+python3 tools/update/signpak.py "$KEY" "$DSTAGE"/*.opk > "$DSTAGE/sign.log" 2>&1 && ok "wine 8.0.0, wine 9.1.0 and winapp (deps=wine>=9.0), signed" || { bad "signpak"; tail -3 "$DSTAGE/sign.log"; }
+cat > "$TMPD/sD.sh" <<'EOS'
+mkdir /users/justin
+echo ==D-NONE==
+opk install /d/winapp-1.0.0.opk
+opk list
+echo ==D-OLD==
+opk install /d/wine-8.0.0.opk
+opk install /d/winapp-1.0.0.opk
+opk list
+opk remove wine
+echo ==D-OK==
+opk install /d/wine-9.1.0.opk
+opk install /d/winapp-1.0.0.opk
+opk list
+echo ==D-NEEDED==
+opk remove wine
+opk list
+echo ==D-STAY==
+opk remove winapp
+opk list
+echo ==D-LAST==
+opk remove wine
+opk list
+echo ==FERTIG==
+EOS
+EXTRA=(/d/)
+for f in "$DSTAGE"/*.opk "$DSTAGE"/*.opk.sig; do [ -f "$f" ] && EXTRA+=("/d/$(basename "$f")=$f"); done
+image "$TMPD/D.img" "$TMPD/sD.sh" "$P0"
+run "$TMPD/D.img" d 600
+D="$TMPD/d.klar"
+grep -qa '==FERTIG==' "$D" || { bad "the dependency guest did not finish"; tail -15 "$D" | sed 's/^/        /'; }
+part "$D" D-NONE D-OLD > "$TMPD/p.txt"
+has "$TMPD/p.txt" "missing dependency: wine" "winapp without wine: refused, wine named"
+hasnot "$TMPD/p.txt" "winapp ->" "... and winapp is not installed"
+part "$D" D-OLD D-OK > "$TMPD/p.txt"
+has "$TMPD/p.txt" "dependency version too old: wine" "wine 8.0.0 is too old for wine>=9.0: refused"
+hasnot "$TMPD/p.txt" "winapp ->" "... and winapp is not installed"
+part "$D" D-OK D-NEEDED > "$TMPD/p.txt"
+has "$TMPD/p.txt" "wine -> " "wine 9.1.0 installs"
+has "$TMPD/p.txt" "winapp -> " "winapp installs after wine, the dependency is met"
+part "$D" D-NEEDED D-STAY > "$TMPD/p.txt"
+has "$TMPD/p.txt" "still needed by: winapp" "removing wine while winapp needs it: refused"
+has "$TMPD/p.txt" "wine -> " "... wine is still there"
+part "$D" D-STAY D-LAST > "$TMPD/p.txt"
+hasnot "$TMPD/p.txt" "winapp -> " "winapp removed"
+has "$TMPD/p.txt" "wine -> " "the dependency stays when the app goes"
+part "$D" D-LAST FERTIG > "$TMPD/p.txt"
+hasnot "$TMPD/p.txt" "wine -> " "wine removed on its own afterwards"
+fi
+
+if want tabs; then
+echo "== 4f. the window tabs: Apps (not installed, no system), System, Runtimes, search is global, requires text =="
+RES=${STORE_RES:-1024x768}; MODE=${STORE_MODE:-light}; SHOTS=${STORE_SHOTS:-}
+python3 tools/storeapps/mkview.py gen "$TMPD/ctkey"
+cp -r "$TMPD/srv/good" "$TMPD/srv/ctabs"
+python3 tools/storeapps/mkview.py tabs "$TMPD/srv/ctabs" "$TMPD/ctkey/catalog.seed"
+serve ctabs $((P0+8)) && ok "the tabs source: signed catalog with kind=system, runtime, cli and requires" || bad "the tabs source does not start"
+printf 'lang=de\n' > "$TMPD/locale.conf"
+printf '# /etc/theme.conf\nscheme=day\nmode=%s\naccent=\nshape=classic\n' "$MODE" > "$TMPD/theme.conf"
+{
+    cat <<'EOS'
+mkdir /users/justin
+opk install /quelle1/hallo-1.opk
+orientbus serve 0 &
+sleep -m 300
+stored serve 0 &
+sleep 1
+setsess 1000
+store &
+echo ==S-WAIT==
+EOS
+    for _ in $(seq 1 30); do printf 'sleep 40\necho ==S-SNAP==\nact call store.list\n'; done
+    echo "echo ==FERTIG=="
+} > "$TMPD/sT.sh"
+EXTRA=("/etc/store.catalog.pub=$TMPD/ctkey/catalog.pub" "/etc/uitrace=$TMPD/locale.conf" "/etc/theme.conf=$TMPD/theme.conf" "/etc/locale.conf=$TMPD/locale.conf")
+EXTRA+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/de/ /usr/share/locale/en/ "/usr/share/locale/de/messages=locale/de/messages" "/usr/share/locale/en/messages=locale/en/messages")
+[ -f assets/osum-icons.ttf ] && EXTRA+=("/lib/icons.ttf=assets/osum-icons.ttf")
+[ -f assets/osum-sans-bold.ttf ] && EXTRA+=("/lib/bold.ttf=assets/osum-sans-bold.ttf")
+PROGS_SAVE=$PROGS; PROGS="$PROGS store"
+image "$TMPD/T.img" "$TMPD/sT.sh" $((P0+8))
+PROGS=$PROGS_SAVE
+SOCK="$TMPD/mon.sock"; rm -f "$SOCK"
+timeout 1500 $QEMU_X86 -cpu "$OSUM_CPU" -smp 1 -kernel "$TMPD/k0.img" -m 768 \
+    -append "gfx disp fbres=$RES wm wmdauer wmshell osum vfs bus nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0 script=sh /t/s.sh;exit" \
+    -serial "file:$TMPD/w.txt" -display none -no-reboot -device "VGA,edid=on,xres=${RES%x*},yres=${RES#*x},vgamem_mb=32" \
+    -monitor "unix:$SOCK,server,nowait" \
+    -netdev user,id=n0 -device e1000,netdev=n0,mac=52:54:00:0a:0b:0c \
+    -drive "file=$TMPD/T.img,format=raw,if=ide,index=0" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$TMPD/qemut.txt" 2>&1 &
+QPID=$!; SRVPIDS="$SRVPIDS $QPID"
+. tools/store/winlib.sh
+if waitfor "==S-WAIT==" 150; then
+    ok "the script reached the window part"
+    MARK=1; i=0; while [ $i -lt 120 ] && [ "$(lastn)" != 3 ]; do sleep 1; i=$((i + 1)); done
+    [ "$(lastn)" = 3 ] && ok "start page is the Apps tab: three tiles (Gruss, Tabnativ, Weinapp), not the installed Hallo, no system or runtime tools" || bad "apps tab tiles: '$(lastn)' (want 3)"
+    sleep 3; shot t1-apps
+    for t in "Tabnativ" "Weinapp"; do sawt "$t" && ok "Apps tab shows '$t'" || bad "Apps tab misses '$t'"; done
+    for t in "Sysbox" "Weinlauf" "Klitool" "Hallo"; do sawt "$t" && bad "Apps tab shows '$t' and should not" || ok "Apps tab hides '$t'"; done
+    for t in "System" "Laufzeiten" "Installierte anzeigen"; do sawt "$t" && ok "the window offers '$t'" || bad "no '$t'"; done
+    mark
+    tapt "Installierte anzeigen" && sleep 3
+    sawt "Hallo" && [ "$(lastn)" = 4 ] && ok "Show installed brings Hallo back (four tiles)" || bad "show installed: tiles '$(lastn)'"
+    shot t2-installed
+    mark
+    tapt "Installierte anzeigen" && sleep 3
+    [ "$(lastn)" = 3 ] && ok "switching it off hides Hallo again" || bad "show installed off: tiles '$(lastn)'"
+    mark
+    tapt "System" && sleep 3
+    sawt "Sysbox" && [ "$(lastn)" = 1 ] && ok "System tab: only Sysbox" || bad "system tab: tiles '$(lastn)'"
+    sawt "Weinlauf" && bad "System tab shows a runtime" || ok "System tab has no runtime"
+    shot t3-system
+    mark
+    tapt "Laufzeiten" && sleep 3
+    sawt "Weinlauf" && sawt "Klitool" && [ "$(lastn)" = 2 ] && ok "Runtimes tab: Weinlauf and Klitool (cli)" || bad "runtimes tab: tiles '$(lastn)'"
+    sawt "Tabnativ" && bad "Runtimes tab shows an app" || ok "Runtimes tab has no app"
+    shot t4-runtimes
+    mark
+    tapt "Programme" && sleep 2
+    key ctrl-f; typetext weinl; sleep 3
+    sawt "Weinlauf" && [ "$(lastn)" = 1 ] && ok "search finds the runtime from the Apps tab" || bad "search weinl: tiles '$(lastn)'"
+    sawt "Laufzeiten & Werkzeuge" && ok "the hit says where it lives: Laufzeiten & Werkzeuge" || bad "no category on the search hit"
+    shot t5-search
+    key esc; key ctrl-f; typetext sysb; sleep 3
+    sawt "Sysbox" && ok "search finds the system tool from the Apps tab" || bad "search sysb"
+    key esc; key ctrl-f; typetext hall; sleep 3
+    sawt "Hallo" && ok "search finds the installed app although the Apps tab hides it" || bad "search hall"
+    key esc; sleep 2
+    mark
+    tapt "Weinapp" && sleep 3
+    sawt "Benötigt: Weinlauf (wird mitinstalliert)" && ok "detail page says what is needed before installing: Weinlauf (wird mitinstalliert)" || bad "no requires line on the detail page"
+    shot t6-detail
+    sawt "store." && bad "raw locale keys painted" || ok "no raw locale keys"
+else
+    bad "the script never reached the window part"; wclean | tail -20 | sed 's/^/        /'
+fi
+kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null
+fi
+
 if want offline; then
 echo "== 6. the window offline: no store service answers, the installed list comes from local state =="
 RES=${STORE_RES:-1024x768}; SHOTS=${STORE_SHOTS:-}
@@ -747,7 +848,7 @@ cat > "$TMPD/sO.sh" <<'EOS'
 mkdir /users/justin
 opk install /quelle1/hallo-1.opk
 setsess 1000
-store &
+store --show-installed &
 echo ==O-WAIT==
 sleep 400
 echo ==FERTIG==
