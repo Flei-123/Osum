@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import fs.evfd
+import fs.file
+import fs.unixsock
+import ipc.perm
+import lib.errno
+import sched.taskconst
+import sched.taskslot
+import sys.sysfd
+import sys.sysuser
+
+export {
+    stamp, getopt, SO_PEERCRED, SO_PEERPIDFD
+}
+
+const SO_PEERCRED: u64 = 17
+const SO_PEERPIDFD: u64 = 77
+const UCRED_BYTES: u64 = 12
+const PIDFD_BYTES: u64 = 4
+const NOBODY: u64 = 65534
+const GID_SHIFT: u64 = 32
+const ID_MASK: u64 = 0xFFFFFFFF
+
+fn task_pid(state: u64, me: u64) -> u64 {
+    let g: u64 = taskslot.tget(state, me, taskconst.T_TGID)
+    if g != 0 {
+        return g
+    }
+    return taskslot.tget(state, me, taskconst.T_PID)
+}
+
+fn stamp(state: u64, me: u64, si: u64) {
+    let ug: u64 = perm.euid(state, me) | (perm.egid(state, me) << GID_SHIFT)
+    unixsock.sock_set_cred(state, si, task_pid(state, me), ug)
+}
+
+fn getopt(state: u64, me: u64, ui: u64, name: u64, val: u64, lenp: u64, room: u64) -> u64 {
+    let peer: u64 = unixsock.sock_peer(state, ui)
+    var pid: u64 = 0
+    var uid: u64 = NOBODY
+    var gid: u64 = NOBODY
+    if peer < unixsock.USOCK_MAX {
+        pid = unixsock.sock_cred_pid(state, peer)
+        uid = unixsock.sock_cred_ug(state, peer) & ID_MASK
+        gid = unixsock.sock_cred_ug(state, peer) >> GID_SHIFT
+    }
+    if name == SO_PEERCRED {
+        if room < UCRED_BYTES {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        if !sysuser.put32(state, me, val, pid) || !sysuser.put32(state, me, val + 4, uid)
+            || !sysuser.put32(state, me, val + 8, gid) || !sysuser.put32(state, me, lenp, UCRED_BYTES) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        return 0
+    }
+    return pidfd(state, me, pid, val, lenp, room)
+}
+
+fn pidfd(state: u64, me: u64, pid: u64, val: u64, lenp: u64, room: u64) -> u64 {
+    if room < PIDFD_BYTES {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if pid == 0 {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    let of: u64 = evfd.pidfd_new(state, pid, 0)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    sysfd.cx_put(state, me, fd, true)
+    if !sysuser.put32(state, me, val, fd) || !sysuser.put32(state, me, lenp, PIDFD_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return 0
+}
