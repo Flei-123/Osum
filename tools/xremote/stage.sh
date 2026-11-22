@@ -11,6 +11,7 @@ done
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 PKG="$WORK/pkg"
+rm -rf "$OUT"
 mkdir -p "$PKG/bau" "$OUT"
 cp pakete/xremote/INFO pakete/xremote/INITTAB pakete/xremote/DEFAULTS pakete/xremote/rezept pakete/xremote/start "$PKG/"
 if [ -n "${XR_VERSION:-}" ]; then
@@ -23,6 +24,7 @@ bash tools/xremote/build-daemon.sh "$PKG/bau/xremote" kernel/user/xrcli.fi
 cp assets/musl/ld-musl-x86_64.so.1 "$PKG/bau/ld-musl-x86_64.so.1"
 (cd "$PKG" && python3 "$OPK" bauen rezept -o "$WORK/xremote.opk") > "$WORK/build.log" 2>&1 || { cat "$WORK/build.log" >&2; exit 1; }
 python3 "$OPK" installieren --wurzel "$OUT" "$WORK/xremote.opk" > "$WORK/install.log" 2>&1 || { cat "$WORK/install.log" >&2; exit 1; }
+python3 -I tools/xremote/guestplan.py "$OUT"
 [ -z "${XR_OPK_OUT:-}" ] || cp "$WORK/xremote.opk" "$XR_OPK_OUT"
 rm -rf "$OUT/users" "$OUT/system/device.key" "$OUT/system/device.pub" "$OUT/system/machine-id"
 echo "xremote stage: $(find "$OUT/apps/xremote.osp" -type f | wc -l) files in $OUT/apps/xremote.osp, package record under $OUT/store"

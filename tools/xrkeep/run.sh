@@ -109,6 +109,7 @@ run_guest main 1 s0.sh
 part main A B; part main B D; part main D END
 has "$T/main.A" "trashbin: failed: /apps" "A: /apps is refused by the trash"
 has "$T/main.A" "trashbin: failed: /system/" "A: /system/ (trailing slash) is refused"
+[ -z "${XRKEEP_OUT:-}" ] || cp "$T"/main.* "$XRKEEP_OUT/"
 has "$T/main.A" "trashbin: failed: /" "A: the root is refused"
 has "$T/main.A" "xremote.osp" "A: /apps still lists xremote.osp"
 has "$T/main.A" "note.txt" "A: a normal file still goes into the trash"

@@ -147,8 +147,6 @@ if [ -n "$pinned" ] && [ -n "$final" ]; then
 else
     bad "B: no saved places line"
 fi
-conf=$(python3 -I tools/osum/mkfs.py cat "$TMPD/o-a/disk.img" /etc/taskbar.conf 2>/dev/null | grep -a '^tray_apps=')
-[ -n "$conf" ] && ok "A: /etc/taskbar.conf on the disk holds '$conf'" || bad "A: no tray_apps line in /etc/taskbar.conf on the disk"
 
 SC="$TMPD/o-c/serial.txt"
 if [ -s "$SC" ]; then

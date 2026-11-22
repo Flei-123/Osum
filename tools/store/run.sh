@@ -24,7 +24,7 @@ cleanup() { for p in $SRVPIDS; do kill "$p" 2>/dev/null; done; [ -n "${STORE_KEE
 trap cleanup EXIT
 BLOCKS=${BLOCKS:-40000}
 export OSUM_CPU=${OSUM_CPU:-Haswell}
-PROGS="sh ls cat echo sleep mkdir cp chmod rm orientbus act su stored opk ota"
+PROGS="sh ls cat echo sleep mkdir cp chmod rm orientbus act su stored opk ota apprights"
 SRV_PORT=${STORE_PORT:-$(( 19000 + ($$ % 900) ))}
 
 echo "== 1. build =="
@@ -824,10 +824,11 @@ else
     serve xr $((P0+4)) && ok "the xremote source is up" || bad "xremote source does not start"
     cat > "$TMPD/sXr.sh" <<'EOS'
 mkdir /users/justin
-orientbus serve 24000 &
+orientbus serve 0 &
 sleep -m 300
-stored serve 24000 &
+stored serve 0 &
 sleep 1
+apprights load
 setsess 1000
 echo ==X-SHIPPED==
 opk list
