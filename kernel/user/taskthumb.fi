@@ -8,14 +8,20 @@ import uikit.uiscale
 import uitheme
 import ulib
 
-export { MAX_SLOTS, THUMB_W, THUMB_H, prepare, refresh, paint, ready, acquire, release }
+export { MAX_SLOTS, MAX_W, MAX_H, box_w, box_h, prepare, refresh, paint, ready, acquire, release }
 
 const MAX_SLOTS: u64 = 5
-const THUMB_W: u64 = 184
-const THUMB_H: u64 = 116
+const MAX_W: u64 = 200
+const MAX_H: u64 = 130
+const MIN_W: u64 = 96
+const MIN_H: u64 = 64
+const HOVER_FILL_ALPHA: u64 = 96
+const HOVER_RING_ALPHA: u64 = 255
+const HOVER_RING_PX: u64 = 2
 const MAX_PIXEL_SCALE: u64 = 2
-const SLOT_BYTES: u64 = 341504
-const POOL_BYTES: u64 = 1707520
+const BYTES_PER_PIXEL: u64 = 4
+const SLOT_BYTES: u64 = MAX_W * MAX_PIXEL_SCALE * MAX_H * MAX_PIXEL_SCALE * BYTES_PER_PIXEL
+const POOL_BYTES: u64 = SLOT_BYTES * MAX_SLOTS
 const SYS_MUNMAP: u64 = 11
 
 static mut pool: u64 = 0
@@ -23,6 +29,8 @@ static mut win_id: [u64; 5] = [0 as u64; 5]
 static mut px_w: [u64; 5] = [0 as u64; 5]
 static mut px_h: [u64; 5] = [0 as u64; 5]
 static mut got: [u64; 5] = [0 as u64; 5]
+static mut box_dw: [u64; 5] = [0 as u64; 5]
+static mut box_dh: [u64; 5] = [0 as u64; 5]
 
 fn slot_ptr(i: u64) -> u64 {
     return pool + i * SLOT_BYTES
@@ -61,20 +69,48 @@ fn pixel_scale() -> u64 {
     return s
 }
 
+fn box_w(i: u64) -> u64 {
+    return box_dw[i as usize]
+}
+
+fn box_h(i: u64) -> u64 {
+    return box_dh[i as usize]
+}
+
+fn size_box(i: u64, ww: u64, wh: u64) {
+    var bw: u64 = MAX_W
+    var bh: u64 = MAX_H
+    if ww != 0 && wh != 0 {
+        if ww * MAX_H >= wh * MAX_W {
+            bh = wh * MAX_W / ww
+        } else {
+            bw = ww * MAX_H / wh
+        }
+    }
+    if bw < MIN_W {
+        bw = MIN_W
+    }
+    if bh < MIN_H {
+        bh = MIN_H
+    }
+    box_dw[i as usize] = bw
+    box_dh[i as usize] = bh
+}
+
 fn fit(i: u64, ww: u64, wh: u64) {
     let s: u64 = pixel_scale()
-    let box_w: u64 = THUMB_W * s
-    let box_h: u64 = THUMB_H * s
-    var tw: u64 = box_w
-    var th: u64 = box_w
+    let box_pw: u64 = box_dw[i as usize] * s
+    let box_ph: u64 = box_dh[i as usize] * s
+    var tw: u64 = box_pw
+    var th: u64 = box_pw
     if wh != 0 && ww != 0 {
-        th = wh * box_w / ww
+        th = wh * box_pw / ww
     }
-    if th > box_h || ww == 0 || wh == 0 {
-        th = box_h
-        tw = box_h
+    if th > box_ph || ww == 0 || wh == 0 {
+        th = box_ph
+        tw = box_ph
         if wh != 0 {
-            tw = ww * box_h / wh
+            tw = ww * box_ph / wh
         }
     }
     if tw == 0 {
@@ -104,6 +140,7 @@ fn prepare(i: u64, id: u64, ww: u64, wh: u64) {
         return
     }
     win_id[i as usize] = id
+    size_box(i, ww, wh)
     fit(i, ww, wh)
     capture(i)
 }
@@ -120,18 +157,25 @@ fn ready(i: u64) -> bool {
     return pool != 0 && i < MAX_SLOTS && got[i as usize] != 0
 }
 
+fn paint_hover(x: u64, y: u64, w: u64, h: u64) {
+    let r: u64 = fuiscene.rb_px()
+    fuiscene.cv_round_a(x, y, w, h, r, uitheme.theme(uitheme.T_BTNHI), HOVER_FILL_ALPHA)
+    fuiscene.cv_ring_a(x, y, w, h, r, HOVER_RING_PX * pixel_scale(), uitheme.theme(uitheme.T_ACCENT),
+        HOVER_RING_ALPHA)
+}
+
 fn paint(i: u64, x: u64, y: u64, w: u64, h: u64, st: u64) {
     var plate: u64 = uitheme.theme(uitheme.T_BTN)
     if (st & fuiscene.TS_DOWN) != 0 {
         plate = uitheme.theme(uitheme.T_BTNDN)
-    } else if (st & fuiscene.TS_HOT) != 0 {
-        plate = uitheme.theme(uitheme.T_BTNHI)
     }
     fuiscene.cv_round_rgb(x, y, w, h, fuiscene.rb_px(), plate)
-    if !ready(i) {
-        return
+    if ready(i) {
+        let tw: u64 = px_w[i as usize]
+        let th: u64 = px_h[i as usize]
+        fuiscene.cv_image(slot_ptr(i), tw, th, x + (w - tw) / 2, y + (h - th) / 2, tw, th)
     }
-    let tw: u64 = px_w[i as usize]
-    let th: u64 = px_h[i as usize]
-    fuiscene.cv_image(slot_ptr(i), tw, th, x + (w - tw) / 2, y + (h - th) / 2, tw, th)
+    if (st & (fuiscene.TS_HOT | fuiscene.TS_DOWN)) != 0 {
+        paint_hover(x, y, w, h)
+    }
 }
