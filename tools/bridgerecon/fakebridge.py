@@ -52,6 +52,13 @@ def parse_messages(body):
     return messages
 
 
+def take_job():
+    with lock:
+        job = config.get("job")
+        config["job"] = None
+    return job
+
+
 def answer_for(messages):
     out = b""
     for words in messages:
@@ -61,6 +68,13 @@ def answer_for(messages):
             out += ("challenge %s 0\n" % NONCE_HEX).encode()
         elif words[0] == "proof":
             out += b"welcome 0\n"
+        elif words[0] == "poll" and config.get("job"):
+            job = take_job()
+            if job:
+                record("JOB-SENT")
+                out += ("job 1 run %s 0\n" % job.encode().hex()).encode()
+        elif words[0] == "done":
+            record("DONE %s" % " ".join(words[1:3]))
     return out
 
 
@@ -147,9 +161,11 @@ def main():
     parser.add_argument("--bind", required=True)
     parser.add_argument("--log", required=True)
     parser.add_argument("--stall", required=True)
+    parser.add_argument("--job", default="")
     args = parser.parse_args()
     config["log"] = args.log
     config["stall"] = args.stall
+    config["job"] = args.job or None
     threading.Thread(target=serve_dns, args=(args.bind,), daemon=True).start()
     server = TlsServer((args.bind, 443), Handler)
     server.daemon_threads = True
