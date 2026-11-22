@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import arch.cpu
+import mm.mmframe
+
+export { hold, room, drain, HOLD_CAP }
+
+const MAX_CPUS: u64 = 8
+
+const HOLD_CAP: u64 = 1024
+
+static mut held: [u64; 8192] = [0 as u64; 8192]
+static mut counts: [u64; 8] = [0 as u64; 8]
+
+fn count_cell(me: u64) -> u64 {
+    return (&counts[0]) as u64 + me * 8
+}
+
+fn held_cell(me: u64, k: u64) -> u64 {
+    return (&held[0]) as u64 + (me * HOLD_CAP + k) * 8
+}
+
+fn room(state: u64) -> u64 {
+    let me: u64 = cpu.here(state)
+    if me >= MAX_CPUS {
+        return 0
+    }
+    return HOLD_CAP - __mmio_read64(count_cell(me) as *mut u64)
+}
+
+fn hold(state: u64, frame: u64) -> bool {
+    let me: u64 = cpu.here(state)
+    if me >= MAX_CPUS {
+        return false
+    }
+    let n: u64 = __mmio_read64(count_cell(me) as *mut u64)
+    if n >= HOLD_CAP {
+        return false
+    }
+    __mmio_write64(held_cell(me, n) as *mut u64, frame)
+    __mmio_write64(count_cell(me) as *mut u64, n + 1)
+    return true
+}
+
+fn drain(state: u64) {
+    let me: u64 = cpu.here(state)
+    if me >= MAX_CPUS {
+        return
+    }
+    let n: u64 = __mmio_read64(count_cell(me) as *mut u64)
+    if n == 0 {
+        return
+    }
+    let flags: u64 = mmframe.lock(state)
+    var k: u64 = 0
+    while k < n {
+        mmframe.frame_free_inner(state, __mmio_read64(held_cell(me, k) as *mut u64))
+        k = k + 1
+    }
+    __mmio_write64(count_cell(me) as *mut u64, 0)
+    mmframe.unlock(state, flags)
+}
