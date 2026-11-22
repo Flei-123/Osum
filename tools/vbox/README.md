@@ -28,7 +28,7 @@ Server (use `(nohup setsid ... &)` + poll; the build takes ~11 min plus heavy qu
 ```
 bash tools/vbox/run.sh lock w-xyz
 bash tools/vbox/run.sh stamp round-start
-bash tools/vbox/run.sh build z30 /path/to/worktree          # -> /root/abbilder/z30/orientos-usb.img (via heavy)
+bash tools/vbox/run.sh build z30 /path/to/worktree          # -> /root/abbilder/z30/xoffios-usb.img (via heavy)
 bash tools/vbox/run.sh publish z30                           # xz + public/t-<hex>/o.xz; prints the LAPTOP fetch line
 ```
 Laptop (`$s` = `powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\justi\vbl\vbtest.ps1`; paste the fetch line from `publish`):

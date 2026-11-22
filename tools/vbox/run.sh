@@ -5,7 +5,7 @@
 #   bash tools/vbox/run.sh lock <who>            take /root/abbilder/vm.lock (one test VM at a time)
 #   bash tools/vbox/run.sh unlock                release it
 #   bash tools/vbox/run.sh lockstatus
-#   bash tools/vbox/run.sh build <id> <worktree> build image /root/abbilder/<id>/orientos-usb.img via heavy (~11 min, run it in background!)
+#   bash tools/vbox/run.sh build <id> <worktree> build image /root/abbilder/<id>/xoffios-usb.img via heavy (~11 min, run it in background!)
 #   bash tools/vbox/run.sh publish <id>          xz + publish at https://jarvis.fleitec.com/t-<hex>/o.xz, prints the laptop fetch line
 #   bash tools/vbox/run.sh script                publish tools/vbox/vbtest.ps1, prints the laptop install line
 #   bash tools/vbox/run.sh pull <dir> <name>...  copy delivered screenshots (remote_deliver) into <dir>
@@ -45,9 +45,9 @@ case "$cmd" in
     date +%s > "$ABB/$id.t0"
     /root/jarvis/bin/heavy bash tools/usbimg/build.sh "$ABB/$id"
     date +%s > "$ABB/$id.t1"
-    echo "OK: built $ABB/$id/orientos-usb.img in $(( $(cat "$ABB/$id.t1") - $(cat "$ABB/$id.t0") ))s (queue wait included)" ;;
+    echo "OK: built $ABB/$id/xoffios-usb.img in $(( $(cat "$ABB/$id.t1") - $(cat "$ABB/$id.t0") ))s (queue wait included)" ;;
   publish)
-    id="${1:?usage: publish <id>}"; img="$ABB/$id/orientos-usb.img"
+    id="${1:?usage: publish <id>}"; img="$ABB/$id/xoffios-usb.img"
     [ -f "$img" ] || { echo "no $img"; exit 1; }
     raw=$(sha256sum "$img" | cut -c1-64); hex=${raw:0:12}
     dir="$PUB/t-$hex"; mkdir -p "$dir"
