@@ -2,6 +2,7 @@
 import sys
 
 WINDOW_BOX = (16, 40, 1276, 728)
+MIN_DARK_COLORS = 12
 MIN_LIGHT_SHARE = 0.30
 MIN_DIFF_PIXELS = 300
 
@@ -47,13 +48,28 @@ def diff_pixels(rows_a, rows_b):
     return changed
 
 
+def distinct_colors(rows):
+    seen = set()
+    for row in rows:
+        for i in range(0, len(row), 3):
+            seen.add(row[i:i + 3])
+    return len(seen)
+
+
 def main():
-    shot = window_pixels(sys.argv[1])
+    args = [a for a in sys.argv[1:] if a != "--dark"]
+    dark = "--dark" in sys.argv
+    shot = window_pixels(args[0])
     share = light_share(shot)
     print("ARTCRAFT-CHECK light_share=%.3f" % share)
-    ok = share >= MIN_LIGHT_SHARE
-    if len(sys.argv) > 2:
-        changed = diff_pixels(shot, window_pixels(sys.argv[2]))
+    if dark:
+        colors = distinct_colors(shot)
+        print("ARTCRAFT-CHECK distinct_colors=%d" % colors)
+        ok = colors >= MIN_DARK_COLORS
+    else:
+        ok = share >= MIN_LIGHT_SHARE
+    if len(args) > 1:
+        changed = diff_pixels(shot, window_pixels(args[1]))
         print("ARTCRAFT-CHECK typed_diff_pixels=%d" % changed)
         ok = ok and changed >= MIN_DIFF_PIXELS
     print("ARTCRAFT-CHECK %s" % ("green" if ok else "red"))

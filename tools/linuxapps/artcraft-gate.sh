@@ -37,7 +37,9 @@ if [[ " ${STAGES:-cli gui} " == *" gui "* ]]; then
         grep -qaF "wayd: window c=" "$ser" && report "gui $dir window" ok || report "gui $dir window" no "no wayd window"
         TYPED=()
         [ "$dir" = gridcraft ] && TYPED=("$OUT/gui-$dir/typed.ppm")
-        verdict=$(python3 -I tools/linuxapps/artcraftcheck.py "$OUT/gui-$dir/window.ppm" "${TYPED[@]}" 2>&1 | tail -1)
+        DARK=()
+        [ "$dir" = launcher ] && DARK=(--dark)
+        verdict=$(python3 -I tools/linuxapps/artcraftcheck.py "${DARK[@]}" "$OUT/gui-$dir/window.ppm" "${TYPED[@]}" 2>&1 | tail -1)
         [ "$verdict" = "ARTCRAFT-CHECK green" ] && report "gui $dir pixels${TYPED:+ + typing}" ok || report "gui $dir pixels${TYPED:+ + typing}" no "$verdict"
     done
 fi
