@@ -7,7 +7,7 @@ awk -v budget="$BUDGET" -v first="$FIRST" '
 /^FXS sample/ { s = $3; seen = 1 }
 /^FXT / && seen && $3 > 8 && $6 != "awk" && $6 != "sleep" {
     k = $2
-    if (s < first) { base[k] = $4; next }
+    if (s <= first) { base[k] = $4; next }
     if (!(k in base)) base[k] = 0
     use = $4 - base[k]
     if (!(k in top) || use > top[k]) { top[k] = use; name[k] = $6 " " $7 }
