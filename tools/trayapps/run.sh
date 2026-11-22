@@ -9,7 +9,7 @@
 # Boot A (scale 1): click on the bar icon runs the open command, overflow tile menu -> "Show on taskbar" pins beta,
 #   right click on the bar icon opens the menu, a custom entry runs, drag bar -> overflow and back.
 # Boot S (scale 2): bar icons inked and centred.  Boot B (restart): the saved places are the preset.
-# Boot C (counter-proof): no registry, no bar icons.  Boot O (counter-proof): old origin/main tree, no bar icons.
+# Boot C (counter-proof): no registry, no bar icons.  Boot O (counter-proof): tree before the tray registry (8ae3d0be9, override TRAYAPPS_OLD_REF), no bar icons.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 TMPD=$(mktemp -d)
@@ -90,7 +90,7 @@ boot a "$TMPD/dreh_a.txt" 1 "$BASE" yes &
 boot s "$TMPD/dreh_s.txt" 2 "$BASE" yes &
 boot c "$TMPD/dreh_s.txt" 1 "$BASE" no &
 if [ "${TRAYAPPS_OLD:-1}" = 1 ]; then
-    git worktree add --detach "$OLD" origin/main > /dev/null 2>&1 && cp tools/design/drive.py "$OLD/tools/design/drive.py" \
+    git worktree add --detach "$OLD" "${TRAYAPPS_OLD_REF:-8ae3d0be9}" > /dev/null 2>&1 && cp tools/design/drive.py "$OLD/tools/design/drive.py" \
         && boot o "$TMPD/dreh_s.txt" 1 "$BASE" yes "$OLD" &
 fi
 wait

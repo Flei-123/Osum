@@ -38,7 +38,7 @@ export { is_loopback, arp_flush, arp_ask, echoes, EPHEMERAL_BASE, EPHEMERAL_MASK
     sock_readable, sock_next_len, sock_writable, sock_error,
     sock_acceptable, sock_hup,
     sock_nonblock, sock_set_nonblock, sock_put_nonblock, sock_tmo, sock_set_tmo, TMO_MASK,
-    SK_FREE, SK_TCP, SK_UDP, SK_ICMP, SOCK_MAX,
+    SK_FREE, SK_TCP, SK_UDP, SK_ICMP, SOCK_MAX, sock_stat,
     SF_LISTEN, SF_NONBLOCK, SF_CONNECTED, SF_KEEPALIVE, SF_LOOPBIND, SF_LOOPCONN, sock_mark_loopback,
     sock_ka_set, sock_ka_get, KA_ON, KA_IDLE, KA_INTVL, KA_CNT, sock_stale
 , dhcp_set, dhcp_get}
@@ -83,9 +83,8 @@ const TXK_ARP_SUPPRESSED: u64 = 5
 const ARP_GAP_ANY: u64 = 5
 const ARP_GAP_SAME: u64 = 100
 
-const SOCK_OFF: u64 = 0x400
 const SOCK_BYTES: u64 = 32
-const SOCK_MAX: u64 = 16
+const SOCK_MAX: u64 = 128
 
 const ARP_OFF: u64 = 0x600
 const ARP_BYTES: u64 = 16
@@ -107,6 +106,12 @@ const SK_FREE: u64 = 0
 const SK_TCP: u64 = 1
 const SK_UDP: u64 = 2
 const SK_ICMP: u64 = 3
+
+const SS_USED: u64 = 0
+const SS_PEAK: u64 = 1
+const SS_REFUSED: u64 = 2
+const SS_RESERVE: u64 = 3
+const SS_MAX: u64 = 4
 
 const SF_LISTEN: u64 = 1
 const SF_NONBLOCK: u64 = 2
@@ -1112,7 +1117,7 @@ fn icmp_take(state: u64, dst: u64, cap: u64, from: *mut u64) -> u64 {
 }
 
 fn so_at(i: u64) -> u64 {
-    return sc(SOCK_OFF + i * SOCK_BYTES)
+    return kstate.INETSOCK_OFF + i * SOCK_BYTES
 }
 
 fn lport_of(state: u64, i: u64) -> u64 {
@@ -1219,7 +1224,52 @@ fn sock_set_tmo(state: u64, i: u64, snd: bool, ticks: u64) {
     kstate.set(state, so_at(i) + SO_KIND, keep | (t << sh))
 }
 
+fn sock_used(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < SOCK_MAX {
+        if (kstate.get(state, so_at(i) + SO_KIND) & 0xFF) != SK_FREE {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn sock_stat(state: u64, which: u64) -> u64 {
+    if which == SS_USED {
+        return sock_used(state)
+    }
+    if which == SS_PEAK {
+        return netmon.slot_peak(state)
+    }
+    if which == SS_REFUSED {
+        return netmon.refused_total(state)
+    }
+    if which == SS_RESERVE {
+        return tcpreserve.SOCK_RESERVED
+    }
+    if which == SS_MAX {
+        return SOCK_MAX
+    }
+    return 0
+}
+
+fn sock_admitted(state: u64, task: u64) -> bool {
+    let used: u64 = sock_used(state)
+    if !tcpreserve.admit_sock(state, SOCK_MAX - used, task) {
+        netmon.note_refused(state, task)
+        tcpreserve.say_sock_refused(task, used)
+        return false
+    }
+    netmon.note_used(state, used + 1)
+    return true
+}
+
 fn sock_new(state: u64, kind: u64) -> u64 {
+    if !sock_admitted(state, sched.current(state)) {
+        return SOCK_MAX
+    }
     var i: u64 = 0
     while i < SOCK_MAX {
         if (kstate.get(state, so_at(i) + SO_KIND) & 0xFF) == SK_FREE {

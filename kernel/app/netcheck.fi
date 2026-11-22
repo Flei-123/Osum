@@ -3,6 +3,7 @@ import std.rt
 import libc.kcall
 import libc.proc
 import netdiag.healprobe
+import netdiag.helperstate
 import netdiag.netlog
 
 const SYS_NETHEAL: u64 = 1303
@@ -24,6 +25,9 @@ const BAD: u64 = 0xFFFFFFFFFFFFF000
 const BAD_STREAK_PUBLISH: u64 = 2
 const PERIOD_OK_S: u64 = 20
 const PERIOD_BAD_S: u64 = 5
+const BRIDGE_STALE_S: u64 = 300
+const STALE_MIN_RUNG: u64 = 2
+const INFO_UPTIME: u64 = 1
 
 static mut S_TAG: [u8; 9] = "netcheck\0"
 static mut S_STAGE: [u8; 6] = "stage\0"
@@ -82,6 +86,12 @@ fn heal(rung: u64, kind: u64) {
         return
     }
     run_dhcp()
+}
+
+fn bridge_stale() -> bool {
+    let now_ms: u64 = kcall.sys3(kcall.SYS_OSUM_SYSINFO, INFO_UPTIME, 0, 0)
+    let age: u64 = helperstate.alive_age_secs(now_ms)
+    return age != helperstate.NONE && age > BRIDGE_STALE_S
 }
 
 fn log_stage(stage: u64, gw: u64, kind: u64) {
@@ -178,6 +188,20 @@ fn main(start: u64) -> i32 {
             let stage: u64 = healprobe.probe(gw)
             if netget(NG_UPGEN) != seen_gen {
                 sleep_s = 1
+            } else if stage == healprobe.H_OK && bridge_stale() {
+                sleep_s = period_bad
+                if wait_s <= sleep_s && rung < RUNG_MAX {
+                    rung = rung + 1
+                    if rung < STALE_MIN_RUNG {
+                        rung = STALE_MIN_RUNG
+                    }
+                    heals = heals + 1
+                    heal(rung, kind)
+                    log_heal(rung, kind, heals)
+                    wait_s = backoff_s(rung, base)
+                } else if wait_s > sleep_s {
+                    wait_s = wait_s - sleep_s
+                }
             } else if stage == healprobe.H_OK {
                 streak = 0
                 rung = 0

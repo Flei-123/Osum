@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import ulib
+import netdiag.netlog
+
+export { log_slots }
+
+const SYS_NETGET: u64 = 1300
+const NG_SOCKS: u64 = 26
+const SS_USED: u64 = 0
+const SS_PEAK: u64 = 1
+const SS_REFUSED: u64 = 2
+const SS_RESERVE: u64 = 3
+const SS_MAX: u64 = 4
+const NP_REFUSED: u64 = 7
+const NAME_BYTES: u64 = 24
+const NAME_BUF: u64 = 32
+
+static mut LOG_SOCKS: [u8; 6] = "socks\0"
+static mut LOG_NFILE: [u8; 6] = "nfile\0"
+static mut K_USED: [u8; 5] = "used\0"
+static mut K_PEAK: [u8; 5] = "peak\0"
+static mut K_MAX: [u8; 4] = "max\0"
+static mut K_RESERVE: [u8; 8] = "reserve\0"
+static mut K_REFUSED: [u8; 8] = "refused\0"
+static mut K_PROG: [u8; 5] = "prog\0"
+static mut K_COUNT: [u8; 6] = "count\0"
+static mut prog_name: [u8; 32] = [0 as u8; 32]
+
+fn stat(which: u64) -> u64 {
+    let v: u64 = ulib.sys(SYS_NETGET, NG_SOCKS, which, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn prog_query(kind: u64, index: u64, field: u64) -> u64 {
+    let v: u64 = ulib.sys(ulib.SYS_NETMON, kind, index, field)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn load_name(index: u64) {
+    var k: u64 = 0
+    while k < NAME_BUF {
+        prog_name[k as usize] = 0 as u8
+        k = k + 1
+    }
+    k = 0
+    while k < NAME_BYTES {
+        let c: u64 = prog_query(ulib.NK_PNAME, index, k)
+        prog_name[k as usize] = c as u8
+        if c == 0 {
+            return
+        }
+        k = k + 1
+    }
+}
+
+fn log_totals() {
+    netlog.begin((&LOG_SOCKS[0 as usize]) as u64)
+    netlog.num((&K_USED[0 as usize]) as u64, stat(SS_USED))
+    netlog.num((&K_PEAK[0 as usize]) as u64, stat(SS_PEAK))
+    netlog.num((&K_MAX[0 as usize]) as u64, stat(SS_MAX))
+    netlog.num((&K_RESERVE[0 as usize]) as u64, stat(SS_RESERVE))
+    netlog.num((&K_REFUSED[0 as usize]) as u64, stat(SS_REFUSED))
+    netlog.end()
+}
+
+fn log_program(index: u64, refused: u64) {
+    load_name(index)
+    netlog.begin((&LOG_NFILE[0 as usize]) as u64)
+    netlog.text((&K_PROG[0 as usize]) as u64, (&prog_name[0 as usize]) as u64)
+    netlog.num((&K_COUNT[0 as usize]) as u64, refused)
+    netlog.end()
+}
+
+fn log_slots() {
+    log_totals()
+    if stat(SS_REFUSED) == 0 {
+        return
+    }
+    let programs: u64 = prog_query(ulib.NK_MACHINE, 0, ulib.NM_NPROG)
+    var i: u64 = 0
+    while i < programs {
+        let refused: u64 = prog_query(ulib.NK_PROG, i, NP_REFUSED)
+        if refused != 0 {
+            log_program(i, refused)
+        }
+        i = i + 1
+    }
+}

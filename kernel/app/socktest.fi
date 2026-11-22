@@ -1,0 +1,221 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import libc.kcall
+import libc.net
+import libc.proc
+import libc.errno
+
+const SYS_NETGET: u64 = 1300
+const NG_SOCKS: u64 = 26
+const SS_USED: u64 = 0
+const SS_PEAK: u64 = 1
+const SS_REFUSED: u64 = 2
+const SS_RESERVE: u64 = 3
+const SS_MAX: u64 = 4
+const SIGKILL: u64 = 9
+const BAD: u64 = 0xFFFFFFFFFFFFF000
+const HOLD_MAX: u64 = 512
+const SETTLE_S: u64 = 1
+
+static mut held: [u64; 512] = [0 as u64; 512]
+const HOG_SOCKETS: u64 = 31
+const HOG_COUNT: u64 = 4
+const HOG_SECS: u64 = 600
+
+static mut A_SELF: [u8; 14] = "/bin/socktest\0"
+static mut A_BRIDGE: [u8; 13] = "/bin/jarvisd\0"
+static mut A_HOLD: [u8; 5] = "hold\0"
+static mut A_PROBE: [u8; 6] = "probe\0"
+static mut num_a: [u8; 8] = [0 as u8; 8]
+static mut num_b: [u8; 8] = [0 as u8; 8]
+static mut hogs: [u64; 8] = [0 as u64; 8]
+
+fn say(label: str, v: u64) {
+    var out: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&out, label.p as u64, label.n)
+    rt.buf_push_dec_u64(&out, v)
+    rt.buf_push(&out, 10 as u8)
+    rt.write_everything(1, out.ptr, out.len)
+}
+
+fn stat(which: u64) -> u64 {
+    let v: u64 = kcall.sys3(SYS_NETGET, NG_SOCKS, which, 0)
+    if v > BAD {
+        return 0
+    }
+    return v
+}
+
+fn arg_num(start: u64, i: usize) -> u64 {
+    if i >= rt.arg_count(start) {
+        return 0
+    }
+    let a: u64 = rt.arg_ptr(start, i)
+    var v: u64 = 0
+    var k: usize = 0
+    let n: usize = rt.c_length(a)
+    while k < n {
+        v = v * 10 + ((rt.ld8(a, k) as u64) - 48)
+        k = k + 1
+    }
+    return v
+}
+
+fn open_many(want: u64) -> u64 {
+    var opened: u64 = 0
+    var refused: u64 = 0
+    var first_err: u64 = 0
+    while opened + refused < want && opened < HOLD_MAX {
+        let fd: u64 = net.udp_socket()
+        if errno.is_error(fd) {
+            refused = refused + 1
+            if first_err == 0 {
+                first_err = 0 -% fd
+            }
+        } else {
+            held[opened as usize] = fd
+            opened = opened + 1
+        }
+    }
+    say("opened ", opened)
+    say("refused ", refused)
+    say("first_errno ", first_err)
+    return opened
+}
+
+fn mode_hold(start: u64) -> i32 {
+    let want: u64 = arg_num(start, 2)
+    let secs: u64 = arg_num(start, 3)
+    open_many(want)
+    say("hold_used ", stat(SS_USED))
+    proc.sleep(secs, 0)
+    return 0
+}
+
+fn mode_probe() -> i32 {
+    let fd: u64 = net.udp_socket()
+    if errno.is_error(fd) {
+        say("probe_errno ", 0 -% fd)
+        return 1
+    }
+    say("probe_ok ", 1)
+    net.close(fd)
+    return 0
+}
+
+fn mode_stat() -> i32 {
+    say("used ", stat(SS_USED))
+    say("peak ", stat(SS_PEAK))
+    say("refused_total ", stat(SS_REFUSED))
+    say("reserve ", stat(SS_RESERVE))
+    say("max ", stat(SS_MAX))
+    return 0
+}
+
+fn num_text(buf: *mut u8, v: u64) {
+    var digits: [u8; 8] = [0 as u8; 8]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        digits[0] = 48 as u8
+        n = 1
+    }
+    while x > 0 && n < 6 {
+        digits[n as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var k: u64 = 0
+    while k < n {
+        *((buf as u64 + k) as *mut u8) = digits[(n - 1 - k) as usize]
+        k = k + 1
+    }
+    *((buf as u64 + n) as *mut u8) = 0 as u8
+}
+
+fn spawn_hog(sockets: u64, secs: u64) -> u64 {
+    var argv: [u64; 5] = [0 as u64; 5]
+    num_text(&num_a[0 as usize], sockets)
+    num_text(&num_b[0 as usize], secs)
+    argv[0] = (&A_SELF[0 as usize]) as u64
+    argv[1] = (&A_HOLD[0 as usize]) as u64
+    argv[2] = (&num_a[0 as usize]) as u64
+    argv[3] = (&num_b[0 as usize]) as u64
+    let who: u64 = proc.split()
+    if who == 0 {
+        proc.enter((&A_SELF[0 as usize]) as u64, (&argv[0]) as u64)
+        proc.leave(127)
+    }
+    return who
+}
+
+fn stop(who: u64) {
+    kcall.sys2(kcall.SYS_KILL, who, SIGKILL)
+    proc.wait_for(who, 0)
+}
+
+fn mode_killloop(start: u64) -> i32 {
+    let rounds: u64 = arg_num(start, 2)
+    let before: u64 = stat(SS_USED)
+    var r: u64 = 0
+    while r < rounds {
+        let who: u64 = spawn_hog(HOG_SOCKETS, HOG_SECS)
+        proc.sleep(SETTLE_S, 0)
+        stop(who)
+        r = r + 1
+    }
+    proc.sleep(SETTLE_S, 0)
+    say("killloop_before ", before)
+    say("killloop_after ", stat(SS_USED))
+    say("killloop_peak ", stat(SS_PEAK))
+    return 0
+}
+
+fn run_probe(path: u64) -> u64 {
+    var argv: [u64; 3] = [0 as u64; 3]
+    argv[0] = path
+    argv[1] = (&A_PROBE[0 as usize]) as u64
+    return proc.run(path, (&argv[0]) as u64)
+}
+
+fn mode_fill() -> i32 {
+    var i: u64 = 0
+    while i < HOG_COUNT {
+        hogs[i as usize] = spawn_hog(HOG_SOCKETS, HOG_SECS)
+        i = i + 1
+    }
+    proc.sleep(2 * SETTLE_S, 0)
+    say("fill_used ", stat(SS_USED))
+    say("normal_probe_code ", run_probe((&A_SELF[0 as usize]) as u64))
+    say("bridge_probe_code ", run_probe((&A_BRIDGE[0 as usize]) as u64))
+    say("fill_refused_total ", stat(SS_REFUSED))
+    i = 0
+    while i < HOG_COUNT {
+        stop(hogs[i as usize])
+        i = i + 1
+    }
+    proc.sleep(SETTLE_S, 0)
+    say("drained_used ", stat(SS_USED))
+    say("after_probe_code ", run_probe((&A_SELF[0 as usize]) as u64))
+    return 0
+}
+
+fn main(start: u64) -> i32 {
+    if rt.arg_count(start) < 2 {
+        return mode_stat()
+    }
+    let m: u8 = rt.ld8(rt.arg_ptr(start, 1), 0)
+    if m == 104 as u8 {
+        return mode_hold(start)
+    }
+    if m == 112 as u8 {
+        return mode_probe()
+    }
+    if m == 107 as u8 {
+        return mode_killloop(start)
+    }
+    if m == 102 as u8 {
+        return mode_fill()
+    }
+    return mode_stat()
+}

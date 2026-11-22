@@ -103,6 +103,7 @@ export {
     pay_out, pay_in, frame_seen,
     lookups, hits, misses, sys_octets, bench,
     NSOCK, NAME_MAX, report,
+    note_refused, note_used, refused_total, slot_peak, prog_refused,
     K_TCP, K_UDP, K_ICMP
 }
 
@@ -115,7 +116,7 @@ export {
 //
 //   0x0000..0x007F  the scalars of this round
 //   0x0080..0x0C7F  thirty-two task records of 96 octets
-//   0x0C80..0x127F  sixteen socket records of 96 octets
+//   (the socket records moved to kstate.NMSOCK_OFF)
 //   0x1280..0x1FFF  twenty-four PROGRAM records of 144 octets
 //   0x2000..         the frame the classifier bench builds
 //
@@ -130,7 +131,7 @@ export {
 // `tools/netmon/run.sh` counts the rows and fails if there is one for a
 // socket that was never opened.
 //
-// The socket table is SIXTEEN because `inet.SOCK_MAX` is sixteen. The
+// The socket records live in `kstate.NMSOCK_OFF`, one per `inet.SOCK_MAX` slot. The
 // number is not repeated as a constant that could drift: `sock_open`
 // refuses an index it does not have room for, and `inet.fi` is the only
 // caller.
@@ -152,11 +153,10 @@ export {
 const SCAL: u64 = 0x0000
 const TASKS: u64 = 0x0080
 const TBYTES: u64 = 96
-const SOCKS: u64 = TASKS + kstate.MAX_TASKS * TBYTES
 const SBYTES: u64 = 96 // TWELVE fields of eight octets, and not eleven
-const NSOCK: u64 = 16
-const PROGS: u64 = SOCKS + 0x600
-const PBYTES: u64 = 144 // six counters, a flag, a name, six watermarks
+const NSOCK: u64 = 128
+const PROGS: u64 = TASKS + kstate.MAX_TASKS * TBYTES
+const PBYTES: u64 = 152 // six counters, a flag, a name, six watermarks, refused opens
 const NPROG: u64 = 24
 
 // The scalars.
@@ -182,6 +182,8 @@ const NM_CKIND: u64 = 0x40
 const NM_CSLOT: u64 = 0x48
 const NM_CHITS: u64 = 0x50 // how often the cache answered
 const NM_CSCAN: u64 = 0x58 // and how often the table had to be walked
+const NM_REFUSED: u64 = 0x60 // socket opens refused because the table was full
+const NM_PEAK: u64 = 0x68 // most socket slots in use at once
 
 // The fields of a task record. The first six are the counters and they
 // are read from ring 3 by number, so their order is part of the system
@@ -216,6 +218,7 @@ const P_NAME: u64 = 56
 // the same call, so two writers cannot both claim the same octets and a
 // crash between the two halves cannot lose them twice.
 const P_MARK: u64 = 96 // six words, 96..143
+const P_REFUSED: u64 = 144 // socket opens of this program that were refused
 
 // The fields of a socket record, in words.
 const S_USE: u64 = 0 // 0 = free, 1 = in use
@@ -251,7 +254,7 @@ fn tat(t: u64) -> u64 {
 }
 
 fn sat(i: u64) -> u64 {
-    return nm(SOCKS + i * SBYTES)
+    return kstate.NMSOCK_OFF + i * SBYTES
 }
 
 fn pat(i: u64) -> u64 {
@@ -570,6 +573,35 @@ fn prog_of(state: u64, t: u64) -> u64 {
         return NPROG
     }
     return p - 1
+}
+
+fn note_refused(state: u64, t: u64) {
+    kstate.add(state, nm(NM_REFUSED), 1)
+    let p: u64 = prog_of(state, t)
+    if p < NPROG {
+        kstate.add(state, pat(p) + P_REFUSED, 1)
+    }
+}
+
+fn note_used(state: u64, used: u64) {
+    if used > kstate.get(state, nm(NM_PEAK)) {
+        kstate.set(state, nm(NM_PEAK), used)
+    }
+}
+
+fn refused_total(state: u64) -> u64 {
+    return kstate.get(state, nm(NM_REFUSED))
+}
+
+fn slot_peak(state: u64) -> u64 {
+    return kstate.get(state, nm(NM_PEAK))
+}
+
+fn prog_refused(state: u64, i: u64) -> u64 {
+    if i >= NPROG {
+        return 0
+    }
+    return kstate.get(state, pat(i) + P_REFUSED)
 }
 
 // The name of a task into a buffer in `kdata`. Returns its length.
