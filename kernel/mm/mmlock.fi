@@ -1,6 +1,7 @@
 import lib.kstate
 import sched.sched
 import sync.atomic
+import sync.tlbserve
 
 export {
     demand_lock, demand_unlock, mm_lock, mm_unlock, scratch_lock, scratch_unlock, vm_lock, vm_unlock, vm_held, vm_oom_note, vm_oom_take, LOCK_BASE,
@@ -20,9 +21,10 @@ const SPIN_KINDS: u64 = 4
 static mut kind_takes: [u64; 4] = [0 as u64; 4]
 static mut kind_spins: [u64; 4] = [0 as u64; 4]
 
-fn spin_take(lock: u64, who: u64, kind: u64) {
+fn spin_take(state: u64, lock: u64, who: u64, kind: u64) {
     var spins: u64 = 0
     while atomic.cas(lock, 0, who) != 0 {
+        tlbserve.serve(state)
         atomic.pause()
         spins = spins + 1
     }
@@ -39,7 +41,7 @@ fn spin_count(kind: u64) -> u64 {
 }
 
 fn demand_lock(state: u64) {
-    spin_take(state + LOCK_BASE + DEMAND_LOCK, 1, K_DEMAND)
+    spin_take(state, state + LOCK_BASE + DEMAND_LOCK, 1, K_DEMAND)
 }
 
 fn demand_unlock(state: u64) {
@@ -51,7 +53,7 @@ const SCRATCH_LOCK: u64 = 48
 
 fn spin_irq_lock(state: u64, off: u64, kind: u64) -> u64 {
     let fl: u64 = sched.irq_save()
-    spin_take(state + LOCK_BASE + off, 1, kind)
+    spin_take(state, state + LOCK_BASE + off, 1, kind)
     return fl
 }
 
@@ -95,7 +97,7 @@ fn vm_lock(state: u64, task: u64) {
     if kstate.mode_on(state, kstate.M_NOVMLOCK) {
         return
     }
-    spin_take(state + LOCK_BASE + VM_LOCK, task + 1, K_VM)
+    spin_take(state, state + LOCK_BASE + VM_LOCK, task + 1, K_VM)
 }
 
 fn vm_unlock(state: u64, task: u64) {

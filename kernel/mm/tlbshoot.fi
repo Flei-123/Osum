@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.kstate
+import lib.tscdelta
+import arch.cpu
+import arch.x86_64.apic
+import sync.tlbserve
+
+export { flush_space, shoot, shots, timeouts }
+
+const ICR_ASSERT: u64 = 0x4000
+
+const WAIT_DIVISOR: u64 = 50
+
+static mut shot_count: u64 = 0
+static mut timeout_count: u64 = 0
+
+fn shots() -> u64 {
+    return shot_count
+}
+
+fn timeouts() -> u64 {
+    return timeout_count
+}
+
+fn flush_space(state: u64, cr3: u64) {
+    let now: u64 = asm("mov rax, cr3", out("rax"))
+    if cr3 != 0 && cr3 == now {
+        asm("mov rax, cr3\nmov cr3, rax", out("rax"), clobber("memory"))
+    }
+    shoot(state, cr3)
+}
+
+fn targets(state: u64, cr3: u64, me: u64, nc: u64) -> u64 {
+    let want: u64 = cr3 & tlbserve.CR3_ADDR_MASK
+    var mask: u64 = 0
+    var k: u64 = 0
+    while k < nc && k < tlbserve.MAX_CPUS {
+        if k != me && cpu.online(state, k) && tlbserve.loaded_cr3(k) == want {
+            mask = mask | ((1 as u64) << k)
+        }
+        k = k + 1
+    }
+    return mask
+}
+
+fn shoot(state: u64, cr3: u64) {
+    let nc: u64 = cpu.count(state)
+    if nc <= 1 || cr3 == 0 {
+        return
+    }
+    asm("mfence", clobber("memory"))
+    let me: u64 = cpu.here(state)
+    let mask: u64 = targets(state, cr3, me, nc)
+    if mask == 0 {
+        return
+    }
+    var k: u64 = 0
+    while k < tlbserve.MAX_CPUS {
+        if ((mask >> k) & 1) != 0 {
+            tlbserve.request(k)
+            apic.ipi(state, cpu.apic_id(state, k), tlbserve.VEC_TLB | ICR_ASSERT)
+        }
+        k = k + 1
+    }
+    shot_count = shot_count + 1
+    wait_all(state, mask)
+}
+
+fn wait_all(state: u64, mask: u64) {
+    let t0: u64 = apic.tsc()
+    let limit: u64 = apic.tsc_hz(state) / WAIT_DIVISOR
+    var k: u64 = 0
+    while k < tlbserve.MAX_CPUS {
+        if ((mask >> k) & 1) != 0 {
+            let gen: u64 = tlbserve.issued(k)
+            while !tlbserve.acked(k, gen) {
+                tlbserve.serve(state)
+                asm("pause")
+                if limit != 0 && tscdelta.between(t0, apic.tsc()) > limit {
+                    timeout_count = timeout_count + 1
+                    return
+                }
+            }
+        }
+        k = k + 1
+    }
+}
