@@ -27,3 +27,13 @@ drive_args() {
         *) echo "unknown drive kind: $kind" >&2; return 1 ;;
     esac
 }
+
+record_cpus() {
+    local raw=$1 expected=$2 out=$3 got
+    got=$(grep -ao 'C cpus [-0-9]*' "$raw" | head -1 | awk '{print $3}')
+    printf '%s\n' "${got:-missing}" > "$out"
+    if [ "${got:-missing}" != "$expected" ]; then
+        echo "speedcmp: $raw reports cpus=${got:-missing}, expected $expected" >&2
+        return 1
+    fi
+}
