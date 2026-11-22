@@ -822,7 +822,7 @@ if waitfor "==S-WAIT==" 150; then
     tapt "Programme" && sleep 2
     key ctrl-f; typetext weinl; sleep 3
     sawt "Weinlauf" && [ "$(lastn)" = 1 ] && ok "search finds the runtime from the Apps tab" || bad "search weinl: tiles '$(lastn)'"
-    sawt "in Laufzeiten" && ok "the hit says where it lives: in Laufzeiten" || bad "no category on the search hit"
+    sawt "in Laufzeiten" && ok "the hit says where it lives: in Laufzeiten" || { bad "no category on the search hit"; wclean | tail -n +"$MARK" | grep -a "Laufzeiten" | tail -4 | cut -c1-200 | sed 's/^/        /'; }
     shot t5-search
     key esc; key ctrl-f; typetext sysb; sleep 3
     sawt "Sysbox" && ok "search finds the system tool from the Apps tab" || bad "search sysb"
