@@ -749,6 +749,7 @@ hasnot "$TMPD/p.txt" "winapp -> " "winapp removed"
 has "$TMPD/p.txt" "wine -> " "the dependency stays when the app goes"
 part "$D" D-LAST FERTIG > "$TMPD/p.txt"
 hasnot "$TMPD/p.txt" "wine -> " "wine removed on its own afterwards"
+[ "$fail" = 0 ] || { echo "        -- guest output from D-NEEDED:"; sed -n '/==D-NEEDED==/,/==FERTIG==/p' "$D" | head -40 | sed 's/^/        /'; }
 fi
 
 if want tabs; then
