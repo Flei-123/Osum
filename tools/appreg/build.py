@@ -39,6 +39,11 @@ def bundle_title(path):
     return ""
 
 
+def manifest_rows(root):
+    for row in read_rows(os.path.join(root, "tools/svg/apps.tsv"), "\t"):
+        yield row[0], row[5]
+
+
 def entries(root):
     aliases = dict(read_rows(os.path.join(root, "tools/appreg/alias.tsv"), "\t"))
     seen = set()
@@ -49,6 +54,11 @@ def entries(root):
         if app not in seen:
             d = icon_dir(root, app, aliases)
             yield app, "fenster", d, bundle_title(os.path.join(root, aliases[app]))
+            seen.add(app)
+    for app, path in manifest_rows(root):
+        if app not in seen:
+            seen.add(app)
+            yield app, "fenster", os.path.join(root, path), bundle_title(os.path.join(root, path))
 
 
 def main(argv):
