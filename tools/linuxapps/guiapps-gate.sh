@@ -6,7 +6,8 @@ OUT=${2:-$(mktemp -d)}
 . tools/lib/tmpdir.sh
 osum_tmp_guard "${2:-}" "$OUT"
 EXPECT=${GUIAPPS_EXPECT:-tools/linuxapps/guiapps-expected-red.txt}
-CONF=${GUIAPPS_CONF:-tools/linuxapps/guiapps.conf}
+CONF=$(realpath --relative-to="$PWD" "${GUIAPPS_CONF:-tools/linuxapps/guiapps.conf}")
+EXPECT=$(realpath --relative-to="$PWD" "$EXPECT")
 mkdir -p "$OUT/shots"
 OUT=$(realpath "$OUT")
 NAMES=$(grep -v '^#' "$CONF" | cut -d'|' -f1 | tr '\n' ' ')
@@ -33,7 +34,7 @@ out += b"trailer<</Root 1 0 R/Size 6>>\nstartxref\n%d\n%%%%EOF\n" % xref
 open(sys.argv[1], "wb").write(out)
 PY
 EXTRA="/etc/guiapps.sh=$PWD/tools/linuxapps/guest-guiapps.sh@755 /etc/guiapps.conf=$PWD/$CONF@644 /usr/share/guiapps/@755 /usr/share/guiapps/sample.pdf=$OUT/sample.pdf@644" \
-    SPEC=${SPEC:-$WD/run/spec.txt} GUI=1 GUI_EXTRA="settingsd apprights orientbus" BLOCKS=${BLOCKS:-2800000} INODES=${INODES:-14000} TMO=${TMO:-2400} MEM=${MEM:-3072} DONE=FX-END \
+    SPEC=${SPEC:-$WD/run/spec.txt} GUI=1 GUI_EXTRA="settingsd apprights orientbus" BLOCKS=${BLOCKS:-4800000} INODES=${INODES:-40000} TMO=${TMO:-2400} MEM=${MEM:-3072} DONE=FX-END \
     KARGS="gfx disp wm wmdauer wmshell osum vfs bus fremdtrace script=sh /etc/fx.sh;exit" \
     bash tools/linuxapps/run.sh "$WD" tools/linuxapps/guest-guiapps-boot.sh "$OUT/run" > "$OUT/run.log" 2>&1
 kill "$WATCHER" 2>/dev/null
