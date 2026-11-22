@@ -238,6 +238,8 @@ ARGS+=(/usr/ /usr/share/ /usr/share/locale/
 [ -e locale/de/icons ] && ARGS+=("/usr/share/locale/de/icons=locale/de/icons")
 if [ -n "${EH_APPREG_DIR:-}" ]; then
     while read -r reg_spec; do ARGS+=("$reg_spec"); done < <(bash tools/appreg/specs.sh "$EH_APPREG_DIR")
+else
+    while read -r reg_spec; do ARGS+=("$reg_spec"); done < <(bash tools/appreg/args.sh "$OUT/appreg") || exit 1
 fi
 ARGS+=(/users/ /users/justin/ /users/justin/config/
        "/users/justin/config/locale=$OUT/userlocale@0644")
@@ -255,6 +257,7 @@ while read -r z; do
     [ "$z" = "/apps/terminal.osp/start@/bin/sh" ] && z="/apps/terminal.osp/start@$TERM_START"
     ARGS+=("$z")
 done < <(python3 tools/k15/bundle.py "$OUT/apps" "$OUT/buendel" "nur=$GEBAUT" 2>/dev/null || true)
+[ -n "${EH_APPS_EXTRA:-}" ] && ARGS+=(${EH_APPS_EXTRA})
 while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
 bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
     || { echo "FEHLGESCHLAGEN: mkfs"; tail -25 "$OUT/mkfs.log"; exit 1; }

@@ -14,9 +14,13 @@ def read_rows(path, sep):
 
 
 def icon_dir(root, app, aliases):
+    apps_dir = os.environ.get("APPS_DIR")
     for cand in (aliases.get(app), "assets/pkgicons/" + app, "assets/apps/%s.osp" % app):
-        if cand and os.path.isfile(os.path.join(root, cand, "symbol.osym")):
-            return os.path.join(root, cand)
+        if cand and apps_dir and cand.startswith("assets/apps/"):
+            cand = os.path.join(os.path.abspath(apps_dir), os.path.basename(cand))
+        base = cand if cand and os.path.isabs(cand) else os.path.join(root, cand or "")
+        if cand and os.path.isfile(os.path.join(base, "symbol.osym")):
+            return base
     return None
 
 

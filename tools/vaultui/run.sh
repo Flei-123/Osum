@@ -54,7 +54,7 @@ for f in start.txt INFO symbol.osym symbol.svg symbol44.osym symbol64.osym; do
 done
 [ "$(grep -v '^#' assets/apps/vault.osp/start.txt | head -1)" = /bin/vaultui ] && ok "start menu bundle vault.osp starts /bin/vaultui" || bad "vault.osp start.txt"
 grep -q '^name=Vault$' assets/apps/vault.osp/INFO && ! grep -q '^menu=hidden' assets/apps/vault.osp/INFO && ok "bundle is listed in the start menu (not hidden)" || bad "vault.osp INFO"
-grep -q '/apps/vault.osp/start /apps/vault.osp/INFO /apps/vault.osp/symbol' tools/usbimg/build.sh && ok "usbimg PFLICHT has the vault bundle" || bad "usbimg PFLICHT bundle"
+grep -q '/apps/vault.osp/start /apps/vault.osp/INFO /usr/share/appreg/vault/symbol' tools/usbimg/build.sh && ok "usbimg PFLICHT has the vault bundle" || bad "usbimg PFLICHT bundle"
 grep -q 'import expvault' kernel/user/explorer/expnav.fi && grep -q 'expvault.is_vault_dir(full)' kernel/user/explorer/expnav.fi && grep -q '/bin/vaultui' kernel/user/expvault.fi && ok "explorer opens the vault window for the /secrets folder" || bad "explorer vault hook"
 sed 's/expvault.is_vault_dir(full)/false/' kernel/user/explorer/expnav.fi | grep -q 'expvault.is_vault_dir(full)' && bad "COUNTER-PROOF: hook removal not detected" || ok "COUNTER-PROOF: without the call the hook check turns red"
 printf 'root:x:0:0:root:/:/bin/sh\njustin:x:1000:1000:Justin:/:/bin/sh\n' > "$TMPD/passwd"

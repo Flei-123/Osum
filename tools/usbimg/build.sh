@@ -926,13 +926,11 @@ if [ "$IMAGE_PROFILE" = personal ]; then
     [ "${HP_STICK:-0}" = 1 ] && [ "${JM_HIDDEN:-0}" != 1 ] && JM_AUTOSTART='jmini --as-app'
     printf '%s\n' "$JM_AUTOSTART" >> "$OUT/wmplug.autostart"
     { cat etc/hotkeys.conf; cat "$OUT/hotkeys.conf"; } > "$OUT/hotkeys.all" && mv "$OUT/hotkeys.all" "$OUT/hotkeys.conf"
-    python3 -I -c 'import sys; sys.path.insert(0, "tools/k15"); import symjoin; sys.stdout.buffer.write(symjoin.joined("pakete/jarvismini"))' > "$OUT/jarvismini.symbol"
     ARGS+=("/etc/jarvismini.conf=$OUT/jarvismini.conf@0644"
            "/etc/actions.d/jarvismini.actions=etc/actions.d/jarvismini.actions@0644"
            /apps/jarvismini.osp/
            "/apps/jarvismini.osp/INFO=pakete/jarvismini/INFO@0644"
-           "/apps/jarvismini.osp/start@/bin/jarvismini"
-           "/apps/jarvismini.osp/symbol=$OUT/jarvismini.symbol@0644")
+           "/apps/jarvismini.osp/start@/bin/jarvismini")
     if [ "${HP_STICK:-0}" = 1 ]; then
         printf 'on\n' > "$OUT/jarvismini.debug"
         ARGS+=("/etc/jarvismini.debug=$OUT/jarvismini.debug@0644")
@@ -986,26 +984,26 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages /usr/share/
 /apps/explorer.osp/start /apps/editor.osp/start /apps/terminal.osp/start \
 /bin/nedit /apps/editor.osp/INFO \
 /bin/trashbin /apps/trashbin.osp/start /apps/trashbin.osp/INFO \
-/apps/trashbin.osp/symbol /etc/trash.conf \
+/usr/share/appreg/trashbin/symbol /etc/trash.conf \
 /usr/share/appreg/top/symbol /usr/share/appreg/top/console /usr/share/appreg/edit/alias /apps/launcher.osp/start /apps/settings.osp/start \
-/apps/settings.osp/INFO /apps/settings.osp/symbol \
+/apps/settings.osp/INFO /usr/share/appreg/settings/symbol \
 /bin/taskmgr /apps/taskmgr.osp/start /apps/taskmgr.osp/INFO \
-/apps/taskmgr.osp/symbol \
+/usr/share/appreg/taskmgr/symbol \
 /bin/shutdown /bin/power /bin/firnc /bin/fas /beispiel/hallo.fi \
 /bin/installer /apps/installer.osp/start /apps/installer.osp/INFO \
-/apps/installer.osp/symbol \
+/usr/share/appreg/installer/symbol \
 /bin/init /etc/inittab /etc/ziel \
 /bin/orientbus /bin/act /bin/settingsd /etc/orientbus/policy \
 /etc/settings.schema /etc/actions.d/settings.actions \
 /bin/axd /etc/actions.d/a11y.actions /etc/actions.d/screenreader.actions /etc/screenreader.conf \
-/bin/pdfview /apps/pdfview.osp/start /apps/pdfview.osp/INFO /apps/pdfview.osp/symbol \
-/bin/open /bin/certus /etc/handlers.conf /apps/certus.osp/start /apps/certus.osp/INFO /apps/certus.osp/symbol \
+/bin/pdfview /apps/pdfview.osp/start /apps/pdfview.osp/INFO /usr/share/appreg/pdfview/symbol \
+/bin/open /bin/certus /etc/handlers.conf /apps/certus.osp/start /apps/certus.osp/INFO /usr/share/appreg/certus/symbol \
 /bin/store /bin/stored /bin/mediad /etc/actions.d/store.actions /etc/actions.d/media.actions /etc/store.conf \
-/apps/store.osp/start /apps/store.osp/INFO /apps/store.osp/symbol \
-/bin/social /bin/soclocal /bin/melder /bin/freunde /bin/partyrun /bin/socfleitec /apps/social.prog/ACTIONS /apps/social.prog/SETTINGS /etc/social/providers /etc/social/fleitec.conf /etc/social/games.tsv /bin/sysinfo /bin/hwinv /bin/privacy /bin/welcome /bin/elevate /bin/msgbox /apps/welcome.osp/start /apps/welcome.osp/INFO /bin/runbox /apps/run.osp/start /apps/run.osp/INFO /apps/run.osp/symbol /bin/osk /apps/osk.osp/start /apps/osk.osp/INFO /apps/osk.osp/symbol /bin/charmap /apps/charmap.osp/start /apps/charmap.osp/INFO /apps/charmap.osp/symbol /bin/vplay /apps/vplay.osp/start /apps/vplay.osp/INFO /apps/vplay.osp/symbol /bin/xclip /bin/cliphist /apps/cliphist.osp/start /apps/cliphist.osp/INFO /apps/cliphist.osp/symbol \
+/apps/store.osp/start /apps/store.osp/INFO /usr/share/appreg/store/symbol \
+/bin/social /bin/soclocal /bin/melder /bin/freunde /bin/partyrun /bin/socfleitec /apps/social.prog/ACTIONS /apps/social.prog/SETTINGS /etc/social/providers /etc/social/fleitec.conf /etc/social/games.tsv /bin/sysinfo /bin/hwinv /bin/privacy /bin/welcome /bin/elevate /bin/msgbox /apps/welcome.osp/start /apps/welcome.osp/INFO /bin/runbox /apps/run.osp/start /apps/run.osp/INFO /usr/share/appreg/run/symbol /bin/osk /apps/osk.osp/start /apps/osk.osp/INFO /usr/share/appreg/osk/symbol /bin/charmap /apps/charmap.osp/start /apps/charmap.osp/INFO /usr/share/appreg/charmap/symbol /bin/vplay /apps/vplay.osp/start /apps/vplay.osp/INFO /usr/share/appreg/vplay/symbol /bin/xclip /bin/cliphist /apps/cliphist.osp/start /apps/cliphist.osp/INFO /usr/share/appreg/cliphist/symbol \
 /users/$KONTO/ /users/$KONTO/config/"
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
-PFLICHT="$PFLICHT ${PFLICHT_XREMOTE:-} /bin/dialogd /bin/vaultd /bin/vaultctl /bin/vaultprompt /bin/vaultui /apps/vault.osp/start /apps/vault.osp/INFO /apps/vault.osp/symbol /bin/wlanpersist /bin/wmplug /bin/hotkeyd /etc/wmplug.conf /etc/wmplug.autostart /etc/hotkeys.conf /etc/apprights.conf /bin/apprights"
+PFLICHT="$PFLICHT ${PFLICHT_XREMOTE:-} /bin/dialogd /bin/vaultd /bin/vaultctl /bin/vaultprompt /bin/vaultui /apps/vault.osp/start /apps/vault.osp/INFO /usr/share/appreg/vault/symbol /bin/wlanpersist /bin/wmplug /bin/hotkeyd /etc/wmplug.conf /etc/wmplug.autostart /etc/hotkeys.conf /etc/apprights.conf /bin/apprights"
 [ "$IMAGE_PROFILE" = personal ] && PFLICHT="$PFLICHT /bin/bench /apps/widgets.osp/start"
 [ "$IMAGE_PROFILE" = personal ] && PFLICHT="$PFLICHT /bin/jarvismini /apps/jarvismini.osp/start /apps/jarvismini.osp/INFO /etc/jarvismini.conf /etc/actions.d/jarvismini.actions /bin/jmlink /bin/snip /bin/snipt"
 [ "${ROOT_SLIM:-0}" = 1 ] || [ "${BOOT_KERNEL_COPY:-0}" != 1 ] && PFLICHT=${PFLICHT//\/boot\/osum.mb/}

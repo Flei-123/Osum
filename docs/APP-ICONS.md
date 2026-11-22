@@ -13,7 +13,7 @@
 
 - Tray: the flyout tile (`traypop.app_glyph`) and the bar tray (`tbapps.paint_registry`) look up the tray owner name as program id with `storeicon.registry_slot`. No registry entry keeps the old plate with the first letter (flyout) or the generic program glyph (bar).
 - Explorer: program rows (executables, `.osp` bundles) in the list, table and icon views use `storeicon.registry_slot_for_file` (name without `.osp` = program id). The slot ring is reset per listing build; the first 12 distinct programs of a listing get their picture, later rows keep the generic program glyph.
-- Store catalog: tiles of packages that are not installed resolve the package id in the registry (every id of the feed `apps.tsv` has an entry). Third-party packages unknown to the registry still get the letter tile; icons shipped inside the feed are open (needs a feed format change).
+- Store catalog: tiles of packages that are not installed resolve the package id in the registry (every id of the feed `apps.tsv` has an entry). Third-party packages unknown to the registry still get the letter tile; icons of third-party packages: see the signed feed format below.
 
 ## Homepage export (build / deploy)
 
@@ -51,6 +51,13 @@ pink `#fbcfe8 #ec4899 #9d174d`, violet `#ddd6fe #8b5cf6 #5b21b6`, indigo `#c7d2f
 ## Brand exceptions
 
 Certus and Firefox keep their real brand logos (`assets/icons/brand/*.svg`, rasterised with cairosvg because they use radial gradients).
+
+## Icons of third-party packages (signed feed format)
+
+- Installed package: the recipe ships `datei=symbol` (joined OSYM, 72/44/64 px); it lands in `/apps/<id>.osp/symbol` and is covered by the package signature. `appreg.symbol_for` reads it after the registry. System ids never come from here.
+- Not installed (store tile): the catalog app carries `icons{72,44,64}` = `{datei, sha256, groesse}`, PNG, content addressed under `symbole/`. The signed client view `apps.tsv` (`A` line, icon field) names the 72 px file; the file name contains its SHA-256, so the signature on `apps.tsv.sig` pins the picture. The client checks the hash after download and discards on mismatch.
+- Resolution order on the client: registry id, installed bundle `symbol`, feed picture (cached per package id and revision), letter tile. A missing or unverified feed picture never blocks a tile.
+- No new feed field is needed: the existing `A` icon field is the format. Open: client fetch, PNG decode and cache (roadmap).
 
 ## Contact sheet
 

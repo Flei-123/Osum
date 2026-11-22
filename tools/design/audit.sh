@@ -181,7 +181,7 @@ justin:x:1000:1000:Justin:/users/justin:/bin/sh
 EOF
 printf '%s\n' "$lang" > "$OUT/userlocale"
 
-ARGS=(build "$OUT/disk.img" ${AUDIT_DISK_BLOCKS:-49152} --v3 --inodes=512 "--time=$(date +%s)" /lib/
+ARGS=(build "$OUT/disk.img" ${AUDIT_DISK_BLOCKS:-57344} --v3 --inodes=512 "--time=$(date +%s)" /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" "/lib/bold.ttf=assets/osum-sans-bold.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf" /bin/)
 for p in $progs; do ARGS+=("/bin/$p=$BUILDD/$p.elf"); done
@@ -258,6 +258,7 @@ if [ -n "${ETCFILES:-}" ] && [ -d "$ETCFILES" ]; then
 fi
 rm -rf "$OUT/apps"; cp -a assets/apps "$OUT/apps"
 #
+while read -r z; do ARGS+=("$z"); done < <(bash tools/appreg/args.sh "$OUT/appreg")
 while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py "$OUT/apps" "$OUT/buendel" "nur=$progs" 2>/dev/null || true)
 while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
 # r126: AUDIT_MKFS_EXTRA="/bin/x=/path/x.elf ..." puts extra files on the disk (a stub program for a click test)

@@ -7,12 +7,10 @@
 
 import os
 import shutil
-import subprocess
 import sys
 
 HIER = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HIER)
-import symjoin  # noqa: E402
 
 
 INFO_LIMIT = 1023
@@ -106,22 +104,10 @@ def main(argv):
         target_dir = "/apps/%s" % name
         line_list.append(target_dir + "/")
         line_list.append("%s/INFO=%s" % (target_dir, os.path.join(file_path, "INFO")))
-        sym = os.path.join(arbeit, name + ".symbol")
-        fertig = os.path.join(file_path, "symbol.osym")
-        if os.path.isfile(os.path.join(file_path, "symbol.svg")) and not os.path.isfile(fertig):
+        baked = os.path.join(file_path, "symbol.osym")
+        if os.path.isfile(os.path.join(file_path, "symbol.svg")) and not os.path.isfile(baked):
             print("bundle: %s has symbol.svg but no baked symbol.osym (run tools/svg/apps.sh)" % file_path, file=sys.stderr)
             return 1
-        if os.path.isfile(fertig):
-            with open(sym, "wb") as out:
-                out.write(symjoin.joined(file_path))
-        else:
-            r = subprocess.run([sys.executable, os.path.join(HIER, "icon.py"),
-                                os.path.join(file_path, "symbol.txt"), sym],
-                               capture_output=True, text=True)
-            if r.returncode != 0:
-                print(r.stdout + r.stderr, file=sys.stderr)
-                return 1
-        line_list.append("%s/symbol=%s" % (target_dir, sym))
         brand_name = os.path.join(arbeit, "SYSTEM")
         if not os.path.exists(brand_name):
             with open(brand_name, "w") as f:

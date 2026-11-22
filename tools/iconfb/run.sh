@@ -28,26 +28,24 @@ PY
 
 PROGS=$(for d in assets/apps/*.osp; do head -n 20 "$d/start.txt" | grep -v '^#' | head -n 1 | sed 's|.*/||'; done | tr '\n' ' ')
 python3 tools/k15/bundle.py assets/apps "$TMP/work" "nur=$PROGS term" > "$TMP/list" 2>/dev/null
-N=$(grep -c '^/apps/[^/]*/symbol=' "$TMP/list")
+N=$(grep -c '/symbol=' "$TMP/list")
+[ "$N" = 0 ] && ok "bundle listing ships no per-bundle symbol (registry owns icons)" || bad "bundle listing still has $N symbol lines"
+python3 -I tools/appreg/build.py "$PWD" "$TMP/reg" > "$TMP/reg.log" 2>&1 && ok "registry builds a symbol for every app" || bad "registry build: $(tail -1 "$TMP/reg.log")"
 NB=$(ls -d assets/apps/*.osp | wc -l)
-[ "$N" = "$NB" ] && ok "every bundle ships a symbol ($N/$NB)" || bad "bundles with symbol $N of $NB"
+NS=$(for d in assets/apps/*.osp; do b=$(basename "$d" .osp); [ -s "$TMP/reg/usr/share/appreg/$b/symbol" ] || [ -s "$TMP/reg/usr/share/appreg/$(sed -n "s/^\([a-z0-9]*\)\t.*apps\/$b\.osp\$/\1/p" tools/appreg/alias.tsv | head -1)/symbol" ] || echo "$b"; done | wc -l)
+[ "$NS" = 0 ] && ok "every bundle resolves to a registry symbol ($NB bundles)" || bad "$NS bundles without registry symbol"
 
 check_overlay() {
-    local mod=$1
-    mkdir -p "$TMP/empty" "$TMP/same" "$TMP/nocertus" "$TMP/out1" "$TMP/out2" "$TMP/out3"
-    cp "$TMP"/work/*.symbol "$TMP/same/"
-    cp "$TMP"/work/*.symbol "$TMP/nocertus/"
-    rm -f "$TMP/nocertus/certus.osp.symbol"
-    local a b c
-    a=$(python3 -I "$mod" "$TMP/list" "$TMP/empty" "$TMP/out1" | grep -c '/symbol$')
-    b=$(python3 -I "$mod" "$TMP/list" "$TMP/same" "$TMP/out2" | grep -c '/symbol$')
-    c=$(python3 -I "$mod" "$TMP/list" "$TMP/nocertus" "$TMP/out3" | grep '/symbol$' | tr '\n' ' ')
-    [ "$a" = "$NB" ] && [ "$b" = 0 ] && [ "$c" = "bundlefiles: /apps/certus.osp/symbol " ] && [ -s "$TMP/out3/apps/certus.osp/INFO" ] && [ -s "$TMP/out3/apps/certus.osp/data/README" ]
+    local mod=$1 want got
+    mkdir -p "$TMP/out1"
+    want=$(grep -c -E '^/apps/[^/]+/(INFO|SYSTEM|data/README)=' "$TMP/list")
+    got=$(python3 -I "$mod" "$TMP/list" "$TMP/out1" | grep -c '^bundlefiles: /apps/')
+    [ "$got" = "$want" ] && [ "$want" -gt 0 ] && ! find "$TMP/out1" -name symbol | grep -q . && [ -s "$TMP/out1/apps/certus.osp/INFO" ] && [ -s "$TMP/out1/apps/certus.osp/data/README" ]
 }
-if check_overlay tools/ota/bundlefiles.py; then ok "overlay ships exactly the missing/changed bundle symbols"; else bad "overlay bundle files"; fi
-sed 's/changed = fresh or not/changed = False and not/' tools/ota/bundlefiles.py > "$TMP/mut.py"
-rm -rf "$TMP/out1" "$TMP/out2" "$TMP/out3"
-if check_overlay "$TMP/mut.py"; then bad "mutation 'never-ship-symbols' not caught"; else ok "mutation 'never-ship-symbols' is caught"; fi
+if check_overlay tools/ota/bundlefiles.py; then ok "overlay ships every bundle file and no symbol"; else bad "overlay bundle files"; fi
+sed 's/result.append((m.group(1), m.group(2), m.group(3)))/pass/' tools/ota/bundlefiles.py > "$TMP/mut.py"
+rm -rf "$TMP/out1"
+if check_overlay "$TMP/mut.py"; then bad "mutation 'never-ship-files' not caught"; else ok "mutation 'never-ship-files' is caught"; fi
 grep -q 'tools/ota/bundlefiles.py' tools/ota/republish-hp.sh && ok "republish-hp.sh ships bundle files" || bad "republish-hp.sh not wired to bundlefiles.py"
 
 if [ "${ICONFB_QUICK:-0}" != 1 ]; then

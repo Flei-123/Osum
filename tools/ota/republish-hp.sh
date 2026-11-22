@@ -83,7 +83,7 @@ fi
 ALLPROGS=()
 for f in "$IMG"/*.elf; do n=$(basename "$f" .elf); [ "$n" = "osum.mb" ] || ALLPROGS+=("$n"); done
 python3 tools/k15/bundle.py assets/apps "$EXTRA.bundle" nur="${ALLPROGS[*]} term" > "$EXTRA.blist"
-python3 -I tools/ota/bundlefiles.py "$EXTRA.blist" "$HP_BASE/buendel" "$EXTRA"
+python3 -I tools/ota/bundlefiles.py "$EXTRA.blist" "$EXTRA"
 python3 tools/k15/bundle.py assets/apps "$EXTRA.bundle" nur="${PROGS[*]} term" \
     | sed -n 's|^\(/apps/[A-Za-z0-9._-]*/start\)@\(/bin/[A-Za-z0-9._-]*\)$|\1 \2|p' \
     | grep -v '^/apps/terminal.osp/start ' > "$LINKS" || true

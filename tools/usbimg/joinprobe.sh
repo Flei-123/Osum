@@ -21,7 +21,7 @@ command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "JOINPROBE: skipped, qem
 KVM=()
 [ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)
 
-SEED="$OUT/seed"; PKG="$OUT/pkg"
+SEED="$OUT/bau/seed"; PKG="$OUT/bau/pkg"
 mkdir -p "$SEED" "$PKG"
 printf 'c\tpeter\tfriend\tonline\tPeter (LAN)\tpeter\tin the cellar\tEchoGame\t0\t\t1\n' > "$SEED/local.book"
 {
@@ -31,10 +31,10 @@ printf 'c\tpeter\tfriend\tonline\tPeter (LAN)\tpeter\tin the cellar\tEchoGame\t0
 printf 'l\techo\tEchoGame\n' > "$SEED/games.tsv"
 printf 'app:freunde contacts.read messages.send invites.send activity.write\n' > "$SEED/apps"
 printf 'name=Friends\ninfo=Friends bar\nkeys=friends,freunde\nfassung=1\n' > "$PKG/INFO"
-cp assets/apps/charmap.osp/symbol.osym "$PKG/symbol.osym"
+python3 -I tools/k15/mksymbol.py assets/apps/charmap.osp "$PKG/symbol"
 
 SOCIAL_SEED="$SEED" UITRACE=1 \
-USBIMG_EXTRA="/apps/freunde.osp/ /apps/freunde.osp/INFO=$PKG/INFO@0644 /apps/freunde.osp/start@/bin/freunde /apps/freunde.osp/symbol.osym=$PKG/symbol.osym@0644" \
+USBIMG_EXTRA="/apps/freunde.osp/ /apps/freunde.osp/INFO=$PKG/INFO@0644 /apps/freunde.osp/start@/bin/freunde /apps/freunde.osp/symbol=$PKG/symbol@0644" \
     bash tools/usbimg/build.sh "$OUT/bau" > "$OUT/build.txt" 2>&1 \
     && ok "image builds (uitrace on, seeded friend)" || { bad "image does not build"; tail -5 "$OUT/build.txt"; echo "JOINPROBE: $pass passed, $fail failed"; exit 1; }
 

@@ -155,7 +155,7 @@ num "seam lines in the kernel (no comments/blank) -- as little kernel as possibl
 python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
     && ok "the directory tree for the file manager is built ($(head -1 "$TMPD/baum.log"))" \
     || bad "tools/k15/tree.py failed"
-ARGS=(build "$TMPD/disk.img" 16384 /lib/
+ARGS=(build "$TMPD/disk.img" 16384 --inodes=512 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS"
       "/lib/bold.ttf=assets/osum-sans-bold.ttf" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
@@ -168,6 +168,7 @@ ARGS+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/en/
        /usr/share/locale/de/
        "/usr/share/locale/de/messages=locale/de/messages")
 
+while read -r zeile; do ARGS+=("$zeile"); done < <(bash tools/appreg/args.sh "$TMPD/appreg")
 while read -r zeile; do ARGS+=("$zeile"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
@@ -818,11 +819,14 @@ else
     bad "the bundle does not carry the file manager with name AND command"
     grep -a 'launcher: treffer' "$TMPD/start.txt" | sed 's/^/        /' | head -6
 fi
-for teil in INFO symbol start data/README; do
-    grep -q "^/apps/explorer.osp/$teil " "$TMPD/disk.ls" \
-        && ok "the bundle carries $teil" \
-        || bad "/apps/explorer.osp/$teil is missing on the disk"
+for teil in /apps/explorer.osp/INFO /apps/explorer.osp/start /apps/explorer.osp/data/README /usr/share/appreg/explorer/symbol; do
+    grep -q "^$teil " "$TMPD/disk.ls" \
+        && ok "the image carries $teil" \
+        || bad "$teil is missing on the disk"
 done
+grep -q "^/apps/explorer.osp/symbol " "$TMPD/disk.ls" \
+    && bad "bundle still ships its own symbol (registry owns icons)" \
+    || ok "the bundle ships no symbol of its own"
 gb=$(grep -c '^/apps/[a-z]*\.osp/$' "$TMPD/disk.ls")
 num "so viele Buendel liegen unter /apps" "$gb" eq "$soll"
 hasnot "$TMPD/disk.ls" "/usr/share/apps" \
@@ -871,7 +875,7 @@ schau "with its description" \
 schau_nicht "the name is NOT there in the regular weight (the counter-proof to the bold)" \
     tchain "$TMPD/start.ppm" "$SANS_INK" 15 $((SCX + SRX)) $((SCY + SRB + FEI * SZH)) \
     $FEFG $FEBG "File Explorer" 96
-sym() { echo "$TMPD/buendel/$1.osp.symbol"; }
+sym() { python3 tools/k15/mksymbol.py "assets/apps/$1.osp" "$TMPD/$1.symbol" && echo "$TMPD/$1.symbol"; }
 ICS=16
 [ -f assets/apps/explorer.osp/symbol.osym ] && ICS=32
 for a in explorer terminal; do
