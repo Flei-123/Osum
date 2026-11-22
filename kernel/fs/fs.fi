@@ -1188,6 +1188,7 @@ fn bm_store(state: u64, kb: u64) -> bool {
 }
 
 fn block_free(state: u64, b: u64) {
+    iattr.leaf_drop()
     if b < data_start(state) || b >= total_blocks(state) {
         return
     }
@@ -1837,6 +1838,9 @@ fn size_write(state: u64, ino: u64, new_size: u64, only_grow: bool) -> bool {
     if known == new_size || (only_grow && new_size < known) {
         return true
     }
+    if only_grow && size_defer(state, ino, new_size) {
+        return true
+    }
     if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
         return false
     }
@@ -1973,13 +1977,34 @@ static mut lp_ino: u64 = 0
 static mut lp_group: u64 = 0
 static mut lp_lba: u64 = 0
 static mut lp_dirty: u64 = 0
+static mut lp_buf: [u64; 64] = [0 as u64; 64]
+
+fn lp_data() -> u64 {
+    return (&lp_buf[0 as usize]) as u64
+}
 
 fn lp_flush(state: u64) -> bool {
     if lp_dirty == 0 {
         return true
     }
     lp_dirty = 0
-    return ofsj.write(state, lp_lba, buf_i2(state))
+    return ofsj.write(state, lp_lba, lp_data())
+}
+
+fn lp_end(state: u64) -> bool {
+    let ok: bool = lp_flush(state)
+    if ok && lp_lba != 0 {
+        iattr.leaf_hold(lp_lba)
+        return true
+    }
+    lp_lba = 0
+    return ok
+}
+
+fn lp_revive() {
+    if lp_lba != 0 && !iattr.leaf_valid(lp_lba) {
+        lp_lba = 0
+    }
 }
 
 fn lp_drop(state: u64) -> bool {
@@ -2038,6 +2063,7 @@ static mut dp_active: u64 = 0
 static mut dp_loaded: u64 = 0
 static mut dp_ino: u64 = 0
 static mut dp_dirty: u64 = 0
+static mut dp_size_new: u64 = 0
 static mut dp_ptr: [u64; 16] = [0 as u64; 16]
 
 fn dp_flush(state: u64) -> bool {
@@ -2045,18 +2071,45 @@ fn dp_flush(state: u64) -> bool {
         return true
     }
     dp_dirty = 0
+    let grown_to: u64 = dp_size_new
+    dp_size_new = 0
     let lba: u64 = inode_block_of(state, dp_ino)
     if !ofsj.read(state, lba, buf_in(state)) {
         return false
     }
-    let at: u64 = buf_in(state) + inode_off(state, dp_ino) + I_DIRECT
+    let off: u64 = inode_off(state, dp_ino)
+    let at: u64 = buf_in(state) + off
     let count: u64 = directs(state)
     var i: u64 = 0
     while i < count {
-        regio.write64(at + i * 8, dp_ptr[i as usize])
+        regio.write64(at + I_DIRECT + i * 8, dp_ptr[i as usize])
         i = i + 1
     }
-    return ofsj.write(state, lba, buf_in(state))
+    let grew: bool = grown_to > regio.read64(at + I_SIZE)
+    if grew {
+        wbscope.mark_struct(state)
+        regio.write64(at + I_SIZE, grown_to)
+    }
+    if !ofsj.write(state, lba, buf_in(state)) {
+        return false
+    }
+    if grew && regio.read64(at + I_TYPE) == T_FILE {
+        nidx.note(state, nidx.OP_SIZE, 0, dp_ino, T_FILE, grown_to, 0)
+    }
+    put_attrs(state, lba, off / inode_bytes(state), at)
+    return true
+}
+
+fn size_defer(state: u64, ino: u64, new_size: u64) -> bool {
+    if dp_active == 0 || ofsj.enabled(state) || !dp_load(state, ino) {
+        return false
+    }
+    if new_size <= dp_size_new || new_size <= inode_get(state, ino, I_SIZE) {
+        return true
+    }
+    dp_size_new = new_size
+    dp_dirty = 1
+    return true
 }
 
 fn dp_load(state: u64, ino: u64) -> bool {
@@ -2128,7 +2181,7 @@ fn file_block_cached(state: u64, ino: u64, index: u64) -> u64 {
             return 0
         }
         let lba: u64 = leaf_ptr_block(state, ino, k, true)
-        if lba == 0 || !ofsj.read(state, lba, buf_i2(state)) {
+        if lba == 0 || !ofsj.read(state, lba, lp_data()) {
             return 0
         }
         lp_ino = ino
@@ -2136,7 +2189,7 @@ fn file_block_cached(state: u64, ino: u64, index: u64) -> u64 {
         lp_lba = lba
     }
     let at: u64 = (k % PER_BLOCK) * 8
-    let b: u64 = regio.read64(buf_i2(state) + at)
+    let b: u64 = regio.read64(lp_data() + at)
     if b != 0 {
         return b
     }
@@ -2144,7 +2197,7 @@ fn file_block_cached(state: u64, ino: u64, index: u64) -> u64 {
     if fresh == 0 {
         return 0
     }
-    regio.write64(buf_i2(state) + at, fresh)
+    regio.write64(lp_data() + at, fresh)
     lp_dirty = 1
     return fresh
 }
@@ -2152,13 +2205,14 @@ fn file_block_cached(state: u64, ino: u64, index: u64) -> u64 {
 fn write_at_scoped(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
     let flags: u64 = enter(state)
     free_batch_begin()
-    lp_lba = 0
+    lp_revive()
     lp_dirty = 0
     let outer: bool = dp_active == 0
     if outer {
         dp_active = 1
         dp_loaded = 0
         dp_dirty = 0
+        dp_size_new = 0
     }
     var n: u64 = write_at_blocks(state, ino, off, src, len)
     if outer {
@@ -2168,7 +2222,7 @@ fn write_at_scoped(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
         dp_active = 0
         dp_loaded = 0
     }
-    if !lp_drop(state) {
+    if !lp_end(state) {
         n = 0
     }
     free_batch_end(state)
