@@ -8,6 +8,7 @@ import statistics
 import sys
 
 import bench_parse as parse
+import bench_status
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -84,11 +85,23 @@ def attach_in_work(entries, in_work):
     by_test = {}
     for item in in_work:
         for test_id in item["tests"]:
-            by_test[test_id] = item["id"]
+            by_test[test_id] = item
     for entry in entries:
-        marker = by_test.get(entry["id"])
-        if marker and any(entry[smp]["status"] in ("behind", "hang") for smp in SMP_KEYS):
-            entry["in_work"] = marker
+        item = by_test.get(entry["id"])
+        if item and any(entry[smp]["status"] in ("behind", "hang") for smp in SMP_KEYS):
+            entry["in_work"] = item["id"]
+            entry["in_work_status"] = item["status"]
+
+
+def attach_ratio_ranges(entries, in_work):
+    by_id = {e["id"]: e for e in entries}
+    for item in in_work:
+        item["ratio_range"] = {}
+        for smp in SMP_KEYS:
+            ratios = [by_id[t][smp]["ratio"] for t in item["tests"]
+                      if t in by_id and by_id[t][smp]["status"] == "behind" and by_id[t][smp]["ratio"]]
+            if ratios:
+                item["ratio_range"][smp] = [round(min(ratios), 2), round(max(ratios), 2)]
 
 
 def matrix_summary(entries):
@@ -163,7 +176,9 @@ def build(args):
     tests = parse.read_tests(os.path.join(REPO, "tools", "speedcmp", "tests.tsv"))
     meta = parse.read_report_meta(args.report)
     entries = matrix_entries(args.raw, tests) + app_entries(args.raw) + firefox_entries(args.raw)
-    attach_in_work(entries, sources["in_work"])
+    in_work = bench_status.derive(sources["in_work"], args.projects, args.staff)
+    attach_in_work(entries, in_work)
+    attach_ratio_ranges(entries, in_work)
     stale = {t for item in sources.get("carried_over", []) for t in item.get("stale_tests", [])}
     for entry in entries:
         if entry["id"] in stale:
@@ -194,7 +209,7 @@ def build(args):
             "references": sources["references"],
         },
         "entries": entries,
-        "in_work": sources["in_work"],
+        "in_work": in_work,
         "not_measured": sources["not_measured"],
         "uncertainty": sources["uncertainty"],
         "host": sources["host"],
@@ -207,6 +222,8 @@ def main():
     parser.add_argument("--report", default=DEFAULT_REPORT)
     parser.add_argument("--sources", default=os.path.join(HERE, "bench_sources.json"))
     parser.add_argument("--out", default=DEFAULT_OUT)
+    parser.add_argument("--projects")
+    parser.add_argument("--staff")
     parser.add_argument("--commit")
     parser.add_argument("--date")
     args = parser.parse_args()
