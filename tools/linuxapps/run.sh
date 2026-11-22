@@ -23,6 +23,8 @@ mkdir -p "$OUT"
 SPEC=${SPEC:-$WD/fxrun/spec.txt}
 [ -r "$SPEC" ] || { echo "LINUXAPPS: no spec $SPEC (run prep-firefox.sh)"; exit 1; }
 KARGS=${KARGS:-osum vfs nokbd nosched noproc nofs fremdtrace}
+. tools/lib/smpwords.sh
+KARGS=$(smp_boot_words "${SMP:-1}" "$KARGS")
 MEM=${MEM:-3072}; TMO=${TMO:-600}; BLOCKS=${BLOCKS:-900000}; DONE=${DONE:-FX-END}; DRIVE=${DRIVE:-ide}
 ACC=(); [ -w /dev/kvm ] && ACC=(-accel kvm -cpu host)
 if [ -z "${KERNEL:-}" ]; then

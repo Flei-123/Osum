@@ -8,6 +8,7 @@ OUT=${1:?outdir}; BENCH=${2:?bench binary}
 mkdir -p "$OUT"
 export FIRNLIB="$ROOT/lib"
 . tools/lib/firnenv.sh
+. tools/lib/smpwords.sh
 firnenv_need_firnc1
 LIBC=$(resolve_musl_libc) || { echo "osum: no musl libc.so" >&2; exit 1; }
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
@@ -37,7 +38,7 @@ for i in $(seq 1 "$SPEED_RUNS"); do
     cp "$W/disk.img" "$W/live.img"
     drive_args "$OSUM_DRIVE" "$W/live.img" "${SPEED_DRIVE_EXTRA-,snapshot=on}" || exit 1
     timeout "$SPEED_BOOT_TIMEOUT" qemu-system-x86_64 "${SPEED_KVM[@]}" -smp "$SPEED_SMP" -m "$SPEED_MEM" -kernel "$W/k.mb" \
-        -append "osum vfs nokbd ${SPEED_OSUM_WORDS-nosched noproc nofs} script=${SPEED_SCRIPT:-/bin/speedbench;exit}" -serial "file:$OUT/osum-$i.raw" -display none -no-reboot ${SPEED_MONITOR:+-monitor unix:$SPEED_MONITOR,server,nowait} \
+        -append "osum vfs nokbd $(smp_boot_words "$SPEED_SMP" "${SPEED_OSUM_WORDS-nosched noproc nofs}") script=${SPEED_SCRIPT:-/bin/speedbench;exit}" -serial "file:$OUT/osum-$i.raw" -display none -no-reboot ${SPEED_MONITOR:+-monitor unix:$SPEED_MONITOR,server,nowait} \
         "${DRIVE_ARGS[@]}" -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
     echo "osum run $i rc=$?" >&2
     grep -a '^S ' "$OUT/osum-$i.raw" | tr -d '\r' > "$OUT/osum-$i.txt"

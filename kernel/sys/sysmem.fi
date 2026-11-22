@@ -285,7 +285,7 @@ fn do_map(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64,
         if of < file.MAX_OPEN && (file.open_kind(state, of) == file.K_FILE || file.open_kind(state, of) == file.K_VFILE) {
             return map_file(state, me, addr, len, prot, flags, fd, off)
         }
-        return map_fd(state, me, fd, len, prot, off, fixed_addr(addr, flags))
+        return map_fd_locked(state, me, fd, len, prot, off, fixed_addr(addr, flags))
     }
     // With MAP_ANONYMOUS Linux ignores the descriptor as well.
     if off != 0 {
@@ -771,7 +771,9 @@ fn map_file(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64, fd:
             return followed
         }
     }
+    mmlock.vm_lock(state, me)
     let lz: u64 = map_file_lazy(state, me, addr, len, prot, flags, of, off)
+    mmlock.vm_unlock(state, me)
     if lz != 0 {
         return lz
     }
@@ -779,7 +781,10 @@ fn map_file(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64, fd:
     if (prot & PROT_EXEC) != 0 {
         rw = rw | PROT_EXEC
     }
+    mmlock.vm_lock(state, me)
     let base: u64 = map_anon(state, me, addr, len, rw, flags | sysconst.MAP_ANONYMOUS)
+    mmlock.vm_unlock(state, me)
+    vm_oom_after(state)
     if base >= 0xFFFFFFFFFFFFF000 {
         return base
     }
@@ -1026,6 +1031,14 @@ fn map_drm(state: u64, me: u64, of: u64, len: u64, prot: u64, off: u64) -> u64 {
         return sysuser.neg(errno.E_INVAL)
     }
     return map_shm_obj(state, me, s, sysfd.writable(state, of), len, prot, 0)
+}
+
+fn map_fd_locked(state: u64, me: u64, fd: u64, len: u64, prot: u64,
+    off: u64, at: u64) -> u64 {
+    mmlock.vm_lock(state, me)
+    let r: u64 = map_fd(state, me, fd, len, prot, off, at)
+    mmlock.vm_unlock(state, me)
+    return r
 }
 
 fn map_fd(state: u64, me: u64, fd: u64, len: u64, prot: u64,
