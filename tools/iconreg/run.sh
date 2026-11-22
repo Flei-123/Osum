@@ -37,5 +37,11 @@ mksite; ICONREG_SITE="$D/site" python3 -I "$ROOT/tools/iconreg/check.py" "$ROOT"
 mksite; printf '<svg/>' > "$D/site/src/assets/icons/explorer.svg"; expect_red_site "homepage icon copy"
 mksite; printf '{{icon:ghost}}' >> "$D/site/src/index.template.html"; expect_red_site "homepage icon id outside the registry"
 mksite; printf '<svg viewBox="0 0 1 1"/>' >> "$D/site/src/partials/bar.html"; expect_red_site "homepage inline svg"
+python3 -I "$ROOT/tools/appreg/export.py" --out "$D/exp" > /dev/null && python3 -I -c "
+import json,sys
+d=json.load(open(sys.argv[1]+'/index.json'))
+assert d['icons']['edit']['alias_of']=='editor' and d['icons']['explorer']['file']=='explorer.svg'
+assert all(open(sys.argv[1]+'/'+v['file']).read().lstrip().startswith('<svg') for v in d['icons'].values())
+" "$D/exp" && ok "export: every id has its SVG, aliases resolve" || bad "export index wrong"
 echo "iconreg: $PASS ok, $FAIL fail"
 [ "$FAIL" = 0 ]

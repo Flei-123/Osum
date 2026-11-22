@@ -6,13 +6,18 @@ import symvar
 import appreg
 import uikit.uiicon
 
-export { slot_for, reset }
+export { slot_for, registry_slot, registry_slot_for_file, reset }
 
 const SLOT_COUNT: u64 = 12
 const NAME_W: u64 = 24
 const STATE_EMPTY: u8 = 0
 const STATE_OK: u8 = 1
 const STATE_MISSING: u8 = 2
+const STATE_LETTER: u8 = 3
+const BUNDLE_SUFFIX_LEN: u64 = 4
+
+static mut s_file_id: [u8; 24] = [0 as u8; 24]
+static mut p_bundle_suffix: [u8; 5] = ".osp\0"
 
 static mut s_data: [u8; 538800] = [0 as u8; 538800]
 static mut s_name: [u8; 288] = [0 as u8; 288]
@@ -43,33 +48,70 @@ fn load(name: u64, k: u64) -> bool {
     let slot: u64 = slot_ptr(k)
     let got: u64 = appreg.symbol_for(name, slot)
     if !symvar.joined_ok(slot, got) {
-        appreg.note_letter_tile(name)
-        return uiicon.app_icon(name, slot)
+        return false
     }
     symvar.register(slot, got)
     return true
 }
 
-fn slot_for(name: u64) -> u64 {
-    if name == 0 || __mmio_read8(name as *mut u8) == 0 as u8 {
-        return 0
+fn letter_tile(name: u64, k: u64) -> bool {
+    appreg.note_letter_tile(name)
+    if !uiicon.app_icon(name, slot_ptr(k)) {
+        return false
     }
-    var k: u64 = find(name)
-    if k < SLOT_COUNT {
-        if s_state[k as usize] == STATE_OK {
-            return slot_ptr(k)
-        }
-        return 0
-    }
-    k = s_next
+    s_state[k as usize] = STATE_LETTER
+    return true
+}
+
+fn claim(name: u64) -> u64 {
+    let k: u64 = s_next
     s_next = (s_next + 1) % SLOT_COUNT
     ulib.strncpy(name_ptr(k), name, NAME_W)
     if load(name, k) {
         s_state[k as usize] = STATE_OK
+    } else {
+        s_state[k as usize] = STATE_MISSING
+    }
+    return k
+}
+
+fn lookup(name: u64, letter: bool) -> u64 {
+    if name == 0 || __mmio_read8(name as *mut u8) == 0 as u8 {
+        return 0
+    }
+    var k: u64 = find(name)
+    if k == SLOT_COUNT {
+        k = claim(name)
+    }
+    if s_state[k as usize] == STATE_OK {
         return slot_ptr(k)
     }
-    s_state[k as usize] = STATE_MISSING
+    if letter && (s_state[k as usize] == STATE_LETTER || letter_tile(name, k)) {
+        return slot_ptr(k)
+    }
     return 0
+}
+
+fn slot_for(name: u64) -> u64 {
+    return lookup(name, true)
+}
+
+fn registry_slot(name: u64) -> u64 {
+    return lookup(name, false)
+}
+
+fn registry_slot_for_file(file: u64) -> u64 {
+    var n: u64 = 0
+    while n < NAME_W - 1 && __mmio_read8((file + n) as *mut u8) != 0 as u8 {
+        s_file_id[n as usize] = __mmio_read8((file + n) as *mut u8)
+        n = n + 1
+    }
+    s_file_id[n as usize] = 0 as u8
+    if n > BUNDLE_SUFFIX_LEN && ulib.streq((&s_file_id[0 as usize]) as u64 + n - BUNDLE_SUFFIX_LEN, (&p_bundle_suffix[0 as usize]) as u64) {
+        n = n - BUNDLE_SUFFIX_LEN
+    }
+    s_file_id[n as usize] = 0 as u8
+    return lookup((&s_file_id[0 as usize]) as u64, false)
 }
 
 fn reset() {
