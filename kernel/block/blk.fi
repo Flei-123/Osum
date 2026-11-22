@@ -1375,6 +1375,12 @@ const W_USED: u64 = 0x2D8
 const W_EPOCH: u64 = 0x2E8
 const W_EVICTS: u64 = 0x2F0
 const W_HINT: u64 = 0x2F8
+const W_CHUNKS: u64 = 0x400
+const WB_CHUNK_SHIFT: u64 = 6
+const WB_CHUNK_MASK: u64 = 63
+const WB_WORD_SLOTS: u64 = 4096
+const WB_WORD_SHIFT: u64 = 12
+const WB_ALL_BITS: u64 = 0xFFFFFFFFFFFFFFFF
 const WB_EVICTS_GROW: u64 = 64
 const WB_HINT_HEADROOM: u64 = 4
 const WB_HOLD_TICKS: u64 = 300
@@ -1666,9 +1672,54 @@ fn wb_begin(state: u64) {
     cs(state, W_DEPTH, cg(state, W_DEPTH) + 1)
 }
 
+fn wb_chunk_word(state: u64, chunk: u64) -> u64 {
+    return cg(state, W_CHUNKS + (chunk >> 6) * 8)
+}
+
+fn wb_chunk_is_set(state: u64, chunk: u64) -> bool {
+    return ((wb_chunk_word(state, chunk) >> (chunk & 63)) & 1) != 0
+}
+
+fn wb_chunk_mark(state: u64, low: u64, high: u64) {
+    var chunk: u64 = low >> WB_CHUNK_SHIFT
+    let last: u64 = high >> WB_CHUNK_SHIFT
+    while chunk <= last {
+        cs(state, W_CHUNKS + (chunk >> 6) * 8, wb_chunk_word(state, chunk) | ((1 as u64) << (chunk & 63)))
+        chunk = chunk + 1
+    }
+}
+
+fn wb_chunk_clear(state: u64, chunk: u64) {
+    cs(state, W_CHUNKS + (chunk >> 6) * 8, wb_chunk_word(state, chunk) & (WB_ALL_BITS ^ ((1 as u64) << (chunk & 63))))
+}
+
+fn wb_chunk_next(state: u64, from: u64, last: u64) -> u64 {
+    var chunk: u64 = from
+    while chunk <= last {
+        if (chunk & 63) == 0 && wb_chunk_word(state, chunk) == 0 {
+            chunk = chunk + 64
+        } else if wb_chunk_is_set(state, chunk) {
+            return chunk
+        } else {
+            chunk = chunk + 1
+        }
+    }
+    return last + 1
+}
+
+fn wb_chunks_reset(state: u64) {
+    let words: u64 = (wb_slots(state) + WB_WORD_SLOTS - 1) >> WB_WORD_SHIFT
+    var i: u64 = 0
+    while i < words {
+        cs(state, W_CHUNKS + i * 8, 0)
+        i = i + 1
+    }
+}
+
 fn wb_bounds_reset(state: u64) {
     cs(state, W_LO, wb_slots(state))
     cs(state, W_HI, 0)
+    wb_chunks_reset(state)
 }
 
 fn wb_bounds_note(state: u64, low: u64, high: u64) {
@@ -1678,6 +1729,7 @@ fn wb_bounds_note(state: u64, low: u64, high: u64) {
     if high > cg(state, W_HI) {
         cs(state, W_HI, high)
     }
+    wb_chunk_mark(state, low, high)
 }
 
 fn wb_begin_data(state: u64) {
@@ -1816,6 +1868,7 @@ static mut wb_batch_runs: [u64; 24] = [0 as u64; 24]
 static mut wb_batch_sl: [u64; 8] = [0 as u64; 8]
 static mut wb_batch_end: [u64; 8] = [0 as u64; 8]
 static mut wb_batch_n: [u64; 1] = [0 as u64; 1]
+static mut wb_flush_failed: [u64; 1] = [0 as u64; 1]
 
 fn wb_run_done(state: u64, sl: u64, e: u64) {
     var j: u64 = sl
@@ -1886,24 +1939,52 @@ fn wb_flush_run(state: u64, sl: u64, e: u64, lba: u64, dv: u64) -> bool {
     return ok
 }
 
-fn wb_flush_class(state: u64, low: u64, high: u64, cls: u64) -> bool {
-    var ok: bool = true
-    wb_batch_n[0] = 0
-    var sl: u64 = cg(state, W_LO)
-    while sl <= cg(state, W_HI) && !wb_budget_spent() {
+fn wb_flush_chunk(state: u64, chunk: u64, from: u64, low: u64, high: u64, cls: u64) -> u64 {
+    let hi: u64 = cg(state, W_HI)
+    let chunk_end: u64 = (chunk << WB_CHUNK_SHIFT) + WB_CHUNK_MASK
+    var sl: u64 = from
+    var kept: bool = false
+    while sl <= chunk_end && sl <= hi && !wb_budget_spent() {
         let m: u64 = wb_meta(state, sl)
         let lba: u64 = m & WB_LBA_MASK
         if m == 0 || lba < low || lba >= high || !wb_class_ok(m, cls) {
+            if m != 0 {
+                kept = true
+            }
             sl = sl + 1
         } else {
             let e: u64 = wb_run_end(state, sl, m, high)
             if !wb_flush_run(state, sl, e, lba, (m >> 48) & WB_DEV_MASK) {
-                ok = false
+                wb_flush_failed[0] = 1
             }
             wb_budget_take(e - sl)
             sl = e
         }
     }
+    if !kept && (sl > chunk_end || sl > hi) {
+        wb_chunk_clear(state, chunk)
+    }
+    return sl
+}
+
+fn wb_flush_class(state: u64, low: u64, high: u64, cls: u64) -> bool {
+    wb_batch_n[0] = 0
+    wb_flush_failed[0] = 0
+    let hi: u64 = cg(state, W_HI)
+    let last_chunk: u64 = hi >> WB_CHUNK_SHIFT
+    var sl: u64 = cg(state, W_LO)
+    var chunk: u64 = sl >> WB_CHUNK_SHIFT
+    while chunk <= last_chunk && sl <= hi && !wb_budget_spent() {
+        chunk = wb_chunk_next(state, chunk, last_chunk)
+        if chunk <= last_chunk {
+            if sl < (chunk << WB_CHUNK_SHIFT) {
+                sl = chunk << WB_CHUNK_SHIFT
+            }
+            sl = wb_flush_chunk(state, chunk, sl, low, high, cls)
+            chunk = sl >> WB_CHUNK_SHIFT
+        }
+    }
+    var ok: bool = wb_flush_failed[0] == 0
     if !wb_batch_commit(state) {
         ok = false
     }
