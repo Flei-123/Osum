@@ -2,6 +2,7 @@ profile kernel
 
 import lib.kstate
 import fs.procfs.pfbase
+import fs.procfs.pfmapsres
 import fs.procfs.pfproc
 import fs.procfs.pfwrite
 import sched.proc.procbase
@@ -39,7 +40,6 @@ const IDX_ANONYMOUS: u64 = 11
 const IDX_SWAP: u64 = 19
 const IDX_SWAP_PSS: u64 = 20
 
-static mut resume_cell: [u64; 3] = [0 as u64; 3]
 static mut scan_cell: [u64; 4] = [0 as u64; 4]
 
 static mut thp_line: [u8; 26] = b"THPeligible:           0\x0a\x00"
@@ -208,15 +208,10 @@ fn block(state: u64, t: u64, at: u64, from: u64, to: u64, rights: u64) -> u64 {
 }
 
 fn resume_point(t: u64, base: u64) -> bool {
-    if base == pfbase.COUNT_ONLY {
-        return false
-    }
     if base == 0 {
-        resume_cell[0 as usize] = 0
         scan_cell[0 as usize] = 0
-        return false
     }
-    return resume_cell[0 as usize] == t + 1 && resume_cell[2 as usize] <= base
+    return pfmapsres.resume(t, pfmapsres.KIND_SMAPS)
 }
 
 fn read_ahead_done(p: u64) -> bool {
@@ -227,22 +222,12 @@ fn read_ahead_done(p: u64) -> bool {
     return p > base + READ_AHEAD_BYTES
 }
 
-fn remember(t: u64, cursor: u64, p: u64) {
-    let base: u64 = pfbase.window_base()
-    if base == 0 || base == pfbase.COUNT_ONLY || p > base {
-        return
-    }
-    resume_cell[0 as usize] = t + 1
-    resume_cell[1 as usize] = cursor
-    resume_cell[2 as usize] = p
-}
-
 fn make(state: u64, t: u64) -> u64 {
     var p: u64 = 0
     var cursor: u64 = procbase.USER_DATA
     if resume_point(t, pfbase.window_base()) {
-        cursor = resume_cell[1 as usize]
-        p = resume_cell[2 as usize]
+        cursor = pfmapsres.cursor()
+        p = pfmapsres.offset()
     }
     while pfproc.next_run(state, t, cursor) {
         let from: u64 = pfproc.run_start()
@@ -251,7 +236,7 @@ fn make(state: u64, t: u64) -> u64 {
         p = pfproc.map_line(state, t, p, from, to, rights)
         p = block(state, t, p, from, to, rights)
         cursor = to
-        remember(t, cursor, p)
+        pfmapsres.remember(t, pfmapsres.KIND_SMAPS, cursor, p)
         if p > pfproc.maps_limit() || read_ahead_done(p) {
             return p
         }

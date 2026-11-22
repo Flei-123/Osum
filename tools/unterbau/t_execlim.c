@@ -14,7 +14,7 @@
 #define SPAWN_FAILED 127
 #define OUT_CAP 400000
 #define NATIVE_MAX_ARGS 254
-#define EXEC_MAX_ARGS 256
+#define EXEC_MAX_ARGS 4096
 
 static char *fill(size_t len, int index)
 {
