@@ -67,7 +67,7 @@ def read_apps(path):
             if len(parts) < 5:
                 continue
             name, linux, osum, _ratio, codes = parts[:5]
-            hung = "124" in codes.split(",")
+            hung = any(code != "0" for code in codes.split(","))
             result[name] = {"linux": float(linux), "osum": float(osum), "hung": hung}
     return result
 

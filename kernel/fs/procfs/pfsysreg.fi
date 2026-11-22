@@ -22,9 +22,13 @@ const KIND_PROVIDER: u64 = 112
 const SEG_MAX: u64 = 40
 const CHILD_CACHE_SLOTS: u64 = 64
 const HASH_MASK: u64 = 0xFFFFFFFF
+const LINE_MAX: u64 = 256
 
 static mut root_cache: [u64; 6] = [0 as u64; 6]
 static mut child_cache: [u64; 64] = [0 as u64; 64]
+static mut line_starts: [u16; 256] = [0 as u16; 256]
+static mut line_total: u64 = 0
+static mut lines_built: bool = false
 
 fn tab(at: u64) -> u64 {
     return kstate.get8(pfsystab.base() + at)
@@ -59,12 +63,14 @@ fn slash_end(line: u64) -> u64 {
 }
 
 fn tree_root(first: u64, second: u64) -> u64 {
-    var at: u64 = 0
-    while at < pfsystab.LEN {
+    let total: u64 = line_count()
+    var li: u64 = 0
+    while li < total {
+        let at: u64 = line_at(li)
         if tab(at) == first && tab(at + 1) == second {
             return dir_id(at, slash_end(at))
         }
-        at = next_line(at)
+        li = li + 1
     }
     return 0
 }
@@ -103,12 +109,29 @@ fn memory_root() -> u64 {
     return cached_root(5, 109, 101)
 }
 
-fn next_line(at: u64) -> u64 {
-    var i: u64 = at
-    while i < pfsystab.LEN && tab(i) != NEWLINE {
+fn build_lines() {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < pfsystab.LEN {
+        if tab(i) == NEWLINE && i + 1 < pfsystab.LEN && n < LINE_MAX {
+            line_starts[(n) as usize] = (i + 1) as u16
+            n = n + 1
+        }
         i = i + 1
     }
-    return i + 1
+    line_total = n
+    lines_built = true
+}
+
+fn line_count() -> u64 {
+    if !lines_built {
+        build_lines()
+    }
+    return line_total
+}
+
+fn line_at(index: u64) -> u64 {
+    return line_starts[(index) as usize] as u64
 }
 
 fn has_prefix(line: u64, ref: u64, plen: u64) -> bool {
@@ -154,12 +177,16 @@ fn child_id(line: u64, plen: u64) -> u64 {
 
 fn first_of_part(line: u64, ref: u64, plen: u64) -> bool {
     let n: u64 = part_len(line, plen)
-    var at: u64 = 0
-    while at < line {
+    var li: u64 = 0
+    while li < line_count() {
+        let at: u64 = line_at(li)
+        if at >= line {
+            return true
+        }
         if has_prefix(at, ref, plen) && same_part(line, at, plen, n) {
             return false
         }
-        at = next_line(at)
+        li = li + 1
     }
     return true
 }
@@ -168,15 +195,17 @@ fn nth(dir: u64, index: u64) -> u64 {
     let ref: u64 = offset_of(dir)
     let plen: u64 = plen_of(dir)
     var seen: u64 = 0
-    var at: u64 = 0
-    while at < pfsystab.LEN {
+    let total: u64 = line_count()
+    var li: u64 = 0
+    while li < total {
+        let at: u64 = line_at(li)
         if has_prefix(at, ref, plen) && first_of_part(at, ref, plen) {
             if seen == index {
                 return child_id(at, plen)
             }
             seen = seen + 1
         }
-        at = next_line(at)
+        li = li + 1
     }
     return 0
 }
@@ -221,13 +250,15 @@ fn find_child(dir: u64, seg: u64, seg_len: u64) -> u64 {
     if hint != 0 && hint < pfsystab.LEN && line_matches(hint, ref, plen, seg, seg_len) {
         return child_id(hint, plen)
     }
-    var at: u64 = 0
-    while at < pfsystab.LEN {
+    let total: u64 = line_count()
+    var li: u64 = 0
+    while li < total {
+        let at: u64 = line_at(li)
         if line_matches(at, ref, plen, seg, seg_len) {
             child_cache[(slot) as usize] = at
             return child_id(at, plen)
         }
-        at = next_line(at)
+        li = li + 1
     }
     return 0
 }
