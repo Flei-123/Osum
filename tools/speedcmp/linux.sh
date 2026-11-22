@@ -49,10 +49,13 @@ fi
 echo "linux kernel: $KERNEL_FILE" > "$OUT/linux-kernel.txt"
 
 drive_args "$LINUX_DRIVE" "$W/root.ext4" ,snapshot=on || exit 1
+CPU_FAIL=0
 for i in $(seq 1 "$SPEED_RUNS"); do
     timeout "$SPEED_BOOT_TIMEOUT" qemu-system-x86_64 "${SPEED_KVM[@]}" -smp "$SPEED_SMP" -m "$SPEED_MEM" -kernel "$W/vmlinuz" -initrd "$W/initrd" \
         -append "root=$DRIVE_ROOT rw rootfstype=ext4 console=ttyS0 quiet panic=1 init=/usr/bin/speedinit" \
         "${DRIVE_ARGS[@]}" -display none -no-reboot -nographic -serial "file:$OUT/linux-$i.raw" -monitor none -net none > /dev/null 2>&1
     echo "linux run $i rc=$?" >&2
     grep -a '^S ' "$OUT/linux-$i.raw" | tr -d '\r' > "$OUT/linux-$i.txt"
+    record_cpus "$OUT/linux-$i.raw" "$SPEED_SMP" "$OUT/linux-$i.cpus" || CPU_FAIL=1
 done
+[ "$CPU_FAIL" = 0 ] || exit 1

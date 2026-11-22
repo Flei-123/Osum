@@ -283,6 +283,7 @@ static void run_thread(long n)
 #include "sbproc.h"
 #include "pbench.h"
 #include "wakebench.h"
+#include "sbcpus.h"
 
 int main(int argc, char **argv)
 {
@@ -290,6 +291,7 @@ int main(int argc, char **argv)
         return 0;
     if (argc > 1)
         only_filter = argv[1];
+    report_cpus();
     io_buf = malloc(IO_CHUNK);
     memset(io_buf, 0x5A, IO_CHUNK);
     data_fd = open(DATA_PATH, O_RDWR | O_CREAT | O_TRUNC, 0600);

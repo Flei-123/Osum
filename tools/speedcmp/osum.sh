@@ -34,6 +34,7 @@ SPEC="$SPEC /lib/ld-musl-x86_64.so.1=$LIBC /bin/speedbench=$BENCH /etc/passwd=$W
 bash tools/mkfsfi/mkfs.sh build "$W/disk.img" ${SPEED_DISK_BLOCKS:-393216} --v3 --inodes=${SPEED_INODES:-4096} ${SPEED_MKFS_OPTS-} $SPEC > "$W/mkfs.txt" 2>&1 || { tail -5 "$W/mkfs.txt" >&2; exit 1; }
 
 OSUM_DRIVE=${OSUM_DRIVE:-ahci}
+CPU_FAIL=0
 for i in $(seq 1 "$SPEED_RUNS"); do
     cp "$W/disk.img" "$W/live.img"
     drive_args "$OSUM_DRIVE" "$W/live.img" "${SPEED_DRIVE_EXTRA-,snapshot=on}" || exit 1
@@ -42,5 +43,7 @@ for i in $(seq 1 "$SPEED_RUNS"); do
         "${DRIVE_ARGS[@]}" -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
     echo "osum run $i rc=$?" >&2
     grep -a '^S ' "$OUT/osum-$i.raw" | tr -d '\r' > "$OUT/osum-$i.txt"
+    record_cpus "$OUT/osum-$i.raw" "$SPEED_SMP" "$OUT/osum-$i.cpus" || CPU_FAIL=1
     rm -f "$W/live.img"
 done
+[ "$CPU_FAIL" = 0 ] || exit 1
