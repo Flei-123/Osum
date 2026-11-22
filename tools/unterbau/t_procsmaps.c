@@ -243,14 +243,11 @@ static long slurp_interleaved(const char *a, const char *b, long *len_b)
     return ta;
 }
 
-static void test_interleaved(void)
+static pid_t spawn_idle(int *release_fd)
 {
-    char *base = mmap(0, MANY_VMAS * PAGE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    for (int i = 1; i < MANY_VMAS; i += 2)
-        mprotect(base + i * PAGE_BYTES, PAGE_BYTES, PROT_READ);
     int fd[2];
     if (pipe(fd) != 0)
-        return;
+        return -1;
     pid_t pid = fork();
     if (pid == 0) {
         char c;
@@ -259,22 +256,43 @@ static void test_interleaved(void)
         _exit(0);
     }
     close(fd[0]);
-    char path[48];
-    snprintf(path, sizeof path, "/proc/%d/smaps", (int)pid);
+    *release_fd = fd[1];
+    return pid;
+}
+
+static void release_idle(pid_t pid, int release_fd)
+{
+    (void)!write(release_fd, "x", 1);
+    close(release_fd);
+    waitpid(pid, 0, 0);
+}
+
+static void test_interleaved(void)
+{
+    char *base = mmap(0, MANY_VMAS * PAGE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    for (int i = 1; i < MANY_VMAS; i += 2)
+        mprotect(base + i * PAGE_BYTES, PAGE_BYTES, PROT_READ);
+    int release_a, release_b;
+    pid_t pid_a = spawn_idle(&release_a);
+    pid_t pid_b = spawn_idle(&release_b);
+    if (pid_a < 0 || pid_b < 0)
+        return;
+    char path_a[48], path_b[48];
+    snprintf(path_a, sizeof path_a, "/proc/%d/smaps", (int)pid_a);
+    snprintf(path_b, sizeof path_b, "/proc/%d/smaps", (int)pid_b);
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    long seq_a = slurp_chunked("/proc/self/smaps", smaps_buf);
-    long seq_b = slurp_chunked(path, other2_buf);
+    long seq_a = slurp_chunked(path_a, smaps_buf);
+    long seq_b = slurp_chunked(path_b, other2_buf);
     long seq_ns = elapsed_ns(&t0);
     clock_gettime(CLOCK_MONOTONIC, &t0);
     long mix_b = 0;
-    long mix_a = slurp_interleaved("/proc/self/smaps", path, &mix_b);
+    long mix_a = slurp_interleaved(path_a, path_b, &mix_b);
     long mix_ns = elapsed_ns(&t0);
     CHECK("smaps_interleaved_same_length", seq_a > WINDOW_BYTES && seq_a == mix_a && seq_b == mix_b, "seq=%ld/%ld mix=%ld/%ld", seq_a, seq_b, mix_a, mix_b);
     CHECK("smaps_interleaved_not_quadratic", mix_ns <= INTERLEAVE_SLACK * seq_ns + INTERLEAVE_FLOOR_NS, "seq_us=%ld mix_us=%ld", seq_ns / 1000, mix_ns / 1000);
-    write(fd[1], "x", 1);
-    close(fd[1]);
-    waitpid(pid, 0, 0);
+    release_idle(pid_a, release_a);
+    release_idle(pid_b, release_b);
     munmap(base, MANY_VMAS * PAGE_BYTES);
 }
 

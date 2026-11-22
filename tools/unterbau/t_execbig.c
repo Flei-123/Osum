@@ -7,7 +7,7 @@
 #define CHILD "/bin/c_child"
 #define OUT_BYTES 256
 #define MAX_ARG_BYTES 131072
-#define MAX_ARGS 256
+#define MAX_ARGS 4096
 
 static char *make_arg(size_t len, int index)
 {
@@ -79,8 +79,9 @@ int main(void)
     run_shape("args_many_small", 200, 600, "verify argc=202 total=120000 bad=0 env=envval\n", 0);
     run_shape("args_total_ok", 2, 70000, "verify argc=4 total=140000 bad=0 env=envval\n", 0);
     run_shape("args_total_over", 3, 60000, "", E2BIG);
-    run_shape("args_count_max", MAX_ARGS - 2, 8, "verify argc=256 total=2032 bad=0 env=envval\n", 0);
+    run_shape("args_count_max", MAX_ARGS - 2, 8, "verify argc=4096 total=32752 bad=0 env=envval\n", 0);
     run_shape("args_count_over", MAX_ARGS, 8, "", E2BIG);
+    run_shape("args_count_1000", 1000, 20, "verify argc=1002 total=20000 bad=0 env=envval\n", 0);
     run_shape("args_count_100", 100, 20, "verify argc=102 total=2000 bad=0 env=envval\n", 0);
     return 0;
 }
