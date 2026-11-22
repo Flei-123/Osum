@@ -1,5 +1,14 @@
 # App icons — one hand-built SVG per program
 
+## One registry, resolved by program id
+
+- Runtime: every consumer (start menu list and search, task bar, task manager, store tiles, elevate dialog) calls `appreg.symbol_for(id, slot)`.
+  It reads `/usr/share/appreg/<id>/symbol` first and falls back to `/apps/<id>.osp/symbol` only for packages that ship their own picture.
+  The fallback for a program with neither is the generic letter tile (`lib/appicon.fi`). No per-program glyph or colour table exists in code.
+- Build: `tools/appreg/build.py` writes one registry entry per row of `tools/svg/apps.tsv` (plus `apps.tab` and `alias.tsv`), joined from the baked 72/44/64 pictures.
+- Swap an icon: replace `assets/icons/app/<name>.svg`, run `bash tools/svg/apps.sh <app>`, rebuild the image. Nothing else changes.
+- Gate: `bash tools/iconreg/run.sh` (host only) is red when a file outside `kernel/user/appreg.fi` names an icon path, when code holds a per-program icon table, when a copy of an icon differs from its central source, or when a program has no registry entry. Ratchet value `icons outside registry` must stay 0.
+
 Source of truth: `assets/icons/app/<name>.svg`. `tools/svg/apps.tsv` maps a bundle to its source (`=<name>`, or `@<brand>` for a brand logo
 in `assets/icons/brand/`). `bash tools/svg/apps.sh [app...]` copies the SVG to `<bundle>/symbol.svg` and bakes `symbol.osym` (72) +
 `symbol44.osym` + `symbol64.osym` with our own renderer (`lib/svg`, baker `tools/svg/bake.fi`).
