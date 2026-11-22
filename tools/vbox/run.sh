@@ -41,7 +41,7 @@ case "$cmd" in
     cd "$wt"
     [ "$(wc -c < "$ABB/vm-device.key" 2>/dev/null || echo 0)" -ge 65 ] \
         || { (umask 077; python3 -I -c 'import secrets; print(secrets.token_hex(32))' > "$ABB/vm-device.key"); }
-    export PARTTAB=mbr FS_BLOCKS=122880 JARVIS_DEVICE_KEY=$ABB/vm-device.key JARVIS_CONF=assets/jarvis/rechte-justin.conf IMAGE_ID="$id"
+    export PARTTAB=mbr JARVIS_DEVICE_KEY=$ABB/vm-device.key JARVIS_CONF=assets/jarvis/rechte-justin.conf IMAGE_ID="$id"
     date +%s > "$ABB/$id.t0"
     /root/jarvis/bin/heavy bash tools/usbimg/build.sh "$ABB/$id"
     date +%s > "$ABB/$id.t1"
