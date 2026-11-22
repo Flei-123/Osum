@@ -18,6 +18,7 @@ while IFS='|' read -r name toolkit category envs cmd; do
         sleep 2
         i=$((i + 2))
         busybox kill -0 $PID 2>/dev/null || break
+        busybox cat /proc/$PID/maps > /tmp/$name.maps 2>/dev/null
     done
     echo "GUIAPP shot $name"
     sleep 4
@@ -25,7 +26,7 @@ while IFS='|' read -r name toolkit category envs cmd; do
     sleep 8
     echo "GUIAPP shot2 $name"
     sleep 4
-    if busybox kill -0 $PID 2>/dev/null; then echo "GUIAPP alive $name"; else wait $PID; echo "GUIAPP exited $name rc=$?"; fi
+    if busybox kill -0 $PID 2>/dev/null; then echo "GUIAPP alive $name"; else wait $PID; rc=$?; echo "GUIAPP exited $name rc=$rc"; if [ $rc -ge 128 ]; then echo "GUIAPP maps $name: $(busybox tr '\n' '|' < /tmp/$name.maps | busybox head -c 6000)"; fi; fi
     busybox kill $PID 2>/dev/null
     sleep 2
     busybox kill -9 $PID 2>/dev/null
