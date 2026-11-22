@@ -10,6 +10,11 @@ from registry import load_all
 CANNED = {
     "/bin/cat /proc/battery": "ende 0\npresent=1 valid=1 percent=95 state=0 full=4229 rem=4055 bif=1 bst=1\n",
     "/bin/cat /proc/thermal": "ende 0\nzone \\_TZ.CPUZ temp_c=46.0 present=1\n",
+    "/bin/cat /proc/cmdline": "ende 0\nosum vfs intelgpu intelgpuedid intelgpuflip intelgpublit\n",
+    "/bin/cat /proc/intelgpu": "ende 0\ndevice=0x5916\ngen=95\nedp_enabled=1\nplane_enabled=1\npanel_on=1\nrefresh_mhz=60049\nedid_status=ok\nmfg=AUO\nmode=1920x1080\nflip_status=5\nflip_count=0\nflip_rollback=0\nblit_status=1\nblit_hangs=0\nwrites=31\ndenied=0\n",
+    "/bin/cat /proc/s3": "ende 0\nversion 1\nwhy 2\nwhy_text no FACS\nfacs 0x00000000\nslp_typ_a 0\ncycles 0\n",
+    "/bin/cat /proc/inputdevs": "ende 0\ni2c_ctrls=3 i2c_devs=0 i2c_hung=1 i2c_aml=0 hid_devs=0\n",
+    "/bin/cat /proc/hotkeys": "ende 0\nevents 3\nunknown 2\nactions 1\n",
     "/bin/cat /etc/jarvis/permissions.conf": "ende 0\ncommand_allowed = /bin/ls\ninput = no\n",
 }
 
@@ -56,6 +61,11 @@ def main():
     expect("counter-proof: leaking cat is caught", sum(r.status == "FAIL" for r in run_group("access", leak=True)) == 3)
     bat = run_group("battery")
     expect("battery percent consistent", any(r.name == "percent consistent" and r.status == "OK" for r in bat))
+    gpu = run_group("gpu")
+    expect("gpu: EDID and pipe pass, failed flip and blit are caught", [r.status for r in gpu if r.name in ("EDID read over DP-AUX", "eDP pipe running")] == ["OK", "OK"]
+           and [r.status for r in gpu if r.name in ("double buffer flip self-test", "blitter submissions")] == ["FAIL", "FAIL"])
+    expect("standby: missing FACS is caught", any(r.name == "FACS found" and r.status == "FAIL" for r in run_group("standby")))
+    expect("input: no I2C-HID device is caught", any(r.name.startswith("I2C-HID") and r.status == "FAIL" for r in run_group("input")))
     print("selftest: %d OK / %d FAIL" % (passed, failed))
     return 1 if failed else 0
 
