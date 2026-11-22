@@ -1,0 +1,307 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+export {
+    kind_from_word, kind_tab, tab_shown, ver_at_least,
+    reg_clear, reg_add, reg_count, reg_find, reg_name, reg_installed, reg_requires, reg_set_installed,
+    requires_next, requires_has,
+    plan_build, plan_len, plan_at, plan_unknown, plan_unknown_name,
+    KIND_APP, KIND_SYSTEM, KIND_RUNTIME, KIND_CLI,
+    TAB_APPS, TAB_SYSTEM, TAB_RUNTIME, NONE,
+}
+
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const KIND_APP: u64 = 0
+const KIND_SYSTEM: u64 = 1
+const KIND_RUNTIME: u64 = 2
+const KIND_CLI: u64 = 3
+const TAB_APPS: u64 = 0
+const TAB_SYSTEM: u64 = 1
+const TAB_RUNTIME: u64 = 2
+const REG_MAX: u64 = 64
+const NAME_W: u64 = 24
+const VER_W: u64 = 12
+const REQ_W: u64 = 96
+const PLAN_MAX: u64 = 16
+const DEPTH_MAX: u64 = 6
+const VER_PARTS: u64 = 6
+const PART_LIMIT: u64 = 100000000
+const CH_COMMA: u64 = 44
+const CH_SPACE: u64 = 32
+const CH_GT: u64 = 62
+const CH_EQ: u64 = 61
+const CH_DOT: u64 = 46
+const CH_ZERO: u64 = 48
+const CH_NINE: u64 = 57
+const ST_NEW: u8 = 0
+const ST_OPEN: u8 = 1
+const ST_DONE: u8 = 2
+
+static mut W_SYSTEM: [u8; 7] = "system\0"
+static mut W_RUNTIME: [u8; 8] = "runtime\0"
+static mut W_CLI: [u8; 4] = "cli\0"
+
+static mut r_name: [u8; 1536] = [0 as u8; 1536]
+static mut r_ver: [u8; 768] = [0 as u8; 768]
+static mut r_req: [u8; 6144] = [0 as u8; 6144]
+static mut r_n: u64 = 0
+static mut p_state: [u8; 64] = [0 as u8; 64]
+static mut p_list: [u64; 16] = [0 as u64; 16]
+static mut p_n: u64 = 0
+static mut p_unknown: u64 = 0
+static mut p_unknown_name: [u8; 24] = [0 as u8; 24]
+static mut t_name: [u8; 24] = [0 as u8; 24]
+static mut t_min: [u8; 12] = [0 as u8; 12]
+
+fn b(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn put(p: u64, i: u64, c: u64) {
+    *((p + i) as *mut u8) = c as u8
+}
+
+fn same(a: u64, c: u64) -> bool {
+    var i: u64 = 0
+    while b(a, i) != 0 && b(a, i) == b(c, i) {
+        i = i + 1
+    }
+    return b(a, i) == b(c, i)
+}
+
+fn copy_cap(dst: u64, src: u64, cap: u64) {
+    var i: u64 = 0
+    while b(src, i) != 0 && i + 1 < cap {
+        put(dst, i, b(src, i))
+        i = i + 1
+    }
+    put(dst, i, 0)
+}
+
+fn kind_from_word(word: u64) -> u64 {
+    if same(word, (&W_SYSTEM[0 as usize]) as u64) {
+        return KIND_SYSTEM
+    }
+    if same(word, (&W_RUNTIME[0 as usize]) as u64) {
+        return KIND_RUNTIME
+    }
+    if same(word, (&W_CLI[0 as usize]) as u64) {
+        return KIND_CLI
+    }
+    return KIND_APP
+}
+
+fn kind_tab(kind: u64, bundled: bool) -> u64 {
+    if kind == KIND_SYSTEM || (bundled && kind == KIND_APP) {
+        return TAB_SYSTEM
+    }
+    if kind == KIND_RUNTIME || kind == KIND_CLI {
+        return TAB_RUNTIME
+    }
+    return TAB_APPS
+}
+
+fn tab_shown(view_tab: u64, item_tab: u64, installed: bool, show_installed: bool, searching: bool) -> bool {
+    if searching {
+        return true
+    }
+    if view_tab != item_tab {
+        return false
+    }
+    if view_tab == TAB_APPS && installed && !show_installed {
+        return false
+    }
+    return true
+}
+
+fn part(p: u64, index: u64) -> u64 {
+    var at: u64 = 0
+    var k: u64 = 0
+    while k < index {
+        while b(p, at) != 0 && b(p, at) != CH_DOT {
+            at = at + 1
+        }
+        if b(p, at) == 0 {
+            return 0
+        }
+        at = at + 1
+        k = k + 1
+    }
+    var v: u64 = 0
+    while b(p, at) >= CH_ZERO && b(p, at) <= CH_NINE {
+        if v < PART_LIMIT {
+            v = v * 10 + (b(p, at) - CH_ZERO)
+        }
+        at = at + 1
+    }
+    return v
+}
+
+fn ver_at_least(have: u64, min: u64) -> bool {
+    var k: u64 = 0
+    while k < VER_PARTS {
+        let x: u64 = part(have, k)
+        let y: u64 = part(min, k)
+        if x < y {
+            return false
+        }
+        if x > y {
+            return true
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn reg_clear() {
+    r_n = 0
+}
+
+fn reg_count() -> u64 {
+    return r_n
+}
+
+fn reg_name(i: u64) -> u64 {
+    return (&r_name[0 as usize]) as u64 + i * NAME_W
+}
+
+fn reg_installed(i: u64) -> u64 {
+    return (&r_ver[0 as usize]) as u64 + i * VER_W
+}
+
+fn reg_requires(i: u64) -> u64 {
+    return (&r_req[0 as usize]) as u64 + i * REQ_W
+}
+
+fn reg_add(name: u64, installed_version: u64, requires: u64) -> u64 {
+    if r_n >= REG_MAX {
+        return NONE
+    }
+    copy_cap(reg_name(r_n), name, NAME_W)
+    copy_cap(reg_installed(r_n), installed_version, VER_W)
+    copy_cap(reg_requires(r_n), requires, REQ_W)
+    r_n = r_n + 1
+    return r_n - 1
+}
+
+fn reg_set_installed(i: u64, installed_version: u64) {
+    copy_cap(reg_installed(i), installed_version, VER_W)
+}
+
+fn reg_find(name: u64) -> u64 {
+    var i: u64 = 0
+    while i < r_n {
+        if same(reg_name(i), name) {
+            return i
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn requires_next(list: u64, at: u64, name: u64, min: u64) -> u64 {
+    var i: u64 = at
+    while b(list, i) == CH_COMMA || b(list, i) == CH_SPACE {
+        i = i + 1
+    }
+    if b(list, i) == 0 {
+        return NONE
+    }
+    var n: u64 = 0
+    while b(list, i) != 0 && b(list, i) != CH_COMMA && b(list, i) != CH_SPACE && b(list, i) != CH_GT {
+        if n + 1 < NAME_W {
+            put(name, n, b(list, i))
+            n = n + 1
+        }
+        i = i + 1
+    }
+    put(name, n, 0)
+    put(min, 0, 0)
+    if b(list, i) == CH_GT && b(list, i + 1) == CH_EQ {
+        i = i + 2
+        var k: u64 = 0
+        while b(list, i) != 0 && b(list, i) != CH_COMMA && b(list, i) != CH_SPACE {
+            if k + 1 < VER_W {
+                put(min, k, b(list, i))
+                k = k + 1
+            }
+            i = i + 1
+        }
+        put(min, k, 0)
+    }
+    return i
+}
+
+fn requires_has(list: u64) -> bool {
+    return requires_next(list, 0, (&t_name[0 as usize]) as u64, (&t_min[0 as usize]) as u64) != NONE
+}
+
+fn satisfied(j: u64, min: u64) -> bool {
+    let have: u64 = reg_installed(j)
+    return b(have, 0) != 0 && ver_at_least(have, min)
+}
+
+fn note_unknown(name: u64) {
+    if p_unknown == 0 {
+        copy_cap((&p_unknown_name[0 as usize]) as u64, name, NAME_W)
+    }
+    p_unknown = p_unknown + 1
+}
+
+fn visit(i: u64, depth: u64) {
+    if depth > DEPTH_MAX || p_state[i as usize] != ST_NEW {
+        return
+    }
+    p_state[i as usize] = ST_OPEN
+    let list: u64 = reg_requires(i)
+    var name: [u8; 24] = [0 as u8; 24]
+    var min: [u8; 12] = [0 as u8; 12]
+    var at: u64 = 0
+    while at != NONE {
+        at = requires_next(list, at, (&name[0 as usize]) as u64, (&min[0 as usize]) as u64)
+        if at != NONE {
+            let j: u64 = reg_find((&name[0 as usize]) as u64)
+            if j == NONE {
+                note_unknown((&name[0 as usize]) as u64)
+            } else if !satisfied(j, (&min[0 as usize]) as u64) {
+                visit(j, depth + 1)
+            }
+        }
+    }
+    p_state[i as usize] = ST_DONE
+    if p_n < PLAN_MAX {
+        p_list[p_n as usize] = i
+        p_n = p_n + 1
+    }
+}
+
+fn plan_build(target: u64) -> u64 {
+    var i: u64 = 0
+    while i < REG_MAX {
+        p_state[i as usize] = ST_NEW
+        i = i + 1
+    }
+    p_n = 0
+    p_unknown = 0
+    put((&p_unknown_name[0 as usize]) as u64, 0, 0)
+    if target >= r_n {
+        return 0
+    }
+    visit(target, 0)
+    return p_n
+}
+
+fn plan_len() -> u64 {
+    return p_n
+}
+
+fn plan_at(k: u64) -> u64 {
+    return p_list[k as usize]
+}
+
+fn plan_unknown() -> u64 {
+    return p_unknown
+}
+
+fn plan_unknown_name() -> u64 {
+    return (&p_unknown_name[0 as usize]) as u64
+}

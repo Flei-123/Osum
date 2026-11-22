@@ -1,0 +1,185 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import store.registry
+
+struct T {
+    fails: i32,
+    checks: i32,
+}
+
+static mut cbuf: [u8; 4096] = [0 as u8; 4096]
+static mut cslot: usize = 0
+
+fn c(s: str) -> u64 {
+    let base: usize = (cslot % 32) * 128
+    cslot = cslot + 1
+    var i: usize = 0
+    while i < s.length() && i < 127 {
+        cbuf[base + i] = *((s.p as u64 + i as u64) as *mut u8)
+        i = i + 1
+    }
+    cbuf[base + i] = 0 as u8
+    return ((&cbuf[0 as usize]) as u64) + base as u64
+}
+
+fn check(t: *mut T, ok: bool, what: str) {
+    (*t).checks = (*t).checks + 1
+    if ok {
+        io.fmt_print(f"ok   {what}\n")
+    } else {
+        io.fmt_print(f"FAIL {what}\n")
+        (*t).fails = (*t).fails + 1
+    }
+}
+
+fn add(name: str, installed: str, requires: str) -> u64 {
+    return registry.reg_add(c(name), c(installed), c(requires))
+}
+
+fn plan_is(a: str, b: str, d: str) -> bool {
+    var names: [u64; 3] = [c(a), c(b), c(d)]
+    var k: u64 = 0
+    var want: u64 = 0
+    while k < 3 {
+        if (*((names[k as usize]) as *mut u8)) != 0 as u8 {
+            want = want + 1
+        }
+        k = k + 1
+    }
+    if registry.plan_len() != want {
+        return false
+    }
+    k = 0
+    while k < want {
+        var j: u64 = 0
+        var p: u64 = registry.reg_name(registry.plan_at(k))
+        var q: u64 = names[k as usize]
+        while (*((p + j) as *mut u8)) != 0 as u8 && (*((p + j) as *mut u8)) == (*((q + j) as *mut u8)) {
+            j = j + 1
+        }
+        if (*((p + j) as *mut u8)) != (*((q + j) as *mut u8)) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn kinds_and_tabs(t: *mut T) {
+    check(t, registry.kind_from_word(c("cli")) == registry.KIND_CLI, "kind cli")
+    check(t, registry.kind_from_word(c("runtime")) == registry.KIND_RUNTIME, "kind runtime")
+    check(t, registry.kind_from_word(c("system")) == registry.KIND_SYSTEM, "kind system")
+    check(t, registry.kind_from_word(c("gui")) == registry.KIND_APP, "kind gui is a normal app")
+    check(t, registry.kind_from_word(c("")) == registry.KIND_APP, "no kind is a normal app")
+    check(t, registry.kind_tab(registry.KIND_APP, false) == registry.TAB_APPS, "app lands in the apps tab")
+    check(t, registry.kind_tab(registry.KIND_APP, true) == registry.TAB_SYSTEM, "bundled app lands in the system tab")
+    check(t, registry.kind_tab(registry.KIND_SYSTEM, false) == registry.TAB_SYSTEM, "system kind lands in the system tab")
+    check(t, registry.kind_tab(registry.KIND_RUNTIME, false) == registry.TAB_RUNTIME, "runtime lands in the runtime tab")
+    check(t, registry.kind_tab(registry.KIND_CLI, false) == registry.TAB_RUNTIME, "cli lands in the runtime tab")
+    check(t, registry.kind_tab(registry.KIND_CLI, true) == registry.TAB_RUNTIME, "bundled cli stays a tool")
+}
+
+fn filters(t: *mut T) {
+    let apps: u64 = registry.TAB_APPS
+    let sys: u64 = registry.TAB_SYSTEM
+    let rt: u64 = registry.TAB_RUNTIME
+    check(t, registry.tab_shown(apps, apps, false, false, false), "apps tab shows a not installed app")
+    check(t, !registry.tab_shown(apps, apps, true, false, false), "apps tab hides an installed app by default")
+    check(t, registry.tab_shown(apps, apps, true, true, false), "show installed brings it back")
+    check(t, !registry.tab_shown(apps, sys, false, false, false), "apps tab hides system tools")
+    check(t, !registry.tab_shown(apps, rt, false, false, false), "apps tab hides runtimes")
+    check(t, registry.tab_shown(sys, sys, true, false, false), "system tab shows installed system tools")
+    check(t, registry.tab_shown(rt, rt, true, false, false), "runtime tab shows installed runtimes")
+    check(t, !registry.tab_shown(rt, apps, false, false, false), "runtime tab hides apps")
+    check(t, registry.tab_shown(apps, rt, true, false, true), "search finds a runtime from the apps tab")
+    check(t, registry.tab_shown(apps, sys, true, false, true), "search finds an installed system tool")
+    check(t, registry.tab_shown(rt, apps, true, false, true), "search finds an installed app from the runtime tab")
+}
+
+fn versions(t: *mut T) {
+    check(t, registry.ver_at_least(c("9.1"), c("9.0")), "9.1 >= 9.0")
+    check(t, registry.ver_at_least(c("9.0"), c("9.0")), "9.0 >= 9.0")
+    check(t, !registry.ver_at_least(c("8.9"), c("9.0")), "8.9 < 9.0")
+    check(t, registry.ver_at_least(c("10.0"), c("9.9")), "10.0 >= 9.9 (numeric, not text)")
+    check(t, registry.ver_at_least(c("1.2.3"), c("1.2")), "1.2.3 >= 1.2")
+    check(t, !registry.ver_at_least(c("1.2"), c("1.2.1")), "1.2 < 1.2.1")
+    check(t, registry.ver_at_least(c("1"), c("")), "empty minimum is always met")
+}
+
+fn parsing(t: *mut T) {
+    var name: [u8; 24] = [0 as u8; 24]
+    var min: [u8; 12] = [0 as u8; 12]
+    let np: u64 = (&name[0 as usize]) as u64
+    let mp: u64 = (&min[0 as usize]) as u64
+    let list: u64 = c("wine>=9.0, python  dotnet>=6")
+    var at: u64 = registry.requires_next(list, 0, np, mp)
+    check(t, at != registry.NONE && (*(np as *mut u8)) == 119 as u8 && (*((mp) as *mut u8)) == 57 as u8, "first token wine>=9.0")
+    at = registry.requires_next(list, at, np, mp)
+    check(t, at != registry.NONE && (*(np as *mut u8)) == 112 as u8 && (*(mp as *mut u8)) == 0 as u8, "second token python without minimum")
+    at = registry.requires_next(list, at, np, mp)
+    check(t, at != registry.NONE && (*(np as *mut u8)) == 100 as u8 && (*(mp as *mut u8)) == 54 as u8, "third token dotnet>=6")
+    at = registry.requires_next(list, at, np, mp)
+    check(t, at == registry.NONE, "end of list")
+    check(t, registry.requires_has(c("wine")), "requires_has true")
+    check(t, !registry.requires_has(c("")), "requires_has false for empty")
+    check(t, !registry.requires_has(c("  , ")), "requires_has false for separators only")
+}
+
+fn plans(t: *mut T) {
+    registry.reg_clear()
+    let wine: u64 = add("wine", "", "")
+    let game: u64 = add("game", "", "wine>=9.0")
+    let plain: u64 = add("plain", "", "")
+    check(t, registry.plan_build(plain) == 1 && plan_is("plain", "", ""), "no requires: only the app")
+    check(t, registry.plan_build(game) == 2 && plan_is("wine", "game", ""), "wine missing: wine first, then the app")
+    check(t, registry.plan_unknown() == 0, "no unknown dependency")
+    registry.reg_set_installed(wine, c("9.1"))
+    check(t, registry.plan_build(game) == 1 && plan_is("game", "", ""), "wine present in the right version: skipped")
+    registry.reg_set_installed(wine, c("8.0"))
+    check(t, registry.plan_build(game) == 2 && plan_is("wine", "game", ""), "wine too old: installed again first")
+    registry.reg_set_installed(wine, c("9.0"))
+    check(t, registry.plan_build(game) == 1, "wine exactly at the minimum: skipped")
+
+    registry.reg_clear()
+    let a: u64 = add("appa", "", "libb>=1.0")
+    let lb: u64 = add("libb", "", "libc>=2")
+    let lc: u64 = add("libc", "", "")
+    check(t, registry.plan_build(a) == 3 && plan_is("libc", "libb", "appa"), "chain: deepest dependency first")
+    registry.reg_set_installed(lc, c("2.1"))
+    check(t, registry.plan_build(a) == 2 && plan_is("libb", "appa", ""), "chain: installed leaf skipped")
+    registry.reg_set_installed(lb, c("1.5"))
+    check(t, registry.plan_build(a) == 1 && plan_is("appa", "", ""), "chain: all present, only the app")
+
+    registry.reg_clear()
+    let two: u64 = add("two", "", "wine>=9.0,python>=3")
+    add("wine", "", "")
+    add("python", "", "")
+    check(t, registry.plan_build(two) == 3 && plan_is("wine", "python", "two"), "two dependencies in manifest order")
+    registry.reg_set_installed(registry.reg_find(c("python")), c("3.12"))
+    check(t, registry.plan_build(two) == 2 && plan_is("wine", "two", ""), "only the missing one of two")
+
+    registry.reg_clear()
+    let x: u64 = add("cyc1", "", "cyc2")
+    add("cyc2", "", "cyc1")
+    check(t, registry.plan_build(x) == 2, "a cycle ends and lists each package once")
+
+    registry.reg_clear()
+    let orphan: u64 = add("orphan", "", "ghost>=1")
+    check(t, registry.plan_build(orphan) == 1 && registry.plan_unknown() == 1, "unknown dependency is counted")
+    check(t, (*(registry.plan_unknown_name() as *mut u8)) == 103 as u8, "unknown dependency name is kept")
+}
+
+fn main() -> i32 {
+    var t: T = T { fails: 0, checks: 0 }
+    kinds_and_tabs(&t)
+    filters(&t)
+    versions(&t)
+    parsing(&t)
+    plans(&t)
+    io.fmt_print(f"checks={t.checks} fails={t.fails}\n")
+    if t.fails != 0 {
+        return 1
+    }
+    return 0
+}
