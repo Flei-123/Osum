@@ -27,6 +27,8 @@ import ipc.perm
 import ipc.appfs
 import sched.ctr
 import fs.vfs
+import fs.dcache
+import fs.ofsattr
 import sys.readcache
 import sys.pipeio
 import fs.vfscreate
@@ -135,9 +137,9 @@ fn write_checked(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
         }
         return write_of(state, me, of, buf, len)
     }
-    wbscope.begin_data_sized(state, len)
+    let flags: u64 = wbscope.begin_data_locked(state, len)
     let done: u64 = write_steps(state, me, of, buf, len)
-    if !blk.wb_end(state) {
+    if !wbscope.end_data_locked(state, flags) {
         return sysuser.neg(errno.E_IO)
     }
     return done
@@ -1032,6 +1034,34 @@ fn vfs_may(state: u64, me: u64, m: u64, node: u64, want: u64) -> bool {
         perm.euid(state, me), perm.egid(state, me), ist_dir)
 }
 
+fn attrs_may(state: u64, me: u64, node: u64, want: u64, at: u64) -> bool {
+    kstate.add(state, kstate.MU_OFF + kstate.MU_NODECHK, 1)
+    return perm.may_loaded(state, me, node, want, kstate.get(at, ofsattr.AT_MODE), kstate.get(at, ofsattr.AT_UID),
+        kstate.get(at, ofsattr.AT_GID), kstate.get(at, ofsattr.AT_TYPE) == vfsops.N_DIR)
+}
+
+fn root_node(state: u64, path: u64, leaf: u64) -> u64 {
+    let hit: u64 = vfs.node_from_hit(state, 0, leaf)
+    if hit == dcache.MISS {
+        return vfs.node_for(state, 0, path)
+    }
+    return hit
+}
+
+fn node_is_sock(state: u64, node: u64, at: u64) -> bool {
+    if at != 0 {
+        return (kstate.get(at, ofsattr.AT_FIFO) & fs.SOCK_BIT) != 0
+    }
+    return fs.inode_is_sock(state, node)
+}
+
+fn node_is_fifo(state: u64, node: u64, at: u64) -> bool {
+    if at != 0 {
+        return (kstate.get(at, ofsattr.AT_FIFO) & fs.FIFO_BIT) != 0
+    }
+    return fs.inode_is_fifo(state, node)
+}
+
 fn vfs_on_create(state: u64, me: u64, m: u64, node: u64, mode: u64) {
     if node == 0 {
         return
@@ -1062,7 +1092,7 @@ fn open_devshm(state: u64, me: u64, i: u64, flags: u64) -> u64 {
     return fd
 }
 
-fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64, mode: u64, known: u64) -> u64 {
+fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64, mode: u64, known: u64, at: u64) -> u64 {
     if mnt_gone(state, m) {
         return sysuser.neg(errno.E_NODEV)
     }
@@ -1097,10 +1127,18 @@ fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64, mode: u64, known
         }
     }
     // ==================================== RUNDE MULTIUSER: DAS TOR
-    if !vfs_may(state, me, m, node, want_of(flags)) {
-        return sysuser.neg(errno.E_ACCES)
+    var art: u64 = 0
+    if at != 0 {
+        if !attrs_may(state, me, node, want_of(flags), at) {
+            return sysuser.neg(errno.E_ACCES)
+        }
+        art = kstate.get(at, ofsattr.AT_TYPE)
+    } else {
+        if !vfs_may(state, me, m, node, want_of(flags)) {
+            return sysuser.neg(errno.E_ACCES)
+        }
+        art = vfs.v_attr(state, m, node, vfsops.A_TYPE)
     }
-    let art: u64 = vfs.v_attr(state, m, node, vfsops.A_TYPE)
     if vfs.type_of(state, m) == vfsops.FS_DEV {
         if devfs.is_fb(node) {
             return open_devfb(state, me, flags)
@@ -1239,7 +1277,8 @@ fn open_named(state: u64, me: u64, buf: u64, len: u64, flags: u64, mode: u64) ->
     if alias != sysfdalias.NONE {
         return open_alias(state, me, alias)
     }
-    if !perm.walk(state, me, buf) {
+    var leaf: [u64; 1] = [0 as u64; 1]
+    if !perm.walk_leaf(state, me, buf, (&leaf[0 as usize]) as u64) {
         return sysuser.neg(errno.E_ACCES)
     }
     if ((flags & 3) != 0 || (flags & O_CREAT) != 0 || (flags & O_TRUNC) != 0) && !appfs.write_ok(state, me, buf) {
@@ -1249,18 +1288,24 @@ fn open_named(state: u64, me: u64, buf: u64, len: u64, flags: u64, mode: u64) ->
         let m: u64 = vfs.mount_for(state, buf)
         if m < vfs.MAX_MNT {
             var known: u64 = 0
+            var loaded: [u64; 12] = [0 as u64; 12]
+            var at: u64 = 0
             if m == 0 && vfs.all_mode(state) {
                 var fifo: u64 = 0
                 if vfs.type_of(state, 0) == vfsops.FS_OFS {
-                    fifo = vfs.node_for(state, 0, buf)
-                    known = fifo
+                    known = root_node(state, buf, leaf[0 as usize])
+                    fifo = known
+                    if known != 0 {
+                        at = (&loaded[0 as usize]) as u64
+                        ofsattr.load(state, 0, known, at)
+                    }
                 } else {
                     fifo = fs.path(state, buf)
                 }
-                if fifo != 0 && fs.inode_is_sock(state, fifo) {
+                if fifo != 0 && node_is_sock(state, fifo, at) {
                     return sysuser.neg(errno.E_NXIO)
                 }
-                if fifo != 0 && fs.inode_is_fifo(state, fifo) {
+                if fifo != 0 && node_is_fifo(state, fifo, at) {
                     if !perm.may(state, me, fifo, want_of(flags)) {
                         return sysuser.neg(errno.E_ACCES)
                     }
@@ -1268,7 +1313,7 @@ fn open_named(state: u64, me: u64, buf: u64, len: u64, flags: u64, mode: u64) ->
                 }
             }
             if m != 0 || vfs.all_mode(state) {
-                return open_vfs(state, me, m, buf, flags, mode, known)
+                return open_vfs(state, me, m, buf, flags, mode, known, at)
             }
         }
     }
@@ -1608,12 +1653,12 @@ fn writev_staged(state: u64, me: u64, of: u64, iov: u64, n: u64) -> u64 {
         return ready
     }
     let total: u64 = iov_bytes(state, me, iov, n)
-    let scoped: bool = total > sysconst.MAX_IO
-    if scoped {
-        wbscope.begin_data_sized(state, total)
+    if total <= sysconst.MAX_IO {
+        return writev_gather(state, me, of, iov, n)
     }
+    let flags: u64 = wbscope.begin_data_locked(state, total)
     let r: u64 = writev_gather(state, me, of, iov, n)
-    if scoped && !blk.wb_end(state) {
+    if !wbscope.end_data_locked(state, flags) {
         return sysuser.neg(errno.E_IO)
     }
     return r
@@ -2400,9 +2445,9 @@ fn cx_close_marked(state: u64, me: u64) {
 // commands carry long runs instead of one block each. The data is on the drive when the call returns.
 fn file_io_loop(state: u64, me: u64, fd: u64, buf: u64, len: u64, writing: bool) -> u64 {
     if writing && len > sysconst.MAX_IO {
-        wbscope.begin_data_sized(state, len)
+        let flags: u64 = wbscope.begin_data_locked(state, len)
         let r: u64 = file_io_loop_steps(state, me, fd, buf, len, writing)
-        if !blk.wb_end(state) {
+        if !wbscope.end_data_locked(state, flags) {
             return sysuser.neg(errno.E_IO)
         }
         return r

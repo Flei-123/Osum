@@ -5,7 +5,7 @@ import arch.x86_64.apic
 
 export {
     FINE_MAX_NS, deadline_after, set_wake, wake_of, expired, due, pending_any, clear_pending, arm_here, partial,
-    mark_full, rate_here, relax_here, fine_enabled, ticks_for, set_next, retune_here
+    mark_full, rate_here, relax_here, fine_enabled, ticks_for, set_next, retune_here, idle_slow_here
 }
 
 const FINE_MAX_NS: u64 = 60000000
@@ -14,12 +14,16 @@ const PARTIAL_PERCENT: u64 = 80
 const MIN_PERIOD_NS: u64 = 40000
 const MAX_CPUS: u64 = 8
 const MAX_SLOTS: u64 = 512
+const IDLE_SLOW_AFTER: u64 = 3
+const IDLE_SLOW_MULT: u64 = 10
 
 static mut wake_ns: [u64; 512] = [0 as u64; 512]
 static mut pending: u64 = 0
 static mut next_ns: u64 = 0
 static mut fast_cpu: [u64; 8] = [0 as u64; 8]
 static mut last_full: [u64; 8] = [0 as u64; 8]
+static mut slowed: [u64; 8] = [0 as u64; 8]
+static mut idle_streak: [u64; 8] = [0 as u64; 8]
 
 fn fine_enabled(state: u64) -> bool {
     return time.khz(state) != 0 && !kstate.mode_on(state, kstate.M_NOHRT)
@@ -136,7 +140,31 @@ fn rate_here(state: u64, mult: u64) {
         apic.timer_ns(state, period_ns(state), time.TICK_NS)
         return
     }
+    if me < MAX_CPUS {
+        if mult == 1 && slowed[me as usize] == 0 {
+            return
+        }
+        slowed[me as usize] = 1
+        if mult == 1 {
+            slowed[me as usize] = 0
+        }
+    }
     apic.timer_rate(state, mult)
+}
+
+fn idle_slow_here(state: u64, worked: bool) {
+    let me: u64 = cpu.here(state)
+    if me >= MAX_CPUS {
+        return
+    }
+    if worked {
+        idle_streak[me as usize] = 0
+        return
+    }
+    idle_streak[me as usize] = idle_streak[me as usize] + 1
+    if idle_streak[me as usize] >= IDLE_SLOW_AFTER {
+        rate_here(state, IDLE_SLOW_MULT)
+    }
 }
 
 fn mark_full(state: u64) {
