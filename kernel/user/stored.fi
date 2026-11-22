@@ -7,6 +7,8 @@ import libc.io
 import actwire
 import xfxio
 import xfxpack
+import xfxpath
+import lxcfg
 import libc.octets
 import libc.clockapi
 import storeapps
@@ -1130,6 +1132,14 @@ static mut P_XFX: [u8; 9] = "/bin/xfx\0"
 static mut A_GET: [u8; 4] = "get\0"
 static mut N_FIREFOX: [u8; 8] = "firefox\0"
 static mut P_XFXMAN: [u8; 31] = "/apps/firefox.osp/xfx.manifest\0"
+static mut P_LXAPP: [u8; 11] = "/bin/lxapp\0"
+static mut N_RUNTIME: [u8; 8] = "linuxrt\0"
+static mut P_RT_MARK: [u8; 32] = "/usr/share/lx/linuxrt.installed\0"
+static mut S_APPS_DIR: [u8; 7] = "/apps/\0"
+static mut S_LX_MANIFEST: [u8; 17] = ".osp/lx.manifest\0"
+static mut T_LX_LOAD: [u8; 23] = "Programm wird geladen\0\0"
+static mut T_LX_UNPACK: [u8; 24] = "Programm wird entpackt\0\0"
+static mut T_LX_FAIL: [u8; 54] = "Linux app parts could not be fetched or were rejected\0"
 static mut W_DONE: [u8; 5] = "done\0"
 static mut W_FAILED: [u8; 7] = "failed\0"
 static mut W_RUNNING: [u8; 8] = "running\0"
@@ -1142,6 +1152,13 @@ const XFX_IDLE_POLLS: u64 = 60
 const XFX_PCT_FROM: u64 = 72
 const XFX_PCT_SPAN: u64 = 27
 
+fn launcher_path(argc: u64) -> u64 {
+    if argc == 3 {
+        return (&P_LXAPP[0 as usize]) as u64
+    }
+    return (&P_XFX[0 as usize]) as u64
+}
+
 fn has_xfx(name: u64) -> bool {
     if !actwire.str_eq(name, (&N_FIREFOX[0 as usize]) as u64) {
         return false
@@ -1149,7 +1166,37 @@ fn has_xfx(name: u64) -> bool {
     return xfxio.exists((&P_XFXMAN[0 as usize]) as u64)
 }
 
+fn has_lx(name: u64) -> bool {
+    var path: [u8; 96] = [0 as u8; 96]
+    if text.length(name) > 40 {
+        return false
+    }
+    ulib.strcpy((&path[0 as usize]) as u64, (&S_APPS_DIR[0 as usize]) as u64)
+    ulib.strcat((&path[0 as usize]) as u64, name)
+    ulib.strcat((&path[0 as usize]) as u64, (&S_LX_MANIFEST[0 as usize]) as u64)
+    return xfxio.exists((&path[0 as usize]) as u64)
+}
+
 fn stage_xfx(verb: u64, name: u64) -> bool {
+    return stage_pack(verb, name, (&A_GET[0 as usize]) as u64, 0, 2, (&T_XFX_LOAD[0 as usize]) as u64, (&T_XFX_UNPACK[0 as usize]) as u64)
+}
+
+fn stage_lx(verb: u64, name: u64) -> bool {
+    if !lxcfg.load(name) || !xfxpath.select_app(name, lxcfg.check_path(), lxcfg.proc_name()) {
+        return false
+    }
+    return stage_pack(verb, name, name, (&A_GET[0 as usize]) as u64, 3, (&T_LX_LOAD[0 as usize]) as u64, (&T_LX_UNPACK[0 as usize]) as u64)
+}
+
+fn stage_lx_with_runtime(verb: u64, name: u64) -> bool {
+    if !ulib.streq(name, (&N_RUNTIME[0 as usize]) as u64) && has_lx((&N_RUNTIME[0 as usize]) as u64) && !xfxio.exists((&P_RT_MARK[0 as usize]) as u64)
+        && !stage_lx(verb, (&N_RUNTIME[0 as usize]) as u64) {
+        return false
+    }
+    return stage_lx(verb, name)
+}
+
+fn stage_pack(verb: u64, name: u64, arg1: u64, arg2: u64, argc: u64, load_text: u64, unpack_text: u64) -> bool {
     var s_busy: [u8; 6] = "lädt\0"
     var polls: u64 = 0
     var idle: u64 = 0
@@ -1157,7 +1204,7 @@ fn stage_xfx(verb: u64, name: u64) -> bool {
     var ok: bool = false
     var going: bool = true
     pct_set(XFX_PCT_FROM)
-    if run((&P_XFX[0 as usize]) as u64, (&A_GET[0 as usize]) as u64, 0, 0, 0, 2) != 0 {
+    if run(launcher_path(argc), arg1, arg2, 0, 0, argc) != 0 {
         return false
     }
     while going && polls < XFX_MAX_POLLS {
@@ -1180,9 +1227,9 @@ fn stage_xfx(verb: u64, name: u64) -> bool {
             if phase != shown {
                 shown = phase
                 if phase == 0 {
-                    stat_set((&s_busy[0 as usize]) as u64, verb, name, (&T_XFX_LOAD[0 as usize]) as u64)
+                    stat_set((&s_busy[0 as usize]) as u64, verb, name, load_text)
                 } else {
-                    stat_set((&s_busy[0 as usize]) as u64, verb, name, (&T_XFX_UNPACK[0 as usize]) as u64)
+                    stat_set((&s_busy[0 as usize]) as u64, verb, name, unpack_text)
                 }
             }
         } else {
@@ -1246,6 +1293,12 @@ fn install_one(verb: u64, name: u64) -> u64 {
     }
     if rc != 0 {
         return fail(verb, name, why)
+    }
+    if has_lx(name) && !stage_lx_with_runtime(verb, name) {
+        run((&P_OPK[0 as usize]) as u64, (&A_ENT[0 as usize]) as u64, name, 0, 0, 3)
+        run((&P_OPK[0 as usize]) as u64, (&A_KAT[0 as usize]) as u64, (&P_TMP[0 as usize]) as u64,
+            (&P_KAT[0 as usize]) as u64, 0, 4)
+        return fail(verb, name, (&T_LX_FAIL[0 as usize]) as u64)
     }
     if has_xfx(name) && !stage_xfx(verb, name) {
         run((&P_OPK[0 as usize]) as u64, (&A_ENT[0 as usize]) as u64, name, 0, 0, 3)

@@ -17,6 +17,9 @@ import opkpfad
 import packsplit
 
 RUNTIME = "linuxrt"
+RUNTIME_CONFIG = "kind=runtime\nproc=linuxrt\ncheck=/lib/ld-musl-x86_64.so.1\n"
+BIN_DIR = "/usr/bin"
+PROC_NAME_MAX = 8
 EXCLUDED = {"apk-tools", "alpine-keys", "alpine-baselayout", "alpine-baselayout-data", "scanelf", "ssl_client", "busybox", "busybox-binsh", "busybox-suid"}
 SKIP_PREFIXES = ("var/cache", "var/lib", "lib/apk", "etc/apk", "usr/include", "usr/share/doc", "usr/share/man", "usr/share/info", "usr/share/locale")
 REGISTRY = os.path.join(ROOT, "tools", "linuxapps", "store-apps.tsv")
@@ -119,7 +122,8 @@ def meta_text(fields):
 
 
 def app_config(app):
-    lines = ["exec=%s" % app["command"]]
+    command = app["command"].split()[0]
+    lines = ["exec=%s" % app["command"], "proc=%s" % command[:PROC_NAME_MAX], "check=%s/%s" % (BIN_DIR, command)]
     lines += ["env=%s" % item for item in app["env"].split() if item]
     return "\n".join(lines) + "\n"
 
@@ -174,7 +178,7 @@ def main():
         make_tar(args.root, files_of(packages, shared, args.root), runtime_tar)
         runtime = {"name": RUNTIME, "title": "Linux runtime", "summary": "Shared libraries for Linux apps", "keys": "linux,runtime",
                    "category": "System", "icon": "terminal", "version": args.version}
-        counts = {RUNTIME: build_package(runtime, "kind=runtime\n", [], runtime_tar, args, work, args.out)}
+        counts = {RUNTIME: build_package(runtime, RUNTIME_CONFIG, [], runtime_tar, args, work, args.out)}
         for app in apps:
             tar_path = os.path.join(work, app["name"] + ".tar")
             make_tar(args.root, files_of(packages, own[app["name"]], args.root), tar_path)

@@ -1,0 +1,232 @@
+profile kernel
+
+import ulib
+import libc.clockapi
+import pw
+import xfxio
+import xfxready
+import xfxpath
+import xfxproc
+import xfxwatch
+import xfxtheme
+import xfxrun
+import lxcfg
+
+export { start, stop }
+
+const SYS_CHOWN: u64 = 92
+const SYS_CHMOD: u64 = 90
+const O_LOG: u64 = 1089
+const FMODE: u64 = 420
+const DMODE: u64 = 448
+const ENV_CAP: u64 = 1536
+const WAYD_POLLS: u64 = 80
+const WAYD_POLL_MS: u64 = 100
+const SETTLE_MS: u64 = 1500
+const WAYD_ARGC: u64 = 4
+const SPAWN_ARGV_CAP: u64 = 9
+
+fn reap_session(uid: u64) {
+    xfxproc.kill_pid(xfxpath.p_pidf(), xfxpath.n_fx())
+    xfxproc.kill_all(xfxpath.n_fx(), uid)
+    xfxproc.kill_pid(xfxpath.p_pidw(), xfxpath.n_wayd())
+    xfxproc.kill_all(xfxpath.n_wayd(), uid)
+}
+
+fn put_pair(env: u64, at: u64, key: u64, value: u64) -> u64 {
+    var kv: [u8; 240] = [0 as u8; 240]
+    ulib.strcpy((&kv[0 as usize]) as u64, key)
+    ulib.strcat((&kv[0 as usize]) as u64, value)
+    return xfxio.env_put(env, at, (&kv[0 as usize]) as u64)
+}
+
+fn build_env(env: u64, home: u64, rd: u64, sock: u64) -> u64 {
+    var k_home: [u8; 6] = "HOME=\0"
+    var k_xdg: [u8; 17] = "XDG_RUNTIME_DIR=\0"
+    var k_way: [u8; 17] = "WAYLAND_DISPLAY=\0"
+    var f1: [u8; 38] = "FONTCONFIG_FILE=/etc/fonts/fonts.conf\0"
+    var f2: [u8; 25] = "GSETTINGS_BACKEND=memory\0"
+    var f3: [u8; 15] = "NO_AT_BRIDGE=1\0"
+    var f4: [u8; 24] = "LIBGL_ALWAYS_SOFTWARE=1\0"
+    var f5: [u8; 25] = "XDG_DATA_DIRS=/usr/share\0"
+    var at: u64 = put_pair(env, 0, (&k_home[0 as usize]) as u64, home)
+    at = put_pair(env, at, (&k_xdg[0 as usize]) as u64, rd)
+    at = put_pair(env, at, (&k_way[0 as usize]) as u64, sock)
+    at = xfxio.env_put(env, at, (&f1[0 as usize]) as u64)
+    at = xfxio.env_put(env, at, (&f2[0 as usize]) as u64)
+    at = xfxio.env_put(env, at, (&f3[0 as usize]) as u64)
+    at = xfxio.env_put(env, at, (&f4[0 as usize]) as u64)
+    at = xfxio.env_put(env, at, (&f5[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < lxcfg.env_count() {
+        at = xfxio.env_put(env, at, lxcfg.env_at(i))
+        i = i + 1
+    }
+    return xfxtheme.env_gtk(env, at, xfxtheme.mode())
+}
+
+fn wait_wayd(mark: u64) -> bool {
+    var i: u64 = 0
+    while i < WAYD_POLLS {
+        if xfxready.wayd_ready(xfxpath.p_log(), mark) {
+            return true
+        }
+        clockapi.sleep_ms(WAYD_POLL_MS)
+        i = i + 1
+    }
+    return false
+}
+
+fn app_argv(argv: u64) -> u64 {
+    var i: u64 = 0
+    while i < lxcfg.exec_argc() && i < SPAWN_ARGV_CAP {
+        *((argv + i * 8) as *mut u64) = lxcfg.exec_argv(i)
+        i = i + 1
+    }
+    return i
+}
+
+fn start() -> u64 {
+    var e_root: [u8; 14] = "lx: root only\0"
+    var e_inst: [u8; 18] = "lx: not installed\0"
+    var p_rt_mark: [u8; 32] = "/usr/share/lx/linuxrt.installed\0"
+    var e_rt: [u8; 26] = "lx: runtime not installed\0"
+    var e_wayd: [u8; 41] = "lx: /bin/wayd missing, update the system\0"
+    var e_run: [u8; 20] = "lx: already running\0"
+    var e_ses: [u8; 33] = "lx: no desktop session, refusing\0"
+    var e_gid: [u8; 30] = "lx: session user has no group\0"
+    var e_spawn: [u8; 22] = "lx: cannot start wayd\0"
+    var e_sock: [u8; 25] = "lx: wayd did not come up\0"
+    var e_app: [u8; 25] = "lx: cannot start the app\0"
+    var e_dead: [u8; 34] = "lx: app exited early, see its log\0"
+    var e_uid: [u8; 51] = "lx: app is not running as the session user, killed\0"
+    var m_ok: [u8; 13] = "lx: started \0"
+    var k_uid: [u8; 5] = "uid=\0"
+    var a_wd: [u8; 5] = "wayd\0"
+    var a_ms: [u8; 11] = "2000000000\0"
+    var a_z: [u8; 2] = "0\0"
+    if !xfxio.is_root() {
+        xfxio.msg((&e_root[0 as usize]) as u64)
+        return 1
+    }
+    if !xfxio.exists(xfxpath.p_fx()) || !xfxio.exists(xfxpath.p_mark()) {
+        xfxio.msg((&e_inst[0 as usize]) as u64)
+        return 1
+    }
+    if !xfxio.exists((&p_rt_mark[0 as usize]) as u64) {
+        xfxio.msg((&e_rt[0 as usize]) as u64)
+        return 1
+    }
+    if !xfxio.exists(xfxpath.p_wayd()) {
+        xfxio.msg((&e_wayd[0 as usize]) as u64)
+        return 1
+    }
+    if xfxproc.proc_ok(xfxio.pid_field(xfxpath.p_pidf(), 0), xfxpath.n_fx()) {
+        xfxio.msg((&e_run[0 as usize]) as u64)
+        return 1
+    }
+    var name: [u8; 64] = [0 as u8; 64]
+    var home: [u8; 120] = [0 as u8; 120]
+    let uid: u64 = ulib.session_owner()
+    if uid == 0 || !pw.name_of_uid(uid, (&name[0 as usize]) as u64, 64) || !pw.home_of_name((&name[0 as usize]) as u64, (&home[0 as usize]) as u64, 120) || home[0 as usize] != 47 as u8 {
+        xfxio.msg((&e_ses[0 as usize]) as u64)
+        return 1
+    }
+    let gid: u64 = pw.gid_of_name((&name[0 as usize]) as u64)
+    if gid == ulib.EOF {
+        xfxio.msg((&e_gid[0 as usize]) as u64)
+        return 1
+    }
+    var rd: [u8; 48] = [0 as u8; 48]
+    var sock: [u8; 80] = [0 as u8; 80]
+    var digits: [u8; 24] = [0 as u8; 24]
+    ulib.strcpy((&rd[0 as usize]) as u64, xfxpath.p_run())
+    xfxio.num_text(uid, (&digits[0 as usize]) as u64)
+    ulib.strcat((&rd[0 as usize]) as u64, (&digits[0 as usize]) as u64)
+    ulib.sys(ulib.SYS_MKDIR, (&rd[0 as usize]) as u64, DMODE, 0)
+    ulib.sys(SYS_CHOWN, (&rd[0 as usize]) as u64, uid, gid)
+    ulib.sys(SYS_CHMOD, (&rd[0 as usize]) as u64, DMODE, 0)
+    xfxrun.sock_path(uid, (&sock[0 as usize]) as u64)
+    reap_session(uid)
+    var env: [u8; 1536] = [0 as u8; 1536]
+    let at: u64 = build_env((&env[0 as usize]) as u64, (&home[0 as usize]) as u64, (&rd[0 as usize]) as u64, (&sock[0 as usize]) as u64)
+    let mark: u64 = xfxready.log_mark(xfxpath.p_log())
+    let s1: u64 = ulib.sys(ulib.SYS_DUP, 1, 0, 0)
+    let s2: u64 = ulib.sys(ulib.SYS_DUP, 2, 0, 0)
+    let lf: u64 = ulib.sys(ulib.SYS_OPEN, xfxpath.p_log(), O_LOG, FMODE)
+    if !ulib.bad(lf) {
+        ulib.sys(ulib.SYS_DUP2, lf, 1, 0)
+        ulib.sys(ulib.SYS_DUP2, lf, 2, 0)
+        ulib.sys(ulib.SYS_CLOSE, lf, 0, 0)
+    }
+    ulib.set_env((&env[0 as usize]) as u64, at)
+    var wv: [u64; 5] = [0 as u64; 5]
+    wv[0] = (&a_wd[0 as usize]) as u64
+    wv[1] = (&sock[0 as usize]) as u64
+    wv[2] = (&a_ms[0 as usize]) as u64
+    wv[3] = (&a_z[0 as usize]) as u64
+    let wpid: u64 = ulib.spawn_user(xfxpath.p_wayd(), (&wv[0 as usize]) as u64, WAYD_ARGC)
+    var up: bool = false
+    var apid: u64 = ulib.EOF
+    if !ulib.bad(wpid) {
+        up = wait_wayd(mark)
+        if up {
+            var av: [u64; 10] = [0 as u64; 10]
+            let argc: u64 = app_argv((&av[0 as usize]) as u64)
+            apid = xfxwatch.spawn_watched(xfxpath.p_fx(), (&av[0 as usize]) as u64, argc, uid)
+        }
+    }
+    ulib.set_env(0, 0)
+    ulib.sys(ulib.SYS_DUP2, s1, 1, 0)
+    ulib.sys(ulib.SYS_DUP2, s2, 2, 0)
+    ulib.sys(ulib.SYS_CLOSE, s1, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, s2, 0, 0)
+    if ulib.bad(wpid) {
+        xfxio.msg((&e_spawn[0 as usize]) as u64)
+        return 1
+    }
+    if !up {
+        reap_session(uid)
+        xfxio.msg((&e_sock[0 as usize]) as u64)
+        return 1
+    }
+    if ulib.bad(apid) {
+        reap_session(uid)
+        xfxio.msg((&e_app[0 as usize]) as u64)
+        return 1
+    }
+    clockapi.sleep_ms(SETTLE_MS)
+    if xfxproc.find_slot(apid) == ulib.EOF {
+        reap_session(uid)
+        xfxio.msg((&e_dead[0 as usize]) as u64)
+        return 1
+    }
+    if xfxproc.proc_uid(apid) != uid || xfxproc.proc_uid(wpid) != uid {
+        reap_session(uid)
+        xfxio.msg((&e_uid[0 as usize]) as u64)
+        return 1
+    }
+    xfxio.store_pid(xfxpath.p_pidw(), wpid, uid)
+    xfxio.store_pid(xfxpath.p_pidf(), apid, uid)
+    ulib.say((&m_ok[0 as usize]) as u64)
+    ulib.say((&k_uid[0 as usize]) as u64)
+    ulib.sayu(uid)
+    ulib.nl()
+    return 0
+}
+
+fn stop() -> u64 {
+    var e_root: [u8; 14] = "lx: root only\0"
+    var m_stop: [u8; 12] = "lx: stopped\0"
+    if !xfxio.is_root() {
+        xfxio.msg((&e_root[0 as usize]) as u64)
+        return 1
+    }
+    var uid: u64 = xfxio.pid_field(xfxpath.p_pidw(), 1)
+    if uid == 0 {
+        uid = ulib.session_owner()
+    }
+    reap_session(uid)
+    xfxio.msg((&m_stop[0 as usize]) as u64)
+    return 0
+}

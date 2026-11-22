@@ -1,0 +1,162 @@
+profile kernel
+
+import ulib
+import libc.text
+import xfxio
+import xfxpath
+import xfxpack
+import xfxproc
+import lxcfg
+import lxrun
+
+export { u_start }
+
+const SLASH: u64 = 47
+const DOT: u64 = 46
+const NAME_MAX: u64 = 40
+const APPS_PREFIX_LEN: u64 = 6
+const DIR_MODE: u64 = 493
+const MANIFEST_CAP: u64 = 16384
+static mut manifest_buf: [u8; 16384] = [0 as u8; 16384]
+static mut app_name: [u8; 48] = [0 as u8; 48]
+static mut s_apps: [u8; 7] = "/apps/\0"
+static mut s_lxdir: [u8; 15] = "/usr/share/lx/\0"
+
+fn name_from_path(path: u64) -> bool {
+    if !ulib.strneq(path, (&s_apps[0 as usize]) as u64, APPS_PREFIX_LEN) {
+        return false
+    }
+    var n: u64 = 0
+    while n < NAME_MAX {
+        let c: u8 = *((path + APPS_PREFIX_LEN + n) as *mut u8)
+        if c == 0 as u8 || c == DOT as u8 || c == SLASH as u8 {
+            break
+        }
+        __mmio_write8(((&app_name[0 as usize]) as u64 + n) as *mut u8, c)
+        n = n + 1
+    }
+    __mmio_write8(((&app_name[0 as usize]) as u64 + n) as *mut u8, 0 as u8)
+    return n > 0
+}
+
+fn select_loaded(name: u64) -> bool {
+    var e_cfg: [u8; 26] = "lx: no lx.app for package\0"
+    if !lxcfg.load(name) || !xfxpath.select_app(name, lxcfg.check_path(), lxcfg.proc_name()) {
+        xfxio.msg((&e_cfg[0 as usize]) as u64)
+        return false
+    }
+    return true
+}
+
+fn status() -> u64 {
+    var l_inst: [u8; 15] = "lx: installed=\0"
+    var l_ins: [u8; 9] = "install=\0"
+    var l_run: [u8; 7] = "state=\0"
+    var l_pid: [u8; 5] = "pid=\0"
+    var y: [u8; 4] = "yes\0"
+    var n: [u8; 3] = "no\0"
+    var r: [u8; 8] = "running\0"
+    var s: [u8; 8] = "stopped\0"
+    var sp: [u8; 2] = " \0"
+    ulib.say((&l_inst[0 as usize]) as u64)
+    if xfxpack.installed() {
+        ulib.say((&y[0 as usize]) as u64)
+    } else {
+        ulib.say((&n[0 as usize]) as u64)
+    }
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.say((&l_ins[0 as usize]) as u64)
+    ulib.say(xfxpack.state_word())
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.say((&l_run[0 as usize]) as u64)
+    let pid: u64 = xfxio.pid_field(xfxpath.p_pidf(), 0)
+    if xfxproc.proc_ok(pid, xfxpath.n_fx()) {
+        ulib.say((&r[0 as usize]) as u64)
+        ulib.say((&sp[0 as usize]) as u64)
+        ulib.say((&l_pid[0 as usize]) as u64)
+        ulib.sayu(pid)
+    } else {
+        ulib.say((&s[0 as usize]) as u64)
+    }
+    ulib.nl()
+    return 0
+}
+
+fn seed_manifest() -> bool {
+    let len: u64 = xfxio.read_text(xfxpath.p_srcman(), (&manifest_buf[0 as usize]) as u64, MANIFEST_CAP)
+    if len == ulib.EOF || len == 0 {
+        return false
+    }
+    return xfxio.write_text(xfxpath.p_man(), (&manifest_buf[0 as usize]) as u64, ulib.O_MAKE)
+}
+
+fn install(with_fetch: bool) -> u64 {
+    var e_man: [u8; 32] = "lx: package manifest unreadable\0"
+    ulib.sys(ulib.SYS_MKDIR, (&s_lxdir[0 as usize]) as u64, DIR_MODE, 0)
+    if !with_fetch && !seed_manifest() {
+        xfxio.msg((&e_man[0 as usize]) as u64)
+        return 1
+    }
+    return xfxpack.install_start(with_fetch)
+}
+
+fn run_command(word: u64) -> u64 {
+    var use: [u8; 50] = "usage: lxapp <name> install|get|start|stop|status\0"
+    var w_i: [u8; 8] = "install\0"
+    var w_g: [u8; 4] = "get\0"
+    var w_st: [u8; 6] = "start\0"
+    var w_sp: [u8; 5] = "stop\0"
+    var w_ss: [u8; 7] = "status\0"
+    if ulib.streq(word, (&w_i[0 as usize]) as u64) {
+        return install(false)
+    }
+    if ulib.streq(word, (&w_g[0 as usize]) as u64) {
+        return install(true)
+    }
+    if ulib.streq(word, (&w_st[0 as usize]) as u64) {
+        return start_checked()
+    }
+    if ulib.streq(word, (&w_sp[0 as usize]) as u64) {
+        return lxrun.stop()
+    }
+    if ulib.streq(word, (&w_ss[0 as usize]) as u64) {
+        return status()
+    }
+    xfxio.msg((&use[0 as usize]) as u64)
+    return 2
+}
+
+fn start_checked() -> u64 {
+    var e_rt: [u8; 28] = "lx: a runtime has no window\0"
+    if lxcfg.runtime() {
+        xfxio.msg((&e_rt[0 as usize]) as u64)
+        return 1
+    }
+    return lxrun.start()
+}
+
+fn u_start(args: u64) -> u64 {
+    var use: [u8; 50] = "usage: lxapp <name> install|get|start|stop|status\0"
+    var w_st: [u8; 6] = "start\0"
+    let count: u64 = ulib.arg_count(args)
+    var ok: bool = false
+    var word: u64 = (&w_st[0 as usize]) as u64
+    if count >= 3 {
+        ulib.strncpy((&app_name[0 as usize]) as u64, ulib.arg_at(args, 1), NAME_MAX)
+        word = ulib.arg_at(args, 2)
+        ok = true
+    } else if count == 2 && *((ulib.arg_at(args, 1)) as *mut u8) != SLASH as u8 {
+        ulib.strncpy((&app_name[0 as usize]) as u64, ulib.arg_at(args, 1), NAME_MAX)
+        ok = true
+    } else if count >= 1 {
+        ok = name_from_path(ulib.arg_at(args, count - 1)) || name_from_path(ulib.arg_at(args, 0))
+    }
+    if !ok {
+        xfxio.msg((&use[0 as usize]) as u64)
+        return 2
+    }
+    if !select_loaded((&app_name[0 as usize]) as u64) {
+        return 1
+    }
+    return run_command(word)
+}
