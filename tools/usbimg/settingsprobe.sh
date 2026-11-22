@@ -6,7 +6,7 @@
 #
 # Builds the stick image (UITRACE=1: the windows report their rectangles), boots it, opens Settings
 # from the start menu, clicks the sidebar entry of the package page "Activity"
-# (/apps/social.prog/SETTINGS, rect `ptaba`), then clicks the first control of the page (the switch
+# (/apps/social.prog/SETTINGS, rect `ptaba`, nested under the Accounts group: opened first via rect `tabe`), then clicks the first control of the page (the switch
 # "Share my activity") TWICE: the first click must ask for confirmation (the action is critical),
 # the second one confirms. Every step is read from the serial line (`settings: state ... status=[..]`)
 # and photographed. The work directory is removed at the end when it was not given.
@@ -64,6 +64,9 @@ warte 3
 klickauf cap_max
 warte 5
 foto 01b-maximized
+klickauf srecttabe
+warte 3
+foto 01c-accounts-open
 klickauf srectptaba
 warte 4
 foto 02-activity
