@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/tcporphan/run.sh -- the TCP table (8 slots) must not be held by orphans whose peer is gone.
+# tools/tcporphan/run.sh -- the TCP table (16 slots) must not be held by orphans whose peer is gone.
 #
 #   /root/jarvis/bin/heavy bash tools/tcporphan/run.sh [noorphanreap]
 #
@@ -46,8 +46,8 @@ grep -a '^TO-\|inet: tcp orphan' "$C" | head -20
 line() { grep -a "^$1" "$C" | head -1; }
 has() { echo "$1" | grep -q -- "$2" && echo 1 || echo 0; }
 chk() { if [ "$1" = 1 ]; then ok "$2"; else bad "$2"; fi; }
-L=$(line TO-OPEN);   chk "$(has "$L" 'rows=7')" "seven connections fill the table, one slot stays reserved for the bridge ($L)"
-L=$(line TO-CLOSED); chk "$(has "$L" 'rows=0')" "all eight programs ended, sockets gone from the table ($L)"
+L=$(line TO-OPEN);   chk "$(has "$L" 'rows=15')" "fifteen connections fill the table, one slot stays reserved for the bridge ($L)"
+L=$(line TO-CLOSED); chk "$(has "$L" 'rows=0')" "all sixteen programs ended, sockets gone from the table ($L)"
 L=$(line TO-NEW1); L2=$(line TO-NEW2)
 if [ "$WORD" = noorphanreap ]; then
     chk "$(has "$L" 'rows=0')" "counter-proof: without the reaper the orphans keep every slot, connect() gets none ($L)"
