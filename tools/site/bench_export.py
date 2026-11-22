@@ -16,6 +16,7 @@ DEFAULT_RAW = "/root/jarvis/data/projects_kb/orientos/reports/bench-raw-20261122
 DEFAULT_REPORT = "/root/jarvis/data/projects_kb/orientos/reports/bench-raw-20261122-smp4real/report.md"
 DEFAULT_OUT = "/root/projects/osum-site/src/data"
 SMP_KEYS = ("smp1", "smp4")
+DESKTOP_TIMEOUT_MS = 120000
 FIREFOX_ENTRIES = [
     ("ff_https_warm_png", "https", "warm", "png"),
     ("ff_https_warm_rc", "https", "warm", "rc"),
@@ -125,13 +126,18 @@ def boot_summary(raw, sources):
     if not runs or "mem.idle_used_mb" not in values:
         sys.exit("benchfull.log: boot or idle RAM values missing")
     login_ms = [r[0] for r in runs]
-    desktop_ms = [r[1] for r in runs]
+    desktop_ms = [r[1] for r in runs if 0 <= r[1] < DESKTOP_TIMEOUT_MS]
+    if not desktop_ms:
+        sys.exit("benchfull.log: no valid login->desktop run")
     unmeasured = sources.get("boot_unmeasured", [])
     summary = {
         "runs": len(runs),
         "login_s": round(statistics.median(login_ms) / 1000, 2),
         "login_s_range": [round(min(login_ms) / 1000, 2), round(max(login_ms) / 1000, 2)],
         "login_to_desktop_s": round(statistics.median(desktop_ms) / 1000, 1),
+        "login_to_desktop_s_range": [round(min(desktop_ms) / 1000, 1), round(max(desktop_ms) / 1000, 1)],
+        "login_to_desktop_runs": len(desktop_ms),
+        "login_to_desktop_failed": len(runs) - len(desktop_ms),
         "idle_ram_mb": values["mem.idle_used_mb"][0],
         "image_mb": values["size.image_mb"][0],
         "kernel_kb": values["size.kernel_kb"][0],

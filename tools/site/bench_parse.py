@@ -98,7 +98,7 @@ def read_bench_gate(path):
             host = HOST_LINE.match(line.rstrip("\n"))
             if host:
                 values[host["key"]] = (float(host["value"]), host["unit"])
-            run = re.search(r"run \d+: login screen (\d+) ms, login->desktop (\d+) ms", line)
+            run = re.search(r"run \d+: login screen (\d+) ms, login->desktop (-?\d+) ms", line)
             if run:
                 runs.append((int(run[1]), int(run[2])))
     return values, runs
