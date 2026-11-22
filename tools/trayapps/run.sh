@@ -23,7 +23,7 @@ PIX=tools/trayapps/pixels.py
 PIN_BUTTON=${TRAYAPPS_PIN_BUTTON:-4}
 MARK_BUTTON=1
 
-printf 'alpha|57514|Alpha ready|notify ran-alpha-open|||Mark|notify ran-alpha-mark||\nbeta|57505|Beta ready|notify ran-beta-open|||Mark|notify ran-beta-mark||\ngamma|57586|Gamma ready|notify ran-gamma-open|||Mark|notify ran-gamma-mark||\n' > "$TMPD/tray.items"
+printf 'alpha|57514|Alpha ready|/bin/notify ran-alpha-open|||Mark|/bin/notify ran-alpha-mark||\nbeta|57505|Beta ready|/bin/notify ran-beta-open|||Mark|/bin/notify ran-beta-mark||\ngamma|57586|Gamma ready|/bin/notify ran-gamma-open|||Mark|/bin/notify ran-gamma-mark||\n' > "$TMPD/tray.items"
 
 cat > "$TMPD/dreh_a.txt" <<SCRIPT
 warteauf 'taskbar: steht|taskbar: geom' || 120
@@ -60,6 +60,7 @@ ziehvon trayapp1 traytile0
 warteauf 'traydrag: end' || 25
 warte 5
 foto 06-dragged
+warte 15
 SCRIPT
 cat > "$TMPD/dreh_s.txt" <<'SCRIPT'
 warteauf 'taskbar: steht|taskbar: geom' || 120
