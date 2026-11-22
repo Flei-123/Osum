@@ -29,7 +29,7 @@ while IFS='|' read -r name toolkit category envs cmd; do
     busybox kill $PID 2>/dev/null
     sleep 2
     busybox kill -9 $PID 2>/dev/null
-    echo "GUIAPP log $name: $(busybox head -c 300 /tmp/$name.log | busybox tr '\n' ' ')"
+    echo "GUIAPP log $name: $(busybox head -c 1200 /tmp/$name.log | busybox tr '\n' ' ')"
     echo "GUIAPP end $name"
 done < /etc/guiapps.conf
 echo FX-END

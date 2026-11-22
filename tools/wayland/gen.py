@@ -9,6 +9,7 @@ WAYLAND_XML = "/usr/share/wayland/wayland.xml"
 XDG_XML = "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml"
 VIEWPORTER_XML = "/usr/share/wayland-protocols/stable/viewporter/viewporter.xml"
 DECORATION_XML = "/usr/share/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml"
+TEXT_INPUT_XML = "/usr/share/wayland-protocols/unstable/text-input/text-input-unstable-v1.xml"
 KDE_DECORATION_XML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "assets", "wayland", "server-decoration.xml")
 
 LIMIT = [
@@ -23,6 +24,7 @@ LIMIT = [
     "zxdg_decoration_manager_v1", "zxdg_toplevel_decoration_v1",
     "xdg_positioner", "xdg_popup", "wl_touch",
     "org_kde_kwin_server_decoration_manager", "org_kde_kwin_server_decoration",
+    "zwp_text_input_manager_v1", "zwp_text_input_v1",
 ]
 
 VERSION = {
@@ -36,6 +38,7 @@ VERSION = {
     "wp_viewporter": 1,
     "zxdg_decoration_manager_v1": 1,
     "org_kde_kwin_server_decoration_manager": 1,
+    "zwp_text_input_manager_v1": 1,
 }
 
 ARGCODE = {
@@ -65,6 +68,7 @@ def main():
     w("//   %s" % XDG_XML)
     w("//   %s" % VIEWPORTER_XML)
     w("//   %s" % DECORATION_XML)
+    w("//   %s" % TEXT_INPUT_XML)
     w("//   assets/wayland/server-decoration.xml")
     w("//")
     w("// Neu erzeugen:  ./tools/wayland/gen.py > kernel/user/wlproto.fi")
@@ -78,7 +82,7 @@ def main():
     w("profile kernel")
     w("")
 
-    roots = [load(WAYLAND_XML), load(XDG_XML), load(VIEWPORTER_XML), load(DECORATION_XML), load(KDE_DECORATION_XML)]
+    roots = [load(WAYLAND_XML), load(XDG_XML), load(VIEWPORTER_XML), load(DECORATION_XML), load(TEXT_INPUT_XML), load(KDE_DECORATION_XML)]
     ifaces = {}
     for r in roots:
         for i in r.findall("interface"):

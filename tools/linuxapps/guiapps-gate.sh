@@ -5,8 +5,8 @@ WD=${1:?workdir from prep-apps.sh with GUI packages}
 OUT=${2:-$(mktemp -d)}
 . tools/lib/tmpdir.sh
 osum_tmp_guard "${2:-}" "$OUT"
-EXPECT=${EXPECT:-tools/linuxapps/guiapps-expected-red.txt}
-CONF=${CONF:-tools/linuxapps/guiapps.conf}
+EXPECT=${GUIAPPS_EXPECT:-tools/linuxapps/guiapps-expected-red.txt}
+CONF=${GUIAPPS_CONF:-tools/linuxapps/guiapps.conf}
 mkdir -p "$OUT/shots"
 OUT=$(realpath "$OUT")
 NAMES=$(grep -v '^#' "$CONF" | cut -d'|' -f1 | tr '\n' ' ')

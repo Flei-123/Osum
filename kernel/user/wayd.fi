@@ -45,6 +45,8 @@ const PROT_READ: u64 = 1
 const PROT_WRITE: u64 = 2
 const MAP_SHARED: u64 = 1
 const MSG_DONTWAIT: u64 = 64
+const MSG_NOSIGNAL: u64 = 16384
+const SEND_FLAGS: u64 = MSG_DONTWAIT | MSG_NOSIGNAL
 
 const WM_CREATE: u64 = 2100
 const WM_FILL: u64 = 2101
@@ -466,6 +468,7 @@ fn on_display(c: u64, id: u64, op: u64, argp: u64) {
         announce(c, rid, wlproto.IF_WP_VIEWPORTER)
         announce(c, rid, wlproto.IF_ZXDG_DECORATION_MANAGER_V1)
         announce(c, rid, wlproto.IF_ORG_KDE_KWIN_SERVER_DECORATION_MANAGER)
+        announce(c, rid, wlproto.IF_ZWP_TEXT_INPUT_MANAGER_V1)
         return
     }
     send_error(c, id, 1)
@@ -1340,6 +1343,16 @@ fn on_deco(c: u64, id: u64, op: u64, argp: u64) {
     deco_configure(c, id)
 }
 
+fn on_text_input_manager(c: u64, id: u64, op: u64, argp: u64) {
+    if op == wlproto.RQ_ZWP_TEXT_INPUT_MANAGER_V1_CREATE_TEXT_INPUT {
+        if obj_new(c, rd32(argp), wlproto.IF_ZWP_TEXT_INPUT_V1) >= MAX_OBJ {
+            send_error(c, id, 0)
+        }
+        return
+    }
+    send_error(c, id, 1)
+}
+
 fn kde_deco_mode(c: u64, id: u64) {
     let p: u64 = ev_begin(c, id, wlproto.EV_ORG_KDE_KWIN_SERVER_DECORATION_MODE)
     ev_arg(c, p, 0, KDE_DECORATION_SERVER)
@@ -1836,6 +1849,8 @@ fn dispatch(c: u64, at: u64, len: u64, fd: u64) -> bool {
         on_deco_manager(c, id, op, argp)
     } else if iface == wlproto.IF_ZXDG_TOPLEVEL_DECORATION_V1 {
         on_deco(c, id, op, argp)
+    } else if iface == wlproto.IF_ZWP_TEXT_INPUT_MANAGER_V1 {
+        on_text_input_manager(c, id, op, argp)
     } else if iface == wlproto.IF_ORG_KDE_KWIN_SERVER_DECORATION_MANAGER {
         on_kde_deco_manager(c, id, op, argp)
     } else if iface == wlproto.IF_ORG_KDE_KWIN_SERVER_DECORATION {
@@ -2143,7 +2158,30 @@ fn fdq_drop(c: u64) {
     }
 }
 
+fn windows_release(c: u64) {
+    var s_closed: [u8; 34] = "wayd: closed windows of client n=\0"
+    var closed: u64 = 0
+    var o: u64 = 0
+    while o < MAX_OBJ {
+        let b: u64 = obj_base(c, o)
+        if objs[(b + O_ID) as usize] != 0 && objs[(b + O_IFACE) as usize] == wlproto.IF_WL_SURFACE
+            && objs[(b + O_A) as usize] != 0 {
+            ulib.sys(WM_CLOSE, objs[(b + O_A) as usize], 0, 0)
+            objs[(b + O_A) as usize] = 0
+            closed = closed + 1
+        }
+        o = o + 1
+    }
+    if closed != 0 {
+        lineout.add_text((&s_closed[0 as usize]) as u64)
+        lineout.add_unum(closed)
+        lineout.end_line()
+    }
+}
+
 fn client_cleanup(c: u64) {
+    windows_release(c)
+    wl_frame.client_init(c)
     objs_release(c)
     wl_data.client_gone(c)
     wl_input.client_init(c)
@@ -2207,7 +2245,7 @@ fn flush_out(c: u64) {
     mh[5 as usize] = 0
     mh[6 as usize] = 0
     let sr: u64 = ulib.sys(SYS_SENDMSG, c_fd[c as usize],
-        (&mh[0 as usize]) as u64, MSG_DONTWAIT)
+        (&mh[0 as usize]) as u64, SEND_FLAGS)
     var t_tx: [u8; 3] = "tx\0"
     trace_line((&t_tx[0 as usize]) as u64, c, n, sr, 0)
     if sr > 0xFFFFFFFFFFFF0000 {
@@ -2248,7 +2286,7 @@ fn send_fd_msg(c: u64, ptr: u64, len: u64, fd: u64) {
     mh[4 as usize] = (&cmsg[0 as usize]) as u64
     mh[5 as usize] = 24
     mh[6 as usize] = 0
-    ulib.sys(SYS_SENDMSG, c_fd[c as usize], (&mh[0 as usize]) as u64, MSG_DONTWAIT)
+    ulib.sys(SYS_SENDMSG, c_fd[c as usize], (&mh[0 as usize]) as u64, SEND_FLAGS)
 }
 
 fn send_keymap(c: u64, kid: u64) {
