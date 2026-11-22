@@ -1,19 +1,25 @@
 // SPDX-License-Identifier: GPL-2.0-only
 profile kernel
 
-export { NONE, GROUPS, begin, add, finish, rows, slot_at, group_at, row_of_slot, heads, group_size, group_of_kind }
+export { NONE, GROUPS, begin, add, finish, rows, slot_at, group_at, fam_at, fam_size, fam_folded, fam_toggle, fam_reset, row_of_slot, heads, group_size, group_of_kind }
 
 const NONE: u64 = 1000000
 const GROUPS: u64 = 3
 const MAXS: u64 = 512
 const GROUP_BASE: u64 = 1000
+const FAM_BASE: u64 = 2000
+const NOFAM: u64 = 1000000
 
 static mut in_slot: [u64; 512] = [0 as u64; 512]
 static mut in_grp: [u64; 512] = [0 as u64; 512]
+static mut in_fam: [u64; 512] = [0 as u64; 512]
+static mut fam_n: [u64; 512] = [0 as u64; 512]
+static mut fam_fold: [u8; 512] = [0 as u8; 512]
+static mut fam_done: [u8; 512] = [0 as u8; 512]
 static mut n_in: u64 = 0
 static mut g_cnt: [u64; 3] = [0 as u64; 3]
-static mut disp: [u64; 516] = [0 as u64; 516]
-static mut head_b: [u8; 516] = [0 as u8; 516]
+static mut disp: [u64; 800] = [0 as u64; 800]
+static mut head_b: [u8; 800] = [0 as u8; 800]
 static mut n_rows: u64 = 0
 
 fn group_of_kind(kind: u64) -> u64 {
@@ -36,30 +42,71 @@ fn begin() {
     }
 }
 
-fn add(slot: u64, grp: u64) {
+fn add(slot: u64, grp: u64, fam: u64) {
     if n_in >= MAXS || grp >= GROUPS {
         return
     }
     in_slot[(n_in) as usize] = slot
     in_grp[(n_in) as usize] = grp
+    in_fam[(n_in) as usize] = fam
     n_in = n_in + 1
     g_cnt[(grp) as usize] = g_cnt[(grp) as usize] + 1
 }
 
+fn fam_clear() {
+    var i: u64 = 0
+    while i < MAXS {
+        fam_n[(i) as usize] = 0
+        fam_done[(i) as usize] = 0 as u8
+        i = i + 1
+    }
+    i = 0
+    while i < n_in {
+        let f: u64 = in_fam[(i) as usize]
+        if f < MAXS {
+            fam_n[(f) as usize] = fam_n[(f) as usize] + 1
+        }
+        i = i + 1
+    }
+}
+
+fn emit(v: u64, head: u64) {
+    disp[(n_rows) as usize] = v
+    head_b[(n_rows) as usize] = head as u8
+    n_rows = n_rows + 1
+}
+
+fn emit_family(g: u64, f: u64) {
+    fam_done[(f) as usize] = 1 as u8
+    emit(FAM_BASE + f, 1)
+    if fam_fold[(f) as usize] != 0 as u8 {
+        return
+    }
+    var j: u64 = 0
+    while j < n_in {
+        if in_fam[(j) as usize] == f && in_grp[(j) as usize] == g {
+            emit(in_slot[(j) as usize], 0)
+        }
+        j = j + 1
+    }
+}
+
 fn finish() {
     n_rows = 0
+    fam_clear()
     var g: u64 = 0
     while g < GROUPS {
         if g_cnt[(g) as usize] > 0 {
-            disp[(n_rows) as usize] = GROUP_BASE + g
-            head_b[(n_rows) as usize] = 1 as u8
-            n_rows = n_rows + 1
+            emit(GROUP_BASE + g, 1)
             var i: u64 = 0
             while i < n_in {
+                let f: u64 = in_fam[(i) as usize]
                 if in_grp[(i) as usize] == g {
-                    disp[(n_rows) as usize] = in_slot[(i) as usize]
-                    head_b[(n_rows) as usize] = 0 as u8
-                    n_rows = n_rows + 1
+                    if f >= MAXS {
+                        emit(in_slot[(i) as usize], 0)
+                    } else if fam_done[(f) as usize] == 0 as u8 {
+                        emit_family(g, f)
+                    }
                 }
                 i = i + 1
             }
@@ -80,10 +127,48 @@ fn slot_at(r: u64) -> u64 {
 }
 
 fn group_at(r: u64) -> u64 {
-    if r >= n_rows || disp[(r) as usize] < GROUP_BASE {
+    if r >= n_rows || disp[(r) as usize] < GROUP_BASE || disp[(r) as usize] >= FAM_BASE {
         return NONE
     }
     return disp[(r) as usize] - GROUP_BASE
+}
+
+fn fam_at(r: u64) -> u64 {
+    if r >= n_rows || disp[(r) as usize] < FAM_BASE {
+        return NONE
+    }
+    return disp[(r) as usize] - FAM_BASE
+}
+
+fn fam_size(f: u64) -> u64 {
+    if f >= MAXS {
+        return 0
+    }
+    return fam_n[(f) as usize]
+}
+
+fn fam_folded(f: u64) -> u64 {
+    if f < MAXS && fam_fold[(f) as usize] != 0 as u8 {
+        return 1
+    }
+    return 0
+}
+
+fn fam_toggle(f: u64) {
+    if f >= MAXS {
+        return
+    }
+    if fam_fold[(f) as usize] == 0 as u8 {
+        fam_fold[(f) as usize] = 1 as u8
+    } else {
+        fam_fold[(f) as usize] = 0 as u8
+    }
+}
+
+fn fam_reset(f: u64) {
+    if f < MAXS {
+        fam_fold[(f) as usize] = 0 as u8
+    }
 }
 
 fn row_of_slot(slot: u64) -> u64 {

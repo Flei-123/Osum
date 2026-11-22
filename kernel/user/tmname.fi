@@ -1,0 +1,169 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+
+export { ROLE_MAIN, ROLE_OTHER, argv0_name, browser_role, role_key, is_browser }
+
+const ROLE_MAIN: u64 = 0
+const ROLE_TAB: u64 = 1
+const ROLE_GPU: u64 = 2
+const ROLE_SOCKET: u64 = 3
+const ROLE_MEDIA: u64 = 4
+const ROLE_UTILITY: u64 = 5
+const ROLE_LAUNCHER: u64 = 6
+const ROLE_OTHER: u64 = 7
+const CMD_WORDS: u64 = 32
+const CMD_CAP: u64 = 256
+const NAME_CAP: u64 = 16
+
+static mut cmd_buf: [u8; 264] = [0 as u8; 264]
+static mut w_browser: [u8; 8] = "firefox\0"
+static mut w_contentproc: [u8; 13] = "-contentproc\0"
+static mut w_tab: [u8; 4] = "tab\0"
+static mut w_gpu: [u8; 4] = "gpu\0"
+static mut w_socket: [u8; 7] = "socket\0"
+static mut w_media: [u8; 4] = "rdd\0"
+static mut w_utility: [u8; 8] = "utility\0"
+static mut w_launcher: [u8; 11] = "forkserver\0"
+static mut k_tab: [u8; 17] = "taskmgr.role.tab\0"
+static mut k_gpu: [u8; 17] = "taskmgr.role.gpu\0"
+static mut k_socket: [u8; 20] = "taskmgr.role.socket\0"
+static mut k_media: [u8; 19] = "taskmgr.role.media\0"
+static mut k_utility: [u8; 21] = "taskmgr.role.utility\0"
+static mut k_launcher: [u8; 22] = "taskmgr.role.launcher\0"
+static mut k_other: [u8; 19] = "taskmgr.role.other\0"
+
+fn byte(p: u64, i: u64) -> u64 {
+    return __mmio_read8((p + i) as *mut u8) as u64
+}
+
+fn put_byte(p: u64, i: u64, v: u64) {
+    __mmio_write8((p + i) as *mut u8, v as u8)
+}
+
+fn unpack(out: u64, at: u64, word: u64) {
+    var i: u64 = 0
+    while i < 8 {
+        put_byte(out, at + i, (word >> (i * 8)) & 255)
+        i = i + 1
+    }
+}
+
+fn argv0_name(slot: u64, out: u64) -> bool {
+    let a: u64 = ulib.sys(ulib.SYS_PSTAT, slot, ulib.P_NAME0, 0)
+    let b: u64 = ulib.sys(ulib.SYS_PSTAT, slot, ulib.P_NAME1, 0)
+    if ulib.bad(a) || a == 0 {
+        put_byte(out, 0, 0)
+        return false
+    }
+    unpack(out, 0, a)
+    if ulib.bad(b) {
+        unpack(out, 8, 0)
+    } else {
+        unpack(out, 8, b)
+    }
+    put_byte(out, NAME_CAP, 0)
+    return true
+}
+
+fn is_browser(name: u64) -> bool {
+    var i: u64 = 0
+    while i < 7 {
+        if byte(name, i) != byte((&w_browser[0]) as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn read_cmd(slot: u64) {
+    let d: u64 = (&cmd_buf[0]) as u64
+    var w: u64 = 0
+    var at: u64 = 0
+    while w < CMD_WORDS {
+        let v: u64 = ulib.sys(ulib.SYS_PSTAT, slot, ulib.P_CMD0 + w, 0)
+        if ulib.bad(v) || v == 0 {
+            w = CMD_WORDS
+        } else {
+            unpack(d, at, v)
+            at = at + 8
+            w = w + 1
+        }
+    }
+    put_byte(d, at, 0)
+}
+
+fn token_at(at: u64, word: u64) -> bool {
+    let d: u64 = (&cmd_buf[0]) as u64
+    var k: u64 = 0
+    while byte(word, k) != 0 {
+        if byte(d, at + k) != byte(word, k) {
+            return false
+        }
+        k = k + 1
+    }
+    let after: u64 = byte(d, at + k)
+    return after == 0 || after == 32
+}
+
+fn has_token(word: u64) -> bool {
+    let d: u64 = (&cmd_buf[0]) as u64
+    var i: u64 = 0
+    while i < CMD_CAP && byte(d, i) != 0 {
+        if (i == 0 || byte(d, i - 1) == 32) && token_at(i, word) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn browser_role(slot: u64) -> u64 {
+    read_cmd(slot)
+    if !has_token((&w_contentproc[0]) as u64) {
+        return ROLE_MAIN
+    }
+    if has_token((&w_tab[0]) as u64) {
+        return ROLE_TAB
+    }
+    if has_token((&w_gpu[0]) as u64) {
+        return ROLE_GPU
+    }
+    if has_token((&w_socket[0]) as u64) {
+        return ROLE_SOCKET
+    }
+    if has_token((&w_media[0]) as u64) {
+        return ROLE_MEDIA
+    }
+    if has_token((&w_utility[0]) as u64) {
+        return ROLE_UTILITY
+    }
+    if has_token((&w_launcher[0]) as u64) {
+        return ROLE_LAUNCHER
+    }
+    return ROLE_OTHER
+}
+
+fn role_key(role: u64) -> u64 {
+    if role == ROLE_TAB {
+        return (&k_tab[0]) as u64
+    }
+    if role == ROLE_GPU {
+        return (&k_gpu[0]) as u64
+    }
+    if role == ROLE_SOCKET {
+        return (&k_socket[0]) as u64
+    }
+    if role == ROLE_MEDIA {
+        return (&k_media[0]) as u64
+    }
+    if role == ROLE_UTILITY {
+        return (&k_utility[0]) as u64
+    }
+    if role == ROLE_LAUNCHER {
+        return (&k_launcher[0]) as u64
+    }
+    return (&k_other[0]) as u64
+}

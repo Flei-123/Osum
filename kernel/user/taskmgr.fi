@@ -20,6 +20,7 @@ import ctxreg
 import uikit.menuicons
 import tmsearch
 import tmview
+import tmname
 import tmcols
 import tmperf
 import tmio
@@ -60,6 +61,18 @@ static mut p_ticks: [u64; 512] = [0 as u64; 512]
 static mut p_last: [u64; 512] = [0 as u64; 512]
 static mut p_lastpid: [u64; 512] = [0 as u64; 512]
 static mut p_name: [u8; 12288] = [0 as u8; 12288]
+static mut p_role: [u64; 512] = [0 as u64; 512]
+static mut thr_slot: [u64; 512] = [0 as u64; 512]
+static mut thr_group: [u64; 512] = [0 as u64; 512]
+static mut thr_n: u64 = 0
+static mut vb_slot: [u64; 512] = [0 as u64; 512]
+static mut shown_buf: [u8; 96] = [0 as u8; 96]
+static mut m_fam: [u8; 16] = "taskmgr: fam r=\0"
+static mut m_fold: [u8; 19] = "taskmgr: fold fam=\0"
+static mut m_leader: [u8; 9] = " leader=\0"
+static mut m_folded: [u8; 9] = " folded=\0"
+static mut m_rolev: [u8; 7] = " role=\0"
+static mut m_role: [u8; 19] = "taskmgr: role pid=\0"
 static mut ord: [u64; 512] = [0 as u64; 512]
 static mut nlive: u64 = 0
 
@@ -91,7 +104,7 @@ static mut us_uid: [u64; 16] = [0 as u64; 16]
 static mut us_cnt: [u64; 16] = [0 as u64; 16]
 static mut us_pm: [u64; 16] = [0 as u64; 16]
 static mut us_pg: [u64; 16] = [0 as u64; 16]
-static mut row_icons: [u64; 516] = [0 as u64; 516]
+static mut row_icons: [u64; 800] = [0 as u64; 800]
 static mut st_blob: [u8; 3072] = [0 as u8; 3072]
 static mut st_n: u64 = 0
 static mut self_exec: [u8; 25] = "/apps/taskmgr.osp/start\0\0"
@@ -459,6 +472,54 @@ fn read_name(slot: u64) {
         i = i + 1
     }
     __mmio_write8((d + NAMEW - 1) as *mut u8, 0 as u8)
+    if __mmio_read8((d) as *mut u8) == 0 as u8 && p_kind[(slot) as usize] == 3 {
+        let _got: bool = tmname.argv0_name(slot, d)
+    }
+}
+
+fn has_name(slot: u64) -> bool {
+    return __mmio_read8(((&p_name[0]) as u64 + slot * NAMEW) as *mut u8) != 0 as u8
+}
+
+fn inherit_name(slot: u64) {
+    var cur: u64 = slot
+    var depth: u64 = 0
+    while depth < 4 {
+        let par: u64 = slot_of_pid(p_ppid[(cur) as usize])
+        if par >= SLOTS {
+            return
+        }
+        if has_name(par) {
+            let dst: u64 = (&p_name[0]) as u64 + slot * NAMEW
+            ulib.strncpy(dst, (&p_name[0]) as u64 + par * NAMEW, NAMEW - 1)
+            __mmio_write8((dst + NAMEW - 1) as *mut u8, 0 as u8)
+            return
+        }
+        cur = par
+        depth = depth + 1
+    }
+}
+
+fn settle_names() {
+    var i: u64 = 0
+    while i < nlive {
+        let s: u64 = ord[(i) as usize]
+        if p_kind[(s) as usize] == 3 && !has_name(s) {
+            inherit_name(s)
+        }
+        i = i + 1
+    }
+}
+
+fn settle_threads() {
+    var i: u64 = 0
+    while i < thr_n {
+        let leader: u64 = slot_of_pid(thr_group[(i) as usize])
+        if leader < SLOTS {
+            p_pm[(leader) as usize] = p_pm[(leader) as usize] + p_pm[(thr_slot[(i) as usize]) as usize]
+        }
+        i = i + 1
+    }
 }
 
 fn name_of(slot: u64) -> u64 {
@@ -608,6 +669,7 @@ fn sample(first: bool) {
 
     tmhist.begin(first)
     nlive = 0
+    thr_n = 0
     var s: u64 = 0
     while s < SLOTS {
         let st: u64 = ulib.sys(ulib.SYS_PSTAT, s, ulib.P_STATE, 0)
@@ -618,6 +680,7 @@ fn sample(first: bool) {
         } else {
             let pid: u64 = pstat(s, ulib.P_PID)
             let tk: u64 = pstat(s, ulib.P_TICKS)
+            let fresh: bool = p_lastpid[(s) as usize] != pid
             var d: u64 = 0
             if p_lastpid[(s) as usize] == pid && tk > p_last[(s) as usize] {
                 d = tk - p_last[(s) as usize]
@@ -631,13 +694,28 @@ fn sample(first: bool) {
             p_pages[(s) as usize] = pstat(s, ulib.P_PAGES)
             p_core[(s) as usize] = pstat(s, ulib.P_CPU)
             p_ticks[(s) as usize] = tk
-            io_sample(s, pid)
             if first || d_all == 0 {
                 p_pm[(s) as usize] = 0
             } else {
                 p_pm[(s) as usize] = d * 1000 / d_all
             }
+            let leader_pid: u64 = pstat(s, ulib.P_TGID)
+            if leader_pid != 0 && leader_pid != pid {
+                thr_slot[(thr_n) as usize] = s
+                thr_group[(thr_n) as usize] = leader_pid
+                thr_n = thr_n + 1
+                s = s + 1
+                continue
+            }
+            io_sample(s, pid)
             read_name(s)
+            if fresh {
+                tmview.fam_reset(s)
+                p_role[(s) as usize] = 0
+                if tmname.is_browser((&p_name[0]) as u64 + s * NAMEW) {
+                    p_role[(s) as usize] = tmname.browser_role(s)
+                }
+            }
             tmhist.note(s, pid, name_of(s), tk, p_pages[(s) as usize], tmio.net_tx(s), tmio.net_rx(s))
             ord[(nlive) as usize] = s
             nlive = nlive + 1
@@ -645,6 +723,8 @@ fn sample(first: bool) {
         s = s + 1
     }
     tmhist.finish()
+    settle_threads()
+    settle_names()
     sort_rows()
 }
 
@@ -916,12 +996,106 @@ fn proc_title(name: u64) -> u64 {
     return name
 }
 
-fn shown_name(s: u64) -> u64 {
+fn has_title(name: u64) -> bool {
+    if name == 0 || __mmio_read8((name) as *mut u8) == 0 as u8 {
+        return false
+    }
+    let _icon: u64 = proc_icon(name)
+    var i: u64 = 0
+    while i < ico_used {
+        if ulib.streq((&ico_name[0]) as u64 + i * 24, name) {
+            return __mmio_read8(((&ico_title[0]) as u64 + i * TITLE_W) as *mut u8) != 0 as u8
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn base_title(s: u64) -> u64 {
     let n: u64 = name_of(s)
     if p_kind[(s) as usize] != 3 {
         return n
     }
+    if !has_name(s) {
+        var a: u64 = tmfmt.put_str((&shown_buf[0]) as u64, 0, n)
+        a = tmfmt.put_str((&shown_buf[0]) as u64, a, ptr((&u_sp[0]) as u64))
+        a = tmfmt.put_num((&shown_buf[0]) as u64, a, p_pid[(s) as usize])
+        __mmio_write8(((&shown_buf[0]) as u64 + a) as *mut u8, 0 as u8)
+        return (&shown_buf[0]) as u64
+    }
     return proc_title(n)
+}
+
+fn shown_name(s: u64) -> u64 {
+    let base: u64 = base_title(s)
+    let role: u64 = p_role[(s) as usize]
+    if role == 0 || p_kind[(s) as usize] != 3 {
+        return base
+    }
+    let d: u64 = (&shown_buf[0]) as u64
+    var a: u64 = 0
+    if base != d {
+        a = tmfmt.put_str(d, 0, base)
+    } else {
+        a = text.length(d)
+    }
+    a = tmfmt.put_str(d, a, ptr((&u_op[0]) as u64))
+    a = tmfmt.put_str(d, a, msg.get(tmname.role_key(role)))
+    a = tmfmt.put_str(d, a, ptr((&u_cl[0]) as u64))
+    __mmio_write8((d + a) as *mut u8, 0 as u8)
+    return d
+}
+
+fn family_name(leader: u64) -> u64 {
+    let d: u64 = (&shown_buf[0]) as u64
+    let base: u64 = base_title(leader)
+    var a: u64 = 0
+    if base != d {
+        a = tmfmt.put_str(d, 0, base)
+    } else {
+        a = text.length(d)
+    }
+    a = tmfmt.put_str(d, a, ptr((&u_op[0]) as u64))
+    a = tmfmt.put_num(d, a, tmview.fam_size(leader))
+    a = tmfmt.put_str(d, a, ptr((&u_cl[0]) as u64))
+    __mmio_write8((d + a) as *mut u8, 0 as u8)
+    return d
+}
+
+fn group_of_slot(s: u64) -> u64 {
+    if p_kind[(s) as usize] == 3 {
+        if has_name(s) && has_title(name_of(s)) {
+            return 0
+        }
+        return 1
+    }
+    return tmview.group_of_kind(p_kind[(s) as usize])
+}
+
+fn family_leader(i: u64, n: u64) -> u64 {
+    let s: u64 = vb_slot[(i) as usize]
+    if p_kind[(s) as usize] != 3 || !has_name(s) {
+        return tmview.NONE
+    }
+    let g: u64 = group_of_slot(s)
+    let nm: u64 = name_of(s)
+    var leader: u64 = s
+    var count: u64 = 0
+    var j: u64 = 0
+    while j < n {
+        let t: u64 = vb_slot[(j) as usize]
+        if p_kind[(t) as usize] == 3 && has_name(t) && ulib.streq(name_of(t), nm) && group_of_slot(t) == g {
+            count = count + 1
+            if p_pid[(t) as usize] < p_pid[(leader) as usize] {
+                leader = t
+            }
+        }
+        j = j + 1
+    }
+    if count < 2 {
+        return tmview.NONE
+    }
+    return leader
 }
 
 fn kind_icon(k: u64) -> u64 {
@@ -968,7 +1142,28 @@ fn build_rows() {
     let nr: u64 = tmview.rows()
     while r < nr {
         let s: u64 = tmview.slot_at(r)
-        if s == tmview.NONE {
+        if s == tmview.NONE && tmview.fam_at(r) != tmview.NONE {
+            let lead: u64 = tmview.fam_at(r)
+            row_icons[(r) as usize] = 0
+            if p_kind[(lead) as usize] == 3 {
+                row_icons[(r) as usize] = proc_icon(name_of(lead))
+            }
+            a = tmfmt.put_str(d, a, family_name(lead))
+            a = tmfmt.put_str(d, a, ptr((&u_tab[0]) as u64))
+            a = tmfmt.put_str(d, a, ptr((&u_tab[0]) as u64))
+            a = tmfmt.put_pm(d, a, fam_pm(lead))
+            a = tmfmt.put_str(d, a, ptr((&u_pct[0]) as u64))
+            a = tmfmt.put_str(d, a, ptr((&u_tab[0]) as u64))
+            a = tmfmt.put_size(d, a, fam_pages(lead) * 4)
+            var t: u64 = 4
+            while t < NCOL {
+                a = tmfmt.put_str(d, a, ptr((&u_tab[0]) as u64))
+                t = t + 1
+            }
+            a = tmfmt.put_str(d, a, ptr((&u_nl[0]) as u64))
+            fuiscene.heat_set(r, 0, 0)
+            fuiscene.heat_set(r, 1, 0)
+        } else if s == tmview.NONE {
             let g: u64 = tmview.group_at(r)
             row_icons[(r) as usize] = 0
             a = tmfmt.put_str(d, a, msg.get(group_key(g)))
@@ -1026,6 +1221,36 @@ fn build_rows() {
     __mmio_write8((d + a) as *mut u8, 0 as u8)
 }
 
+fn same_family(a: u64, b: u64) -> bool {
+    return p_kind[(a) as usize] == 3 && has_name(a) && has_name(b) && ulib.streq(name_of(a), name_of(b))
+}
+
+fn fam_pm(lead: u64) -> u64 {
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < nlive {
+        let t: u64 = ord[(i) as usize]
+        if same_family(t, lead) {
+            sum = sum + p_pm[(t) as usize]
+        }
+        i = i + 1
+    }
+    return sum
+}
+
+fn fam_pages(lead: u64) -> u64 {
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < nlive {
+        let t: u64 = ord[(i) as usize]
+        if same_family(t, lead) {
+            sum = sum + p_pages[(t) as usize]
+        }
+        i = i + 1
+    }
+    return sum
+}
+
 fn group_key(g: u64) -> u64 {
     if g == 0 {
         return ptr((&k_g_apps[0]) as u64)
@@ -1039,12 +1264,20 @@ fn group_key(g: u64) -> u64 {
 fn view_build() {
     tmview.begin()
     let needle: u64 = (&search_buf[0]) as u64
+    var n: u64 = 0
     var i: u64 = 0
     while i < nlive {
         let sl: u64 = ord[(i) as usize]
         if tmsearch.matches(name_of(sl), p_pid[(sl) as usize], needle) {
-            tmview.add(sl, tmview.group_of_kind(p_kind[(sl) as usize]))
+            vb_slot[(n) as usize] = sl
+            n = n + 1
         }
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        let sl: u64 = vb_slot[(i) as usize]
+        tmview.add(sl, group_of_slot(sl), family_leader(i, n))
         i = i + 1
     }
     tmview.finish()
@@ -1352,6 +1585,18 @@ fn bericht() {
     let nr: u64 = tmview.rows()
     while r < nr {
         let s: u64 = tmview.slot_at(r)
+        if s == tmview.NONE && tmview.fam_at(r) != tmview.NONE {
+            let lead: u64 = tmview.fam_at(r)
+            z_new(ptr((&m_fam[0]) as u64))
+            z_num(r)
+            z_kv(ptr((&m_leader[0]) as u64), p_pid[(lead) as usize])
+            z_kv(ptr((&m_n[0]) as u64), tmview.fam_size(lead))
+            z_kv(ptr((&m_folded[0]) as u64), tmview.fam_folded(lead))
+            z_kv(ptr((&m_y[0]) as u64), tab_y(r))
+            z_end()
+            r = r + 1
+            continue
+        }
         if s == tmview.NONE {
             z_new(ptr((&m_grpline[0]) as u64))
             z_num(r)
@@ -1371,7 +1616,7 @@ fn bericht() {
         z_kv(ptr((&m_kib[0]) as u64), p_pages[(s) as usize] * 4)
         z_kv(ptr((&m_kern[0]) as u64), p_core[(s) as usize])
         z_kv(ptr((&m_ct[0]) as u64), p_ticks[(s) as usize])
-        z_kv(ptr((&m_grp[0]) as u64), tmview.group_of_kind(p_kind[(s) as usize]))
+        z_kv(ptr((&m_grp[0]) as u64), group_of_slot(s))
         z_kv(ptr((&m_uid[0]) as u64), tmio.uid(s))
         z_kv(ptr((&m_thr[0]) as u64), tmio.threads(s))
         z_kv(ptr((&m_pr[0]) as u64), tmio.prio(s))
@@ -1392,6 +1637,12 @@ fn bericht() {
         z_str(ptr((&m_name[0]) as u64))
         z_str(name_of(s))
         z_end()
+        if p_role[(s) as usize] != 0 {
+            z_new(ptr((&m_role[0]) as u64))
+            z_num(p_pid[(s) as usize])
+            z_kv(ptr((&m_rolev[0]) as u64), p_role[(s) as usize])
+            z_end()
+        }
         r = r + 1
     }
     page_report(page)
@@ -2564,7 +2815,18 @@ fn u_start(args: u64) -> u64 {
             } else {
                 let z: u64 = fuiscene.table_sel(K_TAB)
                 let zs: u64 = tmview.slot_at(z)
-                if zs != tmview.NONE {
+                let zf: u64 = tmview.fam_at(z)
+                if zs == tmview.NONE && zf != tmview.NONE {
+                    tmview.fam_toggle(zf)
+                    build_rows()
+                    fuiscene.table_set_blob(K_TAB, ptr((&blob[0]) as u64))
+                    fuiscene.table_set_sel(K_TAB, z)
+                    z_new(ptr((&m_fold[0]) as u64))
+                    z_num(p_pid[(zf) as usize])
+                    z_kv(ptr((&m_folded[0]) as u64), tmview.fam_folded(zf))
+                    z_end()
+                    fuiscene.refresh()
+                } else if zs != tmview.NONE {
                     sel_pid = p_pid[(zs) as usize]
                     build_sel()
                     z_new(ptr((&m_choice[0]) as u64))
