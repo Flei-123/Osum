@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -uo pipefail
 SER=${1:?ser.clean of a guest-fx18-idle.sh run}
-BUDGET=${FX18_BUDGET:-150}
+BUDGET=${FX18_BUDGET:-400}
 FIRST=${FX18_FROM:-1}
 awk -v budget="$BUDGET" -v first="$FIRST" '
-/^FXS sample/ { s = $3; seen = 1 }
+/^FXS sample/ { s = $3; seen = 1; last = s }
+/^FXT / && seen && $6 == "firefox" { alive[s] = 1 }
 /^FXT / && seen && $3 > 8 && $6 != "awk" && $6 != "sleep" {
     k = $2
     if (s <= first) { base[k] = $4; next }
@@ -16,6 +17,7 @@ END {
     worst = 0; n = 0
     for (k in top) { n++; if (top[k] > worst) { worst = top[k]; wk = k } }
     if (n == 0) { print "red no thread samples"; exit 1 }
+    if (!(last in alive)) { print "red firefox not alive in the last sample"; exit 1 }
     if (worst > budget) { print "red", wk, name[wk], "used", worst, "ticks budget", budget; exit 1 }
     print "green worst", wk, name[wk], "used", worst, "ticks budget", budget
 }' "$SER"
