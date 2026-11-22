@@ -10,7 +10,7 @@ bad() { echo "  FAIL  $*"; fail=$((fail+1)); }
 
 HIDDEN_BUNDLES="cliphist disks launcher nedit osk run snip viewer welcome widgets"
 VISIBLE_BUNDLES="certus charmap editor explorer firefox installer pdfview settings store taskmgr terminal trashbin vault vplay"
-HIDDEN_PACKAGES="widgetdemo netview themetest top netmon zip lock"
+HIDDEN_PACKAGES="netview themetest top netmon zip lock"
 PROCESS_ALIASES="xfx freeviewer-host runbox snipt vaultui"
 
 for b in $HIDDEN_BUNDLES; do
