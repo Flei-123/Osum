@@ -296,6 +296,7 @@ fn geom3(state: u64, bms: u64, bmb: u64, itab: u64, isz: u64,
     kstate.set(state, kstate.FSG_OFF + G_DIRENT, dent)
     kstate.set(state, kstate.FSG_OFF + G_NAMELEN, nlen)
     kstate.set(state, kstate.FSG_OFF + G_HINT, 0)
+    dir_cursor = 0
 }
 
 fn base_cover(state: u64) -> u64 {
@@ -991,6 +992,8 @@ fn bm_byte(b: u64) -> u64 {
 
 static mut data_overwrite: u64 = 0
 static mut leaf_alloc: u64 = 0
+static mut dir_zone: u64 = 0
+static mut dir_cursor: u64 = 0
 
 fn leaf_overwrite_pending() -> bool {
     return data_overwrite != 0 && leaf_alloc != 0
@@ -1000,6 +1003,15 @@ fn block_alloc_leaf(state: u64) -> u64 {
     leaf_alloc = 1
     let b: u64 = block_alloc(state)
     leaf_alloc = 0
+    return b
+}
+
+fn block_alloc_for(state: u64, ino: u64, index: u64) -> u64 {
+    if index != 0 && inode_type(state, ino) == T_DIR {
+        dir_zone = 1
+    }
+    let b: u64 = block_alloc_leaf(state)
+    dir_zone = 0
     return b
 }
 
@@ -1020,6 +1032,12 @@ fn block_alloc(state: u64) -> u64 {
     let von: u64 = data_start(state)
     if von >= lim {
         return 0
+    }
+    if dir_zone != 0 {
+        let top: u64 = search_free_down(state, von, lim)
+        if top != 0 {
+            return top
+        }
     }
     var start: u64 = kstate.get(state, kstate.FSG_OFF + G_HINT)
     if start < von || start >= lim {
@@ -1058,16 +1076,54 @@ fn search_free(state: u64, von: u64, bis: u64) -> u64 {
             }
         }
         if fund != 0 {
-            wbscope.mark_struct(state)
-            if !bm_store(state, kb) {
-                return 0
+            let got: u64 = claim_block(state, kb, fund)
+            if got != 0 {
+                kstate.set(state, kstate.FSG_OFF + G_HINT, got)
             }
-            kstate.set(state, kstate.FSG_OFF + G_HINT, fund)
-            if !leaf_overwrite_pending() {
-                octets.zero(buf_zz(state), BS)
-                ofsj.write(state, fund, buf_zz(state))
+            return got
+        }
+    }
+    return 0
+}
+
+fn claim_block(state: u64, kb: u64, fund: u64) -> u64 {
+    wbscope.mark_struct(state)
+    if !bm_store(state, kb) {
+        return 0
+    }
+    if !leaf_overwrite_pending() {
+        octets.zero(buf_zz(state), BS)
+        ofsj.write(state, fund, buf_zz(state))
+    }
+    return fund
+}
+
+fn search_free_down(state: u64, von: u64, bis: u64) -> u64 {
+    var top: u64 = bis
+    if dir_cursor != 0 && dir_cursor < bis {
+        top = dir_cursor
+    }
+    while top > von {
+        let kb: u64 = bm_block_of(state, top - 1)
+        if !bm_load(state, kb) {
+            return 0
+        }
+        var floor: u64 = ((top - 1) / BITS_PER_BLOCK) * BITS_PER_BLOCK
+        if floor < von {
+            floor = von
+        }
+        while top > floor {
+            let b: u64 = top - 1
+            let p: u64 = buf_bm(state) + bm_byte(b)
+            if (kstate.get8(p) & (1 << (b % 8))) == 0 {
+                kstate.set8(p, (kstate.get8(p) | (1 << (b % 8))) as u8)
+                let got: u64 = claim_block(state, kb, b)
+                if got != 0 {
+                    dir_cursor = got
+                }
+                return got
             }
-            return fund
+            top = b
         }
     }
     return 0
@@ -1143,6 +1199,9 @@ fn block_clear_bit(state: u64, b: u64) {
     if b < kstate.get(state, kstate.FSG_OFF + G_HINT) {
         kstate.set(state, kstate.FSG_OFF + G_HINT, b)
     }
+    if dir_cursor != 0 && b >= dir_cursor {
+        dir_cursor = b + 1
+    }
 }
 
 fn free_blocks(state: u64) -> u64 {
@@ -1209,7 +1268,7 @@ fn file_block(state: u64, ino: u64, index: u64, grow: bool) -> u64 {
         if b != 0 || !grow {
             return b
         }
-        let fresh: u64 = block_alloc_leaf(state)
+        let fresh: u64 = block_alloc_for(state, ino, index)
         if fresh == 0 {
             return 0
         }
@@ -1321,7 +1380,7 @@ fn single_block(state: u64, ino: u64, k: u64, grow: bool) -> u64 {
     if b != 0 || !grow {
         return b
     }
-    let fresh: u64 = block_alloc_leaf(state)
+    let fresh: u64 = block_alloc_for(state, ino, 1)
     if fresh == 0 {
         return 0
     }
@@ -1378,7 +1437,7 @@ fn double_block(state: u64, ino: u64, d: u64, grow: bool) -> u64 {
     if b != 0 || !grow {
         return b
     }
-    let fresh: u64 = block_alloc_leaf(state)
+    let fresh: u64 = block_alloc_for(state, ino, 1)
     if fresh == 0 {
         return 0
     }
@@ -2021,7 +2080,7 @@ fn dp_block(state: u64, ino: u64, index: u64) -> u64 {
     if dp_dirty != 0 && blk.wb_freed_pending(state) && !dp_flush(state) {
         return 0
     }
-    let fresh: u64 = block_alloc_leaf(state)
+    let fresh: u64 = block_alloc_for(state, ino, index)
     if fresh == 0 {
         return 0
     }
@@ -2060,7 +2119,7 @@ fn file_block_cached(state: u64, ino: u64, index: u64) -> u64 {
     if b != 0 {
         return b
     }
-    let fresh: u64 = block_alloc_leaf(state)
+    let fresh: u64 = block_alloc_for(state, ino, 1)
     if fresh == 0 {
         return 0
     }
