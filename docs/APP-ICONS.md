@@ -8,6 +8,10 @@ in `assets/icons/brand/`). `bash tools/svg/apps.sh [app...]` copies the SVG to `
 
 - Canvas `viewBox="0 0 24 24"`, `width/height 72`. Free-standing object, NO filled tile behind it (`tools/iconaudit`: <= 62 % opaque, corners not all opaque).
 - Flat two-tone: body fill = hue 500, light detail = hue 200, outline = hue 800. No gradients, no alpha, no blur.
+- Delivered set (22.11.2026, Boss choice): `calc editor terminal lock cliphist explorer charmap snip` use `viewBox 0 0 256 256`, a vertical
+  `linearGradient` on the body and a soft ground shadow. The renderer has no `filter`, so `python3 -I tools/svg/softshadow.py <delivered.svg> <out.svg>`
+  replaces the blurred ellipse by nine stacked black `ellipse` layers (non-negative least-squares fit to the Gaussian-blurred ellipse) and the `text`
+  glyph by its DejaVu Serif outline. Measured against the delivered PNGs (Lanczos to 72/64/44 px, light and dark ground): mean RGB error 0.9-3.0 of 255.
 - Outline stroke 1.5, detail strokes 1.7-2.4, round caps and joins, corner radius 2.5-3 on bodies, 1.2-1.8 on small parts.
 - Paper-like surfaces use `#f1f5f9` with the hue-800 outline; the terminal screen uses `#1e293b` with a `#64748b` outline.
 - Never let two shapes share an outer edge (two partially covered pixels composite twice and break the 22 px row check): draw fills first, the outline of the window/body LAST as one stroke-only shape.

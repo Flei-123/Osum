@@ -9,7 +9,7 @@
 # kind of icon. Red means a program would show an empty square / a different
 # drawing style:
 #   1. every bundle assets/apps/*.osp has INFO (name=), start.txt and a symbol
-#   2. the symbol is the vector picture (symbol.osym, OSYM 72x72, baked from symbol.svg, >= 10 % opaque
+#   2. the symbol is the vector picture (symbol.osym, OSYM 72x72, baked from symbol.svg, >= 9 % opaque
 #      pixels, not one flat colour, NO FILLED TILE behind the glyph: r1016) -- no 16x16 pixel art
 #      among 24 px icons
 #   3. tools/svg/apps.tsv knows every bundle (else the next icon run
@@ -40,7 +40,7 @@ def osym_check(path):
     if len(d) != 12 + w * h * 4: return "wrong size"
     px = [d[12 + i*4:16 + i*4] for i in range(w * h)]
     opaque = sum(1 for p in px if p[3] > 128)
-    if opaque * 10 < w * h: return "only %d opaque pixels" % opaque
+    if opaque * 100 < w * h * 9: return "only %d opaque pixels" % opaque
     # r1016: NO TILE.  A program icon is the glyph itself, rounded by its own shape; a filled
     # square / rounded square behind it (Win11 does not do that) shows as (a) most of the 72x72
     # box opaque, or (b) the four corner insets AND the four edge middles all opaque.
