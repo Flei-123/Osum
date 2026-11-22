@@ -72,8 +72,11 @@ fn peek(state: u64, me: u64, addr: u64) -> u64 {
 }
 
 fn poke(state: u64, me: u64, addr: u64, v: u64) -> bool {
+    if !procfault.prepare_write(state, me, addr, 1) {
+        return false
+    }
     let mmfl: u64 = mmlock.mm_lock(state)
-    let phys: u64 = procmap.translate(state, me, addr)
+    let phys: u64 = procmap.translate_w(state, me, addr)
     if phys == 0 {
         mmlock.mm_unlock(state, mmfl)
         return false
@@ -94,7 +97,7 @@ const NO_MAP: u64 = 0xFFFFFFFFFFFFFFFF
 fn copy_out_held(state: u64, me: u64, dst: u64, src: u64, len: u64) -> u64 {
     var n: u64 = 0
     while n < len {
-        let phys: u64 = procmap.user_phys(state, me, dst + n)
+        let phys: u64 = procmap.user_phys_w(state, me, dst + n)
         if phys == 0 {
             return n
         }
@@ -151,15 +154,23 @@ fn copy_out_checked(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
     var n: u64 = 0
     while n < len {
         // r721: translate + copy of ONE page under the MM lock (see `mmlock.mm_lock`): `munmap` on another core cannot free the frame in between
-        let mmfl: u64 = mmlock.mm_lock(state)
-        let phys: u64 = procmap.translate(state, me, dst + n)
-        if phys == 0 {
-            mmlock.mm_unlock(state, mmfl)
-            return false
-        }
         var room: u64 = 4096 - ((dst + n) & 4095)
         if room > len - n {
             room = len - n
+        }
+        var mmfl: u64 = mmlock.mm_lock(state)
+        var phys: u64 = procmap.translate_w(state, me, dst + n)
+        if phys == 0 {
+            mmlock.mm_unlock(state, mmfl)
+            if !procfault.prepare_write(state, me, dst + n, room) {
+                return false
+            }
+            mmfl = mmlock.mm_lock(state)
+            phys = procmap.translate_w(state, me, dst + n)
+        }
+        if phys == 0 {
+            mmlock.mm_unlock(state, mmfl)
+            return false
         }
         guard.stac(state)
         arch.copy_octets(phys, src + n, room)
@@ -328,8 +339,11 @@ fn store_le(state: u64, me: u64, addr: u64, v: u64, width: u64) -> bool {
     if !fits_page(addr, width) {
         return store_octets(state, me, addr, v, width)
     }
+    if !procfault.prepare_write(state, me, addr, width) {
+        return false
+    }
     let mmfl: u64 = mmlock.mm_lock(state)
-    let phys: u64 = procmap.translate(state, me, addr)
+    let phys: u64 = procmap.translate_w(state, me, addr)
     if phys == 0 {
         mmlock.mm_unlock(state, mmfl)
         return false
@@ -438,8 +452,11 @@ fn put_pair64(state: u64, me: u64, addr: u64, first: u64, second: u64) -> bool {
     if (addr & 4095) > 4096 - 16 || !procfault.user_range_ok(state, me, addr, 16) {
         return false
     }
+    if !procfault.prepare_write(state, me, addr, 16) {
+        return false
+    }
     let mmfl: u64 = mmlock.mm_lock(state)
-    let phys: u64 = procmap.user_phys(state, me, addr)
+    let phys: u64 = procmap.user_phys_w(state, me, addr)
     if phys == 0 {
         mmlock.mm_unlock(state, mmfl)
         return false

@@ -1,0 +1,115 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import arch.arch
+import mm.mmframe
+import sync.atomic
+
+export { ready, share, put, extra, live, copies, reuses, note_copy, note_reuse }
+
+const MAX_EXTRA: u64 = 250
+const BYTE_MASK: u64 = 255
+const FRAMES_PER_PAGE: u64 = 4096
+const WORDS_PER_PAGE: u64 = 512
+
+static mut table: u64 = 0
+static mut table_frames: u64 = 0
+static mut live_refs: u64 = 0
+static mut copy_count: u64 = 0
+static mut reuse_count: u64 = 0
+
+fn ready(state: u64) -> bool {
+    if atomic.load((&table) as u64) != 0 {
+        return true
+    }
+    let frames: u64 = mmframe.frames_total(state)
+    let pages: u64 = (frames + FRAMES_PER_PAGE - 1) / FRAMES_PER_PAGE
+    let run: u64 = mmframe.frame_run(state, pages)
+    if run == 0 {
+        return false
+    }
+    arch.fill_words(mmframe.kva(run), 0, pages * WORDS_PER_PAGE)
+    table_frames = frames
+    if atomic.cas((&table) as u64, 0, mmframe.kva(run)) != 0 {
+        mmframe.frame_free_run(state, run, pages)
+    }
+    return true
+}
+
+fn word_of(frame: u64) -> u64 {
+    let base: u64 = atomic.load((&table) as u64)
+    let idx: u64 = frame >> 12
+    if base == 0 || idx >= table_frames {
+        return 0
+    }
+    return base + (idx & (~(7 as u64)))
+}
+
+fn shift_of(frame: u64) -> u64 {
+    return ((frame >> 12) & 7) * 8
+}
+
+fn extra(frame: u64) -> u64 {
+    let w: u64 = word_of(frame)
+    if w == 0 {
+        return 0
+    }
+    return (atomic.load(w) >> shift_of(frame)) & BYTE_MASK
+}
+
+fn share(frame: u64) -> bool {
+    let w: u64 = word_of(frame)
+    if w == 0 {
+        return false
+    }
+    let sh: u64 = shift_of(frame)
+    while true {
+        let old: u64 = atomic.load(w)
+        if ((old >> sh) & BYTE_MASK) >= MAX_EXTRA {
+            return false
+        }
+        if atomic.cas(w, old, old + ((1 as u64) << sh)) == old {
+            atomic.fetch_add((&live_refs) as u64, 1)
+            return true
+        }
+    }
+    return false
+}
+
+fn put(frame: u64) -> bool {
+    let w: u64 = word_of(frame)
+    if w == 0 {
+        return true
+    }
+    let sh: u64 = shift_of(frame)
+    while true {
+        let old: u64 = atomic.load(w)
+        if ((old >> sh) & BYTE_MASK) == 0 {
+            return true
+        }
+        if atomic.cas(w, old, old - ((1 as u64) << sh)) == old {
+            atomic.fetch_sub((&live_refs) as u64, 1)
+            return false
+        }
+    }
+    return true
+}
+
+fn live() -> u64 {
+    return atomic.load((&live_refs) as u64)
+}
+
+fn copies() -> u64 {
+    return atomic.load((&copy_count) as u64)
+}
+
+fn reuses() -> u64 {
+    return atomic.load((&reuse_count) as u64)
+}
+
+fn note_copy() {
+    atomic.fetch_add((&copy_count) as u64, 1)
+}
+
+fn note_reuse() {
+    atomic.fetch_add((&reuse_count) as u64, 1)
+}

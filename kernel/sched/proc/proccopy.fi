@@ -4,7 +4,9 @@ import arch.arch
 import arch.cpu
 import sync.tlbserve
 import lib.kstate
+import mm.frameref
 import mm.mmframe
+import mm.mmlock
 import mm.mmswap
 import sched.sched
 import sched.irqwindow
@@ -16,6 +18,7 @@ import sched.proc.procbase
 import sched.proc.procfault
 import sched.proc.procmap
 import sched.proc.procpt
+import sched.proc.procspace
 
 const V_ENTER_TASK: u64 = 56
 
@@ -108,6 +111,15 @@ fn next_priv_slot(state: u64, from: u64, start: u64) -> u64 {
 }
 
 fn copy_space(state: u64, from: u64, to: u64) -> u64 {
+    if !kstate.mode_on(state, kstate.M_NOCOW) {
+        frameref.ready(state)
+    }
+    let n: u64 = copy_tiles(state, from, to)
+    procspace.tlb_flush_shared(state, from)
+    return n
+}
+
+fn copy_tiles(state: u64, from: u64, to: u64) -> u64 {
     var n: u64 = 0
     var kachel: u64 = next_priv_slot(state, from, 0)
     while kachel < procbase.PRIV_SLOTS {
@@ -118,8 +130,11 @@ fn copy_space(state: u64, from: u64, to: u64) -> u64 {
             if d2 == 0 {
                 return 0
             }
+            mmlock.demand_lock(state)
             let m: u64 = copy_pt(state, s2, d2)
+            mmlock.demand_unlock(state)
             if m == COPY_FAILED {
+                procspace.tlb_flush_shared(state, from)
                 return 0
             }
             n = n + m
@@ -128,6 +143,25 @@ fn copy_space(state: u64, from: u64, to: u64) -> u64 {
         kachel = next_priv_slot(state, from, kachel + 1)
     }
     return n
+}
+
+fn cow_share(src_slot: u64, dst_slot: u64, e: u64) -> bool {
+    if (e & (procbase.PAGE_USER | procbase.PAGE_SHARED)) != procbase.PAGE_USER {
+        return false
+    }
+    if (__mmio_read64(dst_slot as *mut u64) & procbase.PAGE_PRESENT) != 0 {
+        return false
+    }
+    if !frameref.share(e & procbase.ADDR_MASK) {
+        return false
+    }
+    var ne: u64 = (e & (~procbase.PAGE_WRITE)) | procbase.PAGE_COW
+    if (e & procbase.PAGE_WRITE) != 0 {
+        ne = ne | procbase.PAGE_COWW
+    }
+    __mmio_write64(src_slot as *mut u64, ne)
+    __mmio_write64(dst_slot as *mut u64, ne)
+    return true
 }
 
 fn copy_pt(state: u64, src: u64, dst: u64) -> u64 {
@@ -151,6 +185,8 @@ fn copy_pt(state: u64, src: u64, dst: u64) -> u64 {
         }
         if (e & procbase.PAGE_PRESENT) != 0 && (e & procbase.PAGE_PCACHE) != 0 {
             __mmio_write64(slot as *mut u64, e)
+            n = n + 1
+        } else if (e & procbase.PAGE_PRESENT) != 0 && cow_share(src_tab + k * 8, slot, e) {
             n = n + 1
         } else if (e & procbase.PAGE_PRESENT) != 0 {
             var d: u64 = __mmio_read64(slot as *mut u64)
@@ -195,8 +231,8 @@ fn swap_space(state: u64, a: u64, b: u64) {
 fn use_space(state: u64, i: u64) {
     let cr3: u64 = taskslot.tget(state, i, taskconst.T_CR3)
     if cr3 != 0 {
-        asm("mov cr3, rax", in("rax") cr3, clobber("memory"))
         tlbserve.note_cr3(cpu.here(state), cr3)
+        asm("mov cr3, rax", in("rax") cr3, clobber("memory"))
     }
 }
 
