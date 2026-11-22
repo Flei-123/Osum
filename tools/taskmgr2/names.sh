@@ -28,7 +28,7 @@ SER="$TMPD/n/serial.txt"
 python3 -I - "$SER" > "$TMPD/check.txt" 2>&1 <<'PY'
 import re, sys
 lines = open(sys.argv[1], "rb").read().decode("latin1").splitlines()
-start = max((i for i, z in enumerate(lines) if re.match(r"taskmgr: row r=0 ", z)), default=-1)
+start = max((i for i, z in enumerate(lines) if z.startswith("taskmgr: block ")), default=0)
 rows = []
 order = []
 for z in lines[start:]:
