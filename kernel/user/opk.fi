@@ -10,6 +10,7 @@ import opkpack
 import opkinspect
 import opksign
 import opkinit
+import opkver
 import libc.regio
 
 export { u_start }
@@ -94,6 +95,11 @@ static mut E_DEPMISS: [u8; 26] = "opk: missing dependency: \0"
 static mut E_DEPREQ: [u8; 23] = "opk: still needed by: \0"
 static mut E_DEPDEEP: [u8; 45] = "opk: dependency chain too deep or circular: \0"
 static mut S_DEPINST: [u8; 29] = "opk: installing dependency: \0"
+static mut E_DEPOLD: [u8; 34] = "opk: dependency version too old: \0"
+static mut M_VERSION: [u8; 9] = "version=\0"
+static mut M_FASSUNG: [u8; 9] = "fassung=\0"
+static mut dep_old: bool = false
+static mut dep_prev: [u8; 64] = [0 as u8; 64]
 
 static mut E_ARG: [u8; 22] = "opk: missing argument\0"
 static mut E_OPEN: [u8; 20] = "opk: not readable: \0"
@@ -1148,8 +1154,37 @@ fn dep_token(list: u64, at: u64, out: u64) -> u64 {
     return i
 }
 
-// First dependency of the package in PKT (metadata length `ml`) that is not
-// in the current generation -> copied to `miss`. false = all present.
+fn installed_version(plan: u64, name: u64, out: u64) -> bool {
+    var hs: [u8; 72] = [0 as u8; 72]
+    var meta: [u8; 4096] = [0 as u8; 4096]
+    regio.write8(out, 0)
+    if !plan_hash(plan, name, (&hs[0 as usize]) as u64) {
+        return false
+    }
+    store_member((&PATH2[0 as usize]) as u64, (&hs[0 as usize]) as u64)
+    let m: u64 = file_read((&PATH2[0 as usize]) as u64, (&meta[0 as usize]) as u64, 4095)
+    if m == 0xFFFFFFFFFFFFFFFF || m == 0 {
+        return true
+    }
+    if !meta_value((&meta[0 as usize]) as u64, m, (&M_VERSION[0 as usize]) as u64, out, 32) {
+        meta_value((&meta[0 as usize]) as u64, m, (&M_FASSUNG[0 as usize]) as u64, out, 32)
+    }
+    return true
+}
+
+fn dep_unmet(plan: u64, name: u64, min: u64) -> bool {
+    var have: [u8; 32] = [0 as u8; 32]
+    if !installed_version(plan, name, (&have[0 as usize]) as u64) {
+        dep_old = false
+        return true
+    }
+    if opkver.at_least((&have[0 as usize]) as u64, min) {
+        return false
+    }
+    dep_old = true
+    return true
+}
+
 fn dep_first_missing(ml: u64, miss: u64) -> bool {
     var dv: [u8; 256] = [0 as u8; 256]
     if !meta_value((&PKT[0 as usize]) as u64 + HEADER, ml,
@@ -1164,7 +1199,8 @@ fn dep_first_missing(ml: u64, miss: u64) -> bool {
         plan_read(now, plan)
     }
     var tok: [u8; 64] = [0 as u8; 64]
-    var hs: [u8; 72] = [0 as u8; 72]
+    var tn: [u8; 64] = [0 as u8; 64]
+    var tv: [u8; 32] = [0 as u8; 32]
     var at: u64 = 0
     var found: bool = false
     var more: bool = true
@@ -1172,11 +1208,14 @@ fn dep_first_missing(ml: u64, miss: u64) -> bool {
         at = dep_token((&dv[0 as usize]) as u64, at, (&tok[0 as usize]) as u64)
         if at == 0xFFFFFFFFFFFFFFFF {
             more = false
-        } else if !ulib.streq((&tok[0 as usize]) as u64, (&NAME[0 as usize]) as u64)
-            && !plan_hash(plan, (&tok[0 as usize]) as u64, (&hs[0 as usize]) as u64) {
-            ulib.strcpy(miss, (&tok[0 as usize]) as u64)
-            found = true
-            more = false
+        } else {
+            opkver.split_req((&tok[0 as usize]) as u64, (&tn[0 as usize]) as u64, (&tv[0 as usize]) as u64)
+            if !ulib.streq((&tn[0 as usize]) as u64, (&NAME[0 as usize]) as u64)
+                && dep_unmet(plan, (&tn[0 as usize]) as u64, (&tv[0 as usize]) as u64) {
+                ulib.strcpy(miss, (&tn[0 as usize]) as u64)
+                found = true
+                more = false
+            }
         }
     }
     return found
@@ -1192,6 +1231,8 @@ fn dep_required_by(name: u64, who: u64) -> bool {
     var meta: [u8; 4096] = [0 as u8; 4096]
     var dv: [u8; 256] = [0 as u8; 256]
     var tok: [u8; 64] = [0 as u8; 64]
+    var tn: [u8; 64] = [0 as u8; 64]
+    var tv: [u8; 32] = [0 as u8; 32]
     var k: u64 = 0
     var hit: bool = false
     while k < n && !hit {
@@ -1209,10 +1250,13 @@ fn dep_required_by(name: u64, who: u64) -> bool {
                     at = dep_token((&dv[0 as usize]) as u64, at, (&tok[0 as usize]) as u64)
                     if at == 0xFFFFFFFFFFFFFFFF {
                         more = false
-                    } else if ulib.streq((&tok[0 as usize]) as u64, name) {
-                        ulib.strcpy(who, (&nm[0 as usize]) as u64)
-                        hit = true
-                        more = false
+                    } else {
+                        opkver.split_req((&tok[0 as usize]) as u64, (&tn[0 as usize]) as u64, (&tv[0 as usize]) as u64)
+                        if ulib.streq((&tn[0 as usize]) as u64, name) {
+                            ulib.strcpy(who, (&nm[0 as usize]) as u64)
+                            hit = true
+                            more = false
+                        }
                     }
                 }
             }
@@ -1341,6 +1385,9 @@ fn cmd_installieren(file: u64, reason: u64) -> u64 {
     }
     var miss: [u8; 64] = [0 as u8; 64]
     if dep_first_missing(ml, (&miss[0 as usize]) as u64) {
+        if dep_old {
+            return err((&E_DEPOLD[0 as usize]) as u64, (&miss[0 as usize]) as u64)
+        }
         return err((&E_DEPMISS[0 as usize]) as u64, (&miss[0 as usize]) as u64)
     }
     if !store_write(ml, len) {
@@ -1593,6 +1640,7 @@ fn need_write(source: u64, file: u64) {
 }
 
 fn cmd_aktualisieren(name: u64, source: u64, reason: u64) -> u64 {
+    regio.write8((&dep_prev[0 as usize]) as u64, 0)
     return aktu(name, source, reason, 0)
 }
 
@@ -1659,6 +1707,10 @@ fn aktu(name: u64, source: u64, reason: u64, depth: u64) -> u64 {
         if depth >= 8 {
             return err((&E_DEPDEEP[0 as usize]) as u64, name)
         }
+        if ulib.streq((&miss[0 as usize]) as u64, (&dep_prev[0 as usize]) as u64) {
+            return err((&E_DEPOLD[0 as usize]) as u64, (&miss[0 as usize]) as u64)
+        }
+        ulib.strcpy((&dep_prev[0 as usize]) as u64, (&miss[0 as usize]) as u64)
         ulib.say((&S_DEPINST[0 as usize]) as u64)
         ulib.say((&miss[0 as usize]) as u64)
         ulib.nl()
