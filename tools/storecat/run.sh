@@ -23,6 +23,10 @@ $CHECK "$ROOT" "$T/dev.tab" > "$T/dev.txt" && bad "mutant: widgetdemo package no
 if [ -f "$FEED/INDEX" ]; then
     out=$($CHECK "$ROOT" tools/loader/apps.tab "$FEED") && ok "live feed matches apps.tab, no duplicate catalog names" || { bad "live feed is stale or duplicated"; echo "$out"; }
     mkdir -p "$T/feed"; cp "$FEED/INDEX" "$T/feed/INDEX"; [ -f "$FEED/apps.tsv" ] && cp "$FEED/apps.tsv" "$T/feed/apps.tsv"
+    printf 'A\tcom.fleitec.netview\tNetzansicht\tNet view\ttools\n' >> "$T/feed/apps.tsv"
+    $CHECK "$ROOT" tools/loader/apps.tab "$T/feed" > "$T/cons.txt" && bad "mutant: console tool in catalog not caught" || { grep -q 'console tool netview' "$T/cons.txt" && ok "mutant: console tool in catalog is caught" || bad "mutant: wrong message"; }
+    printf 'A\tcom.fleitec.nedit\tEditor\tEditor\tproductivity\n' >> "$T/feed/apps.tsv"
+    $CHECK "$ROOT" tools/loader/apps.tab "$T/feed" > "$T/hid.txt" && bad "mutant: internal app in catalog not caught" || { grep -q 'catalog shows nedit' "$T/hid.txt" && ok "mutant: internal app in catalog is caught" || bad "mutant: wrong message"; }
     printf 'trash\t1.0.0\t0\t1\ttrash-1.opk\tx86_64\n' >> "$T/feed/INDEX"
     $CHECK "$ROOT" tools/loader/apps.tab "$T/feed" > "$T/feed.txt" && bad "mutant: stale trash in INDEX not caught" || { grep -q 'feed package trash' "$T/feed.txt" && ok "mutant: stale trash in INDEX is caught" || bad "mutant: wrong message"; }
 else

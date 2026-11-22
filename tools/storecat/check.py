@@ -46,6 +46,21 @@ def package_problems(root, tab):
     return
 
 
+NOT_STORE_APPS = {"nedit": "internal twin of the editor"}
+
+
+def catalog_problems(root, tab, view):
+    console = {r[0] for r in rows(tab, "|") if len(r) > 6 and r[6] == "konsole"}
+    for row in rows(view, "\t"):
+        if row[0] != "A":
+            continue
+        short = row[1].rsplit(".", 1)[-1]
+        if short in console:
+            yield "catalog shows console tool %s in the app grid" % short
+        if short in NOT_STORE_APPS:
+            yield "catalog shows %s (%s) in the app grid" % (short, NOT_STORE_APPS[short])
+
+
 def feed_problems(tab, feed):
     packages = {r[0] for r in rows(tab, "|")}
     index = [r[0] for r in rows(os.path.join(feed, "INDEX"), "\t")]
@@ -69,6 +84,9 @@ def main(argv):
     problems = list(package_problems(root, tab))
     if feed:
         problems += list(feed_problems(tab, feed))
+        view = os.path.join(feed, "apps.tsv")
+        if os.path.isfile(view):
+            problems += list(catalog_problems(root, tab, view))
     for p in problems:
         print("PROBLEM " + p)
     return 1 if problems else 0
