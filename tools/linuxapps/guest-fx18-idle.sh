@@ -3,7 +3,7 @@ export HOME=/root XDG_RUNTIME_DIR=/tmp MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE
 up() { read u _ < /proc/uptime; echo $u; }
 sample() {
     echo "FXS sample $1 t=$(up)"
-    awk 'FNR==1{if(t!="")print "FXT",f,g,t,r,n; f=FILENAME;t="";n="";g="";r=""} /^Name:/{sub(/^Name:[ \t]*/,"");n=$0} /^Ticks:/{t=$2} /^Runs:/{r=$2} /^Tgid:/{g=$2} END{if(t!="")print "FXT",f,g,t,r,n}' $(i=1; while [ $i -le ${FX18_TIDS:-1500} ]; do [ -e /proc/$i/status ] && echo /proc/$i/status; i=$((i + 1)); done) 2>/dev/null
+    cat $(i=1; while [ $i -le ${FX18_TIDS:-1500} ]; do [ -e /proc/$i/status ] && echo /proc/$i/status; i=$((i + 1)); done) 2>/dev/null | awk 'function out(){if(t!="")print "FXT","/proc/"p"/status",g,t,r,n} /^Name:/{out(); sub(/^Name:[ \t]*/,""); n=$0; t=""; g=""; r=""; p=""} /^Pid:/{p=$2} /^Ticks:/{t=$2} /^Runs:/{r=$2} /^Tgid:/{g=$2} END{out()}'
 }
 mkdir -p /tmp/p
 echo 'user_pref("gfx.webrender.software", true);' > /tmp/p/user.js
