@@ -252,6 +252,21 @@ fn unshare_anon(state: u64, i: u64, addr: u64) -> bool {
     return ok
 }
 
+const COW_AROUND: u64 = 32
+
+fn reuse_around(pt: u64, s: u64) {
+    var k: u64 = s & (~(COW_AROUND - 1))
+    let end: u64 = k + COW_AROUND
+    while k < end {
+        let e: u64 = procpt.read_entry(pt, k)
+        if k != s && is_anon_cow(e) && (e & procbase.PAGE_COWW) != 0 && frameref.extra(e & procbase.ADDR_MASK) == 0 {
+            procpt.write_entry(pt, k, (e & (~(procbase.PAGE_COW | procbase.PAGE_COWW))) | procbase.PAGE_WRITE)
+            frameref.note_reuse()
+        }
+        k = k + 1
+    }
+}
+
 fn cow_write(state: u64, i: u64, addr: u64) -> bool {
     let page: u64 = addr & 0xFFFFFFFFFFFFF000
     let s: u64 = procpt.pt_slot(page)
@@ -272,6 +287,7 @@ fn cow_write(state: u64, i: u64, addr: u64) -> bool {
             let ne: u64 = unshare_page(state, i, pt, s, e)
             if ne != 0 {
                 procpt.write_entry(pt, s, ne | procbase.PAGE_WRITE)
+                reuse_around(pt, s)
                 ok = true
             }
         }
