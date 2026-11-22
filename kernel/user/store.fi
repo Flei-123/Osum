@@ -21,6 +21,8 @@ import storelocal
 import storegeom
 import startcat
 import libc.ascii
+import storetabs
+import store.registry
 
 export { u_start }
 
@@ -39,6 +41,23 @@ static mut T_HINT: [u8; 18] = "store.search.hint\0"
 static mut T_CLEAR: [u8; 19] = "store.search.clear\0"
 static mut T_INSTALLED: [u8; 16] = "store.installed\0"
 static mut N_ALL: [u8; 14] = "store.nav.all\0"
+static mut N_SYSTEM: [u8; 17] = "store.nav.system\0"
+static mut N_RUNTIME: [u8; 18] = "store.nav.runtime\0"
+static mut H_SYSTEM: [u8; 18] = "store.head.system\0"
+static mut H_RUNTIME: [u8; 19] = "store.head.runtime\0"
+static mut T_SHOWINST: [u8; 15] = "store.showinst\0"
+static mut T_NEEDS: [u8; 12] = "store.needs\0"
+static mut T_NEEDS_AUTO: [u8; 17] = "store.needs.auto\0"
+static mut T_NEEDS_HAVE: [u8; 17] = "store.needs.have\0"
+static mut T_STEP: [u8; 11] = "store.step\0"
+static mut T_TAB_SYSTEM: [u8; 17] = "store.tab.system\0"
+static mut T_TAB_RUNTIME: [u8; 18] = "store.tab.runtime\0"
+static mut E_EMPTY: [u8; 1] = "\0"
+static mut T_COLON: [u8; 3] = ": \0"
+static mut T_COMMA: [u8; 3] = ", \0"
+static mut T_SLASH: [u8; 2] = "/\0"
+static mut T_OPEN_P: [u8; 3] = " (\0"
+static mut T_CLOSE_P: [u8; 2] = ")\0"
 static mut N_APPS: [u8; 15] = "store.nav.apps\0"
 static mut N_THEMES: [u8; 17] = "store.nav.themes\0"
 static mut N_MEDIA: [u8; 16] = "store.nav.media\0"
@@ -186,6 +205,7 @@ const K_CLEAR: u64 = 10
 const K_AUTOALL: u64 = 11
 const K_AUTOAPP: u64 = 12
 const K_AUTOSTART: u64 = 13
+const K_SHOWINST: u64 = 14
 const K_CHIP: u64 = 60
 const MAXCHIP: u64 = 8
 const K_WORKS: u64 = K_CHIP + MAXCHIP
@@ -198,6 +218,8 @@ const K_ROWACT: u64 = 160
 
 const MAXI: u64 = 64
 const CAT_INSTALLED: u64 = 5
+const CAT_SYSTEM: u64 = 6
+const CAT_RUNTIME: u64 = 7
 const NAMEW: u64 = 48
 const NONE: u64 = 0xFFFFFFFFFFFFFFFF
 
@@ -244,7 +266,7 @@ static mut s_rseq: u64 = 0
 static mut s_arg_w: u64 = 0
 static mut s_arg_h: u64 = 0
 
-static mut s_cat: u64 = 0
+static mut s_cat: u64 = 1
 static mut s_page: u64 = 0
 static mut s_detail: u64 = 0xFFFFFFFFFFFFFFFF
 static mut s_vis: [u64; 64] = [0 as u64; 64]
@@ -273,6 +295,8 @@ static mut b_num: [u8; 24] = [0 as u8; 24]
 static mut b_line: [u8; 96] = [0 as u8; 96]
 static mut b_wrap: [u8; 128] = [0 as u8; 128]
 static mut b_chip: [u8; 256] = [0 as u8; 256]
+static mut b_need: [u8; 200] = [0 as u8; 200]
+static mut b_step: [u8; 96] = [0 as u8; 96]
 static mut s_chip_n: u64 = 0
 static mut s_chip: u64 = 0
 static mut s_works: bool = false
@@ -510,9 +534,32 @@ fn item_works(i: u64) -> bool {
     return c != storecat2.NONE && storecat2.list_level(c) == storecat2.LEVEL_WORKS
 }
 
+fn is_installed(i: u64) -> bool {
+    let st: u64 = s_state[i as usize] as u64
+    return st == 1 || st == 2
+}
+
+fn query_match(i: u64, q: u64) -> bool {
+    if contains(name_at(i), q) || contains(title_of(i), q) {
+        return true
+    }
+    return contains(desc_of(i), q)
+}
+
 fn item_match(i: u64) -> bool {
+    let q: u64 = (&s_q[0 as usize]) as u64
+    if (*(q as *mut u8)) != 0 as u8 {
+        return query_match(i, q)
+    }
+    return view_match(i)
+}
+
+fn view_match(i: u64) -> bool {
     let cls: u64 = class_of(i)
     let st: u64 = s_state[i as usize] as u64
+    if !storetabs.visible(s_cat, i, is_installed(i), false) {
+        return false
+    }
     if s_cat == 1 && cls != 0 {
         return false
     }
@@ -534,14 +581,6 @@ fn item_match(i: u64) -> bool {
     if s_chip > 0 && s_chip < s_chip_n {
         if !ulib.streq(cat_of(i), (&b_chip[0 as usize]) as u64 + s_chip * 32) {
             return false
-        }
-    }
-    let q: u64 = (&s_q[0 as usize]) as u64
-    if (*(q as *mut u8)) != 0 as u8 {
-        let hit: bool = contains(name_at(i), q) || contains(title_of(i), q)
-        if !hit {
-            let d: u64 = desc_of(i)
-            return contains(d, q)
         }
     }
     return true
@@ -654,6 +693,26 @@ fn add_unlisted() {
     }
 }
 
+fn refresh_registry() {
+    storetabs.begin()
+    var i: u64 = 0
+    while i < s_count {
+        let c: u64 = catalog_of(i)
+        var kind: u64 = registry.KIND_APP
+        var requires: u64 = (&E_EMPTY[0 as usize]) as u64
+        var version: u64 = (&E_EMPTY[0 as usize]) as u64
+        if c != storecat2.NONE {
+            kind = storecat2.list_kind(c)
+            requires = storecat2.list_requires(c)
+        }
+        if is_installed(i) {
+            version = ver_at(i)
+        }
+        storetabs.push(name_at(i), version, requires, kind, s_system[i as usize] != 0 as u8)
+        i = i + 1
+    }
+}
+
 fn load_local() {
     let n: u64 = storelocal.scan()
     var i: u64 = 0
@@ -669,6 +728,7 @@ fn load_local() {
         i = i + 1
     }
     s_local = true
+    refresh_registry()
     count_classes()
     refilter()
 }
@@ -762,6 +822,7 @@ fn load_list() {
     }
     storecat2.load_list()
     add_unlisted()
+    refresh_registry()
     count_classes()
     refilter()
     if s_count == 0 {
@@ -822,7 +883,9 @@ fn load_status() {
     if s_pct_srv > 100 {
         s_pct_srv = 100
     }
-    if s_busy {
+    if s_busy && storetabs.plan_total() > 1 {
+        set_status((&b_step[0 as usize]) as u64, 0)
+    } else if s_busy {
         set_status((&T_BUSY[0 as usize]) as u64, 0)
     } else if phase_is_done((&ph[0 as usize]) as u64) {
         set_status((&T_DONE[0 as usize]) as u64, (&ms[0 as usize]) as u64)
@@ -989,8 +1052,20 @@ fn category_text(i: u64, out: u64) -> bool {
     return app_text(i, (&pre[0 as usize]) as u64, out, 63)
 }
 
+fn tab_label(i: u64) -> u64 {
+    if storetabs.tab_of(i) == registry.TAB_SYSTEM {
+        return msg.get((&T_TAB_SYSTEM[0 as usize]) as u64)
+    }
+    return msg.get((&T_TAB_RUNTIME[0 as usize]) as u64)
+}
+
 fn cat_of(i: u64) -> u64 {
     let d: u64 = (&b_line[0 as usize]) as u64
+    if s_q[0 as usize] != 0 as u8 && storetabs.tab_of(i) != registry.TAB_APPS {
+        sb_begin(d, 96)
+        sb_s(tab_label(i))
+        return d
+    }
     if category_text(i, d) {
         return d
     }
@@ -1099,6 +1174,10 @@ fn nav_glyph(id: u64) -> u64 {
         return icons.FILE_IMAGE
     } else if id == 4 {
         return icons.ARROW_DOWN
+    } else if id == CAT_SYSTEM {
+        return icons.SETTINGS_SYSTEM
+    } else if id == CAT_RUNTIME {
+        return icons.PAGE_DETAILS
     }
     return icons.CHECK
 }
@@ -1381,6 +1460,12 @@ fn build_nav(col: usize) {
     s_nav_id[s_nav_n as usize] = 1
     nav_name((&b_nav[0 as usize]) as u64 + s_nav_n * 32, msg.get((&N_APPS[0 as usize]) as u64))
     s_nav_n = s_nav_n + 1
+    s_nav_id[s_nav_n as usize] = CAT_SYSTEM
+    nav_name((&b_nav[0 as usize]) as u64 + s_nav_n * 32, msg.get((&N_SYSTEM[0 as usize]) as u64))
+    s_nav_n = s_nav_n + 1
+    s_nav_id[s_nav_n as usize] = CAT_RUNTIME
+    nav_name((&b_nav[0 as usize]) as u64 + s_nav_n * 32, msg.get((&N_RUNTIME[0 as usize]) as u64))
+    s_nav_n = s_nav_n + 1
     if s_n_cls[1 as usize] > 0 {
         s_nav_id[s_nav_n as usize] = 2
         nav_name((&b_nav[0 as usize]) as u64 + s_nav_n * 32, msg.get((&N_THEMES[0 as usize]) as u64))
@@ -1415,6 +1500,10 @@ fn page_title() -> u64 {
         return msg.get((&H_UPD[0 as usize]) as u64)
     } else if s_cat == 5 {
         return msg.get((&H_INST[0 as usize]) as u64)
+    } else if s_cat == CAT_SYSTEM {
+        return msg.get((&H_SYSTEM[0 as usize]) as u64)
+    } else if s_cat == CAT_RUNTIME {
+        return msg.get((&H_RUNTIME[0 as usize]) as u64)
     }
     return msg.get((&H_ALL[0 as usize]) as u64)
 }
@@ -1444,8 +1533,109 @@ fn make_titles() {
     sb_n(pages())
 }
 
+fn plan_has(i: u64) -> bool {
+    if storetabs.plan_total() < 2 || !s_busy {
+        return false
+    }
+    var k: u64 = 0
+    while k < storetabs.plan_total() {
+        if ulib.streq(storetabs.plan_name(k), name_at(i)) {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
 fn job_is(i: u64) -> bool {
-    return s_busy && ulib.streq((&s_job[0 as usize]) as u64, name_at(i))
+    return (s_busy && ulib.streq((&s_job[0 as usize]) as u64, name_at(i))) || plan_has(i)
+}
+
+fn item_of(name: u64) -> u64 {
+    var i: u64 = 0
+    while i < s_count {
+        if ulib.streq(name_at(i), name) {
+            return i
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn dep_met(j: u64, min: u64) -> bool {
+    let have: u64 = registry.reg_installed(j)
+    return (*(have as *mut u8)) != 0 as u8 && registry.ver_at_least(have, min)
+}
+
+fn needs_text(i: u64) -> bool {
+    let req: u64 = registry.reg_requires(i)
+    if !registry.requires_has(req) {
+        return false
+    }
+    var name: [u8; 24] = [0 as u8; 24]
+    var min: [u8; 12] = [0 as u8; 12]
+    let np: u64 = (&name[0 as usize]) as u64
+    sb_begin((&b_need[0 as usize]) as u64, 200)
+    sb_s(msg.get((&T_NEEDS[0 as usize]) as u64))
+    sb_c(32)
+    var at: u64 = 0
+    var first: bool = true
+    while at != NONE {
+        at = registry.requires_next(req, at, np, (&min[0 as usize]) as u64)
+        if at != NONE {
+            if !first {
+                sb_s((&T_COMMA[0 as usize]) as u64)
+            }
+            first = false
+            let j: u64 = registry.reg_find(np)
+            if j == NONE {
+                sb_s(np)
+                sb_s((&T_OPEN_P[0 as usize]) as u64)
+                sb_s(msg.get((&T_NEEDS_AUTO[0 as usize]) as u64))
+            } else {
+                sb_s(title_of(j))
+                sb_s((&T_OPEN_P[0 as usize]) as u64)
+                if dep_met(j, (&min[0 as usize]) as u64) {
+                    sb_s(msg.get((&T_NEEDS_HAVE[0 as usize]) as u64))
+                } else {
+                    sb_s(msg.get((&T_NEEDS_AUTO[0 as usize]) as u64))
+                }
+            }
+            sb_s((&T_CLOSE_P[0 as usize]) as u64)
+        }
+    }
+    return true
+}
+
+fn plan_status(name: u64) {
+    sb_begin((&b_step[0 as usize]) as u64, 96)
+    sb_s(msg.get((&T_STEP[0 as usize]) as u64))
+    sb_c(32)
+    sb_n(storetabs.plan_step())
+    sb_s((&T_SLASH[0 as usize]) as u64)
+    sb_n(storetabs.plan_total())
+    sb_s((&T_COLON[0 as usize]) as u64)
+    let i: u64 = item_of(name)
+    if i == NONE {
+        sb_s(name)
+    } else {
+        sb_s(title_of(i))
+    }
+    set_status((&b_step[0 as usize]) as u64, 0)
+}
+
+fn plan_step_run() -> bool {
+    let name: u64 = storetabs.plan_next()
+    if name == NONE {
+        return false
+    }
+    if !call_verb((&V_INSTALL[0 as usize]) as u64, name) {
+        storetabs.plan_clear()
+        return false
+    }
+    plan_status(name)
+    s_busy = true
+    return true
 }
 
 fn button_text(i: u64) -> u64 {
@@ -1664,6 +1854,9 @@ fn build_detail(col: usize) {
     ulib.strncpy((&b_det[0 as usize]) as u64, desc_of(i), 159)
     let _d: usize = fuiscene.label(col, (&b_det[0 as usize]) as u64)
     let _l: usize = fuiscene.label_wrap(col, msg.get((&T_LONG[0 as usize]) as u64), 2)
+    if needs_text(i) {
+        let _n: usize = fuiscene.label_wrap(col, (&b_need[0 as usize]) as u64, 2)
+    }
     build_detail_actions(col, i)
     let card: usize = fuiscene.card(col)
     sb_begin((&b_inf[0 as usize]) as u64, 128)
@@ -1695,6 +1888,9 @@ fn build_detail_actions(col: usize, i: u64) {
         sb_n(s_pct)
         sb_s((&T_PCT[0 as usize]) as u64)
         let _q: usize = fuiscene.label(ar, (&b_pcl[0 as usize]) as u64)
+        if storetabs.plan_total() > 1 {
+            let _st: usize = fuiscene.label(ar, (&b_step[0 as usize]) as u64)
+        }
     } else {
         let st: u64 = s_state[i as usize] as u64
         if st == 2 {
@@ -1811,6 +2007,9 @@ fn build() {
         }
         let tsp: usize = fuiscene.row(tr)
         fuiscene.set_grow(tsp, 1)
+        if s_cat == 1 {
+            let _si: usize = fuiscene.toggle(tr, msg.get((&T_SHOWINST[0 as usize]) as u64), K_SHOWINST, storetabs.show_installed())
+        }
         if s_cat == 4 && s_vis_n > 0 {
             let ua: usize = fuiscene.button_main(tr, msg.get((&T_ALLUP[0 as usize]) as u64), K_ALLUP)
             fuiscene.set_size(ua, 170, 34)
@@ -1858,6 +2057,7 @@ fn sync_info() {
 }
 
 fn warn_dialog() {
+    let has_needs: bool = storetabs.plan_total() > 1 && needs_text(s_ask_item)
     var title: u64 = msg.get((&T_WARN_UNTESTED[0 as usize]) as u64)
     if storecat2.level_rank() == storecat2.LEVEL_PARTIAL {
         title = msg.get((&T_WARN_PARTIAL[0 as usize]) as u64)
@@ -1872,6 +2072,10 @@ fn warn_dialog() {
     } else {
         sb_s((&T_DOT[0 as usize]) as u64)
         sb_s(msg.get((&T_WARN_BODY[0 as usize]) as u64))
+    }
+    if has_needs {
+        sb_s((&T_DOT[0 as usize]) as u64)
+        sb_s((&b_need[0 as usize]) as u64)
     }
     fuiscene.dialog_open(title, (&s_warn[0 as usize]) as u64,
         msg.get((&T_YES_I[0 as usize]) as u64), msg.get((&T_NO[0 as usize]) as u64))
@@ -1898,11 +2102,23 @@ fn ask(verb: u64, item: u64) {
     s_ask_item = item
     s_ask_verb = verb
     storecat2.ensure(name_at(item))
+    if verb == 1 {
+        let _n: u64 = storetabs.plan_start(item)
+    } else {
+        storetabs.plan_clear()
+    }
     if verb != 3 && storecat2.loaded() && storecat2.level_rank() != storecat2.LEVEL_WORKS {
         warn_dialog()
         return
     }
-    if verb == 1 {
+    if verb == 1 && storetabs.plan_total() > 1 && needs_text(item) {
+        sb_begin((&s_warn[0 as usize]) as u64, 400)
+        sb_s((&s_ask_title[0 as usize]) as u64)
+        sb_s((&T_DOT[0 as usize]) as u64)
+        sb_s((&b_need[0 as usize]) as u64)
+        fuiscene.dialog_open(msg.get((&T_ASK_I[0 as usize]) as u64), (&s_warn[0 as usize]) as u64,
+            msg.get((&T_YES_I[0 as usize]) as u64), msg.get((&T_NO[0 as usize]) as u64))
+    } else if verb == 1 {
         fuiscene.dialog_open(msg.get((&T_ASK_I[0 as usize]) as u64), (&s_ask_title[0 as usize]) as u64,
             msg.get((&T_YES_I[0 as usize]) as u64), msg.get((&T_NO[0 as usize]) as u64))
     } else if verb == 2 {
@@ -2130,6 +2346,8 @@ fn u_start(args: u64) -> u64 {
                 if queue_next() {
                     s_busy = true
                 }
+            } else if s_ask_verb == 1 && storetabs.plan_total() > 1 {
+                let _r: bool = plan_step_run()
             } else {
                 var vb: u64 = (&V_INSTALL[0 as usize]) as u64
                 if s_ask_verb == 2 {
@@ -2145,6 +2363,7 @@ fn u_start(args: u64) -> u64 {
             changed = true
         } else if dr == 2 {
             s_ask_verb = 0
+            storetabs.plan_clear()
         }
         if key == K_REFRESH || key == K_RETRY {
             s_loading = true
@@ -2214,6 +2433,11 @@ fn u_start(args: u64) -> u64 {
             ask(3, s_detail)
         } else if key == K_ALLUP {
             ask_all()
+        } else if key == K_SHOWINST {
+            storetabs.set_show_installed(!storetabs.show_installed())
+            s_page = 0
+            refilter()
+            changed = true
         } else if key == K_AUTOALL {
             set_auto(0, !s_auto_all)
             changed = true
@@ -2328,10 +2552,15 @@ fn u_start(args: u64) -> u64 {
                     load_list()
                     if phase_is_failed((&s_phase[0 as usize]) as u64) {
                         queue_clear()
+                        storetabs.plan_clear()
                     } else if queue_left() {
                         if queue_next() {
                             s_busy = true
                         }
+                    } else if storetabs.plan_active() {
+                        let _r: bool = plan_step_run()
+                    } else {
+                        storetabs.plan_clear()
                     }
                 }
                 changed = true
