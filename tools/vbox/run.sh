@@ -44,6 +44,11 @@ case "$cmd" in
     export PARTTAB=mbr JARVIS_DEVICE_KEY=$ABB/vm-device.key JARVIS_CONF=assets/jarvis/rechte-justin.conf IMAGE_ID="$id"
     date +%s > "$ABB/$id.t0"
     /root/jarvis/bin/heavy bash tools/usbimg/build.sh "$ABB/$id"
+    ESP_OFFSET=$((2048 * 512))
+    conf=$(mktemp); trap 'rm -f "$conf"' EXIT
+    MTOOLS_SKIP_CHECK=1 mcopy -n -i "$ABB/$id/xoffios-usb.img@@$ESP_OFFSET" ::/limine.conf "$conf"
+    sed -i 's/ fastboot / /' "$conf"
+    MTOOLS_SKIP_CHECK=1 mcopy -o -i "$ABB/$id/xoffios-usb.img@@$ESP_OFFSET" "$conf" ::/limine.conf
     date +%s > "$ABB/$id.t1"
     echo "OK: built $ABB/$id/xoffios-usb.img in $(( $(cat "$ABB/$id.t1") - $(cat "$ABB/$id.t0") ))s (queue wait included)" ;;
   publish)
