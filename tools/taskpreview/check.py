@@ -138,6 +138,36 @@ check(changed(a3, a4, (x, y, max(jx - 2, x), y + h)) < 1500, "no preview card op
 check(changed(a4, a5, (0, 0, 1280, 700)) > 2000, "the explorer window vanished after Minimise")
 a6, a7 = load("a6-empty"), load("a7-closed")
 check(changed(a6, a7, (640, 640, 900, 780)) > 500, "empty bar menu closed on Escape")
+SLOT_ASPECT_TOLERANCE_PERCENT = 10
+BOX_MIN_W = 96
+BOX_MIN_H = 64
+slots = lines(r"taskview: slot \d+ win=")
+
+
+def slot_follows_window(line):
+    m = re.search(r"win=(\d+)x(\d+) box=(\d+)x(\d+)", line)
+    ww, wh, bw, bh = (int(v) for v in m.groups())
+    if bw == BOX_MIN_W or bh == BOX_MIN_H:
+        return True
+    return abs(bw * wh - bh * ww) * 100 <= SLOT_ASPECT_TOLERANCE_PERCENT * bh * ww
+
+
+check(len(slots) >= 2 and all(slot_follows_window(ln) for ln in slots),
+      "card size: the box of every slot follows the window aspect (%d slots)" % len(slots))
+widths = {num(ln, "w") for ln in previews}
+check(len(widths) >= 2, "card size: cards of different windows differ in width: %s" % sorted(widths))
+p1, p2 = load("p1-peek"), load("p2-unpeek")
+peeks = lines(r"taskview: peek id=\d+")
+check(len(peeks) >= 1 and len(lines(r"taskview: unpeek")) >= 1, "peek: hover over the card logs peek and unpeek (%d)" % len(peeks))
+hidden_strip = (25, 90, 66, 420)
+gone = changed(a1, p1, hidden_strip)
+check(gone >= 500, "peek-hide: the other windows disappear while the card is hovered: %d px changed" % gone)
+kept = changed(a1, p1, (700, 200, 920, 480))
+check(kept < 300, "peek: the window of the card stays as it was: %d px changed" % kept)
+back = changed(a1, p2, hidden_strip)
+check(back < 150, "peek: the other windows are back when the pointer leaves the card: %d px differ" % back)
+ring = changed(a1, p1, (x + 24, y + 36, x + w - 24, y + 39))
+check(ring >= 50, "hover: the card under the pointer is highlighted: %d px changed on its top edge" % ring)
 settings_cards = lines(r"taskview: preview n=\d+ app=settings")
 check(len(settings_cards) >= 1, "hovering the Settings symbol after Explorer shows the Settings card")
 two = [ln for ln in previews if "app=explorer" in ln and num(ln, "n") == 2]
