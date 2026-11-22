@@ -800,13 +800,13 @@ if waitfor "==S-WAIT==" 150; then
     sleep 3; shot t1-apps
     for t in "Tabnativ" "Weinapp"; do sawt "$t" && ok "Apps tab shows '$t'" || bad "Apps tab misses '$t'"; done
     for t in "Sysbox" "Weinlauf" "Klitool" "Hallo"; do sawt "$t" && bad "Apps tab shows '$t' and should not" || ok "Apps tab hides '$t'"; done
-    for t in "System" "Laufzeiten" "Installierte anzeigen"; do sawt "$t" && ok "the window offers '$t'" || bad "no '$t'"; done
+    for t in "System" "Laufzeiten" "Installierte zeigen"; do sawt "$t" && ok "the window offers '$t'" || bad "no '$t'"; done
     mark
-    tapt "Installierte anzeigen" && sleep 3
+    tapt "Installierte zeigen" && sleep 3
     sawt "Hallo" && [ "$(lastn)" = 4 ] && ok "Show installed brings Hallo back (four tiles)" || bad "show installed: tiles '$(lastn)'"
     shot t2-installed
     mark
-    tapt "Installierte anzeigen" && sleep 3
+    tapt "Installierte zeigen" && sleep 3
     [ "$(lastn)" = 3 ] && ok "switching it off hides Hallo again" || bad "show installed off: tiles '$(lastn)'"
     mark
     tapt "System" && sleep 3
@@ -830,7 +830,8 @@ if waitfor "==S-WAIT==" 150; then
     sawt "Hallo" && ok "search finds the installed app although the Apps tab hides it" || bad "search hall"
     key esc; sleep 2
     mark
-    tapt "Weinapp" && sleep 3
+    key esc; key ctrl-f; typetext weinap; sleep 3
+    key down; key ret; sleep 3
     sawt "Benötigt: Weinlauf (wird mitinstalliert)" && ok "detail page says what is needed before installing: Weinlauf (wird mitinstalliert)" || bad "no requires line on the detail page"
     shot t6-detail
     sawt "store." && bad "raw locale keys painted" || ok "no raw locale keys"
