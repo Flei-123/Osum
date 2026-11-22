@@ -61,7 +61,7 @@ static void measure_timed(const char *name, timed_fn fn, long batch)
     do {
         spent += fn(batch);
         total += batch;
-    } while (now_ns() - t0 < MIN_NS);
+    } while (now_ns() - t0 < min_ns);
     prof_read(pb);
     emit(name, (double)spent / (double)total, total);
     prof_emit(name, pa, pb, total);

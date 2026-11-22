@@ -2,53 +2,90 @@ profile kernel
 
 import fs.procfs.pfbase
 
-export { remember, resume, cursor, offset, limit, set_stream }
+export { remember, resume, cursor, offset, limit, set_stream, KIND_MAPS, KIND_SMAPS }
 
 const READ_AHEAD_BYTES: u64 = 4096
+const KIND_MAPS: u64 = 1
+const KIND_SMAPS: u64 = 2
+const KIND_SHIFT: u64 = 24
+const READER_SHIFT: u64 = 32
+const SLOTS: u64 = 16
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
 
-static mut cell: [u64; 3] = [0 as u64; 3]
-static mut streaming: u64 = 0
+static mut keys: [u64; 16] = [0 as u64; 16]
+static mut cursors: [u64; 16] = [0 as u64; 16]
+static mut offsets: [u64; 16] = [0 as u64; 16]
+static mut victim: u64 = 0
+static mut hit: u64 = 0
+static mut reader: u64 = 0
 
-fn set_stream(on: bool) {
-    if on {
-        streaming = 1
-    } else {
-        streaming = 0
-    }
+fn set_stream(who: u64) {
+    reader = who
 }
 
 fn windowed(base: u64) -> bool {
-    return streaming != 0 && base != pfbase.COUNT_ONLY
+    return reader != 0 && base != pfbase.COUNT_ONLY
 }
 
-fn remember(t: u64, cur: u64, p: u64) {
+fn key_of(t: u64, kind: u64) -> u64 {
+    return (reader << READER_SHIFT) | (kind << KIND_SHIFT) | (t + 1)
+}
+
+fn find(key: u64) -> u64 {
+    var i: u64 = 0
+    while i < SLOTS {
+        if keys[i as usize] == key {
+            return i
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn claim(key: u64) -> u64 {
+    let found: u64 = find(key)
+    if found != NONE {
+        return found
+    }
+    let i: u64 = victim
+    victim = (victim + 1) % SLOTS
+    keys[i as usize] = key
+    return i
+}
+
+fn remember(t: u64, kind: u64, cur: u64, p: u64) {
     let base: u64 = pfbase.window_base()
     if !windowed(base) || p > base {
         return
     }
-    cell[0 as usize] = t + 1
-    cell[1 as usize] = cur
-    cell[2 as usize] = p
+    let i: u64 = claim(key_of(t, kind))
+    cursors[i as usize] = cur
+    offsets[i as usize] = p
 }
 
-fn resume(t: u64) -> bool {
+fn resume(t: u64, kind: u64) -> bool {
     let base: u64 = pfbase.window_base()
     if !windowed(base) {
         return false
     }
-    if base == 0 {
-        cell[0 as usize] = 0
+    let i: u64 = find(key_of(t, kind))
+    if i == NONE {
         return false
     }
-    return cell[0 as usize] == t + 1 && cell[2 as usize] <= base
+    if base == 0 {
+        keys[i as usize] = 0
+        return false
+    }
+    hit = i
+    return offsets[i as usize] <= base
 }
 
 fn cursor() -> u64 {
-    return cell[1 as usize]
+    return cursors[hit as usize]
 }
 
 fn offset() -> u64 {
-    return cell[2 as usize]
+    return offsets[hit as usize]
 }
 
 fn limit(full: u64) -> u64 {
