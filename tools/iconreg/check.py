@@ -10,6 +10,12 @@ FORBIDDEN_RUNTIME = re.compile(r"\.osp/symbol|symbol64\.osym|symbol44\.osym|symb
 ICON_USE = re.compile(r"icons\.[A-Z][A-Z_]+|icon_id\(")
 NOT_PROGRAMS = {"run", "top", "zip", "edit", "trash"}
 WINDOW = 2
+SITE_ROOT = "/root/projects/osum-site"
+SITE_ICON_DIR = "src/assets/icons"
+SITE_TEXT_DIRS = ("src/partials", "src/bench")
+SITE_TEXT_FILES = ("src/index.template.html",)
+SITE_ICON_REF = re.compile(r"\{\{icon:([a-z0-9-]+)\}\}")
+SITE_INLINE_SVG = re.compile(r"<svg\b")
 
 
 def read_rows(path):
@@ -99,11 +105,35 @@ def registry_gaps(root):
     return bad
 
 
+def site_texts(site):
+    for rel in SITE_TEXT_FILES:
+        yield rel
+    for folder in SITE_TEXT_DIRS:
+        for path in sorted(glob.glob(os.path.join(site, folder, "**/*.html"), recursive=True)):
+            yield os.path.relpath(path, site)
+
+
+def homepage_copies(root):
+    site = os.environ.get("ICONREG_SITE", SITE_ROOT)
+    if not os.path.isdir(site):
+        return []
+    bad = ["%s: icon file outside the registry" % os.path.relpath(p, site)
+           for p in sorted(glob.glob(os.path.join(site, SITE_ICON_DIR, "*")))]
+    ids = {row[0] for row in manifest(root)}
+    for rel in site_texts(site):
+        text = open(os.path.join(site, rel), encoding="utf-8").read()
+        bad += ["%s: icon id %s is not in the registry" % (rel, i) for i in sorted(set(SITE_ICON_REF.findall(text))) if i not in ids]
+        if SITE_INLINE_SVG.search(text):
+            bad.append("%s: inline svg" % rel)
+    return bad
+
+
 CHECKS = (
     ("runtime reads icons only through appreg", runtime_paths),
     ("no per-program icon table in code", hardcoded_tables),
     ("every program has one central source, copies identical", divergent_copies),
     ("every program resolves in the registry", registry_gaps),
+    ("homepage takes icons only from the registry", homepage_copies),
 )
 
 

@@ -29,5 +29,13 @@ mkcopy; printf 'fn leak() {\n    register("explorer\\0", icons.FILE_FOLDER, 0xE8
 mkcopy; printf '<svg/>' > "$D/t/assets/apps/explorer.osp/symbol.svg"; expect_red "diverging icon copy"
 mkcopy; rm "$D/t/assets/pkgicons/calc/symbol.osym"; expect_red "registry source without symbol"
 mkcopy; rm "$D/t/assets/icons/app/lock.svg"; expect_red "program without central source"
+mksite() { rm -rf "$D/site"; mkdir -p "$D/site/src/partials" "$D/site/src/assets/icons"; printf '{{icon:explorer}}' > "$D/site/src/index.template.html"; }
+expect_red_site() {
+    if ICONREG_SITE="$D/site" python3 -I "$ROOT/tools/iconreg/check.py" "$ROOT" > /dev/null 2>&1; then bad "counter-proof not caught: $1"; else ok "counter-proof caught: $1"; fi
+}
+mksite; ICONREG_SITE="$D/site" python3 -I "$ROOT/tools/iconreg/check.py" "$ROOT" > /dev/null 2>&1 && ok "homepage with registry ids only" || bad "clean homepage flagged"
+mksite; printf '<svg/>' > "$D/site/src/assets/icons/explorer.svg"; expect_red_site "homepage icon copy"
+mksite; printf '{{icon:ghost}}' >> "$D/site/src/index.template.html"; expect_red_site "homepage icon id outside the registry"
+mksite; printf '<svg viewBox="0 0 1 1"/>' >> "$D/site/src/partials/bar.html"; expect_red_site "homepage inline svg"
 echo "iconreg: $PASS ok, $FAIL fail"
 [ "$FAIL" = 0 ]
