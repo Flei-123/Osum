@@ -158,7 +158,7 @@ else
 fi
 TABS_DE=$(grep -a '^settings.tabs' locale/de/messages | sed 's/^[^=]*=//' | grep -o '\\n' | wc -l)
 TABS_LINES=$(grep -ac '^settings.tabs' locale/de/messages)
-num "Reiter in settings.tabs, tabs2 + tabs3 (deutsch)" "$((TABS_DE + TABS_LINES))" eq 35
+num "Reiter in settings.tabs, tabs2 + tabs3 (deutsch)" "$((TABS_DE + TABS_LINES))" eq 39
 
 # ======================================================================
 echo "== 3. der Aufbau: Kern, Userland, Zertifikat, Attrappe =="
