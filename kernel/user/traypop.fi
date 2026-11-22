@@ -53,7 +53,9 @@ import fui.trayslots
 import traymic
 import icons
 import taskbar.tbmetrics
+import taskbar.tbbase
 import taskbar.tbstatus
+import trayapps
 import osktray
 import qs
 import pairshow
@@ -61,7 +63,8 @@ import uikit.uiflyout
 import uikit.uisys
 
 export { init, toggle, step, is_open, hit, shut_now, net_glyph, wlan_glyph, speaker_glyph, mic_glyph,
-    chevron_glyph, tile_at, tile_slot, tile_count, hold, suppress_click, refresh_tiles, overflow_index_at }
+    chevron_glyph, tile_at, tile_slot, tile_app, tile_count, hold, suppress_click, refresh_tiles, overflow_index_at,
+    app_sync, app_bar_count, app_bar_id, app_icon, app_tip, app_click, app_menu_at, app_move, app_places_parse, app_places_text }
 
 const NONE: u64 = 0xFFFFFFFFFFFFFFFF
 const CARD_W: u64 = 380 // design points (r1015: 300 cut 'Kein Verbindungstraeger -- nichts eingesteckt' at the card edge)
@@ -82,6 +85,9 @@ const K_ENT: u64 = 360
 const K_UP: u64 = 380
 const K_HIDE: u64 = 381
 const K_BACK: u64 = 382
+const K_PIN: u64 = 383
+const K_UNPIN: u64 = 384
+const APPS_POLL_MS: u64 = 1000
 const CK_ITEM: u64 = 410
 const CK_SHEET: u64 = 440
 
@@ -168,6 +174,9 @@ static mut k_none: [u8; 10] = "tray.none\0"
 static mut k_up: [u8; 8] = "tray.up\0"
 static mut k_hide: [u8; 10] = "tray.hide\0"
 static mut k_back: [u8; 10] = "tray.back\0"
+static mut k_pin: [u8; 9] = "tray.pin\0"
+static mut k_unpin: [u8; 11] = "tray.unpin\0"
+static mut apps_next: u64 = 0
 static mut k_dots: [u8; 13] = "tray.options\0"
 static mut s_open: [u8; 17] = "traypop: open n=\0"
 static mut s_xy: [u8; 4] = " x=\0"
@@ -811,6 +820,13 @@ fn tile_slot(i: u64) -> u64 {
     return row_id[i as usize] - SLOT_TAG
 }
 
+fn tile_app(i: u64) -> u64 {
+    if i >= n_rows || row_id[i as usize] >= SLOT_TAG {
+        return 0
+    }
+    return row_id[i as usize]
+}
+
 fn tile_at(mx: u64, my: u64) -> u64 {
     if open_ == 0 {
         return NONE
@@ -865,7 +881,7 @@ fn card_h() -> u64 {
     if mode == M_MENU {
         let id: u64 = menu_item
         let m: u64 = tray.tray_menu_count(&tr, id) as u64
-        return h + (m + 4) * (ROW_H + GAPP)
+        return h + (m + 5) * (ROW_H + GAPP)
     }
     if pair_shown() {
         h = h + ROW_H + GAPP
@@ -902,6 +918,13 @@ fn build_menu(r: usize) {
     fuiscene.set_size(bu, CARD_W - 2 * PADP, ROW_H)
     let bh: usize = fuiscene.button(r, msg.get((&k_hide[0 as usize]) as u64), K_HIDE)
     fuiscene.set_size(bh, CARD_W - 2 * PADP, ROW_H)
+    if tray.tray_place(&tr, id) == tray.PLACE_BAR {
+        let bn: usize = fuiscene.button(r, msg.get((&k_unpin[0 as usize]) as u64), K_UNPIN)
+        fuiscene.set_size(bn, CARD_W - 2 * PADP, ROW_H)
+    } else {
+        let bp: usize = fuiscene.button(r, msg.get((&k_pin[0 as usize]) as u64), K_PIN)
+        fuiscene.set_size(bp, CARD_W - 2 * PADP, ROW_H)
+    }
     let bb: usize = fuiscene.button(r, msg.get((&k_back[0 as usize]) as u64), K_BACK)
     fuiscene.set_size(bb, CARD_W - 2 * PADP, ROW_H)
 }
@@ -957,6 +980,7 @@ fn init() -> bool {
     }
     add_system()
     read_items()
+    let _ap: bool = trayapps.sync(&tr)
     tp_win = fuiscene.win_open_plain(0, 0, CARD_W * uiscale.ui_scale(), MAXH * uiscale.ui_scale(), (&t_title[0 as usize]) as u64,
         hostwinp.L_MENU, build)
     if tp_win == fuiscene.BADWIN {
@@ -1041,6 +1065,7 @@ fn open_now() {
         return
     }
     read_items()
+    let _ap: bool = trayapps.sync(&tr)
     read_audio()
     read_pair()
     pair_next = fuiapp.now_ms() + PAIR_POLL_MS
@@ -1206,6 +1231,7 @@ fn on_key(key: u64) -> bool {
             return true
         }
         let _c: bool = tray.tray_click(&tr, id, tray.BTN_LEFT)
+        let _r: u64 = trayapps.run_act(id, tray.ACT_OPEN)
         say((&s_click[0 as usize]) as u64)
         lineout.add_num(id)
         say((&s_ow[0 as usize]) as u64)
@@ -1232,6 +1258,7 @@ fn on_key(key: u64) -> bool {
         let j: u64 = key - K_ENT
         let act: u64 = tray.tray_menu_action(&tr, menu_item, j as usize)
         let _p: bool = tray.tray_pick(&tr, menu_item, j as usize)
+        let _r2: u64 = trayapps.run_act(menu_item, act)
         say((&s_pick[0 as usize]) as u64)
         lineout.add_num(menu_item)
         say((&s_act[0 as usize]) as u64)
@@ -1250,7 +1277,15 @@ fn on_key(key: u64) -> bool {
     }
     if key == K_HIDE {
         let _m: bool = tray.tray_move(&tr, menu_item, tray.PLACE_HIDDEN, 0)
+        place_changed(menu_item)
         back_to_list()
+        return true
+    }
+    if key == K_PIN || key == K_UNPIN {
+        if app_move(menu_item, key == K_UNPIN, 99) {
+            back_to_list()
+            shut((&s_pk[0 as usize]) as u64)
+        }
         return true
     }
     if key == K_BACK {
@@ -1317,6 +1352,12 @@ fn step() -> bool {
     btn_last = btn
     if mode == M_LIST {
         let now: u64 = fuiapp.now_ms()
+        if now >= apps_next {
+            apps_next = now + APPS_POLL_MS
+            if trayapps.sync(&tr) {
+                relayout()
+            }
+        }
         if now >= pair_next {
             pair_next = now + PAIR_POLL_MS
             let old: u64 = pair_sig
@@ -1328,4 +1369,78 @@ fn step() -> bool {
         }
     }
     return false
+}
+
+fn place_changed(id: u64) {
+    trayapps.remember_place(&tr, id)
+    tbbase.apps_places_n = trayapps.places_text((&tbbase.apps_places[0 as usize]) as u64, 255)
+    let _w: bool = tbstatus.conf_write()
+}
+
+fn app_sync() -> bool {
+    if tr.blk == 0 {
+        return false
+    }
+    return trayapps.sync(&tr)
+}
+
+fn app_bar_count() -> u64 {
+    return trayapps.bar_count(&tr)
+}
+
+fn app_bar_id(idx: u64) -> u64 {
+    return trayapps.bar_id(&tr, idx)
+}
+
+fn app_icon(id: u64) -> u64 {
+    return tray.tray_icon(&tr, id)
+}
+
+fn app_tip(id: u64) -> u64 {
+    return tray.tray_tooltip(&tr, id)
+}
+
+fn app_click(id: u64) {
+    let _c: bool = tray.tray_click(&tr, id, tray.BTN_LEFT)
+    let _r: u64 = trayapps.run_act(id, tray.ACT_OPEN)
+    say((&s_click[0 as usize]) as u64)
+    lineout.add_num(id)
+    say((&s_ow[0 as usize]) as u64)
+    say(tray.tray_owner(&tr, id))
+    lineout.end_line()
+}
+
+fn app_menu_at(id: u64, ax: u64, ay: u64, aw: u64, ah: u64) {
+    ax_ = ax
+    ay_ = ay
+    aw_ = aw
+    ah_ = ah
+    if open_ != 0 {
+        shut((&s_toggle[0 as usize]) as u64)
+    }
+    open_now()
+    if open_ != 0 {
+        open_menu(id)
+    }
+}
+
+fn app_move(id: u64, to_overflow: bool, idx: u64) -> bool {
+    var place: u64 = tray.PLACE_BAR
+    if to_overflow {
+        place = tray.PLACE_OVERFLOW
+    }
+    let moved: bool = tray.tray_move(&tr, id, place, idx as usize)
+    if moved {
+        place_changed(id)
+    }
+    return moved
+}
+
+fn app_places_parse(p: u64, n: u64) {
+    trayapps.places_parse(p, n)
+    trayapps.apply_places(&tr)
+}
+
+fn app_places_text(out: u64, cap: u64) -> u64 {
+    return trayapps.places_text(out, cap)
 }

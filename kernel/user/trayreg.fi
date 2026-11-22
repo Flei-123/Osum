@@ -1,0 +1,108 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import xfxio
+import fui.trayline
+
+export { begin, put, put_num, commit, drop, registry_path }
+
+const REGISTRY_CAP: u64 = 2047
+const LINE_CAP: u64 = 480
+static mut P_REGISTRY: [u8; 16] = "/run/tray.items\0"
+static mut P_TMP_SEP: [u8; 2] = "|\0"
+static mut P_TMP_NL: [u8; 2] = "\n\0"
+static mut registry: [u8; 2048] = [0 as u8; 2048]
+static mut merged: [u8; 2560] = [0 as u8; 2560]
+static mut line: [u8; 512] = [0 as u8; 512]
+static mut owner: [u8; 24] = [0 as u8; 24]
+static mut fields: u64 = 0
+
+fn registry_path() -> u64 {
+    return (&P_REGISTRY[0 as usize]) as u64
+}
+
+fn owner_matches(buf: u64, from: u64, to: u64) -> bool {
+    let n: u64 = trayline.field_len(buf, from, to, trayline.F_OWNER)
+    if n != trayline.text_len((&owner[0 as usize]) as u64) {
+        return false
+    }
+    var i: u64 = 0
+    let s: u64 = trayline.field_start(buf, from, to, trayline.F_OWNER)
+    while i < n {
+        if *((buf + s + i) as *mut u8) != owner[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn append_other_lines(len: u64) {
+    let reg: u64 = (&registry[0 as usize]) as u64
+    var at: u64 = 0
+    while at < len {
+        let e: u64 = trayline.line_end(reg, len, at)
+        if e > at && !owner_matches(reg, at, e) {
+            var k: u64 = at
+            while k < e && trayline.text_len((&merged[0 as usize]) as u64) < 2000 {
+                let ch: u8 = registry[k as usize]
+                let cur: u64 = trayline.text_len((&merged[0 as usize]) as u64)
+                merged[cur as usize] = ch
+                merged[(cur + 1) as usize] = 0 as u8
+                k = k + 1
+            }
+            ulib.strcat((&merged[0 as usize]) as u64, (&P_TMP_NL[0 as usize]) as u64)
+        }
+        at = e + 1
+    }
+}
+
+fn load_registry() -> u64 {
+    registry[0 as usize] = 0 as u8
+    let n: u64 = xfxio.read_text(registry_path(), (&registry[0 as usize]) as u64, REGISTRY_CAP)
+    if n == ulib.EOF {
+        return 0
+    }
+    return n
+}
+
+fn rewrite(with_line: bool) -> bool {
+    merged[0 as usize] = 0 as u8
+    append_other_lines(load_registry())
+    if with_line {
+        ulib.strcat((&merged[0 as usize]) as u64, (&line[0 as usize]) as u64)
+        ulib.strcat((&merged[0 as usize]) as u64, (&P_TMP_NL[0 as usize]) as u64)
+    }
+    return xfxio.write_text(registry_path(), (&merged[0 as usize]) as u64, ulib.O_MAKE)
+}
+
+fn begin(name: u64) {
+    ulib.strcpy((&owner[0 as usize]) as u64, name)
+    ulib.strcpy((&line[0 as usize]) as u64, name)
+    fields = 1
+}
+
+fn put(text: u64) {
+    if fields >= trayline.FIELD_COUNT || trayline.text_len((&line[0 as usize]) as u64) + trayline.text_len(text) >= LINE_CAP {
+        return
+    }
+    ulib.strcat((&line[0 as usize]) as u64, (&P_TMP_SEP[0 as usize]) as u64)
+    ulib.strcat((&line[0 as usize]) as u64, text)
+    fields = fields + 1
+}
+
+fn put_num(v: u64) {
+    var digits: [u8; 24] = [0 as u8; 24]
+    xfxio.num_text(v, (&digits[0 as usize]) as u64)
+    put((&digits[0 as usize]) as u64)
+}
+
+fn commit() -> bool {
+    return rewrite(true)
+}
+
+fn drop(name: u64) -> bool {
+    ulib.strcpy((&owner[0 as usize]) as u64, name)
+    return rewrite(false)
+}
