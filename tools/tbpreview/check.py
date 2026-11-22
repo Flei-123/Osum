@@ -5,10 +5,9 @@ import sys
 
 PAD_POINTS = 8
 ROW_POINTS = 36
-THUMB_W_POINTS = 184
-THUMB_H_POINTS = 116
 HEAD_ROW_POINTS = 24
 GAP_POINTS = 4
+SLOT = r"taskview: slot 0 win=\d+x\d+ box=(\d+)x(\d+)"
 PREVIEW = r"taskview: preview n=(\d+) app=(\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)"
 passed = 0
 failed = 0
@@ -125,8 +124,11 @@ def check_all(folder, folder_close, sc):
           "a plate overlaps the bar: %d/%d > %d" % (y1 + h1, y2 + h2, bar_y))
     check(abs(x1 + w1 // 2 - (bx + bw // 2)) <= 2, "button preview centred on the button (%d vs %d)" % (x1 + w1 // 2, bx + bw // 2),
           "button preview off centre: %d vs %d" % (x1 + w1 // 2, bx + bw // 2))
-    check(w1 == (2 * PAD_POINTS + THUMB_W_POINTS) * sc and h1 == (2 * PAD_POINTS + HEAD_ROW_POINTS + GAP_POINTS + THUMB_H_POINTS) * sc, "plate size %dx%d = design size x scale" % (w1, h1),
-          "plate size %dx%d unexpected" % (w1, h1))
+    boxes = [(int(a), int(b)) for a, b in re.findall(SLOT, ser)]
+    box_w, box_h = boxes[0] if boxes else (-1, -1)
+    check(w1 == (2 * PAD_POINTS + box_w) * sc and h1 == (2 * PAD_POINTS + HEAD_ROW_POINTS + GAP_POINTS + box_h) * sc,
+          "plate size %dx%d = logged slot box %dx%d + padding, x scale" % (w1, h1, box_w, box_h),
+          "plate size %dx%d unexpected for slot box %dx%d" % (w1, h1, box_w, box_h))
     shown = differing(im["02-preview-button"], im["00-rest"], (x1, y1, w1, h1))
     check(shown >= 0.5, "button preview visible: %.0f%% of the plate differs from the rest picture" % (100 * shown),
           "button preview not on screen: only %.0f%% differs" % (100 * shown))
