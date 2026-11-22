@@ -5,8 +5,8 @@
 #   /root/jarvis/bin/heavy bash tools/xrkeep/run.sh
 #
 #   A  the system folders (/apps ...) cannot be moved into the trash, a normal file can (trash itself still works)
-#   B  the shipped bundle /apps/xremote.osp (SYSTEM marker) is still there after `opk install` + `opk rebuild`
-#   C  counter-proof: the same bundle without SYSTEM is removed by `opk rebuild` (the marker is what protects it)
+#   B  the staged Store package xremote (package record under /store + /system, no SYSTEM marker) is still there after `opk install` + `opk rebuild`
+#   C  counter-proof: the same files without the package record are removed by `opk rebuild` (the record is what keeps them)
 #   D  counter-proof: a trash build without the guard moves /apps into the trash
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -75,20 +75,24 @@ echo ==END==
 sleep 3
 EOS
 
-dirs="/bin/ /t/ /system/ /apps/ /store/ /tmp/ /proc/ /dev/ /etc/ /var/ /apps/xremote.osp/ /apps/xremote.osp/bin/ /apps/xremote.osp/lib/"
+dirs="/bin/ /t/ /system/ /apps/ /store/ /tmp/ /proc/ /dev/ /etc/ /var/"
 bundle_files() {
-    local with_system=$1
+    local with_record=$1
+    if [ "$with_record" = 1 ]; then
+        python3 tools/xremote/mkfsargs.py "$T/xr"
+        return
+    fi
+    echo "/apps/xremote.osp/" "/apps/xremote.osp/bin/" "/apps/xremote.osp/lib/"
     echo "/apps/xremote.osp/INFO=$XB/INFO" "/apps/xremote.osp/symbol=$XB/symbol" "/apps/xremote.osp/bin/freeviewer-host=$XB/bin/freeviewer-host@755" \
          "/apps/xremote.osp/lib/ld-musl-x86_64.so.1=$XB/lib/ld-musl-x86_64.so.1@755" "/apps/xremote.osp/lib/libgcc_s.so.1=$XB/lib/libgcc_s.so.1"
-    [ "$with_system" = 1 ] && echo "/apps/xremote.osp/SYSTEM=$XB/SYSTEM"
 }
 run_guest() {
-    local name=$1 with_system=$2 script=$3
+    local name=$1 with_record=$2 script=$3
     bash tools/mkfsfi/mkfs.sh build "$T/$name.img" 200000 $dirs \
         $(for p in $PROGS; do echo "/bin/$p=$T/bin/$p.elf"; done) "/bin/trashmut=$T/bin-old/trashbin.elf" \
         "/system/schluessel.pub=$T/src/oeffentlich.key" \
         "/t/extra.opk=$T/src/extra-1.0.0.opk" "/t/extra.opk.sig=$T/src/extra-1.0.0.opk.sig" "/t/s.sh=$T/$script" \
-        $(bundle_files "$with_system") > "$T/$name.mkfs" 2>&1 || tail -3 "$T/$name.mkfs"
+        $(bundle_files "$with_record") > "$T/$name.mkfs" 2>&1 || tail -3 "$T/$name.mkfs"
     local acc=tcg; [ -e /dev/kvm ] && acc=kvm
     timeout 600 qemu-system-x86_64 -accel "$acc" -smp 1 -kernel "$T/k0.img" -m 512 \
         -append "osum vfs nokbd script=sh /t/s.sh;exit" \
@@ -110,15 +114,15 @@ has "$T/main.A" "xremote.osp" "A: /apps still lists xremote.osp"
 has "$T/main.A" "note.txt" "A: a normal file still goes into the trash"
 has "$T/main.B" "opk: installed extra" "B: a package installs next to the shipped bundle"
 has "$T/main.B" "extra.osp" "B: the new package is linked after the rebuild"
-has "$T/main.B" "xremote.osp" "B: xremote.osp survives opk install + rebuild"
+has "$T/main.B" "xremote.osp" "B: xremote.osp survives opk install + rebuild through its package record"
 has "$T/main.B" "freeviewer-host" "B: the host binary is still in place"
 has "$T/main.B" "libgcc_s.so.1" "B: the host libraries are still in place"
 has "$T/main.D" "ls: cannot list /apps" "D: counter-proof: without the guard /apps is gone"
 grep -aiqE 'panic|kernel fault|page fault|exception' "$T/main.klar" && bad "fault on the serial line" || ok "0 faults"
 grep -aq '^kernel: done' "$T/main.klar" && ok "the kernel finished" || bad "kernel did not finish"
 
-run_guest nosys 0 s1.sh
-part nosys C END
-has "$T/nosys.C" "extra.osp" "C: counter-proof run: rebuild linked the package"
-hasnot "$T/nosys.C" "xremote.osp" "C: counter-proof: without SYSTEM the rebuild removes the bundle"
+run_guest norecord 0 s1.sh
+part norecord C END
+has "$T/norecord.C" "extra.osp" "C: counter-proof run: rebuild linked the package"
+hasnot "$T/norecord.C" "xremote.osp" "C: counter-proof: without the package record the rebuild removes the bundle"
 finish

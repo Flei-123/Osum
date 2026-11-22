@@ -9,7 +9,11 @@ export { begin, put, put_num, commit, drop, registry_path }
 
 const REGISTRY_CAP: u64 = 2047
 const LINE_CAP: u64 = 480
+const LOCK_FLAGS: u64 = 193
+const LOCK_MODE: u64 = 420
+const LOCK_WAIT_MS: u64 = 300
 static mut P_REGISTRY: [u8; 16] = "/run/tray.items\0"
+static mut P_LOCK: [u8; 21] = "/run/tray.items.lock\0"
 static mut P_TMP_SEP: [u8; 2] = "|\0"
 static mut P_TMP_NL: [u8; 2] = "\n\0"
 static mut registry: [u8; 2048] = [0 as u8; 2048]
@@ -67,7 +71,38 @@ fn load_registry() -> u64 {
     return n
 }
 
+fn try_lock() -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_LOCK[0 as usize]) as u64, LOCK_FLAGS, LOCK_MODE)
+    if ulib.bad(fd) {
+        return false
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return true
+}
+
+fn lock() {
+    let deadline: u64 = xfxio.now_ms() + LOCK_WAIT_MS
+    while !try_lock() {
+        if xfxio.now_ms() > deadline {
+            ulib.sys(ulib.SYS_UNLINK, (&P_LOCK[0 as usize]) as u64, 0, 0)
+        } else {
+            ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+        }
+    }
+}
+
+fn unlock() {
+    ulib.sys(ulib.SYS_UNLINK, (&P_LOCK[0 as usize]) as u64, 0, 0)
+}
+
 fn rewrite(with_line: bool) -> bool {
+    lock()
+    let done: bool = rewrite_locked(with_line)
+    unlock()
+    return done
+}
+
+fn rewrite_locked(with_line: bool) -> bool {
     merged[0 as usize] = 0 as u8
     append_other_lines(load_registry())
     if with_line {

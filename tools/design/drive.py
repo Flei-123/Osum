@@ -601,6 +601,23 @@ class Fahrer:
                 return None
             return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
+        if name.startswith("trayapp") and name[7:].isdigit():
+            m = last_2(r"taskbar: app icon %s id=\d+ glyph=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % name[7:])
+            if m is None:
+                return None
+            return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
+        if name.startswith("traymenu") and name[8:].isdigit():
+            k = t.rfind("traypop: menu id=")
+            pl = last_2(r"traypop: place x=(\d+) y=(\d+)")
+            if k < 0 or pl is None:
+                return None
+            btns = re.findall(r"traypop: rect id=\d+ kind=2 x=(\d+) y=(\d+) w=(\d+) h=(\d+)", t[k:])
+            n = int(name[8:])
+            if n >= len(btns):
+                return None
+            b = btns[n]
+            return (int(pl.group(1)) + int(b[0]), int(pl.group(2)) + int(b[1]), int(b[2]), int(b[3]))
         if name.startswith("traytile") and name[8:].isdigit():
             o = last_2(r"traypop: open n=\d+ x=(\d+) y=(\d+)")
             m = last_2(r"traypop: tile i=%s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % name[8:])

@@ -150,7 +150,7 @@ run() { # <image> <name> [seconds]
 
 [ -z "${STORE_WINDOW_ONLY:-}" ] || STORE_PART=window
 want() { [ -z "${STORE_PART:-}" ] || [ "$STORE_PART" = "$1" ]; }
-# STORE_PART=bus|auto|window runs one part (STORE_FAST=1 skips the bus part)
+# STORE_PART=bus|auto|window|xremote runs one part (STORE_FAST=1 skips the bus part)
 if want bus && [ -z "${STORE_FAST:-}" ]; then
 echo "== 3. the good way, over the bus, from the signed-in person =="
 cat > "$TMPD/sA.sh" <<'EOS'
@@ -808,6 +808,89 @@ else
     bad "the script never reached the window part"; oclean | tail -20 | sed 's/^/        /'
 fi
 kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null
+fi
+
+if want xremote; then
+echo "== 7. xremote is a Store package: shipped in the image, then update, remove, install =="
+XR_SRC=${XR_DIR:-/root/jarvis/data/orientos-xremote/system}
+if [ ! -s "$XR_SRC/freeviewer-host" ]; then
+    note "skipped, $XR_SRC/freeviewer-host is missing"
+else
+    XRS="$TMPD/xr-stage"
+    bash tools/xremote/stage.sh "$XRS" > "$TMPD/xr-stage.log" 2>&1 && ok "xremote stages as an installed package (store record + links, no SYSTEM marker)" || { bad "xremote stage"; tail -3 "$TMPD/xr-stage.log"; }
+    [ -e "$XRS/apps/xremote.osp/SYSTEM" ] && bad "the staged bundle still carries a SYSTEM marker" || ok "the staged bundle has no SYSTEM marker"
+    XR_VERSION=0.2.9 XR_OPK_OUT="$TMPD/xremote-new.opk" bash tools/xremote/stage.sh "$TMPD/xr-new" > "$TMPD/xr-new.log" 2>&1 && ok "xremote 0.2.9 built for the signed source" || { bad "xremote 0.2.9 build"; tail -3 "$TMPD/xr-new.log"; }
+    mkstore "$TMPD/srv/xr" "$KEY" "$TMPD/xremote-new.opk" && ok "signed source with xremote 0.2.9: $(wc -l < "$TMPD/srv/xr/INDEX") program" || bad "xremote source"
+    serve xr $((P0+4)) && ok "the xremote source is up" || bad "xremote source does not start"
+    cat > "$TMPD/sXr.sh" <<'EOS'
+mkdir /users/justin
+orientbus serve 24000 &
+sleep -m 300
+stored serve 24000 &
+sleep 1
+setsess 1000
+echo ==X-SHIPPED==
+opk list
+apprights get xremote
+ls /apps
+act call store.refresh
+sleep 30
+echo ==X-LIST==
+act call store.list
+echo ==X-UPD==
+act call store.update name=xremote
+act confirm last
+sleep 120
+act call store.status
+opk list
+act call store.list
+echo ==X-REM==
+act call store.remove name=xremote
+act confirm last
+sleep 10
+act call store.status
+opk list
+ls /apps
+act call store.list
+echo ==X-INST==
+act call store.install name=xremote
+act confirm last
+sleep 120
+act call store.status
+opk list
+apprights get xremote
+ls /apps/xremote.osp/bin
+act call store.list
+echo ==X-END==
+EOS
+    EXTRA=($(python3 tools/xremote/mkfsargs.py "$XRS"))
+    image "$TMPD/xr.img" "$TMPD/sXr.sh" $((P0+4))
+    EXTRA=()
+    run "$TMPD/xr.img" xr 900
+    X="$TMPD/xr.klar"
+    has "$X" "==X-END==" "the xremote script ran to its end"
+    part "$X" X-SHIPPED X-LIST > "$TMPD/p.txt"
+    has "$TMPD/p.txt" "xremote -> " "the image ships xremote as an installed package (opk list)"
+    has "$TMPD/p.txt" "apprights: xremote mask=4 net" "the shipped package holds the net right"
+    has "$TMPD/p.txt" "xremote.osp" "/apps links xremote.osp"
+    part "$X" X-LIST X-UPD > "$TMPD/p.txt"
+    has "$TMPD/p.txt" "item=xremote|0.2.9|" "the signed catalog offers xremote 0.2.9"
+    has "$TMPD/p.txt" "|update" "the store marks the shipped xremote as update"
+    part "$X" X-UPD X-REM > "$TMPD/p.txt"
+    has "$TMPD/p.txt" "phase=done" "update xremote: done"
+    has "$TMPD/p.txt" "xremote -> " "xremote is installed after the update"
+    hasnot "$TMPD/p.txt" "|update" "no pending update after the update"
+    part "$X" X-REM X-INST > "$TMPD/p.txt"
+    has "$TMPD/p.txt" "msg=entfernt" "remove xremote: done (it is no longer a fixed system part)"
+    hasnot "$TMPD/p.txt" "  xremote -> " "xremote is gone from the package list"
+    hasnot "$TMPD/p.txt" "xremote.osp" "/apps/xremote.osp is gone"
+    has "$TMPD/p.txt" "|neu" "xremote is 'neu' again"
+    part "$X" X-INST X-END > "$TMPD/p.txt"
+    has "$TMPD/p.txt" "msg=installiert" "install xremote: done"
+    has "$TMPD/p.txt" "xremote -> " "xremote is in the package list again"
+    has "$TMPD/p.txt" "freeviewer-host" "the host binary is back under /apps/xremote.osp/bin"
+    has "$TMPD/p.txt" "apprights: xremote mask=4 net" "the net right is granted again"
+fi
 fi
 
 echo

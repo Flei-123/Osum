@@ -902,14 +902,8 @@ while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
 if [ -s "${XR_DIR:-/root/jarvis/data/orientos-xremote/system}/freeviewer-host" ]; then
     XR_ROOT="$OUT/xremote-root"
     bash tools/xremote/stage.sh "$XR_ROOT" > /dev/null || fehler "xremote stage failed"
-    ARGS+=(/apps/xremote.osp/ /apps/xremote.osp/bin/ /apps/xremote.osp/lib/)
-    for f in INFO INITTAB DEFAULTS symbol SYSTEM lib/libgcc_s.so.1; do
-        ARGS+=("/apps/xremote.osp/$f=$XR_ROOT/apps/xremote.osp/$f")
-    done
-    for f in start bin/freeviewer-host bin/xremoted bin/xremote lib/ld-musl-x86_64.so.1; do
-        ARGS+=("/apps/xremote.osp/$f=$XR_ROOT/apps/xremote.osp/$f@755")
-    done
-    PFLICHT_XREMOTE="/apps/xremote.osp/INFO /apps/xremote.osp/INITTAB /apps/xremote.osp/DEFAULTS /apps/xremote.osp/SYSTEM /apps/xremote.osp/start /apps/xremote.osp/bin/freeviewer-host /apps/xremote.osp/bin/xremoted /apps/xremote.osp/bin/xremote /apps/xremote.osp/lib/ld-musl-x86_64.so.1 /apps/xremote.osp/lib/libgcc_s.so.1"
+    while read -r z; do ARGS+=("$z"); done < <(python3 tools/xremote/mkfsargs.py "$XR_ROOT")
+    PFLICHT_XREMOTE="/apps/xremote.osp/INFO /apps/xremote.osp/INITTAB /apps/xremote.osp/DEFAULTS /apps/xremote.osp/start /apps/xremote.osp/bin/freeviewer-host /apps/xremote.osp/bin/xremoted /apps/xremote.osp/bin/xremote /apps/xremote.osp/lib/ld-musl-x86_64.so.1 /apps/xremote.osp/lib/libgcc_s.so.1 /system/AKTUELL"
 fi
 # W-IMG2 (r921): JARVIS Mini + the global hotkey helper. Personal stick only (the box needs the chat server).
 #   /bin/hotkeyd   started by the desktop autostart line `hotkey` (only when /etc/hotkeys.conf exists)
