@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# Usage: bash tools/s5safe/run.sh [new-kernel.img] [old-poweroff-kernel.img] [old-procfs-kernel.img]
+# Usage: bash tools/s5safe/run.sh [new-kernel.img] [old-poweroff-kernel.img] [old-procfs-kernel.img] [old-facs-kernel.img]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -30,6 +30,7 @@ echo "== 1. build =="
 NEW=${1:-}
 OLD=${2:-}
 OLD_PROC=${3:-}
+OLD_FACS=${4:-}
 if [ -z "$NEW" ]; then
     NEW="$TMPD/new.img"
     bash tools/build-kernel.sh "$NEW" --stufe 0 > "$TMPD/build.txt" 2>&1 \
@@ -91,7 +92,15 @@ for mem in 3072 1024; do
     has "$F" "==END==" "-m $mem: script reached the end"
     hasnot "$F" "EXCEPTION" "-m $mem: listing /proc does not fault"
     hasnot "$F" "CRASH REPORT" "-m $mem: no crash report"
+    has "$F" "why 0" "-m $mem: /proc/s3 finds the FACS (why 0)"
+    hasnot "$F" "facs 0x00000000" "-m $mem: /proc/s3 facs address is not zero"
 done
+
+if [ -n "$OLD_FACS" ]; then
+    echo "== 4b. counter-check: the old kernel cannot see the FACS above the first GiB =="
+    MEM=3072 run_case oldfacs "$OLD_FACS" "$PROC_BASE $PROC_SCRIPT" > /dev/null
+    has "$TMPD/oldfacs.txt" "facs 0x00000000" "old kernel reports no FACS at -m 3072"
+fi
 
 if [ -n "$OLD_PROC" ]; then
     echo "== 5. counter-check: the old kernel faults on ls /proc =="
