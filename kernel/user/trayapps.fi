@@ -1,0 +1,460 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import fui.tray
+import fui.trayline
+
+export {
+    sync, run_act, apply_places, bar_count, bar_id, remember_place, places_parse, places_text, has_command,
+    KIND_OPEN, KIND_SETTINGS, KIND_QUIT, KIND_C1, KIND_C2
+}
+
+const MAXOWN: u64 = 16
+const NAME_CAP: u64 = 23
+const NAME_SLOT: u64 = 24
+const CMD_CAP: u64 = 79
+const CMD_SLOT: u64 = 80
+const LABEL_CAP: u64 = 23
+const LABEL_SLOT: u64 = 24
+const KINDS: u64 = 5
+const KIND_OPEN: u64 = 0
+const KIND_SETTINGS: u64 = 1
+const KIND_QUIT: u64 = 2
+const KIND_C1: u64 = 3
+const KIND_C2: u64 = 4
+const MAX_ARGS: u64 = 8
+const REG_CAP: u64 = 2047
+const FNV_BASIS: u64 = 1469598103934665603
+const FNV_PRIME: u64 = 1099511628211
+const ICON_FIRST_CODEPOINT: u64 = 0xE000
+const NO_INDEX: u64 = 0xFFFFFFFF
+const TIP_CAP: u64 = 62
+
+static mut P_REGISTRY: [u8; 16] = "/run/tray.items\0"
+static mut M_OPEN: [u8; 10] = "tray.open\0"
+static mut M_SETTINGS: [u8; 14] = "tray.settings\0"
+static mut M_QUIT: [u8; 10] = "tray.quit\0"
+static mut own_name: [u8; 384] = [0 as u8; 384]
+static mut own_id: [u64; 16] = [0 as u64; 16]
+static mut own_seen: [u64; 16] = [0 as u64; 16]
+static mut own_cmd: [u8; 6400] = [0 as u8; 6400]
+static mut own_label: [u8; 768] = [0 as u8; 768]
+static mut pl_name: [u8; 384] = [0 as u8; 384]
+static mut pl_place: [u64; 16] = [0 as u64; 16]
+static mut reg_buf: [u8; 2048] = [0 as u8; 2048]
+static mut name_tmp: [u8; 24] = [0 as u8; 24]
+static mut tip_tmp: [u8; 64] = [0 as u8; 64]
+static mut last_sig: u64 = 0
+static mut argv_buf: [u64; 8] = [0 as u64; 8]
+static mut cmd_tmp: [u8; 80] = [0 as u8; 80]
+
+fn byte_at(p: u64, i: u64) -> u8 {
+    return *((p + i) as *mut u8)
+}
+
+fn same_text(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while byte_at(a, i) == byte_at(b, i) {
+        if byte_at(a, i) == 0 as u8 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn copy_text(dst: u64, src: u64, cap: u64) {
+    var i: u64 = 0
+    while i < cap && byte_at(src, i) != 0 as u8 {
+        *((dst + i) as *mut u8) = byte_at(src, i)
+        i = i + 1
+    }
+    *((dst + i) as *mut u8) = 0 as u8
+}
+
+fn name_ptr(i: u64) -> u64 {
+    return (&own_name[0 as usize]) as u64 + i * NAME_SLOT
+}
+
+fn cmd_ptr(i: u64, kind: u64) -> u64 {
+    return (&own_cmd[0 as usize]) as u64 + (i * KINDS + kind) * CMD_SLOT
+}
+
+fn label_ptr(i: u64, which: u64) -> u64 {
+    return (&own_label[0 as usize]) as u64 + (i * 2 + which) * LABEL_SLOT
+}
+
+fn find_owner(name: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAXOWN {
+        if own_id[i as usize] != 0 && same_text(name_ptr(i), name) {
+            return i
+        }
+        i = i + 1
+    }
+    return NO_INDEX
+}
+
+fn find_id(id: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAXOWN {
+        if own_id[i as usize] == id {
+            return i
+        }
+        i = i + 1
+    }
+    return NO_INDEX
+}
+
+fn free_slot() -> u64 {
+    var i: u64 = 0
+    while i < MAXOWN {
+        if own_id[i as usize] == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return NO_INDEX
+}
+
+fn saved_place(name: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAXOWN {
+        if pl_place[i as usize] != 0 && same_text((&pl_name[0 as usize]) as u64 + i * NAME_SLOT, name) {
+            return pl_place[i as usize]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn store_place(name: u64, place: u64) {
+    var spot: u64 = NO_INDEX
+    var i: u64 = 0
+    while i < MAXOWN {
+        if pl_place[i as usize] != 0 && same_text((&pl_name[0 as usize]) as u64 + i * NAME_SLOT, name) {
+            spot = i
+        }
+        i = i + 1
+    }
+    if spot == NO_INDEX {
+        i = 0
+        while i < MAXOWN && spot == NO_INDEX {
+            if pl_place[i as usize] == 0 {
+                spot = i
+            }
+            i = i + 1
+        }
+    }
+    if spot == NO_INDEX {
+        return
+    }
+    copy_text((&pl_name[0 as usize]) as u64 + spot * NAME_SLOT, name, NAME_CAP)
+    pl_place[spot as usize] = place
+}
+
+fn remember_place(t: *mut tray.Tray, id: u64) {
+    let i: u64 = find_id(id)
+    if i == NO_INDEX {
+        return
+    }
+    store_place(name_ptr(i), tray.tray_place(t, id))
+}
+
+fn places_parse(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < MAXOWN {
+        pl_place[i as usize] = 0
+        i = i + 1
+    }
+    var at: u64 = 0
+    while at < n {
+        var e: u64 = at
+        while e < n && byte_at(p, e) != 44 as u8 {
+            e = e + 1
+        }
+        var c: u64 = at
+        while c < e && byte_at(p, c) != 58 as u8 {
+            c = c + 1
+        }
+        if c > at && c + 1 < e && c - at <= NAME_CAP {
+            var k: u64 = 0
+            while k < c - at {
+                name_tmp[k as usize] = byte_at(p, at + k)
+                k = k + 1
+            }
+            name_tmp[k as usize] = 0 as u8
+            let v: u64 = byte_at(p, c + 1) as u64 - 48
+            if v >= tray.PLACE_BAR && v <= tray.PLACE_HIDDEN {
+                store_place((&name_tmp[0 as usize]) as u64, v)
+            }
+        }
+        at = e + 1
+    }
+}
+
+fn apply_places(t: *mut tray.Tray) {
+    var i: u64 = 0
+    while i < MAXOWN {
+        if own_id[i as usize] != 0 {
+            let p: u64 = saved_place(name_ptr(i))
+            if p != 0 && tray.tray_place(t, own_id[i as usize]) != p {
+                let _m: bool = tray.tray_move(t, own_id[i as usize], p, 99)
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn places_text(out: u64, cap: u64) -> u64 {
+    var at: u64 = 0
+    var i: u64 = 0
+    while i < MAXOWN {
+        if pl_place[i as usize] != 0 {
+            let nm: u64 = (&pl_name[0 as usize]) as u64 + i * NAME_SLOT
+            let n: u64 = trayline.text_len(nm)
+            if at + n + 3 < cap {
+                if at > 0 {
+                    *((out + at) as *mut u8) = 44 as u8
+                    at = at + 1
+                }
+                var k: u64 = 0
+                while k < n {
+                    *((out + at + k) as *mut u8) = byte_at(nm, k)
+                    k = k + 1
+                }
+                at = at + n
+                *((out + at) as *mut u8) = 58 as u8
+                *((out + at + 1) as *mut u8) = (48 + pl_place[i as usize]) as u8
+                at = at + 2
+            }
+        }
+        i = i + 1
+    }
+    *((out + at) as *mut u8) = 0 as u8
+    return at
+}
+
+fn read_registry() -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_REGISTRY[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&reg_buf[0 as usize]) as u64, REG_CAP)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) {
+        return 0
+    }
+    return n
+}
+
+fn signature(n: u64) -> u64 {
+    var h: u64 = FNV_BASIS ^ n
+    var i: u64 = 0
+    while i < n {
+        h = (h ^ (reg_buf[i as usize] as u64)) *% FNV_PRIME
+        i = i + 1
+    }
+    return h
+}
+
+fn menu_entry(t: *mut tray.Tray, id: u64, key: u64, action: u64) {
+    let _a: bool = tray.tray_menu_add(t, id, key, action, 0)
+}
+
+fn rebuild_menu(t: *mut tray.Tray, i: u64) {
+    let id: u64 = own_id[i as usize]
+    tray.tray_menu_clear(t, id)
+    if has_command(i, KIND_OPEN) {
+        menu_entry(t, id, (&M_OPEN[0 as usize]) as u64, tray.ACT_OPEN)
+    }
+    if byte_at(label_ptr(i, 0), 0) != 0 as u8 && has_command(i, KIND_C1) {
+        menu_entry(t, id, label_ptr(i, 0), tray.ACT_CUSTOM)
+    }
+    if byte_at(label_ptr(i, 1), 0) != 0 as u8 && has_command(i, KIND_C2) {
+        menu_entry(t, id, label_ptr(i, 1), tray.ACT_CUSTOM + 1)
+    }
+    if has_command(i, KIND_SETTINGS) {
+        menu_entry(t, id, (&M_SETTINGS[0 as usize]) as u64, tray.ACT_SETTINGS)
+    }
+    if has_command(i, KIND_QUIT) {
+        menu_entry(t, id, (&M_QUIT[0 as usize]) as u64, tray.ACT_QUIT)
+    }
+}
+
+fn has_command(i: u64, kind: u64) -> bool {
+    return byte_at(cmd_ptr(i, kind), 0) != 0 as u8
+}
+
+fn store_commands(i: u64, b: u64, from: u64, to: u64) {
+    trayline.field_copy(b, from, to, trayline.F_OPEN, cmd_ptr(i, KIND_OPEN), CMD_CAP)
+    trayline.field_copy(b, from, to, trayline.F_SETTINGS, cmd_ptr(i, KIND_SETTINGS), CMD_CAP)
+    trayline.field_copy(b, from, to, trayline.F_QUIT, cmd_ptr(i, KIND_QUIT), CMD_CAP)
+    trayline.field_copy(b, from, to, trayline.F_C1_LABEL, label_ptr(i, 0), LABEL_CAP)
+    trayline.field_copy(b, from, to, trayline.F_C1_CMD, cmd_ptr(i, KIND_C1), CMD_CAP)
+    trayline.field_copy(b, from, to, trayline.F_C2_LABEL, label_ptr(i, 1), LABEL_CAP)
+    trayline.field_copy(b, from, to, trayline.F_C2_CMD, cmd_ptr(i, KIND_C2), CMD_CAP)
+}
+
+fn place_new(t: *mut tray.Tray, id: u64, name: u64) {
+    let p: u64 = saved_place(name)
+    if p == tray.PLACE_BAR || p == tray.PLACE_HIDDEN {
+        let _m: bool = tray.tray_move(t, id, p, 99)
+    }
+}
+
+fn apply_line(t: *mut tray.Tray, b: u64, from: u64, to: u64) {
+    trayline.field_copy(b, from, to, trayline.F_OWNER, (&name_tmp[0 as usize]) as u64, NAME_CAP)
+    if name_tmp[0 as usize] == 0 as u8 {
+        return
+    }
+    trayline.field_copy(b, from, to, trayline.F_TIP, (&tip_tmp[0 as usize]) as u64, TIP_CAP)
+    let icon: u64 = trayline.field_num(b, from, to, trayline.F_ICON)
+    let nm: u64 = (&name_tmp[0 as usize]) as u64
+    var i: u64 = find_owner(nm)
+    if i == NO_INDEX {
+        i = free_slot()
+        if i == NO_INDEX {
+            return
+        }
+        let id: u64 = tray.tray_register(t, nm, icon, (&tip_tmp[0 as usize]) as u64, false)
+        if id == 0 {
+            return
+        }
+        own_id[i as usize] = id
+        copy_text(name_ptr(i), nm, NAME_CAP)
+        place_new(t, id, nm)
+    } else {
+        let id2: u64 = own_id[i as usize]
+        if tray.tray_icon(t, id2) != icon {
+            let _s: bool = tray.tray_set_icon(t, id2, icon)
+        }
+        if !same_text(tray.tray_tooltip(t, id2), (&tip_tmp[0 as usize]) as u64) {
+            let _u: bool = tray.tray_set_tooltip(t, id2, (&tip_tmp[0 as usize]) as u64)
+        }
+    }
+    store_commands(i, b, from, to)
+    rebuild_menu(t, i)
+    own_seen[i as usize] = 1
+}
+
+fn drop_missing(t: *mut tray.Tray) {
+    var i: u64 = 0
+    while i < MAXOWN {
+        if own_id[i as usize] != 0 && own_seen[i as usize] == 0 {
+            let _n: usize = tray.tray_owner_gone(t, name_ptr(i))
+            own_id[i as usize] = 0
+        }
+        i = i + 1
+    }
+}
+
+fn sync(t: *mut tray.Tray) -> bool {
+    let n: u64 = read_registry()
+    let sig: u64 = signature(n)
+    if sig == last_sig {
+        return false
+    }
+    last_sig = sig
+    var i: u64 = 0
+    while i < MAXOWN {
+        own_seen[i as usize] = 0
+        i = i + 1
+    }
+    var at: u64 = 0
+    let b: u64 = (&reg_buf[0 as usize]) as u64
+    while at < n {
+        let e: u64 = trayline.line_end(b, n, at)
+        if e > at {
+            apply_line(t, b, at, e)
+        }
+        at = e + 1
+    }
+    drop_missing(t)
+    return true
+}
+
+fn bar_count(t: *mut tray.Tray) -> u64 {
+    var n: u64 = 0
+    var k: usize = 0
+    let total: usize = tray.tray_count(t, tray.PLACE_BAR)
+    while k < total {
+        if !tray.tray_is_system(t, tray.tray_at(t, tray.PLACE_BAR, k)) {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn bar_id(t: *mut tray.Tray, idx: u64) -> u64 {
+    var n: u64 = 0
+    var k: usize = 0
+    let total: usize = tray.tray_count(t, tray.PLACE_BAR)
+    while k < total {
+        let id: u64 = tray.tray_at(t, tray.PLACE_BAR, k)
+        if !tray.tray_is_system(t, id) {
+            if n == idx {
+                return id
+            }
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+fn run_kind(i: u64, kind: u64) -> u64 {
+    copy_text((&cmd_tmp[0 as usize]) as u64, cmd_ptr(i, kind), CMD_CAP)
+    if cmd_tmp[0 as usize] == 0 as u8 {
+        return 0
+    }
+    var argc: u64 = 0
+    var at: u64 = 0
+    while byte_at((&cmd_tmp[0 as usize]) as u64, at) != 0 as u8 && argc < MAX_ARGS {
+        while byte_at((&cmd_tmp[0 as usize]) as u64, at) == 32 as u8 {
+            cmd_tmp[at as usize] = 0 as u8
+            at = at + 1
+        }
+        if byte_at((&cmd_tmp[0 as usize]) as u64, at) != 0 as u8 {
+            argv_buf[argc as usize] = (&cmd_tmp[0 as usize]) as u64 + at
+            argc = argc + 1
+        }
+        while byte_at((&cmd_tmp[0 as usize]) as u64, at) != 0 as u8 && byte_at((&cmd_tmp[0 as usize]) as u64, at) != 32 as u8 {
+            at = at + 1
+        }
+    }
+    if argc == 0 {
+        return 0
+    }
+    return ulib.spawn_app(argv_buf[0 as usize], (&argv_buf[0 as usize]) as u64, argc)
+}
+
+fn kind_of_action(act: u64) -> u64 {
+    if act == tray.ACT_OPEN {
+        return KIND_OPEN
+    }
+    if act == tray.ACT_SETTINGS {
+        return KIND_SETTINGS
+    }
+    if act == tray.ACT_QUIT {
+        return KIND_QUIT
+    }
+    if act == tray.ACT_CUSTOM {
+        return KIND_C1
+    }
+    if act == tray.ACT_CUSTOM + 1 {
+        return KIND_C2
+    }
+    return NO_INDEX
+}
+
+fn run_act(id: u64, act: u64) -> u64 {
+    let i: u64 = find_id(id)
+    let kind: u64 = kind_of_action(act)
+    if i == NO_INDEX || kind == NO_INDEX {
+        return 0
+    }
+    return run_kind(i, kind)
+}

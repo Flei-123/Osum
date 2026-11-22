@@ -10,6 +10,8 @@ import xrpath
 import xrhost
 import xrdefaults
 import xrdisplay
+import icons
+import trayreg
 
 export { u_start }
 
@@ -31,6 +33,22 @@ static mut restart_wait: u64 = RESTART_WAIT_MIN
 static mut run_ticks: u64 = 0
 static mut W_NOSESSION: [u8; 10] = "nosession\0"
 static mut F_ENABLED: [u8; 8] = "enabled\0"
+static mut F_DISCONNECT: [u8; 11] = "disconnect\0"
+static mut V_FALSE: [u8; 6] = "false\0"
+static mut T_OWNER: [u8; 8] = "xremote\0"
+static mut T_IDLE: [u8; 26] = "Remote control: no viewer\0"
+static mut T_VIEWER: [u8; 33] = "Remote control: viewer connected\0"
+static mut T_OFF: [u8; 20] = "Remote control: off\0"
+static mut C_OPEN: [u8; 13] = "/bin/xremote\0"
+static mut C_SETTINGS: [u8; 22] = "/bin/settings page=35\0"
+static mut C_DISCONNECT_LABEL: [u8; 18] = "Disconnect viewer\0"
+static mut C_DISCONNECT: [u8; 24] = "/bin/xremote disconnect\0"
+static mut C_STOP_LABEL: [u8; 13] = "Stop service\0"
+static mut C_STOP: [u8; 17] = "/bin/xremote off\0"
+static mut C_START_LABEL: [u8; 14] = "Start service\0"
+static mut C_START: [u8; 16] = "/bin/xremote on\0"
+static mut C_NONE: [u8; 1] = "\0"
+static mut tray_sig: u64 = 99
 static mut F_ADMIN: [u8; 6] = "admin\0"
 static mut F_FIXED: [u8; 6] = "fixed\0"
 static mut MODE_FIXED: [u8; 6] = "fixed\0"
@@ -237,6 +255,58 @@ fn status_idle() {
     }
 }
 
+fn tray_state() -> u64 {
+    if !is_enabled() {
+        return 0
+    }
+    if xrhost.host_running() && xrhost.peer_connected() {
+        return 2
+    }
+    return 1
+}
+
+fn tray_publish() {
+    let st: u64 = tray_state()
+    if st == tray_sig {
+        return
+    }
+    tray_sig = st
+    trayreg.begin((&T_OWNER[0 as usize]) as u64)
+    if st == 2 {
+        trayreg.put_num(icons.EYE)
+        trayreg.put((&T_VIEWER[0 as usize]) as u64)
+    } else if st == 1 {
+        trayreg.put_num(icons.SETTINGS_DISPLAY)
+        trayreg.put((&T_IDLE[0 as usize]) as u64)
+    } else {
+        trayreg.put_num(icons.EYE_OFF)
+        trayreg.put((&T_OFF[0 as usize]) as u64)
+    }
+    trayreg.put((&C_OPEN[0 as usize]) as u64)
+    trayreg.put((&C_SETTINGS[0 as usize]) as u64)
+    trayreg.put((&C_NONE[0 as usize]) as u64)
+    trayreg.put((&C_DISCONNECT_LABEL[0 as usize]) as u64)
+    trayreg.put((&C_DISCONNECT[0 as usize]) as u64)
+    if st == 0 {
+        trayreg.put((&C_START_LABEL[0 as usize]) as u64)
+        trayreg.put((&C_START[0 as usize]) as u64)
+    } else {
+        trayreg.put((&C_STOP_LABEL[0 as usize]) as u64)
+        trayreg.put((&C_STOP[0 as usize]) as u64)
+    }
+    let _c: bool = trayreg.commit()
+}
+
+fn drop_viewer_on_request() {
+    if !flag_set((&F_DISCONNECT[0 as usize]) as u64) {
+        return
+    }
+    let _s: bool = actwire.kvfile_set(xrpath.p_conf(), (&F_DISCONNECT[0 as usize]) as u64, (&V_FALSE[0 as usize]) as u64)
+    if xrhost.host_running() {
+        xrhost.stop_host()
+    }
+}
+
 fn u_start(args: u64) -> u64 {
     if !xfxio.is_root() {
         return 1
@@ -248,8 +318,10 @@ fn u_start(args: u64) -> u64 {
     xrdefaults.seed()
     var wait: u64 = 0
     while true {
+        drop_viewer_on_request()
         wait = step(wait)
         sync_remote_auth()
+        tray_publish()
         xrdisplay.tick(display_peer_ok())
         if !xrhost.host_running() {
             status_idle()
