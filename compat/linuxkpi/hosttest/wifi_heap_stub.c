@@ -11,6 +11,7 @@ struct block {
 
 static u8 arena[ARENA_BYTES] __attribute__((aligned(16)));
 static u64 used;
+static u64 live;
 static struct block *free_list[MAX_CLASS + 1];
 
 void *kzalloc(size_t size, gfp_t flags)
@@ -35,10 +36,41 @@ void *kzalloc(size_t size, gfp_t flags)
 		used += (u64)1 << class;
 		b->class = class;
 	}
+	live += (u64)1 << class;
 	p = (u8 *)(b + 1);
 	for (i = 0; i < ((u64)1 << class) - sizeof(*b); i++)
 		p[i] = 0;
 	return p;
+}
+
+void *lkpi_alloc_aligned(size_t size, size_t align)
+{
+	u64 class = MIN_CLASS;
+	struct block *b;
+	u8 *p;
+	u64 i;
+
+	while (((u64)1 << class) < size + sizeof(*b) && class <= MAX_CLASS)
+		class++;
+	if (class > MAX_CLASS)
+		return NULL;
+	while ((((u64)arena + used + sizeof(*b)) & (align - 1)) != 0)
+		used++;
+	if (used + ((u64)1 << class) > ARENA_BYTES)
+		return NULL;
+	b = (struct block *)(arena + used);
+	used += (u64)1 << class;
+	b->class = class;
+	live += (u64)1 << class;
+	p = (u8 *)(b + 1);
+	for (i = 0; i < ((u64)1 << class) - sizeof(*b); i++)
+		p[i] = 0;
+	return p;
+}
+
+size_t lkpi_heap_used(void)
+{
+	return live;
 }
 
 void kfree(const void *ptr)
@@ -48,6 +80,7 @@ void kfree(const void *ptr)
 	if (!ptr)
 		return;
 	b = (struct block *)ptr - 1;
+	live -= (u64)1 << b->class;
 	b->next = free_list[b->class];
 	free_list[b->class] = b;
 }
