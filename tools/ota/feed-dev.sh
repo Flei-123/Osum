@@ -14,6 +14,7 @@
 # OVL_EXTRA_DIR     optional dir copied into the overlay as is: top-level files are /bin names, subdirectories
 #                   are absolute destinations (apps/x.osp/start -> /apps/x.osp/start, etc/..., usr/share/...).
 # OVL_LINKS         optional file of "<dest> /bin/<name>" lines: <dest> becomes a second name of the new /bin file.
+# FEED_ROOT         optional: feed root other than /srv/store/osum (own device feed, needs aktuell/schluessel.pub, v, pakete, register.json)
 # FEED_KERNEL      optional: publish this osum.mb instead of building one (a kernel byte-identical to the
 #                   installed slot A makes the device apply the overlay live, without a trial boot).
 # DRY_OUT           optional dir: with --dry the signed stand (system/<channel> content) is copied there.
@@ -30,7 +31,7 @@ cd "$(dirname "$0")/../.."
 IMGDIR=$1; NOTES=$2; shift 2
 DRY=0; PROGS=()
 for a in "$@"; do if [ "$a" = "--dry" ]; then DRY=1; else PROGS+=("$a"); fi; done
-FEED=/srv/store/osum
+FEED=${FEED_ROOT:-/srv/store/osum}
 CHANNEL=${CHANNEL:-dev}
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
