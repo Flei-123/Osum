@@ -52,6 +52,7 @@ void lkpi_napi_run(void);
 void lkpi_irq_poll(void);
 int lkpi_firmware_register(const char *name, const void *data, size_t size);
 void lkpi_firmware_clear(void);
+int lkpi_firmware_load(const char *name, const unsigned char *hash, size_t cap);
 void *lkpi_devres_alloc(struct device *dev, size_t size, void (*release)(void *payload));
 void lkpi_devres_release(struct device *dev);
 

@@ -3,6 +3,8 @@
 #include <linux/dmi.h>
 #include <linux/kobject.h>
 #include <linux/devcoredump.h>
+#include <osum/osum_if.h>
+#define LKPI_FRAME_BYTES 4096
 
 #define LKPI_FW_REGISTRY_MAX 8
 #define LKPI_FORMAT_MAX 256
@@ -17,6 +19,7 @@ struct fw_entry {
 	const char *name;
 	const void *data;
 	size_t size;
+	unsigned long long frames;
 };
 
 struct fw_request {
@@ -130,12 +133,41 @@ int lkpi_firmware_register(const char *name, const void *data, size_t size)
 	fw_registry[fw_count].name = name;
 	fw_registry[fw_count].data = data;
 	fw_registry[fw_count].size = size;
+	fw_registry[fw_count].frames = 0;
 	fw_count++;
+	return 0;
+}
+
+int lkpi_firmware_load(const char *name, const unsigned char *hash, size_t cap)
+{
+	unsigned long long frames = (cap + LKPI_FRAME_BYTES - 1) / LKPI_FRAME_BYTES;
+	unsigned long long base = k_frames(frames);
+	unsigned long long size;
+	int rc;
+
+	if (!base)
+		return -ENOMEM;
+	size = k_fwreq(name, hash, base, frames * LKPI_FRAME_BYTES);
+	if (!size) {
+		k_frames_free(base, frames);
+		return -ENOENT;
+	}
+	rc = lkpi_firmware_register(name, (const void *)base, size);
+	if (rc) {
+		k_frames_free(base, frames);
+		return rc;
+	}
+	fw_registry[fw_count - 1].frames = frames;
 	return 0;
 }
 
 void lkpi_firmware_clear(void)
 {
+	unsigned int i;
+
+	for (i = 0; i < fw_count; i++)
+		if (fw_registry[i].frames)
+			k_frames_free((unsigned long long)fw_registry[i].data, fw_registry[i].frames);
 	fw_count = 0;
 }
 

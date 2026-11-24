@@ -42,6 +42,6 @@ lkpi_driver_flags() {
 	LKPI_DRIVER_FLAGS=()
 	case "$1" in
 		bochs) LKPI_DRIVER_FLAGS=(-Wno-pointer-sign) ;;
-		iwlwifi) LKPI_DRIVER_FLAGS=(-Wno-error -w -D__KERNEL__ -DKBUILD_MODNAME='"iwlwifi"' -include osum/kconfig_iwlwifi.h) ;;
+		iwlwifi) LKPI_DRIVER_FLAGS=(-Wno-error -w -D__KERNEL__ -DKBUILD_MODNAME='"iwlwifi"' -DLKPI_MULTI_INIT -include osum/kconfig_iwlwifi.h) ;;
 	esac
 }

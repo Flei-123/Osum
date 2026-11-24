@@ -7,7 +7,9 @@ import subprocess
 import sys
 
 MAX_SECTIONS = 64
-MAX_IMAGE = 0x80000
+MAX_IMAGE = 0x200000
+MAX_FILE = 0x200000
+FILE_OVERHEAD = 128
 MAX_ALIGN = 4096
 MAX_EXPORT_NAME = 63
 ALLOWED_RELOCS = {1: "R_X86_64_64", 2: "R_X86_64_PC32", 4: "R_X86_64_PLT32", 10: "R_X86_64_32", 11: "R_X86_64_32S"}
@@ -175,6 +177,8 @@ def check_object(obj, label, allowed_undefined, fails):
         fails.append("%s: no allocated section" % label)
     if size > MAX_IMAGE:
         fails.append("%s: image %d bytes, loader limit %d" % (label, size, MAX_IMAGE))
+    if len(obj.data) + FILE_OVERHEAD > MAX_FILE:
+        fails.append("%s: module file %d bytes, loader limit %d" % (label, len(obj.data) + FILE_OVERHEAD, MAX_FILE))
     for reloc in obj.relocs:
         if not obj.allocated(reloc.target):
             continue

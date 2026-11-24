@@ -22,7 +22,12 @@ static inline void module_put(struct module *m) { (void)m; }
 #define MODULE_ALIAS(a) LKPI_NOOP_DECL
 #define MODULE_IMPORT_NS(n) LKPI_NOOP_DECL
 
+#ifdef LKPI_MULTI_INIT
+#define module_init(fn) extern int lkpi_init_##fn(void) __attribute__((alias(#fn)))
+#define module_exit(fn) extern void lkpi_exit_##fn(void) __attribute__((alias(#fn)))
+#else
 #define module_init(fn) extern int lkpi_driver_init(void) __attribute__((alias(#fn)))
 #define module_exit(fn) extern void lkpi_driver_exit(void) __attribute__((alias(#fn)))
+#endif
 
 #endif

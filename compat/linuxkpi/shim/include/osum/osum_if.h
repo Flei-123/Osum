@@ -22,7 +22,7 @@
 #define OSUM_KERNEL_SYMBOLS \
 	k_abi k_puts \
 	k_pcicfg_read k_pcicfg_write k_pcibar \
-	k_ioremap k_frames k_frames_free \
+	k_ioremap k_frames k_frames_free k_fwreq \
 	k_kms_register k_kms_unregister k_shm_frame \
 	k_wifi_register k_wifi_unregister k_wifi_hw
 
@@ -34,6 +34,7 @@ unsigned long long k_pcibar(unsigned long long index, unsigned long long *out);
 unsigned long long k_ioremap(unsigned long long phys, unsigned long long size);
 unsigned long long k_frames(unsigned long long count);
 void k_frames_free(unsigned long long addr, unsigned long long count);
+unsigned long long k_fwreq(const char *name, const unsigned char *hash, unsigned long long dst, unsigned long long cap);
 
 struct osum_kms_ops {
 	unsigned long long ready;
