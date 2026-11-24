@@ -121,8 +121,10 @@ static int fill_chanctx(struct lkpi_wifi_hw *w)
 	struct ieee80211_channel *chan = find_join_channel(w);
 
 	if (!chan)
-		return LKPI80211_EINVAL;
-	cfg80211_chandef_create(&ctx->def, chan, NL80211_CHAN_NO_HT);
+		return 0;
+	ctx->def.chan = chan;
+	ctx->def.center_freq1 = chan->center_freq;
+	ctx->def.width = NL80211_CHAN_WIDTH_20_NOHT;
 	ctx->min_def = ctx->def;
 	ctx->rx_chains_static = 1;
 	ctx->rx_chains_dynamic = 1;
