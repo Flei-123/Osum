@@ -205,6 +205,7 @@ if [[ -n $MODULE_KEYS || -n $BAN_FLOOR ]]; then
         ${MODULE_KEYS:+--keys "$MODULE_KEYS"} ${BAN_FLOOR:+--floor "$BAN_FLOOR"} \
         >/dev/null || { echo "mkpolicy failed" >&2; exit 1; }
 fi
+[[ -e $TMP/lib ]] || ln -s "$FIRNLIB" "$TMP/lib" || exit 1
 
 KMAIN=$(find "$KDIR" -name kmain.fi -type f | head -1)
 UPROG=$(find "$KDIR" -name uprog.fi -type f | head -1)
@@ -218,9 +219,9 @@ BC_KEY=$(bc_common_key "$FIRNC" "$TMP" "$STUFE")
 EXT4_STATE=$([[ $OHNE_EXT4 == 1 ]] && echo off || echo on)
 NTFS_STATE=$([[ $OHNE_NTFS == 1 ]] && echo off || echo on)
 echo "build: key=${BC_KEY:0:12} ext4=$EXT4_STATE ntfs=$NTFS_STATE" >&2
-bc_compile "$FIRNC" "$TMP" "$BC_KEY" "${KMAIN#$TMP/}" "$TMP/k.o" &
+FIRNLIB=lib bc_compile "$FIRNC" "$TMP" "$BC_KEY" "${KMAIN#$TMP/}" "$TMP/k.o" &
 BC_P1=$!
-bc_compile "$FIRNC" "$TMP" "$BC_KEY" "${UPROG#$TMP/}" "$TMP/uprog.o" &
+FIRNLIB=lib bc_compile "$FIRNC" "$TMP" "$BC_KEY" "${UPROG#$TMP/}" "$TMP/uprog.o" &
 BC_P2=$!
 BC_RC=0
 wait "$BC_P1" || BC_RC=1

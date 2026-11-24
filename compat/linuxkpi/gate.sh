@@ -14,7 +14,7 @@ NEEDLE='linuxkpi|lkpi|Linux version|vermagic=|\.modinfo'
 tracked=$(git ls-files third_party kernel/linuxkpi '*.ko' | wc -l)
 [ "$tracked" -eq 0 ] && ok "repo tracks no Linux source, shim or .ko" || bad "repo tracks $tracked Linux files"
 
-leaks=$(grep -rIl -iE 'linuxkpi|lkpi' kernel boot lib module tools/build-kernel.sh tools/mkfsfi tools/sync tools/module 2>/dev/null | wc -l)
+leaks=$(grep -rail -E 'linuxkpi|lkpi' kernel boot lib module tools/build-kernel.sh tools/mkfsfi tools/sync tools/module 2>/dev/null | wc -l)
 [ "$leaks" -eq 0 ] && ok "no kernel/boot/lib/module/image-build file references linuxkpi" || bad "$leaks image-side files reference linuxkpi"
 
 if [ -n "${LINUXKPI_IMAGE:-}" ]; then IMG="$LINUXKPI_IMAGE"
