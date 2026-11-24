@@ -15,9 +15,14 @@ D=$(mktemp -d); osum_tmp_guard "" "$D"
 . tools/lib/firnenv.sh
 . compat/linuxkpi/flags.sh
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
-fin() { echo "LKPI-IWL: $pass passed, $fail failed"; [ "$fail" -eq 0 ]; exit $?; }
-FW_FILE="${IWL_FW_FILE:-/root/fw-cache/iwlwifi-8265-36.ucode}"
-[ -f "$FW_FILE" ] || { echo "LKPI-IWL: skipped, no firmware $FW_FILE"; exit 0; }
+keep() {
+    [ -n "${LKPI_IWL_OUT:-}" ] || return 0
+    mkdir -p "$LKPI_IWL_OUT" && cp "$D"/*.klar "$LKPI_IWL_OUT"/ 2>/dev/null
+    return 0
+}
+fin() { keep; echo "LKPI-IWL: $pass passed, $fail failed"; [ "$fail" -eq 0 ]; exit $?; }
+FW_FILE="${IWL_FW_FILE:-$(bash compat/linuxkpi/fetch.sh fw-iwlwifi-8265 "$D/fw" 2>/dev/null)}"
+[ -f "$FW_FILE" ] || { echo "LKPI-IWL: skipped, firmware not fetchable from sources.tsv"; exit 0; }
 FW_NAME=$(basename "$FW_FILE")
 
 bash compat/linuxkpi/iwlmod.sh "$D/m" > "$D/mod.txt" 2>&1 && ok "iwlwifi (67 units) and shim build, closure ok, modules signed" || { bad "module build"; tail -5 "$D/mod.txt"; fin; }
@@ -63,18 +68,25 @@ runvm() {
     tr -cd '\11\12\15\40-\176' < "$D/o-$name.txt" > "$D/$name.klar"
 }
 mkimg native "$PK_NATIVE"
+mkimg compat "$PK_NATIVE"
 mkimg load "$PK_LOAD"
 runvm native "fakewlan" "-nic user,model=e1000" &
+runvm compat "fakewlan iwlcompat" "-nic user,model=e1000" &
 runvm load "" "-nic none" &
 wait
 
-for v in native load; do
+for v in native compat load; do
     has "$D/$v.klar" "==END==" "$v: script ran to the end"
     hasnot "$D/$v.klar" "EXCEPTION" "$v: no kernel exception"
 done
 hasre "$D/native.klar" 'iwl: .*id=8086:24fd' "native: own iwl driver probes the 8265"
 hasnot "$D/native.klar" "drvstore: bind lkpi-iwlwifi" "native: store does not bind a second driver to the claimed 8265"
 hasnot "$D/native.klar" "lkpi:" "native: the compat module never ran"
+hasre "$D/compat.klar" 'iwl: no device' "compat: word iwlcompat makes the native driver stand down"
+hasnot "$D/compat.klar" "iwl: hw_rev" "compat: native driver never probed the 8265"
+hasre "$D/compat.klar" 'drvstore: bind lkpi-iwlwifi -> [0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f] 8086:24fd ok' "compat: store binds lkpi-iwlwifi to the 8265 and the real iwl_pci_probe returns ok"
+hasnot "$D/compat.klar" "probe failed" "compat: real probe reports no failure"
+has "$D/compat.klar" "drvstore: fw ok $FW_NAME" "compat: firmware served to the real driver"
 has "$D/load.klar" "drvstore: fw ok $FW_NAME" "load: kernel served the pinned firmware to the module"
 hasnot "$D/load.klar" "drvstore: fw error" "load: no firmware error"
 hasnot "$D/load.klar" "module: too big" "load: loader accepts the module above 512 KiB"

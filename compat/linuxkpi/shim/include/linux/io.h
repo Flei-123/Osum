@@ -3,14 +3,87 @@
 
 #include <linux/kernel.h>
 
-static inline u8 readb(const volatile void __iomem *addr) { return *(const volatile u8 *)addr; }
-static inline u16 readw(const volatile void __iomem *addr) { return *(const volatile u16 *)addr; }
-static inline u32 readl(const volatile void __iomem *addr) { return *(const volatile u32 *)addr; }
-static inline u64 readq(const volatile void __iomem *addr) { return *(const volatile u64 *)addr; }
-static inline void writeb(u8 value, volatile void __iomem *addr) { *(volatile u8 *)addr = value; }
-static inline void writew(u16 value, volatile void __iomem *addr) { *(volatile u16 *)addr = value; }
-static inline void writel(u32 value, volatile void __iomem *addr) { *(volatile u32 *)addr = value; }
-static inline void writeq(u64 value, volatile void __iomem *addr) { *(volatile u64 *)addr = value; }
+extern unsigned long lkpi_fake_mmio_base;
+u32 lkpi_fake_mmio_read(unsigned long offset);
+void lkpi_fake_mmio_write(unsigned long offset, u32 value);
+
+#define LKPI_FAKE_MMIO_SPAN 0x3000UL
+
+static inline bool lkpi_is_fake_mmio(const volatile void __iomem *addr)
+{
+	return lkpi_fake_mmio_base && (unsigned long)addr - lkpi_fake_mmio_base < LKPI_FAKE_MMIO_SPAN;
+}
+
+static inline u32 readl(const volatile void __iomem *addr)
+{
+	if (lkpi_is_fake_mmio(addr))
+		return lkpi_fake_mmio_read((unsigned long)addr - lkpi_fake_mmio_base);
+	return *(const volatile u32 *)addr;
+}
+
+static inline void writel(u32 value, volatile void __iomem *addr)
+{
+	if (lkpi_is_fake_mmio(addr)) {
+		lkpi_fake_mmio_write((unsigned long)addr - lkpi_fake_mmio_base, value);
+		return;
+	}
+	*(volatile u32 *)addr = value;
+}
+
+static inline u8 readb(const volatile void __iomem *addr)
+{
+	if (lkpi_is_fake_mmio(addr))
+		return readl((const volatile void __iomem *)((unsigned long)addr & ~3UL)) >> (((unsigned long)addr & 3UL) * 8);
+	return *(const volatile u8 *)addr;
+}
+
+static inline u16 readw(const volatile void __iomem *addr)
+{
+	if (lkpi_is_fake_mmio(addr))
+		return readl((const volatile void __iomem *)((unsigned long)addr & ~3UL)) >> (((unsigned long)addr & 2UL) * 8);
+	return *(const volatile u16 *)addr;
+}
+
+static inline u64 readq(const volatile void __iomem *addr)
+{
+	if (lkpi_is_fake_mmio(addr))
+		return readl(addr) | (u64)readl((const volatile void __iomem *)((unsigned long)addr + 4)) << 32;
+	return *(const volatile u64 *)addr;
+}
+
+static inline void writeb(u8 value, volatile void __iomem *addr)
+{
+	if (lkpi_is_fake_mmio(addr)) {
+		unsigned long shift = ((unsigned long)addr & 3UL) * 8;
+		volatile void __iomem *word = (volatile void __iomem *)((unsigned long)addr & ~3UL);
+
+		writel((readl(word) & ~(0xffU << shift)) | ((u32)value << shift), word);
+		return;
+	}
+	*(volatile u8 *)addr = value;
+}
+
+static inline void writew(u16 value, volatile void __iomem *addr)
+{
+	if (lkpi_is_fake_mmio(addr)) {
+		unsigned long shift = ((unsigned long)addr & 2UL) * 8;
+		volatile void __iomem *word = (volatile void __iomem *)((unsigned long)addr & ~3UL);
+
+		writel((readl(word) & ~(0xffffU << shift)) | ((u32)value << shift), word);
+		return;
+	}
+	*(volatile u16 *)addr = value;
+}
+
+static inline void writeq(u64 value, volatile void __iomem *addr)
+{
+	if (lkpi_is_fake_mmio(addr)) {
+		writel((u32)value, addr);
+		writel((u32)(value >> 32), (volatile void __iomem *)((unsigned long)addr + 4));
+		return;
+	}
+	*(volatile u64 *)addr = value;
+}
 
 static inline void outb(u8 value, u16 port)
 {

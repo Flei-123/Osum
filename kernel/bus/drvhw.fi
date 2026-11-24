@@ -6,10 +6,11 @@ import bus.pci
 import bus.drvfw
 import lib.ksym
 import mm.mmframe
+import bus.drvfakemmio
 import arch.x86_64.apic
 
 export {
-    init, pcicfg_read, pcicfg_write, pcibar, ioremap, frames, frames_free, mark, reclaim_window, reclaim_owner, granted,
+    init, clock_ns, mmio_fake, mmio_rd, mmio_wr, pcicfg_read, pcicfg_write, pcibar, ioremap, frames, frames_free, mark, reclaim_window, reclaim_owner, granted,
     HW_OK, HW_DENIED, HW_NOCTX, HW_RANGE, MAX_RUNS, MAX_FRAMES
 }
 
@@ -31,6 +32,7 @@ const CFG_COMMAND_MASK: u64 = 0x407
 const CFG_SAFE_FROM: u64 = 0x40
 const CFG_SIZE: u64 = 256
 const BAR_COUNT: u64 = 6
+const NS_PER_TICK: u64 = 10000000
 
 const MAX_RUNS: u64 = 8
 const MAX_FRAMES: u64 = 1024
@@ -48,6 +50,37 @@ fn init() {
     ksym.hw_set(ksym.H_IOREMAP, ksym.addr_2u(ioremap))
     ksym.hw_set(ksym.H_FRAMES, ksym.addr_1u(frames))
     ksym.hw_set(ksym.H_FRAMES_FREE, ksym.addr_2u(frames_free))
+    ksym.hw_set(ksym.H_CLOCK_NS, ksym.addr_0u(clock_ns))
+    ksym.hw_set(ksym.H_MMIO_FAKE, ksym.addr_0u(mmio_fake))
+    ksym.hw_set(ksym.H_MMIO_RD, ksym.addr_1u(mmio_rd))
+    ksym.hw_set(ksym.H_MMIO_WR, ksym.addr_2u(mmio_wr))
+}
+
+fn mmio_fake() -> u64 {
+    let state: u64 = drvfw.bound_state()
+    if state == 0 || !allowed(RIGHT_MMIO) {
+        return 0
+    }
+    if !pci.fake_wlan_active(state) || !kstate.mode_on(state, kstate.M_IWLCOMPAT) {
+        return 0
+    }
+    return drvfakemmio.region(state)
+}
+
+fn mmio_rd(off: u64) -> u64 {
+    return drvfakemmio.rd(off)
+}
+
+fn mmio_wr(off: u64, value: u64) -> u64 {
+    return drvfakemmio.wr(off, value)
+}
+
+fn clock_ns() -> u64 {
+    let state: u64 = drvfw.bound_state()
+    if state == 0 {
+        return 0
+    }
+    return kstate.get(state, kstate.TICKS) * NS_PER_TICK
 }
 
 fn bound_index(state: u64) -> u64 {
@@ -135,6 +168,10 @@ fn ioremap(phys: u64, size: u64) -> u64 {
     }
     if !inside_memory_bar(state, phys, size) {
         return 0
+    }
+    let fake: u64 = mmio_fake()
+    if fake != 0 {
+        return fake
     }
     return apic.map_range(state, phys, size)
 }

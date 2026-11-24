@@ -236,6 +236,29 @@ u64 k_pcibar(u64 index, u64 *info)
 	return HW_OK;
 }
 
+u64 k_clock_ns(void)
+{
+	return 0;
+}
+
+u64 k_mmio_fake(void)
+{
+	return 0;
+}
+
+u64 k_mmio_rd(u64 offset)
+{
+	(void)offset;
+	return 0;
+}
+
+u64 k_mmio_wr(u64 offset, u64 value)
+{
+	(void)offset;
+	(void)value;
+	return 0;
+}
+
 u64 k_ioremap(u64 phys, u64 size)
 {
 	u64 vram_end = (u64)vram_area + cur->bar0_reported;

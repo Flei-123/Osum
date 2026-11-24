@@ -83,6 +83,7 @@ void __iomem *ioremap(resource_size_t phys, unsigned long size)
 	virt = k_ioremap(phys, size);
 	if (!virt)
 		return NULL;
+	lkpi_mmio_note_mapping(virt);
 	if (mapping_count < MAPPING_MAX) {
 		mappings[mapping_count].phys = phys;
 		mappings[mapping_count].size = size;

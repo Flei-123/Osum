@@ -11,6 +11,17 @@ IFS=$'\t' read -r _ version url tsha file fsha spdx _ _ <<<"$row"
 case "$OUT" in "$(pwd)"/*) echo "fetch: output must be outside the repository" >&2; exit 2;; esac
 mkdir -p "$OUT"
 [ -z "$(ls -A "$OUT")" ] || { echo "fetch: output directory not empty" >&2; exit 2; }
+if [ "$tsha" = "-" ]; then
+	mkdir -p "$OUT/src"
+	target="$OUT/src/$file"
+	case "$url" in
+		local:*) cp "${LKPI_FW_SOURCE:-${url#local:}}" "$target" ;;
+		*) curl -fsSL -o "$target" "$url" ;;
+	esac
+	echo "$fsha  $target" | sha256sum -c --quiet - || { rm -f "$target"; echo "fetch: file sha256 mismatch" >&2; exit 3; }
+	echo "$target"
+	exit 0
+fi
 TARBALL="$OUT/linux-$version.tar.xz"
 if [ -n "${LINUXKPI_TARBALL:-}" ]; then cp "$LINUXKPI_TARBALL" "$TARBALL"; else curl -fsSL -o "$TARBALL" "$url"; fi
 echo "$tsha  $TARBALL" | sha256sum -c --quiet - || { rm -f "$TARBALL"; echo "fetch: tarball sha256 mismatch" >&2; exit 3; }

@@ -57,7 +57,7 @@ fi
 if build_wifi_rt "$SHIM" "$T/rt" > "$T/rt.build" 2>&1; then
     "$T/rt" > "$T/rt.out"; rc=$?
     grep '^FAIL' "$T/rt.out" | head -10
-    [ "$rc" = 0 ] && ok "shim runtime (dma, pages, work, timers, napi, skb): $(grep '^checks=' "$T/rt.out") $(grep '^failures=' "$T/rt.out")" || bad "shim runtime run"
+    [ "$rc" = 0 ] && ok "shim runtime (dma, pages, work, timers, napi, skb, time, sg, devres, firmware): $(grep '^checks=' "$T/rt.out") $(grep '^failures=' "$T/rt.out")" || bad "shim runtime run"
 else
     bad "shim runtime build"; head -10 "$T/rt.build"
 fi
@@ -76,6 +76,11 @@ rtmutant delayearly src/wifi_sched.c "if (time_after(timer->expires, now))" "if 
 rtmutant napioff src/wifi_net.c "if (!(napi->state & LKPI_NAPI_ENABLED) || (napi->state & LKPI_NAPI_SCHEDULED))" "if (napi->state & LKPI_NAPI_SCHEDULED)"
 rtmutant skbdirty src/wifi_skb.c "skb->in_use = 1;" "skb->in_use = 1; skb->shinfo.nr_frags = 1;"
 rtmutant dmaerr src/wifi_mem.c "return addr == DMA_MAPPING_ERROR;" "return 0;"
+rtmutant noclock src/wifi_time.c "return real > virt ? real : virt;" "return real > virt ? virt : real;"
+rtmutant sgskip src/wifi_sg.c "if ((size_t)skip >= room) {" "if (0) {"
+rtmutant fwleak src/wifi_dev.c "k_frames_free(base, frames);
+		return -ENOENT;" "return -ENOENT;"
+rtmutant devresall src/wifi_dev.c "if (dev && res->dev != dev) {" "if (0) {"
 python3 -I tools/lkpi80211/synccheck.py "$SHIM/include/osum/macplan_ops.h" lib/wlan/macplan.fi > "$T/sync.out" 2>&1 && ok "macplan op numbers in the shim header equal lib/wlan/macplan.fi" || { bad "op numbers differ"; head -5 "$T/sync.out"; }
 wmutant() {
     local name=$1 file=$2 from=$3 to=$4 m="$T/wm-$1"

@@ -2,6 +2,7 @@
 #include <linux/delay.h>
 #include <linux/time.h>
 #include <linux/timekeeping.h>
+#include <osum/osum_if.h>
 
 #define LKPI_REAL_EPOCH_SECONDS 1767225600ULL
 
@@ -9,17 +10,45 @@ volatile unsigned long jiffies;
 u64 jiffies_64;
 static u64 sub_tick_ns;
 static bool advancing;
+static u64 kernel_clock_base_ns;
+static bool kernel_clock_seen;
 
-u64 lkpi_time_ns(void)
+static u64 virtual_ns(void)
 {
 	return (u64)jiffies * LKPI_NS_PER_JIFFY + sub_tick_ns;
 }
 
+static u64 kernel_elapsed_ns(void)
+{
+	u64 now = k_clock_ns();
+
+	if (!kernel_clock_seen) {
+		kernel_clock_base_ns = now;
+		kernel_clock_seen = true;
+	}
+	return now - kernel_clock_base_ns;
+}
+
+u64 lkpi_time_ns(void)
+{
+	u64 virt = virtual_ns();
+	u64 real = kernel_elapsed_ns();
+
+	return real > virt ? real : virt;
+}
+
 void lkpi_time_advance_ns(u64 ns, bool sleeping)
 {
-	u64 total = sub_tick_ns + ns;
-	u64 ticks = total / LKPI_NS_PER_JIFFY;
+	u64 virt = virtual_ns();
+	u64 target = virt + ns;
+	u64 real = kernel_elapsed_ns();
+	u64 total;
+	u64 ticks;
 
+	if (real > target)
+		target = real;
+	total = sub_tick_ns + (target - virt);
+	ticks = total / LKPI_NS_PER_JIFFY;
 	sub_tick_ns = total % LKPI_NS_PER_JIFFY;
 	if (!ticks || advancing)
 		return;

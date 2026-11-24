@@ -6,6 +6,24 @@
 #define PCI_COMMAND_MASK 0x407U
 #define PCI_REVISION 8
 
+unsigned long lkpi_fake_mmio_base;
+
+u32 lkpi_fake_mmio_read(unsigned long offset)
+{
+	return (u32)k_mmio_rd(offset);
+}
+
+void lkpi_fake_mmio_write(unsigned long offset, u32 value)
+{
+	k_mmio_wr(offset, value);
+}
+
+void lkpi_mmio_note_mapping(u64 virt)
+{
+	if (virt && virt == k_mmio_fake())
+		lkpi_fake_mmio_base = (unsigned long)virt;
+}
+
 static struct pci_dev device;
 static struct pci_driver *bound_driver;
 static bool attached;

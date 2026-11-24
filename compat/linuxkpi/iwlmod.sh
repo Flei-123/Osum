@@ -14,7 +14,7 @@ lkpi_flags "$SHIM"
 lkpi_driver_flags "$DRIVER"
 TREE=$(bash compat/linuxkpi/fetch.sh "$DRIVER" "$W/fetch")
 mkdir -p "$OUT"
-FW_FILE="${IWL_FW_FILE:-/root/fw-cache/iwlwifi-8265-36.ucode}"
+FW_FILE="${IWL_FW_FILE:-$(bash compat/linuxkpi/fetch.sh fw-iwlwifi-8265 "$W/fw")}"
 FW_NAME=$(basename "$FW_FILE")
 FW_HASH=$(sha256sum "$FW_FILE" | cut -d' ' -f1)
 FW_SIZE=$(stat -c %s "$FW_FILE")

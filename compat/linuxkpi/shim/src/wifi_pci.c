@@ -204,6 +204,7 @@ int pcim_iomap_regions_request_all(struct pci_dev *dev, int mask, const char *na
 		iomap_table[bar] = (void __iomem *)k_ioremap(start, length);
 		if (!iomap_table[bar])
 			return -ENOMEM;
+		lkpi_mmio_note_mapping((u64)(unsigned long)iomap_table[bar]);
 	}
 	return 0;
 }

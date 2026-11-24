@@ -10,6 +10,7 @@ void lkpi_heap_release(void);
 size_t lkpi_heap_used(void);
 
 int lkpi_pci_attach(u64 state);
+void lkpi_mmio_note_mapping(u64 virt);
 int lkpi_pci_probe_status(void);
 
 void *lkpi_vram_map(void);

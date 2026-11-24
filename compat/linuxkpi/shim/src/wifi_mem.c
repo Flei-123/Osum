@@ -1,13 +1,27 @@
 #include "wifi.h"
 #include <linux/dma-mapping.h>
 
+static void *dma_page_align(void *raw)
+{
+	unsigned long aligned = ((unsigned long)raw + sizeof(void *) + PAGE_SIZE - 1) & ~((unsigned long)PAGE_SIZE - 1);
+
+	((void **)aligned)[-1] = raw;
+	return (void *)aligned;
+}
+
 void *dma_alloc_coherent(struct device *dev, size_t size, dma_addr_t *handle, gfp_t gfp)
 {
 	void *ptr;
 
 	(void)dev;
 	(void)gfp;
-	ptr = kzalloc(size, GFP_KERNEL);
+	if (size < PAGE_SIZE) {
+		ptr = kzalloc(size, GFP_KERNEL);
+	} else {
+		void *raw = kzalloc(size + PAGE_SIZE, GFP_KERNEL);
+
+		ptr = raw ? dma_page_align(raw) : NULL;
+	}
 	if (!ptr)
 		return NULL;
 	*handle = (dma_addr_t)(unsigned long)ptr;
@@ -17,9 +31,8 @@ void *dma_alloc_coherent(struct device *dev, size_t size, dma_addr_t *handle, gf
 void dma_free_coherent(struct device *dev, size_t size, void *cpu_addr, dma_addr_t handle)
 {
 	(void)dev;
-	(void)size;
 	(void)handle;
-	kfree(cpu_addr);
+	kfree(size < PAGE_SIZE ? cpu_addr : ((void **)cpu_addr)[-1]);
 }
 
 dma_addr_t dma_map_single(struct device *dev, void *ptr, size_t size, enum dma_data_direction dir)
