@@ -12,6 +12,7 @@
 #define SYS_EXIT 60
 #define TEST_DELAY 5
 #define TEST_BYTES 256
+#define ALIGNED_ROUNDS 24
 #define TEST_FRAME_BYTES 4096
 #define TEST_FW_BYTES 64
 #define TEST_NS_PER_MS 1000000ULL
@@ -138,6 +139,27 @@ static void count_timer(struct timer_list *timer)
 	timer_runs++;
 }
 
+static void aligned_stress(void)
+{
+	void *keep[ALIGNED_ROUNDS];
+	void *small[ALIGNED_ROUNDS];
+	bool ok = true;
+	size_t before = lkpi_heap_used();
+	int i;
+
+	for (i = 0; i < ALIGNED_ROUNDS; i++) {
+		keep[i] = lkpi_alloc_aligned(64 + 100 * i, PAGE_SIZE);
+		small[i] = kzalloc(24 + i, GFP_KERNEL);
+		ok = ok && keep[i] && small[i] && ((unsigned long)keep[i] & (PAGE_SIZE - 1)) == 0;
+	}
+	check(ok, "aligned and plain allocations interleave, all aligned ones page aligned");
+	for (i = 0; i < ALIGNED_ROUNDS; i++) {
+		kfree(keep[i]);
+		kfree(small[i]);
+	}
+	check(lkpi_heap_used() == before, "aligned blocks coalesce back to the original heap use");
+}
+
 static void dma_paths(void)
 {
 	dma_addr_t handle = 0;
@@ -147,6 +169,7 @@ static void dma_paths(void)
 	struct page *page = alloc_pages(GFP_KERNEL, 1);
 
 	check(buf && handle == (dma_addr_t)(unsigned long)buf && buf[TEST_BYTES - 1] == 0, "coherent buffer zeroed and mapped");
+	check((handle & (PAGE_SIZE - 1)) == 0, "small coherent buffer is page aligned");
 	check(dma_map_single(NULL, buf, TEST_BYTES, DMA_TO_DEVICE) == handle, "single mapping equals coherent address");
 	check(dma_mapping_error(NULL, DMA_MAPPING_ERROR) && !dma_mapping_error(NULL, handle), "mapping error detected");
 	check(dma_set_mask_and_coherent(NULL, ~0ULL) == 0 && dma_set_mask(NULL, 0) != 0, "dma mask accepted and refused");
@@ -155,6 +178,8 @@ static void dma_paths(void)
 	check(big && (big_handle & (PAGE_SIZE - 1)) == 0 && big[PAGE_SIZE - 1] == 0, "page-sized coherent buffer is page aligned and zeroed");
 	dma_free_coherent(NULL, PAGE_SIZE, big, big_handle);
 	check(page && page_address(page) && page_count(page) == 1, "page allocated with one reference");
+	check(page && ((unsigned long)page_address(page) & (PAGE_SIZE - 1)) == 0, "allocated page is page aligned");
+	aligned_stress();
 	get_page(page);
 	check(page_count(page) == 2, "page reference taken");
 	put_page(page);

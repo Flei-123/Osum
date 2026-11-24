@@ -1,27 +1,13 @@
 #include "wifi.h"
 #include <linux/dma-mapping.h>
 
-static void *dma_page_align(void *raw)
-{
-	unsigned long aligned = ((unsigned long)raw + sizeof(void *) + PAGE_SIZE - 1) & ~((unsigned long)PAGE_SIZE - 1);
-
-	((void **)aligned)[-1] = raw;
-	return (void *)aligned;
-}
-
 void *dma_alloc_coherent(struct device *dev, size_t size, dma_addr_t *handle, gfp_t gfp)
 {
 	void *ptr;
 
 	(void)dev;
 	(void)gfp;
-	if (size < PAGE_SIZE) {
-		ptr = kzalloc(size, GFP_KERNEL);
-	} else {
-		void *raw = kzalloc(size + PAGE_SIZE, GFP_KERNEL);
-
-		ptr = raw ? dma_page_align(raw) : NULL;
-	}
+	ptr = lkpi_alloc_aligned(size, PAGE_SIZE);
 	if (!ptr)
 		return NULL;
 	*handle = (dma_addr_t)(unsigned long)ptr;
@@ -31,8 +17,9 @@ void *dma_alloc_coherent(struct device *dev, size_t size, dma_addr_t *handle, gf
 void dma_free_coherent(struct device *dev, size_t size, void *cpu_addr, dma_addr_t handle)
 {
 	(void)dev;
+	(void)size;
 	(void)handle;
-	kfree(size < PAGE_SIZE ? cpu_addr : ((void **)cpu_addr)[-1]);
+	kfree(cpu_addr);
 }
 
 dma_addr_t dma_map_single(struct device *dev, void *ptr, size_t size, enum dma_data_direction dir)
@@ -119,7 +106,7 @@ struct page *alloc_pages(gfp_t gfp, unsigned int order)
 	page = kzalloc(sizeof(*page), GFP_KERNEL);
 	if (!page)
 		return NULL;
-	page->virtual = kzalloc(PAGE_SIZE << order, GFP_KERNEL);
+	page->virtual = lkpi_alloc_aligned(PAGE_SIZE << order, PAGE_SIZE);
 	if (!page->virtual) {
 		kfree(page);
 		return NULL;

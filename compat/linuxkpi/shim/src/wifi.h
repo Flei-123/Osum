@@ -6,6 +6,8 @@
 #include <osum/macplan_ops.h>
 
 void lkpi_mmio_note_mapping(u64 virt);
+void *lkpi_alloc_aligned(size_t size, size_t align);
+size_t lkpi_heap_used(void);
 
 #define LKPI_WIFI_PRIV_MAX 16384
 #define LKPI_WIFI_OBJ_PRIV_MAX 6144

@@ -1,6 +1,6 @@
 #include "lkpi.h"
 
-#define ARENA_MAX 24
+#define ARENA_MAX 64
 #define ARENA_FRAMES 64ULL
 #define FRAME_BYTES 4096ULL
 #define RUN_FRAMES_MAX 1024ULL
@@ -57,6 +57,47 @@ static void *take(struct block *b, u64 need)
 	return b + 1;
 }
 
+static u64 aligned_payload(const struct block *b, u64 align)
+{
+	u64 payload = (u64)(b + 1);
+	u64 aligned = ALIGN(payload, align);
+
+	while (aligned != payload && aligned - payload < SPLIT_MIN)
+		aligned += align;
+	return aligned;
+}
+
+static struct block *find_free_aligned(const struct arena *a, u64 need, u64 align)
+{
+	struct block *b = (struct block *)a->base;
+
+	while ((u64)b < arena_end(a)) {
+		u64 head;
+
+		if (b->size < sizeof(*b))
+			return NULL;
+		head = aligned_payload(b, align) - (u64)(b + 1);
+		if (!b->used && b->size >= head + need)
+			return b;
+		b = block_next(b);
+	}
+	return NULL;
+}
+
+static struct block *split_head(struct block *b, u64 align)
+{
+	u64 head = aligned_payload(b, align) - (u64)(b + 1);
+	struct block *tail;
+
+	if (head == 0)
+		return b;
+	tail = (struct block *)((u64)b + head);
+	tail->size = b->size - head;
+	tail->used = 0;
+	b->size = head;
+	return tail;
+}
+
 static void coalesce(const struct arena *a)
 {
 	struct block *b = (struct block *)a->base;
@@ -81,11 +122,35 @@ static bool arena_is_empty(const struct arena *a)
 	return !b->used && b->size == a->frames * FRAME_BYTES;
 }
 
+static struct block *grow_arena(u64 need, u64 align)
+{
+	u64 frames = (need + align + FRAME_BYTES - 1) / FRAME_BYTES;
+	u64 base;
+	struct block *b;
+
+	if (arena_count == ARENA_MAX) {
+		_printk("lkpi: kmalloc %lu: arenas exhausted\n", (unsigned long)need);
+		return NULL;
+	}
+	if (frames < ARENA_FRAMES)
+		frames = ARENA_FRAMES;
+	base = k_frames(frames);
+	if (!base) {
+		_printk("lkpi: kmalloc %lu: no frames\n", (unsigned long)need);
+		return NULL;
+	}
+	arenas[arena_count].base = base;
+	arenas[arena_count].frames = frames;
+	arena_count++;
+	b = (struct block *)base;
+	b->size = frames * FRAME_BYTES;
+	b->used = 0;
+	return b;
+}
+
 void *kmalloc(size_t size, gfp_t flags)
 {
 	u64 need;
-	u64 frames;
-	u64 base;
 	unsigned int i;
 	struct block *b;
 
@@ -102,25 +167,31 @@ void *kmalloc(size_t size, gfp_t flags)
 		if (b)
 			return take(b, need);
 	}
-	if (arena_count == ARENA_MAX) {
-		_printk("lkpi: kmalloc %lu: arenas exhausted\n", (unsigned long)size);
+	b = grow_arena(need, BLOCK_ALIGN);
+	return b ? take(b, need) : NULL;
+}
+
+void *lkpi_alloc_aligned(size_t size, size_t align)
+{
+	u64 need;
+	unsigned int i;
+	struct block *b = NULL;
+
+	if (size == 0)
+		size = 1;
+	if (size > RUN_FRAMES_MAX * FRAME_BYTES - sizeof(struct block)) {
+		_printk("lkpi: aligned alloc %lu too large\n", (unsigned long)size);
 		return NULL;
 	}
-	frames = (need + FRAME_BYTES - 1) / FRAME_BYTES;
-	if (frames < ARENA_FRAMES)
-		frames = ARENA_FRAMES;
-	base = k_frames(frames);
-	if (!base) {
-		_printk("lkpi: kmalloc %lu: no frames\n", (unsigned long)size);
+	need = ALIGN((u64)size + sizeof(struct block), BLOCK_ALIGN);
+	for (i = 0; i < arena_count && !b; i++)
+		b = find_free_aligned(&arenas[i], need, align);
+	if (!b)
+		b = grow_arena(need, align);
+	if (!b)
 		return NULL;
-	}
-	arenas[arena_count].base = base;
-	arenas[arena_count].frames = frames;
-	arena_count++;
-	b = (struct block *)base;
-	b->size = frames * FRAME_BYTES;
-	b->used = 0;
-	return take(b, need);
+	b = split_head(b, align);
+	return memset(take(b, need), 0, size);
 }
 
 void *kzalloc(size_t size, gfp_t flags)

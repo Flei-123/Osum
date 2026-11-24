@@ -7,6 +7,7 @@
 #include <osum/osum_if.h>
 
 void lkpi_heap_release(void);
+void *lkpi_alloc_aligned(size_t size, size_t align);
 size_t lkpi_heap_used(void);
 
 int lkpi_pci_attach(u64 state);

@@ -149,9 +149,8 @@ void vfree(const void *addr)
 
 unsigned long __get_free_pages(gfp_t gfp, unsigned int order)
 {
-	void *ptr = kzalloc(PAGE_SIZE << order, gfp);
-
-	return (unsigned long)ptr;
+	(void)gfp;
+	return (unsigned long)lkpi_alloc_aligned(PAGE_SIZE << order, PAGE_SIZE);
 }
 
 void free_pages(unsigned long addr, unsigned int order)
