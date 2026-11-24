@@ -33,6 +33,7 @@ void *devm_kzalloc(struct device *dev, size_t size, gfp_t gfp);
 char *devm_kasprintf(struct device *dev, gfp_t gfp, const char *fmt, ...) __printf(3, 4);
 void *dev_get_drvdata(const struct device *dev);
 void dev_set_drvdata(struct device *dev, void *data);
+void dev_printk(const char *level, const struct device *dev, const char *fmt, ...) __printf(3, 4);
 #define dev_err(dev, fmt, ...) _printk("lkpi: " fmt, ##__VA_ARGS__)
 #define dev_crit(dev, fmt, ...) _printk("lkpi: " fmt, ##__VA_ARGS__)
 #define dev_warn(dev, fmt, ...) _printk("lkpi: " fmt, ##__VA_ARGS__)

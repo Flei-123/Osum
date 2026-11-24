@@ -253,3 +253,18 @@ int dmi_check_system(const struct dmi_system_id *list)
 	(void)list;
 	return 0;
 }
+
+#define DEV_PRINTK_LINE 256
+
+void dev_printk(const char *level, const struct device *dev, const char *fmt, ...)
+{
+	char line[DEV_PRINTK_LINE];
+	va_list args;
+
+	(void)level;
+	(void)dev;
+	va_start(args, fmt);
+	vsnprintf(line, sizeof(line), fmt, args);
+	va_end(args);
+	_printk("lkpi: %s", line);
+}

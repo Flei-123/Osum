@@ -149,7 +149,7 @@ bool pci_pme_capable(struct pci_dev *dev, pci_power_t state)
 int pci_enable_msi(struct pci_dev *dev)
 {
 	(void)dev;
-	return -ENOSYS;
+	return 0;
 }
 
 int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *entries, int minvec, int maxvec)

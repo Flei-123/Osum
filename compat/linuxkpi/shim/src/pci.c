@@ -55,6 +55,8 @@ static const struct pci_device_id *find_id(const struct pci_driver *driver,
 	return NULL;
 }
 
+static struct pci_bus root_bus;
+
 int lkpi_pci_attach(u64 state)
 {
 	u64 bar[3];
@@ -76,6 +78,9 @@ int lkpi_pci_attach(u64 state)
 	device.subsystem_device = (u16)subsystem;
 	device.class = (u32)class_code;
 	device.devfn = (u32)osum_ctx_read(state, OSUM_CTX_BDF) & 0xff;
+	memset(&root_bus, 0, sizeof(root_bus));
+	root_bus.number = (unsigned char)(osum_ctx_read(state, OSUM_CTX_BDF) >> 8);
+	device.bus = &root_bus;
 	device.irq = (u8)osum_ctx_read(state, OSUM_CTX_IRQ);
 	device.revision = (u8)k_pcicfg_read(PCI_REVISION);
 	for (i = 0; i < OSUM_BAR_COUNT; i++) {

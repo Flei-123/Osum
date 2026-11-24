@@ -201,6 +201,8 @@ long lkpi_wait_slice(wait_queue_head_t *q, long timeout)
 {
 	(void)q;
 	lkpi_time_sleep_ns(LKPI_NS_PER_JIFFY);
+	lkpi_irq_poll();
+	lkpi_napi_run();
 	return timeout > 0 ? timeout - 1 : 0;
 }
 

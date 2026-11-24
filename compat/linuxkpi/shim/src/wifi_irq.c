@@ -99,8 +99,12 @@ int irq_set_affinity_hint(unsigned int irq, const void *mask)
 
 void lkpi_irq_poll(void)
 {
+	static bool polling;
 	unsigned int i;
 
+	if (polling)
+		return;
+	polling = true;
 	for (i = 0; i < LKPI_IRQ_MAX; i++) {
 		struct irq_slot slot = slots[i];
 		irqreturn_t result = IRQ_WAKE_THREAD;
@@ -112,4 +116,5 @@ void lkpi_irq_poll(void)
 		if (result == IRQ_WAKE_THREAD && slot.thread_fn)
 			slot.thread_fn(slot.irq, slot.dev_id);
 	}
+	polling = false;
 }

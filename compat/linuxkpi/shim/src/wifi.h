@@ -7,8 +7,8 @@
 
 void lkpi_mmio_note_mapping(u64 virt);
 
-#define LKPI_WIFI_PRIV_MAX 8192
-#define LKPI_WIFI_OBJ_PRIV_MAX 256
+#define LKPI_WIFI_PRIV_MAX 16384
+#define LKPI_WIFI_OBJ_PRIV_MAX 6144
 
 struct lkpi_wifi_hw {
 	struct ieee80211_hw hw;

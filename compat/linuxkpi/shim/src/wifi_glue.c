@@ -223,3 +223,18 @@ void lkpi_wifi_glue_detach(void)
 	kfree(glue);
 	glue = NULL;
 }
+
+int lkpi_wifi_glue_attach_when_ready(unsigned int rounds)
+{
+	struct ieee80211_hw *hw;
+
+	while (rounds--) {
+		hw = lkpi_wifi_registered_hw();
+		if (hw)
+			return lkpi_wifi_glue_attach(hw, NULL);
+		lkpi_time_tick();
+		lkpi_irq_poll();
+		lkpi_napi_run();
+	}
+	return LKPI80211_EPROTO;
+}

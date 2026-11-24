@@ -457,7 +457,7 @@ static void bare_driver(void)
 	check(hw != NULL, "bare driver allocates");
 	check(ieee80211_register_hw(hw) == LKPI80211_EINVAL, "register refuses driver without mandatory ops");
 	ieee80211_free_hw(hw);
-	check(ieee80211_alloc_hw(9000, &fake_ops) == NULL, "oversized priv refused");
+	check(ieee80211_alloc_hw(20000, &fake_ops) == NULL, "oversized priv refused");
 }
 
 static void upcall_paths(struct ieee80211_hw *hw)

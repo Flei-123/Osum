@@ -119,18 +119,16 @@ static void put_integer(struct sink *s, va_list *args, char conv, const struct s
 	}
 }
 
-int vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
-{
-	struct sink s = { buf, size, 0 };
-	va_list ap;
+static void put_pointer_ext(struct sink *s, const char **fmt, va_list *ap, const struct spec *sp);
 
-	va_copy(ap, args);
+static void format(struct sink *s, const char *fmt, va_list *ap)
+{
 	for (; *fmt; fmt++) {
 		struct spec sp = { false, false, false, 0, -1, 0 };
 		char conv;
 
 		if (*fmt != '%') {
-			put_char(&s, *fmt);
+			put_char(s, *fmt);
 			continue;
 		}
 		fmt++;
@@ -145,7 +143,7 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
 				break;
 		}
 		if (*fmt == '*') {
-			sp.width = va_arg(ap, int);
+			sp.width = va_arg(*ap, int);
 			if (sp.width < 0) {
 				sp.left = true;
 				sp.width = -sp.width;
@@ -157,7 +155,7 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
 		if (*fmt == '.') {
 			fmt++;
 			if (*fmt == '*') {
-				sp.precision = va_arg(ap, int);
+				sp.precision = va_arg(*ap, int);
 				fmt++;
 			} else {
 				sp.precision = parse_number(&fmt);
@@ -178,27 +176,97 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
 		case 'x':
 		case 'X':
 		case 'o':
-			put_integer(&s, &ap, conv, &sp);
+			put_integer(s, ap, conv, &sp);
 			break;
 		case 'p':
-			sp.alt = true;
-			put_number(&s, (u64)va_arg(ap, void *), false, 16, false, &sp);
+			put_pointer_ext(s, &fmt, ap, &sp);
 			break;
 		case 'c':
-			put_char(&s, (char)va_arg(ap, int));
+			put_char(s, (char)va_arg(*ap, int));
 			break;
 		case 's':
-			put_string(&s, va_arg(ap, const char *), &sp);
+			put_string(s, va_arg(*ap, const char *), &sp);
 			break;
 		case '%':
-			put_char(&s, '%');
+			put_char(s, '%');
 			break;
 		default:
-			put_char(&s, '%');
-			put_char(&s, conv);
+			put_char(s, '%');
+			put_char(s, conv);
 			break;
 		}
 	}
+}
+
+static void put_mac(struct sink *s, const u8 *mac)
+{
+	static const struct spec two = { false, true, false, 2, -1, 0 };
+	int i;
+
+	if (!mac) {
+		put_string(s, "(null)", &(struct spec){ false, false, false, 0, -1, 0 });
+		return;
+	}
+	for (i = 0; i < 6; i++) {
+		if (i)
+			put_char(s, ':');
+		put_number(s, mac[i], false, 16, false, &two);
+	}
+}
+
+static void put_ipv4(struct sink *s, const u8 *ip)
+{
+	static const struct spec plain = { false, false, false, 0, -1, 0 };
+	int i;
+
+	for (i = 0; i < 4; i++) {
+		if (i)
+			put_char(s, '.');
+		put_number(s, ip[i], false, 10, false, &plain);
+	}
+}
+
+static void put_pointer_ext(struct sink *s, const char **fmt, va_list *ap, const struct spec *sp)
+{
+	struct spec ptr = *sp;
+	char next = (*fmt)[1];
+
+	if (next == 'V') {
+		const struct va_format *vf = va_arg(*ap, const struct va_format *);
+		va_list inner;
+
+		(*fmt)++;
+		if (!vf || !vf->fmt || !vf->va)
+			return;
+		va_copy(inner, *vf->va);
+		format(s, vf->fmt, &inner);
+		va_end(inner);
+		return;
+	}
+	if (next == 'M') {
+		(*fmt)++;
+		put_mac(s, va_arg(*ap, const u8 *));
+		return;
+	}
+	if (next == 'I' && (*fmt)[2] == '4') {
+		*fmt += 2;
+		put_ipv4(s, va_arg(*ap, const u8 *));
+		return;
+	}
+	if (next == 's' || next == 'S' || next == 'B' || next == 'K') {
+		(*fmt)++;
+	}
+	ptr.alt = true;
+	put_number(s, (u64)va_arg(*ap, void *), false, 16, false, &ptr);
+}
+
+int vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
+{
+	struct sink s = { buf, size, 0 };
+	va_list ap;
+
+	va_copy(ap, args);
+	format(&s, fmt, &ap);
 	va_end(ap);
 	if (size)
 		buf[s.pos < size ? s.pos : size - 1] = 0;

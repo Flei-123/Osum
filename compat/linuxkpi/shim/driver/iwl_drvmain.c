@@ -1,6 +1,12 @@
+#ifdef LKPI_IWL_DEBUG
+#include <linux/kernel.h>
+#include "iwl-modparams.h"
+#endif
 #include "../src/lkpi.h"
 #include "../src/wifi.h"
 #include "iwl_fwinfo.h"
+
+#define IWL_PUMP_ROUNDS 3000
 
 int lkpi_init_iwl_drv_init(void);
 void lkpi_exit_iwl_drv_exit(void);
@@ -12,6 +18,10 @@ void lkpi_module_exit(u64 state) __asm__("module_exit");
 int lkpi_module_init(u64 state)
 {
 	int rc = lkpi_pci_attach(state);
+
+#ifdef LKPI_IWL_DEBUG
+	iwlwifi_mod_params.debug_level = 0xFFFFFFFF;
+#endif
 
 	if (rc)
 		return rc;
@@ -27,7 +37,12 @@ int lkpi_module_init(u64 state)
 		lkpi_firmware_clear();
 		return rc;
 	}
-	return lkpi_pci_probe_status();
+	rc = lkpi_pci_probe_status();
+	if (rc)
+		return rc;
+	if (lkpi_wifi_glue_attach_when_ready(IWL_PUMP_ROUNDS))
+		_printk("lkpi: iwl radio not registered after %d rounds\n", IWL_PUMP_ROUNDS);
+	return 0;
 }
 
 void lkpi_module_exit(u64 state)

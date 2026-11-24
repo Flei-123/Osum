@@ -1,5 +1,12 @@
 #include "wifi.h"
 
+static struct ieee80211_hw *registered_hw;
+
+struct ieee80211_hw *lkpi_wifi_registered_hw(void)
+{
+	return registered_hw;
+}
+
 struct lkpi_wifi_hw *lkpi_wifi_of(const struct ieee80211_hw *hw)
 {
 	return (struct lkpi_wifi_hw *)hw;
@@ -60,12 +67,16 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 	    !w->ops->sta_state || !w->ops->tx)
 		return LKPI80211_EINVAL;
 	w->state.registered = 1;
+	if (!registered_hw)
+		registered_hw = hw;
 	return 0;
 }
 
 void ieee80211_unregister_hw(struct ieee80211_hw *hw)
 {
 	lkpi_wifi_of(hw)->state.registered = 0;
+	if (registered_hw == hw)
+		registered_hw = NULL;
 }
 
 void lkpi80211_set_upcalls(struct ieee80211_hw *hw, const struct lkpi80211_upcalls *upcalls, void *ctx)

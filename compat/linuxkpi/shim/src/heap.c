@@ -1,6 +1,6 @@
 #include "lkpi.h"
 
-#define ARENA_MAX 8
+#define ARENA_MAX 24
 #define ARENA_FRAMES 64ULL
 #define FRAME_BYTES 4096ULL
 #define RUN_FRAMES_MAX 1024ULL
@@ -92,22 +92,28 @@ void *kmalloc(size_t size, gfp_t flags)
 	(void)flags;
 	if (size == 0)
 		size = 1;
-	if (size > RUN_FRAMES_MAX * FRAME_BYTES - sizeof(struct block))
+	if (size > RUN_FRAMES_MAX * FRAME_BYTES - sizeof(struct block)) {
+		_printk("lkpi: kmalloc %lu too large\n", (unsigned long)size);
 		return NULL;
+	}
 	need = ALIGN((u64)size + sizeof(struct block), BLOCK_ALIGN);
 	for (i = 0; i < arena_count; i++) {
 		b = find_free(&arenas[i], need);
 		if (b)
 			return take(b, need);
 	}
-	if (arena_count == ARENA_MAX)
+	if (arena_count == ARENA_MAX) {
+		_printk("lkpi: kmalloc %lu: arenas exhausted\n", (unsigned long)size);
 		return NULL;
+	}
 	frames = (need + FRAME_BYTES - 1) / FRAME_BYTES;
 	if (frames < ARENA_FRAMES)
 		frames = ARENA_FRAMES;
 	base = k_frames(frames);
-	if (!base)
+	if (!base) {
+		_printk("lkpi: kmalloc %lu: no frames\n", (unsigned long)size);
 		return NULL;
+	}
 	arenas[arena_count].base = base;
 	arenas[arena_count].frames = frames;
 	arena_count++;
