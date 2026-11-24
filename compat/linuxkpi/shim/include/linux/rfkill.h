@@ -4,6 +4,7 @@
 #include <linux/types.h>
 #include <uapi/linux/rfkill.h>
 struct rfkill;
+static inline bool rfkill_soft_blocked(struct rfkill *rfkill) { (void)rfkill; return false; }
 bool rfkill_set_hw_state_reason(struct rfkill *rfkill, bool blocked, enum rfkill_hard_block_reasons reason);
 static inline bool rfkill_set_hw_state(struct rfkill *rfkill, bool blocked)
 {

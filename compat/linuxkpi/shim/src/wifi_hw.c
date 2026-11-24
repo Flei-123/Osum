@@ -5,6 +5,16 @@ struct lkpi_wifi_hw *lkpi_wifi_of(const struct ieee80211_hw *hw)
 	return (struct lkpi_wifi_hw *)hw;
 }
 
+struct lkpi_wifi_hw *lkpi_wifi_of_vif(const struct ieee80211_vif *vif)
+{
+	return container_of(vif, struct lkpi_wifi_hw, vif.vif);
+}
+
+struct lkpi_wifi_hw *lkpi_wifi_of_sta(const struct ieee80211_sta *sta)
+{
+	return container_of(sta, struct lkpi_wifi_hw, sta.sta);
+}
+
 struct ieee80211_hw *ieee80211_alloc_hw_nm(size_t priv_data_len, const struct ieee80211_ops *ops, const char *requested_name)
 {
 	struct lkpi_wifi_hw *w;
@@ -16,6 +26,14 @@ struct ieee80211_hw *ieee80211_alloc_hw_nm(size_t priv_data_len, const struct ie
 		return NULL;
 	w->used = 1;
 	w->ops = ops;
+	w->wiphy = kzalloc(sizeof(*w->wiphy) + sizeof(struct ieee80211_hw *), GFP_KERNEL);
+	if (!w->wiphy) {
+		kfree(w);
+		return NULL;
+	}
+	*(struct ieee80211_hw **)w->wiphy->priv = &w->hw;
+	w->hw.wiphy = w->wiphy;
+	w->wdev.wiphy = w->wiphy;
 	w->hw.priv = w->priv;
 	w->hw.queues = 1;
 	return &w->hw;
@@ -23,8 +41,10 @@ struct ieee80211_hw *ieee80211_alloc_hw_nm(size_t priv_data_len, const struct ie
 
 void ieee80211_free_hw(struct ieee80211_hw *hw)
 {
-	if (hw)
-		kfree(lkpi_wifi_of(hw));
+	if (!hw)
+		return;
+	kfree(lkpi_wifi_of(hw)->wiphy);
+	kfree(lkpi_wifi_of(hw));
 }
 
 int ieee80211_register_hw(struct ieee80211_hw *hw)

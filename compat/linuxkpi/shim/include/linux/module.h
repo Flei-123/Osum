@@ -5,6 +5,9 @@
 
 struct module;
 #define THIS_MODULE ((struct module *)0)
+#define try_module_get(m) ((void)(m), 1)
+static inline void module_put(struct module *m) { (void)m; }
+#define request_module_nowait(fmt, ...) 0
 
 #define LKPI_NOOP_DECL _Static_assert(1, "module metadata")
 #define module_param(name, type, perm) LKPI_NOOP_DECL

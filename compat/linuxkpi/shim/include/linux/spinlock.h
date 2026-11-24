@@ -20,6 +20,8 @@ typedef struct { int locked; } rwlock_t;
 #define spin_unlock_irq(l) spin_unlock(l)
 #define spin_lock_irqsave(l, f) do { (f) = 0; spin_lock(l); } while (0)
 #define spin_unlock_irqrestore(l, f) do { (void)(f); spin_unlock(l); } while (0)
+#define spin_lock_nested(l, n) spin_lock(l)
+#define spin_trylock_bh(l) spin_trylock(l)
 #define spin_trylock(l) ((l)->locked ? 0 : ((l)->locked = 1))
 #define spin_is_locked(l) ((l)->locked)
 #define assert_spin_locked(l) ((void)(l))

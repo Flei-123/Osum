@@ -16,6 +16,10 @@ extern u64 jiffies_64;
 #define time_before(a, b) time_after(b, a)
 #define time_after_eq(a, b) ((long)((a) - (b)) >= 0)
 #define time_before_eq(a, b) time_after_eq(b, a)
+#define time_is_after_jiffies(a) time_before(jiffies, a)
+#define time_is_before_jiffies(a) time_after(jiffies, a)
+unsigned long round_jiffies(unsigned long j);
+unsigned long round_jiffies_relative(unsigned long j);
 static inline unsigned long msecs_to_jiffies(unsigned int m) { return ((unsigned long)m * HZ + MSEC_PER_SEC - 1) / MSEC_PER_SEC; }
 static inline unsigned long usecs_to_jiffies(unsigned int u) { return ((unsigned long)u * HZ + USEC_PER_SEC - 1) / USEC_PER_SEC; }
 static inline unsigned int jiffies_to_msecs(unsigned long j) { return j * (MSEC_PER_SEC / HZ); }

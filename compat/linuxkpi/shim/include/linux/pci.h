@@ -87,6 +87,27 @@ int pcim_enable_device(struct pci_dev *dev);
 int pci_request_region(struct pci_dev *dev, int bar, const char *name);
 void pci_release_regions(struct pci_dev *dev);
 
+int pci_read_config_dword(struct pci_dev *dev, int where, u32 *val);
+int pci_read_config_word(struct pci_dev *dev, int where, u16 *val);
+int pci_write_config_word(struct pci_dev *dev, int where, u16 val);
+int pci_write_config_byte(struct pci_dev *dev, int where, u8 val);
+void pci_set_master(struct pci_dev *dev);
+u16 pci_find_ext_capability(struct pci_dev *dev, int cap_id);
+int pcie_capability_read_word(struct pci_dev *dev, int pos, u16 *val);
+struct pci_dev *pcie_find_root_port(struct pci_dev *dev);
+struct pci_dev *pci_dev_get(struct pci_dev *dev);
+void pci_dev_put(struct pci_dev *dev);
+const char *pci_name(const struct pci_dev *dev);
+bool pci_pme_capable(struct pci_dev *dev, pci_power_t state);
+int pci_enable_msi(struct pci_dev *dev);
+int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *entries, int minvec, int maxvec);
+int pci_assign_resource(struct pci_dev *dev, int resno);
+void pci_lock_rescan_remove(void);
+void pci_unlock_rescan_remove(void);
+int pci_rescan_bus(struct pci_bus *bus);
+void pci_stop_and_remove_bus_device(struct pci_dev *dev);
+int pcim_iomap_regions_request_all(struct pci_dev *dev, int mask, const char *name);
+void __iomem *const *pcim_iomap_table(struct pci_dev *dev);
 static inline void pci_set_drvdata(struct pci_dev *dev, void *data)
 {
 	dev->dev.driver_data = data;

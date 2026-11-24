@@ -25,6 +25,12 @@ struct device {
 	const char *init_name;
 };
 const char *dev_name(const struct device *dev);
+struct device *get_device(struct device *dev);
+void put_device(struct device *dev);
+void device_release_driver(struct device *dev);
+int device_reprobe(struct device *dev);
+void *devm_kzalloc(struct device *dev, size_t size, gfp_t gfp);
+char *devm_kasprintf(struct device *dev, gfp_t gfp, const char *fmt, ...) __printf(3, 4);
 void *dev_get_drvdata(const struct device *dev);
 void dev_set_drvdata(struct device *dev, void *data);
 #define dev_err(dev, fmt, ...) _printk("lkpi: " fmt, ##__VA_ARGS__)

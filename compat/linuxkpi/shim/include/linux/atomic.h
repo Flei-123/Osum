@@ -20,6 +20,8 @@
 #define atomic64_set(v, i) __atomic_store_n(&(v)->counter, (i), __ATOMIC_RELAXED)
 #define atomic64_inc(v) ((void)__atomic_add_fetch(&(v)->counter, 1, __ATOMIC_SEQ_CST))
 #define atomic64_inc_return(v) __atomic_add_fetch(&(v)->counter, 1, __ATOMIC_SEQ_CST)
+static inline int atomic_dec_if_positive(atomic_t *v) { int c = atomic_read(v) - 1; if (c >= 0) atomic_set(v, c); return c; }
+static inline int atomic_fetch_add_unless(atomic_t *v, int a, int u) { int c = atomic_read(v); if (c != u) atomic_set(v, c + a); return c; }
 #define smp_mb() __atomic_thread_fence(__ATOMIC_SEQ_CST)
 #define smp_wmb() __atomic_thread_fence(__ATOMIC_RELEASE)
 #define smp_rmb() __atomic_thread_fence(__ATOMIC_ACQUIRE)

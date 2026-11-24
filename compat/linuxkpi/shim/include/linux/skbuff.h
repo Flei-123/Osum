@@ -4,6 +4,9 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/in6.h>
+#include <linux/dma-direction.h>
+struct device;
+struct page;
 
 #define SKB_CB_SIZE 48
 
@@ -26,6 +29,9 @@ struct sk_buff {
 	__wsum csum;
 	__be16 protocol;
 	u16 queue_mapping;
+	u8 *head_alloc;
+	u16 mac_header;
+	u16 transport_header;
 	u8 in_use;
 	u32 magic;
 	char cb[SKB_CB_SIZE] __attribute__((aligned(8)));
@@ -60,5 +66,29 @@ void skb_queue_head_init(struct sk_buff_head *list);
 void __skb_queue_tail(struct sk_buff_head *list, struct sk_buff *skb);
 struct sk_buff *__skb_dequeue(struct sk_buff_head *list);
 u32 skb_queue_len(const struct sk_buff_head *list);
+void skb_queue_tail(struct sk_buff_head *list, struct sk_buff *skb);
+struct sk_buff *skb_dequeue(struct sk_buff_head *list);
+void skb_queue_purge(struct sk_buff_head *list);
+void __skb_queue_purge(struct sk_buff_head *list);
+void skb_queue_splice_init(struct sk_buff_head *list, struct sk_buff_head *head);
+void *skb_put_data(struct sk_buff *skb, const void *data, unsigned int len);
+void *skb_put_zero(struct sk_buff *skb, unsigned int len);
+struct sk_buff *skb_copy(const struct sk_buff *skb, gfp_t gfp);
+int pskb_expand_head(struct sk_buff *skb, int nhead, int ntail, gfp_t gfp);
+int __skb_linearize(struct sk_buff *skb);
+void skb_add_rx_frag(struct sk_buff *skb, int i, struct page *page, int off, int size, unsigned int truesize);
+void *skb_frag_address(const skb_frag_t *frag);
+dma_addr_t skb_frag_dma_map(struct device *dev, const skb_frag_t *frag, size_t offset, size_t size, enum dma_data_direction dir);
+static inline unsigned int skb_frag_size(const skb_frag_t *frag) { return frag->size; }
+static inline void __skb_queue_head_init(struct sk_buff_head *list) { list->first = NULL; list->last = NULL; list->qlen = 0; }
+static inline int skb_queue_empty(const struct sk_buff_head *list) { return list->first == NULL; }
+static inline unsigned int skb_headlen(const struct sk_buff *skb) { return skb->len - skb->data_len; }
+static inline int skb_is_nonlinear(const struct sk_buff *skb) { return skb->data_len != 0; }
+static inline int skb_is_gso(const struct sk_buff *skb) { return skb_shinfo(skb)->gso_size != 0; }
+static inline unsigned char *skb_tail_pointer(const struct sk_buff *skb) { return skb->tail; }
+static inline unsigned char *skb_mac_header(const struct sk_buff *skb) { return skb->head + skb->mac_header; }
+static inline unsigned char *skb_transport_header(const struct sk_buff *skb) { return skb->head + skb->transport_header; }
+static inline void skb_set_mac_header(struct sk_buff *skb, int offset) { skb->mac_header = (u16)(skb->data - skb->head) + offset; }
+static inline void skb_postpush_rcsum(struct sk_buff *skb, const void *start, unsigned int len) { (void)skb; (void)start; (void)len; }
 
 #endif

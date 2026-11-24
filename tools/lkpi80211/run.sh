@@ -94,7 +94,7 @@ wmutant qosmap wifi_dispatch.c "changed = BSS_CHANGED_QOS;" "changed = BSS_CHANG
 wmutant assocflag wifi_dispatch.c "cfg.assoc = w->state.sta_state >= IEEE80211_STA_ASSOC;" "cfg.assoc = 1;"
 wmutant acdrop wifi_dispatch.c "0, arg, &params);" "0, 0, &params);"
 wmutant skbleak wifi_skb.c "	live--;
-	kfree(skb);" "	kfree(skb);"
+	for (i = 0;" "	for (i = 0;"
 wmutant doublefree wifi_skb.c "if (!skb->in_use || skb->magic != SKB_MAGIC_LIVE) {" "if (0) {"
 wmutant scanguard wifi_upcall.c "if (!w->state.scanning)
 		return;" "if (0)

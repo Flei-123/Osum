@@ -13,5 +13,6 @@ void kmem_cache_free(struct kmem_cache *cache, void *obj);
 #define kmalloc_array(n, size, flags) kcalloc((n), (size), (flags))
 #define kzalloc_obj(p, flags) kzalloc(sizeof(*(p)), (flags))
 void *kmemdup(const void *src, size_t len, gfp_t flags);
+void *kvmemdup(const void *src, size_t len, gfp_t flags);
 #define kfree_sensitive(p) kfree(p)
 #endif

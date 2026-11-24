@@ -15,7 +15,6 @@ struct workqueue_struct *system_unbound_wq = &wq_unbound;
 
 static struct list_head pending = LIST_HEAD_INIT(pending);
 static struct list_head armed = LIST_HEAD_INIT(armed);
-static unsigned long clock_ticks;
 
 static bool linked(const struct list_head *entry)
 {
@@ -71,7 +70,7 @@ bool queue_delayed_work(struct workqueue_struct *wq, struct delayed_work *dwork,
 	if (!delay)
 		return queue_work(wq, &dwork->work);
 	dwork->timer.function = delayed_fire;
-	mod_timer(&dwork->timer, clock_ticks + delay);
+	mod_timer(&dwork->timer, jiffies + delay);
 	return true;
 }
 
@@ -161,6 +160,14 @@ int del_timer_sync(struct timer_list *timer)
 	return del_timer(timer);
 }
 
+int timer_shutdown_sync(struct timer_list *timer)
+{
+	int was_pending = del_timer_sync(timer);
+
+	timer->function = NULL;
+	return was_pending;
+}
+
 int timer_pending(const struct timer_list *timer)
 {
 	return linked(&timer->entry);
@@ -170,7 +177,8 @@ void lkpi_timers_run(unsigned long now)
 {
 	struct timer_list *timer, *next;
 
-	clock_ticks = now;
+	jiffies = now;
+	jiffies_64 = now;
 	list_for_each_entry_safe(timer, next, &armed, entry) {
 		if (time_after(timer->expires, now))
 			continue;
@@ -187,6 +195,23 @@ void lkpi_work_run(void)
 void wake_up(wait_queue_head_t *q)
 {
 	(void)q;
+}
+
+long lkpi_wait_slice(wait_queue_head_t *q, long timeout)
+{
+	(void)q;
+	lkpi_time_sleep_ns(LKPI_NS_PER_JIFFY);
+	return timeout > 0 ? timeout - 1 : 0;
+}
+
+void wait_for_completion(struct completion *c)
+{
+	unsigned long budget = LKPI_WAIT_BUDGET_TICKS;
+
+	while (!c->done && budget--)
+		lkpi_wait_slice(&c->wait, 1);
+	if (c->done && c->done != ~0U / 2)
+		c->done--;
 }
 
 void complete(struct completion *c)

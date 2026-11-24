@@ -65,17 +65,22 @@ def nm_names(path, undefined):
 def closure(cc, flags, tree, ok_units, shim_objs):
     work = tempfile.mkdtemp(prefix="lkpi-obj-")
     undef, defined = set(), set()
+    users = {}
     for unit in ok_units:
         obj = os.path.join(work, unit.replace("/", "_") + ".o")
         rc, _ = compile_unit(cc, flags, tree, unit, [], obj)
         if rc == 0:
-            undef |= nm_names(obj, True)
+            names = nm_names(obj, True)
+            for name in names:
+                users.setdefault(name, []).append(unit)
+            undef |= names
             defined |= nm_names(obj, False)
     provided = set()
     for obj in shim_objs:
         provided |= nm_names(obj, False)
     subprocess.run(["rm", "-rf", work])
-    return sorted(undef - defined - provided)
+    missing = sorted(undef - defined - provided)
+    return missing, {name: users[name] for name in missing}
 
 
 def main():
@@ -97,9 +102,9 @@ def main():
         per_unit[unit] = {"state": state, "header": header, "errors": errors}
     ok_units = [u for u in units if per_unit[u]["state"] == "ok"]
     headers = discover_headers(args.cc, args.flag, args.tree, units, args.jobs)
-    undefined = closure(args.cc, args.flag, args.tree, ok_units, args.shim_obj)
+    undefined, undefined_by = closure(args.cc, args.flag, args.tree, ok_units, args.shim_obj)
     report = {"units": len(units), "units_ok": len(ok_units), "headers_missing": headers,
-              "undefined": undefined, "complete": len(ok_units) == len(units), "per_unit": per_unit}
+              "undefined": undefined, "undefined_by": undefined_by, "complete": len(ok_units) == len(units), "per_unit": per_unit}
     json.dump(report, open(args.json, "w"), indent=1, sort_keys=True)
     print("units_ok=%d/%d headers_missing=%d undefined=%d complete=%s" % (
         len(ok_units), len(units), len(headers), len(undefined), report["complete"]))

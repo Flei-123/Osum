@@ -1,3 +1,4 @@
+#define SPRINTF_LIMIT 2147483647U
 #include "lkpi.h"
 
 #define LINE_MAX 256
@@ -211,6 +212,30 @@ int snprintf(char *buf, size_t size, const char *fmt, ...)
 
 	va_start(args, fmt);
 	length = vsnprintf(buf, size, fmt, args);
+	va_end(args);
+	return length;
+}
+
+int scnprintf(char *buf, size_t size, const char *fmt, ...)
+{
+	va_list args;
+	int length;
+
+	if (!size)
+		return 0;
+	va_start(args, fmt);
+	length = vsnprintf(buf, size, fmt, args);
+	va_end(args);
+	return length < (int)size ? length : (int)size - 1;
+}
+
+int sprintf(char *buf, const char *fmt, ...)
+{
+	va_list args;
+	int length;
+
+	va_start(args, fmt);
+	length = vsnprintf(buf, SPRINTF_LIMIT, fmt, args);
 	va_end(args);
 	return length;
 }

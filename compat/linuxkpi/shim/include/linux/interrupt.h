@@ -4,6 +4,7 @@
 #include <linux/kernel.h>
 #include <linux/atomic.h>
 #include <linux/cpu.h>
+#include <linux/device.h>
 typedef int irqreturn_t;
 typedef irqreturn_t (*irq_handler_t)(int, void *);
 #define IRQ_NONE 0
@@ -21,4 +22,6 @@ void free_irq(unsigned int irq, void *dev);
 void disable_irq(unsigned int irq);
 void enable_irq(unsigned int irq);
 void synchronize_irq(unsigned int irq);
+int devm_request_threaded_irq(struct device *dev, unsigned int irq, irq_handler_t handler, irq_handler_t thread_fn, unsigned long flags, const char *name, void *dev_id);
+int irq_set_affinity_hint(unsigned int irq, const void *mask);
 #endif

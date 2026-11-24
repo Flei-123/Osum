@@ -53,6 +53,7 @@
 #define ENODEV 19
 #define EINVAL 22
 #define ENOSPC 28
+#define E2BIG 7
 #define ERANGE 34
 #define ENOSYS 38
 #define MAX_ERRNO 4095
@@ -116,6 +117,9 @@ struct va_format { const char *fmt; va_list *va; };
 int _printk(const char *fmt, ...) __printf(1, 2);
 int vsnprintf(char *buf, size_t size, const char *fmt, va_list args);
 int snprintf(char *buf, size_t size, const char *fmt, ...) __printf(3, 4);
+int scnprintf(char *buf, size_t size, const char *fmt, ...) __printf(3, 4);
+int sprintf(char *buf, const char *fmt, ...) __printf(2, 3);
+void dump_stack(void);
 
 #define printk(fmt, ...) _printk(fmt, ##__VA_ARGS__)
 #define pr_err(fmt, ...) _printk("lkpi: " fmt, ##__VA_ARGS__)
@@ -167,5 +171,8 @@ void *kzalloc(size_t size, gfp_t flags);
 void *kcalloc(size_t count, size_t size, gfp_t flags);
 void *krealloc(void *ptr, size_t size, gfp_t flags);
 void kfree(const void *ptr);
+
+#include <linux/random.h>
+#include <linux/math64.h>
 
 #endif

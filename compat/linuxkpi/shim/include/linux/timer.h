@@ -10,6 +10,7 @@ struct timer_list { struct list_head entry; unsigned long expires; void (*functi
 int mod_timer(struct timer_list *timer, unsigned long expires);
 int del_timer(struct timer_list *timer);
 int del_timer_sync(struct timer_list *timer);
+int timer_shutdown_sync(struct timer_list *timer);
 int timer_pending(const struct timer_list *timer);
 #define timer_delete(t) del_timer(t)
 #define timer_delete_sync(t) del_timer_sync(t)

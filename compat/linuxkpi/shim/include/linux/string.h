@@ -3,6 +3,8 @@
 #define LKPI_LINUX_STRING_H
 #include <linux/kernel.h>
 size_t strscpy(char *dst, const char *src, size_t size);
+ssize_t strscpy_pad(char *dst, const char *src, size_t size);
+size_t strnlen(const char *text, size_t max);
 size_t strlcpy(char *dst, const char *src, size_t size);
 char *strchr(const char *s, int c);
 char *strstr(const char *haystack, const char *needle);

@@ -51,3 +51,22 @@ void kfree(const void *ptr)
 	b->next = free_list[b->class];
 	free_list[b->class] = b;
 }
+
+void *memcpy(void *dst, const void *src, size_t count)
+{
+	u8 *to = dst;
+	const u8 *from = src;
+
+	while (count--)
+		*to++ = *from++;
+	return dst;
+}
+
+void *memset(void *dst, int value, size_t count)
+{
+	u8 *to = dst;
+
+	while (count--)
+		*to++ = (u8)value;
+	return dst;
+}

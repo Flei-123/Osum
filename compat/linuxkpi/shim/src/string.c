@@ -81,3 +81,24 @@ int strncmp(const char *a, const char *b, size_t count)
 		return 0;
 	return (u8)*a - (u8)*b;
 }
+
+size_t strnlen(const char *text, size_t max)
+{
+	size_t length = 0;
+
+	while (length < max && text[length])
+		length++;
+	return length;
+}
+
+ssize_t strscpy_pad(char *dst, const char *src, size_t size)
+{
+	size_t length;
+
+	if (!size)
+		return -E2BIG;
+	length = strnlen(src, size - 1);
+	memcpy(dst, src, length);
+	memset(dst + length, 0, size - length);
+	return src[length] ? -E2BIG : (ssize_t)length;
+}

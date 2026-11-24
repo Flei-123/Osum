@@ -3,5 +3,7 @@
 #define LKPI_LINUX_DEVCOREDUMP_H
 #include <linux/device.h>
 #include <linux/scatterlist.h>
+void dev_coredumpsg(struct device *dev, struct scatterlist *table, size_t datalen, gfp_t gfp);
+void _devcd_free_sgtable(void *data);
 void dev_coredumpv(struct device *dev, void *data, size_t datalen, gfp_t gfp);
 #endif

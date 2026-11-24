@@ -4,6 +4,7 @@
 #include <linux/spinlock.h>
 #include <linux/mutex.h>
 struct lock_class_key { int unused; };
+#define lockdep_assert(cond) ((void)(cond))
 #define lockdep_assert_held(l) ((void)(l))
 #define lockdep_assert_held_once(l) ((void)(l))
 #define lockdep_assert_not_held(l) ((void)(l))
