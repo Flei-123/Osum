@@ -58,5 +58,24 @@ if [ -s "$T/a/desktop.png" ] && [ -s "$T/c/desktop.png" ]; then
     echo "        edge sharpness: 150 percent $s150, 100 percent $s100"
     python3 -I -c "import sys; sys.exit(0 if float('$s150') >= 0.8 * float('$s100') and float('$s150') > 0 else 1)" && ok "text edges at 150 percent as sharp as at 100 percent" || bad "blurred text at 150 percent ($s150 vs $s100)"
 else bad "no screenshots"; fi
+echo "== D. EDID delivered late (Intel driver path, stage device)"
+mach "$T/e" extra="lateedid=$HEX150"
+mach "$T/g" extra="lateedid=$HEX200"
+E="$T/e/serial.txt"; G="$T/g/serial.txt"
+for f in "$E" "$G"; do [ -s "$f" ] || { bad "no serial output: $f"; echo "FRACSCALE: $PASS passed, $FAIL failed"; exit 1; }; done
+grep -aqE 'taskbar: geom .* h=72 ' "$E" && ok "late 293x165 mm EDID: bar is 72 px" || bad "late 150: $(grep -a 'taskbar: geom ' "$E" | tail -1)"
+grep -aqE 'fb: fonts pct=150 px_ui=23 px_mono=24' "$E" && ok "late EDID: terminal font 24 px" || bad "late fonts 150: $(grep -a 'fb: fonts' "$E" | head -1)"
+grep -aqE 'taskbar: pin explorer .* w=60 h=60 ' "$E" && ok "late EDID: pin buttons 60x60" || bad "late pin: $(grep -a 'taskbar: pin explorer ' "$E" | head -1)"
+grep -aqE 'taskbar: geom .* h=96 ' "$G" && grep -aqE 'fb: fonts pct=200 px_ui=30 px_mono=32' "$G" && ok "late 250x140 mm EDID: 200 percent, bar 96 px" || bad "late 200: $(grep -a 'taskbar: geom ' "$G" | tail -1) $(grep -a 'fb: fonts' "$G" | head -1)"
+grep -aq 'panic\|FAULT\|#UD\|#PF' "$E" "$G" && bad "kernel fault in a late EDID run" || ok "no fault in the late EDID runs"
+cp kernel/gfx/vmode.fi "$T/vmode.fi.orig"
+trap 'cp "$T/vmode.fi.orig" kernel/gfx/vmode.fi; rm -rf "$T"' EXIT
+sed -i 's/^    if g(state, S_SCALEPCT) != 0 {$/    if g(state, S_SCALEPCT) == 0 {/' kernel/gfx/vmode.fi
+cmp -s "$T/vmode.fi.orig" kernel/gfx/vmode.fi && bad "counter-proof mutation did not apply"
+mach "$T/f" extra="lateedid=$HEX150"
+cp "$T/vmode.fi.orig" kernel/gfx/vmode.fi
+F="$T/f/serial.txt"
+[ -s "$F" ] || bad "no serial output: $F"
+grep -aqE 'taskbar: geom .* h=48 ' "$F" && ok "counter-proof: late EDID without rescale leaves the bar at 48 px" || bad "counter-proof not red: $(grep -a 'taskbar: geom ' "$F" | tail -1)"
 echo "FRACSCALE: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

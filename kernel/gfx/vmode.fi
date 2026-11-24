@@ -13,7 +13,7 @@ import lib.errno
 import gfx.dispscale
 
 export {
-    scale_pct, set_scale_pct, boot_edid_take, boot_edid_given, edid_give,
+    scale_pct, set_scale_pct, boot_edid_take, boot_edid_given, edid_give, late_edid_scale, late_edid_take,
     probe, ready, count, mode_at, mode_w, mode_h, mode_bpp, find_mode,
     cand_count, cand_w, cand_h, cand_why,
     vram, depths, refused, toobig, probed, map_limit,
@@ -1008,6 +1008,20 @@ fn hex_nibble(c: u64) -> u64 {
     return 16
 }
 
+fn hex_block(at: u64, dst: u64) -> bool {
+    var i: u64 = 0
+    while i < 128 {
+        let hi: u64 = hex_nibble(kstate.get8(at + i * 2))
+        let lo: u64 = hex_nibble(kstate.get8(at + 1 + i * 2))
+        if hi > 15 || lo > 15 {
+            return false
+        }
+        kstate.set8(dst + i, ((hi << 4) | lo) as u8)
+        i = i + 1
+    }
+    return true
+}
+
 fn boot_edid_take(state: u64, cmd: u64) {
     var w_edid: [u8; 6] = "edid=\0"
     s(state, S_BOOTEDID, 0)
@@ -1019,21 +1033,32 @@ fn boot_edid_take(state: u64, cmd: u64) {
         return
     }
     let dst: u64 = state + kstate.DLUT_OFF + EDID_OFF
-    var i: u64 = 0
-    while i < 128 {
-        let hi: u64 = hex_nibble(kstate.get8(at + 5 + i * 2))
-        let lo: u64 = hex_nibble(kstate.get8(at + 6 + i * 2))
-        if hi > 15 || lo > 15 {
-            return
-        }
-        kstate.set8(dst + i, ((hi << 4) | lo) as u8)
-        i = i + 1
+    if !hex_block(at + 5, dst) {
+        return
     }
     if edid_check(dst) != 0 {
         return
     }
     s(state, S_BOOTEDID, 1)
     edid_digest(state, dst)
+}
+
+fn late_edid_take(state: u64, cmd: u64) {
+    var w_late: [u8; 10] = "lateedid=\0"
+    if cmd == 0 || g(state, S_BOOTEDID) != 0 {
+        return
+    }
+    let at: u64 = cmdword.find(cmd, (&w_late[0]) as u64, 9)
+    if at == 0 {
+        return
+    }
+    var tmp: [u8; 128] = [0 as u8; 128]
+    if !hex_block(at + 9, (&tmp[0]) as u64) {
+        return
+    }
+    if edid_give(state, (&tmp[0]) as u64) {
+        late_edid_scale(state)
+    }
 }
 
 fn edid_give(state: u64, src: u64) -> bool {
@@ -1124,6 +1149,18 @@ fn dpi_scale(state: u64, w: u64) -> u64 {
         return 0
     }
     return dispscale.pct_for_dpi(w * 254 / (mm * 10))
+}
+
+fn late_edid_scale(state: u64) {
+    if g(state, S_SCALEPCT) != 0 {
+        return
+    }
+    let ds: u64 = dpi_scale(state, fb.width(state))
+    if ds == 0 {
+        return
+    }
+    set_scale_pct(state, ds)
+    let _sc: bool = fb.set_uiscale(state, dispscale.whole_for_pct(ds))
 }
 
 fn boot_edid_given(state: u64) -> bool {
