@@ -95,6 +95,9 @@ static long long glue_rx_take(u64 dst, u64 room)
 
 	if (!glue)
 		return -1;
+	lkpi_time_tick();
+	lkpi_irq_poll();
+	lkpi_napi_run();
 	if (!skb_queue_len(&glue->rx) && glue->poll)
 		glue->poll(glue->hw);
 	skb = __skb_dequeue(&glue->rx);
