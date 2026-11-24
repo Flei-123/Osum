@@ -54,6 +54,28 @@ if build_wifi "$SHIM" "$T/wifi" > "$T/wifi.build" 2>&1; then
 else
     bad "wifi build"; head -10 "$T/wifi.build"
 fi
+if build_wifi_rt "$SHIM" "$T/rt" > "$T/rt.build" 2>&1; then
+    "$T/rt" > "$T/rt.out"; rc=$?
+    grep '^FAIL' "$T/rt.out" | head -10
+    [ "$rc" = 0 ] && ok "shim runtime (dma, pages, work, timers, napi, skb): $(grep '^checks=' "$T/rt.out") $(grep '^failures=' "$T/rt.out")" || bad "shim runtime run"
+else
+    bad "shim runtime build"; head -10 "$T/rt.build"
+fi
+rtmutant() {
+    local name=$1 file=$2 from=$3 to=$4 m="$T/rm-$1"
+    rm -rf "$m"; cp -r "$SHIM" "$m"
+    python3 -I -c 'import sys; s=open(sys.argv[1]).read(); assert sys.argv[2] in s; open(sys.argv[1],"w").write(s.replace(sys.argv[2], sys.argv[3], 1))' \
+        "$m/$file" "$from" "$to" || { bad "runtime mutant $name: pattern missing"; return; }
+    if build_wifi_rt "$m" "$T/rtm-$name" > "$T/rtm-$name.build" 2>&1 && ! "$T/rtm-$name" > "$T/rtm-$name.out" 2>&1; then
+        ok "runtime mutant $name rejected ($(grep -c '^FAIL' "$T/rtm-$name.out") checks red)"
+    else
+        bad "runtime mutant $name not rejected"
+    fi
+}
+rtmutant delayearly src/wifi_sched.c "if (time_after(timer->expires, now))" "if (0)"
+rtmutant napioff src/wifi_net.c "if (!(napi->state & LKPI_NAPI_ENABLED) || (napi->state & LKPI_NAPI_SCHEDULED))" "if (napi->state & LKPI_NAPI_SCHEDULED)"
+rtmutant skbdirty src/wifi_skb.c "skb->in_use = 1;" "skb->in_use = 1; skb->shinfo.nr_frags = 1;"
+rtmutant dmaerr src/wifi_mem.c "return addr == DMA_MAPPING_ERROR;" "return 0;"
 python3 -I tools/lkpi80211/synccheck.py "$SHIM/include/osum/macplan_ops.h" lib/wlan/macplan.fi > "$T/sync.out" 2>&1 && ok "macplan op numbers in the shim header equal lib/wlan/macplan.fi" || { bad "op numbers differ"; head -5 "$T/sync.out"; }
 wmutant() {
     local name=$1 file=$2 from=$3 to=$4 m="$T/wm-$1"

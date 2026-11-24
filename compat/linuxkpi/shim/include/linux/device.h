@@ -28,6 +28,7 @@ const char *dev_name(const struct device *dev);
 void *dev_get_drvdata(const struct device *dev);
 void dev_set_drvdata(struct device *dev, void *data);
 #define dev_err(dev, fmt, ...) _printk("lkpi: " fmt, ##__VA_ARGS__)
+#define dev_crit(dev, fmt, ...) _printk("lkpi: " fmt, ##__VA_ARGS__)
 #define dev_warn(dev, fmt, ...) _printk("lkpi: " fmt, ##__VA_ARGS__)
 #define dev_info(dev, fmt, ...) _printk("lkpi: " fmt, ##__VA_ARGS__)
 #define dev_dbg(dev, fmt, ...) no_printk(fmt, ##__VA_ARGS__)

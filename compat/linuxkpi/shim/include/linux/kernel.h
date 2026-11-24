@@ -11,6 +11,16 @@
 #define TRUE 1
 #define FALSE 0
 #define ilog2(n) ((n) < 2 ? 0 : 63 - __builtin_clzll((unsigned long long)(n)))
+#define IS_ERR_OR_NULL(ptr) (!(ptr) || IS_ERR(ptr))
+#define PTR_ERR_OR_ZERO(ptr) (IS_ERR(ptr) ? PTR_ERR(ptr) : 0)
+#define abs(x) ({ __typeof__(x) _x = (x); _x < 0 ? -_x : _x; })
+#define upper_32_bits(n) ((u32)(((n) >> 16) >> 16))
+#define lower_32_bits(n) ((u32)((n) & 0xffffffffU))
+#define round_down(x, y) ((x) & ~((__typeof__(x))(y) - 1))
+#define roundup(x, y) ((((x) + ((y) - 1)) / (y)) * (y))
+#define is_power_of_2(n) ((n) != 0 && (((n) & ((n) - 1)) == 0))
+#define rounddown_pow_of_two(n) (1UL << (63 - __builtin_clzl((unsigned long)(n))))
+#define HWEIGHT32(w) __builtin_popcount((u32)(w))
 #define BUILD_BUG_ON(cond) ((void)sizeof(char[1 - 2 * !!(cond)]))
 #define BUILD_BUG_ON_MSG(cond, msg) BUILD_BUG_ON(cond)
 #define BUILD_BUG_ON_ZERO(e) ((int)sizeof(struct { int : (-!!(e)); }))
@@ -125,6 +135,19 @@ int snprintf(char *buf, size_t size, const char *fmt, ...) __printf(3, 4);
 	if (_warned && !_seen) { \
 		_seen = true; \
 		_printk("lkpi: WARNING %s:%d\n", __FILE__, __LINE__); \
+	} \
+	_warned; })
+#define WARN(cond, fmt, ...) ({ \
+	int _warned = !!(cond); \
+	if (_warned) \
+		_printk("lkpi: WARNING " fmt, ##__VA_ARGS__); \
+	_warned; })
+#define WARN_ONCE(cond, fmt, ...) ({ \
+	static bool _seen; \
+	int _warned = !!(cond); \
+	if (_warned && !_seen) { \
+		_seen = true; \
+		_printk("lkpi: WARNING " fmt, ##__VA_ARGS__); \
 	} \
 	_warned; })
 #define BUG_ON(cond) do { if (cond) lkpi_halt(__FILE__, __LINE__); } while (0)

@@ -35,5 +35,7 @@ struct lkpi_wifi_hw {
 
 struct lkpi_wifi_hw *lkpi_wifi_of(const struct ieee80211_hw *hw);
 int lkpi_wifi_op(struct lkpi_wifi_hw *w, u32 op, u64 arg);
+void lkpi_timers_run(unsigned long now);
+void lkpi_work_run(void);
 
 #endif

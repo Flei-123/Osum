@@ -2,6 +2,7 @@
 #ifndef LKPI_LINUX_KTIME_H
 #define LKPI_LINUX_KTIME_H
 #include <linux/time.h>
+#define ktime_set(secs, nsecs) ((ktime_t)(secs) * NSEC_PER_SEC + (nsecs))
 static inline s64 ktime_to_ns(ktime_t k) { return k; }
 static inline s64 ktime_to_us(ktime_t k) { return k / NSEC_PER_USEC; }
 static inline s64 ktime_to_ms(ktime_t k) { return k / NSEC_PER_MSEC; }

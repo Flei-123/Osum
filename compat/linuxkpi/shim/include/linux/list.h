@@ -13,6 +13,19 @@ static inline void list_del(struct list_head *e) { e->next->prev = e->prev; e->p
 static inline void list_del_init(struct list_head *e) { list_del(e); }
 static inline int list_empty(const struct list_head *h) { return h->next == h; }
 static inline void list_move_tail(struct list_head *e, struct list_head *head) { list_del(e); list_add_tail(e, head); }
+static inline void list_move(struct list_head *e, struct list_head *head) { list_del(e); list_add(e, head); }
+static inline void list_replace(struct list_head *old, struct list_head *n) { n->next = old->next; n->next->prev = n; n->prev = old->prev; n->prev->next = n; }
+static inline void list_replace_init(struct list_head *old, struct list_head *n) { list_replace(old, n); INIT_LIST_HEAD(old); }
+static inline void list_splice_tail(const struct list_head *list, struct list_head *head)
+{
+	if (list_empty(list))
+		return;
+	list->next->prev = head->prev;
+	head->prev->next = list->next;
+	list->prev->next = head;
+	head->prev = list->prev;
+}
+static inline void list_splice_tail_init(struct list_head *list, struct list_head *head) { list_splice_tail(list, head); INIT_LIST_HEAD(list); }
 #define list_entry(ptr, type, member) container_of(ptr, type, member)
 #define list_first_entry(ptr, type, member) list_entry((ptr)->next, type, member)
 #define list_first_entry_or_null(ptr, type, member) (list_empty(ptr) ? NULL : list_first_entry(ptr, type, member))

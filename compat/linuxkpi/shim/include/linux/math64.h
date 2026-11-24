@@ -7,5 +7,6 @@
 #define div_s64(a, b) ((s64)(a) / (s32)(b))
 #define div64_s64(a, b) ((s64)(a) / (s64)(b))
 #define do_div(n, base) ({ u32 _r = (u64)(n) % (u32)(base); (n) = (u64)(n) / (u32)(base); _r; })
+#define mul_u64_u64_div_u64(a, b, c) ((u64)(((unsigned __int128)(a) * (b)) / (c)))
 #define mul_u64_u32_div(a, mul, div) ((u64)(((unsigned __int128)(a) * (mul)) / (div)))
 #endif

@@ -16,6 +16,21 @@ static inline void clear_bit(long nr, volatile unsigned long *addr) { __atomic_f
 static inline bool test_bit(long nr, const volatile unsigned long *addr) { return (addr[BIT_WORD(nr)] >> (nr % BITS_PER_LONG)) & 1; }
 static inline bool test_and_set_bit(long nr, volatile unsigned long *addr) { return (__atomic_fetch_or(&addr[BIT_WORD(nr)], BIT_MASK(nr), __ATOMIC_SEQ_CST) & BIT_MASK(nr)) != 0; }
 static inline bool test_and_clear_bit(long nr, volatile unsigned long *addr) { return (__atomic_fetch_and(&addr[BIT_WORD(nr)], ~BIT_MASK(nr), __ATOMIC_SEQ_CST) & BIT_MASK(nr)) != 0; }
+static inline unsigned long ffz(unsigned long word) { return __builtin_ctzl(~word); }
+static inline bool __test_and_clear_bit(long nr, volatile unsigned long *addr)
+{
+	bool was_set = test_bit(nr, addr);
+
+	addr[BIT_WORD(nr)] &= ~BIT_MASK(nr);
+	return was_set;
+}
+static inline unsigned long find_last_bit(const unsigned long *addr, unsigned long size)
+{
+	while (size--)
+		if (test_bit(size, addr))
+			return size;
+	return 0;
+}
 #define __set_bit(nr, addr) ((addr)[BIT_WORD(nr)] |= BIT_MASK(nr))
 #define __clear_bit(nr, addr) ((addr)[BIT_WORD(nr)] &= ~BIT_MASK(nr))
 static inline int fls(unsigned int x) { return x ? 32 - __builtin_clz(x) : 0; }
