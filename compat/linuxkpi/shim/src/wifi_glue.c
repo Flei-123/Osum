@@ -130,8 +130,10 @@ static long long glue_op(u64 op, u64 arg)
 		return LKPI80211_EPROTO;
 	w = lkpi_wifi_of(glue->hw);
 	rc = lkpi_wifi_op(w, op, arg);
-	if (rc)
+	if (rc) {
+		_printk("lkpi: wifi op %u failed (%d)\n", (unsigned int)op, rc);
 		return rc;
+	}
 	if (op == MACPLAN_OP_HW_SCAN)
 		glue->scan = GLUE_SCAN_RUNNING;
 	if (op == MACPLAN_OP_CANCEL_HW_SCAN)

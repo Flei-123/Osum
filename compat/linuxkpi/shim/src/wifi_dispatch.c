@@ -34,6 +34,7 @@ static int op_add_interface(struct lkpi_wifi_hw *w)
 
 	if (!w->state.started || w->state.iface)
 		return LKPI80211_EPROTO;
+	w->vif.vif.type = NL80211_IFTYPE_STATION;
 	rc = w->ops->add_interface(&w->hw, &w->vif.vif);
 	if (!rc)
 		w->state.iface = 1;
@@ -49,16 +50,34 @@ static int op_remove_interface(struct lkpi_wifi_hw *w)
 	return 0;
 }
 
+static void fill_scan_request(struct lkpi_wifi_hw *w)
+{
+	struct ieee80211_supported_band *band = w->wiphy->bands[NL80211_BAND_2GHZ];
+	struct cfg80211_scan_request *req = &w->scan.request.req;
+	int i;
+
+	memset(&w->scan, 0, sizeof(w->scan));
+	req->wiphy = w->wiphy;
+	req->wdev = &w->wdev;
+	if (!band)
+		return;
+	for (i = 0; i < band->n_channels && req->n_channels < LKPI_SCAN_CHANNELS; i++) {
+		if (band->channels[i].flags & IEEE80211_CHAN_DISABLED)
+			continue;
+		req->channels[req->n_channels++] = &band->channels[i];
+	}
+}
+
 static int op_hw_scan(struct lkpi_wifi_hw *w)
 {
-	struct ieee80211_scan_request req = { 0 };
 	int rc;
 
 	if (!w->state.iface || w->state.scanning)
 		return LKPI80211_EPROTO;
 	if (!w->ops->hw_scan)
 		return LKPI80211_ENOSYS;
-	rc = w->ops->hw_scan(&w->hw, &w->vif.vif, &req);
+	fill_scan_request(w);
+	rc = w->ops->hw_scan(&w->hw, &w->vif.vif, &w->scan.request);
 	if (!rc)
 		w->state.scanning = 1;
 	return rc;

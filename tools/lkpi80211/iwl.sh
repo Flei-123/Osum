@@ -42,9 +42,10 @@ if [ -n "${LKPI_IWL_KERNEL:-}" ]; then cp "$LKPI_IWL_KERNEL" "$D/k0.img"; ok "ke
 fi
 {
     echo 'echo ==START=='
-    for i in 1 2 3 4; do echo 'sleep 5'; done
+    for i in 1 2 3 4 5 6; do echo 'sleep 5'; done
     echo 'echo ==WAITED=='
     echo 'cat /proc/drivers'
+    echo 'cat /proc/wlan'
     echo 'drvctl list'
     echo 'echo ==END=='
 } > "$D/s.sh"
@@ -87,6 +88,15 @@ hasnot "$D/compat.klar" "iwl: hw_rev" "compat: native driver never probed the 82
 hasre "$D/compat.klar" 'drvstore: bind lkpi-iwlwifi -> [0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f] 8086:24fd ok' "compat: store binds lkpi-iwlwifi to the 8265 and the real iwl_pci_probe returns ok"
 hasnot "$D/compat.klar" "probe failed" "compat: real probe reports no failure"
 has "$D/compat.klar" "drvstore: fw ok $FW_NAME" "compat: firmware served to the real driver"
+has "$D/compat.klar" "iwl_mvm_up RT uCode started" "compat: real firmware path reaches the RT uCode through the fake firmware"
+hasnot "$D/compat.klar" "Add internal station failed" "compat: SCD_QUEUE_CFG and ADD_STA answered, no restart loop"
+hasnot "$D/compat.klar" "fakefw: scd bad" "compat: queue config read through the wide header"
+hasnot "$D/compat.klar" "lkpi: double free" "compat: shim heap reports no double free in the run"
+hasnot "$D/compat.klar" "free of unknown pointer" "compat: shim heap reports no foreign pointer free"
+hasnot "$D/compat.klar" "radio not registered" "compat: ieee80211_register_hw reached and glue attached"
+hasre "$D/compat.klar" 'net OrientFake ch=6 sec=wpa2' "compat: real driver scan returns the fake access point"
+hasre "$D/compat.klar" 'net CafeOpen ch=1 sec=open' "compat: real driver scan returns the open network"
+hasnot "$D/compat.klar" "wifi op 3 failed" "compat: add_interface accepted"
 has "$D/load.klar" "drvstore: fw ok $FW_NAME" "load: kernel served the pinned firmware to the module"
 hasnot "$D/load.klar" "drvstore: fw error" "load: no firmware error"
 hasnot "$D/load.klar" "module: too big" "load: loader accepts the module above 512 KiB"

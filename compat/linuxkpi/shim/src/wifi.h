@@ -15,6 +15,8 @@ bool lkpi_driver_released(void);
 #define LKPI_WIFI_PRIV_MAX 16384
 #define LKPI_WIFI_OBJ_PRIV_MAX 6144
 
+#define LKPI_SCAN_CHANNELS 24
+
 struct lkpi_wifi_hw {
 	struct ieee80211_hw hw;
 	const struct ieee80211_ops *ops;
@@ -39,6 +41,10 @@ struct lkpi_wifi_hw {
 		struct ieee80211_chanctx_conf ctx;
 		u8 priv[LKPI_WIFI_OBJ_PRIV_MAX];
 	} chanctx __attribute__((aligned(16)));
+	struct {
+		struct ieee80211_scan_request request;
+		struct ieee80211_channel *channels[LKPI_SCAN_CHANNELS];
+	} scan;
 	struct ieee80211_key_conf pairwise;
 	struct ieee80211_key_conf group;
 };
