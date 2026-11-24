@@ -14,6 +14,7 @@
 #        HP_LX_PARTS=<dir with NAME.tar.partNNN> adds the Linux app parts as usr/share/lx/ overlay files (each gz <= 3.9 MB, checked)
 #        HP_DEV=1 ships assets/jarvis/rechte-hp-dev.conf (devmode = yes, screenshot = always, input = yes) as /etc/jarvis/permissions.conf;
 #                 without it the HP gets rechte-hp.conf back = dev mode OFF (see docs/DEVMODE.md)
+#        HP_SKIP_EXTRAS="/etc/x /usr/share/y/*" removes these staged absolute-path files again (device keeps its own, e.g. personal /etc/jarvis/permissions.conf)
 #        HP_KEEP_IMAGE=1 keeps the built image dir.  Run directly (not via heavy) when the heavy queue hangs.
 set -euo pipefail
 REPO=${OSUM_MAIN_CHECKOUT:-/root/jarvis/projects/u_DiS4in7esMF1/osum}
@@ -89,6 +90,9 @@ if [ -n "${HP_DEVBIN:-}" ]; then
         echo "republish-hp: devbin ${pair#*:}"
     done
 fi
+for skip in ${HP_SKIP_EXTRAS:-}; do
+    rm -rf "$EXTRA"$skip
+done
 ALLPROGS=()
 for f in "$IMG"/*.elf; do n=$(basename "$f" .elf); [ "$n" = "osum.mb" ] || ALLPROGS+=("$n"); done
 python3 tools/k15/bundle.py assets/apps "$EXTRA.bundle" nur="${ALLPROGS[*]} term" > "$EXTRA.blist"
