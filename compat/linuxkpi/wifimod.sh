@@ -5,10 +5,11 @@ cd "$(dirname "$0")/../.."
 OUT="${1:?usage: wifimod.sh <output-dir> [shim-dir]}"
 SHIM="${2:-compat/linuxkpi/shim}"
 . compat/linuxkpi/flags.sh
-lkpi_flags "$SHIM"
 . tools/lib/tmpdir.sh
 W=$(mktemp -d)
 osum_tmp_guard "" "$W"
+lkpi_fetch_headers wifi "$W/hdr"
+lkpi_flags "$SHIM"
 mkdir -p "$OUT"
 shim_objs=(); drv_objs=()
 for name in $LKPI_WIFI_MODULE_SOURCES; do

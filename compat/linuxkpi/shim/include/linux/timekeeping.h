@@ -2,6 +2,7 @@
 #ifndef LKPI_LINUX_TIMEKEEPING_H
 #define LKPI_LINUX_TIMEKEEPING_H
 #include <linux/ktime.h>
+struct system_device_crosststamp { ktime_t device; ktime_t sys_realtime; ktime_t sys_monoraw; };
 ktime_t ktime_get(void);
 ktime_t ktime_get_boottime(void);
 ktime_t ktime_get_real(void);

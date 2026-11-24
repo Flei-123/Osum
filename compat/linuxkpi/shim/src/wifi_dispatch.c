@@ -13,7 +13,7 @@ static int op_start(struct lkpi_wifi_hw *w)
 
 	if (w->state.started)
 		return LKPI80211_EPROTO;
-	rc = w->hw.ops->start(&w->hw);
+	rc = w->ops->start(&w->hw);
 	if (!rc)
 		w->state.started = 1;
 	return rc;
@@ -23,7 +23,7 @@ static int op_stop(struct lkpi_wifi_hw *w)
 {
 	if (!w->state.started || w->state.iface)
 		return LKPI80211_EPROTO;
-	w->hw.ops->stop(&w->hw, false);
+	w->ops->stop(&w->hw, false);
 	w->state.started = 0;
 	return 0;
 }
@@ -34,7 +34,7 @@ static int op_add_interface(struct lkpi_wifi_hw *w)
 
 	if (!w->state.started || w->state.iface)
 		return LKPI80211_EPROTO;
-	rc = w->hw.ops->add_interface(&w->hw, &w->vif.vif);
+	rc = w->ops->add_interface(&w->hw, &w->vif.vif);
 	if (!rc)
 		w->state.iface = 1;
 	return rc;
@@ -44,7 +44,7 @@ static int op_remove_interface(struct lkpi_wifi_hw *w)
 {
 	if (!w->state.iface || w->state.sta_state != IEEE80211_STA_NOTEXIST || w->state.chanctx)
 		return LKPI80211_EPROTO;
-	w->hw.ops->remove_interface(&w->hw, &w->vif.vif);
+	w->ops->remove_interface(&w->hw, &w->vif.vif);
 	w->state.iface = 0;
 	return 0;
 }
@@ -56,9 +56,9 @@ static int op_hw_scan(struct lkpi_wifi_hw *w)
 
 	if (!w->state.iface || w->state.scanning)
 		return LKPI80211_EPROTO;
-	if (!w->hw.ops->hw_scan)
+	if (!w->ops->hw_scan)
 		return LKPI80211_ENOSYS;
-	rc = w->hw.ops->hw_scan(&w->hw, &w->vif.vif, &req);
+	rc = w->ops->hw_scan(&w->hw, &w->vif.vif, &req);
 	if (!rc)
 		w->state.scanning = 1;
 	return rc;
@@ -68,8 +68,8 @@ static int op_cancel_hw_scan(struct lkpi_wifi_hw *w)
 {
 	if (!w->state.scanning)
 		return LKPI80211_EPROTO;
-	if (w->hw.ops->cancel_hw_scan)
-		w->hw.ops->cancel_hw_scan(&w->hw, &w->vif.vif);
+	if (w->ops->cancel_hw_scan)
+		w->ops->cancel_hw_scan(&w->hw, &w->vif.vif);
 	w->state.scanning = 0;
 	return 0;
 }
@@ -80,8 +80,8 @@ static int op_add_chanctx(struct lkpi_wifi_hw *w)
 
 	if (!w->state.iface || w->state.chanctx)
 		return LKPI80211_EPROTO;
-	if (w->hw.ops->add_chanctx)
-		rc = w->hw.ops->add_chanctx(&w->hw, &w->chanctx.ctx);
+	if (w->ops->add_chanctx)
+		rc = w->ops->add_chanctx(&w->hw, &w->chanctx.ctx);
 	if (!rc)
 		w->state.chanctx = 1;
 	return rc;
@@ -91,8 +91,8 @@ static int op_remove_chanctx(struct lkpi_wifi_hw *w)
 {
 	if (!w->state.chanctx || w->state.assigned)
 		return LKPI80211_EPROTO;
-	if (w->hw.ops->remove_chanctx)
-		w->hw.ops->remove_chanctx(&w->hw, &w->chanctx.ctx);
+	if (w->ops->remove_chanctx)
+		w->ops->remove_chanctx(&w->hw, &w->chanctx.ctx);
 	w->state.chanctx = 0;
 	return 0;
 }
@@ -103,8 +103,8 @@ static int op_assign(struct lkpi_wifi_hw *w)
 
 	if (!w->state.chanctx || w->state.assigned)
 		return LKPI80211_EPROTO;
-	if (w->hw.ops->assign_vif_chanctx)
-		rc = w->hw.ops->assign_vif_chanctx(&w->hw, &w->vif.vif, &w->vif.vif.bss_conf, &w->chanctx.ctx);
+	if (w->ops->assign_vif_chanctx)
+		rc = w->ops->assign_vif_chanctx(&w->hw, &w->vif.vif, &w->vif.vif.bss_conf, &w->chanctx.ctx);
 	if (!rc)
 		w->state.assigned = 1;
 	return rc;
@@ -114,8 +114,8 @@ static int op_unassign(struct lkpi_wifi_hw *w)
 {
 	if (!w->state.assigned || w->state.sta_state != IEEE80211_STA_NOTEXIST)
 		return LKPI80211_EPROTO;
-	if (w->hw.ops->unassign_vif_chanctx)
-		w->hw.ops->unassign_vif_chanctx(&w->hw, &w->vif.vif, &w->vif.vif.bss_conf, &w->chanctx.ctx);
+	if (w->ops->unassign_vif_chanctx)
+		w->ops->unassign_vif_chanctx(&w->hw, &w->vif.vif, &w->vif.vif.bss_conf, &w->chanctx.ctx);
 	w->state.assigned = 0;
 	return 0;
 }
@@ -129,7 +129,7 @@ static int op_sta_state(struct lkpi_wifi_hw *w, u64 arg)
 		return LKPI80211_EPROTO;
 	if (arg != old + 1 && arg + 1 != old)
 		return LKPI80211_EPROTO;
-	rc = w->hw.ops->sta_state(&w->hw, &w->vif.vif, &w->sta.sta, old, arg);
+	rc = w->ops->sta_state(&w->hw, &w->vif.vif, &w->sta.sta, old, arg);
 	if (!rc)
 		w->state.sta_state = arg;
 	return rc;
@@ -141,10 +141,10 @@ static int op_prep_tx(struct lkpi_wifi_hw *w, bool complete)
 
 	if (!w->state.assigned)
 		return LKPI80211_EPROTO;
-	if (complete && w->hw.ops->mgd_complete_tx)
-		w->hw.ops->mgd_complete_tx(&w->hw, &w->vif.vif, &info);
-	if (!complete && w->hw.ops->mgd_prepare_tx)
-		w->hw.ops->mgd_prepare_tx(&w->hw, &w->vif.vif, &info);
+	if (complete && w->ops->mgd_complete_tx)
+		w->ops->mgd_complete_tx(&w->hw, &w->vif.vif, &info);
+	if (!complete && w->ops->mgd_prepare_tx)
+		w->ops->mgd_prepare_tx(&w->hw, &w->vif.vif, &info);
 	return 0;
 }
 
@@ -161,8 +161,8 @@ static int op_bss_info(struct lkpi_wifi_hw *w, u64 arg)
 		w->vif.vif.bss_conf.qos = true;
 	} else
 		return LKPI80211_EINVAL;
-	if (w->hw.ops->bss_info_changed)
-		w->hw.ops->bss_info_changed(&w->hw, &w->vif.vif, &w->vif.vif.bss_conf, changed);
+	if (w->ops->bss_info_changed)
+		w->ops->bss_info_changed(&w->hw, &w->vif.vif, &w->vif.vif.bss_conf, changed);
 	return 0;
 }
 
@@ -170,21 +170,21 @@ static int op_vif_cfg(struct lkpi_wifi_hw *w)
 {
 	if (!w->state.assigned)
 		return LKPI80211_EPROTO;
-	w->vif.vif.bss_conf.assoc = w->state.sta_state >= IEEE80211_STA_ASSOC;
-	if (w->hw.ops->vif_cfg_changed)
-		w->hw.ops->vif_cfg_changed(&w->hw, &w->vif.vif, BSS_CHANGED_ASSOC);
+	w->vif.vif.cfg.assoc = w->state.sta_state >= IEEE80211_STA_ASSOC;
+	if (w->ops->vif_cfg_changed)
+		w->ops->vif_cfg_changed(&w->hw, &w->vif.vif, BSS_CHANGED_ASSOC);
 	return 0;
 }
 
 static int op_conf_tx(struct lkpi_wifi_hw *w, u64 arg)
 {
-	struct ieee80211_tx_queue_params params = { 0, EDCA_CW_MIN, EDCA_CW_MAX, EDCA_AIFS };
+	struct ieee80211_tx_queue_params params = { .txop = 0, .cw_min = EDCA_CW_MIN, .cw_max = EDCA_CW_MAX, .aifs = EDCA_AIFS };
 
 	if (arg >= IEEE80211_NUM_ACS || !w->state.assigned)
 		return LKPI80211_EPROTO;
-	if (!w->hw.ops->conf_tx)
+	if (!w->ops->conf_tx)
 		return 0;
-	return w->hw.ops->conf_tx(&w->hw, &w->vif.vif, 0, arg, &params);
+	return w->ops->conf_tx(&w->hw, &w->vif.vif, 0, arg, &params);
 }
 
 static int op_set_key(struct lkpi_wifi_hw *w, u64 arg)
@@ -194,7 +194,7 @@ static int op_set_key(struct lkpi_wifi_hw *w, u64 arg)
 	struct ieee80211_key_conf *key = pairwise ? &w->pairwise : &w->group;
 	int rc;
 
-	if (arg < MACPLAN_KEY_SET_PAIRWISE || arg > MACPLAN_KEY_DEL_GROUP || !w->hw.ops->set_key)
+	if (arg < MACPLAN_KEY_SET_PAIRWISE || arg > MACPLAN_KEY_DEL_GROUP || !w->ops->set_key)
 		return LKPI80211_ENOSYS;
 	if (set && w->state.sta_state < IEEE80211_STA_ASSOC)
 		return LKPI80211_EPROTO;
@@ -206,7 +206,7 @@ static int op_set_key(struct lkpi_wifi_hw *w, u64 arg)
 		key->keyidx = pairwise ? 0 : 1;
 		key->flags = pairwise ? IEEE80211_KEY_FLAG_PAIRWISE : 0;
 	}
-	rc = w->hw.ops->set_key(&w->hw, set ? SET_KEY : DISABLE_KEY, &w->vif.vif,
+	rc = w->ops->set_key(&w->hw, set ? SET_KEY : DISABLE_KEY, &w->vif.vif,
 				pairwise ? &w->sta.sta : NULL, key);
 	if (rc)
 		return rc;
@@ -221,8 +221,8 @@ static int op_set_key(struct lkpi_wifi_hw *w, u64 arg)
 
 static int op_flush(struct lkpi_wifi_hw *w)
 {
-	if (w->hw.ops->flush)
-		w->hw.ops->flush(&w->hw, &w->vif.vif, FLUSH_ALL_QUEUES, false);
+	if (w->ops->flush)
+		w->ops->flush(&w->hw, &w->vif.vif, FLUSH_ALL_QUEUES, false);
 	return 0;
 }
 

@@ -10,13 +10,31 @@ lkpi_flags() {
 	LKPI_CFLAGS=(-O2 -ffreestanding -nostdinc -fno-pic -mcmodel=small -mno-red-zone -mgeneral-regs-only
 		-fno-stack-protector -fno-asynchronous-unwind-tables -fno-common -fcf-protection=none
 		-fno-tree-loop-distribute-patterns -Wall -Wextra -Werror -Wno-unused-parameter "-I$1/include")
+	[ -z "${LKPI_INC:-}" ] || LKPI_CFLAGS+=(-isystem "$LKPI_INC")
 }
 
 lkpi_driver_headers() {
 	LKPI_DRIVER_HEADERS=""
 	case "$1" in
-		iwlwifi) LKPI_DRIVER_HEADERS="hdr-ieee80211 hdr-nl80211 hdr-radiotap" ;;
+		iwlwifi|wifi) LKPI_DRIVER_HEADERS="hdr-wifi" ;;
 	esac
+}
+
+lkpi_fetch_headers() {
+	local set=$1 work=$2 hdr path
+	[ -z "${LKPI_INC:-}" ] || return 0
+	if [ -z "${LINUXKPI_TARBALL:-}" ]; then
+		local cached="${LINUXKPI_CACHE:-/root/lkpi-src/dl612}/linux-6.12.101.tar.xz"
+		[ -f "$cached" ] && export LINUXKPI_TARBALL="$cached"
+	fi
+	lkpi_driver_headers "$set"
+	mkdir -p "$work/inc/linux"
+	for hdr in $LKPI_DRIVER_HEADERS; do
+		path=$(bash compat/linuxkpi/fetch.sh "$hdr" "$work/$hdr") || return 1
+		cp -r "$path/include/net" "$work/inc/"
+		cp "$path"/include/linux/*.h "$path"/include/uapi/linux/*.h "$work/inc/linux/"
+	done
+	LKPI_INC="$work/inc"
 }
 
 lkpi_driver_flags() {

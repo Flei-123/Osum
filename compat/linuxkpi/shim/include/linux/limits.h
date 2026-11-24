@@ -1,0 +1,20 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+#ifndef LKPI_LINUX_LIMITS_H
+#define LKPI_LINUX_LIMITS_H
+#define INT_MAX 2147483647
+#define INT_MIN (-INT_MAX - 1)
+#define UINT_MAX 4294967295U
+#define LONG_MAX 9223372036854775807L
+#define U8_MAX 255
+#define S8_MAX 127
+#define S8_MIN (-128)
+#define U16_MAX 65535
+#define S16_MAX 32767
+#define S16_MIN (-32768)
+#define U32_MAX 4294967295U
+#define S32_MAX 2147483647
+#define S32_MIN (-S32_MAX - 1)
+#define U64_MAX 18446744073709551615ULL
+#define S64_MAX 9223372036854775807LL
+#define S64_MIN (-S64_MAX - 1)
+#endif

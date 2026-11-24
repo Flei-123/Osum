@@ -169,7 +169,7 @@ static void f_bss_info(struct ieee80211_hw *hw, struct ieee80211_vif *vif, struc
 
 static void f_vif_cfg(struct ieee80211_hw *hw, struct ieee80211_vif *vif, u64 changed)
 {
-	if (changed != BSS_CHANGED_ASSOC || vif->bss_conf.assoc != (fake.sta_state >= IEEE80211_STA_ASSOC))
+	if (changed != BSS_CHANGED_ASSOC || vif->cfg.assoc != (fake.sta_state >= IEEE80211_STA_ASSOC))
 		fake.vif_assoc_wrong++;
 	record(MACPLAN_OP_VIF_CFG_CHANGED, 0);
 }

@@ -14,6 +14,7 @@ command -v qemu-system-x86_64 >/dev/null || { echo "LKPI80211-QEMU: skipped, no 
 D=$(mktemp -d); osum_tmp_guard "" "$D"
 . tools/lib/firnenv.sh
 . compat/linuxkpi/flags.sh
+lkpi_fetch_headers wifi "$D/hdr" && export LKPI_INC || { echo "LKPI80211-QEMU: header fetch failed"; exit 1; }
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
 keep() {
     [ -n "${LKPI80211_OUT:-}" ] || return 0
@@ -36,7 +37,7 @@ mutant_pack() {
     bash compat/linuxkpi/wifimod.sh "$D/mo-$name" "$m" > "$D/mod-$name.txt" 2>&1 || { bad "mutant $name does not build"; tail -3 "$D/mod-$name.txt"; return 1; }
     bash compat/linuxkpi/wifipack.sh "$D/mo-$name/linuxkpiwifi.omod" "$D/mo-$name/wififake_drv.omod" "$D/pk-$name" 2> "$D/pack-$name.txt"
 }
-PK_NOBSSID=$(mutant_pack nobssid src/wifi_glue.c '/memcpy(w->vif.vif.bss_conf.bssid/d')
+PK_NOBSSID=$(mutant_pack nobssid src/wifi_glue.c '/memcpy(w->bssid/d')
 PK_NOSTA=$(mutant_pack nosta src/wifi_glue.c '/memcpy(w->sta.sta.addr/d')
 [ -d "$PK_OK" ] && [ -d "$PK_NOBSSID" ] && [ -d "$PK_NOSTA" ] && ok "store packages built (good, no-bssid mutant, no-sta-addr mutant)" || { bad "packages"; fin; }
 

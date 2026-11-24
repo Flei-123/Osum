@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef LKPI_LINUX_DEVICE_H
 #define LKPI_LINUX_DEVICE_H
+#include <linux/kobject.h>
 #include <linux/kernel.h>
 #include <linux/lockdep.h>
 #include <linux/atomic.h>
@@ -17,6 +18,7 @@ struct device_driver {
 };
 struct bus_type { const char *name; };
 struct device {
+	struct kobject kobj;
 	const struct bus_type *bus;
 	void *driver_data;
 	struct device *parent;

@@ -15,10 +15,15 @@ TARBALL="$OUT/linux-$version.tar.xz"
 if [ -n "${LINUXKPI_TARBALL:-}" ]; then cp "$LINUXKPI_TARBALL" "$TARBALL"; else curl -fsSL -o "$TARBALL" "$url"; fi
 echo "$tsha  $TARBALL" | sha256sum -c --quiet - || { rm -f "$TARBALL"; echo "fetch: tarball sha256 mismatch" >&2; exit 3; }
 mkdir -p "$OUT/src"
-tar -xJf "$TARBALL" -C "$OUT/src" --strip-components=1 "linux-$version/${file%/}" "linux-$version/LICENSES/preferred/GPL-2.0"
+IFS=, read -r -a members <<<"${file%/}"
+extract=(); for m in "${members[@]}"; do extract+=("linux-$version/$m"); done
+tar -xJf "$TARBALL" -C "$OUT/src" --strip-components=1 "${extract[@]}" "linux-$version/LICENSES/preferred/GPL-2.0"
 case "$file" in
 	*/) got=$(cd "$OUT/src" && find "${file%/}" -type f | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
 		[ "$got" = "$fsha" ] || { echo "fetch: tree sha256 mismatch" >&2; exit 3; } ;;
+	*,*) got=$(cd "$OUT/src" && printf '%s\n' "${members[@]}" | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
+		[ "$got" = "$fsha" ] || { echo "fetch: file set sha256 mismatch" >&2; exit 3; }
+		echo "$OUT/src"; exit 0 ;;
 	*) echo "$fsha  $OUT/src/$file" | sha256sum -c --quiet - || { echo "fetch: file sha256 mismatch" >&2; exit 3; } ;;
 esac
 echo "$OUT/src/${file%/}"

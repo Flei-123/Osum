@@ -10,6 +10,8 @@
 
 struct lkpi_wifi_hw {
 	struct ieee80211_hw hw;
+	const struct ieee80211_ops *ops;
+	u8 bssid[ETH_ALEN];
 	struct lkpi80211_state state;
 	struct lkpi80211_upcalls upcalls;
 	void *upcall_ctx;

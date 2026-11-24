@@ -143,7 +143,8 @@ static long long glue_bssid_set(u64 addr)
 	if (!glue)
 		return -1;
 	w = lkpi_wifi_of(glue->hw);
-	memcpy(w->vif.vif.bss_conf.bssid, (const void *)addr, ETH_ALEN);
+	memcpy(w->bssid, (const void *)addr, ETH_ALEN);
+	w->vif.vif.bss_conf.bssid = w->bssid;
 	memcpy(w->sta.sta.addr, (const void *)addr, ETH_ALEN);
 	return 0;
 }
@@ -160,7 +161,7 @@ static long long glue_aid_set(u64 aid)
 {
 	if (!glue)
 		return -1;
-	lkpi_wifi_of(glue->hw)->vif.vif.bss_conf.aid = aid;
+	lkpi_wifi_of(glue->hw)->vif.vif.cfg.aid = aid;
 	return 0;
 }
 

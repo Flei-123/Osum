@@ -13,4 +13,5 @@ static inline ktime_t ktime_add_ms(ktime_t a, u64 ms) { return a + ms * NSEC_PER
 static inline s64 ktime_us_delta(ktime_t a, ktime_t b) { return (a - b) / NSEC_PER_USEC; }
 static inline s64 ktime_ms_delta(ktime_t a, ktime_t b) { return (a - b) / NSEC_PER_MSEC; }
 static inline bool ktime_before(ktime_t a, ktime_t b) { return a < b; }
+#include <linux/timekeeping.h>
 #endif

@@ -3,7 +3,14 @@
 
 #include <linux/types.h>
 #include <linux/overflow.h>
+#include <linux/limits.h>
 
+#define static_assert(expr, ...) _Static_assert(expr, "" __VA_ARGS__)
+#define __attribute_const__ __attribute__((const))
+#define roundup_pow_of_two(n) ((n) <= 1 ? 1UL : 1UL << (64 - __builtin_clzl((unsigned long)(n) - 1)))
+#define TRUE 1
+#define FALSE 0
+#define ilog2(n) ((n) < 2 ? 0 : 63 - __builtin_clzll((unsigned long long)(n)))
 #define BUILD_BUG_ON(cond) ((void)sizeof(char[1 - 2 * !!(cond)]))
 #define BUILD_BUG_ON_MSG(cond, msg) BUILD_BUG_ON(cond)
 #define BUILD_BUG_ON_ZERO(e) ((int)sizeof(struct { int : (-!!(e)); }))

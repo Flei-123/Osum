@@ -5,7 +5,7 @@ static struct lkpi_wifi_hw *owner(struct ieee80211_vif *vif)
 	return (struct lkpi_wifi_hw *)((u8 *)vif - __builtin_offsetof(struct lkpi_wifi_hw, vif));
 }
 
-void ieee80211_rx_napi(struct ieee80211_hw *hw, struct ieee80211_sta *sta, struct sk_buff *skb, void *napi)
+void ieee80211_rx_napi(struct ieee80211_hw *hw, struct ieee80211_sta *sta, struct sk_buff *skb, struct napi_struct *napi)
 {
 	struct lkpi_wifi_hw *w = lkpi_wifi_of(hw);
 

@@ -20,4 +20,6 @@ struct lockdep_map { int unused; };
 #define STATIC_LOCKDEP_MAP_INIT(n, k) { 0 }
 #define lock_map_acquire(m) do { } while (0)
 #define lock_map_release(m) do { } while (0)
+#define lock_map_acquire_read(m) do { } while (0)
+#define lock_map_acquire_try(m) do { } while (0)
 #endif

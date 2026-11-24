@@ -5,7 +5,7 @@ struct lkpi_wifi_hw *lkpi_wifi_of(const struct ieee80211_hw *hw)
 	return (struct lkpi_wifi_hw *)hw;
 }
 
-struct ieee80211_hw *ieee80211_alloc_hw(size_t priv_data_len, const struct ieee80211_ops *ops)
+struct ieee80211_hw *ieee80211_alloc_hw_nm(size_t priv_data_len, const struct ieee80211_ops *ops, const char *requested_name)
 {
 	struct lkpi_wifi_hw *w;
 
@@ -15,7 +15,7 @@ struct ieee80211_hw *ieee80211_alloc_hw(size_t priv_data_len, const struct ieee8
 	if (!w)
 		return NULL;
 	w->used = 1;
-	w->hw.ops = ops;
+	w->ops = ops;
 	w->hw.priv = w->priv;
 	w->hw.queues = 1;
 	return &w->hw;
@@ -36,8 +36,8 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 	if (hw->vif_data_size > LKPI_WIFI_OBJ_PRIV_MAX || hw->sta_data_size > LKPI_WIFI_OBJ_PRIV_MAX ||
 	    hw->chanctx_data_size > LKPI_WIFI_OBJ_PRIV_MAX)
 		return LKPI80211_EINVAL;
-	if (!hw->ops->start || !hw->ops->stop || !hw->ops->add_interface || !hw->ops->remove_interface ||
-	    !hw->ops->sta_state || !hw->ops->tx)
+	if (!w->ops->start || !w->ops->stop || !w->ops->add_interface || !w->ops->remove_interface ||
+	    !w->ops->sta_state || !w->ops->tx)
 		return LKPI80211_EINVAL;
 	w->state.registered = 1;
 	return 0;
@@ -70,6 +70,6 @@ int lkpi80211_tx(struct ieee80211_hw *hw, struct sk_buff *skb)
 		return LKPI80211_EPROTO;
 	if (w->state.sta_state >= IEEE80211_STA_AUTH)
 		control.sta = &w->sta.sta;
-	hw->ops->tx(hw, &control, skb);
+	w->ops->tx(hw, &control, skb);
 	return 0;
 }

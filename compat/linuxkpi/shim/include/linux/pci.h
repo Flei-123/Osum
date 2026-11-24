@@ -11,6 +11,21 @@
 #define PCI_SUBVENDOR_ID_REDHAT_QUMRANET 0x1af4
 #define PCI_SUBDEVICE_ID_QEMU 0x1100
 #define PCI_NUM_RESOURCES 6
+#define PCI_BASE_ADDRESS_0 0x10
+#define PCIE_LINK_STATE_L0S 1
+#define PCIE_LINK_STATE_L1 2
+#define PCIE_LINK_STATE_CLKPM 4
+struct pci_dev;
+int pci_disable_link_state(struct pci_dev *pdev, int state);
+#define PCI_BASE_ADDRESS_MEM_TYPE_MASK 0x06
+#define PCI_BASE_ADDRESS_MEM_TYPE_64 0x04
+#define PCI_BASE_ADDRESS_MEM_MASK (~0x0fUL)
+typedef int pci_power_t;
+#define PCI_D0 0
+#define PCI_D1 1
+#define PCI_D2 2
+#define PCI_D3hot 3
+#define PCI_D3cold 4
 #define PCI_EXP_LNKCTL 16
 #define PCI_EXP_LNKCTL_ASPM_L0S 0x0001
 #define PCI_EXP_LNKCTL_ASPM_L1 0x0002
@@ -33,7 +48,7 @@
 #define PCI_STATUS_INTERRUPT 0x08
 struct msix_entry { u32 vector; u16 entry; };
 
-struct pci_bus { unsigned char number; struct pci_dev *self; };
+struct pci_bus { struct pci_bus *parent; unsigned char number; struct pci_dev *self; };
 struct pci_dev {
 	struct device dev;
 	struct pci_bus *bus;

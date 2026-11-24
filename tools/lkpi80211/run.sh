@@ -40,6 +40,7 @@ mutant openauth "        if (*p).rsn && !(*p).ptk { return false }" "        (*p
 . compat/linuxkpi/flags.sh
 . compat/linuxkpi/wifibuild.sh
 SHIM=compat/linuxkpi/shim
+lkpi_fetch_headers wifi "$T/hdr" && ok "fetch: wifi protocol headers from the pinned tarball, file set sha256 verified" || bad "fetch: wifi protocol headers"
 if FIRNLIB="$PWD/lib" "$FIRNC" --profile=app tools/lkpi80211/dump.fi -o "$T/dump" > "$T/dump.build" 2>&1 && "$T/dump" > "$T/ops.txt"; then
     ok "planner dump: $(wc -l < "$T/ops.txt") events"
 else
@@ -68,7 +69,7 @@ wmutant() {
 wmutant stepskip wifi_dispatch.c "if (arg != old + 1 && arg + 1 != old)" "if (0)"
 wmutant keymap wifi_dispatch.c "arg == MACPLAN_KEY_SET_PAIRWISE || arg == MACPLAN_KEY_DEL_PAIRWISE;" "arg == MACPLAN_KEY_SET_PAIRWISE;"
 wmutant qosmap wifi_dispatch.c "changed = BSS_CHANGED_QOS;" "changed = BSS_CHANGED_BSSID;"
-wmutant assocflag wifi_dispatch.c "bss_conf.assoc = w->state.sta_state >= IEEE80211_STA_ASSOC;" "bss_conf.assoc = 1;"
+wmutant assocflag wifi_dispatch.c "cfg.assoc = w->state.sta_state >= IEEE80211_STA_ASSOC;" "cfg.assoc = 1;"
 wmutant acdrop wifi_dispatch.c "0, arg, &params);" "0, 0, &params);"
 wmutant skbleak wifi_skb.c "	live--;
 	kfree(skb);" "	kfree(skb);"

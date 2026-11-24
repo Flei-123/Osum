@@ -2,6 +2,8 @@
 #ifndef LKPI_LINUX_NETDEVICE_H
 #define LKPI_LINUX_NETDEVICE_H
 #include <linux/skbuff.h>
+#include <linux/hrtimer.h>
+#include <linux/string.h>
 #include <linux/device.h>
 #include <linux/spinlock.h>
 #include <linux/rcupdate.h>
@@ -29,7 +31,11 @@ typedef u64 netdev_features_t;
 struct net_device;
 struct napi_struct { struct net_device *dev; int (*poll)(struct napi_struct *, int); int weight; unsigned long state; struct list_head poll_list; int napi_id; };
 struct net_device_stats { unsigned long rx_packets, tx_packets, rx_bytes, tx_bytes, rx_errors, tx_errors, rx_dropped, tx_dropped; };
-struct net_device { char name[IFNAMSIZ]; struct device dev; unsigned long state; unsigned int mtu; unsigned char dev_addr[MAX_ADDR_LEN]; unsigned int flags; void *priv; };
+struct netdev_hw_addr { struct netdev_hw_addr *next; unsigned char addr[MAX_ADDR_LEN]; };
+struct netdev_hw_addr_list { struct netdev_hw_addr *first; int count; };
+#define netdev_hw_addr_list_for_each(ha, l) for (ha = (l)->first; ha; ha = ha->next)
+#define netdev_hw_addr_list_count(l) ((l)->count)
+struct net_device { char name[IFNAMSIZ]; struct device dev; unsigned long state; unsigned int mtu; unsigned char dev_addr[MAX_ADDR_LEN]; unsigned int flags; void *priv; struct wireless_dev *ieee80211_ptr; };
 void *netdev_priv(const struct net_device *dev);
 struct net_device *alloc_netdev_dummy(int sizeof_priv);
 void free_netdev(struct net_device *dev);
