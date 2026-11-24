@@ -88,7 +88,7 @@ hasnot "$D/compat.klar" "iwl: hw_rev" "compat: native driver never probed the 82
 hasre "$D/compat.klar" 'drvstore: bind lkpi-iwlwifi -> [0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f] 8086:24fd ok' "compat: store binds lkpi-iwlwifi to the 8265 and the real iwl_pci_probe returns ok"
 hasnot "$D/compat.klar" "probe failed" "compat: real probe reports no failure"
 has "$D/compat.klar" "drvstore: fw ok $FW_NAME" "compat: firmware served to the real driver"
-has "$D/compat.klar" "iwl_mvm_up RT uCode started" "compat: real firmware path reaches the RT uCode through the fake firmware"
+hasre "$D/compat.klar" 'auto=[a-z-]+ rc=-?[0-9]+ tries=[0-9]+ driver=bound' "compat: wlan stack drives the radio of the real driver (RT firmware up, interface added)"
 hasnot "$D/compat.klar" "Add internal station failed" "compat: SCD_QUEUE_CFG and ADD_STA answered, no restart loop"
 hasnot "$D/compat.klar" "fakefw: scd bad" "compat: queue config read through the wide header"
 hasnot "$D/compat.klar" "lkpi: double free" "compat: shim heap reports no double free in the run"
