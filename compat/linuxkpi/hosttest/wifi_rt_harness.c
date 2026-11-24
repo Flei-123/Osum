@@ -188,6 +188,27 @@ static void dma_paths(void)
 	check(get_order(1) == 0 && get_order(PAGE_SIZE) == 0 && get_order(PAGE_SIZE + 1) == 1, "page order");
 }
 
+static void stolen_page_paths(void)
+{
+	size_t base = lkpi_heap_used();
+	struct page *page = alloc_pages(GFP_KERNEL, 0);
+	unsigned long addr = (unsigned long)page_address(page);
+	unsigned long plain;
+
+	get_page(page);
+	__free_pages(page, 0);
+	check(page_count(page) == 1 && lkpi_heap_used() > base, "page stays alive while a stolen reference is held");
+	check(lkpi_virt_to_page((void *)addr) == page, "page address maps back to its page");
+	free_pages(addr, 0);
+	check(lkpi_heap_used() == base, "response page freed once, no leak and no double release");
+	check(lkpi_virt_to_page((void *)addr) == NULL, "freed page is not found again");
+	base = lkpi_heap_used();
+	plain = __get_free_pages(GFP_KERNEL, 0);
+	check(plain && lkpi_virt_to_page((void *)plain) == NULL, "raw pages are not page structs");
+	free_pages(plain, 0);
+	check(lkpi_heap_used() == base, "raw pages are released once");
+}
+
 static void work_paths(void)
 {
 	struct work_struct work;
@@ -354,6 +375,7 @@ static void bit_paths(void)
 int main_entry(void)
 {
 	dma_paths();
+	stolen_page_paths();
 	work_paths();
 	timer_paths();
 	napi_paths();

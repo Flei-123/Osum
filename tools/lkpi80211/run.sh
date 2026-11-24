@@ -77,6 +77,7 @@ rtmutant napioff src/wifi_net.c "if (!(napi->state & LKPI_NAPI_ENABLED) || (napi
 rtmutant skbdirty src/wifi_skb.c "skb->in_use = 1;" "skb->in_use = 1; skb->shinfo.nr_frags = 1;"
 rtmutant dmaerr src/wifi_mem.c "return addr == DMA_MAPPING_ERROR;" "return 0;"
 rtmutant noclock src/wifi_time.c "return real > virt ? real : virt;" "return real > virt ? virt : real;"
+rtmutant pageref src/wifi_mem.c "if (--page->refcount.counter > 0)" "if (--page->refcount.counter > 5)"
 rtmutant sgskip src/wifi_sg.c "if ((size_t)skip >= room) {" "if (0) {"
 rtmutant fwleak src/wifi_dev.c "k_frames_free(base, frames);
 		return -ENOENT;" "return -ENOENT;"

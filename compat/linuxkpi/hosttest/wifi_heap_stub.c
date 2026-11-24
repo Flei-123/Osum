@@ -43,6 +43,11 @@ void *kzalloc(size_t size, gfp_t flags)
 	return p;
 }
 
+void *kmalloc(size_t size, gfp_t flags)
+{
+	return kzalloc(size, flags);
+}
+
 void *lkpi_alloc_aligned(size_t size, size_t align)
 {
 	u64 class = MIN_CLASS;

@@ -98,6 +98,30 @@ void dma_sync_single_for_device(struct device *dev, dma_addr_t addr, size_t size
 	dma_sync_single_for_cpu(dev, addr, size, dir);
 }
 
+static struct page *live_pages;
+
+static void page_unlink(struct page *page)
+{
+	struct page **link;
+
+	for (link = &live_pages; *link; link = &(*link)->next) {
+		if (*link != page)
+			continue;
+		*link = page->next;
+		return;
+	}
+}
+
+struct page *lkpi_virt_to_page(const void *addr)
+{
+	struct page *page;
+
+	for (page = live_pages; page; page = page->next)
+		if (page->virtual == addr)
+			return page;
+	return NULL;
+}
+
 struct page *alloc_pages(gfp_t gfp, unsigned int order)
 {
 	struct page *page;
@@ -112,6 +136,8 @@ struct page *alloc_pages(gfp_t gfp, unsigned int order)
 		return NULL;
 	}
 	page->refcount.counter = 1;
+	page->next = live_pages;
+	live_pages = page;
 	return page;
 }
 
@@ -120,6 +146,9 @@ void __free_pages(struct page *page, unsigned int order)
 	(void)order;
 	if (!page)
 		return;
+	if (--page->refcount.counter > 0)
+		return;
+	page_unlink(page);
 	kfree(page->virtual);
 	kfree(page);
 }
@@ -136,8 +165,7 @@ void get_page(struct page *page)
 
 void put_page(struct page *page)
 {
-	if (--page->refcount.counter == 0)
-		__free_pages(page, 0);
+	__free_pages(page, 0);
 }
 
 int page_count(struct page *page)

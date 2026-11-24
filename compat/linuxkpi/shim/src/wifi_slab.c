@@ -155,6 +155,10 @@ unsigned long __get_free_pages(gfp_t gfp, unsigned int order)
 
 void free_pages(unsigned long addr, unsigned int order)
 {
-	(void)order;
-	kfree((void *)addr);
+	struct page *page = lkpi_virt_to_page((void *)addr);
+
+	if (page)
+		__free_pages(page, order);
+	else
+		kfree((void *)addr);
 }

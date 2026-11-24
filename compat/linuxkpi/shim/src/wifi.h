@@ -7,6 +7,8 @@
 
 void lkpi_mmio_note_mapping(u64 virt);
 void *lkpi_alloc_aligned(size_t size, size_t align);
+struct page;
+struct page *lkpi_virt_to_page(const void *addr);
 size_t lkpi_heap_used(void);
 bool lkpi_driver_released(void);
 

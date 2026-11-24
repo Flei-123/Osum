@@ -5,7 +5,7 @@
 #include <linux/atomic.h>
 #include <linux/slab.h>
 #define PAGE_MASK (~(PAGE_SIZE - 1))
-struct page { unsigned long flags; unsigned long private; atomic_t refcount; void *virtual; };
+struct page { unsigned long flags; unsigned long private; atomic_t refcount; void *virtual; struct page *next; };
 #define __GFP_COMP 0U
 #define __GFP_NORETRY 0U
 #define __GFP_NOMEMALLOC 0U
