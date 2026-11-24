@@ -34,7 +34,7 @@ else
     mv "$D/build/${MARKE_DATEI}-usb.img" "$D/stick.img"
 fi
 if [ -n "${KERNEL:-}" ]; then cp "$KERNEL" "$D/osum.mb"; else
-    bash tools/build-kernel.sh "$D/osum.mb" --stufe 0 > "$D/kb.txt" 2>&1 || { tail -5 "$D/kb.txt"; echo "OVMFBOOT: kernel build failed"; exit 1; }
+    bash tools/build-kernel.sh "$D/osum.mb" --stufe 0 --testbed > "$D/kb.txt" 2>&1 || { tail -5 "$D/kb.txt"; echo "OVMFBOOT: kernel build failed"; exit 1; }
 fi
 OFF=$((2048*512))
 mcopy -i "$D/stick.img@@$OFF" -o "$D/osum.mb" ::osum.mb || { echo "OVMFBOOT: mcopy kernel"; exit 1; }

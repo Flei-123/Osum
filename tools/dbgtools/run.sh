@@ -17,7 +17,7 @@ TOOLS="lspci pcicfg regdump prphread wlanctl"
 PROGS="sh cat echo sleep su $TOOLS"
 mkdir -p "$D/bin"
 bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/b.txt" 2>&1 && ok "programs build" || { bad "programs"; head -10 "$D/b.txt"; echo "DBGTOOLS: $pass passed, $fail failed"; exit 1; }
-./tools/build-kernel.sh "$D/k0.img" --stufe 0 > "$D/k.txt" 2>&1 && ok "kernel builds" || { bad "kernel"; tail -5 "$D/k.txt"; echo "DBGTOOLS: $pass passed, $fail failed"; exit 1; }
+./tools/build-kernel.sh "$D/k0.img" --stufe 0 --testbed > "$D/k.txt" 2>&1 && ok "kernel builds" || { bad "kernel"; tail -5 "$D/k.txt"; echo "DBGTOOLS: $pass passed, $fail failed"; exit 1; }
 printf 'root:x:0:0:root:/:/bin/sh\njustin:x:1000:1000:Justin:/:/bin/sh\n' > "$D/passwd"
 printf 'root:x:0:\njustin:x:1000:\n' > "$D/group"
 cat > "$D/s.sh" <<'EOS'

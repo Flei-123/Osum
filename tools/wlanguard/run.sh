@@ -31,7 +31,7 @@ SRV=$!
 python3 -I tools/iwlfh/ref.py gen "$T/blobs" || { bad "reference generator"; exit 1; }
 bash tools/sync/build.sh "$T/bin" 0 sh echo cat sleep ping dhcp wget wlanctl netstat > "$T/b.txt" 2>&1 \
     && ok "programs build" || { bad "programs build"; tail "$T/b.txt"; echo "WLANGUARD: $pass passed, $fail failed"; exit 1; }
-./tools/build-kernel.sh "$T/k.img" --stufe 0 > "$T/k.txt" 2>&1 \
+./tools/build-kernel.sh "$T/k.img" --stufe 0 --testbed > "$T/k.txt" 2>&1 \
     && ok "kernel builds" || { bad "kernel build"; tail -30 "$T/k.txt"; echo "WLANGUARD: $pass passed, $fail failed"; exit 1; }
 
 snaps() { local i=0; while [ "$i" -lt "$1" ]; do echo "sleep $SNAP_SEC"; i=$((i+1)); done; }

@@ -44,7 +44,7 @@ PK_NOSTA=$(mutant_pack nosta src/wifi_glue.c '/memcpy(w->sta.sta.addr/d')
 mkdir -p "$D/bin"
 bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/p.txt" 2>&1 && ok "programs build" || { bad "programs"; head -10 "$D/p.txt"; fin; }
 if [ -n "${LKPI80211_KERNEL:-}" ]; then cp "$LKPI80211_KERNEL" "$D/k0.img"; ok "kernel supplied"; else
-    ./tools/build-kernel.sh "$D/k0.img" --stufe 0 > "$D/k.txt" 2>&1 && ok "kernel builds" || { bad "kernel"; tail -5 "$D/k.txt"; fin; }
+    ./tools/build-kernel.sh "$D/k0.img" --stufe 0 --testbed > "$D/k.txt" 2>&1 && ok "kernel builds" || { bad "kernel"; tail -5 "$D/k.txt"; fin; }
 fi
 
 {

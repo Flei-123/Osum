@@ -25,7 +25,7 @@ bash tools/sync/build.sh "$T/bin" 0 sh echo cat sleep ping dhcp uplswitch > "$T/
     && ok "programs build" || { bad "programs build"; tail "$T/b.txt"; echo "UPLINKSWITCH: $pass ok, $fail fail"; exit 1; }
 KNEW="${UPLSW_KERNEL:-}"
 if [ -z "$KNEW" ]; then
-    ./tools/build-kernel.sh "$T/k.img" --stufe 0 > "$T/k.txt" 2>&1 \
+    ./tools/build-kernel.sh "$T/k.img" --stufe 0 --testbed > "$T/k.txt" 2>&1 \
         && ok "kernel builds" || { bad "kernel build"; tail -30 "$T/k.txt"; echo "UPLINKSWITCH: $pass ok, $fail fail"; exit 1; }
     KNEW="$T/k.img"
 fi

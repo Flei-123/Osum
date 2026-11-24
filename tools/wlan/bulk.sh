@@ -27,7 +27,7 @@ EXPECT=$(python3 -I -c "import hashlib;print(hashlib.sha256(bytes(((j*7+3)&255) 
 FWPATH=/lib/firmware/intel/iwlwifi/iwlwifi-8265-36.ucode
 bash tools/sync/build.sh "$T/bin" 0 sh echo cat sleep dhcp wget shasum > "$T/b.txt" 2>&1 \
     && ok "programs build" || { bad "programs build"; tail "$T/b.txt"; echo "WLANBULK: $pass ok, $fail fail"; exit 1; }
-./tools/build-kernel.sh "$T/k.img" --stufe 0 > "$T/k.txt" 2>&1 \
+./tools/build-kernel.sh "$T/k.img" --stufe 0 --testbed > "$T/k.txt" 2>&1 \
     && ok "kernel builds" || { bad "kernel build"; tail -30 "$T/k.txt"; echo "WLANBULK: $pass ok, $fail fail"; exit 1; }
 
 {

@@ -29,7 +29,7 @@
 // runtime image through the FH service channel (lib/wlan/iwl_fh8000.fi `fh_load`: bounce buffer of 32 frames, bus address =
 // physical address): lines `iwl: fh RC <n> FAILSEC <n>` and `iwl: fh STAT chunks=<n> bytes=<n> ext=<n> cpu1=<n> cpu2=<n>`, then
 // the ALIVE wait (`iwl: boot rc=<n>`). QEMU has no such device: the word `iwlfhtest` runs the SAME loader for a synthetic 8265 against a
-// fake CSR window in RAM (drv/net/iwl_fake.fi) and adds the model summary (LOADSTAT, CHICK, VIOL, LOST, NONZERO, DIGEST); `iwlfhlost`
+// fake CSR window in RAM (drv/net/testbed/iwl_fake.fi) and adds the model summary (LOADSTAT, CHICK, VIOL, LOST, NONZERO, DIGEST); `iwlfhlost`
 // / `iwlfhbad` break the fake on purpose (tools/iwlfh/run.sh). Silicon behaviour (HP-9c) is NOT MEASURED.
 //
 // NOT MEASURED on real hardware yet: this file exists so that ONE boot of
@@ -59,8 +59,7 @@ import wlan.iwl_boot
 import wlan.iwl_phydb
 import wlan.iwl_paging
 import crypto.sha256
-import drv.net.iwl_fake
-import drv.net.iwl_fakeap
+import drv.net.wlanbed
 import drv.net.iwl_cq
 import drv.net.iwl_xport
 import drv.net.iwl_heldcaps
@@ -83,7 +82,8 @@ import fs.vfsops
 
 export {
     boot, fw_stage, fw_load, quirk_bits, reload_reset, diag_text, diag_more_text, diag_irq_text, bed_gp_known, bed_gp, held_cq, held_probe, held_ready, diag_active, count_targets, target_at, probe_at, ERR_NODEV, ERR_MAP,
-    E_FW_NONE, E_FW_PARSE, E_FW_MEM, E_FW_IMAGE, boot_rfkill
+    E_FW_NONE, E_FW_PARSE, E_FW_MEM, E_FW_IMAGE, boot_rfkill,
+    dma_pages, mode_flag, put_i, fh8000_phases, bed_gp_store, diag_pm_capture, hold_set, FH_BOUNCE_FRAMES, HELD_CQ_OFF
 }
 
 const E_FW_NONE: i64 = -40 // no candidate file exists
@@ -180,6 +180,19 @@ fn diag_more_text(buf: u64, cap: u64) -> u64 {
 
 fn diag_irq_text(buf: u64, cap: u64) -> u64 {
     return iwl_diag.diag_irq_text(&diag_d, buf, cap)
+}
+
+fn bed_gp_store(v: u64) {
+    bed_gp_val = v
+    bed_gp_set = 1
+}
+
+fn diag_pm_capture(buf: u64) {
+    iwl_diag.diag_pm(&diag_d, buf)
+}
+
+fn hold_set(addr: u64) {
+    held_addr = addr
 }
 
 fn bed_gp_known() -> bool {
@@ -626,7 +639,6 @@ fn fw_boot(state: u64, p: *mut iwl_probe.Probe, blob: u64, f: *mut iwl_fw.FwInfo
 }
 
 const FH_BOUNCE_FRAMES: u64 = 32           // 128 KiB = FH_MEM_TB_MAX_LENGTH: fewest chunks
-const FH_SRAM_FRAMES: u64 = 2048           // 8 MiB fake SRAM (8 windows of 1 MiB)
 const FH_TEST_DEV: u64 = 0x24FD            // synthetic Intel Wireless-AC 8265
 
 fn put_i(v: i64) {
@@ -636,33 +648,6 @@ fn put_i(v: i64) {
     } else {
         serial.dec(v as u64)
     }
-}
-
-// `iwl: fh RC <n> FAILSEC <n>` + `iwl: fh STAT ...` (the same text the host gate prints and the Python reference expects).
-fn fh_report(r: i64, st: *mut iwl_fh8000.FhStat) {
-    var s_rc: [u8; 13] = "iwl: fh RC \0\0"
-    var s_fs: [u8; 11] = " FAILSEC \0\0"
-    var s_st: [u8; 22] = "iwl: fh STAT chunks=\0\0"
-    var s_by: [u8; 8] = " bytes=\0"
-    var s_ex: [u8; 6] = " ext=\0"
-    var s_c1: [u8; 7] = " cpu1=\0"
-    var s_c2: [u8; 7] = " cpu2=\0"
-    serial.puts((&s_rc[0]) as u64)
-    put_i(r)
-    serial.puts((&s_fs[0]) as u64)
-    serial.dec((*st).fail_sec)
-    serial.nl()
-    serial.puts((&s_st[0]) as u64)
-    serial.dec((*st).chunks)
-    serial.puts((&s_by[0]) as u64)
-    serial.dec((*st).bytes)
-    serial.puts((&s_ex[0]) as u64)
-    serial.dec((*st).ext_chunks)
-    serial.puts((&s_c1[0]) as u64)
-    serial.dec((*st).secs[0])
-    serial.puts((&s_c2[0]) as u64)
-    serial.dec((*st).secs[1])
-    serial.nl()
 }
 
 // HP-9c.2: the REAL family-8000 sequence. INIT image -> ALIVE -> (NVM/calibration exchange, needs the command queue: HP-9c.1,
@@ -925,168 +910,6 @@ fn fh8000_phases(state: u64, p: *mut iwl_probe.Probe, f: *mut iwl_fw.FwInfo, blo
     return r
 }
 
-// HP-9b QEMU test bed: the REAL loader against the fake CSR window (word iwlfhtest).
-fn fh8000_fake(state: u64, blob: u64, f: *mut iwl_fw.FwInfo) {
-    var s_bad: [u8; 21] = "iwl: fh no memory\0\0\0\0"
-    var s_pw: [u8; 18] = "iwl: fh power rc=\0"
-    var s_ls: [u8; 18] = "iwl: fh LOADSTAT \0"
-    var s_ch: [u8; 15] = "iwl: fh CHICK \0"
-    var s_vi: [u8; 15] = "iwl: fh VIOL \0\0"
-    var s_lo: [u8; 7] = " LOST \0"
-    var s_nz: [u8; 10] = " NONZERO \0"
-    var s_dg: [u8; 9] = " DIGEST \0"
-    let region: u64 = dma_pages(state, iwl_fake.FAKE_PAGES)
-    let sram: u64 = dma_pages(state, FH_SRAM_FRAMES)
-    let bounce: u64 = dma_pages(state, FH_BOUNCE_FRAMES)
-    if region == 0 || sram == 0 || bounce == 0 {
-        serial.puts((&s_bad[0]) as u64)
-        serial.nl()
-        return
-    }
-    let bsize: u64 = FH_BOUNCE_FRAMES * 4096
-    var mode: u64 = iwl_fake.FAKE_NORMAL
-    var win: u64 = bounce
-    if kstate.mode_on(state, kstate.M_IWLFHLOST) {
-        mode = iwl_fake.FAKE_LOST
-    }
-    if kstate.mode_on(state, kstate.M_IWLFHBAD) {
-        mode = iwl_fake.FAKE_BADWIN
-        win = bounce + 4096
-    }
-    iwl_fake.fake_init(region, sram, mode, win, bsize)
-    var p: iwl_probe.Probe = iwl_probe.probe_new()
-    iwl_probe.mmio_set(&p, region, iwl_fake.fake_rd, iwl_fake.fake_wr)
-    wltrace.sync(state)
-    p.no_own = mode_flag(state, kstate.M_IWLNOOWN)
-    let pw: i64 = iwl_pwr.power_up(&p)
-    if pw != 0 {
-        serial.puts((&s_pw[0]) as u64)
-        put_i(pw)
-        serial.nl()
-        return
-    }
-    var st: iwl_fh8000.FhStat = iwl_fh8000.fhstat_new()
-    let r: i64 = iwl_fhload.fh_load(&p, f, blob, iwl_fw.IMG_RT, bounce, bounce, bsize, &st)
-    fh_report(r, &st)
-    serial.puts((&s_ls[0]) as u64)
-    serial.hex(iwl_fake.fake_loadstat(region))
-    serial.nl()
-    serial.puts((&s_ch[0]) as u64)
-    serial.hex(iwl_fake.fake_chick(region))
-    serial.nl()
-    var sum: [u64; 2] = [0 as u64; 2]
-    iwl_fake.fake_sum(region, (&sum[0]) as *mut u64)
-    serial.puts((&s_vi[0]) as u64)
-    serial.dec(iwl_fake.fake_viol(region))
-    serial.puts((&s_lo[0]) as u64)
-    serial.dec(iwl_fake.fake_lost(region))
-    serial.puts((&s_nz[0]) as u64)
-    serial.dec(sum[0])
-    serial.puts((&s_dg[0]) as u64)
-    serial.hex(sum[1])
-    serial.nl()
-    fh8000_fake2(state, blob, f, mode, win)
-}
-
-// HP-9c.2 against a fresh fake: INIT -> ALIVE -> stop -> RT -> ALIVE (`iwl: boot2 ...` lines + model summary).
-#[allow_escape]
-fn fh8000_fake2(state: u64, blob: u64, f: *mut iwl_fw.FwInfo, mode: u64, win: u64) {
-    var s_sum: [u8; 19] = "iwl: boot2 SUMMARY\0"
-    var s_ph: [u8; 8] = " phase \0"
-    var s_b0: [u8; 7] = " init \0"
-    var s_b1: [u8; 5] = " rt \0"
-    var s_vi: [u8; 6] = " viol\0"
-    var s_sp: [u8; 7] = " stops\0"
-    let region: u64 = dma_pages(state, iwl_fake.FAKE_PAGES)
-    let sram: u64 = dma_pages(state, FH_SRAM_FRAMES)
-    let bnc: u64 = dma_pages(state, FH_BOUNCE_FRAMES)
-    if region == 0 || sram == 0 || bnc == 0 {
-        return
-    }
-    var w2: u64 = bnc
-    if mode == iwl_fake.FAKE_BADWIN {
-        w2 = bnc + 4096
-    }
-    iwl_heldcaps.store(f, quirk_bits(state))
-    iwl_fake.fake_init(region, sram, mode, w2, FH_BOUNCE_FRAMES * 4096)
-    iwl_fake.fake_set_knobs(region, mode_flag(state, kstate.M_IWLFHNONVM), mode_flag(state, kstate.M_IWLFHNOINITC), mode_flag(state, kstate.M_IWLFHNOALIVE), mode_flag(state, kstate.M_IWLFHBADNVM))
-    iwl_fakeap.set_drop(mode_flag(state, kstate.M_IWLFHDROP))
-    iwl_fakeap.set_gateway_silent(mode_flag(state, kstate.M_FAKENOGW))
-    iwl_fakeap.set_knobs(mode_flag(state, kstate.M_FAKEBULK), mode_flag(state, kstate.M_FAKELOSS), mode_flag(state, kstate.M_FAKEDUP), mode_flag(state, kstate.M_FAKEREORD), mode_flag(state, kstate.M_FAKEAMSDU), mode_flag(state, kstate.M_FAKENORETX), mode_flag(state, kstate.M_FAKEADDBA))
-    iwl_fake.fake_set_txlag(region, mode_flag(state, kstate.M_FAKETXLAG))
-    iwl_fake.fake_set_slow(region, mode_flag(state, kstate.M_IWLFHSLOW))
-    iwl_fake.fake_set_rxonly(region, mode_flag(state, kstate.M_IWLFHRXONLY) | mode_flag(state, kstate.M_IWLFHRXSILENT))
-    iwl_fake.fake_set_silent(region, mode_flag(state, kstate.M_IWLFHRXSILENT))
-    iwl_fake.fake_set_wake(region, mode_flag(state, kstate.M_IWLFHWAKE))
-    iwl_fake.fake_set_dead(region, mode_flag(state, kstate.M_IWLFHDEAD))
-    iwl_fake.fake_set_expwake(region, mode_flag(state, kstate.M_IWLFHEXPWAKE))
-    iwl_fake.fake_set_rfkill(region, mode_flag(state, kstate.M_IWLFHRFKILL))
-    iwl_fake.fake_set_bigcal(region, mode_flag(state, kstate.M_IWLFHBIGCAL))
-    var p: iwl_probe.Probe = iwl_probe.probe_new()
-    iwl_probe.mmio_set(&p, region, iwl_fake.fake_rd, iwl_fake.fake_wr)
-    wltrace.sync(state)
-    p.no_own = mode_flag(state, kstate.M_IWLNOOWN)
-    bed_gp_val = iwl_pwr.rd(&p, iwl_probe.CSR_GP_CNTRL)
-    bed_gp_set = 1
-    var cq: iwl_cmdq.Cq = iwl_cmdq.cq_new()
-    var cqp: *mut iwl_cmdq.Cq = &cq
-    let bind: bool = kstate.mode_on(state, kstate.M_IWLFHBIND)
-    var hold: u64 = 0
-    if bind {
-        hold = dma_pages(state, 1)
-        if hold != 0 {
-            cqp = (hold + HELD_CQ_OFF) as *mut iwl_cmdq.Cq
-            *cqp = iwl_cmdq.cq_new()
-        }
-    }
-    var pmf: [u64; 16] = [0 as u64; 16]
-    iwl_pwr.snap_warm(&p, (&pmf[9]) as u64)
-    iwl_diag.diag_pm(&diag_d, (&pmf[0]) as u64)
-    let r: i64 = fh8000_phases(state, &p, f, blob, bnc, cqp)
-    if r == 0 && (*cqp).tx_on != 0 && hold == 0 {
-        iwl_cq.cq_selftest(state, cqp, &p, region)
-    }
-    if r == 0 && hold != 0 {
-        iwl_fake.fake_set_ap(region, 1)
-        let hp: *mut iwl_probe.Probe = hold as *mut iwl_probe.Probe
-        *hp = p
-        held_addr = hold
-    }
-    var s_fw: [u8; 19] = "iwl: boot2 FAKEFW \0"
-    var s_nv: [u8; 5] = "nvm=\0"
-    var s_pd: [u8; 8] = " phydb=\0"
-    var s_ic: [u8; 8] = " initc=\0"
-    serial.puts((&s_fw[0]) as u64)
-    serial.puts((&s_nv[0]) as u64)
-    serial.dec(iwl_fake.fake_nvm_reads(region))
-    serial.puts((&s_pd[0]) as u64)
-    serial.dec(iwl_fake.fake_phydb_cmds(region))
-    serial.puts((&s_ic[0]) as u64)
-    serial.dec(iwl_fake.fake_init_completes(region))
-    serial.nl()
-    var s_fp: [u8; 21] = "iwl: boot2 FAKEPD b=\0"
-    var s_fb: [u8; 6] = " bad=\0"
-    serial.puts((&s_fp[0]) as u64)
-    serial.dec(iwl_fake.fake_phydb_bytes(region))
-    serial.puts((&s_fb[0]) as u64)
-    serial.dec(iwl_fake.fake_phydb_bad(region))
-    serial.nl()
-    serial.puts((&s_sum[0]) as u64)
-    serial.puts((&s_ph[0]) as u64)
-    serial.dec(iwl_fake.fake_phase(region))
-    serial.puts((&s_b0[0]) as u64)
-    serial.dec(iwl_fake.fake_phase_bytes(region, 0))
-    serial.puts((&s_b1[0]) as u64)
-    serial.dec(iwl_fake.fake_phase_bytes(region, 1))
-    serial.puts((&s_vi[0]) as u64)
-    serial.put(32 as u8)
-    serial.dec(iwl_fake.fake_viol(region))
-    serial.puts((&s_sp[0]) as u64)
-    serial.put(32 as u8)
-    serial.dec(iwl_fake.fake_stops(region))
-    serial.nl()
-}
-
 // Real device (word iwlboot, family 8000): power up, push the runtime image through the FH channel, wait for ALIVE.
 // Writes device registers; NOT MEASURED on silicon (HP-9c).
 #[allow_escape]
@@ -1199,7 +1022,7 @@ fn fw_stage_run(state: u64) {
             serial.puts((&s_none[0]) as u64)
             serial.nl()
         } else if rh == 0 {
-            fh8000_fake(state, buf, &f)
+            wlanbed.fh_test(state, buf, (&f) as u64)
         }
         return
     }

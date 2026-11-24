@@ -38,6 +38,8 @@ MODULE_KEYS=${MODULE_KEYS:-}
 BAN_FLOOR=${BAN_FLOOR:-}
 OHNE_EXT4=0
 OHNE_NTFS=0
+TESTBED=off
+[[ -n ${OSUM_TESTBED:-} ]] && TESTBED=$OSUM_TESTBED
 [[ -n ${OSUM_EXT4:-} ]] && [[ $OSUM_EXT4 == off ]] && OHNE_EXT4=1
 [[ -n ${OSUM_NTFS:-} ]] && [[ $OSUM_NTFS == off ]] && OHNE_NTFS=1
 
@@ -52,6 +54,7 @@ while [[ $# -gt 0 ]]; do
         --ban-floor) BAN_FLOOR=$2; shift 2 ;;
         --ohne-bruecke) OHNE_BRUECKE=1; shift ;;
         --ohne-symbole) SYMBOLE=off; shift ;;
+        --testbed) TESTBED=on; shift ;;
         --gui) GUI=$2; shift 2 ;;
         --stufe) STUFE=$2; shift 2 ;;
         --base) KERNEL_BASE=$2; shift 2 ;;
@@ -62,6 +65,7 @@ while [[ $# -gt 0 ]]; do
 done
 case "$KERNEL_BASE" in ""|0x*[0-9a-fA-F]) ;; *) echo "--base takes a hex address like 0x1600000, not '$KERNEL_BASE'" >&2; exit 1 ;; esac
 case "$GUI" in on|off) ;; *) echo "--gui takes on or off, not '$GUI'" >&2; exit 1 ;; esac
+case "$TESTBED" in on|off) ;; *) echo "testbed takes on or off, not '$TESTBED'" >&2; exit 1 ;; esac
 case "$TUNNEL" in on|off) ;; *) echo "tunnel takes on or off, not '$TUNNEL'" >&2; exit 1 ;; esac
 OHNE_TUNNEL=0
 [[ $TUNNEL == off ]] && OHNE_TUNNEL=1
@@ -159,6 +163,12 @@ if [[ $OHNE_NTFS == 1 ]]; then
     ersetze ntfs-aus ntfs || exit 1
 fi
 weg ntfs-aus
+
+if [[ $TESTBED == off ]]; then
+    ersetze bedwire-aus bedwire || exit 1
+    find "$TMP/kernel/drv/net/testbed" -type f -name '*.fi' ! -name bedwire.fi -delete
+fi
+weg bedwire-aus
 
 GFX_DATEIEN="wm wig font ttf tile wmplug vmode ansi ps2m kgui kgbase kgdisp kgsvc kgwm kgrun kgstage sysgui dispsave cursor vgpu vgarrange beam vmsvga pixelguard shot"
 if [[ $GUI == off ]]; then
@@ -274,4 +284,4 @@ fi
 mkdir -p "$(dirname "$AUS")"
 cp -f "$TMP/osum.elf" "$AUS.elf"
 objcopy -O elf32-i386 "$TMP/osum.elf" "$AUS" || exit 1
-echo "$AUS ($(stat -c%s "$AUS") bytes, level $STUFE, gui=$GUI, tunnel=$TUNNEL, ps2m=$([[ $OHNE_PS2M == 1 ]] && echo module || echo builtin), symbols=$SYMBOLE, ext4=$([[ $OHNE_EXT4 == 1 ]] && echo off || echo on), ntfs=$([[ $OHNE_NTFS == 1 ]] && echo off || echo on))"
+echo "$AUS ($(stat -c%s "$AUS") bytes, level $STUFE, gui=$GUI, tunnel=$TUNNEL, ps2m=$([[ $OHNE_PS2M == 1 ]] && echo module || echo builtin), symbols=$SYMBOLE, ext4=$([[ $OHNE_EXT4 == 1 ]] && echo off || echo on), ntfs=$([[ $OHNE_NTFS == 1 ]] && echo off || echo on), testbed=$TESTBED)"

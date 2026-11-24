@@ -46,7 +46,7 @@ echo "expected from Python: size=$SIZE $EXP"
 
 bash tools/sync/build.sh "$T/bin" 0 sh echo > "$T/b.txt" 2>&1 \
     && ok "programs build" || { bad "programs build"; tail "$T/b.txt"; echo "IWLFWTEST: $pass ok, $fail fail"; exit 1; }
-./tools/build-kernel.sh "$T/k.img" --stufe 0 > "$T/k.txt" 2>&1 \
+./tools/build-kernel.sh "$T/k.img" --stufe 0 --testbed > "$T/k.txt" 2>&1 \
     && ok "kernel builds" || { bad "kernel build"; tail -30 "$T/k.txt"; echo "IWLFWTEST: $pass ok, $fail fail"; exit 1; }
 printf 'echo ==START==\necho ==END==\n' > "$T/s.sh"
 

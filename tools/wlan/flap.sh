@@ -23,7 +23,7 @@ python3 -I tools/iwlfh/ref.py gen "$T/blobs" || { bad "reference generator"; exi
 FWPATH=/lib/firmware/intel/iwlwifi/iwlwifi-8265-36.ucode
 bash tools/sync/build.sh "$T/bin" 0 sh echo cat sleep ping host dhcp burn wget wlanctl > "$T/b.txt" 2>&1 \
     && ok "programs build" || { bad "programs build"; tail "$T/b.txt"; echo "WLANFLAP: $pass ok, $fail fail"; exit 1; }
-./tools/build-kernel.sh "$T/k.img" --stufe 0 > "$T/k.txt" 2>&1 \
+./tools/build-kernel.sh "$T/k.img" --stufe 0 --testbed > "$T/k.txt" 2>&1 \
     && ok "kernel builds" || { bad "kernel build"; tail -30 "$T/k.txt"; echo "WLANFLAP: $pass ok, $fail fail"; exit 1; }
 
 {

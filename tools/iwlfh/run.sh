@@ -5,7 +5,7 @@
 #   bash tools/iwlfh/run.sh        (heavy: kernel build + 10 QEMU boots)
 #
 # MEASURES (QEMU, no Intel WLAN device; kernel word `iwlfhtest` fakes an 8265 identity and runs the REAL
-# lib/wlan/iwl_fh8000.fi against a fake CSR window in RAM, kernel/drv/net/iwl_fake.fi):
+# lib/wlan/iwl_fh8000.fi against a fake CSR window in RAM, kernel/drv/net/testbed/iwl_fake.fi):
 #   * the candidate file /lib/firmware/intel/iwlwifi/iwlwifi-8265-36.ucode is read through the VFS
 #   * the five summary lines (RC, STAT, LOADSTAT, CHICK, VIOL/LOST/NONZERO/DIGEST) equal the independent Python
 #     reference (tools/iwlfh/ref.py -> tools/wlan/fh8000_ref.py): chunk plan, extended range, load status, SRAM bytes
@@ -35,7 +35,7 @@ FWPATH=/lib/firmware/intel/iwlwifi/iwlwifi-8265-36.ucode
 
 bash tools/sync/build.sh "$T/bin" 0 sh echo cat > "$T/b.txt" 2>&1 \
     && ok "programs build" || { bad "programs build"; tail "$T/b.txt"; echo "IWLFH: $pass ok, $fail fail"; exit 1; }
-./tools/build-kernel.sh "$T/k.img" --stufe 0 > "$T/k.txt" 2>&1 \
+./tools/build-kernel.sh "$T/k.img" --stufe 0 --testbed > "$T/k.txt" 2>&1 \
     && ok "kernel builds" || { bad "kernel build"; tail -30 "$T/k.txt"; echo "IWLFH: $pass ok, $fail fail"; exit 1; }
 printf 'echo ==START==\necho ==END==\n' > "$T/s.sh"
 
