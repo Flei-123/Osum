@@ -232,6 +232,8 @@ int lkpi_wifi_glue_attach_when_ready(unsigned int rounds)
 		hw = lkpi_wifi_registered_hw();
 		if (hw)
 			return lkpi_wifi_glue_attach(hw, NULL);
+		if (lkpi_driver_released())
+			return LKPI80211_EPROTO;
 		lkpi_time_tick();
 		lkpi_irq_poll();
 		lkpi_napi_run();

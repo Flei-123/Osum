@@ -61,9 +61,17 @@ void put_device(struct device *dev)
 	(void)dev;
 }
 
+static bool driver_released;
+
 void device_release_driver(struct device *dev)
 {
 	(void)dev;
+	driver_released = true;
+}
+
+bool lkpi_driver_released(void)
+{
+	return driver_released;
 }
 
 int device_reprobe(struct device *dev)

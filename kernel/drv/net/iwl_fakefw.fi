@@ -7,6 +7,7 @@ import drv.net.iwl_fakeap_frames
 import drv.net.iwl_fakescan
 import drv.net.iwl_fakehdr
 import drv.net.iwl_fakemac
+import drv.net.iwl_fakenvm
 import drv.net.iwl_fakephy
 import drv.net.iwl_faketx
 import wlan.iwl_mvm_txq
@@ -14,10 +15,16 @@ import wlan.iwl_buf
 import libc.octets
 
 export {
-    doorbell, alive, alive_forced, reset, rx_enabled, set_norx, set_silent, set_txlag, set_knobs, set_bigcal, phydb_bytes, phydb_bad, cmds, rx_pkts, rx_drops, tx_ok, tx_bad, last_cmd, set_ap, ap_on, set_irq_rx, last_uid, phydb_cmds, nvm_reads, init_completes, err_word, FAKE_SCD_BASE
+    doorbell, alive, alive_forced, reset, rx_enabled, set_norx, set_silent, set_txlag, set_knobs, set_bigcal, phydb_bytes, phydb_bad, cmds, rx_pkts, rx_drops, tx_ok, tx_bad, last_cmd, set_ap, ap_on, set_irq_rx, last_uid, phydb_cmds, nvm_reads, init_completes, err_word, FAKE_SCD_BASE, set_compat, FAKE_SCRATCH, FAKE_SCRATCH_BYTES
 }
 
 const FAKE_SCD_BASE: u64 = 0x00800000
+const FAKE_SCRATCH: u64 = 0x4000
+const FAKE_SCRATCH_BYTES: u64 = 8192
+const TFD_TB_AT: u64 = 4
+const TFD_TB_SIZE: u64 = 6
+const TFD_MAX_TBS: u64 = 20
+const S_COMPAT: u64 = 0x2558
 const FAKE_ERR_PTR: u64 = 0x00800200
 const FAKE_ERR_ID: u64 = 0x71
 const FAKE_UMAC_PTR: u64 = 0x00800300
@@ -138,6 +145,8 @@ fn set_ap(ctx: u64, on: u64) {
 }
 fn set_irq_rx(ctx: u64, on: u64) { octets.st64(ctx, S_IRQRX, on) }
 fn ap_on(ctx: u64) -> bool { return octets.ld64(ctx, S_AP) != 0 }
+fn set_compat(ctx: u64, on: u64) { octets.st64(ctx, S_COMPAT, on) }
+fn compat(ctx: u64) -> bool { return octets.ld64(ctx, S_COMPAT) != 0 }
 fn phydb_cmds(ctx: u64) -> u64 { return octets.ld64(ctx, S_PHYDB) }
 fn phydb_bytes(ctx: u64) -> u64 { return octets.ld64(ctx, S_PHYBYTES) }
 fn phydb_bad(ctx: u64) -> u64 { return octets.ld64(ctx, S_PHYBAD) }
@@ -366,6 +375,19 @@ fn phy_cfg_ok(ctx: u64, tb0: u64, total: u64) -> bool {
     return true
 }
 
+fn nvm_len(ctx: u64, sec: u64) -> u64 {
+    if compat(ctx) { return iwl_fakenvm.total(sec) }
+    if sec == 1 || sec == 5 { return NVM_FAKE_LEN }
+    if sec == MAO_SEC { return MAO_FAKE_LEN }
+    return 0
+}
+
+fn nvm_byte(ctx: u64, sec: u64, i: u64) -> u64 {
+    if compat(ctx) { return iwl_fakenvm.byte(sec, i) }
+    if sec == MAO_SEC { return mao_byte(i) }
+    return (sec * 16 + i) & 0xFF
+}
+
 fn put_nvm(ctx: u64, req: u64, seq: u64) {
     let rb: u64 = rx_begin(ctx)
     if rb == 0 { return }
@@ -374,11 +396,9 @@ fn put_nvm(ctx: u64, req: u64, seq: u64) {
     let want: u64 = octets.ld16(req, 10)
     var dl: u64 = 0
     var status: u64 = 1
-    let valid: bool = sec == 1 || sec == 5 || sec == MAO_SEC
-    if valid && !(sec == 1 && octets.ld64(ctx, S_BADNVM) != 0) {
+    let total: u64 = nvm_len(ctx, sec)
+    if total != 0 && !(sec == 1 && octets.ld64(ctx, S_BADNVM) != 0) {
         status = 0
-        var total: u64 = NVM_FAKE_LEN
-        if sec == MAO_SEC { total = MAO_FAKE_LEN }
         if off < total { dl = total - off }
         if dl > want { dl = want }
     }
@@ -389,9 +409,7 @@ fn put_nvm(ctx: u64, req: u64, seq: u64) {
     octets.st16(rb, 14, status)
     var i: u64 = 0
     while i < dl {
-        var v: u64 = (sec * 16 + off + i) & 0xFF
-        if sec == MAO_SEC { v = mao_byte(off + i) }
-        octets.st8(rb, 16 + i, v)
+        octets.st8(rb, 16 + i, nvm_byte(ctx, sec, off + i))
         i = i + 1
     }
     octets.st64(ctx, S_NVMRD, octets.ld64(ctx, S_NVMRD) + 1)
@@ -486,24 +504,51 @@ fn check_phydb(ctx: u64, tb0: u64, total: u64) {
     if bad { octets.st64(ctx, S_PHYBAD, octets.ld64(ctx, S_PHYBAD) + 1) }
 }
 
+fn gather_tbs(ctx: u64, t: u64, n: u64) -> u64 {
+    let scratch: u64 = ctx + FAKE_SCRATCH
+    var total: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let at: u64 = t + TFD_TB_AT + k * TFD_TB_SIZE
+        let hn: u64 = octets.ld16(at, 4)
+        let addr: u64 = octets.ld32(at, 0) | ((hn & 0xF) << 32)
+        let len: u64 = hn >> 4
+        if addr == 0 || total + len > FAKE_SCRATCH_BYTES { return 0 }
+        octets.copy(scratch + total, addr, len)
+        total = total + len
+        k = k + 1
+    }
+    return total
+}
+
 fn one_tfd(ctx: u64, ring: u64, idx: u64) {
     let t: u64 = ring + idx * TFD_SIZE
     let n: u64 = octets.ld8(t, 3)
     let hn0: u64 = octets.ld16(t, 8)
-    let tb0: u64 = octets.ld32(t, 4) | ((hn0 & 0xF) << 32)
+    var tb0: u64 = octets.ld32(t, 4) | ((hn0 & 0xF) << 32)
     let l0: u64 = hn0 >> 4
-    if n < 1 || n > 2 || tb0 == 0 || l0 == 0 {
+    var max_tbs: u64 = 2
+    if compat(ctx) { max_tbs = TFD_MAX_TBS }
+    if n < 1 || n > max_tbs || tb0 == 0 || l0 == 0 {
         viol(ctx)
         return
     }
-    if n == 2 && l0 != FIRST_TB { viol(ctx) }
+    if n >= 2 && l0 != FIRST_TB { viol(ctx) }
+    var total_x: u64 = l0
+    if n == 2 { total_x = l0 + (octets.ld16(t, 14) >> 4) }
+    if compat(ctx) {
+        total_x = gather_tbs(ctx, t, n)
+        if total_x == 0 {
+            viol(ctx)
+            return
+        }
+        tb0 = ctx + FAKE_SCRATCH
+    }
     let cmd: u64 = octets.ld8(tb0, 0)
     let seq: u64 = octets.ld16(tb0, 2)
     if (seq & 0xFF) != idx || ((seq >> 8) & 0x1F) != 0 { viol(ctx) }
     octets.st64(ctx, S_CMDS, octets.ld64(ctx, S_CMDS) + 1)
     octets.st64(ctx, S_LASTCMD, cmd)
-    var total_x: u64 = l0
-    if n == 2 { total_x = l0 + (octets.ld16(t, 14) >> 4) }
     if iwl_fakehdr.umac(cmd) && !iwl_fakehdr.accept(tb0, total_x) { return }
     if cmd == CMD_NVM_ACCESS {
         if octets.ld64(ctx, S_NONVM) == 0 { put_nvm(ctx, tb0, seq) }
@@ -519,9 +564,7 @@ fn one_tfd(ctx: u64, ring: u64, idx: u64) {
     if cmd == CMD_BT_CONFIG { octets.st64(ctx, S_BTCFG, 1) }
     if cmd == CMD_PHY_DB {
         octets.st64(ctx, S_PHYDB, octets.ld64(ctx, S_PHYDB) + 1)
-        var total_p: u64 = l0
-        if n == 2 { total_p = l0 + (octets.ld16(t, 14) >> 4) }
-        check_phydb(ctx, tb0, total_p)
+        check_phydb(ctx, tb0, total_x)
     }
     if cmd == CMD_PHY_CFG && phy_cfg_ok(ctx, tb0, total_x) { after_phy_cfg(ctx, tb0) }
     if cmd == CMD_SCAN_REQ_UMAC {
@@ -538,9 +581,7 @@ fn one_tfd(ctx: u64, ring: u64, idx: u64) {
         if has { octets.st64(ctx, S_Q4MSK, 1) } else { octets.st64(ctx, S_Q4MSK, 0) }
     }
     if cmd == CMD_SCD_CFG && octets.ld8(tb0, iwl_buf.HDR + 3) != iwl_mvm_txq.AUX_QUEUE {
-        var total_c: u64 = l0
-        if n == 2 { total_c = l0 + (octets.ld16(t, 14) >> 4) }
-        if iwl_faketx.scd_check(tb0, total_c) {
+        if iwl_faketx.scd_check(tb0, total_x) {
             if octets.ld8(tb0, 8) == iwl_mvm_txq.SCD_ACTION_ENABLE {
                 octets.st64(ctx, S_Q4CFG, 1)
                 if (octets.ld16(tb0, 12) & 0xFF) != octets.ld64(ctx, S_TXRD4) { viol(ctx) }
@@ -622,7 +663,8 @@ fn doorbell(ctx: u64, v: u64, sched_ok: bool, bc_base: u64) {
     var rd: u64 = octets.ld64(ctx, S_TXRD)
     if rd == wr { return }
     let ring: u64 = octets.ld32(ctx, REG_CBBC_Q0) << 8
-    if octets.ld64(ctx, S_ACCESS) == 0 || ring == 0 || !sched_ok {
+    if compat(ctx) && ring == 0 { return }
+    if !compat(ctx) && (octets.ld64(ctx, S_ACCESS) == 0 || ring == 0 || !sched_ok) {
         viol(ctx)
         return
     }

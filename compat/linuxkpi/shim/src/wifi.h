@@ -8,6 +8,7 @@
 void lkpi_mmio_note_mapping(u64 virt);
 void *lkpi_alloc_aligned(size_t size, size_t align);
 size_t lkpi_heap_used(void);
+bool lkpi_driver_released(void);
 
 #define LKPI_WIFI_PRIV_MAX 16384
 #define LKPI_WIFI_OBJ_PRIV_MAX 6144
@@ -47,7 +48,6 @@ int lkpi_wifi_op(struct lkpi_wifi_hw *w, u32 op, u64 arg);
 void lkpi_timers_run(unsigned long now);
 void lkpi_work_run(void);
 #define LKPI_NS_PER_JIFFY (NSEC_PER_SEC / HZ)
-#define LKPI_WAIT_BUDGET_TICKS (30UL * HZ)
 void lkpi_time_advance_ns(u64 ns, bool sleeping);
 void lkpi_time_sleep_ns(u64 ns);
 void lkpi_time_tick(void);
