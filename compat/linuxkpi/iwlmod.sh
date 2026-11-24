@@ -29,7 +29,7 @@ PY
 shim_objs=(); drv_objs=()
 DEBUG_FLAGS=()
 PUMP_FLAGS=()
-[ "${LKPI_IWL_PUMP:-1}" != 1 ] || PUMP_FLAGS=(-DLKPI_IWL_PUMP)
+[ "${LKPI_IWL_PUMP:-0}" != 1 ] || PUMP_FLAGS=(-DLKPI_IWL_PUMP)
 [ "${LKPI_IWL_DEBUG:-0}" != 1 ] || DEBUG_FLAGS=(-DCONFIG_IWLWIFI_DEBUG=1)
 for name in $LKPI_WIFI_MODULE_SOURCES; do
 	"$LKPI_CC" "${LKPI_CFLAGS[@]}" -c "$SHIM/src/$name.c" -o "$W/shim_$name.o"
