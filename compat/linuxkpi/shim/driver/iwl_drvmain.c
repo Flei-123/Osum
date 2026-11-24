@@ -40,8 +40,10 @@ int lkpi_module_init(u64 state)
 	rc = lkpi_pci_probe_status();
 	if (rc)
 		return rc;
+#ifdef LKPI_IWL_PUMP
 	if (lkpi_wifi_glue_attach_when_ready(IWL_PUMP_ROUNDS))
 		_printk("lkpi: iwl radio not registered after %d rounds\n", IWL_PUMP_ROUNDS);
+#endif
 	return 0;
 }
 

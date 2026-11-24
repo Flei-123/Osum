@@ -28,16 +28,18 @@ open(path, "w").write('#define IWL_FW_NAME "%s"\n#define IWL_FW_CAP %d\nstatic c
 PY
 shim_objs=(); drv_objs=()
 DEBUG_FLAGS=()
+PUMP_FLAGS=()
+[ "${LKPI_IWL_PUMP:-0}" != 1 ] || PUMP_FLAGS=(-DLKPI_IWL_PUMP)
 [ "${LKPI_IWL_DEBUG:-0}" != 1 ] || DEBUG_FLAGS=(-DCONFIG_IWLWIFI_DEBUG=1)
 for name in $LKPI_WIFI_MODULE_SOURCES; do
 	"$LKPI_CC" "${LKPI_CFLAGS[@]}" -c "$SHIM/src/$name.c" -o "$W/shim_$name.o"
 	shim_objs+=("$W/shim_$name.o")
 done
 if [ "${LKPI_IWL_DEBUG:-0}" = 1 ]; then
-	"$LKPI_CC" "${LKPI_CFLAGS[@]}" "${LKPI_DRIVER_FLAGS[@]}" -DCONFIG_IWLWIFI_DEBUG=1 -DLKPI_IWL_DEBUG -I"$LKPI_INC" -I"$W/fwinc" -I"$TREE/drivers/net/wireless/intel/iwlwifi" -I"$TREE" \
+	"$LKPI_CC" "${LKPI_CFLAGS[@]}" "${LKPI_DRIVER_FLAGS[@]}" -DCONFIG_IWLWIFI_DEBUG=1 -DLKPI_IWL_DEBUG "${PUMP_FLAGS[@]}" -I"$LKPI_INC" -I"$W/fwinc" -I"$TREE/drivers/net/wireless/intel/iwlwifi" -I"$TREE" \
 		-c "$SHIM/driver/iwl_drvmain.c" -o "$W/iwl_drvmain.o"
 else
-	"$LKPI_CC" "${LKPI_CFLAGS[@]}" -I"$W/fwinc" -c "$SHIM/driver/iwl_drvmain.c" -o "$W/iwl_drvmain.o"
+	"$LKPI_CC" "${LKPI_CFLAGS[@]}" "${PUMP_FLAGS[@]}" -I"$W/fwinc" -c "$SHIM/driver/iwl_drvmain.c" -o "$W/iwl_drvmain.o"
 fi
 drv_objs+=("$W/iwl_drvmain.o")
 pids=()
