@@ -103,6 +103,11 @@ static long long glue_rx_take(u64 dst, u64 room)
 	skb = __skb_dequeue(&glue->rx);
 	if (!skb)
 		return 0;
+	if (__skb_linearize(skb)) {
+		glue->rx_dropped++;
+		kfree_skb(skb);
+		return 0;
+	}
 	len = skb->len;
 	if ((u64)len > room) {
 		glue->rx_dropped++;

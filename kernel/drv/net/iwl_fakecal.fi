@@ -1,0 +1,158 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import drv.net.iwl_fakehdr
+import drv.net.iwl_fakenvm
+import libc.octets
+import drv.net.iwl_fakering
+import drv.net.iwl_fakest
+
+export {
+    after_phy_cfg, check_phydb, phy_cfg_ok, put_nvm
+}
+
+const PHY_CFG_V1_TOTAL: u64 = 16
+const PHY_CFG_V3_TOTAL: u64 = 32
+const CMD_INIT_COMPLETE: u64 = 0x04
+const CMD_CALIB_RES: u64 = 0x6B
+const NVM_FAKE_LEN: u64 = 96
+const MAO_SEC: u64 = 11
+const MAO_FAKE_LEN: u64 = 8
+fn mao_byte(i: u64) -> u64 {
+    var m: [u8; 8] = [0, 0, 0x06, 0x11, 0x22, 0x33, 0x44, 0x55]
+    return m[(i & 7) as usize] as u64
+}
+fn phy_cfg_ok(ctx: u64, tb0: u64, total: u64) -> bool {
+    let phase: u64 = octets.ld64(ctx, iwl_fakest.S_PHASE)
+    if phase == 0 { return true }
+    let sb: u64 = iwl_fakehdr.base(tb0)
+    let size: u64 = total - (sb - tb0)
+    if size != PHY_CFG_V1_TOTAL && size != PHY_CFG_V3_TOTAL { return false }
+    let cfg: u64 = octets.ld32(sb, 4)
+    if ((cfg >> 16) & 0xF) == 0 || ((cfg >> 20) & 0xF) == 0 { return false }
+    if phase >= 2 && octets.ld64(ctx, iwl_fakest.S_RTANT) == 0 { return false }
+    if phase >= 2 && !iwl_fakest.compat(ctx) && octets.ld64(ctx, iwl_fakest.S_RTSF) == 0 { return false }
+    return true
+}
+fn nvm_len(ctx: u64, sec: u64) -> u64 {
+    if iwl_fakest.compat(ctx) { return iwl_fakenvm.total(sec) }
+    if sec == 1 || sec == 5 { return NVM_FAKE_LEN }
+    if sec == MAO_SEC { return MAO_FAKE_LEN }
+    return 0
+}
+fn nvm_byte(ctx: u64, sec: u64, i: u64) -> u64 {
+    if iwl_fakest.compat(ctx) { return iwl_fakenvm.byte(sec, i) }
+    if sec == MAO_SEC { return mao_byte(i) }
+    return (sec * 16 + i) & 0xFF
+}
+fn put_nvm(ctx: u64, req: u64, seq: u64) {
+    let rb: u64 = iwl_fakering.rx_begin(ctx)
+    if rb == 0 { return }
+    let body: u64 = iwl_fakehdr.base(req)
+    let sec: u64 = octets.ld16(body, 6)
+    let off: u64 = octets.ld16(body, 8)
+    let want: u64 = octets.ld16(body, 10)
+    var dl: u64 = 0
+    var status: u64 = 1
+    let total: u64 = nvm_len(ctx, sec)
+    if total != 0 && !(sec == 1 && octets.ld64(ctx, iwl_fakest.S_BADNVM) != 0) {
+        status = 0
+        if off < total { dl = total - off }
+        if dl > want { dl = want }
+    }
+    iwl_fakering.rx_hdr(rb, 8 + dl, iwl_fakest.CMD_NVM_ACCESS, seq)
+    octets.st16(rb, 8, off)
+    octets.st16(rb, 10, dl)
+    octets.st16(rb, 12, sec)
+    octets.st16(rb, 14, status)
+    var i: u64 = 0
+    while i < dl {
+        octets.st8(rb, 16 + i, nvm_byte(ctx, sec, off + i))
+        i = i + 1
+    }
+    octets.st64(ctx, iwl_fakest.S_NVMRD, octets.ld64(ctx, iwl_fakest.S_NVMRD) + 1)
+    iwl_fakering.rx_commit(ctx)
+}
+fn put_calib(ctx: u64, typ: u64, len: u64) {
+    let rb: u64 = iwl_fakering.rx_begin(ctx)
+    if rb == 0 { return }
+    iwl_fakering.rx_hdr(rb, 4 + len, CMD_CALIB_RES, iwl_fakest.SEQ_RX_FRAME)
+    octets.zero(rb + 8, 4 + len)
+    octets.st16(rb, 8, typ)
+    octets.st16(rb, 10, len)
+    if len >= 2 { octets.st16(rb, 12, typ) }
+    iwl_fakering.rx_commit(ctx)
+}
+fn put_calib_id(ctx: u64, typ: u64, id: u64, len: u64) {
+    let rb: u64 = iwl_fakering.rx_begin(ctx)
+    if rb == 0 { return }
+    iwl_fakering.rx_hdr(rb, 4 + len, CMD_CALIB_RES, iwl_fakest.SEQ_RX_FRAME)
+    octets.zero(rb + 8, 4 + len)
+    octets.st16(rb, 8, typ)
+    octets.st16(rb, 10, len)
+    var i: u64 = 0
+    while i < len {
+        octets.st8(rb, 12 + i, (typ * 31 + id * 7 + i) & 0xFF)
+        i = i + 1
+    }
+    if typ >= 4 { octets.st16(rb, 12, id) }
+    iwl_fakering.rx_commit(ctx)
+}
+fn put_big_calib(ctx: u64) {
+    put_calib_id(ctx, 1, 0, 20)
+    put_calib_id(ctx, 3, 0, 12)
+    put_calib_id(ctx, 2, 0, 2600)
+    var i: u64 = 0
+    while i < 4 {
+        put_calib_id(ctx, 4, i, 1312)
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        var tl: u64 = 52
+        if i == 7 { tl = 2056 }
+        put_calib_id(ctx, 5, i, tl)
+        i = i + 1
+    }
+}
+fn put_init_complete(ctx: u64) {
+    let rb: u64 = iwl_fakering.rx_begin(ctx)
+    if rb == 0 { return }
+    iwl_fakering.rx_hdr(rb, 4, CMD_INIT_COMPLETE, iwl_fakest.SEQ_RX_FRAME)
+    octets.st32(rb, 8, 0)
+    octets.st64(ctx, iwl_fakest.S_INITC, octets.ld64(ctx, iwl_fakest.S_INITC) + 1)
+    iwl_fakering.rx_commit(ctx)
+}
+fn after_phy_cfg(ctx: u64, tb0: u64) {
+    if octets.ld64(ctx, iwl_fakest.S_PHASE) != 1 && !iwl_fakest.compat(ctx) { return }
+    let sb: u64 = iwl_fakehdr.base(tb0)
+    if octets.ld32(sb, 4) == 0 || octets.ld32(sb, 8) == 0 { return }
+    if octets.ld64(ctx, iwl_fakest.S_BIGCAL) != 0 {
+        put_big_calib(ctx)
+    } else {
+        put_calib(ctx, 1, 4)
+        put_calib(ctx, 2, 8)
+        put_calib(ctx, 4, 6)
+        put_calib(ctx, 5, 6)
+    }
+    if octets.ld64(ctx, iwl_fakest.S_NOINITC) == 0 { put_init_complete(ctx) }
+}
+fn check_phydb(ctx: u64, tb0: u64, total: u64) {
+    let typ: u64 = octets.ld16(tb0, 4)
+    let len: u64 = octets.ld16(tb0, 6)
+    octets.st64(ctx, iwl_fakest.S_PHYBYTES, octets.ld64(ctx, iwl_fakest.S_PHYBYTES) + len)
+    if octets.ld64(ctx, iwl_fakest.S_BIGCAL) == 0 { return }
+    if 8 + len != total { octets.st64(ctx, iwl_fakest.S_PHYBAD, octets.ld64(ctx, iwl_fakest.S_PHYBAD) + 1) }
+    if 8 + len != total { return }
+    var id: u64 = 0
+    if typ >= 4 { id = octets.ld16(tb0, 8) }
+    var i: u64 = 0
+    var bad: bool = false
+    while i < len {
+        var want: u64 = (typ * 31 + id * 7 + i) & 0xFF
+        if typ >= 4 && i < 2 { want = (id >> (8 * i)) & 0xFF }
+        if octets.ld8(tb0, 8 + i) != want { bad = true }
+        i = i + 1
+    }
+    if bad { octets.st64(ctx, iwl_fakest.S_PHYBAD, octets.ld64(ctx, iwl_fakest.S_PHYBAD) + 1) }
+}

@@ -1,0 +1,124 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import drv.net.iwl_fakecal
+import drv.net.iwl_fakehdr
+import drv.net.iwl_fakemac
+import drv.net.iwl_fakephy
+import drv.net.iwl_fakering
+import drv.net.iwl_fakescan
+import drv.net.iwl_fakest
+import drv.net.iwl_faketrace
+import drv.net.iwl_faketx
+import drv.net.iwl_fakeerr
+import drv.net.iwl_fakeq
+import wlan.iwl_buf
+import wlan.iwl_mvm_txq
+import libc.octets
+
+export {
+    doorbell
+}
+
+const TFD_SIZE: u64 = 128
+const FIRST_TB: u64 = 20
+const TFD_MAX_TBS: u64 = 20
+const CMD_SF_CFG: u64 = 0xD1
+const CMD_TX_ANT_CFG: u64 = 0x98
+const CMD_BT_CONFIG: u64 = 0x9B
+const CMD_SCD_CFG: u64 = 0x1D
+const CMD_PHY_CFG: u64 = 0x6A
+const CMD_MAC_CONTEXT: u64 = 0x28
+const CMD_PHY_CONTEXT: u64 = 0x08
+const CMD_PHY_DB: u64 = 0x6C
+const CMD_SCAN_REQ_UMAC: u64 = 0x0D
+
+fn one_tfd(ctx: u64, ring: u64, idx: u64) {
+    let t: u64 = ring + idx * TFD_SIZE
+    let n: u64 = octets.ld8(t, 3)
+    let hn0: u64 = octets.ld16(t, 8)
+    var tb0: u64 = octets.ld32(t, 4) | ((hn0 & 0xF) << 32)
+    let l0: u64 = hn0 >> 4
+    var max_tbs: u64 = 2
+    if iwl_fakest.compat(ctx) { max_tbs = TFD_MAX_TBS }
+    if n < 1 || n > max_tbs || tb0 == 0 || l0 == 0 {
+        iwl_fakest.viol(ctx)
+        return
+    }
+    if n >= 2 && l0 != FIRST_TB { iwl_fakest.viol(ctx) }
+    var total_x: u64 = l0
+    if n == 2 { total_x = l0 + (octets.ld16(t, 14) >> 4) }
+    if iwl_fakest.compat(ctx) {
+        total_x = iwl_fakeq.gather_tbs(ctx, t, n)
+        if total_x == 0 {
+            iwl_fakest.viol(ctx)
+            return
+        }
+        tb0 = ctx + iwl_fakeq.FAKE_SCRATCH
+    }
+    let cmd: u64 = octets.ld8(tb0, 0)
+    let seq: u64 = octets.ld16(tb0, 2)
+    if (seq & 0xFF) != idx || ((seq >> 8) & 0x1F) != 0 { iwl_fakest.viol(ctx) }
+    octets.st64(ctx, iwl_fakest.S_CMDS, octets.ld64(ctx, iwl_fakest.S_CMDS) + 1)
+    octets.st64(ctx, iwl_fakest.S_LASTCMD, cmd)
+    if iwl_fakest.compat(ctx) { iwl_faketrace.command(cmd, tb0, total_x) }
+    if iwl_fakehdr.umac(cmd) && !iwl_fakehdr.accept(tb0, total_x) { return }
+    if cmd == iwl_fakest.CMD_NVM_ACCESS {
+        if octets.ld64(ctx, iwl_fakest.S_NONVM) == 0 { iwl_fakecal.put_nvm(ctx, tb0, seq) }
+    } else if cmd == CMD_PHY_CONTEXT {
+        if iwl_fakephy.check(tb0, total_x) { iwl_fakering.put_status(ctx, cmd, seq) } else { iwl_fakeerr.err_fill(ctx, tb0, total_x) }
+    } else if cmd == CMD_PHY_CFG {
+        if iwl_fakecal.phy_cfg_ok(ctx, tb0, total_x) { iwl_fakering.put_status(ctx, cmd, seq) } else { iwl_fakeerr.err_fill(ctx, tb0, total_x) }
+    } else if cmd == iwl_fakest.CMD_TIME_EVENT {
+        iwl_fakering.put_time_event(ctx, iwl_fakehdr.base(tb0), seq)
+    } else {
+        iwl_fakering.put_status(ctx, cmd, seq)
+    }
+    if cmd == CMD_SF_CFG && octets.ld64(ctx, iwl_fakest.S_PHASE) >= 2 { octets.st64(ctx, iwl_fakest.S_RTSF, 1) }
+    if cmd == CMD_TX_ANT_CFG && octets.ld64(ctx, iwl_fakest.S_PHASE) >= 2 { octets.st64(ctx, iwl_fakest.S_RTANT, 1) }
+    if cmd == CMD_BT_CONFIG { octets.st64(ctx, iwl_fakest.S_BTCFG, 1) }
+    if cmd == CMD_PHY_DB {
+        octets.st64(ctx, iwl_fakest.S_PHYDB, octets.ld64(ctx, iwl_fakest.S_PHYDB) + 1)
+        iwl_fakecal.check_phydb(ctx, tb0, total_x)
+    }
+    if cmd == CMD_PHY_CFG && iwl_fakecal.phy_cfg_ok(ctx, tb0, total_x) { iwl_fakecal.after_phy_cfg(ctx, tb0) }
+    if cmd == CMD_SCAN_REQ_UMAC {
+        let sb: u64 = iwl_fakehdr.base(tb0)
+        let uid: u64 = octets.ld32(sb, 8)
+        octets.st64(ctx, iwl_fakest.S_LASTUID, uid)
+        let scan_ok: bool = iwl_fakescan.check(sb, total_x - (sb - tb0))
+        if octets.ld64(ctx, iwl_fakest.S_AP) != 0 && scan_ok { iwl_fakering.put_beacons(ctx) }
+        iwl_fakering.put_scan_complete(ctx, uid)
+    }
+    if cmd == CMD_MAC_CONTEXT { iwl_fakemac.report(tb0) }
+    let cb: u64 = iwl_fakehdr.base(tb0)
+    let cn: u64 = total_x - (cb - tb0)
+    if cmd == iwl_fakest.CMD_ADD_STA && octets.ld32(cb, iwl_buf.HDR + 40) != iwl_mvm_txq.queue_msk_of(iwl_mvm_txq.AUX_QUEUE) { iwl_fakeq.on_sta_mask(ctx, cb) }
+    if cmd == CMD_SCD_CFG { iwl_fakeq.on_scd_cfg(ctx, cb, cn) }
+    if cmd == iwl_fakest.CMD_TX {
+        iwl_faketx.say(iwl_faketx.W_TX_Q0)
+        octets.st64(ctx, iwl_fakest.S_TXBAD, octets.ld64(ctx, iwl_fakest.S_TXBAD) + 1)
+    }
+}
+
+fn doorbell(ctx: u64, v: u64, sched_ok: bool, bc_base: u64) {
+    let q: u64 = (v >> 8) & 0x1F
+    if q != 0 {
+        if iwl_fakeq.q_usable(ctx, q) { iwl_fakeq.queue_doorbell(ctx, q, v, bc_base) }
+        return
+    }
+    let wr: u64 = v & 0xFF
+    var rd: u64 = octets.ld64(ctx, iwl_fakest.S_TXRD)
+    if rd == wr { return }
+    let ring: u64 = octets.ld32(ctx, iwl_fakest.REG_CBBC_Q0) << 8
+    if iwl_fakest.compat(ctx) && ring == 0 { return }
+    if !iwl_fakest.compat(ctx) && (octets.ld64(ctx, iwl_fakest.S_ACCESS) == 0 || ring == 0 || !sched_ok) {
+        iwl_fakest.viol(ctx)
+        return
+    }
+    while rd != wr {
+        one_tfd(ctx, ring, rd)
+        rd = (rd + 1) & 0xFF
+    }
+    octets.st64(ctx, iwl_fakest.S_TXRD, rd)
+}

@@ -1,0 +1,210 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import drv.net.iwl_fakeap
+import drv.net.iwl_fakeap_frames
+import drv.net.iwl_fakeict
+import wlan.iwl_buf
+import libc.octets
+import drv.net.iwl_fakest
+
+export {
+    FAKE_SCD_BASE, alive, alive_forced, ap_air, put_beacons, put_scan_complete, put_status, put_time_event, put_tx_resp, rx_begin, rx_commit, rx_enabled, rx_hdr
+}
+
+const FAKE_SCD_BASE: u64 = 0x00800000
+const CMD_TIME_EVENT_NOTIF: u64 = 0x2A
+const TE_RESP_LEN: u64 = 16
+const TE_NOTIF_LEN: u64 = 24
+const TE_ACTION_START: u64 = 1
+const TE_ID_OFF: u64 = 8
+const CMD_RX_PHY: u64 = 0xC0
+const CMD_RX_MPDU: u64 = 0xC1
+const TX_CMD_HDR: u64 = 60
+const TX_FLG_MH_PAD: u64 = 0x100000
+const REG_FH_INT: u64 = 0x010
+const INT_FH_RX: u64 = 0x80000000
+const FH_INT_RX_CHNL0: u64 = 0x00010000
+const RX_ENABLE: u64 = 0x80000000
+const CMD_SCAN_COMPLETE_UMAC: u64 = 0x0F
+const CMD_ALIVE: u64 = 0x01
+const ALIVE_V3_LEN: u64 = 68
+fn rx_enabled(ctx: u64) -> bool {
+    return (octets.ld32(ctx, iwl_fakest.REG_RX_CONFIG) & RX_ENABLE) != 0 && octets.ld32(ctx, iwl_fakest.REG_RBD_BASE) != 0 && octets.ld32(ctx, iwl_fakest.REG_STTS) != 0
+}
+fn rx_begin(ctx: u64) -> u64 {
+    if octets.ld64(ctx, iwl_fakest.S_NORX) != 0 || !rx_enabled(ctx) {
+        octets.st64(ctx, iwl_fakest.S_DROPS, octets.ld64(ctx, iwl_fakest.S_DROPS) + 1)
+        return 0
+    }
+    let closed: u64 = octets.ld64(ctx, iwl_fakest.S_CLOSED)
+    if ((octets.ld32(ctx, iwl_fakest.REG_RBD_WPTR) + 256 - closed) & 0xFF) == 0 {
+        octets.st64(ctx, iwl_fakest.S_DROPS, octets.ld64(ctx, iwl_fakest.S_DROPS) + 1)
+        return 0
+    }
+    let bd: u64 = octets.ld32(ctx, iwl_fakest.REG_RBD_BASE) << 8
+    let rb: u64 = octets.ld32(bd, 4 * closed) << 8
+    if rb == 0 {
+        iwl_fakest.viol(ctx)
+        return 0
+    }
+    return rb
+}
+fn rx_commit(ctx: u64) {
+    let closed: u64 = (octets.ld64(ctx, iwl_fakest.S_CLOSED) + 1) & 0xFF
+    octets.st64(ctx, iwl_fakest.S_CLOSED, closed)
+    if octets.ld64(ctx, iwl_fakest.S_SILENT) == 0 { octets.st16(octets.ld32(ctx, iwl_fakest.REG_STTS) << 4, 0, closed) }
+    octets.st64(ctx, iwl_fakest.S_PKTS, octets.ld64(ctx, iwl_fakest.S_PKTS) + 1)
+    if octets.ld64(ctx, iwl_fakest.S_IRQRX) != 0 {
+        iwl_fakeict.raise_cause(ctx, INT_FH_RX)
+        octets.st32(ctx, REG_FH_INT, octets.ld32(ctx, REG_FH_INT) | FH_INT_RX_CHNL0)
+    }
+}
+fn rx_hdr(rb: u64, plen: u64, cmd: u64, seq: u64) {
+    octets.st32(rb, 0, 4 + plen)
+    octets.st8(rb, 4, cmd)
+    octets.st8(rb, 5, 0)
+    octets.st16(rb, 6, seq)
+}
+const ADD_STA_SUCCESS: u64 = 1
+const PHY_LEN: u64 = 64
+const PHY_LEN_COMPAT: u64 = 68
+const PHY_FLAGS_OFF: u64 = 20
+const PHY_RATE_OFF: u64 = 56
+const PHY_FLAG_BAND_24: u64 = 1
+const PHY_RATE_6M_OFDM: u64 = 0x0D
+const MPDU_STATUS_LEN: u64 = 4
+const MPDU_STATUS_OK: u64 = 3
+fn status_of(cmd: u64) -> u64 {
+    if cmd == iwl_fakest.CMD_ADD_STA { return ADD_STA_SUCCESS }
+    return 0
+}
+fn put_status(ctx: u64, cmd: u64, seq: u64) {
+    let rb: u64 = rx_begin(ctx)
+    if rb == 0 { return }
+    rx_hdr(rb, 4, cmd, seq)
+    octets.st32(rb, 8, status_of(cmd))
+    rx_commit(ctx)
+}
+fn put_time_event(ctx: u64, cmd_base: u64, seq: u64) {
+    let payload: u64 = cmd_base + iwl_buf.HDR
+    let id: u64 = octets.ld32(payload, TE_ID_OFF)
+    let color: u64 = octets.ld32(payload, 0)
+    let uid: u64 = seq + 1
+    let rb: u64 = rx_begin(ctx)
+    if rb == 0 { return }
+    rx_hdr(rb, TE_RESP_LEN, iwl_fakest.CMD_TIME_EVENT, seq)
+    octets.st32(rb, 8, 1)
+    octets.st32(rb, 12, id)
+    octets.st32(rb, 16, uid)
+    octets.st32(rb, 20, color)
+    rx_commit(ctx)
+    let nb: u64 = rx_begin(ctx)
+    if nb == 0 { return }
+    rx_hdr(nb, TE_NOTIF_LEN, CMD_TIME_EVENT_NOTIF, iwl_fakest.SEQ_RX_FRAME)
+    octets.zero(nb + 8, TE_NOTIF_LEN)
+    octets.st32(nb, 16, uid)
+    octets.st32(nb, 20, color)
+    octets.st32(nb, 24, TE_ACTION_START)
+    octets.st32(nb, 28, 1)
+    rx_commit(ctx)
+}
+fn put_tx_resp(ctx: u64, seq: u64) {
+    let rb: u64 = rx_begin(ctx)
+    if rb == 0 { return }
+    rx_hdr(rb, 16, iwl_fakest.CMD_TX, seq)
+    octets.zero(rb + 8, 16)
+    octets.st8(rb, 8, 1)
+    rx_commit(ctx)
+}
+fn put_phy(ctx: u64, energy: u64, channel: u64) {
+    let rb: u64 = rx_begin(ctx)
+    if rb == 0 { return }
+    var plen: u64 = PHY_LEN
+    if iwl_fakest.compat(ctx) { plen = PHY_LEN_COMPAT }
+    rx_hdr(rb, plen, CMD_RX_PHY, iwl_fakest.SEQ_RX_FRAME)
+    octets.zero(rb + 8, plen)
+    if iwl_fakest.compat(ctx) {
+        octets.st16(rb, 8 + PHY_FLAGS_OFF, PHY_FLAG_BAND_24)
+        octets.st32(rb, 8 + PHY_RATE_OFF, PHY_RATE_6M_OFDM)
+    }
+    octets.st16(rb, 8 + 22, channel)
+    octets.st32(rb, 8 + 28, energy)
+    rx_commit(ctx)
+}
+fn put_mpdu(ctx: u64, frame: u64, len: u64) {
+    let rb: u64 = rx_begin(ctx)
+    if rb == 0 { return }
+    var tail: u64 = 0
+    if iwl_fakest.compat(ctx) { tail = MPDU_STATUS_LEN }
+    rx_hdr(rb, 4 + len + tail, CMD_RX_MPDU, iwl_fakest.SEQ_RX_FRAME)
+    octets.st16(rb, 8, len)
+    octets.st16(rb, 10, 0)
+    octets.copy(rb + 12, frame, len)
+    if tail != 0 { octets.st32(rb, 12 + len, MPDU_STATUS_OK) }
+    rx_commit(ctx)
+}
+fn put_beacons(ctx: u64) {
+    var buf: [u8; 256] = [0 as u8; 256]
+    let b: u64 = (&buf[0]) as u64
+    var i: u64 = 0
+    while i < iwl_fakeap_frames.net_count() {
+        let n: u64 = iwl_fakeap_frames.beacon_build(i, b)
+        put_phy(ctx, iwl_fakeap_frames.net_energy(i), iwl_fakeap_frames.net_channel(i))
+        put_mpdu(ctx, b, n)
+        i = i + 1
+    }
+}
+fn ap_air(ctx: u64, tb0: u64) {
+    let flen: u64 = octets.ld16(tb0, 4)
+    if flen < 24 || flen > 400 { return }
+    let flags: u64 = octets.ld32(tb0, 8)
+    var fr: u64 = tb0 + TX_CMD_HDR
+    var fl: u64 = flen
+    var plain: [u8; 400] = [0 as u8; 400]
+    if (flags & TX_FLG_MH_PAD) != 0 && (flen & 3) != 0 {
+        var hl: u64 = 24
+        if (octets.ld8(tb0, TX_CMD_HDR) & 0x80) != 0 { hl = 26 }
+        octets.copy((&plain[0]) as u64, fr, hl)
+        octets.copy((&plain[0]) as u64 + hl, fr + hl + 2, flen - hl)
+        fr = (&plain[0]) as u64
+    }
+    let cnt: u64 = iwl_fakeap.on_tx(fr, fl)
+    var k: u64 = 0
+    while k < cnt {
+        if iwl_fakest.compat(ctx) { put_phy(ctx, iwl_fakeap_frames.net_energy(0), iwl_fakeap_frames.net_channel(0)) }
+        put_mpdu(ctx, iwl_fakeap.resp_ptr(k), iwl_fakeap.resp_len(k))
+        k = k + 1
+    }
+}
+fn put_scan_complete(ctx: u64, uid: u64) {
+    let rb: u64 = rx_begin(ctx)
+    if rb == 0 { return }
+    rx_hdr(rb, 16, CMD_SCAN_COMPLETE_UMAC, iwl_fakest.SEQ_RX_FRAME)
+    octets.zero(rb + 8, 16)
+    octets.st32(rb, 8, uid)
+    octets.st8(rb, 12, 1)
+    octets.st8(rb, 13, 1)
+    octets.st8(rb, 14, 1)
+    rx_commit(ctx)
+}
+fn alive(ctx: u64) {
+    octets.st64(ctx, iwl_fakest.S_PHASE, octets.ld64(ctx, iwl_fakest.S_PHASE) + 1)
+    octets.st64(ctx, iwl_fakest.S_RTSF, 0)
+    octets.st64(ctx, iwl_fakest.S_RTANT, 0)
+    octets.st64(ctx, iwl_fakest.S_BTCFG, 0)
+    if octets.ld64(ctx, iwl_fakest.S_NOALIVE) != 0 { return }
+    alive_forced(ctx)
+}
+fn alive_forced(ctx: u64) {
+    let rb: u64 = rx_begin(ctx)
+    if rb == 0 { return }
+    rx_hdr(rb, ALIVE_V3_LEN, CMD_ALIVE, iwl_fakest.SEQ_RX_FRAME)
+    octets.zero(rb + 8, ALIVE_V3_LEN)
+    octets.st16(rb, 8, 0xCAFE)
+    octets.st32(rb, 8 + 36, 0x00ABCDE0)
+    octets.st32(rb, 8 + 20, iwl_fakest.FAKE_ERR_PTR)
+    octets.st32(rb, 8 + 60, iwl_fakest.FAKE_UMAC_PTR)
+    octets.st32(rb, 8 + 40, FAKE_SCD_BASE)
+    rx_commit(ctx)
+}

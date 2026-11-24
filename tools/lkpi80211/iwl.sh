@@ -34,7 +34,7 @@ grep -qF "fw=$FW_LINE" "$PK_NATIVE/driver.inf" && ok "manifest pins the 8265 fir
 FILE_SIZE=$(stat -c %s "$PK_NATIVE/iwlwifi.omod")
 [ "$FILE_SIZE" -gt 524288 ] && ok "driver module is $FILE_SIZE bytes, above the old 512 KiB loader limit" || bad "module no longer above the old limit ($FILE_SIZE)"
 
-PROGS="sh cat echo drvctl sleep"
+PROGS="sh cat echo drvctl sleep ping"
 mkdir -p "$D/bin"
 bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/p.txt" 2>&1 && ok "programs build" || { bad "programs"; head -10 "$D/p.txt"; fin; }
 if [ -n "${LKPI_IWL_KERNEL:-}" ]; then cp "$LKPI_IWL_KERNEL" "$D/k0.img"; ok "kernel supplied"; else
@@ -49,15 +49,27 @@ fi
     echo 'drvctl list'
     echo 'echo ==END=='
 } > "$D/s.sh"
+{
+    echo 'echo ==START=='
+    for i in 1 2 3 4 5 6 7 8 9 10; do echo 'sleep 5'; done
+    echo 'echo ==WAITED=='
+    echo 'cat /proc/wlan'
+    echo 'ping -c 3 192.168.77.1'
+    echo 'echo ==PING=='
+    echo 'cat /proc/wlan'
+    echo 'echo ==END=='
+} > "$D/s-join.sh"
 printf 'tiers=native+compat\n' > "$D/conf-both"
+printf 'ssid OrientFake\npsk orient-fake-pw1\n' > "$D/wlan-good.conf"
+printf 'ssid OrientFake\npsk wrong-passphrase\n' > "$D/wlan-bad.conf"
 
 mkimg() {
-    local name=$1 pkg=$2 f files="/lib/drivers/ /lib/firmware/ /lib/firmware/$FW_NAME=$FW_FILE /lib/drivers/$(basename "$2")/"
+    local name=$1 pkg=$2 script=${3:-$D/s.sh} wlanconf=${4:-} f files="/lib/drivers/ /lib/firmware/ /lib/firmware/$FW_NAME=$FW_FILE /lib/drivers/$(basename "$2")/"
     for f in $(ls "$pkg"); do files="$files /lib/drivers/$(basename "$pkg")/$f=$pkg/$f"; done
     bash tools/mkfsfi/mkfs.sh build "$D/d-$name.img" 40000 /lib/ \
         /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ \
         $(for p in $PROGS; do echo "/bin/$p=$D/bin/$p.elf"; done) \
-        "/t/s.sh=$D/s.sh" "/etc/drvstore.conf=$D/conf-both" $files > "$D/mkfs-$name.txt" 2>&1 || tail -3 "$D/mkfs-$name.txt"
+        "/t/s.sh=$script" "/etc/drvstore.conf=$D/conf-both" ${wlanconf:+"/etc/wlan.conf=$wlanconf"} $files > "$D/mkfs-$name.txt" 2>&1 || tail -3 "$D/mkfs-$name.txt"
 }
 runvm() {
     local name=$1 words=$2 net=$3
@@ -71,12 +83,18 @@ runvm() {
 mkimg native "$PK_NATIVE"
 mkimg compat "$PK_NATIVE"
 mkimg load "$PK_LOAD"
+mkimg joinok "$PK_NATIVE" "$D/s-join.sh" "$D/wlan-good.conf"
+mkimg joinbad "$PK_NATIVE" "$D/s-join.sh" "$D/wlan-bad.conf"
+mkimg joinnative "$PK_NATIVE" "$D/s-join.sh" "$D/wlan-good.conf"
 runvm native "fakewlan" "-nic user,model=e1000" &
 runvm compat "fakewlan iwlcompat" "-nic user,model=e1000" &
 runvm load "" "-nic none" &
+runvm joinok "fakewlan iwlcompat" "-nic user,model=e1000" &
+runvm joinbad "fakewlan iwlcompat" "-nic user,model=e1000" &
+runvm joinnative "fakewlan" "-nic user,model=e1000" &
 wait
 
-for v in native compat load; do
+for v in native compat load joinok joinbad joinnative; do
     has "$D/$v.klar" "==END==" "$v: script ran to the end"
     hasnot "$D/$v.klar" "EXCEPTION" "$v: no kernel exception"
 done
@@ -97,6 +115,16 @@ hasnot "$D/compat.klar" "radio not registered" "compat: ieee80211_register_hw re
 hasre "$D/compat.klar" 'net OrientFake ch=6 sec=wpa2' "compat: real driver scan returns the fake access point"
 hasre "$D/compat.klar" 'net CafeOpen ch=1 sec=open' "compat: real driver scan returns the open network"
 hasnot "$D/compat.klar" "wifi op 3 failed" "compat: add_interface accepted"
+hasre "$D/joinok.klar" 'fakeap: auth' "join: auth frame of the real driver reaches the fake access point on its management queue"
+hasre "$D/joinok.klar" 'fakeap: assoc' "join: association request reaches the fake access point"
+hasnot "$D/joinok.klar" "fakefw: tx bad" "join: every TX descriptor of the real driver passes the fake firmware checks"
+hasre "$D/joinok.klar" 'iwl_mvm_rx_tx_cmd_single TXQ [0-9]+ status SUCCESS' "join: TX responses are consumed by the real driver (44-byte iwl_tx_resp)"
+hasnot "$D/joinok.klar" "wifi op 7 failed" "join: channel context accepted"
+hasre "$D/joinok.klar" '3 transmitted, [1-3] received' "join: WPA2 handshake, DHCP and ping through the real driver"
+hasre "$D/joinok.klar" 'link losses=0' "join: link stays up"
+has "$D/joinbad.klar" "3 transmitted, 0 received" "join: wrong passphrase gives no ping replies"
+hasre "$D/joinnative.klar" '3 transmitted, [1-3] received' "control: native driver without iwlcompat joins and pings the same fake access point"
+hasnot "$D/joinnative.klar" "lkpi:" "control: native join never touches the compat module"
 has "$D/load.klar" "drvstore: fw ok $FW_NAME" "load: kernel served the pinned firmware to the module"
 hasnot "$D/load.klar" "drvstore: fw error" "load: no firmware error"
 hasnot "$D/load.klar" "module: too big" "load: loader accepts the module above 512 KiB"

@@ -1,0 +1,220 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import drv.net.iwl_fakering
+import drv.net.iwl_fakest
+import drv.net.iwl_faketx
+import wlan.iwl_buf
+import wlan.iwl_mvm_txq
+import libc.octets
+
+export {
+    FAKE_SCRATCH, FAKE_SCRATCH_BYTES, gather_tbs, on_sta_mask, on_scd_cfg, q_usable, queue_doorbell, reset_queues
+}
+
+const FAKE_SCRATCH: u64 = 0x4000
+const FAKE_SCRATCH_BYTES: u64 = 8192
+const TFD_TB_AT: u64 = 4
+const TFD_TB_SIZE: u64 = 6
+const TFD_MAX_TBS: u64 = 20
+const TFD_SIZE: u64 = 128
+const QUEUE_FIRST: u64 = 4
+const QUEUE_LIMIT: u64 = 12
+const QUEUE_STRIDE: u64 = 32
+const QUEUE_CFG: u64 = 0
+const QUEUE_STA: u64 = 8
+const QUEUE_RD: u64 = 16
+const QUEUE_UNACK: u64 = 24
+const TX_LAG_GROUP: u64 = 16
+const TX_OK_LOG: u64 = 3
+const TX_CMD_HDR: u64 = 60
+const TX_RESP_LEN: u64 = 44
+const TX_RESP_RATE: u64 = 4
+const TX_RESP_SEQ_CTL: u64 = 28
+const TX_RESP_BYTE_CNT: u64 = 30
+const TX_RESP_RA_TID: u64 = 33
+const TX_RESP_FRAME_CTRL: u64 = 34
+const TX_RESP_STATUS: u64 = 36
+const TX_RESP_SSN: u64 = 40
+const TX_STATUS_SUCCESS: u64 = 1
+const TX_RATE_6M_OFDM: u64 = 0x0D
+const TX_CMD_LEN_OFF: u64 = 4
+const TX_CMD_STA_OFF: u64 = 20
+const TX_CMD_TID_OFF: u64 = 55
+const FRAME_SEQ_CTL_OFF: u64 = 22
+const STA_MASK_OFF: u64 = 40
+const SCD_QUEUE_OFF: u64 = 3
+const SCD_ACTION_OFF: u64 = 4
+const SCD_SSN_OFF: u64 = 12
+
+fn gather_tbs(ctx: u64, t: u64, n: u64) -> u64 {
+    let scratch: u64 = ctx + FAKE_SCRATCH
+    var total: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let at: u64 = t + TFD_TB_AT + k * TFD_TB_SIZE
+        let hn: u64 = octets.ld16(at, 4)
+        let addr: u64 = octets.ld32(at, 0) | ((hn & 0xF) << 32)
+        let len: u64 = hn >> 4
+        if addr == 0 || total + len > FAKE_SCRATCH_BYTES { return 0 }
+        octets.copy(scratch + total, addr, len)
+        total = total + len
+        k = k + 1
+    }
+    return total
+}
+
+fn slot(q: u64) -> u64 { return iwl_fakest.S_QTAB + (q - QUEUE_FIRST) * QUEUE_STRIDE }
+
+fn q_usable(ctx: u64, q: u64) -> bool {
+    if q == iwl_mvm_txq.DATA_QUEUE { return true }
+    return iwl_fakest.compat(ctx) && q >= QUEUE_FIRST && q < QUEUE_LIMIT
+}
+
+fn field(ctx: u64, q: u64, f: u64) -> u64 { return octets.ld64(ctx, slot(q) + f) }
+
+fn set_field(ctx: u64, q: u64, f: u64, v: u64) { octets.st64(ctx, slot(q) + f, v) }
+
+fn reset_queues(ctx: u64) {
+    octets.zero(ctx + iwl_fakest.S_QTAB, (QUEUE_LIMIT - QUEUE_FIRST) * QUEUE_STRIDE)
+    var q: u64 = QUEUE_FIRST
+    while q < QUEUE_LIMIT {
+        octets.st32(ctx, iwl_fakest.REG_CBBC_Q0 + 4 * q, 0)
+        q = q + 1
+    }
+}
+
+fn on_sta_mask(ctx: u64, cb: u64) {
+    let mask: u64 = octets.ld32(cb, iwl_buf.HDR + STA_MASK_OFF)
+    var seen: bool = false
+    var q: u64 = QUEUE_FIRST
+    while q < QUEUE_LIMIT {
+        if q_usable(ctx, q) {
+            let has: bool = (mask & iwl_mvm_txq.queue_msk_of(q)) != 0
+            if has { set_field(ctx, q, QUEUE_STA, 1) }
+            if !has && !iwl_fakest.compat(ctx) { set_field(ctx, q, QUEUE_STA, 0) }
+            if has { seen = true }
+        }
+        q = q + 1
+    }
+    if seen { iwl_faketx.say(iwl_faketx.W_STA_OK) } else { iwl_faketx.say(iwl_faketx.W_STA_NO) }
+}
+
+fn on_scd_cfg(ctx: u64, cb: u64, cn: u64) {
+    let q: u64 = octets.ld8(cb, iwl_buf.HDR + SCD_QUEUE_OFF)
+    if q == iwl_mvm_txq.AUX_QUEUE { return }
+    var aggregate_max: u64 = 0
+    if iwl_fakest.compat(ctx) { aggregate_max = 1 }
+    if !q_usable(ctx, q) || !iwl_mvm_txq.scd_cfg_check(cb, cn, aggregate_max) {
+        iwl_faketx.say(iwl_faketx.W_SCD_BAD)
+        return
+    }
+    iwl_faketx.say(iwl_faketx.W_SCD_OK)
+    if octets.ld8(cb, iwl_buf.HDR + SCD_ACTION_OFF) != iwl_mvm_txq.SCD_ACTION_ENABLE {
+        set_field(ctx, q, QUEUE_CFG, 0)
+        return
+    }
+    set_field(ctx, q, QUEUE_CFG, 1)
+    let ssn: u64 = octets.ld16(cb, SCD_SSN_OFF) & 0xFF
+    if iwl_fakest.compat(ctx) {
+        set_field(ctx, q, QUEUE_RD, ssn)
+        return
+    }
+    if ssn != field(ctx, q, QUEUE_RD) { iwl_fakest.viol(ctx) }
+}
+
+fn tx_verdict(ctx: u64, q: u64, tb0: u64, first_len: u64, idx: u64, bc_base: u64) -> u64 {
+    let cfg: bool = field(ctx, q, QUEUE_CFG) != 0
+    let sta: bool = field(ctx, q, QUEUE_STA) != 0
+    if !iwl_fakest.compat(ctx) { return iwl_faketx.tx_check(tb0, first_len, idx, bc_base, cfg, sta) }
+    if !cfg { return iwl_faketx.W_TX_CFG }
+    if !sta { return iwl_faketx.W_TX_STA }
+    if octets.ld16(tb0, 2) != ((q << 8) | idx) { return iwl_faketx.W_TX_SEQ }
+    return 0
+}
+
+fn put_tx_done(ctx: u64, q: u64, idx: u64, tb0: u64) {
+    let rb: u64 = iwl_fakering.rx_begin(ctx)
+    if rb == 0 { return }
+    iwl_fakering.rx_hdr(rb, TX_RESP_LEN, iwl_fakest.CMD_TX, (q << 8) | idx)
+    octets.zero(rb + 8, TX_RESP_LEN)
+    octets.st8(rb, 8, 1)
+    octets.st32(rb, 8 + TX_RESP_RATE, TX_RATE_6M_OFDM)
+    octets.st16(rb, 8 + TX_RESP_SEQ_CTL, octets.ld16(tb0, TX_CMD_HDR + FRAME_SEQ_CTL_OFF))
+    octets.st16(rb, 8 + TX_RESP_BYTE_CNT, octets.ld16(tb0, TX_CMD_LEN_OFF))
+    octets.st8(rb, 8 + TX_RESP_RA_TID, (octets.ld8(tb0, TX_CMD_STA_OFF) << 4) | (octets.ld8(tb0, TX_CMD_TID_OFF) & 0xF))
+    octets.st16(rb, 8 + TX_RESP_FRAME_CTRL, octets.ld16(tb0, TX_CMD_HDR))
+    octets.st16(rb, 8 + TX_RESP_STATUS, TX_STATUS_SUCCESS)
+    octets.st32(rb, 8 + TX_RESP_SSN, (idx + 1) & 0xFF)
+    iwl_fakering.rx_commit(ctx)
+}
+
+fn respond(ctx: u64, q: u64, idx: u64, tb0: u64) {
+    if iwl_fakest.compat(ctx) {
+        put_tx_done(ctx, q, idx, tb0)
+        return
+    }
+    if octets.ld64(ctx, iwl_fakest.S_TXLAG) == 0 || ((idx + 1) % TX_LAG_GROUP) == 0 {
+        iwl_fakering.put_tx_resp(ctx, (q << 8) | idx)
+        set_field(ctx, q, QUEUE_UNACK, 0)
+        return
+    }
+    set_field(ctx, q, QUEUE_UNACK, 0x100 | idx)
+}
+
+fn queue_tfd(ctx: u64, q: u64, ring: u64, idx: u64, bc_base: u64) {
+    let t: u64 = ring + idx * TFD_SIZE
+    let n: u64 = octets.ld8(t, 3)
+    let hn0: u64 = octets.ld16(t, 8)
+    var tb0: u64 = octets.ld32(t, 4) | ((hn0 & 0xF) << 32)
+    let first_len: u64 = hn0 >> 4
+    if iwl_fakest.compat(ctx) {
+        if n < 1 || n > TFD_MAX_TBS || gather_tbs(ctx, t, n) == 0 {
+            iwl_fakest.viol(ctx)
+            return
+        }
+        tb0 = ctx + FAKE_SCRATCH
+    } else if n != 2 || tb0 == 0 {
+        iwl_fakest.viol(ctx)
+        return
+    }
+    let cmd: u64 = octets.ld8(tb0, 0)
+    var why: u64 = 0
+    if cmd != iwl_fakest.CMD_TX { why = iwl_faketx.W_TX_SEQ }
+    if why == 0 { why = tx_verdict(ctx, q, tb0, first_len, idx, bc_base) }
+    octets.st64(ctx, iwl_fakest.S_CMDS, octets.ld64(ctx, iwl_fakest.S_CMDS) + 1)
+    octets.st64(ctx, iwl_fakest.S_LASTCMD, cmd)
+    if why != 0 {
+        iwl_faketx.say(why)
+        octets.st64(ctx, iwl_fakest.S_TXBAD, octets.ld64(ctx, iwl_fakest.S_TXBAD) + 1)
+        return
+    }
+    if octets.ld64(ctx, iwl_fakest.S_TXOK) < TX_OK_LOG { iwl_faketx.say(iwl_faketx.W_TX_OK) }
+    octets.st64(ctx, iwl_fakest.S_TXOK, octets.ld64(ctx, iwl_fakest.S_TXOK) + 1)
+    respond(ctx, q, idx, tb0)
+    if octets.ld64(ctx, iwl_fakest.S_AP) != 0 { iwl_fakering.ap_air(ctx, tb0) }
+}
+
+fn queue_doorbell(ctx: u64, q: u64, v: u64, bc_base: u64) {
+    let wr: u64 = v & 0xFF
+    var rd: u64 = field(ctx, q, QUEUE_RD)
+    if rd == wr {
+        let un: u64 = field(ctx, q, QUEUE_UNACK)
+        if un != 0 {
+            iwl_fakering.put_tx_resp(ctx, (q << 8) | (un & 0xFF))
+            set_field(ctx, q, QUEUE_UNACK, 0)
+        }
+        return
+    }
+    let ring: u64 = octets.ld32(ctx, iwl_fakest.REG_CBBC_Q0 + 4 * q) << 8
+    let access: bool = octets.ld64(ctx, iwl_fakest.S_ACCESS) != 0 || iwl_fakest.compat(ctx)
+    if !access || ring == 0 {
+        iwl_fakest.viol(ctx)
+        return
+    }
+    while rd != wr {
+        queue_tfd(ctx, q, ring, rd, bc_base)
+        rd = (rd + 1) & 0xFF
+    }
+    set_field(ctx, q, QUEUE_RD, rd)
+}
