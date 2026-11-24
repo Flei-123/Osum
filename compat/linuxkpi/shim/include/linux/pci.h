@@ -4,39 +4,39 @@
 #include <linux/kernel.h>
 #include <linux/io.h>
 #include <linux/module.h>
+#include <linux/device.h>
+#include <linux/dma-mapping.h>
+#include <linux/mod_devicetable.h>
 
-#define PCI_ANY_ID (~0U)
 #define PCI_SUBVENDOR_ID_REDHAT_QUMRANET 0x1af4
 #define PCI_SUBDEVICE_ID_QEMU 0x1100
 #define PCI_NUM_RESOURCES 6
+#define PCI_EXP_LNKCTL 16
+#define PCI_EXP_LNKCTL_ASPM_L0S 0x0001
+#define PCI_EXP_LNKCTL_ASPM_L1 0x0002
+#define PCI_EXP_LNKCTL_ASPMC 0x0003
+#define PCI_EXP_LNKSTA 18
+#define PCI_EXP_LNKSTA_CLS 0x000f
+#define PCI_EXP_LNKSTA_CLS_2_5GB 0x0001
+#define PCI_EXP_LNKSTA_CLS_5_0GB 0x0002
+#define PCI_EXP_LNKSTA_CLS_8_0GB 0x0003
+#define PCI_EXP_DEVCTL2 40
+#define PCI_EXP_DEVCTL2_LTR_EN 0x0400
+#define PCI_VENDOR_ID_INTEL 0x8086
+#define PCI_ERR_ROOT_COMMAND 0x2c
+#define PCI_ERR_ROOT_STATUS 0x30
+#define PCI_ERR_ROOT_ERR_SRC 0x34
+#define PCI_EXT_CAP_ID_ERR 0x01
+#define PCI_COMMAND 4
+#define PCI_COMMAND_INTX_DISABLE 0x400
+#define PCI_STATUS 6
+#define PCI_STATUS_INTERRUPT 0x08
+struct msix_entry { u32 vector; u16 entry; };
 
-struct dev_pm_ops {
-};
-
-#define SET_SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn)
-
-struct device_driver {
-	const char *name;
-	const struct dev_pm_ops *pm;
-};
-
-struct device {
-	void *driver_data;
-	struct device *parent;
-};
-
-struct pci_device_id {
-	u32 vendor;
-	u32 device;
-	u32 subvendor;
-	u32 subdevice;
-	u32 class;
-	u32 class_mask;
-	unsigned long driver_data;
-};
-
+struct pci_bus { unsigned char number; struct pci_dev *self; };
 struct pci_dev {
 	struct device dev;
+	struct pci_bus *bus;
 	u16 vendor;
 	u16 device;
 	u16 subsystem_vendor;

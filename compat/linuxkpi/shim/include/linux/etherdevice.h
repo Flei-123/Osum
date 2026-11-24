@@ -2,6 +2,7 @@
 #ifndef LKPI_LINUX_ETHERDEVICE_H
 #define LKPI_LINUX_ETHERDEVICE_H
 #include <linux/if_ether.h>
+#include <linux/skbuff.h>
 #include <linux/kernel.h>
 static inline bool is_zero_ether_addr(const u8 *a) { return !(a[0] | a[1] | a[2] | a[3] | a[4] | a[5]); }
 static inline bool is_multicast_ether_addr(const u8 *a) { return a[0] & 1; }

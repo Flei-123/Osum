@@ -2,7 +2,14 @@
 #define LKPI_LINUX_KERNEL_H
 
 #include <linux/types.h>
+#include <linux/overflow.h>
 
+#define BUILD_BUG_ON(cond) ((void)sizeof(char[1 - 2 * !!(cond)]))
+#define BUILD_BUG_ON_MSG(cond, msg) BUILD_BUG_ON(cond)
+#define BUILD_BUG_ON_ZERO(e) ((int)sizeof(struct { int : (-!!(e)); }))
+#define ____cacheline_aligned __attribute__((aligned(64)))
+#define ____cacheline_aligned_in_smp ____cacheline_aligned
+#define SMP_CACHE_BYTES 64
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define min(a, b) ({ __typeof__(a) _a = (a); __typeof__(b) _b = (b); _a < _b ? _a : _b; })
 #define max(a, b) ({ __typeof__(a) _a = (a); __typeof__(b) _b = (b); _a > _b ? _a : _b; })
@@ -13,6 +20,11 @@
 #define BIT(n) (1UL << (n))
 #define PAGE_SHIFT 12
 #define PAGE_SIZE (1UL << PAGE_SHIFT)
+#define min_t(t, a, b) ((t)(a) < (t)(b) ? (t)(a) : (t)(b))
+#define max_t(t, a, b) ((t)(a) > (t)(b) ? (t)(a) : (t)(b))
+#define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
+#define clamp(v, lo, hi) min(max(v, lo), hi)
+#define swap(a, b) do { __typeof__(a) _t = (a); (a) = (b); (b) = _t; } while (0)
 #define ALIGN(x, a) (((x) + ((__typeof__(x))(a) - 1)) & ~((__typeof__(x))(a) - 1))
 #define PAGE_ALIGN(x) ALIGN(x, PAGE_SIZE)
 
@@ -27,6 +39,33 @@
 #define ERANGE 34
 #define ENOSYS 38
 #define MAX_ERRNO 4095
+#define ERFKILL 132
+#define ENODATA 61
+#define ENXIO 6
+#define EBADF 9
+#define ECONNRESET 104
+#define ENOTSUP 95
+#define ENOMSG 42
+#define EPFNOSUPPORT 96
+#define EAGAIN 11
+#define EEXIST 17
+#define EPERM 1
+#define ETIMEDOUT 110
+#define EOPNOTSUPP 95
+#define ENOTSUPP 524
+#define EOVERFLOW 75
+#define EALREADY 114
+#define EPROTO 71
+#define ENOBUFS 105
+#define ERESTARTSYS 512
+#define EINPROGRESS 115
+#define ESHUTDOWN 108
+#define EHOSTUNREACH 113
+#define EACCES 13
+#define EHOSTDOWN 112
+#define ENOTCONN 107
+#define EMSGSIZE 90
+#define EBADMSG 74
 
 static inline void *ERR_PTR(long error)
 {
@@ -47,11 +86,16 @@ static inline bool IS_ERR(const void *ptr)
 #define GFP_ATOMIC 0U
 #define __GFP_ZERO 1U
 
+#define DUMP_PREFIX_NONE 0
+#define DUMP_PREFIX_ADDRESS 1
+#define DUMP_PREFIX_OFFSET 2
+void print_hex_dump(const char *level, const char *prefix_str, int prefix_type, int rowsize, int groupsize, const void *buf, size_t len, bool ascii);
 #define KERN_ERR ""
 #define KERN_WARNING ""
 #define KERN_INFO ""
 #define KERN_DEBUG ""
 
+struct va_format { const char *fmt; va_list *va; };
 int _printk(const char *fmt, ...) __printf(1, 2);
 int vsnprintf(char *buf, size_t size, const char *fmt, va_list args);
 int snprintf(char *buf, size_t size, const char *fmt, ...) __printf(3, 4);

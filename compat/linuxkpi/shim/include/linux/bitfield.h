@@ -5,6 +5,7 @@
 #define __bf_shf(x) (__builtin_ffsll(x) - 1)
 #define FIELD_PREP(mask, val) ((__typeof__(mask))(((u64)(val) << __bf_shf(mask)) & (mask)))
 #define FIELD_GET(mask, reg) ((__typeof__(mask))(((reg) & (mask)) >> __bf_shf(mask)))
+#define FIELD_PREP_CONST(mask, val) FIELD_PREP(mask, val)
 #define FIELD_FIT(mask, val) (!((((u64)(val)) << __bf_shf(mask)) & ~(u64)(mask)))
 #define FIELD_MAX(mask) ((__typeof__(mask))((mask) >> __bf_shf(mask)))
 #define u8_encode_bits(v, field) ((u8)FIELD_PREP(field, v))

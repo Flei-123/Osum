@@ -55,6 +55,11 @@ typedef struct { s64 counter; } atomic64_t;
 #define __must_check __attribute__((warn_unused_result))
 #define __cold __attribute__((cold))
 #define __rcu
+#define __percpu
+#define __cond_lock(x, c) (c)
+#define __acquire(x) (void)0
+#define __release(x) (void)0
+#define __must_hold_shared(x)
 #define __bitwise
 #define __acquires(x)
 #define __releases(x)
@@ -78,4 +83,6 @@ typedef struct { s64 counter; } atomic64_t;
 #define __always_inline inline __attribute__((always_inline))
 #define __printf(a, b) __attribute__((format(printf, a, b)))
 
+#include <linux/stddef.h>
+#include <linux/kconfig.h>
 #endif

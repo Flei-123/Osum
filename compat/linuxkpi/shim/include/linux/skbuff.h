@@ -3,9 +3,15 @@
 
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/in6.h>
 
 #define SKB_CB_SIZE 48
 
+struct sk_buff;
+typedef struct skb_frag { struct page *page; u32 offset; u32 size; } skb_frag_t;
+#define MAX_SKB_FRAGS 17
+struct skb_shared_info { u8 nr_frags; u16 gso_size; u16 gso_segs; u32 gso_type; skb_frag_t frags[MAX_SKB_FRAGS]; struct sk_buff *frag_list; };
+#define skb_walk_frags(skb, iter) for (iter = skb_shinfo(skb)->frag_list; iter; iter = iter->next)
 struct sk_buff {
 	struct sk_buff *next;
 	u8 *head;
@@ -17,6 +23,7 @@ struct sk_buff {
 	u8 in_use;
 	u32 magic;
 	char cb[SKB_CB_SIZE] __attribute__((aligned(8)));
+	struct skb_shared_info shinfo;
 };
 
 struct sk_buff_head {
@@ -25,6 +32,7 @@ struct sk_buff_head {
 	u32 qlen;
 };
 
+#define skb_shinfo(skb) (&(skb)->shinfo)
 struct sk_buff *alloc_skb(unsigned int size, gfp_t priority);
 struct sk_buff *dev_alloc_skb(unsigned int length);
 void kfree_skb(struct sk_buff *skb);

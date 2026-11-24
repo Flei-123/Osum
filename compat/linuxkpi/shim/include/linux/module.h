@@ -14,6 +14,10 @@ struct module;
 #define MODULE_AUTHOR(text) LKPI_NOOP_DECL
 #define MODULE_DESCRIPTION(text) LKPI_NOOP_DECL
 #define MODULE_LICENSE(text) LKPI_NOOP_DECL
+#define MODULE_FIRMWARE(name) LKPI_NOOP_DECL
+#define MODULE_VERSION(v) LKPI_NOOP_DECL
+#define MODULE_ALIAS(a) LKPI_NOOP_DECL
+#define MODULE_IMPORT_NS(n) LKPI_NOOP_DECL
 
 #define module_init(fn) extern int lkpi_driver_init(void) __attribute__((alias(#fn)))
 #define module_exit(fn) extern void lkpi_driver_exit(void) __attribute__((alias(#fn)))

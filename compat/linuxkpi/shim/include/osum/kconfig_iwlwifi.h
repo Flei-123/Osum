@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef OSUM_KCONFIG_IWLWIFI_H
 #define OSUM_KCONFIG_IWLWIFI_H
+#include <linux/kconfig.h>
 #define CONFIG_X86_64 1
 #define CONFIG_64BIT 1
 #define CONFIG_PCI 1

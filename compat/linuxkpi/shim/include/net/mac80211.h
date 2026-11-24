@@ -7,6 +7,7 @@
 
 #define ETH_ALEN 6
 #define IEEE80211_NUM_ACS 4
+#define IEEE80211_MAX_CHAINS 4
 #define IEEE80211_KEY_FLAG_PAIRWISE BIT(3)
 #define BSS_CHANGED_ASSOC BIT(0)
 #define BSS_CHANGED_BSSID BIT(7)
@@ -83,6 +84,57 @@ struct ieee80211_prep_tx_info {
 	u16 duration;
 	bool success;
 };
+
+
+#define IEEE80211_TX_MAX_RATES 4
+#define IEEE80211_TX_CTL_REQ_TX_STATUS BIT(0)
+#define IEEE80211_TX_CTL_NO_ACK BIT(2)
+#define IEEE80211_TX_CTL_AMPDU BIT(6)
+#define IEEE80211_TX_STAT_ACK BIT(17)
+#define IEEE80211_TX_STAT_AMPDU BIT(18)
+#define IEEE80211_TX_STAT_TX_FILTERED BIT(15)
+#define IEEE80211_TX_CTL_FIRST_FRAGMENT BIT(7)
+#define IEEE80211_TX_INTFL_DONT_ENCRYPT BIT(1)
+
+struct ieee80211_tx_rate {
+	s8 idx;
+	u16 count:5, flags:11;
+} __packed;
+
+struct ieee80211_tx_info {
+	u32 flags;
+	u32 band:3, status_data_idr:1, status_data:13, hw_queue:4, tx_time_est:10;
+	union {
+		struct {
+			struct ieee80211_tx_rate rates[IEEE80211_TX_MAX_RATES];
+			s8 rts_cts_rate_idx;
+			u8 use_rts:1, use_cts_prot:1, short_preamble:1, skip_table:1, antennas:2;
+			struct ieee80211_vif *vif;
+			struct ieee80211_key_conf *hw_key;
+			u32 flags;
+			u32 enqueue_time;
+		} control;
+		struct {
+			struct ieee80211_tx_rate rates[IEEE80211_TX_MAX_RATES];
+			s32 ack_signal;
+			u8 ampdu_ack_len;
+			u8 ampdu_len;
+			u8 antenna;
+			u16 tx_time;
+			u8 flags;
+			u8 pad2;
+			void *status_driver_data[2];
+		} status;
+		struct {
+			struct ieee80211_tx_rate driver_rates[IEEE80211_TX_MAX_RATES];
+			u8 pad[4];
+			void *rate_driver_data[3];
+		};
+		void *driver_data[5];
+	};
+};
+
+#define IEEE80211_SKB_CB(skb) ((struct ieee80211_tx_info *)((skb)->cb))
 
 struct ieee80211_ops {
 	void (*tx)(struct ieee80211_hw *hw, struct ieee80211_tx_control *control, struct sk_buff *skb);
