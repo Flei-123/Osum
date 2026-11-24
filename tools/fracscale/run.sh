@@ -30,15 +30,14 @@ mach() {
     bash tools/alltag/build.sh "$d" tbconf="$T/bar.conf" accel=$ACC uitrace=yes res=$RES "$@" > "$d.log" 2>&1
     [ -s "$d/desktop.png" ] || bash tools/alltag/build.sh "$d" tbconf="$T/bar.conf" accel=$ACC uitrace=yes res=$RES "$@" > "$d.log" 2>&1
 }
-mach "$T/a" extra="edid=$HEX150" &
-mach "$T/b" extra="edid=$HEX100" &
-mach "$T/c" &
-mach "$T/d" extra="edid=$HEX200" &
-wait
+mach "$T/a" extra="edid=$HEX150"
+mach "$T/b" extra="edid=$HEX100"
+mach "$T/c"
+mach "$T/d" extra="edid=$HEX200"
 A="$T/a/serial.txt"; B="$T/b/serial.txt"; C="$T/c/serial.txt"; D="$T/d/serial.txt"
 for f in "$A" "$B" "$C" "$D"; do [ -s "$f" ] || { bad "no serial output: $f"; echo "FRACSCALE: $PASS passed, $FAIL failed"; exit 1; }; done
 echo "== A. EDID 293x165 mm on 1920x1080 without virtio-gpu"
-grep -aqE 'fb: skala x1 .* mm=290 pct=150' "$A" && ok "kernel picks 150 percent (integer scale 1)" || bad "scale line: $(grep -a 'fb: skala' "$A" | head -1)"
+grep -aqE 'fb: skala x1 .* mm=290 +pct=150' "$A" && ok "kernel picks 150 percent (integer scale 1)" || bad "scale line: $(grep -a 'fb: skala' "$A" | head -1)"
 grep -aqE 'taskbar: geom .* h=72 ' "$A" && ok "taskbar is 72 px high (48 pt at 150 percent)" || bad "taskbar geom: $(grep -a 'taskbar: geom ' "$A" | tail -1)"
 grep -aqE 'taskbar: pin explorer .* w=60 h=60 ' "$A" && ok "pin buttons are 60x60 (40 pt at 150 percent)" || bad "pin: $(grep -a 'taskbar: pin explorer ' "$A" | head -1)"
 echo "== B. thresholds and counter-proofs"
