@@ -47,7 +47,7 @@ def _s(x):
 TABLE = {
     'base': _s("""ulib msg nv pw grp sha tools nidx actwire actcli act image gif jpeg pngenc flate inflate media
         unix kbund bstore jenc jsig key vault pin trash chacha dcrypt bsec aiot setschema wl_data wl_frame wl_popup wl_backdrop wl_input
-        wl_keytab wl_msg wlproto h264 h264tab mp3tab sync serline instaccount diskscan drvpkg drvmatch instkern dualkern
+        wl_keytab wl_msg wlproto h264 h264tab mp3tab sync serline instaccount diskscan drvpkg drvmatch drvbundle drvcat drvdevs instkern dualkern
         brand_start hwid dbgio"""),
     'cmd': _s("""cat chmod chown cp cut date df diff dirname du echo env false find grep gunzip gzip head id kill ln
         locate ls mkdir mount mv passwd patch ps rm rmdir sed seq shasum shutdown reboot sleep sort su
@@ -57,7 +57,7 @@ TABLE = {
     'toolkit': _s("""appdir fuib fuiglyph fuiapp fuiscene fuied winopts winfloat backdrop template"""),
     'services': _s("""orientbus odbd settingsd stored social sshd wayd powerd hotkeyd wmplug dhcp sntp svc rpc rpcc
         rpcd init ota opk presence proxy dnswt fsrv fsrw fsrlim fremdfs stickwr standby power
-        melder autorun diskctl drvctl dispctl ebpfctl axd bsect modeapply"""),
+        melder autorun diskctl drvctl drvfeed dispctl ebpfctl axd bsect modeapply"""),
     'shell': _s("""desktop taskbar launcher glogin login signin lock lockclaim idlelock floatlock welcome barpop traypop
         calpop calev taskview notifc qs qsmodes runbox wmd freunde tiling backlum cliphist mbg modul elevate msgbox"""),
     'apps': _s("""explorer expakt exporte fileop expdlg expmodell massren trashbin settings term termfull nedit calc

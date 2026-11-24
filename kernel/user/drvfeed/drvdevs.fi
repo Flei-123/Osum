@@ -1,0 +1,237 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.io
+import libc.octets
+
+export {
+    load, first, next, parse, cand, cand_count, drv_ptr, src_ptr, id_ptr, kind_ptr, NONE,
+}
+
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const BUF_CAP: u64 = 16384
+const CAND_W: u64 = 48
+const NL: u64 = 10
+const SP: u64 = 32
+
+static mut BUF: [u8; 16384] = [0 as u8; 16384]
+static mut LEN: u64 = 0
+static mut P_PROC: [u8; 14] = "/proc/drivers\0"
+static mut MARK: [u8; 10] = "# devices\0"
+static mut CANDS: [u8; 144] = [0 as u8; 144]
+static mut N_CAND: u64 = 0
+static mut DRV: [u8; 32] = [0 as u8; 32]
+static mut SRC: [u8; 16] = [0 as u8; 16]
+static mut ID: [u8; 40] = [0 as u8; 40]
+static mut KIND: [u8; 12] = [0 as u8; 12]
+static mut SUB: [u8; 12] = [0 as u8; 12]
+static mut CLASS: [u8; 8] = [0 as u8; 8]
+static mut K_DRV: [u8; 6] = " drv=\0"
+static mut K_SRC: [u8; 6] = " src=\0"
+static mut K_SUB: [u8; 6] = " sub=\0"
+static mut K_CLASS: [u8; 8] = " class=\0"
+static mut W_PCI: [u8; 5] = "pci \0"
+static mut W_PCICLASS: [u8; 10] = "pciclass \0"
+static mut W_USB: [u8; 5] = "usb \0"
+static mut SUB_COLON: [u8; 2] = ":\0"
+static mut W_ACPI: [u8; 6] = "acpi \0"
+
+fn at8(i: u64) -> u64 {
+    return octets.ld8((&BUF[0 as usize]) as u64, i)
+}
+
+fn load() -> bool {
+    let fd: u64 = io.open((&P_PROC[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let n: u64 = io.read_full(fd, (&BUF[0 as usize]) as u64, BUF_CAP - 1)
+    io.close(fd)
+    if ulib.bad(n) {
+        return false
+    }
+    LEN = n
+    octets.st8((&BUF[0 as usize]) as u64, n, 0)
+    return true
+}
+
+fn line_end(at: u64) -> u64 {
+    var i: u64 = at
+    while i < LEN && at8(i) != NL {
+        i = i + 1
+    }
+    return i
+}
+
+fn line_has_mark(at: u64) -> bool {
+    var i: u64 = 0
+    while octets.ld8((&MARK[0 as usize]) as u64, i) != 0 {
+        if at8(at + i) != octets.ld8((&MARK[0 as usize]) as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn first() -> u64 {
+    var at: u64 = 0
+    while at < LEN {
+        if line_has_mark(at) {
+            return next(at)
+        }
+        at = line_end(at) + 1
+    }
+    return NONE
+}
+
+fn next(at: u64) -> u64 {
+    let n: u64 = line_end(at) + 1
+    if n >= LEN {
+        return NONE
+    }
+    if at8(n) == 35 {
+        return NONE
+    }
+    return n
+}
+
+fn copy_token(from: u64, out: u64, cap: u64) {
+    var n: u64 = 0
+    var i: u64 = from
+    while i < LEN && at8(i) != SP && at8(i) != NL && n + 1 < cap {
+        octets.st8(out, n, at8(i))
+        n = n + 1
+        i = i + 1
+    }
+    octets.st8(out, n, 0)
+}
+
+fn token_start(at: u64, index: u64) -> u64 {
+    var i: u64 = at
+    var t: u64 = 0
+    while t < index {
+        while i < LEN && at8(i) != SP && at8(i) != NL {
+            i = i + 1
+        }
+        if i >= LEN || at8(i) == NL {
+            return NONE
+        }
+        i = i + 1
+        t = t + 1
+    }
+    return i
+}
+
+fn key_start(at: u64, key: u64) -> u64 {
+    let end: u64 = line_end(at)
+    var i: u64 = at
+    while i < end {
+        var j: u64 = 0
+        while octets.ld8(key, j) != 0 && at8(i + j) == octets.ld8(key, j) {
+            j = j + 1
+        }
+        if octets.ld8(key, j) == 0 {
+            return i + j
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn read_key(at: u64, key: u64, out: u64, cap: u64) {
+    octets.st8(out, 0, 0)
+    let s: u64 = key_start(at, key)
+    if s != NONE {
+        copy_token(s, out, cap)
+    }
+}
+
+fn add_cand(prefix: u64, body: u64) {
+    if N_CAND >= 3 {
+        return
+    }
+    let dst: u64 = (&CANDS[0 as usize]) as u64 + N_CAND * CAND_W
+    ulib.strcpy(dst, prefix)
+    ulib.strcat(dst, body)
+    N_CAND = N_CAND + 1
+}
+
+fn add_pci_cands() {
+    var full: [u8; 40] = [0 as u8; 40]
+    ulib.strcpy((&full[0 as usize]) as u64, (&ID[0 as usize]) as u64)
+    if octets.ld8((&SUB[0 as usize]) as u64, 0) != 0 {
+        ulib.strcat((&full[0 as usize]) as u64, (&SUB_COLON[0 as usize]) as u64)
+        ulib.strcat((&full[0 as usize]) as u64, (&SUB[0 as usize]) as u64)
+        add_cand((&W_PCI[0 as usize]) as u64, (&full[0 as usize]) as u64)
+    }
+    add_cand((&W_PCI[0 as usize]) as u64, (&ID[0 as usize]) as u64)
+    if octets.ld8((&CLASS[0 as usize]) as u64, 0) != 0 {
+        add_cand((&W_PCICLASS[0 as usize]) as u64, (&CLASS[0 as usize]) as u64)
+    }
+}
+
+fn strip_hex_prefix(p: u64) {
+    var r: u64 = 0
+    var w: u64 = 0
+    while octets.ld8(p, r) != 0 {
+        if octets.ld8(p, r) == 48 && octets.ld8(p, r + 1) == 120 {
+            r = r + 2
+        } else {
+            octets.st8(p, w, octets.ld8(p, r))
+            w = w + 1
+            r = r + 1
+        }
+    }
+    octets.st8(p, w, 0)
+}
+
+fn parse(at: u64) {
+    N_CAND = 0
+    copy_token(at, (&KIND[0 as usize]) as u64, 12)
+    read_key(at, (&K_DRV[0 as usize]) as u64, (&DRV[0 as usize]) as u64, 32)
+    read_key(at, (&K_SRC[0 as usize]) as u64, (&SRC[0 as usize]) as u64, 16)
+    read_key(at, (&K_SUB[0 as usize]) as u64, (&SUB[0 as usize]) as u64, 12)
+    read_key(at, (&K_CLASS[0 as usize]) as u64, (&CLASS[0 as usize]) as u64, 8)
+    strip_hex_prefix((&SUB[0 as usize]) as u64)
+    strip_hex_prefix((&CLASS[0 as usize]) as u64)
+    if octets.ld8((&KIND[0 as usize]) as u64, 0) == 112 {
+        copy_token(token_start(at, 2), (&ID[0 as usize]) as u64, 40)
+        strip_hex_prefix((&ID[0 as usize]) as u64)
+        add_pci_cands()
+        return
+    }
+    copy_token(token_start(at, 1), (&ID[0 as usize]) as u64, 40)
+    strip_hex_prefix((&ID[0 as usize]) as u64)
+    if octets.ld8((&KIND[0 as usize]) as u64, 0) == 117 {
+        add_cand((&W_USB[0 as usize]) as u64, (&ID[0 as usize]) as u64)
+    }
+    if octets.ld8((&KIND[0 as usize]) as u64, 0) == 97 {
+        add_cand((&W_ACPI[0 as usize]) as u64, (&ID[0 as usize]) as u64)
+    }
+}
+
+fn cand(i: u64) -> u64 {
+    return (&CANDS[0 as usize]) as u64 + i * CAND_W
+}
+
+fn cand_count() -> u64 {
+    return N_CAND
+}
+
+fn drv_ptr() -> u64 {
+    return (&DRV[0 as usize]) as u64
+}
+
+fn src_ptr() -> u64 {
+    return (&SRC[0 as usize]) as u64
+}
+
+fn id_ptr() -> u64 {
+    return (&ID[0 as usize]) as u64
+}
+
+fn kind_ptr() -> u64 {
+    return (&KIND[0 as usize]) as u64
+}

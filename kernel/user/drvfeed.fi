@@ -1,0 +1,570 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.io
+import libc.octets
+import tools
+import drvpkg
+import drvfeed.drvbundle
+import drvfeed.drvcat
+import drvfeed.drvdevs
+
+export { u_start }
+
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const EXIT_FETCH: u64 = 1
+const EXIT_CATALOG: u64 = 2
+const EXIT_UNKNOWN: u64 = 3
+const EXIT_POLICY: u64 = 4
+const EXIT_BUNDLE_HASH: u64 = 5
+const EXIT_UNPACK: u64 = 6
+const EXIT_FW_HASH: u64 = 7
+const EXIT_INSTALL: u64 = 8
+const EXIT_SIGNATURE: u64 = 9
+const EXIT_USAGE: u64 = 64
+
+static mut ARGV: [u64; 8] = [0 as u64; 8]
+static mut P_OTA: [u8; 9] = "/bin/ota\0"
+static mut P_CTL: [u8; 12] = "/bin/drvctl\0"
+static mut P_WORK: [u8; 13] = "/tmp/drvfeed\0"
+static mut P_STAGE: [u8; 19] = "/tmp/drvfeed/stage\0"
+static mut P_BUNDLE: [u8; 19] = "/tmp/drvfeed/b.drv\0"
+static mut P_CAT_TMP: [u8; 19] = "/tmp/drvfeed/c.tsv\0"
+static mut P_SIG_TMP: [u8; 19] = "/tmp/drvfeed/c.sig\0"
+static mut P_FWROOT: [u8; 14] = "/lib/firmware\0"
+static mut P_DRIVERS: [u8; 13] = "/lib/drivers\0"
+static mut P_CONF: [u8; 18] = "/etc/drvfeed.conf\0"
+static mut N_CAT: [u8; 12] = "drivers.tsv\0"
+static mut N_SIG: [u8; 16] = "drivers.tsv.sig\0"
+static mut W_FETCH: [u8; 6] = "fetch\0"
+static mut W_INSTALL: [u8; 8] = "install\0"
+static mut W_LOAD: [u8; 5] = "load\0"
+static mut K_FW: [u8; 3] = "fw\0"
+static mut K_NAME: [u8; 5] = "name\0"
+static mut K_VERSION: [u8; 8] = "version\0"
+static mut SPACE: [u8; 2] = " \0"
+static mut HEX_A: [u8; 65] = [0 as u8; 65]
+static mut DIGEST: [u8; 32] = [0 as u8; 32]
+static mut PATH_A: [u8; 192] = [0 as u8; 192]
+static mut PATH_B: [u8; 192] = [0 as u8; 192]
+static mut FWSPEC: [u8; 100] = [0 as u8; 100]
+static mut CONF_BUF: [u8; 128] = [0 as u8; 128]
+
+fn text_len(p: u64) -> u64 {
+    var n: u64 = 0
+    while octets.ld8(p, n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn out(p: u64) {
+    tools.ob_str(p)
+}
+
+fn out_line(p: u64) {
+    tools.ob_str(p)
+    tools.ob_nl()
+    tools.ob_flush()
+}
+
+fn run(path: u64, a1: u64, a2: u64, a3: u64, argc: u64) -> u64 {
+    ARGV[0 as usize] = path
+    ARGV[1 as usize] = a1
+    ARGV[2 as usize] = a2
+    ARGV[3 as usize] = a3
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, path, (&ARGV[0 as usize]) as u64, argc)
+    if ulib.bad(pid) {
+        return NONE
+    }
+    return ulib.wait_code(pid)
+}
+
+fn fetch(file: u64, dst: u64) -> bool {
+    return run((&P_OTA[0 as usize]) as u64, (&W_FETCH[0 as usize]) as u64, file, dst, 4) == 0
+}
+
+fn mkwork() {
+    ulib.sys(ulib.SYS_MKDIR, (&P_WORK[0 as usize]) as u64, 0, 0)
+}
+
+fn hash_matches(path: u64, hex: u64) -> bool {
+    if !drvbundle.file_sha256(path, (&DIGEST[0 as usize]) as u64) {
+        return false
+    }
+    drvbundle.digest_hex((&DIGEST[0 as usize]) as u64, (&HEX_A[0 as usize]) as u64)
+    return drvcat.ci_equal((&HEX_A[0 as usize]) as u64, hex)
+}
+
+fn conf_has(word: u64) -> bool {
+    let fd: u64 = io.open((&P_CONF[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let n: u64 = io.read_full(fd, (&CONF_BUF[0 as usize]) as u64, 127)
+    io.close(fd)
+    if ulib.bad(n) {
+        return false
+    }
+    octets.st8((&CONF_BUF[0 as usize]) as u64, n, 0)
+    var i: u64 = 0
+    while i < n {
+        var j: u64 = 0
+        while octets.ld8(word, j) != 0 && octets.ld8((&CONF_BUF[0 as usize]) as u64, i + j) == octets.ld8(word, j) {
+            j = j + 1
+        }
+        if octets.ld8(word, j) == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn auto_mode() -> bool {
+    var w: [u8; 10] = "mode=auto\0"
+    return conf_has((&w[0 as usize]) as u64)
+}
+
+fn cmd_mode(value: u64) -> u64 {
+    var s_auto: [u8; 10] = "mode=auto\0"
+    var s_ask: [u8; 9] = "mode=ask\0"
+    var w_auto: [u8; 5] = "auto\0"
+    var w_ask: [u8; 4] = "ask\0"
+    var nlc: [u8; 2] = "\n\0"
+    if value == 0 {
+        if auto_mode() {
+            out_line((&s_auto[0 as usize]) as u64)
+        } else {
+            out_line((&s_ask[0 as usize]) as u64)
+        }
+        return 0
+    }
+    var line: u64 = 0
+    if ulib.streq(value, (&w_auto[0 as usize]) as u64) {
+        line = (&s_auto[0 as usize]) as u64
+    }
+    if ulib.streq(value, (&w_ask[0 as usize]) as u64) {
+        line = (&s_ask[0 as usize]) as u64
+    }
+    if line == 0 {
+        return EXIT_USAGE
+    }
+    let fd: u64 = io.create((&P_CONF[0 as usize]) as u64)
+    if ulib.bad(fd) {
+        return EXIT_INSTALL
+    }
+    io.write_text(fd, line)
+    io.write_text(fd, (&nlc[0 as usize]) as u64)
+    io.close(fd)
+    return 0
+}
+
+fn cmd_refresh() -> u64 {
+    var s_ok: [u8; 23] = "drvfeed: catalog ok n=\0"
+    var s_fetch: [u8; 33] = "drvfeed: catalog fetch failed\0\0\0\0"
+    var s_bad: [u8; 40] = "drvfeed: catalog rejected (signature)\0\0\0"
+    mkwork()
+    if !fetch((&N_CAT[0 as usize]) as u64, (&P_CAT_TMP[0 as usize]) as u64)
+        || !fetch((&N_SIG[0 as usize]) as u64, (&P_SIG_TMP[0 as usize]) as u64) {
+        out_line((&s_fetch[0 as usize]) as u64)
+        return EXIT_FETCH
+    }
+    if drvcat.install_verified((&P_CAT_TMP[0 as usize]) as u64, (&P_SIG_TMP[0 as usize]) as u64) != drvcat.C_OK {
+        out_line((&s_bad[0 as usize]) as u64)
+        return EXIT_CATALOG
+    }
+    drvcat.load()
+    out((&s_ok[0 as usize]) as u64)
+    tools.ob_num(drvcat.count())
+    tools.ob_nl()
+    tools.ob_flush()
+    return 0
+}
+
+fn stage_path(rel: u64, out_path: u64) {
+    drvpkg.join(out_path, (&P_STAGE[0 as usize]) as u64, rel)
+}
+
+fn split_fw_spec() -> bool {
+    var i: u64 = 0
+    while octets.ld8((&FWSPEC[0 as usize]) as u64, i) != 0 {
+        if octets.ld8((&FWSPEC[0 as usize]) as u64, i) == 58 {
+            octets.st8((&FWSPEC[0 as usize]) as u64, i, 0)
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn manifest_fw_ok() -> bool {
+    var fw_dir: [u8; 8] = "fw/\0\0\0\0\0"
+    var rel: [u8; 48] = [0 as u8; 48]
+    if !drvpkg.field_nth((&K_FW[0 as usize]) as u64, 0, (&FWSPEC[0 as usize]) as u64, 100) {
+        return true
+    }
+    if !split_fw_spec() {
+        return false
+    }
+    ulib.strcpy((&rel[0 as usize]) as u64, (&fw_dir[0 as usize]) as u64)
+    ulib.strcat((&rel[0 as usize]) as u64, (&FWSPEC[0 as usize]) as u64)
+    stage_path((&rel[0 as usize]) as u64, (&PATH_A[0 as usize]) as u64)
+    if !drvpkg.file_exists((&PATH_A[0 as usize]) as u64) {
+        return true
+    }
+    return hash_matches((&PATH_A[0 as usize]) as u64, (&FWSPEC[0 as usize]) as u64 + text_len((&FWSPEC[0 as usize]) as u64) + 1)
+}
+
+fn install_firmware() {
+    if !drvpkg.field_nth((&K_FW[0 as usize]) as u64, 0, (&FWSPEC[0 as usize]) as u64, 100) {
+        return
+    }
+    if !split_fw_spec() {
+        return
+    }
+    var fw_dir: [u8; 8] = "fw/\0\0\0\0\0"
+    var rel: [u8; 48] = [0 as u8; 48]
+    ulib.strcpy((&rel[0 as usize]) as u64, (&fw_dir[0 as usize]) as u64)
+    ulib.strcat((&rel[0 as usize]) as u64, (&FWSPEC[0 as usize]) as u64)
+    stage_path((&rel[0 as usize]) as u64, (&PATH_A[0 as usize]) as u64)
+    if !drvpkg.file_exists((&PATH_A[0 as usize]) as u64) {
+        return
+    }
+    ulib.sys(ulib.SYS_MKDIR, (&P_FWROOT[0 as usize]) as u64, 0, 0)
+    drvpkg.join((&PATH_B[0 as usize]) as u64, (&P_FWROOT[0 as usize]) as u64, (&FWSPEC[0 as usize]) as u64)
+    drvpkg.copy_file((&PATH_A[0 as usize]) as u64, (&PATH_B[0 as usize]) as u64)
+}
+
+#[allow_escape]
+fn finish_stage() -> u64 {
+    var e_sig: [u8; 41] = "drvfeed: manifest signature check failed\0"
+    var e_fw: [u8; 36] = "drvfeed: firmware hash mismatch\0\0\0\0\0"
+    var e_inst: [u8; 28] = "drvfeed: drvctl refused it\0\0"
+    var s_now: [u8; 22] = "drvfeed: bound now\0\0\0\0"
+    var s_boot: [u8; 31] = "drvfeed: active after reboot\0\0\0"
+    var s_done: [u8; 20] = "drvfeed: installed \0"
+    var pkg: [u8; 40] = [0 as u8; 40]
+    if drvpkg.verify_dir((&P_STAGE[0 as usize]) as u64) != drvpkg.V_OK {
+        out_line((&e_sig[0 as usize]) as u64)
+        return EXIT_SIGNATURE
+    }
+    if !manifest_fw_ok() {
+        out_line((&e_fw[0 as usize]) as u64)
+        return EXIT_FW_HASH
+    }
+    drvpkg.field_nth((&K_NAME[0 as usize]) as u64, 0, (&pkg[0 as usize]) as u64, 40)
+    if run((&P_CTL[0 as usize]) as u64, (&W_INSTALL[0 as usize]) as u64, (&P_STAGE[0 as usize]) as u64, 0, 3) != 0 {
+        out_line((&e_inst[0 as usize]) as u64)
+        return EXIT_INSTALL
+    }
+    drvpkg.verify_dir((&P_STAGE[0 as usize]) as u64)
+    install_firmware()
+    out((&s_done[0 as usize]) as u64)
+    out_line((&pkg[0 as usize]) as u64)
+    if run((&P_CTL[0 as usize]) as u64, (&W_LOAD[0 as usize]) as u64, (&pkg[0 as usize]) as u64, 0, 3) == 0 {
+        out_line((&s_now[0 as usize]) as u64)
+    } else {
+        out_line((&s_boot[0 as usize]) as u64)
+    }
+    return 0
+}
+
+#[allow_escape]
+fn fetch_firmware(name: u64) -> u64 {
+    var e_fetch: [u8; 33] = "drvfeed: firmware fetch failed\0\0\0"
+    var e_hash: [u8; 36] = "drvfeed: firmware hash mismatch\0\0\0\0\0"
+    var fw_name: [u8; 40] = [0 as u8; 40]
+    var fw_hash: [u8; 72] = [0 as u8; 72]
+    var fw_file: [u8; 72] = [0 as u8; 72]
+    var fw_dir: [u8; 8] = "fw/\0\0\0\0\0"
+    var rel: [u8; 48] = [0 as u8; 48]
+    let w: u64 = drvcat.find_part(87, name)
+    if w == NONE {
+        return 0
+    }
+    drvcat.field(w, 2, (&fw_name[0 as usize]) as u64, 40)
+    drvcat.field(w, 4, (&fw_hash[0 as usize]) as u64, 72)
+    drvcat.field(w, 5, (&fw_file[0 as usize]) as u64, 72)
+    if !drvpkg.valid_file((&fw_name[0 as usize]) as u64) || !drvpkg.valid_file((&fw_file[0 as usize]) as u64) {
+        return EXIT_UNPACK
+    }
+    ulib.strcpy((&rel[0 as usize]) as u64, (&fw_dir[0 as usize]) as u64)
+    ulib.strcat((&rel[0 as usize]) as u64, (&fw_name[0 as usize]) as u64)
+    stage_path((&rel[0 as usize]) as u64, (&PATH_A[0 as usize]) as u64)
+    if !fetch((&fw_file[0 as usize]) as u64, (&PATH_A[0 as usize]) as u64) {
+        out_line((&e_fetch[0 as usize]) as u64)
+        return EXIT_FETCH
+    }
+    if !hash_matches((&PATH_A[0 as usize]) as u64, (&fw_hash[0 as usize]) as u64) {
+        io.unlink((&PATH_A[0 as usize]) as u64)
+        out_line((&e_hash[0 as usize]) as u64)
+        return EXIT_FW_HASH
+    }
+    return 0
+}
+
+#[allow_escape]
+fn cmd_install(name: u64) -> u64 {
+    var e_unknown: [u8; 33] = "drvfeed: not in the catalog\0\0\0\0\0\0"
+    var e_policy: [u8; 41] = "drvfeed: compat tier refused by policy\0\0\0"
+    var e_fetch: [u8; 33] = "drvfeed: package fetch failed\0\0\0\0"
+    var e_hash: [u8; 33] = "drvfeed: package hash mismatch\0\0\0"
+    var e_unpack: [u8; 33] = "drvfeed: package unreadable\0\0\0\0\0\0"
+    var tier: [u8; 12] = [0 as u8; 12]
+    var w_compat: [u8; 7] = "compat\0"
+    var sha: [u8; 72] = [0 as u8; 72]
+    var file: [u8; 72] = [0 as u8; 72]
+    if drvcat.load() != drvcat.C_OK {
+        return EXIT_CATALOG
+    }
+    let d: u64 = drvcat.find_package(name)
+    if d == NONE {
+        out_line((&e_unknown[0 as usize]) as u64)
+        return EXIT_UNKNOWN
+    }
+    drvcat.field(d, 3, (&tier[0 as usize]) as u64, 12)
+    drvcat.field(d, 5, (&sha[0 as usize]) as u64, 72)
+    drvcat.field(d, 6, (&file[0 as usize]) as u64, 72)
+    if ulib.streq((&tier[0 as usize]) as u64, (&w_compat[0 as usize]) as u64) && !drvpkg.compat_allowed() {
+        out_line((&e_policy[0 as usize]) as u64)
+        return EXIT_POLICY
+    }
+    if !drvpkg.valid_file((&file[0 as usize]) as u64) {
+        return EXIT_UNPACK
+    }
+    mkwork()
+    if !fetch((&file[0 as usize]) as u64, (&P_BUNDLE[0 as usize]) as u64) {
+        out_line((&e_fetch[0 as usize]) as u64)
+        return EXIT_FETCH
+    }
+    if !hash_matches((&P_BUNDLE[0 as usize]) as u64, (&sha[0 as usize]) as u64) {
+        io.unlink((&P_BUNDLE[0 as usize]) as u64)
+        out_line((&e_hash[0 as usize]) as u64)
+        return EXIT_BUNDLE_HASH
+    }
+    if drvbundle.unpack((&P_BUNDLE[0 as usize]) as u64, (&P_STAGE[0 as usize]) as u64) != drvbundle.B_OK {
+        out_line((&e_unpack[0 as usize]) as u64)
+        return EXIT_UNPACK
+    }
+    let fw: u64 = fetch_firmware(name)
+    if fw != 0 {
+        return fw
+    }
+    return finish_stage()
+}
+
+fn cmd_install_file(path: u64) -> u64 {
+    var e_unpack: [u8; 33] = "drvfeed: package unreadable\0\0\0\0\0\0"
+    var e_policy: [u8; 41] = "drvfeed: compat tier refused by policy\0\0\0"
+    mkwork()
+    if drvbundle.unpack(path, (&P_STAGE[0 as usize]) as u64) != drvbundle.B_OK {
+        out_line((&e_unpack[0 as usize]) as u64)
+        return EXIT_UNPACK
+    }
+    if drvpkg.verify_dir((&P_STAGE[0 as usize]) as u64) == drvpkg.V_OK && drvpkg.is_compat() && !drvpkg.compat_allowed() {
+        out_line((&e_policy[0 as usize]) as u64)
+        return EXIT_POLICY
+    }
+    return finish_stage()
+}
+
+fn installed_version(name: u64) -> u64 {
+    var dir: [u8; 96] = [0 as u8; 96]
+    var text: [u8; 16] = [0 as u8; 16]
+    drvpkg.join((&dir[0 as usize]) as u64, (&P_DRIVERS[0 as usize]) as u64, name)
+    if drvpkg.verify_dir((&dir[0 as usize]) as u64) != drvpkg.V_OK {
+        return NONE
+    }
+    if !drvpkg.field_nth((&K_VERSION[0 as usize]) as u64, 0, (&text[0 as usize]) as u64, 16) {
+        return NONE
+    }
+    return ulib.to_num((&text[0 as usize]) as u64)
+}
+
+fn pkg_for_device(name_out: u64) -> bool {
+    var i: u64 = 0
+    while i < drvdevs.cand_count() {
+        if drvcat.match_package(drvdevs.cand(i), name_out, 40) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+#[allow_escape]
+static mut S_INSTALLED: [u8; 10] = "installed\0"
+static mut S_UPDATE: [u8; 7] = "update\0"
+static mut S_AVAILABLE: [u8; 10] = "available\0"
+static mut S_PENDING: [u8; 8] = "pending\0"
+static mut S_BLOCKED: [u8; 8] = "blocked\0"
+
+fn state_word(drv_none: bool, name: u64, cat_version: u64, tier_compat: bool) -> u64 {
+    let have: u64 = installed_version(name)
+    if !drv_none {
+        if have != NONE && cat_version > have {
+            return (&S_UPDATE[0 as usize]) as u64
+        }
+        return (&S_INSTALLED[0 as usize]) as u64
+    }
+    if have != NONE {
+        return (&S_PENDING[0 as usize]) as u64
+    }
+    if tier_compat && !drvpkg.compat_allowed() {
+        return (&S_BLOCKED[0 as usize]) as u64
+    }
+    return (&S_AVAILABLE[0 as usize]) as u64
+}
+
+fn print_device(name: u64, none_drv: bool) {
+    var s_dev: [u8; 5] = "dev \0"
+    var s_drv: [u8; 6] = " drv=\0"
+    var s_state: [u8; 8] = " state=\0"
+    var s_pkg: [u8; 6] = " pkg=\0"
+    var s_ver: [u8; 6] = " ver=\0"
+    var s_tier: [u8; 7] = " tier=\0"
+    var s_size: [u8; 7] = " size=\0"
+    var s_missing: [u8; 8] = "missing\0"
+    var w_compat: [u8; 7] = "compat\0"
+    var ver: [u8; 16] = [0 as u8; 16]
+    var tier: [u8; 12] = [0 as u8; 12]
+    var size: [u8; 16] = [0 as u8; 16]
+    out((&s_dev[0 as usize]) as u64)
+    out(drvdevs.kind_ptr())
+    out((&SPACE[0 as usize]) as u64)
+    out(drvdevs.id_ptr())
+    out((&s_drv[0 as usize]) as u64)
+    out(drvdevs.drv_ptr())
+    out((&s_state[0 as usize]) as u64)
+    if name == 0 {
+        out_line((&s_missing[0 as usize]) as u64)
+        return
+    }
+    let d: u64 = drvcat.find_package(name)
+    drvcat.field(d, 2, (&ver[0 as usize]) as u64, 16)
+    drvcat.field(d, 3, (&tier[0 as usize]) as u64, 12)
+    drvcat.field(d, 4, (&size[0 as usize]) as u64, 16)
+    out(state_word(none_drv, name, ulib.to_num((&ver[0 as usize]) as u64),
+        ulib.streq((&tier[0 as usize]) as u64, (&w_compat[0 as usize]) as u64)))
+    out((&s_pkg[0 as usize]) as u64)
+    out(name)
+    out((&s_ver[0 as usize]) as u64)
+    out((&ver[0 as usize]) as u64)
+    out((&s_tier[0 as usize]) as u64)
+    out((&tier[0 as usize]) as u64)
+    out((&s_size[0 as usize]) as u64)
+    out_line((&size[0 as usize]) as u64)
+}
+
+fn cmd_list() -> u64 {
+    var s_none: [u8; 5] = "none\0"
+    var s_store: [u8; 6] = "store\0"
+    var name: [u8; 40] = [0 as u8; 40]
+    var s_nocat: [u8; 28] = "drvfeed: no catalog loaded\0\0"
+    var s_end: [u8; 12] = "drvfeed: ok\0"
+    if !drvdevs.load() {
+        return EXIT_FETCH
+    }
+    if drvcat.load() != drvcat.C_OK {
+        out_line((&s_nocat[0 as usize]) as u64)
+    }
+    var at: u64 = drvdevs.first()
+    while at != drvdevs.NONE {
+        drvdevs.parse(at)
+        let none_drv: bool = ulib.streq(drvdevs.drv_ptr(), (&s_none[0 as usize]) as u64)
+        let store_drv: bool = ulib.streq(drvdevs.src_ptr(), (&s_store[0 as usize]) as u64)
+        if none_drv || store_drv {
+            octets.st8((&name[0 as usize]) as u64, 0, 0)
+            if pkg_for_device((&name[0 as usize]) as u64) {
+                print_device((&name[0 as usize]) as u64, none_drv)
+            } else {
+                print_device(0, none_drv)
+            }
+        }
+        at = drvdevs.next(at)
+    }
+    out_line((&s_end[0 as usize]) as u64)
+    return 0
+}
+
+fn cmd_auto() -> u64 {
+    var s_none: [u8; 5] = "none\0"
+    var s_ask: [u8; 40] = "drvfeed: proposals only (mode=ask)\0\0\0\0\0\0"
+    var name: [u8; 40] = [0 as u8; 40]
+    var bad: u64 = 0
+    var ver: [u8; 16] = [0 as u8; 16]
+    var tier: [u8; 12] = [0 as u8; 12]
+    var w_compat: [u8; 7] = "compat\0"
+    let r: u64 = cmd_refresh()
+    if r != 0 {
+        return r
+    }
+    if !auto_mode() {
+        out_line((&s_ask[0 as usize]) as u64)
+        return cmd_list()
+    }
+    if !drvdevs.load() {
+        return EXIT_FETCH
+    }
+    var at: u64 = drvdevs.first()
+    while at != drvdevs.NONE {
+        drvdevs.parse(at)
+        octets.st8((&name[0 as usize]) as u64, 0, 0)
+        if ulib.streq(drvdevs.drv_ptr(), (&s_none[0 as usize]) as u64) && pkg_for_device((&name[0 as usize]) as u64) {
+            let d: u64 = drvcat.find_package((&name[0 as usize]) as u64)
+            drvcat.field(d, 2, (&ver[0 as usize]) as u64, 16)
+            drvcat.field(d, 3, (&tier[0 as usize]) as u64, 12)
+            let w: u64 = state_word(true, (&name[0 as usize]) as u64, ulib.to_num((&ver[0 as usize]) as u64),
+                ulib.streq((&tier[0 as usize]) as u64, (&w_compat[0 as usize]) as u64))
+            if ulib.streq(w, (&S_AVAILABLE[0 as usize]) as u64) && cmd_install((&name[0 as usize]) as u64) != 0 {
+                bad = bad + 1
+            }
+        }
+        at = drvdevs.next(at)
+    }
+    return bad
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 120] = "usage: drvfeed refresh | list | install <pkg> | install-file <file.drv> | auto | mode [ask|auto]\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var w_refresh: [u8; 8] = "refresh\0"
+    var w_list: [u8; 5] = "list\0"
+    var w_install: [u8; 8] = "install\0"
+    var w_file: [u8; 13] = "install-file\0"
+    var w_auto: [u8; 5] = "auto\0"
+    var w_mode: [u8; 5] = "mode\0"
+    let argc: u64 = ulib.arg_count(args)
+    if argc >= 2 {
+        let cmd: u64 = ulib.arg_at(args, 1)
+        if ulib.streq(cmd, (&w_refresh[0 as usize]) as u64) {
+            return cmd_refresh()
+        }
+        if ulib.streq(cmd, (&w_list[0 as usize]) as u64) {
+            return cmd_list()
+        }
+        if ulib.streq(cmd, (&w_install[0 as usize]) as u64) && argc >= 3 {
+            return cmd_install(ulib.arg_at(args, 2))
+        }
+        if ulib.streq(cmd, (&w_file[0 as usize]) as u64) && argc >= 3 {
+            return cmd_install_file(ulib.arg_at(args, 2))
+        }
+        if ulib.streq(cmd, (&w_auto[0 as usize]) as u64) {
+            return cmd_auto()
+        }
+        if ulib.streq(cmd, (&w_mode[0 as usize]) as u64) {
+            var v: u64 = 0
+            if argc >= 3 {
+                v = ulib.arg_at(args, 2)
+            }
+            return cmd_mode(v)
+        }
+    }
+    ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+    return EXIT_USAGE
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}

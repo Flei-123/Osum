@@ -105,3 +105,14 @@ USB/ACPI auto-bind (only PCI binds; USB/ACPI are listed), hot-plug rescan, right
 ## 12. Tier key (05.11.2026, gate `tools/tiers/run.sh`)
 
 - Manifest key `tier=native|compat` (optional, default native). Policy `/etc/drvstore.conf` line `tiers=native+compat` allows compat packages; otherwise code 26 at scan, `drvctl install` refuses. `drvctl list` shows the tier, `drvctl tiers` the policy. See `DRIVER-TIERS.md`.
+
+## 13. Driver feed and client (24.11.2026, gate `tools/drvfeed/run.sh` 51/0)
+
+- Feed layout (flat, `ota fetch` takes no slashes): `drivers.tsv` + `drivers.tsv.sig` (Ed25519 by the catalog key, the one that signs `apps.tsv`, pinned in `storeapps`, override `/etc/store.catalog.pub`), `drv-<name>-<version>.drv` per package, `fw-<firmware name>` per firmware blob.
+- Catalog `drivers.tsv`, header `OSUM-DRIVERS 1`, tab separated: `D name version tier size sha256 file title`, `M name <match line as in driver.inf>`, `W name fwname size sha256 file`. The catalog pins the SHA-256 of every bundle and firmware file, so one signature covers all parts.
+- Bundle `.drv` (`tools/drvfeed/bundle.py`): `OSDRV1\n`, then entries `<name> <size>\n<bytes>`; names are package files (`driver.inf`, `driver.inf.sig`, `*.omod`) or `fw/<name>`. The bundle itself is unsigned: the manifest signature, the module signature and the manifest `fw=` hash carry the trust.
+- Publisher: `tools/drvfeed/mkfeed.py <outdir> --seed <32 raw bytes> --pkg <dir>... --fw NAME=PATH` (refuses a firmware file whose hash differs from the manifest). First real entry: `compat/linuxkpi/iwlfeed.sh` (lkpi-iwlwifi, tier=compat, firmware 8265); not run yet.
+- Client `/bin/drvfeed` (`kernel/user/drvfeed.fi`, parts in `kernel/user/drvfeed/`): `refresh` (fetch + verify + store `/var/store/drivers.tsv`), `list` (devices of `/proc/drivers` with `drv=none` or a store package: `state=missing|available|blocked|pending|installed|update`), `install <pkg>`, `install-file <file.drv>`, `auto`, `mode [ask|auto]` (`/etc/drvfeed.conf`, default ask: `auto` only lists proposals).
+- Install order: bundle hash against the signed catalog, unpack to `/tmp/drvfeed/stage`, firmware hash against the catalog, manifest signature (`drvpkg.verify_dir`), manifest `fw=` hash against the staged firmware, `drvctl install`, firmware copied to `/lib/firmware`, `drvctl load`. Any failed check stops before anything is installed. Exit codes: 2 catalog, 3 unknown, 4 compat policy, 5 bundle hash, 7 firmware hash, 8 drvctl, 9 signature.
+- Kernel: `load <name>` on `/dev/drvctl` rescans `/lib/drivers` for packages that were not in the boot index (`drvstore.scan_new`), so a freshly installed package binds without reboot. A package name that was rejected at boot and reinstalled still needs a reboot.
+- Open: Store window tab, `store.drivers*` actions in `stored`, double click on `.drv`, USB/ACPI auto-bind, live feed publication (see roadmap r45).

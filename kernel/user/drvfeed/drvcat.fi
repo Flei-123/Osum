@@ -1,0 +1,236 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.io
+import libc.octets
+import storeapps
+
+export {
+    install_verified, load, count, first_line, next_line, kind_at, field, line_is,
+    find_package, find_part, match_package, ci_equal,
+    C_OK, C_UNREADABLE, C_BAD_SIGNATURE, C_MALFORMED, C_TOO_BIG, NONE,
+}
+
+const C_OK: u64 = 0
+const C_UNREADABLE: u64 = 1
+const C_BAD_SIGNATURE: u64 = 2
+const C_MALFORMED: u64 = 3
+const C_TOO_BIG: u64 = 4
+const CAT_CAP: u64 = 32768
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const TAB: u64 = 9
+const NL: u64 = 10
+
+static mut CAT: [u8; 32768] = [0 as u8; 32768]
+static mut SIG: [u8; 64] = [0 as u8; 64]
+static mut CAT_LEN: u64 = 0
+static mut HEADER: [u8; 16] = "OSUM-DRIVERS 1\n\0"
+static mut P_CAT: [u8; 23] = "/var/store/drivers.tsv\0"
+static mut P_SIG: [u8; 27] = "/var/store/drivers.tsv.sig\0"
+static mut P_DIR: [u8; 11] = "/var/store\0"
+
+fn file_into(path: u64, buf: u64, cap: u64) -> u64 {
+    let fd: u64 = io.open(path, 0)
+    if ulib.bad(fd) {
+        return NONE
+    }
+    let n: u64 = io.read_full(fd, buf, cap)
+    io.close(fd)
+    if ulib.bad(n) {
+        return NONE
+    }
+    return n
+}
+
+fn store_file(path: u64, buf: u64, n: u64) -> bool {
+    let fd: u64 = io.create(path)
+    if ulib.bad(fd) {
+        return false
+    }
+    let w: u64 = io.write_all(fd, buf, n)
+    io.close(fd)
+    return !ulib.bad(w) && w == n
+}
+
+fn has_header() -> bool {
+    var i: u64 = 0
+    while octets.ld8((&HEADER[0 as usize]) as u64, i) != 0 {
+        if octets.ld8((&CAT[0 as usize]) as u64, i) != octets.ld8((&HEADER[0 as usize]) as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn read_verified(tsv: u64, sig: u64) -> u64 {
+    let n: u64 = file_into(tsv, (&CAT[0 as usize]) as u64, CAT_CAP)
+    if n == NONE || n == 0 {
+        return C_UNREADABLE
+    }
+    if n >= CAT_CAP {
+        return C_TOO_BIG
+    }
+    octets.st8((&CAT[0 as usize]) as u64, n, 0)
+    if file_into(sig, (&SIG[0 as usize]) as u64, 64) != 64 {
+        return C_UNREADABLE
+    }
+    if !storeapps.verify_signed((&CAT[0 as usize]) as u64, n, (&SIG[0 as usize]) as u64) {
+        return C_BAD_SIGNATURE
+    }
+    if !has_header() {
+        return C_MALFORMED
+    }
+    CAT_LEN = n
+    return C_OK
+}
+
+fn install_verified(tsv: u64, sig: u64) -> u64 {
+    let code: u64 = read_verified(tsv, sig)
+    if code != C_OK {
+        return code
+    }
+    ulib.sys(ulib.SYS_MKDIR, (&P_DIR[0 as usize]) as u64, 0, 0)
+    if !store_file((&P_CAT[0 as usize]) as u64, (&CAT[0 as usize]) as u64, CAT_LEN)
+        || !store_file((&P_SIG[0 as usize]) as u64, (&SIG[0 as usize]) as u64, 64) {
+        return C_UNREADABLE
+    }
+    return C_OK
+}
+
+fn load() -> u64 {
+    return read_verified((&P_CAT[0 as usize]) as u64, (&P_SIG[0 as usize]) as u64)
+}
+
+fn first_line() -> u64 {
+    return next_line(0)
+}
+
+fn next_line(at: u64) -> u64 {
+    var i: u64 = at
+    if at == 0 {
+        i = 0
+        while i < CAT_LEN && octets.ld8((&CAT[0 as usize]) as u64, i) != NL {
+            i = i + 1
+        }
+        i = i + 1
+        if i >= CAT_LEN {
+            return NONE
+        }
+        return i
+    }
+    while i < CAT_LEN && octets.ld8((&CAT[0 as usize]) as u64, i) != NL {
+        i = i + 1
+    }
+    i = i + 1
+    if i >= CAT_LEN {
+        return NONE
+    }
+    return i
+}
+
+fn kind_at(at: u64) -> u64 {
+    return octets.ld8((&CAT[0 as usize]) as u64, at)
+}
+
+fn line_is(at: u64, kind: u64) -> bool {
+    return kind_at(at) == kind
+}
+
+fn field(at: u64, index: u64, out: u64, cap: u64) -> bool {
+    var i: u64 = at
+    var f: u64 = 0
+    while f < index {
+        while i < CAT_LEN && octets.ld8((&CAT[0 as usize]) as u64, i) != TAB && octets.ld8((&CAT[0 as usize]) as u64, i) != NL {
+            i = i + 1
+        }
+        if i >= CAT_LEN || octets.ld8((&CAT[0 as usize]) as u64, i) == NL {
+            return false
+        }
+        i = i + 1
+        f = f + 1
+    }
+    var n: u64 = 0
+    while i < CAT_LEN && n + 1 < cap {
+        let c: u64 = octets.ld8((&CAT[0 as usize]) as u64, i)
+        if c == TAB || c == NL {
+            octets.st8(out, n, 0)
+            return true
+        }
+        octets.st8(out, n, c)
+        n = n + 1
+        i = i + 1
+    }
+    octets.st8(out, n, 0)
+    return true
+}
+
+fn count() -> u64 {
+    var n: u64 = 0
+    var at: u64 = first_line()
+    while at != NONE {
+        if line_is(at, 68) {
+            n = n + 1
+        }
+        at = next_line(at)
+    }
+    return n
+}
+
+fn lower(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+fn ci_equal(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while lower(octets.ld8(a, i)) == lower(octets.ld8(b, i)) {
+        if octets.ld8(a, i) == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn find_package(name: u64) -> u64 {
+    var have: [u8; 40] = [0 as u8; 40]
+    var at: u64 = first_line()
+    while at != NONE {
+        if line_is(at, 68) && field(at, 1, (&have[0 as usize]) as u64, 40)
+            && ulib.streq((&have[0 as usize]) as u64, name) {
+            return at
+        }
+        at = next_line(at)
+    }
+    return NONE
+}
+
+fn find_part(kind: u64, name: u64) -> u64 {
+    var have: [u8; 40] = [0 as u8; 40]
+    var at: u64 = first_line()
+    while at != NONE {
+        if line_is(at, kind) && field(at, 1, (&have[0 as usize]) as u64, 40)
+            && ulib.streq((&have[0 as usize]) as u64, name) {
+            return at
+        }
+        at = next_line(at)
+    }
+    return NONE
+}
+
+fn match_package(candidate: u64, out_name: u64, cap: u64) -> bool {
+    var have: [u8; 48] = [0 as u8; 48]
+    var at: u64 = first_line()
+    while at != NONE {
+        if line_is(at, 77) && field(at, 2, (&have[0 as usize]) as u64, 48)
+            && ci_equal((&have[0 as usize]) as u64, candidate) {
+            return field(at, 1, out_name, cap)
+        }
+        at = next_line(at)
+    }
+    return false
+}

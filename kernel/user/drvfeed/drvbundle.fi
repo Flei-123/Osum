@@ -1,0 +1,198 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.io
+import crypto.sha256
+import drvpkg
+
+export {
+    unpack, file_sha256, digest_hex,
+    B_OK, B_UNREADABLE, B_MAGIC, B_NAME, B_WRITE, B_TRUNCATED, B_TOO_BIG,
+}
+
+const B_OK: u64 = 0
+const B_UNREADABLE: u64 = 1
+const B_MAGIC: u64 = 2
+const B_NAME: u64 = 3
+const B_WRITE: u64 = 4
+const B_TRUNCATED: u64 = 5
+const B_TOO_BIG: u64 = 6
+const NONE: u64 = 0xFFFFFFFFFFFFFFFF
+const LINE_CAP: u64 = 80
+const ENTRY_CAP: u64 = 8388608
+const CHUNK: u64 = 4096
+const FW_PREFIX_LEN: u64 = 3
+
+static mut CHUNK_BUF: [u8; 4096] = [0 as u8; 4096]
+static mut LINE: [u8; 80] = [0 as u8; 80]
+static mut ENTRY_PATH: [u8; 160] = [0 as u8; 160]
+static mut FW_DIR: [u8; 160] = [0 as u8; 160]
+static mut HEX: [u8; 17] = "0123456789abcdef\0"
+
+fn read_line(fd: u64) -> u64 {
+    var n: u64 = 0
+    var one: [u8; 1] = [0 as u8; 1]
+    while n + 1 < LINE_CAP {
+        let r: u64 = io.read(fd, (&one[0 as usize]) as u64, 1)
+        if ulib.bad(r) || r == 0 {
+            return NONE
+        }
+        if one[0 as usize] == 10 as u8 {
+            LINE[n as usize] = 0 as u8
+            return n
+        }
+        LINE[n as usize] = one[0 as usize]
+        n = n + 1
+    }
+    return NONE
+}
+
+fn last_space(len: u64) -> u64 {
+    var i: u64 = len
+    while i > 0 {
+        i = i - 1
+        if LINE[i as usize] == 32 as u8 {
+            return i
+        }
+    }
+    return NONE
+}
+
+fn is_fw_entry() -> bool {
+    return LINE[0 as usize] == 102 as u8 && LINE[1 as usize] == 119 as u8 && LINE[2 as usize] == 47 as u8
+}
+
+fn entry_name_ok(name: u64, is_fw: bool) -> bool {
+    var at: u64 = name
+    if is_fw {
+        at = name + FW_PREFIX_LEN
+    }
+    return drvpkg.valid_file(at)
+}
+
+fn copy_body(fd: u64, dst: u64, size: u64) -> u64 {
+    let out: u64 = io.create(dst)
+    if ulib.bad(out) {
+        return B_WRITE
+    }
+    var left: u64 = size
+    while left > 0 {
+        var want: u64 = CHUNK
+        if left < want {
+            want = left
+        }
+        let got: u64 = io.read_full(fd, (&CHUNK_BUF[0 as usize]) as u64, want)
+        if ulib.bad(got) || got != want {
+            io.close(out)
+            return B_TRUNCATED
+        }
+        let put: u64 = io.write_all(out, (&CHUNK_BUF[0 as usize]) as u64, want)
+        if ulib.bad(put) || put != want {
+            io.close(out)
+            return B_WRITE
+        }
+        left = left - want
+    }
+    io.close(out)
+    return B_OK
+}
+
+fn read_one(fd: u64, dst_dir: u64) -> u64 {
+    let len: u64 = read_line(fd)
+    if len == NONE {
+        return NONE
+    }
+    let sp: u64 = last_space(len)
+    if sp == NONE {
+        return B_NAME
+    }
+    LINE[sp as usize] = 0 as u8
+    let size: u64 = ulib.to_num((&LINE[0 as usize]) as u64 + sp + 1)
+    let is_fw: bool = is_fw_entry()
+    if !entry_name_ok((&LINE[0 as usize]) as u64, is_fw) {
+        return B_NAME
+    }
+    if size > ENTRY_CAP {
+        return B_TOO_BIG
+    }
+    drvpkg.join((&ENTRY_PATH[0 as usize]) as u64, dst_dir, (&LINE[0 as usize]) as u64)
+    return copy_body(fd, (&ENTRY_PATH[0 as usize]) as u64, size)
+}
+
+fn check_magic(fd: u64) -> bool {
+    var magic: [u8; 7] = "OSDRV1\0"
+    let len: u64 = read_line(fd)
+    return len != NONE && ulib.streq((&LINE[0 as usize]) as u64, (&magic[0 as usize]) as u64)
+}
+
+fn prepare_dir(dst_dir: u64) {
+    var fw: [u8; 3] = "fw\0"
+    var inf: [u8; 11] = "driver.inf\0"
+    var sig: [u8; 15] = "driver.inf.sig\0"
+    ulib.sys(ulib.SYS_MKDIR, dst_dir, 0, 0)
+    drvpkg.join((&FW_DIR[0 as usize]) as u64, dst_dir, (&fw[0 as usize]) as u64)
+    ulib.sys(ulib.SYS_MKDIR, (&FW_DIR[0 as usize]) as u64, 0, 0)
+    drvpkg.join((&ENTRY_PATH[0 as usize]) as u64, dst_dir, (&inf[0 as usize]) as u64)
+    io.unlink((&ENTRY_PATH[0 as usize]) as u64)
+    drvpkg.join((&ENTRY_PATH[0 as usize]) as u64, dst_dir, (&sig[0 as usize]) as u64)
+    io.unlink((&ENTRY_PATH[0 as usize]) as u64)
+}
+
+fn unpack(path: u64, dst_dir: u64) -> u64 {
+    let fd: u64 = io.open(path, 0)
+    if ulib.bad(fd) {
+        return B_UNREADABLE
+    }
+    if !check_magic(fd) {
+        io.close(fd)
+        return B_MAGIC
+    }
+    prepare_dir(dst_dir)
+    var code: u64 = B_OK
+    while code == B_OK {
+        code = read_one(fd, dst_dir)
+        if code == NONE {
+            io.close(fd)
+            return B_OK
+        }
+    }
+    io.close(fd)
+    return code
+}
+
+fn file_sha256(path: u64, out: u64) -> bool {
+    let fd: u64 = io.open(path, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    var h: sha256.Sha256 = sha256.sha256_new()
+    sha256.begin(&h)
+    var going: bool = true
+    while going {
+        let got: u64 = io.read_full(fd, (&CHUNK_BUF[0 as usize]) as u64, CHUNK)
+        if ulib.bad(got) {
+            io.close(fd)
+            return false
+        }
+        if got == 0 {
+            going = false
+        } else {
+            sha256.update(&h, (&CHUNK_BUF[0 as usize]) as u64, got as usize)
+        }
+    }
+    io.close(fd)
+    sha256.finish(&h, out)
+    return true
+}
+
+fn digest_hex(digest: u64, out: u64) {
+    var i: u64 = 0
+    while i < 32 {
+        let b: u64 = (*((digest + i) as *mut u8)) as u64
+        *((out + i * 2) as *mut u8) = HEX[(b >> 4) as usize]
+        *((out + i * 2 + 1) as *mut u8) = HEX[(b & 15) as usize]
+        i = i + 1
+    }
+    *((out + 64) as *mut u8) = 0 as u8
+}
