@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 LKPI_SHIM_SOURCES="heap string printk resource pci drm_core drm_kms drm_vram drm_fbdev drm_backend shim_main"
-LKPI_WIFI_SOURCES="wifi_skb wifi_mem wifi_hw wifi_dispatch wifi_upcall"
-LKPI_WIFI_MODULE_SOURCES="heap string printk bitops pci wifi_skb wifi_mem wifi_slab wifi_time wifi_rand wifi_sg wifi_dev wifi_cfg wifi_mac wifi_lib wifi_pci wifi_irq wifi_sched wifi_net wifi_hw wifi_dispatch wifi_upcall wifi_glue shim_main"
+LKPI_WIFI_SOURCES="wifi_skb wifi_mem wifi_txq wifi_hw wifi_dispatch wifi_upcall"
+LKPI_WIFI_MODULE_SOURCES="heap string printk bitops pci wifi_skb wifi_mem wifi_slab wifi_time wifi_rand wifi_sg wifi_dev wifi_cfg wifi_mac wifi_lib wifi_pci wifi_irq wifi_sched wifi_net wifi_txq wifi_hw wifi_dispatch wifi_upcall wifi_glue shim_main"
 LKPI_WIFI_RT_SOURCES="bitops wifi_skb wifi_mem wifi_slab wifi_time wifi_rand wifi_sched wifi_net wifi_sg wifi_dev wifi_irq"
 LKPI_WIFI_DRIVER_SOURCES="wifi_fake wifi_drvmain"
 LKPI_CC="${CC:-gcc-12}"

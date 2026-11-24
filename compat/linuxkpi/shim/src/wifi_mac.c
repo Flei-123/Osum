@@ -181,13 +181,6 @@ void ieee80211_tx_status_ext(struct ieee80211_hw *hw, struct ieee80211_tx_status
 		ieee80211_tx_status_skb(hw, status->skb);
 }
 
-struct sk_buff *ieee80211_tx_dequeue(struct ieee80211_hw *hw, struct ieee80211_txq *txq)
-{
-	(void)hw;
-	(void)txq;
-	return NULL;
-}
-
 struct sk_buff *ieee80211_beacon_get_template(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 					      struct ieee80211_mutable_offsets *offs, unsigned int link_id)
 {

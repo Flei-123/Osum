@@ -24,6 +24,8 @@ struct lkpi_wifi_hw {
 	struct wiphy *wiphy;
 	struct wireless_dev wdev;
 	u8 hw_blocked;
+	u8 join_channel;
+	u8 join_band;
 	struct lkpi80211_state state;
 	struct lkpi80211_upcalls upcalls;
 	void *upcall_ctx;
@@ -45,6 +47,7 @@ struct lkpi_wifi_hw {
 		struct ieee80211_scan_request request;
 		struct ieee80211_channel *channels[LKPI_SCAN_CHANNELS];
 	} scan;
+	struct sk_buff_head txq_queue[IEEE80211_NUM_TIDS + 1];
 	struct ieee80211_key_conf pairwise;
 	struct ieee80211_key_conf group;
 };
@@ -53,6 +56,9 @@ struct lkpi_wifi_hw *lkpi_wifi_of(const struct ieee80211_hw *hw);
 struct lkpi_wifi_hw *lkpi_wifi_of_vif(const struct ieee80211_vif *vif);
 struct lkpi_wifi_hw *lkpi_wifi_of_sta(const struct ieee80211_sta *sta);
 int lkpi_wifi_op(struct lkpi_wifi_hw *w, u32 op, u64 arg);
+int lkpi_txq_attach(struct lkpi_wifi_hw *w);
+void lkpi_txq_release(struct lkpi_wifi_hw *w);
+bool lkpi_txq_enqueue(struct lkpi_wifi_hw *w, struct sk_buff *skb);
 void lkpi_timers_run(unsigned long now);
 void lkpi_work_run(void);
 #define LKPI_NS_PER_JIFFY (NSEC_PER_SEC / HZ)

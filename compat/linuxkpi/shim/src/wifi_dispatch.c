@@ -6,6 +6,8 @@
 #define EDCA_CW_MAX 1023
 #define EDCA_AIFS 2
 #define FLUSH_ALL_QUEUES 0xFFFFFFFFu
+#define DEFAULT_BEACON_INT 100
+#define DEFAULT_DTIM_PERIOD 1
 
 static int op_start(struct lkpi_wifi_hw *w)
 {
@@ -93,12 +95,51 @@ static int op_cancel_hw_scan(struct lkpi_wifi_hw *w)
 	return 0;
 }
 
+static struct ieee80211_channel *find_join_channel(struct lkpi_wifi_hw *w)
+{
+	struct ieee80211_channel *first = NULL;
+	int b, i;
+
+	for (b = 0; b < NUM_NL80211_BANDS; b++) {
+		struct ieee80211_supported_band *band = w->wiphy->bands[b];
+
+		for (i = 0; band && i < band->n_channels; i++) {
+			if (band->channels[i].flags & IEEE80211_CHAN_DISABLED)
+				continue;
+			if (band->channels[i].hw_value == w->join_channel)
+				return &band->channels[i];
+			if (!first)
+				first = &band->channels[i];
+		}
+	}
+	return first;
+}
+
+static int fill_chanctx(struct lkpi_wifi_hw *w)
+{
+	struct ieee80211_chanctx_conf *ctx = &w->chanctx.ctx;
+	struct ieee80211_channel *chan = find_join_channel(w);
+
+	if (!chan)
+		return LKPI80211_EINVAL;
+	cfg80211_chandef_create(&ctx->def, chan, NL80211_CHAN_NO_HT);
+	ctx->min_def = ctx->def;
+	ctx->rx_chains_static = 1;
+	ctx->rx_chains_dynamic = 1;
+	w->join_band = chan->band;
+	w->vif.vif.bss_conf.chanreq.oper = ctx->def;
+	return 0;
+}
+
 static int op_add_chanctx(struct lkpi_wifi_hw *w)
 {
 	int rc = 0;
 
 	if (!w->state.iface || w->state.chanctx)
 		return LKPI80211_EPROTO;
+	rc = fill_chanctx(w);
+	if (rc)
+		return rc;
 	if (w->ops->add_chanctx)
 		rc = w->ops->add_chanctx(&w->hw, &w->chanctx.ctx);
 	if (!rc)
@@ -122,6 +163,7 @@ static int op_assign(struct lkpi_wifi_hw *w)
 
 	if (!w->state.chanctx || w->state.assigned)
 		return LKPI80211_EPROTO;
+	w->vif.vif.bss_conf.chanctx_conf = &w->chanctx.ctx;
 	if (w->ops->assign_vif_chanctx)
 		rc = w->ops->assign_vif_chanctx(&w->hw, &w->vif.vif, &w->vif.vif.bss_conf, &w->chanctx.ctx);
 	if (!rc)
@@ -135,6 +177,7 @@ static int op_unassign(struct lkpi_wifi_hw *w)
 		return LKPI80211_EPROTO;
 	if (w->ops->unassign_vif_chanctx)
 		w->ops->unassign_vif_chanctx(&w->hw, &w->vif.vif, &w->vif.vif.bss_conf, &w->chanctx.ctx);
+	w->vif.vif.bss_conf.chanctx_conf = NULL;
 	w->state.assigned = 0;
 	return 0;
 }
@@ -148,6 +191,8 @@ static int op_sta_state(struct lkpi_wifi_hw *w, u64 arg)
 		return LKPI80211_EPROTO;
 	if (arg != old + 1 && arg + 1 != old)
 		return LKPI80211_EPROTO;
+	if (old == IEEE80211_STA_NOTEXIST)
+		w->sta.sta.deflink.smps_mode = IEEE80211_SMPS_OFF;
 	rc = w->ops->sta_state(&w->hw, &w->vif.vif, &w->sta.sta, old, arg);
 	if (!rc)
 		w->state.sta_state = arg;
@@ -173,9 +218,11 @@ static int op_bss_info(struct lkpi_wifi_hw *w, u64 arg)
 
 	if (!w->state.assigned)
 		return LKPI80211_EPROTO;
-	if (arg == MACPLAN_BSS_BSSID)
+	if (arg == MACPLAN_BSS_BSSID) {
 		changed = BSS_CHANGED_BSSID;
-	else if (arg == MACPLAN_BSS_QOS) {
+		w->vif.vif.bss_conf.beacon_int = DEFAULT_BEACON_INT;
+		w->vif.vif.bss_conf.dtim_period = DEFAULT_DTIM_PERIOD;
+	} else if (arg == MACPLAN_BSS_QOS) {
 		changed = BSS_CHANGED_QOS;
 		w->vif.vif.bss_conf.qos = true;
 	} else

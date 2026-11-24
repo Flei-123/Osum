@@ -116,9 +116,11 @@ static long long glue_rx_take(u64 dst, u64 room)
 
 static long long glue_set_channel(u64 channel, u64 band)
 {
-	(void)channel;
 	(void)band;
-	return glue ? 0 : -1;
+	if (!glue)
+		return -1;
+	lkpi_wifi_of(glue->hw)->join_channel = channel;
+	return 0;
 }
 
 static long long glue_op(u64 op, u64 arg)
@@ -151,6 +153,7 @@ static long long glue_bssid_set(u64 addr)
 	memcpy(w->bssid, (const void *)addr, ETH_ALEN);
 	w->vif.vif.bss_conf.bssid = w->bssid;
 	memcpy(w->sta.sta.addr, (const void *)addr, ETH_ALEN);
+	memcpy(w->sta.sta.deflink.addr, (const void *)addr, ETH_ALEN);
 	return 0;
 }
 
@@ -159,6 +162,7 @@ static long long glue_addr_set(u64 addr)
 	if (!glue)
 		return -1;
 	memcpy(lkpi_wifi_of(glue->hw)->vif.vif.addr, (const void *)addr, ETH_ALEN);
+	memcpy(lkpi_wifi_of(glue->hw)->vif.vif.bss_conf.addr, (const void *)addr, ETH_ALEN);
 	return 0;
 }
 
