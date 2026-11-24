@@ -1,0 +1,28 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+#ifndef LKPI_ASM_BYTEORDER_H
+#define LKPI_ASM_BYTEORDER_H
+#include <linux/types.h>
+#define cpu_to_le16(x) ((__force __le16)(u16)(x))
+#define cpu_to_le32(x) ((__force __le32)(u32)(x))
+#define cpu_to_le64(x) ((__force __le64)(u64)(x))
+#define le16_to_cpu(x) ((__force u16)(__le16)(x))
+#define le32_to_cpu(x) ((__force u32)(__le32)(x))
+#define le64_to_cpu(x) ((__force u64)(__le64)(x))
+#define cpu_to_be16(x) ((__force __be16)__builtin_bswap16(x))
+#define cpu_to_be32(x) ((__force __be32)__builtin_bswap32(x))
+#define cpu_to_be64(x) ((__force __be64)__builtin_bswap64(x))
+#define be16_to_cpu(x) __builtin_bswap16((__force u16)(__be16)(x))
+#define be32_to_cpu(x) __builtin_bswap32((__force u32)(__be32)(x))
+#define be64_to_cpu(x) __builtin_bswap64((__force u64)(__be64)(x))
+#define le16_to_cpup(p) le16_to_cpu(*(p))
+#define le32_to_cpup(p) le32_to_cpu(*(p))
+#define le64_to_cpup(p) le64_to_cpu(*(p))
+#define cpu_to_le16s(p) do { } while (0)
+#define cpu_to_le32s(p) do { } while (0)
+#define le16_add_cpu(p, v) (*(p) = cpu_to_le16(le16_to_cpu(*(p)) + (v)))
+#define le32_add_cpu(p, v) (*(p) = cpu_to_le32(le32_to_cpu(*(p)) + (v)))
+#define htons(x) cpu_to_be16(x)
+#define ntohs(x) be16_to_cpu(x)
+#define htonl(x) cpu_to_be32(x)
+#define ntohl(x) be32_to_cpu(x)
+#endif

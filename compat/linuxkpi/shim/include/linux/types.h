@@ -27,6 +27,44 @@ typedef __builtin_va_list va_list;
 #define va_copy(dst, src) __builtin_va_copy(dst, src)
 #define va_arg(ap, type) __builtin_va_arg(ap, type)
 
+typedef u8 __u8;
+typedef u16 __u16;
+typedef u32 __u32;
+typedef u64 __u64;
+typedef s8 __s8;
+typedef s16 __s16;
+typedef s32 __s32;
+typedef s64 __s64;
+typedef u16 __le16;
+typedef u32 __le32;
+typedef u64 __le64;
+typedef u16 __be16;
+typedef u32 __be32;
+typedef u64 __be64;
+typedef u16 __sum16;
+typedef u32 __wsum;
+typedef int pid_t;
+typedef long long loff_t;
+typedef s64 ktime_t;
+typedef struct { int counter; } atomic_t;
+typedef struct { s64 counter; } atomic64_t;
+#define __packed __attribute__((packed))
+#define __aligned(x) __attribute__((aligned(x)))
+#define __maybe_unused __attribute__((unused))
+#define __always_unused __attribute__((unused))
+#define __must_check __attribute__((warn_unused_result))
+#define __cold __attribute__((cold))
+#define __rcu
+#define __bitwise
+#define __acquires(x)
+#define __releases(x)
+#define __must_hold(x)
+#define fallthrough __attribute__((fallthrough))
+#define __counted_by(m)
+#define __nonstring
+#define __read_mostly
+#define __section(s) __attribute__((section(s)))
+#define noinline __attribute__((noinline))
 #define bool _Bool
 #define true 1
 #define false 0

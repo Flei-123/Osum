@@ -2,7 +2,12 @@
 
 Roadmap r3731. Sibling of `LINUXKPI-PLAN.md` (same rules: Linux sources only via `compat/linuxkpi/fetch.sh` at build time, never in the repo, never patched, shipped only as a signed driver-store package, nothing in the standard image). Model: FreeBSD LinuxKPI-802.11 on net80211. **Linux mac80211/cfg80211 are not ported**; the shim implements the mac80211 *driver API* (`struct ieee80211_hw`, `ieee80211_ops`, rx/tx-status, scan, sta, keys) on top of `lib/wlan/*` + `kernel/net/wlan_*.fi`.
 
-Status: plan + measurement + stage 1 (state planner `lib/wlan/macplan.fi`, gate `tools/lkpi80211/run.sh` 6/0). No C shim for 802.11 yet.
+Status (24.11.2026, roadmap r91): W1-W3 green, W4 in progress (build probe + ratchet), W5 prepared, not run.
+- W1 planner: `tools/lkpi80211/run.sh` 19/0 (also covers W2).
+- W2 shim (hw/vif/sta/key objects, op dispatch from macplan, upcalls, skb pool) + host fake driver: same gate, 9 shim mutants red.
+- W3 QEMU: `tools/lkpi80211/qemu.sh` 45/0 on main c7befade6 (fake radio module through the shim over `iwl_fakeap`: scan, auth, assoc, WPA2 M2/M4, DHCP, ICMP; counter-proofs wrong PSK, no-BSSID/no-STA mutants, tier=native, no package).
+- W4: `tools/lkpi80211/w4.sh` (fetch iwlwifi tree + 3 Linux protocol headers by hash, wrong tree hash rejected, `compat/linuxkpi/treeprobe.sh` compiles the 67 Kbuild units of iwlwifi+iwlmvm against the shim, ratchet `compat/linuxkpi/units/iwlwifi.ratchet`, counter-proof: removing one shim header trips it). Baseline 24.11.: units 0/67, missing headers 65 -> 45 after the first base header batch.
+- W5: `tools/lkpi80211/hpab/` (A/B script + switch table); switch = boot word `noiwl` + `tiers=native+compat` + installed `lkpi-iwlwifi`.
 
 ## 1. Measured surface (Linux 6.12.101, Debian `6.12.101+deb12-rt` .ko, tool `compat/linuxkpi/measure80211.py`)
 Method: `nm -u` over all modules of one driver stack minus what the stack defines; split by provider: defined in `mac80211.ko`, defined in `cfg80211.ko`, rest = kernel base (grouped by the `EXPORT_SYMBOL` file in the pinned tarball). Compiler artifacts removed. Sources: `#include <...>` and `struct ieee80211_ops` initializers in the driver tree.
@@ -63,12 +68,20 @@ FreeBSD reference (freebsd-src main, read only): `linux_80211.c` 10309 lines (32
 | stage | content | gate |
 |---|---|---|
 | W1 (done) | op ordering as Firn state planner `lib/wlan/macplan.fi` (events from own stack -> ordered `ieee80211_ops` calls, sta single steps, chanctx, keys, leave/down from every phase); measurement tool | `tools/lkpi80211/run.sh` 6/0 (kernel-profile compile, 23 host checks incl. 200000-event fuzz, 4 mutants red) |
-| W2 | C glue + Firn objects: `ieee80211_hw/vif/sta`, op dispatch from macplan, upcall table, skb pool, cfg80211 helpers; Board lifecycle hook | host harness like DRM `hostbuild.sh` with a fake mac80211 driver (hwsim-like, C, own) logging op order = macplan |
-| W3 | QEMU: own `mac80211_hwsim`-like fake driver module (C, not Linux code) over the existing `iwl_fake*` AP (`kernel/drv/net/iwl_fakeap*.fi`) -> scan, WPA2 connect, ping | QEMU gate: connect + ping + counter-proof wrong PSK |
-| W4 | iwlwifi (iwlmvm + pcie) fetched 6.12.101, unmodified, built over shim, store package `lkpi-iwlwifi`; firmware via fw.request | build + closure 0 undefined; QEMU probe on fake CSR (`tools/iwlfh`) |
+| W2 (done) | C glue + objects: `ieee80211_hw/vif/sta`, op dispatch from macplan, upcall table, skb pool; Board lifecycle hook | `tools/lkpi80211/run.sh` 19/0 (host fake driver, 9 shim mutants) |
+| W3 (done) | QEMU: own fake radio module (C, not Linux code) over `iwl_fakeap` -> scan, WPA2 connect, ping | `tools/lkpi80211/qemu.sh` 45/0 |
+| W4 (in progress) | iwlwifi (iwlmvm + pcie) fetched 6.12.101 as a hashed tree, unmodified, built over shim, store package `lkpi-iwlwifi`; firmware via fw.request | `tools/lkpi80211/w4.sh` ratchet (units compiling, missing headers), then closure 0 undefined; QEMU probe on fake CSR (`tools/iwlfh`) |
 | W5 | HP 8265: A/B own driver vs lkpi-iwlwifi (scan count, connect time, ping, throughput) | Boss hardware (needs) |
 | W6 | rtw88, mt76 (mt7921e), then rtw89, ath10k/11k (ath11k needs MHI + QMI: extra base) | per driver |
 
 ## 6. Rules
 - Same as `LINUXKPI-PLAN.md` sections 0 and 2; Wi-Fi rows go to `compat/linuxkpi/sources.tsv` only in W4.
 - Licenses (main file SPDX): iwlwifi `GPL-2.0 OR BSD-3-Clause` (dual), mt76 ISC, rtw88/rtw89 `GPL-2.0 OR BSD-3-Clause`, ath10k ISC, ath11k BSD-3-Clause-Clear (SPDX of the main file each, checked 6.12.101): all usable without GPL. Not yet scanned per file. Firmware blobs: linux-firmware redistributable, data only.
+
+## 7. W4 build path (24.11.2026)
+- Sources: `sources.tsv` row `iwlwifi` pins the whole directory `drivers/net/wireless/intel/iwlwifi/` (204 files) by a tree hash (`find | sort | sha256sum` of every file, then sha256 of that list); `fetch.sh` handles rows ending in `/`. Units = `compat/linuxkpi/units/iwlwifi.txt` (Kbuild for IWLWIFI+IWLMVM without DVM, debugfs, LEDs, PM_SLEEP, MEI, EFI, ACPI, tracing): 34 iwlwifi + 33 iwlmvm.
+- Cut for headers: wire protocol definitions come from Linux unchanged (`hdr-ieee80211` = include/linux/ieee80211.h, `hdr-nl80211` = uapi nl80211.h, `hdr-radiotap`; fetched by hash, `lkpi_driver_headers`); the driver API (`net/mac80211.h`, `net/cfg80211.h`) and all base headers are own shim headers (FreeBSD way), because the shim implements them and owns the struct layout. Kconfig: `shim/include/osum/kconfig_iwlwifi.h` via `lkpi_driver_flags iwlwifi`.
+- `treeprobe.py`: per unit ok / first missing header / error count; full missing-header set by stub discovery (empty stubs until no new name); closure (nm -u of compiled units minus defined minus shim objects) once units compile.
+- Open, in order: (1) remaining 45 base headers (netdevice/skb+NAPI, spinlock/mutex/wait/completion, workqueue/timer/jiffies/ktime, device/dma-mapping/dmapool/interrupt/firmware, mm/vmalloc, sched, seq_file/debugfs stubs, tracepoint stubs, ipv6/tcp/tso for TSO offload); (2) own `net/mac80211.h` + `net/cfg80211.h` grown to iwlmvm usage (FreeBSD: 2684 + 2384 lines) and the W2 shim C moved onto that layout; (3) closure to 0: ~258 base symbols + 78 mac80211 + 27 cfg80211 upcalls; (4) loader limit `closure.py MAX_IMAGE` 512 KiB vs ~2.8 MB driver; (5) `pack.sh` for `lkpi-iwlwifi` with iwlwifi-8265 firmware via fw.request; (6) QEMU probe on fake CSR.
+- Guard needed before W5: native iwl must claim the PCI function in `drvreg` when it boots, so a compat package can never bind the same 8265 (today only `noiwl` separates them).
+- Estimate to W5 on the HP: ~15-20 worker sessions of 60 min (headers 2-3, mac80211/cfg80211 API 4-6, closure + loader 4-6, package + QEMU probe 3-4, HP A/B 1-2).

@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 DRIVER="${1:?usage: fetch.sh <driver> <empty-output-dir>}"
 OUT="${2:?usage: fetch.sh <driver> <empty-output-dir>}"
-TSV=compat/linuxkpi/sources.tsv
+TSV="${LKPI_SOURCES:-compat/linuxkpi/sources.tsv}"
 row=$(awk -F'\t' -v d="$DRIVER" 'NR>1 && $1==d' "$TSV")
 [ -n "$row" ] || { echo "fetch: unknown driver $DRIVER" >&2; exit 2; }
 IFS=$'\t' read -r _ version url tsha file fsha spdx _ _ <<<"$row"
@@ -15,6 +15,10 @@ TARBALL="$OUT/linux-$version.tar.xz"
 if [ -n "${LINUXKPI_TARBALL:-}" ]; then cp "$LINUXKPI_TARBALL" "$TARBALL"; else curl -fsSL -o "$TARBALL" "$url"; fi
 echo "$tsha  $TARBALL" | sha256sum -c --quiet - || { rm -f "$TARBALL"; echo "fetch: tarball sha256 mismatch" >&2; exit 3; }
 mkdir -p "$OUT/src"
-tar -xJf "$TARBALL" -C "$OUT/src" --strip-components=1 "linux-$version/$file" "linux-$version/LICENSES/preferred/GPL-2.0"
-echo "$fsha  $OUT/src/$file" | sha256sum -c --quiet - || { echo "fetch: file sha256 mismatch" >&2; exit 3; }
-echo "$OUT/src/$file"
+tar -xJf "$TARBALL" -C "$OUT/src" --strip-components=1 "linux-$version/${file%/}" "linux-$version/LICENSES/preferred/GPL-2.0"
+case "$file" in
+	*/) got=$(cd "$OUT/src" && find "${file%/}" -type f | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
+		[ "$got" = "$fsha" ] || { echo "fetch: tree sha256 mismatch" >&2; exit 3; } ;;
+	*) echo "$fsha  $OUT/src/$file" | sha256sum -c --quiet - || { echo "fetch: file sha256 mismatch" >&2; exit 3; } ;;
+esac
+echo "$OUT/src/${file%/}"

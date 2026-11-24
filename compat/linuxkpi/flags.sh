@@ -12,9 +12,17 @@ lkpi_flags() {
 		-fno-tree-loop-distribute-patterns -Wall -Wextra -Werror -Wno-unused-parameter "-I$1/include")
 }
 
+lkpi_driver_headers() {
+	LKPI_DRIVER_HEADERS=""
+	case "$1" in
+		iwlwifi) LKPI_DRIVER_HEADERS="hdr-ieee80211 hdr-nl80211 hdr-radiotap" ;;
+	esac
+}
+
 lkpi_driver_flags() {
 	LKPI_DRIVER_FLAGS=()
 	case "$1" in
 		bochs) LKPI_DRIVER_FLAGS=(-Wno-pointer-sign) ;;
+		iwlwifi) LKPI_DRIVER_FLAGS=(-Wno-error -w -D__KERNEL__ -DKBUILD_MODNAME='"iwlwifi"' -include osum/kconfig_iwlwifi.h) ;;
 	esac
 }
