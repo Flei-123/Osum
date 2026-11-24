@@ -10,8 +10,10 @@ import drv.gpu.vmsvga
 import mm.mmframe
 import arch.x86_64.apic
 import lib.errno
+import gfx.dispscale
 
 export {
+    scale_pct, set_scale_pct, boot_edid_take,
     probe, ready, count, mode_at, mode_w, mode_h, mode_bpp, find_mode,
     cand_count, cand_w, cand_h, cand_why,
     vram, depths, refused, toobig, probed, map_limit,
@@ -81,6 +83,8 @@ const S_MAPLIMIT: u64 = 0x0E0
 const S_UNMAPPABLE: u64 = 0x0E8
 const S_MODEBITS: u64 = 0x0F0
 const S_NIGHT: u64 = 0x168
+const S_BOOTEDID: u64 = 0x170
+const S_SCALEPCT: u64 = 0x178
 const NIGHT_G_DROP: u64 = 35
 const NIGHT_B_DROP: u64 = 70
 const NIGHT_MAX: u64 = 100
@@ -935,41 +939,14 @@ fn std_scan(dst: u64) -> u64 {
     return best
 }
 
-fn edid_probe(state: u64) {
-    s(state, S_EDID, 0)
-    s(state, S_NATW, 0)
-    s(state, S_NATH, 0)
-    let mmio: u64 = g(state, S_MMIO)
-    if mmio == 0 {
-        s(state, S_EDIDWHY, 1)
-        return
-    }
-    let v: u64 = apic.map_device(state, mmio)
-    if v == 0 {
-        s(state, S_EDIDWHY, 2)
-        return
-    }
-    let dst: u64 = state + kstate.DLUT_OFF + EDID_OFF
-    var i: u64 = 0
-    while i < EDID_BYTES {
-        let w32: u64 = __mmio_read32((v +% i) as *mut u32) as u64
-        kstate.set8(dst + i, (w32 & 0xFF) as u8)
-        kstate.set8(dst + i + 1, ((w32 >> 8) & 0xFF) as u8)
-        kstate.set8(dst + i + 2, ((w32 >> 16) & 0xFF) as u8)
-        kstate.set8(dst + i + 3, ((w32 >> 24) & 0xFF) as u8)
-        i = i + 4
-    }
+fn edid_check(dst: u64) -> u64 {
     if kstate.get8(dst) != 0 || kstate.get8(dst + 7) != 0 {
-        s(state, S_EDIDWHY, 3)
-        fb.unmap_slot(state, v)
-        return
+        return 3
     }
-    i = 1
+    var i: u64 = 1
     while i < 7 {
         if kstate.get8(dst + i) != 0xFF {
-            s(state, S_EDIDWHY, 3)
-            fb.unmap_slot(state, v)
-            return
+            return 3
         }
         i = i + 1
     }
@@ -980,11 +957,12 @@ fn edid_probe(state: u64) {
         i = i + 1
     }
     if sum != 0 {
-        s(state, S_EDIDWHY, 4)
-        fb.unmap_slot(state, v)
-        return
+        return 4
     }
-    fb.unmap_slot(state, v)
+    return 0
+}
+
+fn edid_digest(state: u64, dst: u64) {
     s(state, S_EDIDWHY, 0)
     s(state, S_EDID, 1)
     var best: u64 = 0
@@ -1015,6 +993,84 @@ fn edid_probe(state: u64) {
     }
     s(state, S_NATW, best >> 16)
     s(state, S_NATH, best & 0xFFFF)
+}
+
+fn hex_nibble(c: u64) -> u64 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return 16
+}
+
+fn boot_edid_take(state: u64, cmd: u64) {
+    var w_edid: [u8; 6] = "edid=\0"
+    s(state, S_BOOTEDID, 0)
+    if cmd == 0 {
+        return
+    }
+    let at: u64 = cmdword.find(cmd, (&w_edid[0]) as u64, 5)
+    if at == 0 {
+        return
+    }
+    let dst: u64 = state + kstate.DLUT_OFF + EDID_OFF
+    var i: u64 = 0
+    while i < 128 {
+        let hi: u64 = hex_nibble(kstate.get8(at + 5 + i * 2))
+        let lo: u64 = hex_nibble(kstate.get8(at + 6 + i * 2))
+        if hi > 15 || lo > 15 {
+            return
+        }
+        kstate.set8(dst + i, ((hi << 4) | lo) as u8)
+        i = i + 1
+    }
+    if edid_check(dst) != 0 {
+        return
+    }
+    s(state, S_BOOTEDID, 1)
+    edid_digest(state, dst)
+}
+
+fn edid_probe(state: u64) {
+    s(state, S_EDID, 0)
+    s(state, S_NATW, 0)
+    s(state, S_NATH, 0)
+    let dst: u64 = state + kstate.DLUT_OFF + EDID_OFF
+    if g(state, S_BOOTEDID) != 0 {
+        edid_digest(state, dst)
+        return
+    }
+    let mmio: u64 = g(state, S_MMIO)
+    if mmio == 0 {
+        s(state, S_EDIDWHY, 1)
+        return
+    }
+    let v: u64 = apic.map_device(state, mmio)
+    if v == 0 {
+        s(state, S_EDIDWHY, 2)
+        return
+    }
+    var i: u64 = 0
+    while i < EDID_BYTES {
+        let w32: u64 = __mmio_read32((v +% i) as *mut u32) as u64
+        kstate.set8(dst + i, (w32 & 0xFF) as u8)
+        kstate.set8(dst + i + 1, ((w32 >> 8) & 0xFF) as u8)
+        kstate.set8(dst + i + 2, ((w32 >> 16) & 0xFF) as u8)
+        kstate.set8(dst + i + 3, ((w32 >> 24) & 0xFF) as u8)
+        i = i + 4
+    }
+    fb.unmap_slot(state, v)
+    let why: u64 = edid_check(dst)
+    if why != 0 {
+        s(state, S_EDIDWHY, why)
+        return
+    }
+    edid_digest(state, dst)
 }
 
 fn native(state: u64) -> u64 {
@@ -1052,14 +1108,15 @@ fn dpi_scale(state: u64, w: u64) -> u64 {
     if mm < 100 || mm > 2000 || w == 0 {
         return 0
     }
-    let dpi: u64 = w * 254 / (mm * 10)
-    if dpi >= 280 {
-        return 3
-    }
-    if dpi >= 150 {
-        return 2
-    }
-    return 1
+    return dispscale.pct_for_dpi(w * 254 / (mm * 10))
+}
+
+fn scale_pct(state: u64) -> u64 {
+    return g(state, S_SCALEPCT)
+}
+
+fn set_scale_pct(state: u64, pct: u64) {
+    s(state, S_SCALEPCT, pct)
 }
 
 fn edid_ok(state: u64) -> bool {
@@ -1921,6 +1978,7 @@ fn parse(state: u64, cmd: u64) {
         }
     }
     s(state, S_MODEBITS, m)
+    boot_edid_take(state, cmd)
 }
 
 fn mode(state: u64) -> u64 {

@@ -1,0 +1,59 @@
+import mem
+import ctx
+import efi
+import mbcore
+
+export { append_word }
+
+const EDID_BLOCK: u64 = 128
+const ACTIVE_LO: u64 = 0x44ec9f36bd8c1056
+const ACTIVE_HI: u64 = 0x8679817f33a6a892
+const DISCOVERED_LO: u64 = 0x41fad3801c0c34f6
+const DISCOVERED_HI: u64 = 0xaa661a6cd08a49a0
+const LOCATE_PROTOCOL: u64 = 320
+const HEX_OFFSET: u64 = 6
+
+fn locate(c: u64, lo: u64, hi: u64) -> u64 {
+    if efi.call3(efi.bs_fn(c, LOCATE_PROTOCOL), efi.guid(c, lo, hi), 0, efi.out_addr(c, 0)) != 0 {
+        return 0
+    }
+    return efi.out(c, 0)
+}
+
+fn block_of(c: u64) -> u64 {
+    var proto: u64 = locate(c, ACTIVE_LO, ACTIVE_HI)
+    if proto == 0 || mem.get32(proto) < EDID_BLOCK || mem.get64(proto + 8) == 0 {
+        proto = locate(c, DISCOVERED_LO, DISCOVERED_HI)
+    }
+    if proto == 0 || mem.get32(proto) < EDID_BLOCK {
+        return 0
+    }
+    return mem.get64(proto + 8)
+}
+
+fn hex_digit(v: u64) -> u64 {
+    if v < 10 {
+        return 48 + v
+    }
+    return 87 + v
+}
+
+fn append_word(c: u64, mbi: u64) {
+    let block: u64 = block_of(c)
+    if block == 0 {
+        return
+    }
+    var buf: [u8; 272] = [0 as u8; 272]
+    let at: u64 = (&buf[0]) as u64
+    var pre: [u8; 7] = " edid=\0"
+    mem.copy(at, (&pre[0]) as u64, HEX_OFFSET)
+    var i: u64 = 0
+    while i < EDID_BLOCK {
+        let b: u64 = mem.get8(block + i)
+        mem.set8(at + HEX_OFFSET + i * 2, hex_digit(b >> 4))
+        mem.set8(at + HEX_OFFSET + i * 2 + 1, hex_digit(b & 15))
+        i = i + 1
+    }
+    mem.set8(at + HEX_OFFSET + EDID_BLOCK * 2, 0)
+    mbcore.append_cmdline(mbi, at)
+}
