@@ -62,7 +62,7 @@ run() {
         extra="-chardev socket,id=r0,path=$T/$n.sock,server=on,wait=off -device usb-redir,chardev=r0${REDIR_BUS:+,bus=$REDIR_BUS}"
         [ -n "${BEHIND_HUB:-}" ] && extra="-device usb-hub,bus=x0.0,port=1,id=h0 -chardev socket,id=r0,path=$T/$n.sock,server=on,wait=off -device usb-redir,chardev=r0,bus=x0.0,port=1.2"
     fi
-    timeout 170 qemu-system-x86_64 -accel $ACC -kernel "$T/k.img" -m 256 \
+    timeout ${QTIMEOUT:-170} qemu-system-x86_64 -accel $ACC -kernel "$T/k.img" -m 256 \
         -append "osum ${BASEW:-nokbd nosched noproc nofs noring3} $words ${XWORDS:-} ${XEXTRA:-} nic nip=169.254.10.1/16 nsvc=0 nwait=0 script=sh /t/$script;exit" \
         -serial "file:$T/$n.txt" -display none -nic none -no-reboot -pidfile "$T/$n.qpid" -S \
         -monitor "unix:$T/$n.mon,server,nowait" \
@@ -86,6 +86,7 @@ run() {
         sleep 2
         : > "$T/$n.unplug"
     fi
+    [ -n "${RUN_DRIVER:-}" ] && "$RUN_DRIVER" "$n"
     bash tools/work/waitfor.sh -t ${QWAIT:-160} -i 2 pid "$qp" >/dev/null 2>&1
     kill "$qp" 2>/dev/null
     [ -f "$T/$n.hpid" ] && kill "$(cat "$T/$n.hpid")" 2>/dev/null

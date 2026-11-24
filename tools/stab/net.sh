@@ -7,7 +7,7 @@
 #   bash tools/stab/net.sh [idle_s] [outage_s] [recover_s]
 #
 # Everything runs in a private network namespace (unshare -n): a throw-away
-# bruecke_server.py (the repo copy), a TLS 1.3 front for it (tlsfront.py, test
+# bridge_server.py (the repo copy), a TLS 1.3 front for it (tlsfront.py, test
 # certificate), a DNS stub, and a QEMU with user networking in which the guest
 # reaches the host loopback as 10.0.2.2. The device key is a fresh one made here
 # and pre-paired with the throw-away server -- NEVER the Dell's key.
@@ -17,7 +17,7 @@
 #           handshake on the guest), and the CPU ticks (100 per second) the
 #           jarvisd tasks used in that time = percent of one core
 #   outage: QEMU `set_link n0 off` for <outage_s> seconds, then on; seconds from
-#           link-up to the first connection and to the first poll ("puls") of the
+#           link-up to the first connection and to the first poll of the
 #           new session
 #
 # STAB_TREE=<worktree> builds the guest (kernel + jarvisd) from another tree, for
@@ -64,9 +64,9 @@ mkdir -p "$T/srv"
 python3 "$HERE/tools/bridge-server/bridge_server.py" --port $UP --bind 127.0.0.1 --root "$T/srv" 2> "$T/server.log" >/dev/null &
 PIDS+=($!)
 sleep 1.5
-ADMIN=$(cat "$T/srv/verwalter.key")
-curl -s -X POST -H "X-Bruecke-Verwalter: $ADMIN" -H 'Content-Type: application/json' \
-    -d "{\"was\":\"vorab\",\"pubkey\":\"$PUB\"}" http://127.0.0.1:$UP/bruecke/koppeln > "$T/pair.txt" 2>&1
+ADMIN=$(cat "$T/srv/admin.key")
+curl -s -X POST -H "X-Bridge-Admin: $ADMIN" -H 'Content-Type: application/json' \
+    -d "{\"what\":\"preauth\",\"pubkey\":\"$PUB\"}" http://127.0.0.1:$UP/bridge/pair > "$T/pair.txt" 2>&1
 python3 "$HERE/tools/stab/tlsfront.py" --cert "$T/certs/good.pem" --key "$T/certs/good.key" --port 443 --upstream $UP --log "$T/front.log" 2> "$T/front.err" &
 PIDS+=($!)
 python3 "$HERE/tools/stab/dnsstub.py" 10.0.2.2 53 2> "$T/dns.err" &
@@ -77,7 +77,7 @@ sleep 0.7
 cat > "$T/permissions.conf" <<CONF
 server         = 10.0.2.2:443
 transport      = https
-path           = /bruecke/draht
+path           = /bridge/wire
 servername     = jarvis.test
 roots          = /etc/ssl/roots.pem
 commands       = no
@@ -156,7 +156,7 @@ ticks_of() { # <marker> -> sum of TICKS of the jarvisd tasks listed after the ma
 P0=$(ticks_of "==PS0=="); P1=$(ticks_of "==PS1==")
 DT=$(python3 -c "print(round($T_PS1-$T_PS0,1))")
 CONNS=$(awk -v a="$T_PS0" -v b="$T_PS1" '$1=="CONN" && $2>=a && $2<=b' "$T/front.log" | wc -l)
-PULS=$(awk -v a="$T_PS0" -v b="$T_PS1" '$1=="CONN" && $2>=a && $2<=b && $4=="puls"' "$T/front.log" | wc -l)
+PULS=$(awk -v a="$T_PS0" -v b="$T_PS1" '$1=="CONN" && $2>=a && $2<=b && $4=="poll"' "$T/front.log" | wc -l)
 python3 - "$P0" "$P1" "$DT" "$CONNS" "$PULS" "$LABEL" <<'E'
 import sys
 p0, p1, dt, conns, puls, label = int(sys.argv[1]), int(sys.argv[2]), float(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]), sys.argv[6]
@@ -165,7 +165,7 @@ print("STABNET[%s]: idle %.0f s: %d connections (%d polls) = %.1f per minute; ja
       % (label, dt, conns, puls, conns * 60.0 / dt, d, d / (dt * 100.0) * 100))
 E
 FIRST=$(awk -v a="$T_ON" '$1=="CONN" && $2>=a {print $2; exit}' "$T/front.log")
-FIRSTP=$(awk -v a="$T_ON" '$1=="CONN" && $2>=a && $4=="puls" {print $2; exit}' "$T/front.log")
+FIRSTP=$(awk -v a="$T_ON" '$1=="CONN" && $2>=a && $4=="poll" {print $2; exit}' "$T/front.log")
 LASTOK=$(awk -v a="$T_OFF" '$1=="CONN" && $2<a {t=$2} END{print t}' "$T/front.log")
 python3 - "$T_ON" "$FIRST" "$FIRSTP" "$OUT" "$LASTOK" "$T_OFF" "$LABEL" <<'E'
 import sys

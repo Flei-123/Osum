@@ -37,6 +37,7 @@ const INT_ERR_MAX: u64 = 8
 const INT_LINK_BIT: u64 = 0x40
 const KICK_TICKS: u64 = 300
 const KICK_MAX: u64 = 3
+const KICK_SLOW_TICKS: u64 = 1000
 const WBUF: u64 = 0x200
 const RBUF: u64 = 0x300
 const CTL_DELAY_US: u64 = 10000
@@ -161,6 +162,20 @@ fn kick(state: u64, b: u64, slot: u64, stamp: u64) {
     }
     setc(b, X_KICKRC, rc)
     setc(b, X_KICKT, stamp)
+}
+
+fn kick_due(state: u64, b: u64, now: u64) -> bool {
+    let t0: u64 = getc(b, X_KICKT)
+    if t0 == 0 {
+        setc(b, X_KICKT, now + 1)
+        return false
+    }
+    var gap: u64 = KICK_TICKS
+    if getc(b, X_KICKS) >= KICK_MAX {
+        if kstate.mode_on(state, kstate.M_NOKICKLOOP) { return false }
+        gap = KICK_SLOW_TICKS
+    }
+    return now + 1 - t0 >= gap
 }
 
 fn refresh_bmcr(state: u64, b: u64, slot: u64) -> u64 {
@@ -394,15 +409,10 @@ fn house(state: u64, b: u64, slot: u64, now: u64) -> u64 {
     let phy_link: u64 = now_link
     if now_link == 2 {
         refresh_bmcr(state, b, slot)
-        if kick_enabled(state) && getc(b, X_KICKS) < KICK_MAX {
-            let t0: u64 = getc(b, X_KICKT)
-            if t0 == 0 {
-                setc(b, X_KICKT, now + 1)
-            } else if now + 1 - t0 >= KICK_TICKS {
-                kick(state, b, slot, now + 1)
-                refresh_regs(state, b, slot)
-                mode_line(b)
-            }
+        if kick_enabled(state) && kick_due(state, b, now) {
+            kick(state, b, slot, now + 1)
+            refresh_regs(state, b, slot)
+            mode_line(b)
         }
     }
     if phy_link == 2 && getc(b, X_INTLINK) == 1 {
@@ -414,6 +424,7 @@ fn house(state: u64, b: u64, slot: u64, now: u64) -> u64 {
     setc(b, X_LINK, now_link)
     setc(b, X_CHG, getc(b, X_CHG) + 1)
     if now_link == 1 {
+        setc(b, X_KICKT, 0)
         apply_media(state, b, slot)
     }
     mode_line(b)

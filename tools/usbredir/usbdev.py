@@ -24,6 +24,8 @@ ap.add_argument('--max-secs', type=int, default=240)
 ap.add_argument('--phy-boot', default='down')
 ap.add_argument('--phy-deaf', action='store_true')
 ap.add_argument('--phy-mute', action='store_true')
+ap.add_argument('--phy-stuck', action='store_true')
+ap.add_argument('--wire-ctl', default='')
 ap.add_argument('--intr', default='off')
 ap.add_argument('--bt', default='normal')
 ap.add_argument('--link', default='up')
@@ -219,7 +221,7 @@ from ch336model import Ch336Model
 from ax179model import Ax179Model
 from rtl8153model import Rtl8153Model
 from btmodel import BtModel
-CH = Ch336Model(MAC, A.phy_boot, lambda s: log(s), not A.phy_deaf) if PROF['kind'] == 'ch336' else None
+CH = Ch336Model(MAC, A.phy_boot, lambda s: log(s), not A.phy_deaf, A.phy_stuck) if PROF['kind'] == 'ch336' else None
 BT = BtModel(lambda s: log(s), A.bt) if PROF['kind'] == 'bt' else None
 VN = None
 if PROF['kind'] == 'ax179':
@@ -306,7 +308,7 @@ class Dev:
     def connect_dev(self):
         global CH
         if CH is not None:
-            CH = Ch336Model(MAC, A.phy_boot, lambda s: log(s), not A.phy_deaf)
+            CH = Ch336Model(MAC, A.phy_boot, lambda s: log(s), not A.phy_deaf, A.phy_stuck)
         self.cfg = 1
         self.alt = {}
         self.pend_in = []
@@ -609,6 +611,21 @@ class Dev:
             self.handle(typ, rid, p)
 
 
+def poll_wire(stamp):
+    if CH is None or not A.wire_ctl:
+        return stamp
+    try:
+        st = os.stat(A.wire_ctl)
+        if st.st_mtime_ns == stamp:
+            return stamp
+        word = open(A.wire_ctl).read().strip()
+    except OSError:
+        return stamp
+    if word in ('on', 'off'):
+        CH.set_wire(word == 'on')
+    return st.st_mtime_ns
+
+
 def main():
     t0 = time.time()
     while not os.path.exists(A.sock):
@@ -635,8 +652,10 @@ def main():
     t_disc = 0.0
     t_ready = 0.0
     log('connected profile=%s' % A.profile)
+    wire_stamp = None
     while time.time() - t0 < A.max_secs:
         LINK.poll()
+        wire_stamp = poll_wire(wire_stamp)
         r, _, _ = select.select([s], [], [], 0.02)
         if r:
             try:

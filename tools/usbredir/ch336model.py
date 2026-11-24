@@ -14,8 +14,10 @@ INTR_LINK_BIT = 0x40
 
 
 class Ch336Model:
-    def __init__(self, mac, boot, log, allow_kick=True):
+    def __init__(self, mac, boot, log, allow_kick=True, stuck=False):
         self.mac = mac
+        self.stuck = stuck
+        self.wire = True
         self.log = log
         self.allow_kick = allow_kick
         self.bmcr = {'down': 0x0800, 'an': 0x1000, 'iso': 0x0400}.get(boot, 0x0800)
@@ -28,10 +30,23 @@ class Ch336Model:
     def start_phy(self, how):
         self.kicks += 1
         self.log('phy kick #%d via %s' % (self.kicks, how))
-        if self.allow_kick:
+        if self.allow_kick and self.wire:
             self.started = True
             self.bmcr = 0x1000
             self.log('phy autoneg running, link up')
+
+    def set_wire(self, on):
+        if on == self.wire:
+            return
+        self.wire = on
+        if not on:
+            self.started = False
+            self.log('wire off, link down')
+        elif not self.stuck:
+            self.started = True
+            self.log('wire on, link up')
+        else:
+            self.log('wire on, phy stuck until restart')
 
     def phy_read(self, reg):
         if reg == 0:
