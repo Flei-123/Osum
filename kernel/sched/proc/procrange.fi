@@ -118,6 +118,51 @@ fn mark_run(state: u64, i: u64, base: u64, pages: u64, bits: u64) -> bool {
     return true
 }
 
+fn file_run_ok(base: u64, pages: u64, ino: u64, pg: u64) -> bool {
+    if ino >= procmap.LAZYF_MAX || pg >= procmap.LAZYF_MAX || pages > procmap.LAZYF_MAX - pg {
+        return false
+    }
+    return procmap.lazy_zone(base) && procmap.lazy_zone(base + (pages - 1) * 4096)
+}
+
+fn mark_file_tile(pt: u64, s: u64, n: u64, a: u64, bits: u64, pg: u64) -> u64 {
+    var k: u64 = 0
+    while k < n {
+        if !procmap.lazy_zone(a + k * 4096) || procpt.read_entry(pt, s + k) != 0 {
+            return k
+        }
+        procpt.write_entry(pt, s + k, bits | ((pg + k) << 32))
+        k = k + 1
+    }
+    return n
+}
+
+fn mark_file_run(state: u64, i: u64, base: u64, pages: u64, bits: u64, ino: u64, pg: u64) -> u64 {
+    if pages == 0 || !file_run_ok(base, pages, ino, pg) {
+        return 0
+    }
+    let entry: u64 = bits | procbase.PAGE_LAZYF | (ino << 12)
+    var done: u64 = 0
+    while done < pages {
+        let a: u64 = base + done * 4096
+        let s: u64 = procpt.pt_slot(a)
+        let pt: u64 = procpt.pt_for(state, i, a, true)
+        if pt == 0 || s >= 512 {
+            return done
+        }
+        var n: u64 = 512 - s
+        if n > pages - done {
+            n = pages - done
+        }
+        let m: u64 = mark_file_tile(pt, s, n, a, entry, pg + done)
+        done = done + m
+        if m != n {
+            return done
+        }
+    }
+    return done
+}
+
 fn tile_slots(a: u64, end: u64) -> u64 {
     let tile_end: u64 = ((a >> 21) + 1) << 21
     if end < tile_end {

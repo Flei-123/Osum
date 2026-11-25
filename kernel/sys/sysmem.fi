@@ -187,13 +187,10 @@ fn lazy_run_f(state: u64, me: u64, base: u64, pages: u64, prot: u64, fk: u64, fp
     if fk == 0 {
         return procrange.mark_run(state, me, base, pages, procmap.lazy_bits(rd, wr, ex))
     }
-    var k: u64 = 0
-    while k < pages {
-        if !procmap.lazy_mark_file(state, me, base + k * sysconst.PAGE, rd, wr, ex, fk - 1, fpg + k) {
-            lazy_undo(state, me, base, k)
-            return false
-        }
-        k = k + 1
+    let done: u64 = procrange.mark_file_run(state, me, base, pages, procmap.lazy_bits(rd, wr, ex), fk - 1, fpg)
+    if done != pages {
+        lazy_undo(state, me, base, done)
+        return false
     }
     return true
 }
@@ -425,9 +422,13 @@ fn map_fixed_f(state: u64, me: u64, addr: u64, pages: u64, prot: u64, fk: u64, f
     }
     file_shm_flush_maps(state, me, addr, pages * sysconst.PAGE, true)
     let _released: bool = unixsock.map_release(state, mem_owner(state, me), addr, pages * sysconst.PAGE)
-    if in_lazy && fk == 0 {
+    if in_lazy {
         procrange.release(state, me, addr, end)
-        if !procrange.mark_run(state, me, addr, pages, procmap.lazy_bits((prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0)) {
+        let bits: u64 = procmap.lazy_bits((prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0)
+        if fk == 0 && !procrange.mark_run(state, me, addr, pages, bits) {
+            return sysuser.neg(errno.E_NOMEM)
+        }
+        if fk != 0 && procrange.mark_file_run(state, me, addr, pages, bits, fk - 1, fpg) != pages {
             return sysuser.neg(errno.E_NOMEM)
         }
         kstate.add(state, kstate.MAPS, pages)
