@@ -5,11 +5,13 @@ import block.blk
 import fs.ofsj
 import fs.fs
 import arch.arch
+import sched.sched
 
 export { sync, drain, idle }
 
 const DRAIN_SLOTS: u64 = 256
 const DRAIN_ROUNDS_MAX: u64 = 4096
+const IDLE_SLOTS: u64 = 32
 
 fn sync(state: u64) -> bool {
     let flags: u64 = fslock.enter(state)
@@ -57,16 +59,36 @@ fn idle_table(state: u64) {
     if !blk.wb_due(state) {
         return
     }
-    let flags: u64 = fslock.save_irq()
-    if fslock.try_take(state) {
-        let _flushed: bool = blk.flush(state)
-        if fs.reclaim_locked(state) {
-            let _again: bool = blk.flush(state)
+    var round: u64 = 0
+    while round < DRAIN_ROUNDS_MAX && sched.ready_count(state) == 0 {
+        if idle_step(state) != blk.FLUSH_MORE {
+            return
         }
-        blk.wb_release(state)
-        fslock.give(state)
+        round = round + 1
     }
+}
+
+fn idle_step(state: u64) -> u64 {
+    let flags: u64 = fslock.save_irq()
+    if !fslock.try_take(state) {
+        fslock.restore_irq(flags)
+        return blk.FLUSH_FAILED
+    }
+    let step: u64 = blk.wb_flush_some(state, IDLE_SLOTS)
+    if step == blk.FLUSH_DONE {
+        finish_table(state)
+    }
+    fslock.give(state)
     fslock.restore_irq(flags)
+    return step
+}
+
+fn finish_table(state: u64) {
+    let _flushed: bool = blk.flush(state)
+    if fs.reclaim_locked(state) {
+        let _again: bool = blk.flush(state)
+    }
+    blk.wb_release(state)
 }
 
 fn idle(state: u64) {
