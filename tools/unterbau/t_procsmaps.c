@@ -320,6 +320,188 @@ static void test_other_process(void)
     CHECK("smaps_gone_pid_fails", open(path, O_RDONLY) < 0, "still opens");
 }
 
+static unsigned long layout_base;
+#define LAYOUT_UNIT (2UL * 1024 * 1024)
+#define LAYOUT_UNITS 24
+#define FNV_OFFSET 0xcbf29ce484222325UL
+#define FNV_PRIME 0x100000001b3UL
+
+static unsigned long fnv_word(unsigned long h, unsigned long v)
+{
+    for (int i = 0; i < 8; i++)
+        h = (h ^ ((v >> (i * 8)) & 0xff)) * FNV_PRIME;
+    return h;
+}
+
+static unsigned long fnv_range(const char *buf, const char *end, unsigned long h)
+{
+    for (const char *p = buf; p < end; p++)
+        h = (h ^ (unsigned char)*p) * FNV_PRIME;
+    return h;
+}
+
+static void layout_map(unsigned long unit, unsigned long units, int prot, int fd)
+{
+    int flags = MAP_FIXED | (fd < 0 ? MAP_PRIVATE | MAP_ANONYMOUS : MAP_SHARED);
+    void *r = mmap((void *)(layout_base + unit * LAYOUT_UNIT), units * LAYOUT_UNIT, prot, flags, fd, 0);
+    if (r == MAP_FAILED)
+        FAIL("layout_map", "unit=%lu errno=%d", unit, errno);
+}
+
+static void layout_touch(unsigned long unit, unsigned long page, unsigned long pages)
+{
+    volatile char *p = (volatile char *)(layout_base + unit * LAYOUT_UNIT + page * PAGE_BYTES);
+    for (unsigned long i = 0; i < pages; i++)
+        p[i * PAGE_BYTES] = 1;
+}
+
+static int layout_file(void)
+{
+    char name[] = "/tmp/procsmaps.XXXXXX";
+    int fd = mkstemp(name);
+    if (fd < 0)
+        return -1;
+    unlink(name);
+    if (ftruncate(fd, 2 * LAYOUT_UNIT) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int reserve_layout(void)
+{
+    unsigned long span = (LAYOUT_UNITS + 1) * LAYOUT_UNIT;
+    void *r = mmap(0, span, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (r == MAP_FAILED)
+        return -1;
+    layout_base = ((unsigned long)r + LAYOUT_UNIT - 1) & ~(LAYOUT_UNIT - 1);
+    return 0;
+}
+
+static void build_layout(void)
+{
+    int fd = layout_file();
+    layout_map(0, 2, PROT_READ | PROT_WRITE, -1);
+    layout_map(3, 2, PROT_READ | PROT_WRITE, -1);
+    layout_touch(3, 0, 512);
+    layout_touch(4, 0, 512);
+    layout_map(6, 1, PROT_READ | PROT_WRITE, -1);
+    for (unsigned long i = 0; i < 512; i += 2)
+        mprotect((void *)(layout_base + 6 * LAYOUT_UNIT + i * PAGE_BYTES), PAGE_BYTES, PROT_READ);
+    layout_touch(6, 1, 1);
+    layout_map(8, 1, PROT_NONE, -1);
+    layout_map(10, 3, PROT_READ | PROT_WRITE, -1);
+    layout_touch(10, 0, 1);
+    layout_touch(11, 256, 1);
+    layout_touch(12, 511, 1);
+    layout_map(14, 2, PROT_READ, -1);
+    layout_map(16, 2, PROT_READ | PROT_WRITE, -1);
+    if (fd >= 0) {
+        layout_map(18, 2, PROT_READ, fd);
+        volatile char *f = (volatile char *)(layout_base + 18 * LAYOUT_UNIT);
+        (void)f[0];
+        (void)f[PAGE_BYTES * 300];
+    }
+    layout_map(21, 1, PROT_READ | PROT_WRITE, -1);
+    mprotect((void *)(layout_base + 21 * LAYOUT_UNIT + 100 * PAGE_BYTES), 50 * PAGE_BYTES, PROT_READ);
+    layout_touch(21, 90, 2);
+}
+
+static unsigned long layout_hash(const char *buf, int smaps, int *lines)
+{
+    unsigned long h = FNV_OFFSET;
+    int in_range = 0;
+    *lines = 0;
+    for (const char *p = buf; *p;) {
+        const char *eol = strchr(p, '\n');
+        if (!eol)
+            eol = p + strlen(p);
+        int header = is_header(p);
+        unsigned long lo = 0, hi = 0;
+        const char *rest = p;
+        if (header) {
+            char *q;
+            lo = strtoul(p, &q, 16);
+            hi = strtoul(q + 1, &q, 16);
+            rest = q;
+            in_range = lo >= layout_base && lo < layout_base + LAYOUT_UNITS * LAYOUT_UNIT;
+        }
+        if (in_range && header) {
+            h = fnv_word(fnv_word(h, lo - layout_base), hi - layout_base);
+            h = fnv_range(rest, eol + 1, h);
+            (*lines)++;
+        } else if (in_range && smaps) {
+            h = fnv_range(p, eol + 1, h);
+            (*lines)++;
+        }
+        p = *eol ? eol + 1 : eol;
+    }
+    return h;
+}
+
+static void test_layout_hash(void)
+{
+    if (reserve_layout() != 0) {
+        FAIL("layout_reserve", "errno=%d", errno);
+        return;
+    }
+    build_layout();
+    long m = slurp("/proc/self/maps", maps_buf);
+    long s = slurp("/proc/self/smaps", smaps_buf);
+    int maps_lines, smaps_lines;
+    unsigned long mh = layout_hash(maps_buf, 0, &maps_lines);
+    unsigned long sh = layout_hash(smaps_buf, 1, &smaps_lines);
+    CHECK("layout_dump", m > 0 && s > 0 && maps_lines >= 10 && smaps_lines > maps_lines, "maps=%ld smaps=%ld lines=%d/%d", m, s, maps_lines, smaps_lines);
+    PASS("layout_hash", "maps=%016lx smaps=%016lx lines=%d/%d", mh, sh, maps_lines, smaps_lines);
+}
+
+#define SPEED_TOUCHED_BYTES (128UL * 1024 * 1024)
+#define SPEED_UNTOUCHED_BYTES (512UL * 1024 * 1024)
+#define SPEED_READS 5
+
+static long median_us(long *v, int n)
+{
+    for (int i = 1; i < n; i++)
+        for (int j = i; j > 0 && v[j - 1] > v[j]; j--) {
+            long t = v[j];
+            v[j] = v[j - 1];
+            v[j - 1] = t;
+        }
+    return v[n / 2];
+}
+
+static long time_read_us(const char *path, char *buf)
+{
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    long len = slurp(path, buf);
+    long ns = elapsed_ns(&t0);
+    return len > 0 ? ns / 1000 : -1;
+}
+
+static void test_scan_speed(void)
+{
+    char *touched = mmap(0, SPEED_TOUCHED_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    char *untouched = mmap(0, SPEED_UNTOUCHED_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (touched == MAP_FAILED || untouched == MAP_FAILED) {
+        FAIL("speed_map", "errno=%d", errno);
+        return;
+    }
+    for (unsigned long off = 0; off < SPEED_TOUCHED_BYTES; off += PAGE_BYTES)
+        touched[off] = 1;
+    long maps_us[SPEED_READS], smaps_us[SPEED_READS];
+    for (int i = 0; i < SPEED_READS; i++) {
+        maps_us[i] = time_read_us("/proc/self/maps", maps_buf);
+        smaps_us[i] = time_read_us("/proc/self/smaps", smaps_buf);
+    }
+    long maps_med = median_us(maps_us, SPEED_READS);
+    long smaps_med = median_us(smaps_us, SPEED_READS);
+    PASS("speed_time", "maps_us=%ld smaps_us=%ld", maps_med, smaps_med);
+    munmap(touched, SPEED_TOUCHED_BYTES);
+    munmap(untouched, SPEED_UNTOUCHED_BYTES);
+}
+
 static void test_listing(void)
 {
     DIR *d = opendir("/proc/self");
@@ -344,5 +526,7 @@ int main(void)
     test_interleaved();
     test_other_process();
     test_listing();
+    test_layout_hash();
+    test_scan_speed();
     return 0;
 }
