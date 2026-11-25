@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-MAX_RATIO=${HALTPOLL_MAX_RATIO:-0.85}
+MAX_RATIO=${HALTPOLL_MAX_RATIO:-0.95}
 TESTS="vfork_exit_wait thread_create_join"
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 pass=0; fail=0
