@@ -2248,15 +2248,61 @@ const F_SEAL_GROW: u64 = 4
 // r721: the bounce buffer WL_SCRATCH is ONE page for the whole machine; two cores in sendmsg/recvmsg/read/write on sockets used it at the
 // same time and mixed their octets. The pair (copy in + send) / (receive + copy out) now runs under `mmlock.scratch_lock`.
 // A failed copy comes back as -EFAULT (the marker value); everything else is what `send_bytes` / `recv_bytes` said.
+fn stream_put(state: u64, me: u64, si: u64, src: u64, n: u64) -> u64 {
+    let p: u64 = unixsock.send_peer(state, si)
+    if p >= unixsock.USOCK_MAX {
+        return sysuser.neg(errno.E_PIPE)
+    }
+    var done: u64 = 0
+    while done < n {
+        let c: u64 = unixsock.put_window(state, p, n - done)
+        if c == 0 {
+            break
+        }
+        if !sysuser.copy_in(state, me, unixsock.put_addr(state, p), src + done, c) {
+            if done == 0 {
+                return sysuser.neg(errno.E_FAULT)
+            }
+            return done
+        }
+        unixsock.put_commit(state, p, c)
+        done = done + c
+    }
+    if done == 0 && n != 0 && unixsock.room(state, p) != 0 {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    return done
+}
+
+fn stream_get(state: u64, me: u64, si: u64, dst: u64, n: u64) -> u64 {
+    var done: u64 = 0
+    while done < n {
+        let c: u64 = unixsock.get_window(state, si, n - done)
+        if c == 0 {
+            break
+        }
+        if !sysuser.copy_out(state, me, dst + done, unixsock.get_addr(state, si), c) {
+            if done == 0 {
+                return sysuser.neg(errno.E_FAULT)
+            }
+            return done
+        }
+        unixsock.get_commit(state, si, c)
+        done = done + c
+    }
+    return done
+}
+
 fn wl_send(state: u64, me: u64, si: u64, src: u64, n: u64, dg: bool) -> u64 {
     let fl: u64 = mmlock.scratch_lock(state)
+    if !dg {
+        let w: u64 = stream_put(state, me, si, src, n)
+        mmlock.scratch_unlock(state, fl)
+        return w
+    }
     var r: u64 = sysuser.neg(errno.E_FAULT)
     if sysuser.copy_in(state, me, state + sysconst.WL_SCRATCH, src, n) {
-        if dg {
-            r = unixsock.send_dgram(state, si, sysconst.WL_SCRATCH, n)
-        } else {
-            r = unixsock.send_bytes(state, si, sysconst.WL_SCRATCH, n)
-        }
+        r = unixsock.send_dgram(state, si, sysconst.WL_SCRATCH, n)
     }
     mmlock.scratch_unlock(state, fl)
     return r
@@ -2264,12 +2310,12 @@ fn wl_send(state: u64, me: u64, si: u64, src: u64, n: u64, dg: bool) -> u64 {
 
 fn wl_recv(state: u64, me: u64, si: u64, dst: u64, n: u64, dg: bool) -> u64 {
     let fl: u64 = mmlock.scratch_lock(state)
-    var r: u64 = 0
-    if dg {
-        r = unixsock.recv_dgram(state, si, sysconst.WL_SCRATCH, n)
-    } else {
-        r = unixsock.recv_bytes(state, si, sysconst.WL_SCRATCH, n)
+    if !dg {
+        let g: u64 = stream_get(state, me, si, dst, n)
+        mmlock.scratch_unlock(state, fl)
+        return g
     }
+    var r: u64 = unixsock.recv_dgram(state, si, sysconst.WL_SCRATCH, n)
     if !errno.is_error(r) && r != 0 && !sysuser.copy_out(state, me, dst, state + sysconst.WL_SCRATCH, r) {
         r = sysuser.neg(errno.E_FAULT)
     }
@@ -2550,8 +2596,8 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool,
     let nonblock: bool = dontwait || (file.open_flags(state, of) & sysconst.UB_O_NONBLOCK) != 0
     let dg: bool = unixsock.sock_kind(state, si) == unixsock.UK_DGRAM
     var n: u64 = len
-    if n > sysconst.MSG_MAX {
-        if dg && writing {
+    if dg && n > sysconst.MSG_MAX {
+        if writing {
             return sysuser.neg(errno.E_MSGSIZE)
         }
         n = sysconst.MSG_MAX
@@ -2593,11 +2639,8 @@ fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool,
             n = free
         }
         let w: u64 = wl_send(state, me, si, buf, n, dg)
-        if w == sysuser.neg(errno.E_FAULT) {
-            return w
-        }
         if errno.is_error(w) {
-            return sysuser.neg(w)
+            return w
         }
         sched.poll_kick(state)
         return w

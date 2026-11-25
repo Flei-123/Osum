@@ -1,0 +1,136 @@
+profile kernel
+
+import libc.regio
+import mm.mmframe
+import arch.arch
+
+export {
+    RING_BYTES, ring_new, ring_free, ring_at, ring_fwd, ring_dist, ring_span, ring_back,
+    ring_put, ring_get, ring_release,
+}
+
+const PAGE: u64 = 4096
+const RING_PT: u64 = 512
+const RING_PAGES: u64 = 52
+const RING_BYTES: u64 = 212992
+
+fn slot(r: u64, k: u64) -> u64 {
+    return r + RING_PT + k * 8
+}
+
+fn ring_new(state: u64) -> u64 {
+    let frame: u64 = mmframe.frame_alloc_high_first(state)
+    if frame == 0 {
+        return 0
+    }
+    let r: u64 = mmframe.kva(frame)
+    mmframe.fill8(r, RING_PT + RING_PAGES * 8, 0)
+    return r
+}
+
+fn ring_free(state: u64, r: u64) {
+    var k: u64 = 0
+    while k < RING_PAGES {
+        let pg: u64 = regio.read64(slot(r, k))
+        if pg != 0 {
+            mmframe.frame_free(state, mmframe.phys(pg))
+        }
+        k = k + 1
+    }
+    mmframe.frame_free(state, mmframe.phys(r))
+}
+
+fn ring_fwd(pos: u64, n: u64) -> u64 {
+    return (pos + n) % RING_BYTES
+}
+
+fn ring_dist(from: u64, to: u64) -> u64 {
+    if to >= from {
+        return to - from
+    }
+    return RING_BYTES - from + to
+}
+
+fn ring_span(pos: u64, n: u64) -> u64 {
+    let left: u64 = PAGE - pos % PAGE
+    if n < left {
+        return n
+    }
+    return left
+}
+
+fn ring_at(r: u64, pos: u64) -> u64 {
+    let pg: u64 = regio.read64(slot(r, pos / PAGE))
+    if pg == 0 {
+        return 0
+    }
+    return pg + pos % PAGE
+}
+
+fn back_page(state: u64, r: u64, k: u64) -> bool {
+    if regio.read64(slot(r, k)) != 0 {
+        return true
+    }
+    let frame: u64 = mmframe.frame_alloc_high_first(state)
+    if frame == 0 {
+        return false
+    }
+    regio.write64(slot(r, k), mmframe.kva(frame))
+    return true
+}
+
+fn ring_back(state: u64, r: u64, pos: u64, n: u64) -> bool {
+    var p: u64 = pos
+    var left: u64 = n
+    while left != 0 {
+        if !back_page(state, r, p / PAGE) {
+            return false
+        }
+        let c: u64 = ring_span(p, left)
+        p = ring_fwd(p, c)
+        left = left - c
+    }
+    return true
+}
+
+fn ring_put(r: u64, pos: u64, src: u64, n: u64) {
+    var p: u64 = pos
+    var done: u64 = 0
+    while done < n {
+        let c: u64 = ring_span(p, n - done)
+        arch.copy_octets(ring_at(r, p), src + done, c)
+        p = ring_fwd(p, c)
+        done = done + c
+    }
+}
+
+fn ring_get(r: u64, pos: u64, dst: u64, n: u64) {
+    var p: u64 = pos
+    var done: u64 = 0
+    while done < n {
+        let c: u64 = ring_span(p, n - done)
+        arch.copy_octets(dst + done, ring_at(r, p), c)
+        p = ring_fwd(p, c)
+        done = done + c
+    }
+}
+
+fn ring_release(state: u64, r: u64, from: u64, to: u64, tail: u64) {
+    let keep: u64 = tail / PAGE
+    var p: u64 = from
+    var left: u64 = ring_dist(from, to)
+    while left != 0 {
+        let c: u64 = PAGE - p % PAGE
+        if left < c {
+            return
+        }
+        let k: u64 = p / PAGE
+        let pg: u64 = regio.read64(slot(r, k))
+        if k != keep && pg != 0 {
+            regio.write64(slot(r, k), 0)
+            mmframe.frame_free(state, mmframe.phys(pg))
+        }
+        p = ring_fwd(p, c)
+        left = left - c
+    }
+}

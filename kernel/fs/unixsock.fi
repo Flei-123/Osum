@@ -10,6 +10,7 @@ import mm.mmlock
 import sync.atomic
 import sync.fqlock
 import fs.file
+import fs.usring
 import lib.errno
 import serial
 import klog
@@ -21,7 +22,7 @@ export {
     sock_peer, sock_set_peer, sock_set_cred, sock_cred_pid, sock_cred_ug, sock_state, sock_set_state,
     bind_path, name_bound, name_of, name_len, name_byte, find_listener, listen_on, accept_from, connect_to, connect_pair,
     pending,
-    send_bytes, recv_bytes, waiting, room, peer_gone, read_closed, write_closed, shutdown_sock,
+    send_peer, put_window, put_addr, put_commit, get_window, get_addr, get_commit, waiting, room, peer_gone, read_closed, write_closed, shutdown_sock,
     push_fd, pop_fd, fd_waiting, fd_room,
     map_room, map_note, map_release, map_release_all, maps_live, map_rec_base, map_rec_word, shm_file_cover_ref, shm_file_overlaps, shm_file_mark, shm_file_key,
     map_arena_find, shm_demand, shm_lazy, shm_frame_demand, shm_resident, UM_LAZY, UM_WRITE,
@@ -93,8 +94,7 @@ const BACKLOG_MAX: u64 = 64
 const FQ_COUNT: u64 = 0
 const FQ_SLOT: u64 = 8
 const FQ_MARK: u64 = 136
-const RING_DATA: u64 = 320
-const RING_USABLE: u64 = 3776
+const DGRAM_LIMIT: u64 = 3776
 
 const UK_FREE: u64 = 0
 const UK_STREAM: u64 = 1
@@ -356,15 +356,9 @@ fn ensure_ring(state: u64, i: u64) -> u64 {
     if r != 0 {
         return r
     }
-    let frame: u64 = mmframe.frame_alloc_high_first(state)
-    if frame == 0 {
+    r = usring.ring_new(state)
+    if r == 0 {
         return 0
-    }
-    r = mmframe.kva(frame)
-    var o: u64 = 0
-    while o < RING_DATA {
-        regio.write8(r + o, 0)
-        o = o + 1
     }
     kstate.set(state, sk_at(i) + SK_RING, r)
     kstate.set(state, sk_at(i) + SK_HEAD, 0)
@@ -403,7 +397,7 @@ fn sock_free(state: u64, i: u64) {
             }
             q = q + 1
         }
-        mmframe.frame_free(state, mmframe.phys(r))
+        usring.ring_free(state, r)
     }
     let nmi: u64 = kstate.get(state, sk_at(i) + SK_NAME)
     if nmi < UNAME_MAX {
@@ -731,7 +725,7 @@ fn waiting(state: u64, i: u64) -> u64 {
     if t >= h {
         return t - h
     }
-    return RING_USABLE - h + t
+    return usring.RING_BYTES - h + t
 }
 
 fn room(state: u64, i: u64) -> u64 {
@@ -743,10 +737,10 @@ fn room(state: u64, i: u64) -> u64 {
         return 0
     }
     let w: u64 = waiting(state, i)
-    if w + 1 >= RING_USABLE {
+    if w + 1 >= usring.RING_BYTES {
         return 0
     }
-    return RING_USABLE - w - 1
+    return usring.RING_BYTES - w - 1
 }
 
 fn peer_gone(state: u64, i: u64) -> bool {
@@ -759,70 +753,66 @@ fn peer_gone(state: u64, i: u64) -> bool {
     return kstate.get(state, sk_at(i) + SK_PEER) >= USOCK_MAX
 }
 
-fn send_bytes(state: u64, i: u64, src: u64, len: u64) -> u64 {
+fn send_peer(state: u64, i: u64) -> u64 {
     if i >= USOCK_MAX {
-        return errno.E_BADF
+        return USOCK_MAX
     }
     let p: u64 = kstate.get(state, sk_at(i) + SK_PEER)
-    if p >= USOCK_MAX || shut_bit(state, i, USED_NO_OUT) {
-        return errno.E_PIPE
+    if p >= USOCK_MAX || shut_bit(state, i, USED_NO_OUT) || kstate.get(state, sk_at(p) + SK_RING) == 0 {
+        return USOCK_MAX
     }
+    return p
+}
+
+fn put_window(state: u64, p: u64, want: u64) -> u64 {
     let r: u64 = kstate.get(state, sk_at(p) + SK_RING)
-    if r == 0 {
-        return errno.E_PIPE
-    }
-    var n: u64 = len
+    let t: u64 = kstate.get(state, sk_at(p) + SK_TAIL)
+    var n: u64 = usring.ring_span(t, want)
     let free: u64 = room(state, p)
     if n > free {
         n = free
     }
-    if n == 0 {
+    if n == 0 || !usring.ring_back(state, r, t, n) {
         return 0
     }
-    var t: u64 = kstate.get(state, sk_at(p) + SK_TAIL)
-    var o: u64 = 0
-    while o < n {
-        regio.write8(r + RING_DATA + t, kstate.get8(state + src + o))
-        t = t + 1
-        if t >= RING_USABLE {
-            t = 0
-        }
-        o = o + 1
-    }
-    kstate.set(state, sk_at(p) + SK_TAIL, t)
-    kstate.add(state, mmlock.LOCK_BASE + C_BYTES, n)
     return n
 }
 
-fn recv_bytes(state: u64, i: u64, dst: u64, len: u64) -> u64 {
-    if i >= USOCK_MAX {
-        return errno.E_BADF
-    }
-    let r: u64 = kstate.get(state, sk_at(i) + SK_RING)
-    if r == 0 {
+fn put_addr(state: u64, p: u64) -> u64 {
+    return usring.ring_at(kstate.get(state, sk_at(p) + SK_RING), kstate.get(state, sk_at(p) + SK_TAIL))
+}
+
+fn advance_tail(state: u64, p: u64, n: u64) {
+    kstate.set(state, sk_at(p) + SK_TAIL, usring.ring_fwd(kstate.get(state, sk_at(p) + SK_TAIL), n))
+}
+
+fn put_commit(state: u64, p: u64, n: u64) {
+    advance_tail(state, p, n)
+    kstate.add(state, mmlock.LOCK_BASE + C_BYTES, n)
+}
+
+fn get_window(state: u64, i: u64, want: u64) -> u64 {
+    if i >= USOCK_MAX || kstate.get(state, sk_at(i) + SK_RING) == 0 {
         return 0
     }
-    var n: u64 = len
+    var n: u64 = usring.ring_span(kstate.get(state, sk_at(i) + SK_HEAD), want)
     let have: u64 = waiting(state, i)
     if n > have {
         n = have
     }
-    if n == 0 {
-        return 0
-    }
-    var h: u64 = kstate.get(state, sk_at(i) + SK_HEAD)
-    var o: u64 = 0
-    while o < n {
-        kstate.set8(state + dst + o,
-            regio.read8(r + RING_DATA + h) as u8)
-        h = h + 1
-        if h >= RING_USABLE {
-            h = 0
-        }
-        o = o + 1
-    }
-    kstate.set(state, sk_at(i) + SK_HEAD, h)
     return n
+}
+
+fn get_addr(state: u64, i: u64) -> u64 {
+    return usring.ring_at(kstate.get(state, sk_at(i) + SK_RING), kstate.get(state, sk_at(i) + SK_HEAD))
+}
+
+fn get_commit(state: u64, i: u64, n: u64) {
+    let r: u64 = kstate.get(state, sk_at(i) + SK_RING)
+    let h: u64 = kstate.get(state, sk_at(i) + SK_HEAD)
+    let nh: u64 = usring.ring_fwd(h, n)
+    usring.ring_release(state, r, h, nh, kstate.get(state, sk_at(i) + SK_TAIL))
+    kstate.set(state, sk_at(i) + SK_HEAD, nh)
 }
 
 fn dgram_room(state: u64, i: u64) -> u64 {
@@ -852,34 +842,38 @@ fn send_dgram_to(state: u64, p: u64, src: u64, len: u64) -> u64 {
     if r == 0 {
         return errno.E_PIPE
     }
-    if len + DGRAM_HDR + 1 >= RING_USABLE {
+    if len + DGRAM_HDR + 1 >= DGRAM_LIMIT {
         return errno.E_MSGSIZE
     }
     if room(state, p) < len + DGRAM_HDR {
         return errno.E_AGAIN
     }
     var t: u64 = kstate.get(state, sk_at(p) + SK_TAIL)
+    if !usring.ring_back(state, r, t, len + DGRAM_HDR) {
+        return errno.E_AGAIN
+    }
     var o: u64 = 0
     while o < DGRAM_HDR {
-        regio.write8(r + RING_DATA + t, (len >> (o * 8)) & 0xFF)
-        t = t + 1
-        if t >= RING_USABLE {
-            t = 0
-        }
+        regio.write8(usring.ring_at(r, t), (len >> (o * 8)) & 0xFF)
+        t = usring.ring_fwd(t, 1)
         o = o + 1
     }
-    o = 0
-    while o < len {
-        regio.write8(r + RING_DATA + t, kstate.get8(state + src + o))
-        t = t + 1
-        if t >= RING_USABLE {
-            t = 0
-        }
-        o = o + 1
-    }
-    kstate.set(state, sk_at(p) + SK_TAIL, t)
+    usring.ring_put(r, t, state + src, len)
+    advance_tail(state, p, len + DGRAM_HDR)
     kstate.add(state, mmlock.LOCK_BASE + C_BYTES, len)
     return len
+}
+
+fn dgram_header(r: u64, head: u64) -> u64 {
+    var h: u64 = head
+    var mlen: u64 = 0
+    var o: u64 = 0
+    while o < DGRAM_HDR {
+        mlen = mlen | (regio.read8(usring.ring_at(r, h)) << (o * 8))
+        h = usring.ring_fwd(h, 1)
+        o = o + 1
+    }
+    return mlen
 }
 
 fn dgram_len(state: u64, i: u64) -> u64 {
@@ -890,25 +884,7 @@ fn dgram_len(state: u64, i: u64) -> u64 {
     if r == 0 {
         return 0
     }
-    var h: u64 = kstate.get(state, sk_at(i) + SK_HEAD)
-    var mlen: u64 = 0
-    var o: u64 = 0
-    while o < DGRAM_HDR {
-        mlen = mlen | (regio.read8(r + RING_DATA + h) << (o * 8))
-        h = h + 1
-        if h >= RING_USABLE {
-            h = 0
-        }
-        o = o + 1
-    }
-    return mlen
-}
-
-fn ring_dist(from: u64, to: u64) -> u64 {
-    if to >= from {
-        return to - from
-    }
-    return RING_USABLE - from + to
+    return dgram_header(r, kstate.get(state, sk_at(i) + SK_HEAD))
 }
 
 fn fd_deliverable(state: u64, i: u64) -> bool {
@@ -923,7 +899,7 @@ fn fd_deliverable(state: u64, i: u64) -> bool {
     var yes: bool = false
     if regio.read64(r + FQ_COUNT) != 0 {
         let mark: u64 = regio.read64(r + FQ_MARK)
-        let d: u64 = ring_dist(kstate.get(state, sk_at(i) + SK_HEAD), mark)
+        let d: u64 = usring.ring_dist(kstate.get(state, sk_at(i) + SK_HEAD), mark)
         yes = d == 0 || d > waiting(state, i)
     }
     fqlock.leave(state, fl)
@@ -941,7 +917,7 @@ fn fd_limit(state: u64, i: u64, avail: u64) -> u64 {
     let fl: u64 = fqlock.enter(state)
     var limit: u64 = avail
     if regio.read64(r + FQ_COUNT) != 0 {
-        let d: u64 = ring_dist(kstate.get(state, sk_at(i) + SK_HEAD), regio.read64(r + FQ_MARK))
+        let d: u64 = usring.ring_dist(kstate.get(state, sk_at(i) + SK_HEAD), regio.read64(r + FQ_MARK))
         if d != 0 && d < avail {
             limit = d
         }
@@ -972,33 +948,14 @@ fn recv_dgram(state: u64, i: u64, dst: u64, len: u64) -> u64 {
     if waiting(state, i) < DGRAM_HDR {
         return 0
     }
-    var h: u64 = kstate.get(state, sk_at(i) + SK_HEAD)
-    var mlen: u64 = 0
-    var o: u64 = 0
-    while o < DGRAM_HDR {
-        mlen = mlen | (regio.read8(r + RING_DATA + h) << (o * 8))
-        h = h + 1
-        if h >= RING_USABLE {
-            h = 0
-        }
-        o = o + 1
-    }
+    let h: u64 = kstate.get(state, sk_at(i) + SK_HEAD)
+    let mlen: u64 = dgram_header(r, h)
     var n: u64 = mlen
     if n > len {
         n = len
     }
-    o = 0
-    while o < mlen {
-        if o < n {
-            kstate.set8(state + dst + o, regio.read8(r + RING_DATA + h) as u8)
-        }
-        h = h + 1
-        if h >= RING_USABLE {
-            h = 0
-        }
-        o = o + 1
-    }
-    kstate.set(state, sk_at(i) + SK_HEAD, h)
+    usring.ring_get(r, usring.ring_fwd(h, DGRAM_HDR), state + dst, n)
+    get_commit(state, i, mlen + DGRAM_HDR)
     return n
 }
 
