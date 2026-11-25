@@ -13,6 +13,7 @@ import fs.iattr
 export {
     setup, disable, enabled, begin, commit, abort, write, read, read_stream, read_stream_span,
     replay, needed, room, slots, counter, chunk, clear,
+    held, hold, held_drop,
     write_blocks, commit_lazy, flush_pending, pending, age, group_on, group_counter,
     GROUP_IDLE_TICKS, GC_GROUPS, GC_DEFERRED,
     J_TX, J_REPLAY, J_RBLOCKS, J_CHUNKS, J_WRITES, J_HITS, J_STGRUNS,
@@ -64,6 +65,7 @@ static mut g_pending: [u64; 1] = [0 as u64; 1]
 static mut g_since: [u64; 1] = [0 as u64; 1]
 static mut g_mode: [u64; 1] = [0 as u64; 1]
 static mut g_stats: [u64; 2] = [0 as u64; 2]
+static mut g_held: [u64; 2] = [0 as u64; 2]
 
 const MAP_ENTRIES: u64 = 1024
 const MAP_MASK: u64 = 1023
@@ -84,6 +86,19 @@ fn g(state: u64, off: u64) -> u64 {
 
 fn s(state: u64, off: u64, v: u64) {
     kstate.set(state, kstate.JR_OFF + off, v)
+}
+
+fn held_drop() {
+    g_held[0] = 0
+}
+
+fn hold(state: u64, lba: u64) {
+    g_held[0] = state
+    g_held[1] = lba
+}
+
+fn held(state: u64, lba: u64) -> bool {
+    return g_held[0] == state && g_held[1] == lba
 }
 
 fn counter(state: u64, welcher: u64) -> u64 {
@@ -210,6 +225,7 @@ fn room(state: u64) -> u64 {
 }
 
 fn disable(state: u64) {
+    held_drop()
     iattr.flush()
     let _flushed: bool = flush_pending(state)
     g_pending[0] = 0
@@ -220,6 +236,7 @@ fn disable(state: u64) {
 }
 
 fn setup(state: u64, jstart: u64, jblocks: u64) -> bool {
+    held_drop()
     s(state, J_DEPTH, 0)
     s(state, J_COUNT, 0)
     s(state, J_FULL, 0)
@@ -341,6 +358,16 @@ fn map_insert(state: u64, lba: u64, slot: u64) {
 }
 
 fn write(state: u64, lba: u64, src: u64) -> bool {
+    let ok: bool = write_block(state, lba, src)
+    if ok && src == state + kstate.FS_INODE_BUF {
+        hold(state, lba)
+    } else if g_held[1] == lba {
+        held_drop()
+    }
+    return ok
+}
+
+fn write_block(state: u64, lba: u64, src: u64) -> bool {
     iattr.drop(state, lba)
     if !enabled(state) || g(state, J_DEPTH) == 0 {
         return blk.write(state, lba, src)
@@ -388,6 +415,9 @@ fn write_blocks(state: u64, lba: u64, src: u64, n: u64) -> bool {
 }
 
 fn read(state: u64, lba: u64, dst: u64) -> bool {
+    if dst == state + kstate.FS_INODE_BUF {
+        held_drop()
+    }
     if enabled(state) && g(state, J_DEPTH) != 0 {
         let i: u64 = find(state, lba)
         if i != KEIN {
@@ -420,6 +450,7 @@ fn read_stream_span(state: u64, lba: u64, dst: u64, span: u64) -> bool {
 }
 
 fn abort(state: u64) {
+    held_drop()
     iattr.flush()
     let d: u64 = g(state, J_DEPTH)
     if d > 0 {
@@ -483,6 +514,7 @@ fn persist(state: u64) -> bool {
         g_stats[GC_GROUPS as usize] = g_stats[GC_GROUPS as usize] + 1
     }
     if !ok {
+        held_drop()
         s(state, J_COUNT, 0)
         s(state, J_FULL, 0)
     }
@@ -621,6 +653,7 @@ fn chunk(state: u64) -> bool {
 }
 
 fn replay(state: u64, jstart: u64, jblocks: u64) -> u64 {
+    held_drop()
     iattr.flush()
     if jstart == 0 || jblocks < BLOCKS_NEEDED {
         return 0
@@ -702,6 +735,7 @@ fn replay(state: u64, jstart: u64, jblocks: u64) -> u64 {
 }
 
 fn clear(state: u64, jstart: u64, jblocks: u64) {
+    held_drop()
     if jstart == 0 || jblocks < BLOCKS_NEEDED {
         return
     }

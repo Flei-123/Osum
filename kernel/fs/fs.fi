@@ -437,7 +437,26 @@ fn buf_sb(state: u64) -> u64 {
 
 #[inline]
 fn buf_in(state: u64) -> u64 {
-    return state + kstate.FS_OFF + 512
+    return state + kstate.FS_INODE_BUF
+}
+
+fn inode_block_load(state: u64, lba: u64) -> bool {
+    if ofsj.held(state, lba) {
+        ofsj.held_drop()
+        return true
+    }
+    return ofsj.read(state, lba, buf_in(state))
+}
+
+fn inode_block_peek(state: u64, lba: u64) -> bool {
+    if ofsj.held(state, lba) {
+        return true
+    }
+    if !ofsj.read(state, lba, buf_in(state)) {
+        return false
+    }
+    ofsj.hold(state, lba)
+    return true
 }
 
 #[inline]
@@ -531,7 +550,7 @@ fn set_times(state: u64, ino: u64, c: u64, m: u64, a: u64) -> bool {
         return false
     }
     let flags: u64 = enter(state)
-    if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
+    if !inode_block_load(state, inode_block_of(state, ino)) {
         leave(state, flags)
         return false
     }
@@ -744,7 +763,7 @@ fn inode_get(state: u64, ino: u64, field: u64) -> u64 {
         }
         v = 0
     }
-    if ofsj.read(state, lba, buf_in(state)) {
+    if inode_block_peek(state, lba) {
         let at: u64 = buf_in(state) + off
         v = kstate.get(at, field)
         if which != iattr.MISS {
@@ -792,7 +811,7 @@ fn inode_set(state: u64, ino: u64, field: u64, v: u64) -> bool {
     }
     let flags: u64 = enter(state)
     var ok: bool = false
-    if ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
+    if inode_block_load(state, inode_block_of(state, ino)) {
         regio.write64(buf_in(state) + inode_off(state, ino) + field, v)
         ok = ofsj.write(state, inode_block_of(state, ino), buf_in(state))
     }
@@ -812,7 +831,7 @@ fn inode_get_blind(state: u64, ino: u64, field: u64) -> u64 {
     if ino == 0 || ino > inode_count(state) {
         return 0
     }
-    if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
+    if !inode_block_peek(state, inode_block_of(state, ino)) {
         return 0
     }
     return regio.read64(buf_in(state) + inode_off(state, ino) + field)
@@ -859,7 +878,7 @@ fn race_core(state: u64, index: u64, soll: u64, runden: u64,
 fn inode_init(state: u64, ino: u64, kind: u64) -> bool {
     let flags: u64 = enter(state)
     dirindex.touch(state, ino)
-    if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
+    if !inode_block_load(state, inode_block_of(state, ino)) {
         leave(state, flags)
         return false
     }
@@ -884,7 +903,7 @@ fn inode_zap(state: u64, ino: u64) -> bool {
         return false
     }
     let flags: u64 = enter(state)
-    if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
+    if !inode_block_load(state, inode_block_of(state, ino)) {
         leave(state, flags)
         return false
     }
@@ -1559,7 +1578,7 @@ fn truncate_directs(state: u64, ino: u64) -> bool {
         }
         i = i + 1
     }
-    if !ofsj.read(state, lba, buf_in(state)) {
+    if !inode_block_load(state, lba) {
         return more
     }
     i = 0
@@ -1841,7 +1860,7 @@ fn size_write(state: u64, ino: u64, new_size: u64, only_grow: bool) -> bool {
     if only_grow && size_defer(state, ino, new_size) {
         return true
     }
-    if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
+    if !inode_block_load(state, inode_block_of(state, ino)) {
         return false
     }
     let at: u64 = buf_in(state) + inode_off(state, ino)
@@ -2074,7 +2093,7 @@ fn dp_flush(state: u64) -> bool {
     let grown_to: u64 = dp_size_new
     dp_size_new = 0
     let lba: u64 = inode_block_of(state, dp_ino)
-    if !ofsj.read(state, lba, buf_in(state)) {
+    if !inode_block_load(state, lba) {
         return false
     }
     let off: u64 = inode_off(state, dp_ino)
@@ -2128,7 +2147,7 @@ fn dp_load(state: u64, ino: u64) -> bool {
         dp_loaded = 1
         return true
     }
-    if !ofsj.read(state, lba, buf_in(state)) {
+    if !inode_block_peek(state, lba) {
         return false
     }
     let at: u64 = buf_in(state) + off
@@ -3642,6 +3661,7 @@ fn format_as(state: u64, v: u64, inodes: u64) -> bool {
         kb = kb + 1
     }
     // The inode table: empty.
+    ofsj.held_drop()
     octets.zero(buf_in(state), BS)
     var k: u64 = 0
     while k < itb {
