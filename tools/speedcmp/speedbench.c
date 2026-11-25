@@ -282,6 +282,7 @@ static void run_thread(long n)
 #include "sbmeta.h"
 #include "sbsysfs.h"
 #include "sbrand.h"
+#include "sbshm.h"
 #include "sbproc.h"
 #include "pbench.h"
 #include "wakebench.h"
@@ -337,6 +338,7 @@ int main(int argc, char **argv)
     sbm_run_all();
     sbs_run_all();
     sbr_run_all();
+    sbshm_run_all();
     sbp_run_all();
     tlb_bench();
     cpu_bench();
