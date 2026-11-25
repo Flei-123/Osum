@@ -285,6 +285,7 @@ static void run_thread(long n)
 #include "wakebench.h"
 #include "sbcpus.h"
 #include "tlbbench.h"
+#include "cpubench.h"
 
 int main(int argc, char **argv)
 {
@@ -334,6 +335,7 @@ int main(int argc, char **argv)
     sbm_run_all();
     sbp_run_all();
     tlb_bench();
+    cpu_bench();
     close(data_fd);
     unlink(DATA_PATH);
     (void)!write(1, "\nS END 0 0\n", 11);
