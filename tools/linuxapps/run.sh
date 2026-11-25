@@ -60,9 +60,9 @@ mapfile -t SP < "$OUT/spec.txt"
 bash tools/mkfsfi/mkfs.sh build "$OUT/disk.img" "$BLOCKS" --v3 --inodes=${INODES:-4096} "${SP[@]}" "/etc/fx.sh=$OUT/fx.sh@755" "/etc/inittab=$OUT/inittab" > "$OUT/mkfs.log" 2>&1 \
     || { echo "LINUXAPPS: mkfs failed"; tail -5 "$OUT/mkfs.log"; exit 1; }
 echo "LINUXAPPS: disk $(stat -c%s "$OUT/disk.img") bytes, kernel $KERNEL"
-DRV=(-drive "file=$OUT/disk.img,format=raw,if=ide,index=0")
-[ "$DRIVE" = ahci ] && DRV=(-device ahci,id=ahci -drive "file=$OUT/disk.img,format=raw,if=none,id=d0" -device ide-hd,drive=d0,bus=ahci.0)
-[ "$DRIVE" = nvme ] && DRV=(-drive "file=$OUT/disk.img,format=raw,if=none,id=d0" -device nvme,drive=d0,serial=fxnvme)
+DRV=(-drive "file=$OUT/disk.img,format=raw${DRIVE_SNAP:+,snapshot=on},if=ide,index=0")
+[ "$DRIVE" = ahci ] && DRV=(-device ahci,id=ahci -drive "file=$OUT/disk.img,format=raw${DRIVE_SNAP:+,snapshot=on},if=none,id=d0" -device ide-hd,drive=d0,bus=ahci.0)
+[ "$DRIVE" = nvme ] && DRV=(-drive "file=$OUT/disk.img,format=raw${DRIVE_SNAP:+,snapshot=on},if=none,id=d0" -device nvme,drive=d0,serial=fxnvme)
 SOCK="$OUT/mon.sock"; rm -f "$SOCK"
 timeout "$TMO" qemu-system-x86_64 "${ACC[@]}" -smp "${SMP:-1}" -kernel "$KERNEL" -m "$MEM" -append "$KARGS" \
     -serial "file:$OUT/ser.txt" -display none -no-reboot -monitor "unix:$SOCK,server,nowait" "${DRV[@]}" \

@@ -28,3 +28,5 @@ for l in lines:
     for s in set(fr): inc[s]+=1
 print("kernel",n,"user",nu)
 for s,c in inc.most_common(top): print("%5d %5.1f%% %s"%(c,100.0*c/max(n,1),s))
+print("-- leaf")
+for s,c in leaf.most_common(top): print("%5d %5.1f%% %s"%(c,100.0*c/max(n,1),s))
