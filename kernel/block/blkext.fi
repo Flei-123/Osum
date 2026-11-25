@@ -1,0 +1,75 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import mm.mmframe
+
+export { BASE_WAYS, ext_ways, data_of, cell_of, note_evict, grow_due, grow }
+
+const BASE_WAYS: u64 = 256
+const CHUNK_WAYS: u64 = 256
+const CHUNK_SHIFT: u64 = 8
+const CHUNK_MASK: u64 = 255
+const MAX_CHUNKS: u64 = 15
+const WAY_BYTES: u64 = 4096
+const CELL_BYTES: u64 = 32
+const META_AT: u64 = 1048576
+const CHUNK_FRAMES: u64 = 258
+const RAM_DIV_FRAMES: u64 = 16512
+const RESERVE_FRAMES: u64 = 16384
+
+static mut chunk_base: [u64; 15] = [0 as u64; 15]
+static mut chunks: u64 = 0
+static mut evicts: u64 = 0
+
+fn ext_ways() -> u64 {
+    return chunks << CHUNK_SHIFT
+}
+
+fn chunk_of(way: u64) -> u64 {
+    return chunk_base[((way - BASE_WAYS) >> CHUNK_SHIFT) as usize]
+}
+
+fn data_of(way: u64) -> u64 {
+    return chunk_of(way) + ((way - BASE_WAYS) & CHUNK_MASK) * WAY_BYTES
+}
+
+fn cell_of(way: u64, off: u64) -> u64 {
+    return chunk_of(way) + META_AT + ((way - BASE_WAYS) & CHUNK_MASK) * CELL_BYTES + off
+}
+
+fn note_evict() {
+    evicts = evicts + 1
+}
+
+fn limit(state: u64) -> u64 {
+    let cap: u64 = mmframe.frames_total(state) / RAM_DIV_FRAMES
+    if cap > MAX_CHUNKS {
+        return MAX_CHUNKS
+    }
+    return cap
+}
+
+fn grow_due(state: u64, total: u64) -> bool {
+    return evicts >= total && chunks < limit(state)
+}
+
+fn grow(state: u64) -> u64 {
+    evicts = 0
+    if chunks >= limit(state) || mmframe.frames_free(state) < RESERVE_FRAMES {
+        return 0
+    }
+    let b: u64 = mmframe.frame_run(state, CHUNK_FRAMES)
+    if b == 0 {
+        return 0
+    }
+    chunk_base[chunks as usize] = b
+    let first: u64 = BASE_WAYS + (chunks << CHUNK_SHIFT)
+    chunks = chunks + 1
+    var i: u64 = 0
+    while i < CHUNK_WAYS {
+        kstate.set(cell_of(first + i, 0), 0, 0)
+        i = i + 1
+    }
+    return first
+}
