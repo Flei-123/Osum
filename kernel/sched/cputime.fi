@@ -1,0 +1,73 @@
+profile kernel
+
+import lib.kstate
+
+export { note, task_user, cpu_user, RING_MASK }
+
+const RING_MASK: u64 = 3
+const RING_USER: u64 = 3
+
+static mut task_pid: [u64; 512] = [0 as u64; 512]
+static mut task_ticks: [u64; 512] = [0 as u64; 512]
+static mut core_ticks: [u64; 8] = [0 as u64; 8]
+static mut due_at: [u64; 8] = [0 as u64; 8]
+
+const LATE_DIVISOR: u64 = 50
+const RESYNC_PERIODS: u64 = 2
+
+fn deferred(core: u64, now: u64, period: u64) -> bool {
+    if period == 0 || core >= kstate.MAX_CPUS {
+        return false
+    }
+    let due: u64 = due_at[core as usize] + period
+    if due_at[core as usize] == 0 || now + period / 2 < due || now > due + RESYNC_PERIODS * period {
+        due_at[core as usize] = now
+        return false
+    }
+    if now > due && now - due > period / LATE_DIVISOR {
+        due_at[core as usize] = due
+        return true
+    }
+    due_at[core as usize] = now
+    return false
+}
+
+fn note(core: u64, slot: u64, pid: u64, cs: u64, now: u64, period: u64) {
+    let late: bool = deferred(core, now, period)
+    if (cs & RING_MASK) != RING_USER || late {
+        return
+    }
+    if core < kstate.MAX_CPUS {
+        core_ticks[core as usize] = core_ticks[core as usize] + 1
+    }
+    if slot >= kstate.MAX_TASKS {
+        return
+    }
+    if task_pid[slot as usize] != pid {
+        task_pid[slot as usize] = pid
+        task_ticks[slot as usize] = 0
+    }
+    task_ticks[slot as usize] = task_ticks[slot as usize] + 1
+}
+
+fn task_user(slot: u64, pid: u64, total: u64) -> u64 {
+    if slot >= kstate.MAX_TASKS || task_pid[slot as usize] != pid {
+        return 0
+    }
+    let user: u64 = task_ticks[slot as usize]
+    if user > total {
+        return total
+    }
+    return user
+}
+
+fn cpu_user(core: u64, busy: u64) -> u64 {
+    if core >= kstate.MAX_CPUS {
+        return 0
+    }
+    let user: u64 = core_ticks[core as usize]
+    if user > busy {
+        return busy
+    }
+    return user
+}

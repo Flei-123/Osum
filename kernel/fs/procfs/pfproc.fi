@@ -21,6 +21,7 @@ import lib.kstate
 import fs.mnt
 import sched.origin
 import bus.pci
+import sched.cputime
 import sched.proc.procbase
 import sched.proc.proclow
 import sched.proc.procmap
@@ -86,7 +87,7 @@ fn w_ch(state: u64, at: u64, c: u64) -> u64 {
         }
         return at + 1
     }
-    kstate.set8(buf(state) + rel, c as u8)
+    *((pfbase.render_buf_addr() + rel) as *mut u8) = c as u8
     return at + 1
 }
 
@@ -627,6 +628,15 @@ fn w_ids(state: u64, at: u64, user: u64, real: u64, effective: u64) -> u64 {
     return w_nl(state, p)
 }
 
+fn w_user_sys(state: u64, at: u64, user: u64, busy: u64) -> u64 {
+    var p: u64 = w_num(state, at, user)
+    p = w_ch(state, p, 32)
+    p = w_ch(state, p, 48)
+    p = w_ch(state, p, 32)
+    p = w_num(state, p, busy - user)
+    return w_ch(state, p, 32)
+}
+
 fn make_stat(state: u64) -> u64 {
     var s1: [u8; 12] = "ticks     \0\0"
     var s2: [u8; 12] = "ctxt      \0\0"
@@ -639,7 +649,6 @@ fn make_stat(state: u64) -> u64 {
     var sb: [u8; 7] = "btime \0"
     var sc: [u8; 6] = "cpu  \0"
     var scc: [u8; 4] = "cpu\0"
-    var sc0: [u8; 6] = " 0 0 \0"
     var sc1: [u8; 13] = " 0 0 0 0 0 0\0"
     var p: u64 = 0
     let total: u64 = kstate.get(state, kstate.TICKS)
@@ -652,12 +661,7 @@ fn make_stat(state: u64) -> u64 {
         idle_ticks = total
     }
     p = w_str(state, p, (&sc[0]) as u64)
-    p = w_num(state, p, total - idle_ticks)
-    p = w_ch(state, p, 32)
-    p = w_ch(state, p, 48)
-    p = w_ch(state, p, 32)
-    p = w_ch(state, p, 48)
-    p = w_ch(state, p, 32)
+    p = w_user_sys(state, p, cputime.cpu_user(0, total - idle_ticks), total - idle_ticks)
     p = w_num(state, p, idle_ticks)
     var z: u64 = 0
     while z < 6 {
@@ -689,8 +693,7 @@ fn make_stat(state: u64) -> u64 {
         p = w_str(state, p, (&scc[0]) as u64)
         p = w_num(state, p, sci)
         p = w_ch(state, p, 32)
-        p = w_num(state, p, ct - ci)
-        p = w_str(state, p, (&sc0[0]) as u64)
+        p = w_user_sys(state, p, cputime.cpu_user(sci, ct - ci), ct - ci)
         p = w_num(state, p, ci)
         p = w_str(state, p, (&sc1[0]) as u64)
         p = w_nl(state, p)
@@ -1092,8 +1095,10 @@ fn make_pstat(state: u64, t: u64) -> u64 {
     p = st_num(state, p, 0)
     p = st_num(state, p, 0)
     p = st_num(state, p, 0)
-    p = st_num(state, p, taskslot.tget(state, t, taskconst.T_TICKS))
-    p = st_num(state, p, 0)
+    let ticks: u64 = taskslot.tget(state, t, taskconst.T_TICKS)
+    let user: u64 = cputime.task_user(t, taskslot.tget(state, t, taskconst.T_PID), ticks)
+    p = st_num(state, p, user)
+    p = st_num(state, p, ticks - user)
     p = st_num(state, p, 0)
     p = st_num(state, p, 0)
     p = st_num(state, p, taskslot.tget(state, t, taskconst.T_PRIO))
