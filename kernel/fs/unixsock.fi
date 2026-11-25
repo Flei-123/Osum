@@ -24,7 +24,7 @@ export {
     pending,
     send_peer, put_window, put_addr, put_commit, get_window, get_addr, get_commit, waiting, room, peer_gone, read_closed, write_closed, shutdown_sock,
     push_fd, pop_fd, fd_waiting, fd_room,
-    map_room, map_note, map_release, map_release_all, maps_live, map_rec_base, map_rec_word, shm_file_cover_ref, shm_file_overlaps, shm_file_mark, shm_file_key,
+    map_room, map_note, map_fork_lazy, map_release, map_release_all, maps_live, map_rec_base, map_rec_word, shm_file_cover_ref, shm_file_overlaps, shm_file_mark, shm_file_key,
     map_arena_find, shm_demand, shm_lazy, shm_file_any, shm_frame_demand, shm_resident, UM_LAZY, UM_WRITE,
     shm_new, shm_new_any, shm_free, shm_used, shm_pages, shm_frame, shm_grow, shm_new_contig, shm_wrap, shm_contig, shm_base, shm_flags, shm_max_pages,
     shm_ref, shm_ref_live, shm_unref, shm_refs, shm_size, shm_set_size,
@@ -1203,6 +1203,36 @@ fn map_note(state: u64, task: u64, i: u64, base: u64, pages: u64, flags: u64) ->
     return false
 }
 
+fn map_fork_lazy(state: u64, from: u64, to: u64) {
+    if map_live(state) == 0 {
+        return
+    }
+    var k: u64 = 0
+    while k < UMAP_MAX {
+        let b: u64 = kstate.get(state, um_at(k))
+        let w: u64 = kstate.get(state, um_at(k) + 8)
+        if b != 0 && (w & 0xFFFF) == from && (w & UM_LAZY) != 0 {
+            map_fork_one(state, to, b, w)
+        }
+        k = k + 1
+    }
+}
+
+fn map_fork_one(state: u64, to: u64, b: u64, w: u64) {
+    let i: u64 = (w >> 16) & 0xFFFF
+    var flags: u64 = UM_LAZY
+    if (w & UM_WRITE) != 0 && shm_wmap_take(state, i) {
+        flags = flags | UM_WRITE
+    }
+    if !map_note(state, to, i, b, (w >> 32) & UM_PAGES_MASK, flags) {
+        if (flags & UM_WRITE) != 0 {
+            shm_wmap_drop(state, i)
+        }
+        return
+    }
+    shm_ref(state, i)
+}
+
 fn map_live(state: u64) -> u64 {
     return kstate.get(state, mmlock.LOCK_BASE + C_UMAPS)
 }
@@ -1551,35 +1581,20 @@ fn shm_grow(state: u64, i: u64, n: u64) -> u64 {
     if tab_err != 0 {
         return tab_err
     }
-    var have: u64 = kstate.get(state, sm_at(i) + SM_PAGES)
-    var eager: u64 = n
-    if eager > SHM_PAGES_MAX {
-        eager = SHM_PAGES_MAX
-    }
-    while have < eager {
-        let f: u64 = mmframe.frame_alloc_user(state)
-        if f == 0 {
-            return errno.E_NOMEM
-        }
-        mmframe.fill8(mmframe.kva(f), mmframe.FRAME_SIZE, 0)
-        regio.write64(pg_slot(state, i, have), f)
-        have = have + 1
-        kstate.set(state, sm_at(i) + SM_PAGES, have)
-    }
     kstate.set(state, sm_at(i) + SM_PAGES, n)
     return 0
 }
 
 fn shm_lazy(state: u64, i: u64) -> bool {
-    if i >= USHM_MAX || shm_contig(state, i) {
-        return false
-    }
-    return kstate.get(state, sm_at(i) + SM_PAGES) > SHM_PAGES_MAX
+    return i < USHM_MAX && !shm_contig(state, i)
 }
 
 fn shm_frame_demand(state: u64, i: u64, p: u64) -> u64 {
-    if i >= USHM_MAX || kstate.get(state, sm_at(i) + SM_USED) == 0 || shm_contig(state, i) {
+    if i >= USHM_MAX || kstate.get(state, sm_at(i) + SM_USED) == 0 {
         return 0
+    }
+    if shm_contig(state, i) {
+        return shm_frame(state, i, p)
     }
     if p >= kstate.get(state, sm_at(i) + SM_PAGES) || p >= SHM_PAGES_LIMIT {
         return 0
