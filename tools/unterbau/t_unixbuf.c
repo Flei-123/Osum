@@ -50,7 +50,7 @@ static void check_capacity(void)
         return;
     }
     fcntl(sv[0], F_SETFL, O_NONBLOCK);
-    unsigned char *out = malloc(BIG), *in = malloc(BIG);
+    unsigned char *out = malloc(BIG), *echo = malloc(BIG);
     fill(out, BIG, 1);
     size_t sent = 0;
     int eagain = 0;
@@ -66,12 +66,12 @@ static void check_capacity(void)
     CHECK("full_is_eagain", sent == BIG || eagain, "errno=%d", errno);
     struct pollfd p = { .fd = sv[1], .events = POLLIN };
     CHECK("poll_in", poll(&p, 1, 0) == 1 && (p.revents & POLLIN), "revents=%x", p.revents);
-    size_t got = read_all(sv[1], in, sent);
-    CHECK("roundtrip", got == sent && first_bad(in, got, 1) == got, "received %zu of %zu, mismatch at %zu", got, sent, first_bad(in, got, 1));
+    size_t got = read_all(sv[1], echo, sent);
+    CHECK("roundtrip", got == sent && first_bad(echo, got, 1) == got, "received %d of %d, mismatch at %d", (int)got, (int)sent, (int)first_bad(echo, got, 1));
     struct pollfd q = { .fd = sv[0], .events = POLLOUT };
     CHECK("poll_out_after_drain", poll(&q, 1, 0) == 1 && (q.revents & POLLOUT), "revents=%x", q.revents);
     free(out);
-    free(in);
+    free(echo);
     close(sv[0]);
     close(sv[1]);
 }
