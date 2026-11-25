@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import sync.atomic
 import arch.cpu
+import sched.sched
+import sched.park
 import lib.kstate
 import serial
 import drv.blk.ahci.ahci_defs
@@ -10,6 +12,10 @@ const DL_TAKEN: u64 = 1
 const DL_SPINS: u64 = 40000000
 
 static mut dl_owner: u64 = 0
+
+static mut dl_parked: u64 = 0
+
+static mut dl_releases: [u64; 9] = [0 as u64; 9]
 
 static mut dl_refused: u64 = 0
 
@@ -47,27 +53,43 @@ fn lock_in(state: u64) -> u64 {
     if kstate.mode_on(state, kstate.M_NOAHCILOCK) {
         return DL_BYPASS
     }
-    let me: u64 = cpu.here(state) + 1
+    let me: u64 = sched.current(state) + 1
     if atomic.load((&dl_owner) as u64) == me {
         atomic.fetch_add((&dl_nested) as u64, 1)
-        dl_say((&s_dl_nest[0]) as u64, me - 1)
+        dl_say((&s_dl_nest[0]) as u64, cpu.here(state))
         return ahci_defs.DL_REFUSE
     }
     var spin: u64 = 0
     while spin < DL_SPINS {
+        let seen: u64 = park.seq((&dl_releases[0]) as u64)
         if atomic.cas((&dl_owner) as u64, 0, me) == 0 {
             return DL_TAKEN
         }
-        atomic.pause()
-        spin = spin + 1
+        if atomic.load((&dl_parked) as u64) != 0 && park.can_park(state) {
+            park.wait_on(state, (&dl_releases[0]) as u64, seen)
+        } else {
+            atomic.pause()
+            spin = spin + 1
+        }
     }
     atomic.fetch_add((&dl_refused) as u64, 1)
     dl_say((&s_dl_busy[0]) as u64, me - 1)
     return ahci_defs.DL_REFUSE
 }
 
-fn lock_out(t: u64) {
+fn lock_out(state: u64, t: u64) {
     if t == DL_TAKEN {
         atomic.store((&dl_owner) as u64, 0)
+        if park.has_waiters((&dl_releases[0]) as u64) {
+            park.wake_all(state, (&dl_releases[0]) as u64)
+        }
     }
+}
+
+fn parked_set(on: bool) {
+    var v: u64 = 0
+    if on {
+        v = 1
+    }
+    atomic.store((&dl_parked) as u64, v)
 }

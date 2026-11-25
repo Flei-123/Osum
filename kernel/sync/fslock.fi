@@ -5,11 +5,16 @@ import lib.kstate
 import sync.atomic
 import sync.fslockstat
 import arch.cpu
+import sched.park
 
-export { enter, leave, mine, take, try_take, give, nested, save_irq, restore_irq }
+export { enter, leave, mine, take, try_take, give, nested, save_irq, restore_irq, park_begin, park_end, holder_parked }
 
 const NESTED: u64 = 0x8000000000000000
 const IF_BIT: u64 = 0x200
+
+static mut parked_holder: u64 = 0
+
+static mut releases: [u64; 9] = [0 as u64; 9]
 
 #[inline]
 fn task_id(state: u64) -> u64 {
@@ -31,8 +36,38 @@ fn mine(state: u64) -> bool {
     return atomic.lock_owner(state, atomic.L_FS) == task_id(state) + 1
 }
 
+fn holder_parked() -> bool {
+    return atomic.load((&parked_holder) as u64) != 0
+}
+
+fn park_begin(state: u64) -> bool {
+    if !mine(state) {
+        return false
+    }
+    atomic.store((&parked_holder) as u64, task_id(state) + 1)
+    return true
+}
+
+fn park_end() {
+    atomic.store((&parked_holder) as u64, 0)
+}
+
+fn take_parking(state: u64) -> bool {
+    let q: u64 = (&releases[0]) as u64
+    while holder_parked() && park.can_park(state) {
+        let seen: u64 = park.seq(q)
+        if atomic.lock_try(state, atomic.L_FS, task_id(state)) {
+            return true
+        }
+        park.wait_on(state, q, seen)
+    }
+    return false
+}
+
 fn take(state: u64) {
-    atomic.lock_take(state, atomic.L_FS, task_id(state))
+    if !take_parking(state) {
+        atomic.lock_take(state, atomic.L_FS, task_id(state))
+    }
     fslockstat.begin()
 }
 
@@ -47,6 +82,9 @@ fn try_take(state: u64) -> bool {
 fn give(state: u64) {
     fslockstat.end()
     atomic.lock_give(state, atomic.L_FS)
+    if park.has_waiters((&releases[0]) as u64) {
+        park.wake_all(state, (&releases[0]) as u64)
+    }
 }
 
 #[inline]

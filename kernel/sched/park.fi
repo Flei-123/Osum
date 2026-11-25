@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import sync.atomic
+import arch.cpu
+import sched.sched
+import sched.hrt
+import sched.taskslot
+import sched.taskconst
+
+export { Q_BYTES, can_park, others_ready, wait_on, wake_all, seq, has_waiters }
+
+const Q_SEQ: u64 = 0
+const Q_MASK: u64 = 8
+const MASK_WORDS: u64 = 8
+const Q_BYTES: u64 = 72
+const PARK_TICKS: u64 = 1
+
+fn can_park(state: u64) -> bool {
+    let cur: u64 = sched.current(state)
+    if cur >= kstate.MAX_TASKS || cur >= MASK_WORDS * 64 {
+        return false
+    }
+    let kind: u64 = taskslot.tget(state, cur, taskconst.T_KIND)
+    return kind == taskconst.K_USER || kind == taskconst.K_WORKER
+}
+
+fn others_ready(state: u64) -> bool {
+    return sched.ready_count(state) != 0
+}
+
+#[inline]
+fn seq(q: u64) -> u64 {
+    return atomic.load(q + Q_SEQ)
+}
+
+fn has_waiters(q: u64) -> bool {
+    var w: u64 = 0
+    while w < MASK_WORDS {
+        if atomic.load(q + Q_MASK + w * 8) != 0 {
+            return true
+        }
+        w = w + 1
+    }
+    return false
+}
+
+fn enlist(q: u64, task: u64) {
+    let word: u64 = q + Q_MASK + (task / 64) * 8
+    let bit: u64 = 1 << (task % 64)
+    var old: u64 = atomic.load(word)
+    while (old & bit) == 0 && atomic.cas(word, old, old | bit) != old {
+        old = atomic.load(word)
+    }
+}
+
+fn wait_on(state: u64, q: u64, seen: u64) {
+    let flags: u64 = sched.irq_save()
+    let cur: u64 = sched.current(state)
+    enlist(q, cur)
+    atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
+    if seq(q) != seen {
+        atomic.lock_give(state, atomic.L_SCHED)
+        sched.irq_restore(flags)
+        return
+    }
+    taskslot.tset(state, cur, taskconst.T_WAKE, kstate.get(state, kstate.TICKS) + PARK_TICKS)
+    hrt.set_wake(cur, 0)
+    taskslot.tset(state, cur, taskconst.T_STATE, taskconst.S_SLEEP)
+    sched.schedule_locked(state)
+    sched.irq_restore(flags)
+}
+
+fn take_word(word: u64) -> u64 {
+    var old: u64 = atomic.load(word)
+    while old != 0 && atomic.cas(word, old, 0) != old {
+        old = atomic.load(word)
+    }
+    return old
+}
+
+fn wake_word(state: u64, base: u64, bits: u64) -> u64 {
+    var left: u64 = bits
+    var woke: u64 = 0
+    var i: u64 = 0
+    while left != 0 {
+        if (left & 1) != 0 {
+            sched.wake_sleeper(state, base + i)
+            woke = woke + 1
+        }
+        left = left >> 1
+        i = i + 1
+    }
+    return woke
+}
+
+fn wake_all(state: u64, q: u64) -> u64 {
+    atomic.fetch_add(q + Q_SEQ, 1)
+    var woke: u64 = 0
+    var w: u64 = 0
+    while w < MASK_WORDS {
+        let bits: u64 = take_word(q + Q_MASK + w * 8)
+        if bits != 0 {
+            woke = woke + wake_word(state, w * 64, bits)
+        }
+        w = w + 1
+    }
+    return woke
+}
