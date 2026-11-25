@@ -1,0 +1,188 @@
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+import libc.kcall
+
+export { u_start }
+
+const CHAIN_LIMIT: u64 = 6000
+const FILL_COUNT: u64 = 3
+const BODY_LEN: u64 = 700
+
+static mut num: [u8; 32] = [0 as u8; 32];
+static mut path_a: [u8; 64] = [0 as u8; 64];
+static mut path_b: [u8; 64] = [0 as u8; 64];
+static mut body: [u8; 1024] = [0 as u8; 1024];
+
+fn set_num(v: u64) -> u64 {
+    if v == 0 {
+        num[(0) as usize] = 48 as u8;
+        num[(1) as usize] = 0 as u8;
+        return 1;
+    }
+    var place: u64 = 0;
+    var y: u64 = v;
+    while y > 0 {
+        place = place + 1;
+        y = y / 10;
+    }
+    let n: u64 = place;
+    var x: u64 = v;
+    while place > 0 {
+        num[(place - 1) as usize] = (48 + (x % 10)) as u8;
+        x = x / 10;
+        place = place - 1;
+    }
+    num[(n) as usize] = 0 as u8;
+    return n;
+}
+
+fn chain_path(dest: u64, prefix: u64, n: u64) {
+    ulib.strcpy(dest, prefix);
+    set_num(n);
+    ulib.strcat(dest, (&num[0 as usize]) as u64);
+}
+
+fn exists(path: u64) -> bool {
+    let fd: u64 = io.open(path, 0);
+    if errno.failed(fd) {
+        return false;
+    }
+    io.close(fd);
+    return true;
+}
+
+fn fill_body() {
+    var i: u64 = 0;
+    while i < BODY_LEN {
+        body[(i) as usize] = ((i * 31 + 7) % 251) as u8;
+        i = i + 1;
+    }
+}
+
+fn writer() -> u64 {
+    var s_los: [u8; 10] = "fsrw: los\0";
+    var p_dir: [u8; 3] = "/r\0";
+    var p_fill: [u8; 9] = "/r/fill\0\0";
+    var p_tmp: [u8; 18] = "/r/data.safe.tmp\0\0";
+    var p_bin: [u8; 18] = "/r/data.safe.bin\0\0";
+    var p_chain: [u8; 6] = "/r/c\0\0";
+    io.make_dir((&p_dir[0 as usize]) as u64);
+    var k: u64 = 0;
+    while k < FILL_COUNT {
+        chain_path((&path_a[0 as usize]) as u64, (&p_fill[0 as usize]) as u64, k);
+        let f: u64 = io.create((&path_a[0 as usize]) as u64);
+        if !errno.failed(f) {
+            io.close(f);
+        }
+        k = k + 1;
+    }
+    fill_body();
+    let df: u64 = io.create((&p_tmp[0 as usize]) as u64);
+    if errno.failed(df) {
+        return 1;
+    }
+    io.write(df, (&body[0 as usize]) as u64, BODY_LEN);
+    io.close(df);
+    chain_path((&path_a[0 as usize]) as u64, (&p_chain[0 as usize]) as u64, 0);
+    let cf: u64 = io.create((&path_a[0 as usize]) as u64);
+    if errno.failed(cf) {
+        return 1;
+    }
+    io.close(cf);
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.say((&s_los[0 as usize]) as u64);
+    ulib.nl();
+    var n: u64 = 0;
+    var at_tmp: bool = true;
+    while n < CHAIN_LIMIT {
+        if at_tmp {
+            ulib.sys(ulib.SYS_RENAME, (&p_tmp[0 as usize]) as u64,
+                (&p_bin[0 as usize]) as u64, 0);
+        } else {
+            ulib.sys(ulib.SYS_RENAME, (&p_bin[0 as usize]) as u64,
+                (&p_tmp[0 as usize]) as u64, 0);
+        }
+        at_tmp = !at_tmp;
+        chain_path((&path_a[0 as usize]) as u64, (&p_chain[0 as usize]) as u64, n);
+        chain_path((&path_b[0 as usize]) as u64, (&p_chain[0 as usize]) as u64, n + 1);
+        ulib.sys(ulib.SYS_RENAME, (&path_a[0 as usize]) as u64,
+            (&path_b[0 as usize]) as u64, 0);
+        n = n + 1;
+    }
+    return 0;
+}
+
+fn verifier() -> u64 {
+    var s_pp: [u8; 14] = "fsrren: pp = \0";
+    var s_at: [u8; 14] = "fsrren: at = \0";
+    var s_ch: [u8; 14] = "fsrren: ch = \0";
+    var s_body: [u8; 17] = "fsrren: body = \0\0";
+    var p_tmp: [u8; 18] = "/r/data.safe.tmp\0\0";
+    var p_bin: [u8; 18] = "/r/data.safe.bin\0\0";
+    var p_chain: [u8; 6] = "/r/c\0\0";
+    var buf: [u8; 1024] = [0 as u8; 1024];
+    var pp: u64 = 0;
+    var which: u64 = 0;
+    if exists((&p_tmp[0 as usize]) as u64) {
+        pp = pp + 1;
+        which = (&p_tmp[0 as usize]) as u64;
+    }
+    if exists((&p_bin[0 as usize]) as u64) {
+        pp = pp + 1;
+        which = (&p_bin[0 as usize]) as u64;
+    }
+    ulib.say((&s_pp[0 as usize]) as u64);
+    ulib.sayu(pp);
+    ulib.nl();
+    var good: u64 = 0;
+    if pp == 1 {
+        fill_body();
+        let fd: u64 = io.open(which, 0);
+        let got: u64 = io.read_full(fd, (&buf[0 as usize]) as u64, 1024);
+        good = 1;
+        if got != BODY_LEN {
+            good = 0;
+        }
+        var i: u64 = 0;
+        while i < BODY_LEN && good == 1 {
+            if buf[(i) as usize] != body[(i) as usize] {
+                good = 0;
+            }
+            i = i + 1;
+        }
+    }
+    ulib.say((&s_body[0 as usize]) as u64);
+    ulib.sayu(good);
+    ulib.nl();
+    var chain: u64 = 0;
+    var last: u64 = 0;
+    var n: u64 = 0;
+    while n <= CHAIN_LIMIT {
+        chain_path((&path_a[0 as usize]) as u64, (&p_chain[0 as usize]) as u64, n);
+        if exists((&path_a[0 as usize]) as u64) {
+            chain = chain + 1;
+            last = n;
+        }
+        n = n + 1;
+    }
+    ulib.say((&s_ch[0 as usize]) as u64);
+    ulib.sayu(chain);
+    ulib.nl();
+    ulib.say((&s_at[0 as usize]) as u64);
+    ulib.sayu(last);
+    ulib.nl();
+    return 0;
+}
+
+fn u_start(args: u64) -> u64 {
+    var w_v: [u8; 2] = "v\0";
+    if ulib.arg_count(args) > 1 {
+        if ulib.streq(ulib.arg_at(args, 1), (&w_v[0 as usize]) as u64) {
+            return verifier();
+        }
+    }
+    return writer();
+}
