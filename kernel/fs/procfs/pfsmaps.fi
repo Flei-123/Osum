@@ -14,8 +14,6 @@ export { make }
 const BLOCK_BYTES_MAX: u64 = 1024
 const READ_AHEAD_BYTES: u64 = 8192
 const LABEL_COUNT: u64 = 22
-const LABEL_MAX: u64 = 24
-const NEWLINE: u64 = 10
 const PAGE_BYTES: u64 = 4096
 const PAGE_KB: u64 = 4
 const HUGE_MASK: u64 = 0xFFFFFFFFFFE00000
@@ -44,29 +42,12 @@ static mut scan_cell: [u64; 4] = [0 as u64; 4]
 
 static mut thp_line: [u8; 26] = b"THPeligible:           0\x0a\x00"
 
-static mut labels: [u8; 232] = b"Size\x0aKernelPageSize\x0aMMUPageSize\x0aRss\x0aPss\x0aPss_Dirty\x0aShared_Clean\x0aShared_Dirty\x0aPrivate_Clean\x0aPrivate_Dirty\x0aReferenced\x0aAnonymous\x0aKSM\x0aLazyFree\x0aAnonHugePages\x0aShmemPmdMapped\x0aFilePmdMapped\x0aShared_Hugetlb\x0aPrivate_Hugetlb\x0aSwap\x0aSwapPss\x0aLocked\x0a"
+static mut labels: [u8; 232] = b"Size\x00KernelPageSize\x00MMUPageSize\x00Rss\x00Pss\x00Pss_Dirty\x00Shared_Clean\x00Shared_Dirty\x00Private_Clean\x00Private_Dirty\x00Referenced\x00Anonymous\x00KSM\x00LazyFree\x00AnonHugePages\x00ShmemPmdMapped\x00FilePmdMapped\x00Shared_Hugetlb\x00Private_Hugetlb\x00Swap\x00SwapPss\x00Locked\x00"
+
+static mut label_offsets: [u64; 22] = [0 as u64, 5 as u64, 20 as u64, 32 as u64, 36 as u64, 40 as u64, 50 as u64, 63 as u64, 76 as u64, 90 as u64, 104 as u64, 115 as u64, 125 as u64, 129 as u64, 138 as u64, 152 as u64, 167 as u64, 181 as u64, 196 as u64, 212 as u64, 217 as u64, 225 as u64]
 
 fn label_start(index: u64) -> u64 {
-    var at: u64 = (&labels[0]) as u64
-    var skip: u64 = index
-    while skip > 0 {
-        while kstate.get8(at) != NEWLINE {
-            at = at + 1
-        }
-        at = at + 1
-        skip = skip - 1
-    }
-    return at
-}
-
-fn label_copy(index: u64, out: u64) {
-    let src: u64 = label_start(index)
-    var i: u64 = 0
-    while kstate.get8(src + i) != NEWLINE && i < LABEL_MAX {
-        kstate.set8(out + i, kstate.get8(src + i) as u8)
-        i = i + 1
-    }
-    kstate.set8(out + i, 0 as u8)
+    return ((&labels[0]) as u64) + label_offsets[index as usize]
 }
 
 fn scan_table(state: u64, pt: u64, from: u64, to: u64) -> u64 {
@@ -74,6 +55,17 @@ fn scan_table(state: u64, pt: u64, from: u64, to: u64) -> u64 {
     var swap: u64 = 0
     var addr: u64 = from
     var slot: u64 = procpt.pt_slot(addr)
+    let count: u64 = (to - from + PAGE_BYTES - 1) / PAGE_BYTES
+    if slot < PT_ENTRIES && count > 1 && slot + count <= PT_ENTRIES && procpt.uniform_from(pt, slot, count) {
+        let first: u64 = procpt.read_entry(pt, slot)
+        if (first & procbase.PAGE_PRESENT) != 0 {
+            return count
+        }
+        if procmap.is_swap_entry(first) {
+            return count << SWAP_SHIFT
+        }
+        return 0
+    }
     while addr < to && slot < PT_ENTRIES {
         let e: u64 = procpt.read_entry(pt, slot)
         if (e & procbase.PAGE_PRESENT) != 0 {
@@ -187,7 +179,6 @@ fn values_needed(at: u64) -> bool {
 }
 
 fn block(state: u64, t: u64, at: u64, from: u64, to: u64, rights: u64) -> u64 {
-    var name: [u8; 25] = [0 as u8; 25]
     var counted: u64 = 0
     if values_needed(at) {
         counted = scan_cached(state, t, from, to)
@@ -199,8 +190,7 @@ fn block(state: u64, t: u64, at: u64, from: u64, to: u64, rights: u64) -> u64 {
     var p: u64 = at
     var i: u64 = 0
     while i < LABEL_COUNT {
-        label_copy(i, (&name[0]) as u64)
-        p = pfwrite.w_kb_line(state, p, (&name[0]) as u64, value_at(i, size_kb, rss_kb, swap_kb, file_backed))
+        p = pfwrite.w_kb_line(state, p, label_start(i), value_at(i, size_kb, rss_kb, swap_kb, file_backed))
         i = i + 1
     }
     p = pfproc.w_str(state, p, (&thp_line[0]) as u64)

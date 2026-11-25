@@ -1179,6 +1179,10 @@ fn run_rights() -> u64 {
     return run_cell[2 as usize]
 }
 
+const RIGHTS_KEY_MASK: u64 = 0x8010000000000FFF
+const RIGHTS_KEY_NONE: u64 = 0x4000000000000000
+const PT_SLOTS: u64 = 512
+
 fn next_run(state: u64, t: u64, from: u64) -> bool {
     let high: u64 = procmap.LAZY_ATOP
     var addr: u64 = from
@@ -1186,6 +1190,8 @@ fn next_run(state: u64, t: u64, from: u64) -> bool {
     var run_r: u64 = 0
     var in_run: bool = false
     var going: bool = true
+    var last_key: u64 = RIGHTS_KEY_NONE
+    var last_rights: u64 = 0
     while going && addr < high {
         let k: u64 = procpt.pd_slot(addr)
         if k != 0 && procpt.pt_for(state, t, addr, false) == 0 {
@@ -1198,10 +1204,35 @@ fn next_run(state: u64, t: u64, from: u64) -> bool {
             let chunk_end: u64 = (addr & 0xFFFFFFFFFFE00000) + 0x200000
             let pt: u64 = procpt.pt_for(state, t, addr, false)
             var slot: u64 = procpt.pt_slot(addr)
+            if pt != 0 && slot == 0 && chunk_end <= high && !proclow.aliased(addr) {
+                if procpt.uniform_from(pt, 0, PT_SLOTS) {
+                    let ur: u64 = procspace.entry_rights(procpt.read_entry(pt, 0))
+                    if in_run {
+                        if ur != run_r {
+                            going = false
+                        } else {
+                            addr = chunk_end
+                        }
+                    } else {
+                        if ur != 0 {
+                            in_run = true
+                            start = addr
+                            run_r = ur
+                        }
+                        addr = chunk_end
+                    }
+                }
+            }
             while going && addr < chunk_end && addr < high {
                 var r: u64 = 0
                 if pt != 0 && slot < 512 {
-                    r = procspace.entry_rights(procpt.read_entry(pt, slot))
+                    let e: u64 = procpt.read_entry(pt, slot)
+                    let key: u64 = e & RIGHTS_KEY_MASK
+                    if key != last_key {
+                        last_rights = procspace.entry_rights(e)
+                        last_key = key
+                    }
+                    r = last_rights
                 }
                 if in_run {
                     if r != run_r {
