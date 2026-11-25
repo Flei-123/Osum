@@ -67,7 +67,7 @@ static void check_capacity(void)
     struct pollfd p = { .fd = sv[1], .events = POLLIN };
     CHECK("poll_in", poll(&p, 1, 0) == 1 && (p.revents & POLLIN), "revents=%x", p.revents);
     size_t got = read_all(sv[1], in, sent);
-    CHECK("roundtrip", got == sent && first_bad(in, got, 1) == got, "got=%zu sent=%zu bad=%zu", got, sent, first_bad(in, got, 1));
+    CHECK("roundtrip", got == sent && first_bad(in, got, 1) == got, "received %zu of %zu, mismatch at %zu", got, sent, first_bad(in, got, 1));
     struct pollfd q = { .fd = sv[0], .events = POLLOUT };
     CHECK("poll_out_after_drain", poll(&q, 1, 0) == 1 && (q.revents & POLLOUT), "revents=%x", q.revents);
     free(out);
