@@ -6,6 +6,8 @@ import arch.cpu
 import arch.msr
 import pwr.pwr
 import pwr.idlestat
+import pwr.haltpoll
+import arch.x86_64.apic
 import sched.taskconst
 import sched.taskslot
 import serial
@@ -27,6 +29,7 @@ const REPORT_AFTER_TICKS: u64 = 6000
 const ENTRY_LOW_MASK: u64 = 4294967295
 const PKG_MSR_COUNT: u64 = 9
 const NEWLINE: u64 = 10
+const CYCLES_PER_US_DIV: u64 = 1000000
 
 static mut applied: [u64; 8] = [0 as u64; 8]
 static mut break_ok: u64 = 2
@@ -93,10 +96,35 @@ fn sleep_here(state: u64) {
         cpu.x_add(state, me, cpu.X_IDLEENT, pwr.ENT_MWAIT)
         return
     }
+    let per_us: u64 = apic.tsc_hz(state) / CYCLES_PER_US_DIV
+    let began_poll: u64 = idlestat.sleep_begin()
+    poll_here(state, me, began_poll)
+    if cpu.x_get(state, me, cpu.X_PEND) != 0 {
+        asm("sti")
+        haltpoll.adapt(me, idlestat.sleep_begin() -% began_poll, per_us)
+        return
+    }
     let began_hlt: u64 = idlestat.sleep_begin()
     asm("sti\nhlt")
     idlestat.sleep_end(me, began_hlt)
     cpu.x_add(state, me, cpu.X_IDLEENT, 1)
+    haltpoll.adapt(me, idlestat.sleep_begin() -% began_poll, per_us)
+}
+
+fn poll_here(state: u64, me: u64, began: u64) {
+    let window: u64 = haltpoll.window(me)
+    if window == 0 || kstate.mode_on(state, kstate.M_NOHALTPOLL) {
+        return
+    }
+    haltpoll.enter(me)
+    if cpu.x_get(state, me, cpu.X_PEND) == 0 {
+        asm("sti")
+        while cpu.x_get(state, me, cpu.X_PEND) == 0 && (idlestat.sleep_begin() -% began) < window {
+            asm("pause")
+        }
+        asm("cli")
+    }
+    haltpoll.leave(me)
 }
 
 fn sync_here(state: u64) {
