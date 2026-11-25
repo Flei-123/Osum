@@ -61,6 +61,8 @@ class Drbg:
         first = chacha_block(self.key, nonce, 0)
         self.key = first[:32]
         rk = first[32:]
+        if n <= 32:
+            return rk[:n]
         out = b''
         counter = 1
         while len(out) < n:

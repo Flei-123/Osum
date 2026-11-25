@@ -395,12 +395,29 @@ fn do_stat(state: u64, me: u64, name: u64, out: u64) -> u64 {
     if kstate.get(state, kstate.FS_READY) == 0 {
         return sysuser.neg(errno.E_NOSYS)
     }
-    let ino: u64 = fs.path(state, buf)
+    let ino: u64 = ofs_follow(state, buf, leaf[0 as usize])
     if ino == 0 {
         return sysuser.neg(errno.E_NOENT)
     }
     fill_stat(state, ino)
     return stat_out(state, me, out)
+}
+
+fn ofs_follow(state: u64, path: u64, leaf: u64) -> u64 {
+    if leaf == dcache.MISS {
+        return fs.path(state, path)
+    }
+    if leaf == dcache.NEG {
+        return 0
+    }
+    return leaf
+}
+
+fn ofs_nofollow(state: u64, path: u64, parent: u64) -> u64 {
+    if parent == 0 {
+        return fs.path_nofollow(state, path)
+    }
+    return fs.child_nofollow(state, parent, path)
 }
 
 // ======================================================== RUNDE OFS3
@@ -433,7 +450,7 @@ fn do_lstat(state: u64, me: u64, name: u64, out: u64) -> u64 {
     if kstate.get(state, kstate.FS_READY) == 0 {
         return sysuser.neg(errno.E_NOSYS)
     }
-    let ino: u64 = fs.path_nofollow(state, buf)
+    let ino: u64 = ofs_nofollow(state, buf, parent[0 as usize])
     if ino == 0 {
         return sysuser.neg(errno.E_NOENT)
     }
@@ -500,7 +517,8 @@ fn do_readlink(state: u64, me: u64, name: u64, out: u64,
     if errno.is_error(len) {
         return len
     }
-    if !perm.walk(state, me, buf) {
+    var parent: [u64; 1] = [0 as u64; 1]
+    if !perm.walk_leaf(state, me, buf, 0, (&parent[0 as usize]) as u64) {
         return sysuser.neg(errno.E_ACCES)
     }
     if vfs.ready(state) {
@@ -534,7 +552,7 @@ fn do_readlink(state: u64, me: u64, name: u64, out: u64,
     if kstate.get(state, kstate.FS_READY) == 0 {
         return sysuser.neg(errno.E_NOSYS)
     }
-    let ino: u64 = fs.path_nofollow(state, buf)
+    let ino: u64 = ofs_nofollow(state, buf, parent[0 as usize])
     if ino == 0 {
         return sysuser.neg(errno.E_NOENT)
     }
@@ -1507,13 +1525,8 @@ fn do_fchown(state: u64, me: u64, fd: u64, uid: u64, gid: u64) -> u64 {
 const ACCESS_NOT_VFS: u64 = 0xFFFFFFFFFFFFFFFF
 const ACCESS_WRITE: u64 = 2
 
-fn vfs_access(state: u64, me: u64, name: u64, want: u64) -> u64 {
+fn vfs_access(state: u64, buf: u64, want: u64) -> u64 {
     if !vfs.ready(state) {
-        return ACCESS_NOT_VFS
-    }
-    let buf: u64 = sysuser.nameb(state)
-    let len: u64 = sysuser.fetch_path(state, me, name, buf, sysconst.MAX_NAME)
-    if errno.is_error(len) {
         return ACCESS_NOT_VFS
     }
     let m: u64 = vfs.mount_for(state, buf)
@@ -1530,13 +1543,25 @@ fn vfs_access(state: u64, me: u64, name: u64, want: u64) -> u64 {
 }
 
 fn do_access(state: u64, me: u64, name: u64, want: u64) -> u64 {
-    let on_vfs: u64 = vfs_access(state, me, name, want)
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = sysuser.fetch_path(state, me, name, buf, sysconst.MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    let on_vfs: u64 = vfs_access(state, buf, want)
     if on_vfs != ACCESS_NOT_VFS {
         return on_vfs
     }
-    let ino: u64 = sysuser.ino_of_path(state, me, name)
-    if errno.is_error(ino) {
-        return ino
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    var leaf: [u64; 1] = [0 as u64; 1]
+    if !perm.walk_leaf(state, me, buf, (&leaf[0 as usize]) as u64, 0) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    let ino: u64 = ofs_follow(state, buf, leaf[0 as usize])
+    if ino == 0 {
+        return sysuser.neg(errno.E_NOENT)
     }
     if want == 0 {
         return 0
