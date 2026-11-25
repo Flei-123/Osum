@@ -33,7 +33,7 @@ import sys.sysfd
 import sys.sysfile
 
 export {
-    big_bottom, brk_of, map_shm_obj, is_brk_guard_probe, clear_child_tid, do_brk, do_madvise, do_map, do_mprotect, do_mremap, do_unmap, file_shm_flush_maps, map_bottom, mem_owner, reap_dead_threads, res_clear, vm_oom_after
+    big_bottom, brk_of, map_shm_obj, is_brk_guard_probe, clear_child_tid, do_brk, do_madvise, do_map, do_mprotect, do_mremap, do_unmap, file_shm_flush_maps, map_bottom, mem_owner, reap_dead_threads, res_clear, res_inherit, vm_oom_after
 }
 
 const PROT_READ: u64 = 1
@@ -304,13 +304,14 @@ fn map_anon(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64) -> 
     // RUNDE LIMITS3: a big PROT_NONE | MAP_NORESERVE mapping is a RESERVATION (JS engines, allocators): address space only, no frame.
     let fixed: bool = is_fixed(flags)
     if prot == 0 && !fixed && len >= RES_MIN && len <= RES_MAX {
-        if pages <= LAZY_RESERVE_PAGES {
-            let lr: u64 = lazy_alloc(state, me, pages, prot)
-            if lr < 0xFFFFFFFFFFFFF000 {
-                return lr
-            }
+        if pages > LAZY_RESERVE_PAGES {
+            return res_add(state, mem_owner(state, me), sysfd.page_up(len), RES_TOP)
         }
-        return res_add(state, mem_owner(state, me), sysfd.page_up(len))
+        let rr: u64 = res_add(state, mem_owner(state, me), sysfd.page_up(len), procbase.LAZY_TOP)
+        if rr < 0xFFFFFFFFFFFFF000 {
+            return rr
+        }
+        return lazy_alloc(state, me, pages, prot)
     }
     if !fixed && pages >= LAZY_MIN_PAGES && !kstate.mode_on(state, kstate.M_NOLAZY) {
         let lz: u64 = lazy_alloc(state, me, pages, prot)
@@ -1117,12 +1118,21 @@ fn res_clear(state: u64, owner: u64) {
     taskslot.tset(state, owner, taskconst.T_LAZY, 0)
 }
 
-fn res_add(state: u64, owner: u64, len: u64) -> u64 {
+fn res_inherit(state: u64, parent: u64, child: u64) {
+    var k: u64 = 0
+    while k < RES_SLOTS {
+        res_set(state, child, k, res_start(state, parent, k), res_len(state, parent, k))
+        k = k + 1
+    }
+    taskslot.tset(state, child, taskconst.T_RESNEXT, taskslot.tget(state, parent, taskconst.T_RESNEXT))
+}
+
+fn res_add(state: u64, owner: u64, len: u64, top: u64) -> u64 {
     var next: u64 = taskslot.tget(state, owner, taskconst.T_RESNEXT)
     if next < RES_BASE {
         next = RES_BASE
     }
-    if next + len > RES_TOP {
+    if next + len > top {
         return sysuser.neg(errno.E_NOMEM)
     }
     // merge with the range that ends exactly here
