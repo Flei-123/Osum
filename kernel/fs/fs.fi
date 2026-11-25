@@ -65,6 +65,7 @@ import mm.fileshare
 import fs.ofsj
 import fs.wbscope
 import fs.deferfree
+import fs.freecount
 import fs.ofsext
 import sched.time
 import libc.regio
@@ -178,6 +179,7 @@ fn inode_count(state: u64) -> u64 {
 }
 
 fn geom_ext(state: u64, xbm: u64, xit: u64, xin: u64) {
+    freecount.invalidate()
     kstate.set(state, kstate.FSG_OFF + G_XBM, xbm)
     kstate.set(state, kstate.FSG_OFF + G_XIT, xit)
     kstate.set(state, kstate.FSG_OFF + G_XIN, xin)
@@ -204,6 +206,7 @@ fn data_start(state: u64) -> u64 {
 }
 
 fn geom(state: u64, inodes: u64, data: u64) {
+    freecount.invalidate()
     kstate.set(state, kstate.FSG_OFF + G_INODES, inodes)
     kstate.set(state, kstate.FSG_OFF + G_DATA, data)
 }
@@ -239,6 +242,7 @@ fn geom_j(state: u64, js: u64, jb: u64) {
 }
 
 fn geom_total(state: u64, n: u64) {
+    freecount.invalidate()
     kstate.set(state, kstate.FSG_OFF + G_TOTAL, n)
 }
 
@@ -1122,8 +1126,10 @@ fn search_free(state: u64, von: u64, bis: u64) -> u64 {
 fn claim_block(state: u64, kb: u64, fund: u64) -> u64 {
     wbscope.mark_struct(state)
     if !bm_store(state, kb) {
+        freecount.invalidate()
         return 0
     }
+    freecount.claimed()
     if !leaf_overwrite_pending() {
         octets.zero(buf_zz(state), BS)
         if ofsj.write(state, fund, buf_zz(state)) {
@@ -1230,8 +1236,13 @@ fn block_clear_bit(state: u64, b: u64) {
         return
     }
     let p: u64 = buf_bm(state) + bm_byte(b)
+    let was_set: bool = (kstate.get8(p) & (1 << (b % 8))) != 0
     kstate.set8(p, (kstate.get8(p) & (255 ^ (1 << (b % 8)))) as u8)
-    let _stored: bool = bm_store(state, kb)
+    if !bm_store(state, kb) {
+        freecount.invalidate()
+    } else if was_set {
+        freecount.released()
+    }
     if b < kstate.get(state, kstate.FSG_OFF + G_HINT) {
         kstate.set(state, kstate.FSG_OFF + G_HINT, b)
     }
@@ -1242,6 +1253,17 @@ fn block_clear_bit(state: u64, b: u64) {
 
 fn free_blocks(state: u64) -> u64 {
     let flags: u64 = enter(state)
+    var n: u64 = 0
+    if freecount.known() {
+        n = freecount.value()
+    } else {
+        n = scan_free_blocks(state)
+    }
+    leave(state, flags)
+    return n + deferfree.queued_blocks(state)
+}
+
+fn scan_free_blocks(state: u64) -> u64 {
     let last: u64 = total_blocks(state)
     var lim: u64 = max_blocks(state)
     if last < lim {
@@ -1252,7 +1274,6 @@ fn free_blocks(state: u64) -> u64 {
     while b < lim {
         let kb: u64 = bm_block_of(state, b)
         if !ofsj.read(state, kb, buf_bm(state)) {
-            leave(state, flags)
             return n
         }
         var ende: u64 = (b / BITS_PER_BLOCK + 1) * BITS_PER_BLOCK
@@ -1273,8 +1294,8 @@ fn free_blocks(state: u64) -> u64 {
             }
         }
     }
-    leave(state, flags)
-    return n + deferfree.queued_blocks(state)
+    freecount.store(n)
+    return n
 }
 
 // The `index`-th block of a file. With `grow` a missing one is created --
@@ -3624,6 +3645,7 @@ fn format_as(state: u64, v: u64, inodes: u64) -> bool {
     dirindex.reset()
     iattr.flush()
     deferfree.reset(state)
+    freecount.invalidate()
     kstate.set(state, kstate.K13_OFF + kstate.U_FSVER, v)
     let total: u64 = blk.blocks(state)
     var isz: u64 = INODE_SIZE
@@ -3771,6 +3793,7 @@ fn mount(state: u64) -> bool {
     dirindex.reset()
     iattr.flush()
     deferfree.reset(state)
+    freecount.invalidate()
     kstate.set(state, kstate.FS_READY, 0)
     geom_j(state, 0, 0)
     if !blk.read(state, 0, buf_sb(state)) {
