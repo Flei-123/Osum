@@ -15,7 +15,8 @@ lines=open(f).read().splitlines()
 for l in lines:
     if l.startswith("#"):
         _,t,run,kind=l.split(); marks[(int(run),kind)]=float(t)
-spans=[(marks[(r,sys.argv[5])],marks[(r,"rc")]) for r in range(2,99) if win and (r,sys.argv[5]) in marks and (r,"rc") in marks]
+end_kind=sys.argv[6] if len(sys.argv)>6 else "rc"
+spans=[(marks[(r,sys.argv[5])],marks[(r,end_kind)]) for r in range(2,99) if win and (r,sys.argv[5]) in marks and (r,end_kind) in marks]
 for l in lines:
     if l.startswith("#"): continue
     p=l.split()
