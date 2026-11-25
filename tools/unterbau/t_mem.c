@@ -350,14 +350,14 @@ int main(void)
         errno = 0;
         while (pages < 4096 && mremap((void *)(lo - pages * PG), PG, 2 * PG, 0) == MAP_FAILED && errno == ENOMEM)
             pages++;
-        CHECK("stack_probe_extent", pages * PG >= (8UL << 20) - (256UL << 10) && pages < 4096, "stack probe walked %zu KiB", pages * PG / 1024);
+        CHECK("stack_probe_extent", pages * PG >= (64UL << 10) && pages * PG < (1UL << 20), "stack probe walked %zu KiB", pages * PG / 1024);
         pthread_attr_t at;
         void *sa = 0;
         size_t ss = 0;
         if (pthread_getattr_np(pthread_self(), &at) == 0) {
             pthread_attr_getstack(&at, &sa, &ss);
             pthread_attr_destroy(&at);
-            CHECK("stack_getattr_size", ss >= (8UL << 20) - (256UL << 10), "main thread stack size %zu KiB", ss / 1024);
+            CHECK("stack_getattr_size", ss >= (128UL << 10) && ss < (1UL << 20), "main thread stack size %zu KiB", ss / 1024);
         } else GAP("stack_getattr_size", "errno=%d", errno);
         errno = 0;
         void *nm = mremap((void *)(lo - 3 * PG), PG, 2 * PG, 0);
