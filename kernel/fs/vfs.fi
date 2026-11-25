@@ -29,6 +29,7 @@ export {
 
 const MAX_MNT: u64 = 8
 const READ_BYPASS: u64 = 65536
+const WRITE_THROUGH_MAX: u64 = 262144
 const PCACHE_LOW_FRAMES: u64 = 4096
 const PCACHE_SHRINK_BATCH: u64 = 64
 const PCACHE_LOW_RESERVE: u64 = 512
@@ -434,8 +435,51 @@ fn v_write(state: u64, m: u64, node: u64, off: u64, src: u64,
     let r: u64 = o.write(state, m, node, off, src, len)
     if mnt.fstype(state, m) != vfsops.FS_OFS {
         pcache.drop_node(state, m, node)
+    } else {
+        pages_after_write(state, m, node, off, src, len, r)
     }
     return r
+}
+
+fn pages_after_write(state: u64, m: u64, node: u64, off: u64, src: u64, len: u64, wrote: u64) {
+    if wrote == 0 || wrote > len || len > WRITE_THROUGH_MAX {
+        pcache.drop_pages(state, node, off, len)
+        return
+    }
+    if kstate.get(state, kstate.PCACHE_BASE) == 0 {
+        return
+    }
+    let first: u64 = off >> 12
+    let last: u64 = (off + wrote - 1) >> 12
+    var idx: u64 = first
+    while idx <= last {
+        write_through_page(state, m, node, idx, off, src, wrote)
+        idx = idx + 1
+    }
+    pcache.drop_partials_before(state, node, first)
+}
+
+fn write_through_page(state: u64, m: u64, node: u64, idx: u64, off: u64, src: u64, wrote: u64) {
+    let page_at: u64 = idx << 12
+    var lo: u64 = 0
+    if off > page_at {
+        lo = off - page_at
+    }
+    var hi: u64 = pcache.PAGE_BYTES
+    if off + wrote < page_at + pcache.PAGE_BYTES {
+        hi = off + wrote - page_at
+    }
+    let from: u64 = src + (page_at + lo - off)
+    if pcache.patch_page(state, m, node, idx, lo, hi, from) || lo != 0 || hi != pcache.PAGE_BYTES {
+        return
+    }
+    let slot: u64 = page_for_fill(state, m, node, idx)
+    if slot == 0 {
+        return
+    }
+    pcache.copy_out(pcache.buffer_of(slot), from, pcache.PAGE_BYTES)
+    pcache.finish_fill(state, slot, m, node, idx, pcache.PAGE_BYTES)
+    pcache.note_write_alloc(state)
 }
 
 fn v_create(state: u64, m: u64, path: u64, art: u64) -> u64 {

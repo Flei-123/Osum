@@ -11,7 +11,8 @@ export {
     hits, misses, inserts, evictions, drops, resident, shrunk, bypassed,
     note_bypass, MISS, PAGE_BYTES, pin, unpin, valid_of,
     drop_pages, stat, H_SCANS, H_WALKED, H_DROP_CALLS, H_DROP_NODE, H_DROP_INO, H_DROP_MOUNT, H_DROP_ALL, H_DROP_RANGE, H_SETS, H_EVICTS, H_SHRUNK,
-    base_of, find_way, slot_at, pin_slot, unpin_slot, pin_page, frame_at, set_of, run_slot, run_frame, pin_page_run
+    base_of, find_way, slot_at, pin_slot, unpin_slot, pin_page, frame_at, set_of, run_slot, run_frame, pin_page_run,
+    patch_page, drop_partials_before, note_write_alloc, H_PATCHES, H_WRITE_ALLOCS
 }
 
 const MISS: u64 = 0xFFFFFFFFFFFFFFFF
@@ -49,6 +50,8 @@ const H_DROP_INO: u64 = 136
 const H_DROP_MOUNT: u64 = 144
 const H_DROP_ALL: u64 = 152
 const H_DROP_RANGE: u64 = 168
+const H_PATCHES: u64 = 176
+const H_WRITE_ALLOCS: u64 = 184
 const PROBE_MAX_PAGES: u64 = 32
 const S_NODE: u64 = 0
 const S_KEY: u64 = 8
@@ -557,6 +560,67 @@ fn drop_pages(state: u64, node: u64, off: u64, len: u64) {
     }
     kstate.set(b, H_DROP_RANGE, kstate.get(b, H_DROP_RANGE) + dropped)
     cachelock.give(b, flags)
+}
+
+fn set_valid(b: u64, s: u64, node: u64, valid: u64) {
+    let old: u64 = kstate.get(s, S_VALID)
+    if old < PAGE_BYTES && valid >= PAGE_BYTES {
+        kstate.set(b, chain_at(node), kstate.get(b, chain_at(node)) - PARTIAL_ONE)
+    }
+    kstate.set(s, S_VALID, valid)
+}
+
+fn patch_page(state: u64, m: u64, node: u64, idx: u64, lo: u64, hi: u64, src: u64) -> bool {
+    if kstate.mode_on(state, kstate.M_PCNOINVAL) {
+        return true
+    }
+    let b: u64 = kstate.get(state, kstate.PCACHE_BASE)
+    if b == 0 {
+        return true
+    }
+    let flags: u64 = cachelock.take(b)
+    kstate.set(b, H_EPOCH, kstate.get(b, H_EPOCH) + 1)
+    let way: u64 = find_way(b, node, m, idx)
+    if way == 0 {
+        cachelock.give(b, flags)
+        return false
+    }
+    let s: u64 = slot_at(b, node, m, idx, way - 1)
+    let valid: u64 = kstate.get(s, S_VALID)
+    if lo <= valid {
+        copy_out(kstate.get(s, S_FRAME) + lo, src, hi - lo)
+        if hi > valid {
+            set_valid(b, s, node, hi)
+        }
+        kstate.set(b, H_PATCHES, kstate.get(b, H_PATCHES) + 1)
+    } else {
+        invalidate(b, s)
+    }
+    cachelock.give(b, flags)
+    return true
+}
+
+fn drop_partials_before(state: u64, node: u64, first: u64) {
+    if kstate.mode_on(state, kstate.M_PCNOINVAL) {
+        return
+    }
+    let b: u64 = kstate.get(state, kstate.PCACHE_BASE)
+    if b == 0 {
+        return
+    }
+    let flags: u64 = cachelock.take(b)
+    if chain_partials(b, node) != 0 {
+        let dropped: u64 = drop_partial_before(b, node, first)
+        kstate.set(b, H_DROP_RANGE, kstate.get(b, H_DROP_RANGE) + dropped)
+    }
+    cachelock.give(b, flags)
+}
+
+fn note_write_alloc(state: u64) {
+    let b: u64 = kstate.get(state, kstate.PCACHE_BASE)
+    if b != 0 {
+        kstate.add(b, H_WRITE_ALLOCS, 1)
+    }
 }
 
 fn drop_node(state: u64, m: u64, node: u64) {
