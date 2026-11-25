@@ -87,7 +87,7 @@ SCRIPT_G="cat /etc/big.txt;echo appended >> /etc/big.txt;cat /etc/big.txt;cat /p
 qboot g "" "$SCRIPT_G"
 done_ok g G
 [ "$(lines_of g appended)" = 1 ] && ok "G appended line visible through the page cache" || bad "G appended lines $(lines_of g appended)"
-[ "$(stat_of g pcache.drop.range)" -ge 1 ] && [ "$(stat_of g pcache.drop.ino)" = 0 ] && ok "G range drop $(stat_of g pcache.drop.range), no whole-file drop" || bad "G range=$(stat_of g pcache.drop.range) ino=$(stat_of g pcache.drop.ino)"
+[ $(( $(stat_of g pcache.patch) + $(stat_of g pcache.drop.range) )) -ge 1 ] && [ "$(stat_of g pcache.drop.ino)" = 0 ] && ok "G patched $(stat_of g pcache.patch) range drops $(stat_of g pcache.drop.range), no whole-file drop" || bad "G patch=$(stat_of g pcache.patch) range=$(stat_of g pcache.drop.range) ino=$(stat_of g pcache.drop.ino)"
 [ "$(stat_of g pcache.miss)" -le 5 ] && ok "G untouched pages stayed cached (misses $(stat_of g pcache.miss))" || bad "G misses $(stat_of g pcache.miss)"
 qboot gn "pcnoinval" "$SCRIPT_G"
 done_ok gn Gc
