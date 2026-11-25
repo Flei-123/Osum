@@ -32,7 +32,7 @@ fn prefill_file_page(state: u64, i: u64, addr: u64, writable: bool, runnable: bo
     if pt == 0 {
         return false
     }
-    if lazy_file_page(state, i, addr, pt, s, procpt.read_entry(pt, s)) == 1 {
+    if lazy_file_page(state, i, addr, pt, s, procpt.read_entry(pt, s), !writable) == 1 {
         return true
     }
     procpt.write_entry(pt, s, 0)
@@ -46,13 +46,18 @@ fn lazy_file_install(state: u64, cur: u64, page: u64, pt: u64, s: u64, e0: u64, 
     if (e & procbase.PAGE_PRESENT) != 0 {
         result = 2
     } else if (e & procbase.PAGE_LAZYF) != 0 && (e & procbase.PAGE_USER) != 0 && ((e ^ e0) & 0x000FFFFFFFFFF000) == 0 {
-        if (!shared || (e & procbase.PAGE_WRITE) == 0) && ctr.mem_charge(state, ctr.ctr_of(state, cur), 1) {
-            var bits: u64 = procbase.PAGE_PRESENT | procbase.PAGE_USER | (e & procbase.PAGE_WRITE)
+        if ctr.mem_charge(state, ctr.ctr_of(state, cur), 1) {
+            var bits: u64 = procbase.PAGE_PRESENT | procbase.PAGE_USER
             if (e & procbase.PAGE_LAZYX) == 0 {
                 bits = bits | procpt.nx(state)
             }
             if shared {
                 bits = bits | procbase.PAGE_SHARED | procbase.PAGE_PCACHE
+                if (e & procbase.PAGE_WRITE) != 0 {
+                    bits = bits | procbase.PAGE_COW | procbase.PAGE_COWW
+                }
+            } else {
+                bits = bits | (e & procbase.PAGE_WRITE)
             }
             procpt.write_entry(pt, s, frame | bits)
             taskslot.tset(state, cur, taskconst.T_UPAGES, taskslot.tget(state, cur, taskconst.T_UPAGES) + 1)
@@ -155,10 +160,9 @@ fn lazy_file_private_frame(state: u64, ino: u64, pg: u64) -> u64 {
     return frame
 }
 
-fn lazy_file_page(state: u64, cur: u64, page: u64, pt: u64, s: u64, e0: u64) -> u64 {
+fn lazy_file_page(state: u64, cur: u64, page: u64, pt: u64, s: u64, e0: u64, share: bool) -> u64 {
     let ino: u64 = lazy_file_ino(e0)
     let pg: u64 = lazy_file_pg(e0)
-    let share: bool = (e0 & procbase.PAGE_WRITE) == 0
     var frame: u64 = 0
     var shared: bool = false
     var owned: bool = false
@@ -236,11 +240,11 @@ fn lazy_file_around(state: u64, cur: u64, page: u64, pt: u64, s: u64, e0: u64) -
     var i: u64 = first
     while i < first + FAULT_AROUND_PAGES {
         if i == s {
-            main = lazy_file_page(state, cur, page, pt, s, e0)
+            main = lazy_file_page(state, cur, page, pt, s, e0, true)
         } else if ((cached >> (i - first)) & 1) != 0 {
             let e: u64 = procpt.read_entry(pt, i)
             if lazy_file_neighbor(e, ino, pg + i - s) {
-                let _r: u64 = lazy_file_page(state, cur, page, pt, i, e)
+                let _r: u64 = lazy_file_page(state, cur, page, pt, i, e, true)
             }
         }
         i = i + 1
@@ -263,7 +267,7 @@ fn lazy_file_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -
     if (e0 & procbase.PAGE_WRITE) == 0 {
         r = lazy_file_around(state, cur, page, pt, s, e0)
     } else {
-        r = lazy_file_page(state, cur, page, pt, s, e0)
+        r = lazy_file_page(state, cur, page, pt, s, e0, (err & 2) == 0)
     }
     if r != 0 {
         procspace.tlb_flush_if_current(state, cur, tlbstat.FAULT_FILE)
