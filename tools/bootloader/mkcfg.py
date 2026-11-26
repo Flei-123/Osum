@@ -42,7 +42,7 @@ def parse_limine(text):
     return timeout, default, [e for e in entries if e["kernel"] and e["proto"] == "multiboot1"]
 
 
-def render(timeout, default, entries, resolution=None, menu=None, keywait=None, logo=None):
+def render(timeout, default, entries, resolution=None, menu=None, keywait=None, logo=None, anim=None):
     out = ["timeout %d" % timeout, "default %d" % (default if 1 <= default <= len(entries) else 1)]
     if menu:
         out.append("menu %s" % menu)
@@ -52,6 +52,8 @@ def render(timeout, default, entries, resolution=None, menu=None, keywait=None, 
         out.append("logo %s" % logo)
     if resolution:
         out.append("resolution %s" % resolution)
+    if anim:
+        out.append("bootanim %s" % anim)
     for e in entries:
         out.append("")
         out.append("entry %s" % e["title"])
@@ -65,10 +67,10 @@ def render(timeout, default, entries, resolution=None, menu=None, keywait=None, 
 
 def main(argv):
     if len(argv) < 3:
-        sys.stderr.write("usage: mkcfg.py <limine.conf> <osboot.cfg> [--timeout N] [--resolution WxH] [--menu hidden|shown] [--keywait MS] [--logo PATH] [--entries N]\n")
+        sys.stderr.write("usage: mkcfg.py <limine.conf> <osboot.cfg> [--timeout N] [--resolution WxH] [--menu hidden|shown] [--keywait MS] [--logo PATH] [--anim NAME] [--entries N]\n")
         return 2
     timeout, default, entries = parse_limine(open(argv[1]).read())
-    resolution = menu = logo = None
+    resolution = menu = logo = anim = None
     keywait = None
     limit = 16
     rest = argv[3:]
@@ -84,13 +86,15 @@ def main(argv):
             keywait = int(rest.pop(0))
         elif flag == "--logo":
             logo = rest.pop(0)
+        elif flag == "--anim":
+            anim = rest.pop(0)
         elif flag == "--entries":
             limit = int(rest.pop(0))
     if not entries:
         sys.stderr.write("mkcfg: no multiboot1 entry in %s\n" % argv[1])
         return 1
     entries = entries[:limit]
-    open(argv[2], "w").write(render(timeout, default, entries, resolution, menu, keywait, logo))
+    open(argv[2], "w").write(render(timeout, default, entries, resolution, menu, keywait, logo, anim))
     return 0
 
 

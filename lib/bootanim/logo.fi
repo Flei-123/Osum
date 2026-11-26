@@ -1,0 +1,199 @@
+profile kernel
+
+import bootanim.fx
+import bootanim.canvas
+
+export { LOGO_HEADER, cache_bytes, build, ready, texel, alpha, edge, draw, draw_masked }
+
+const LOGO_HEADER: u64 = 12
+const LOGO_REF: i64 = 176
+const AREA_ONE: u64 = 256
+const AREA_SHIFT: u64 = 8
+const EDGE_STEP: i64 = 2
+const MASK_ALL: i64 = 0
+const INK_GAIN: u64 = 6
+
+fn rd8(p: u64) -> u64 {
+    return (*(p as *mut u8)) as u64
+}
+
+fn rd32(p: u64) -> u64 {
+    return (*(p as *mut u32)) as u64
+}
+
+fn f(cv: u64, off: u64) -> u64 {
+    return *((cv + off) as *mut u64)
+}
+
+fn src_w(cv: u64) -> u64 {
+    return rd32(f(cv, canvas.CV_LOGO) + 4)
+}
+
+fn src_h(cv: u64) -> u64 {
+    return rd32(f(cv, canvas.CV_LOGO) + 8)
+}
+
+fn dest_h(cv: u64) -> i64 {
+    return canvas.unit(cv, LOGO_REF)
+}
+
+fn dest_w(cv: u64) -> i64 {
+    return fx.clamp((src_w(cv) as i64) * dest_h(cv) / (src_h(cv) as i64), 1, 4096)
+}
+
+fn cache_bytes(cv: u64) -> u64 {
+    if f(cv, canvas.CV_LOGO) == 0 {
+        return 0
+    }
+    return (dest_w(cv) * dest_h(cv) * 4) as u64
+}
+
+fn ready(cv: u64) -> bool {
+    return f(cv, canvas.CV_CACHE) != 0 && f(cv, canvas.CV_LW) != 0
+}
+
+fn ink(p: u64) -> u64 {
+    var m: u64 = rd8(p)
+    if rd8(p + 1) > m {
+        m = rd8(p + 1)
+    }
+    if rd8(p + 2) > m {
+        m = rd8(p + 2)
+    }
+    var lift: u64 = m * INK_GAIN
+    if lift > 255 {
+        lift = 255
+    }
+    return rd8(p + 3) * lift / 255
+}
+
+fn sample(cv: u64, dx: u64, dy: u64) -> u64 {
+    let l: u64 = f(cv, canvas.CV_LOGO)
+    let w: u64 = src_w(cv)
+    let h: u64 = src_h(cv)
+    let dw: u64 = dest_w(cv) as u64
+    let dh: u64 = dest_h(cv) as u64
+    let fx0: u64 = dx * w * AREA_ONE / dw
+    let fx1: u64 = (dx + 1) * w * AREA_ONE / dw
+    let fy0: u64 = dy * h * AREA_ONE / dh
+    let fy1: u64 = (dy + 1) * h * AREA_ONE / dh
+    var sr: u64 = 0
+    var sg: u64 = 0
+    var sb: u64 = 0
+    var sa: u64 = 0
+    var total: u64 = 0
+    var sy: u64 = fy0 >> AREA_SHIFT
+    while (sy << AREA_SHIFT) < fy1 && sy < h {
+        var y0: u64 = sy << AREA_SHIFT
+        if fy0 > y0 {
+            y0 = fy0
+        }
+        var y1: u64 = (sy + 1) << AREA_SHIFT
+        if fy1 < y1 {
+            y1 = fy1
+        }
+        var sx: u64 = fx0 >> AREA_SHIFT
+        while (sx << AREA_SHIFT) < fx1 && sx < w {
+            var x0: u64 = sx << AREA_SHIFT
+            if fx0 > x0 {
+                x0 = fx0
+            }
+            var x1: u64 = (sx + 1) << AREA_SHIFT
+            if fx1 < x1 {
+                x1 = fx1
+            }
+            let wt: u64 = (x1 - x0) * (y1 - y0)
+            let p: u64 = l + LOGO_HEADER + (sy * w + sx) * 4
+            let a: u64 = ink(p)
+            sr = sr + rd8(p) * a * wt
+            sg = sg + rd8(p + 1) * a * wt
+            sb = sb + rd8(p + 2) * a * wt
+            sa = sa + a * wt
+            total = total + wt
+            sx = sx + 1
+        }
+        sy = sy + 1
+    }
+    if total == 0 || sa == 0 {
+        return 0
+    }
+    let alpha_v: u64 = sa / total
+    return (sr / sa) << 16 | (sg / sa) << 8 | (sb / sa) | (alpha_v << 24)
+}
+
+fn build(cv: u64, cache: u64) -> bool {
+    if f(cv, canvas.CV_LOGO) == 0 || cache == 0 {
+        return false
+    }
+    let dw: i64 = dest_w(cv)
+    let dh: i64 = dest_h(cv)
+    var y: i64 = 0
+    while y < dh {
+        var x: i64 = 0
+        while x < dw {
+            *((cache + ((y * dw + x) as u64) * 4) as *mut u32) = sample(cv, x as u64, y as u64) as u32
+            x = x + 1
+        }
+        y = y + 1
+    }
+    *((cv + canvas.CV_CACHE) as *mut u64) = cache
+    *((cv + canvas.CV_LW) as *mut u64) = dw as u64
+    *((cv + canvas.CV_LH) as *mut u64) = dh as u64
+    return true
+}
+
+fn texel(cv: u64, x: i64, y: i64) -> u64 {
+    let dw: i64 = f(cv, canvas.CV_LW) as i64
+    let dh: i64 = f(cv, canvas.CV_LH) as i64
+    if x < 0 || y < 0 || x >= dw || y >= dh {
+        return 0
+    }
+    return rd32(f(cv, canvas.CV_CACHE) + ((y * dw + x) as u64) * 4)
+}
+
+fn alpha(cv: u64, x: i64, y: i64) -> i64 {
+    return (texel(cv, x, y) >> 24) as i64
+}
+
+fn edge(cv: u64, x: i64, y: i64) -> i64 {
+    let a: i64 = alpha(cv, x, y)
+    let l: i64 = alpha(cv, x - EDGE_STEP, y)
+    let r: i64 = alpha(cv, x + EDGE_STEP, y)
+    let u: i64 = alpha(cv, x, y - EDGE_STEP)
+    let d: i64 = alpha(cv, x, y + EDGE_STEP)
+    let gx: i64 = fx.clamp(r - l, 0, 255) + fx.clamp(l - r, 0, 255)
+    let gy: i64 = fx.clamp(d - u, 0, 255) + fx.clamp(u - d, 0, 255)
+    return fx.clamp((gx + gy) * a / 255, 0, 255)
+}
+
+fn draw(cv: u64, cx: i64, cy: i64, k: i64, tint: u64) {
+    draw_masked(cv, cx, cy, k, tint, MASK_ALL)
+}
+
+fn masked(cv: u64, x: i64, y: i64, clip_y: i64) -> bool {
+    return clip_y != MASK_ALL && y >= clip_y
+}
+
+fn draw_masked(cv: u64, cx: i64, cy: i64, k: i64, tint: u64, clip_y: i64) {
+    if !ready(cv) || k <= 0 {
+        return
+    }
+    let dw: i64 = f(cv, canvas.CV_LW) as i64
+    let dh: i64 = f(cv, canvas.CV_LH) as i64
+    let left: i64 = cx - dw / 2
+    let top: i64 = cy - dh / 2
+    var y: i64 = 0
+    while y < dh {
+        var x: i64 = 0
+        while x < dw {
+            let t: u64 = texel(cv, x, y)
+            let a: i64 = (t >> 24) as i64
+            if a != 0 && !masked(cv, left + x, top + y, clip_y) {
+                let c: u64 = canvas.mix(t & 0xFFFFFF, tint, (tint >> 24) as i64 * 16)
+                canvas.over(cv, left + x, top + y, c, a * k / 255)
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+}

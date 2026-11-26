@@ -1,0 +1,89 @@
+profile kernel
+
+import bootanim.fx
+import bootanim.canvas
+import bootanim.glow
+
+export { SUB, shape, arc, ring }
+
+const SUB: i64 = 16
+const HEAD_FLOOR: i64 = 1200
+
+fn shape(r16: i64, w16: i64) -> u64 {
+    return (r16 as u64) | ((w16 as u64) << 32)
+}
+
+fn arc(start: i64, len: i64) -> u64 {
+    let s: i64 = ((start % fx.TURN) + fx.TURN) % fx.TURN
+    return (s as u64) | ((fx.clamp(len, 0, fx.TURN) as u64) << 32)
+}
+
+fn coverage(d16: i64, r16: i64, w16: i64) -> i64 {
+    let off: i64 = fx.clamp(d16 - r16, 0, d16) + fx.clamp(r16 - d16, 0, r16)
+    return fx.clamp(w16 + SUB / 2 - off, 0, SUB) * fx.ONE / SUB
+}
+
+fn lit_level(a: i64, ar: u64) -> i64 {
+    let start: i64 = (ar & 0xFFFFFFFF) as i64
+    let len: i64 = (ar >> 32) as i64
+    if len <= 0 {
+        return 0
+    }
+    let rel: i64 = (a - start + fx.TURN) % fx.TURN
+    if rel >= len {
+        return 0
+    }
+    return HEAD_FLOOR + (fx.ONE - HEAD_FLOOR) * rel / len
+}
+
+fn ring_px(cv: u64, x: i64, y: i64, geo: u64, ar: u64, pts: u64) {
+    let ctr: u64 = *((pts + 16) as *mut u64)
+    let dx16: i64 = x * SUB + SUB / 2 - ((ctr & 0xFFFFFFFF) as i64)
+    let dy16: i64 = y * SUB + SUB / 2 - ((ctr >> 32) as i64)
+    let r16: i64 = (geo & 0xFFFFFFFF) as i64
+    let w16: i64 = (geo >> 32) as i64
+    let d16: i64 = fx.isqrt(dx16 * dx16 + dy16 * dy16)
+    let cov: i64 = coverage(d16, r16, w16)
+    if cov == 0 {
+        return
+    }
+    let track: u64 = *(pts as *mut u64)
+    let lit: u64 = *((pts + 8) as *mut u64)
+    canvas.add(cv, x, y, track & 0xFFFFFF, cov * ((track >> 32) as i64) / fx.ONE)
+    let lv: i64 = lit_level(fx.angle(dx16, dy16), ar)
+    canvas.add(cv, x, y, lit & 0xFFFFFF, cov * lv / fx.ONE * ((lit >> 32) as i64) / fx.ONE)
+}
+
+fn span_px(cv: u64, y: i64, xs: u64, geo: u64, ar: u64, base: u64) {
+    var x: i64 = fx.clamp(((xs & 0xFFFFFFFF) as i64) - 0x40000000, 0, canvas.width(cv))
+    let end: i64 = fx.clamp(((xs >> 32) as i64) - 0x40000000, 0, canvas.width(cv))
+    while x < end {
+        ring_px(cv, x, y, geo, ar, base)
+        x = x + 1
+    }
+}
+
+fn ring(cv: u64, geo: u64, ar: u64, track: u64, lit: u64, center16: u64) {
+    var pts: [u64; 3] = [track, lit, center16]
+    let base: u64 = (&pts[0]) as u64
+    let r16: i64 = (geo & 0xFFFFFFFF) as i64
+    let w16: i64 = (geo >> 32) as i64
+    let cx: i64 = ((center16 & 0xFFFFFFFF) as i64) / SUB
+    let cy: i64 = ((center16 >> 32) as i64) / SUB
+    let reach: i64 = (r16 + w16) / SUB + 2
+    let inner: i64 = fx.clamp((r16 - w16) / SUB - 2, 0, reach)
+    let y0: i64 = fx.clamp(cy - reach, 0, canvas.height(cv))
+    let y1: i64 = fx.clamp(cy + reach, 0, canvas.height(cv))
+    var y: i64 = y0
+    while y < y1 {
+        let dy: i64 = y - cy
+        let outer: i64 = fx.isqrt(reach * reach - dy * dy)
+        var hole: i64 = 0
+        if dy * dy < inner * inner {
+            hole = fx.isqrt(inner * inner - dy * dy)
+        }
+        span_px(cv, y, glow.at(cx - outer, cx - hole), geo, ar, base)
+        span_px(cv, y, glow.at(cx + hole, cx + outer + 1), geo, ar, base)
+        y = y + 1
+    }
+}

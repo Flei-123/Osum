@@ -1,0 +1,113 @@
+profile kernel
+
+import bootanim.fx
+import bootanim.canvas
+import bootanim.logo
+import bootanim.glow
+
+export { count, draw, flare }
+
+const PIXELS_PER_PARTICLE: i64 = 700
+const MIN_PARTICLES: i64 = 600
+const MAX_PARTICLES: i64 = 4000
+const PICK_TRIES: u64 = 10
+const ALPHA_MIN: i64 = 128
+const DELAY_MAX: u64 = 700
+const FLIGHT_MS: i64 = 1500
+const SWIRL: i64 = 300
+const SPARK: u64 = 0xBFE4FF
+const TRAIL: i64 = 4
+const TRAIL_STEP: i64 = 60
+const HEAD_K: i64 = 6000
+
+fn count(cv: u64) -> i64 {
+    return fx.clamp(canvas.width(cv) * canvas.height(cv) / PIXELS_PER_PARTICLE, MIN_PARTICLES, MAX_PARTICLES)
+}
+
+fn pick(cv: u64, seed: u64) -> u64 {
+    let dw: u64 = *((cv + canvas.CV_LW) as *mut u64)
+    let dh: u64 = *((cv + canvas.CV_LH) as *mut u64)
+    var i: u64 = 0
+    while i < PICK_TRIES {
+        let h: u64 = fx.hash(seed * 31 + i)
+        let x: i64 = (h % dw) as i64
+        let y: i64 = ((h >> 12) % dh) as i64
+        if logo.alpha(cv, x, y) >= ALPHA_MIN {
+            return glow.at(x, y)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn dot(cv: u64, x16: i64, y16: i64, c: u64, k: i64) {
+    let x: i64 = x16 / 16
+    let y: i64 = y16 / 16
+    let fxp: i64 = x16 % 16
+    let fyp: i64 = y16 % 16
+    canvas.add(cv, x, y, c, k * (16 - fxp) * (16 - fyp) / 256)
+    canvas.add(cv, x + 1, y, c, k * fxp * (16 - fyp) / 256)
+    canvas.add(cv, x, y + 1, c, k * (16 - fxp) * fyp / 256)
+    canvas.add(cv, x + 1, y + 1, c, k * fxp * fyp / 256)
+}
+
+fn path(from: u64, to: u64, ang: i64, u: i64, scale: i64) -> u64 {
+    let uu: i64 = fx.clamp(u, 0, fx.ONE)
+    let e: i64 = fx.ease_out(uu)
+    let swirl: i64 = fx.sin12(uu * 512 / fx.ONE) * (fx.ONE - uu) / fx.ONE * SWIRL * 64 / fx.ONE * scale / 100
+    let x: i64 = fx.lerp(((from & 0xFFFFFFFF) as i64) - 0x40000000, ((to & 0xFFFFFFFF) as i64) - 0x40000000, e)
+    let y: i64 = fx.lerp(((from >> 32) as i64) - 0x40000000, ((to >> 32) as i64) - 0x40000000, e)
+    return glow.at(x - fx.sin12(ang) * swirl / fx.ONE, y + fx.cos12(ang) * swirl / fx.ONE)
+}
+
+fn particle(cv: u64, i: u64, t: i64, fade: i64) {
+    if !logo.ready(cv) {
+        return
+    }
+    let tgt: u64 = pick(cv, i)
+    if tgt == 0 {
+        return
+    }
+    let h: u64 = fx.hash(i * 7919 + 17)
+    let dw: i64 = (*((cv + canvas.CV_LW) as *mut u64)) as i64
+    let dh: i64 = (*((cv + canvas.CV_LH) as *mut u64)) as i64
+    let cx: i64 = canvas.width(cv) / 2
+    let cy: i64 = canvas.height(cv) / 2
+    let tx: i64 = (cx - dw / 2 + ((tgt & 0xFFFFFFFF) as i64) - 0x40000000) * 16
+    let ty: i64 = (cy - dh / 2 + ((tgt >> 32) as i64) - 0x40000000) * 16
+    let ang: i64 = (h % 1024) as i64
+    let reach: i64 = canvas.width(cv) * (500 + ((h >> 10) % 600) as i64) / 1000
+    let sx: i64 = cx * 16 + fx.cos12(ang) * reach * 16 / fx.ONE
+    let sy: i64 = cy * 16 + fx.sin12(ang) * reach * 16 / fx.ONE
+    let u: i64 = fx.span(t, ((h >> 20) % DELAY_MAX) as i64, FLIGHT_MS)
+    let tw: i64 = 3000 + (HEAD_K - 3000) * fx.pulse(t + (h % 997) as i64, 420) / fx.ONE
+    var j: i64 = 0
+    while j < TRAIL {
+        let pos: u64 = path(glow.at(sx, sy), glow.at(tx, ty), ang, u - j * TRAIL_STEP, canvas.unit(cv, 100))
+        dot(cv, ((pos & 0xFFFFFFFF) as i64) - 0x40000000, ((pos >> 32) as i64) - 0x40000000, SPARK, tw * fade / fx.ONE * (TRAIL - j) / TRAIL)
+        j = j + 1
+    }
+}
+
+fn draw(cv: u64, t: i64, fade: i64) {
+    let n: i64 = count(cv)
+    var i: i64 = 0
+    while i < n {
+        particle(cv, i as u64, t, fade)
+        i = i + 1
+    }
+}
+
+fn flare(cv: u64, k: i64) {
+    if k <= 0 {
+        return
+    }
+    let cx: i64 = canvas.width(cv) / 2
+    let cy: i64 = canvas.height(cv) / 2
+    let u: i64 = canvas.unit(cv, 1)
+    glow.streak(cv, glow.at(cx, cy), canvas.width(cv) * 45 / 100, 3 * u, glow.paint(0x9CC8FF, k))
+    glow.glow(cv, glow.at(cx, cy), 160 * u, 160 * u, glow.paint(0x6090FF, k / 3))
+    glow.glow(cv, glow.at(cx + 260 * u, cy - 150 * u), 40 * u, 40 * u, glow.paint(0x50A0FF, k / 5))
+    glow.glow(cv, glow.at(cx + 420 * u, cy - 240 * u), 70 * u, 70 * u, glow.paint(0x8060FF, k / 8))
+    glow.glow(cv, glow.at(cx - 200 * u, cy + 115 * u), 26 * u, 26 * u, glow.paint(0xFFA060, k / 5))
+}

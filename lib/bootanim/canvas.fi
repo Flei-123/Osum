@@ -1,0 +1,178 @@
+profile kernel
+
+import bootanim.fx
+
+export { CV_BUF, CV_W, CV_H, CV_LOGO, CV_CACHE, CV_TARGET, CV_LW, CV_LH, CV_CX, CV_CY, CV_SIZE, init, width, height, unit, pixel, get, set, add, over, rgb, mix, scale, fill_rows, row_gradient, present, crossfade }
+
+const CV_BUF: u64 = 0
+const CV_W: u64 = 8
+const CV_H: u64 = 16
+const CV_LOGO: u64 = 24
+const CV_CACHE: u64 = 32
+const CV_TARGET: u64 = 40
+const CV_LW: u64 = 48
+const CV_LH: u64 = 56
+const CV_CX: u64 = 64
+const CV_CY: u64 = 72
+const CV_SIZE: u64 = 128
+const REF_HEIGHT: i64 = 1080
+
+fn field(cv: u64, off: u64) -> u64 {
+    return *((cv + off) as *mut u64)
+}
+
+fn put_field(cv: u64, off: u64, v: u64) {
+    *((cv + off) as *mut u64) = v
+}
+
+fn init(cv: u64, buf: u64, w: u64, h: u64) {
+    var i: u64 = 0
+    while i < CV_SIZE {
+        put_field(cv, i, 0)
+        i = i + 8
+    }
+    put_field(cv, CV_BUF, buf)
+    put_field(cv, CV_W, w)
+    put_field(cv, CV_H, h)
+}
+
+fn width(cv: u64) -> i64 {
+    return field(cv, CV_W) as i64
+}
+
+fn height(cv: u64) -> i64 {
+    return field(cv, CV_H) as i64
+}
+
+fn unit(cv: u64, n: i64) -> i64 {
+    return fx.clamp(n * height(cv) / REF_HEIGHT, 1, n * 64)
+}
+
+fn pixel(cv: u64, x: i64, y: i64) -> u64 {
+    return field(cv, CV_BUF) + ((y * width(cv) + x) as u64) * 4
+}
+
+fn inside(cv: u64, x: i64, y: i64) -> bool {
+    return x >= 0 && y >= 0 && x < width(cv) && y < height(cv)
+}
+
+fn get(cv: u64, x: i64, y: i64) -> u64 {
+    return (*(pixel(cv, x, y) as *mut u32)) as u64
+}
+
+fn set(cv: u64, x: i64, y: i64, c: u64) {
+    if inside(cv, x, y) {
+        *(pixel(cv, x, y) as *mut u32) = c as u32
+    }
+}
+
+fn rgb(r: i64, g: i64, b: i64) -> u64 {
+    return ((fx.clamp(r, 0, 255) as u64) << 16) | ((fx.clamp(g, 0, 255) as u64) << 8) | (fx.clamp(b, 0, 255) as u64)
+}
+
+fn chan(c: u64, s: u64) -> i64 {
+    return ((c >> s) & 255) as i64
+}
+
+fn mix(a: u64, b: u64, k: i64) -> u64 {
+    let kk: i64 = fx.clamp(k, 0, fx.ONE)
+    return rgb(fx.lerp(chan(a, 16), chan(b, 16), kk), fx.lerp(chan(a, 8), chan(b, 8), kk), fx.lerp(chan(a, 0), chan(b, 0), kk))
+}
+
+fn scale(c: u64, k: i64) -> u64 {
+    return rgb(chan(c, 16) * k / fx.ONE, chan(c, 8) * k / fx.ONE, chan(c, 0) * k / fx.ONE)
+}
+
+fn add(cv: u64, x: i64, y: i64, c: u64, k: i64) {
+    if !inside(cv, x, y) || k <= 0 {
+        return
+    }
+    let p: u64 = pixel(cv, x, y)
+    let d: u64 = (*(p as *mut u32)) as u64
+    let r: i64 = chan(d, 16) + chan(c, 16) * k / fx.ONE
+    let g: i64 = chan(d, 8) + chan(c, 8) * k / fx.ONE
+    let b: i64 = chan(d, 0) + chan(c, 0) * k / fx.ONE
+    *(p as *mut u32) = rgb(r, g, b) as u32
+}
+
+fn over(cv: u64, x: i64, y: i64, c: u64, k: i64) {
+    if !inside(cv, x, y) || k <= 0 {
+        return
+    }
+    let p: u64 = pixel(cv, x, y)
+    *(p as *mut u32) = mix((*(p as *mut u32)) as u64, c, k) as u32
+}
+
+fn fill_row(cv: u64, y: i64, c: u64) {
+    let row: u64 = pixel(cv, 0, y)
+    let both: u64 = c | (c << 32)
+    let w: i64 = width(cv)
+    var x: i64 = 0
+    while x + 1 < w {
+        *((row + (x as u64) * 4) as *mut u64) = both
+        x = x + 2
+    }
+    if x < w {
+        *((row + (x as u64) * 4) as *mut u32) = c as u32
+    }
+}
+
+fn fill_rows(cv: u64, y0: i64, y1: i64, c: u64) {
+    var y: i64 = fx.clamp(y0, 0, height(cv))
+    let end: i64 = fx.clamp(y1, 0, height(cv))
+    while y < end {
+        fill_row(cv, y, c)
+        y = y + 1
+    }
+}
+
+fn row_gradient(cv: u64, y0: i64, y1: i64, top: u64, bottom: u64) {
+    let len: i64 = fx.clamp(y1 - y0, 1, y1 - y0 + 1)
+    var y: i64 = fx.clamp(y0, 0, height(cv))
+    let end: i64 = fx.clamp(y1, 0, height(cv))
+    while y < end {
+        fill_row(cv, y, mix(top, bottom, (y - y0) * fx.ONE / len))
+        y = y + 1
+    }
+}
+
+fn target_at(cv: u64, x: i64, y: i64) -> u64 {
+    return (*((field(cv, CV_TARGET) + ((y * width(cv) + x) as u64) * 4) as *mut u32)) as u64
+}
+
+fn crossfade(cv: u64, k: i64) {
+    if field(cv, CV_TARGET) == 0 || k <= 0 {
+        return
+    }
+    let h: i64 = height(cv)
+    let w: i64 = width(cv)
+    var y: i64 = 0
+    while y < h {
+        var x: i64 = 0
+        while x < w {
+            let p: u64 = pixel(cv, x, y)
+            *(p as *mut u32) = mix((*(p as *mut u32)) as u64, target_at(cv, x, y), k) as u32
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+fn present(cv: u64, fb: u64, pitch: u64, shifts: u64) {
+    let rs: u64 = shifts & 255
+    let gs: u64 = (shifts >> 8) & 255
+    let bs: u64 = (shifts >> 16) & 255
+    let h: i64 = height(cv)
+    let w: i64 = width(cv)
+    var y: i64 = 0
+    while y < h {
+        let dst: u64 = fb + (y as u64) * pitch * 4
+        var x: i64 = 0
+        while x < w {
+            let c: u64 = get(cv, x, y)
+            *((dst + (x as u64) * 4) as *mut u32) = ((((c >> 16) & 255) << rs) | (((c >> 8) & 255) << gs) | ((c & 255) << bs)) as u32
+            x = x + 1
+        }
+        y = y + 1
+    }
+}

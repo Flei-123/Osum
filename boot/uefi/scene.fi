@@ -1,0 +1,75 @@
+import mem
+import ctx
+import plat
+import clock
+import bootanim.fx
+import bootanim.canvas
+import bootanim.logo
+import bootanim.styles
+
+export { start, tick, LOADER_SHARE_MS }
+
+const PAGE: u64 = 4096
+const LOADER_SHARE_MS: i64 = 1500
+const MIN_PERIOD_MS: u64 = 33
+const BUDGET_FACTOR: u64 = 3
+
+static mut desc: [u64; 16] = [0 as u64; 16]
+
+fn shifts(c: u64) -> u64 {
+    return mem.get64(c + ctx.C_RSH) | (mem.get64(c + ctx.C_GSH) << 8) | (mem.get64(c + ctx.C_BSH) << 16)
+}
+
+fn pages_for(n: u64) -> u64 {
+    return (n + PAGE - 1) / PAGE
+}
+
+fn start(c: u64) -> bool {
+    let style: u64 = mem.get64(c + ctx.C_ANIM)
+    if style == styles.NONE || mem.get64(c + ctx.C_TSC_PER_MS) == 0 {
+        return false
+    }
+    let cv: u64 = (&desc[0]) as u64
+    let w: u64 = mem.get64(c + ctx.C_SW)
+    let h: u64 = mem.get64(c + ctx.C_SH)
+    canvas.init(cv, 0, w, h)
+    mem.set64(cv + canvas.CV_LOGO, mem.get64(c + ctx.C_LOGO))
+    let frame_pages: u64 = pages_for(w * h * 4)
+    let buf: u64 = plat.alloc_high(c, frame_pages + pages_for(logo.cache_bytes(cv)) + 1)
+    if buf == 0 {
+        return false
+    }
+    mem.set64(cv + canvas.CV_BUF, buf)
+    logo.build(cv, buf + frame_pages * PAGE)
+    mem.set64(c + ctx.C_ANIM_CV, cv)
+    mem.set64(c + ctx.C_SPLASH, 1)
+    draw(c)
+    return true
+}
+
+fn draw(c: u64) {
+    let cv: u64 = mem.get64(c + ctx.C_ANIM_CV)
+    let t0: u64 = clock.now()
+    let t: i64 = clock.total_ms(c) as i64
+    let p: i64 = fx.span(t, 0, LOADER_SHARE_MS) / 4
+    styles.frame(cv, mem.get64(c + ctx.C_ANIM), t, p, 0)
+    canvas.present(cv, mem.get64(c + ctx.C_FB), mem.get64(c + ctx.C_PITCH), shifts(c))
+    let t1: u64 = clock.now()
+    var gap: u64 = (t1 - t0) * BUDGET_FACTOR
+    let floor: u64 = MIN_PERIOD_MS * mem.get64(c + ctx.C_TSC_PER_MS)
+    if gap < floor {
+        gap = floor
+    }
+    mem.set64(c + ctx.C_ANIM_NEXT, t1 + gap)
+    mem.set64(c + ctx.C_FRAME, mem.get64(c + ctx.C_FRAME) + 1)
+}
+
+fn tick(c: u64) -> bool {
+    if mem.get64(c + ctx.C_ANIM_CV) == 0 {
+        return false
+    }
+    if clock.now() >= mem.get64(c + ctx.C_ANIM_NEXT) {
+        draw(c)
+    }
+    return true
+}

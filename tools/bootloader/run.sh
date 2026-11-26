@@ -91,7 +91,7 @@ grep -aq "$LOGIN" "$D/fb.txt" && ok "fallback: second entry reached login" || ba
 splash_case() {
     local name=$1 res=$2 label=$3
     echo "== splash $label: logo pixels, sharpness, spinner, no menu =="
-    python3 tools/bootloader/mkcfg.py "$D/limine.conf" "$D/$name.cfg" --timeout 0 --keywait 12000 --logo /osboot.logo ${res:+--resolution $res} > /dev/null
+    python3 tools/bootloader/mkcfg.py "$D/limine.conf" "$D/$name.cfg" --timeout 0 --keywait 12000 --logo /osboot.logo --anim spinner ${res:+--resolution $res} > /dev/null
     osb_with_cfg "$D" "$name" "$D/$name.cfg"
     osb_start "$D" "$name" "$D/$name.base" q35 ehci
     if osb_wait_text "$D" "$name" "osboot" 60; then
@@ -115,7 +115,7 @@ splash_case holdhi 1920x1080 "1920x1080"
 splash_case holdlo 1024x768 "1024x768"
 
 echo "== splash: spinner keeps moving while the kernel is read (throttled disk) =="
-python3 tools/bootloader/mkcfg.py "$D/limine.conf" "$D/live.cfg" --timeout 0 --logo /osboot.logo > /dev/null
+python3 tools/bootloader/mkcfg.py "$D/limine.conf" "$D/live.cfg" --timeout 0 --logo /osboot.logo --anim spinner > /dev/null
 osb_with_cfg "$D" live "$D/live.cfg"
 OSB_DRIVE_OPTS=",throttling.bps-read=3000000" osb_start "$D" live "$D/live.base" q35 ehci
 if osb_wait_text "$D" live "osboot" 60; then
