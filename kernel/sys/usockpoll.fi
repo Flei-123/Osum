@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import fs.unixsock
+
+export { bits }
+
+const POLLIN: u64 = 1
+const POLLOUT: u64 = 4
+const POLLHUP: u64 = 16
+const POLLRDNORM: u64 = 0x40
+const POLLWRNORM: u64 = 0x100
+const POLLRDHUP: u64 = 0x2000
+const READABLE: u64 = POLLIN | POLLRDNORM
+const WRITABLE: u64 = POLLOUT | POLLWRNORM
+const UNCONNECTED: u64 = POLLHUP | WRITABLE
+
+fn listener_bits(state: u64, us: u64) -> u64 {
+    if unixsock.pending(state, us) {
+        return READABLE
+    }
+    return 0
+}
+
+fn stream_bits(state: u64, us: u64) -> u64 {
+    if unixsock.sock_state(state, us) == unixsock.S_OPEN {
+        return UNCONNECTED
+    }
+    let in_closed: bool = unixsock.read_closed(state, us)
+    let out_closed: bool = unixsock.write_closed(state, us)
+    var r: u64 = 0
+    if unixsock.waiting(state, us) != 0 || in_closed {
+        r = READABLE
+    }
+    if in_closed {
+        r = r | POLLRDHUP
+    }
+    if in_closed && out_closed {
+        r = r | POLLHUP
+    }
+    if out_closed || unixsock.room(state, unixsock.sock_peer(state, us)) != 0 {
+        r = r | WRITABLE
+    }
+    return r
+}
+
+fn datagram_bits(state: u64, us: u64) -> u64 {
+    let peer: u64 = unixsock.sock_peer(state, us)
+    let in_shut: bool = unixsock.shut_read(state, us)
+    let out_shut: bool = unixsock.shut_write(state, us)
+    var r: u64 = 0
+    if unixsock.waiting(state, us) != 0 || in_shut {
+        r = READABLE
+    }
+    if in_shut {
+        r = r | POLLRDHUP
+    }
+    if in_shut && out_shut {
+        r = r | POLLHUP
+    }
+    if peer >= unixsock.USOCK_MAX || out_shut || unixsock.dgram_room(state, peer) != 0 {
+        r = r | WRITABLE
+    }
+    return r
+}
+
+fn bits(state: u64, us: u64) -> u64 {
+    if unixsock.sock_state(state, us) == unixsock.S_LISTEN {
+        return listener_bits(state, us)
+    }
+    if unixsock.datagram(state, us) {
+        return datagram_bits(state, us)
+    }
+    return stream_bits(state, us)
+}

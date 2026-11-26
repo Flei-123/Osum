@@ -40,6 +40,7 @@ SMP_t_sockshare=${SMP_t_sockshare:-4}
 SMP_t_shmclose=${SMP_t_shmclose:-4}
 SMP_t_fdclose=${SMP_t_fdclose:-4}
 SMP_t_sharedanon=${SMP_t_sharedanon:-4}
+SMP_t_epollhup=${SMP_t_epollhup:-4}
 KW_t_sharedanon=${KW_t_sharedanon:-smpfrueh}
 UB_MEM_t_shmhigh=${UB_MEM_t_shmhigh:-3072}
 UB_MEM_t_lazyhigh=${UB_MEM_t_lazyhigh:-3072}
@@ -52,6 +53,7 @@ KW_t_sockfree=${KW_t_sockfree:-smpfrueh}
 KW_t_sockshare=${KW_t_sockshare:-smpfrueh}
 KW_t_shmclose=${KW_t_shmclose:-smpfrueh}
 KW_t_fdclose=${KW_t_fdclose:-smpfrueh}
+KW_t_epollhup=${KW_t_epollhup:-smpfrueh}
 TMO=${TMO:-150}
 export FIRNLIB="$ROOT/lib"
 
