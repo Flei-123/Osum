@@ -12,7 +12,7 @@ export {
     note_bypass, MISS, PAGE_BYTES, pin, unpin, valid_of,
     drop_pages, stat, H_SCANS, H_WALKED, H_DROP_CALLS, H_DROP_NODE, H_DROP_INO, H_DROP_MOUNT, H_DROP_ALL, H_DROP_RANGE, H_SETS, H_EVICTS, H_SHRUNK,
     base_of, find_way, slot_at, pin_slot, unpin_slot, pin_page, frame_at, set_of, run_slot, run_frame, pin_page_run,
-    patch_page, drop_partials_before, note_write_alloc, H_PATCHES, H_WRITE_ALLOCS
+    patch_run, partials_of, drop_partials_before, note_write_alloc, H_PATCHES, H_WRITE_ALLOCS
 }
 
 const MISS: u64 = 0xFFFFFFFFFFFFFFFF
@@ -570,22 +570,7 @@ fn set_valid(b: u64, s: u64, node: u64, valid: u64) {
     kstate.set(s, S_VALID, valid)
 }
 
-fn patch_page(state: u64, m: u64, node: u64, idx: u64, lo: u64, hi: u64, src: u64) -> bool {
-    if kstate.mode_on(state, kstate.M_PCNOINVAL) {
-        return true
-    }
-    let b: u64 = kstate.get(state, kstate.PCACHE_BASE)
-    if b == 0 {
-        return true
-    }
-    let flags: u64 = cachelock.take(b)
-    kstate.set(b, H_EPOCH, kstate.get(b, H_EPOCH) + 1)
-    let way: u64 = find_way(b, node, m, idx)
-    if way == 0 {
-        cachelock.give(b, flags)
-        return false
-    }
-    let s: u64 = slot_at(b, node, m, idx, way - 1)
+fn patch_slot(b: u64, s: u64, node: u64, lo: u64, hi: u64, src: u64) {
     let valid: u64 = kstate.get(s, S_VALID)
     if lo <= valid {
         copy_out(kstate.get(s, S_FRAME) + lo, src, hi - lo)
@@ -596,8 +581,45 @@ fn patch_page(state: u64, m: u64, node: u64, idx: u64, lo: u64, hi: u64, src: u6
     } else {
         invalidate(b, s)
     }
+}
+
+fn patch_run(state: u64, m: u64, node: u64, pos: u64, src: u64, len: u64) -> u64 {
+    if kstate.mode_on(state, kstate.M_PCNOINVAL) {
+        return len
+    }
+    let b: u64 = kstate.get(state, kstate.PCACHE_BASE)
+    if b == 0 {
+        return len
+    }
+    let flags: u64 = cachelock.take(b)
+    kstate.set(b, H_EPOCH, kstate.get(b, H_EPOCH) + 1)
+    var done: u64 = 0
+    var missing: bool = false
+    while done < len && !missing {
+        let at: u64 = pos + done
+        let way: u64 = find_way(b, node, m, at >> 12)
+        if way == 0 {
+            missing = true
+        } else {
+            let lo: u64 = at & (PAGE_BYTES - 1)
+            var span: u64 = PAGE_BYTES - lo
+            if span > len - done {
+                span = len - done
+            }
+            patch_slot(b, slot_at(b, node, m, at >> 12, way - 1), node, lo, lo + span, src + done)
+            done = done + span
+        }
+    }
     cachelock.give(b, flags)
-    return true
+    return done
+}
+
+fn partials_of(state: u64, node: u64) -> u64 {
+    let b: u64 = kstate.get(state, kstate.PCACHE_BASE)
+    if b == 0 {
+        return 0
+    }
+    return chain_partials(b, node)
 }
 
 fn drop_partials_before(state: u64, node: u64, first: u64) {

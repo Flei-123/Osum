@@ -471,37 +471,36 @@ fn pages_after_write(state: u64, m: u64, node: u64, off: u64, src: u64, len: u64
     if kstate.get(state, kstate.PCACHE_BASE) == 0 {
         return
     }
-    let first: u64 = off >> 12
-    let last: u64 = (off + wrote - 1) >> 12
-    var idx: u64 = first
-    while idx <= last {
-        write_through_page(state, m, node, idx, off, src, wrote)
-        idx = idx + 1
+    var done: u64 = 0
+    while done < wrote {
+        done = done + pcache.patch_run(state, m, node, off + done, src + done, wrote - done)
+        if done < wrote {
+            done = done + fill_missing_page(state, m, node, off + done, src + done, wrote - done)
+        }
     }
-    pcache.drop_partials_before(state, node, first)
+    if pcache.partials_of(state, node) != 0 {
+        pcache.drop_partials_before(state, node, off >> 12)
+    }
 }
 
-fn write_through_page(state: u64, m: u64, node: u64, idx: u64, off: u64, src: u64, wrote: u64) {
-    let page_at: u64 = idx << 12
-    var lo: u64 = 0
-    if off > page_at {
-        lo = off - page_at
+fn fill_missing_page(state: u64, m: u64, node: u64, pos: u64, src: u64, len: u64) -> u64 {
+    let lo: u64 = pos & (pcache.PAGE_BYTES - 1)
+    var span: u64 = pcache.PAGE_BYTES - lo
+    if span > len {
+        span = len
     }
-    var hi: u64 = pcache.PAGE_BYTES
-    if off + wrote < page_at + pcache.PAGE_BYTES {
-        hi = off + wrote - page_at
+    if lo != 0 || span != pcache.PAGE_BYTES {
+        return span
     }
-    let from: u64 = src + (page_at + lo - off)
-    if pcache.patch_page(state, m, node, idx, lo, hi, from) || lo != 0 || hi != pcache.PAGE_BYTES {
-        return
-    }
+    let idx: u64 = pos >> 12
     let slot: u64 = page_for_fill(state, m, node, idx)
     if slot == 0 {
-        return
+        return span
     }
-    pcache.copy_out(pcache.buffer_of(slot), from, pcache.PAGE_BYTES)
+    pcache.copy_out(pcache.buffer_of(slot), src, pcache.PAGE_BYTES)
     pcache.finish_fill(state, slot, m, node, idx, pcache.PAGE_BYTES)
     pcache.note_write_alloc(state)
+    return span
 }
 
 fn v_create(state: u64, m: u64, path: u64, art: u64) -> u64 {

@@ -2269,6 +2269,28 @@ fn write_at_scoped(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
 
 const WRITE_RUN_BLOCKS: u64 = 256
 
+fn leaf_run(state: u64, ino: u64, index: u64, expect: u64, limit: u64) -> u64 {
+    let dn: u64 = directs(state)
+    if index < dn || limit == 0 {
+        return 0
+    }
+    let k: u64 = index - dn
+    if lp_lba == 0 || lp_ino != ino || lp_group != k / PER_BLOCK {
+        return 0
+    }
+    let at: u64 = k % PER_BLOCK
+    var room: u64 = PER_BLOCK - at
+    if room > limit {
+        room = limit
+    }
+    let from: u64 = lp_data() + at * 8
+    var n: u64 = 0
+    while n < room && regio.read64(from + n * 8) == expect + n {
+        n = n + 1
+    }
+    return n
+}
+
 fn write_full_run(state: u64, ino: u64, pos: u64, src: u64, want: u64) -> u64 {
     var count: u64 = 0
     var first: u64 = 0
@@ -2276,16 +2298,19 @@ fn write_full_run(state: u64, ino: u64, pos: u64, src: u64, want: u64) -> u64 {
     if cap > WRITE_RUN_BLOCKS {
         cap = WRITE_RUN_BLOCKS
     }
+    var stop: bool = false
     data_overwrite = 1
-    while count < cap {
-        let b: u64 = file_block_cached(state, ino, pos / BS + count)
+    while count < cap && !stop {
+        let index: u64 = pos / BS + count
+        let b: u64 = file_block_cached(state, ino, index)
         if b == 0 || (count > 0 && b != first + count) {
-            break
+            stop = true
+        } else {
+            if count == 0 {
+                first = b
+            }
+            count = count + 1 + leaf_run(state, ino, index + 1, b + 1, cap - count - 1)
         }
-        if count == 0 {
-            first = b
-        }
-        count = count + 1
     }
     data_overwrite = 0
     if count == 0 || !ofsj.write_blocks(state, first, src, count) {

@@ -188,8 +188,36 @@ fn kernel_buffer_ok(addr: u64, len: u64) -> bool {
     return procmap.canonical(addr) && procmap.canonical(addr +% len)
 }
 
+fn copy_in_fast(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
+    let mmfl: u64 = mmlock.mm_lock(state)
+    let done: u64 = copy_in_held(state, me, dst, src, len)
+    mmlock.mm_unlock(state, mmfl)
+    return done == len
+}
+
+fn copy_in_spans(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
+    var n: u64 = 0
+    while n < len {
+        var take: u64 = len - n
+        if take > FAST_COPY_MAX {
+            take = FAST_COPY_MAX
+        }
+        if !copy_in_fast(state, me, dst + n, src + n, take) {
+            return false
+        }
+        n = n + take
+    }
+    return true
+}
+
 fn copy_in(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
-    if !kernel_buffer_ok(dst, len) || !procfault.user_ok(state, me, src, len) {
+    if !kernel_buffer_ok(dst, len) {
+        return false
+    }
+    if len != 0 && procfault.user_range_ok(state, me, src, len) && copy_in_spans(state, me, dst, src, len) {
+        return true
+    }
+    if !procfault.user_ok(state, me, src, len) {
         return false
     }
     var n: u64 = 0
