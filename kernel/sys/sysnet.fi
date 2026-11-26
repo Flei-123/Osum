@@ -1954,6 +1954,35 @@ fn recvmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
     return got
 }
 
+const MSG_PEEK_FLAG: u64 = 2
+
+fn recvmsg_peek(state: u64, me: u64, si: u64, mh: u64, iov: u64, iovlen: u64) -> u64 {
+    if !sysuser.put64(state, me, mh + sysconst.MH_CONTROLLEN, 0) || !sysuser.put32(state, me, mh + sysconst.MH_FLAGS, 0) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    var got: u64 = 0
+    var v: u64 = 0
+    while v < iovlen {
+        if !procfault.user_ok(state, me, iov + v * 16, 16) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        let base: u64 = sysuser.get64u(state, me, iov + v * 16)
+        let blen: u64 = sysuser.get64u(state, me, iov + v * 16 + 8)
+        let fl: u64 = mmlock.scratch_lock(state)
+        let r: u64 = sysfd.stream_peek(state, me, si, got, base, blen)
+        mmlock.scratch_unlock(state, fl)
+        if r == sysuser.neg(errno.E_FAULT) {
+            return r
+        }
+        got = got + r
+        if r < blen {
+            return got
+        }
+        v = v + 1
+    }
+    return got
+}
+
 fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
     let nlof: u64 = sysevent.nl_of(state, me, fd)
     if nlof < file.MAX_OPEN {
@@ -1975,6 +2004,7 @@ fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
     let iov: u64 = sysuser.get64u(state, me, mh + sysconst.MH_IOV)
     let iovlen: u64 = sysuser.get64u(state, me, mh + sysconst.MH_IOVLEN)
     let stream_deadline: u64 = sysfd.usock_deadline(state, si, false)
+    let peeking: bool = (flags & MSG_PEEK_FLAG) != 0
     while unixsock.waiting(state, si) == 0 {
         let seen: u64 = sched.poll_seq(state)
         if unixsock.read_closed(state, si) {
@@ -1988,6 +2018,9 @@ fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
             return stop
         }
         let _slept: u64 = sysfd.net_wait(state, seen)
+    }
+    if peeking {
+        return recvmsg_peek(state, me, si, mh, iov, iovlen)
     }
     let avail: u64 = unixsock.waiting(state, si)
     var ctlout: u64 = 0
