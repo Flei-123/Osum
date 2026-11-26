@@ -80,7 +80,7 @@ Limits to know: the Limine config (5 s menu timeout) and root-owned data files (
 full image (`tools/vbox/run.sh build` -> `publish` -> laptop `bossswap.ps1`). A program that imports `wlibc` is
 functionally changed by r1277 (`platte_ink`), but overlaying every GUI program does not fit a 60 MiB root.
 
-## 5. HP dev feed: publish and device steps (08.11.2026)
+## 5. The ONE dev feed for HP, Dell and VM: publish and device steps (08.11.2026, unified 26.11.2026)
 
 One command (base preset `HP_BASE=/root/abbilder/hp-stick36-base`, `HP_DEV=1`, ref `origin/main`; runs `republish-hp.sh` via `heavy`, then re-checks signature + every hash and size over https and prints the HP steps):
 
@@ -89,6 +89,10 @@ One command (base preset `HP_BASE=/root/abbilder/hp-stick36-base`, `HP_DEV=1`, r
 
 It refuses a wrong `HP_BASE` (missing, no `SYSVERSION`, fewer than 100 programs) and fails unless the publisher printed `verify OK` and `package feed unchanged` and `tools/ota/verify_feed.py` accepts the https feed (signature, hashes, `--count` = the stand it started from).
 Overrides: `HP_BASE`, `HP_REF`, `FEED_URL`. Gate: `bash tools/publishdev/run.sh` (13 checks, mutants: tampered kernel byte, tampered hash, broken signature, wrong base).
+One feed, one stand, one look for every device: `/srv/store/osum/system/dev` is the only channel. The old Dell side feed `/srv/store/osum-dell` is retired (do not publish into it, `FEED_ROOT` is unset by `publish-dev.sh`); a Dell with `quelle=https://store.fleitec.com/osum-dell/aktuell` is switched once to `quelle=https://store.fleitec.com/osum/aktuell` (`kanal=dev`) in `/etc/ota.conf`.
+Baselines: `tools/ota/device-bases.txt` lists the image dirs the devices were installed from (first = full HP baseline). A file ships when it differs from ANY baseline, so every device gets a superset of what it needs; the client replaces the files by hash-checked copies. Device specifics are never in the feed: hardware is detected by the kernel (drivers, boot words from the probe) and `/etc/jarvis/permissions.conf` is skipped (`HP_SKIP_EXTRAS`), each device keeps its own.
+Add a new device generation: append its baseline dir to `tools/ota/device-bases.txt`; nothing else.
+
 The stand name is `count` = `git rev-list --count <HP_REF>` when the script fetches; a main that moves during the queue wait publishes a later commit: read the printed stand.
 
 Current stand: 5411 (main 6d3d8e658, includes CURRENT/TRIAL files, English wire keys (prov_own, kbund KOPF writer), ab_boot English serial texts, tscdelta, fb-aus gui-off; 141 overlay programs, 359 hashes, VERZEICHNIS 39865 B).
