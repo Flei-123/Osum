@@ -31,7 +31,7 @@ if [ -z "${KERNEL:-}" ]; then
     ./tools/build-kernel.sh "$OUT/k0.img" --stufe 0 > "$OUT/kernel.log" 2>&1 || { echo "LINUXAPPS: kernel build failed"; tail -5 "$OUT/kernel.log"; exit 1; }
     KERNEL=$OUT/k0.img
 fi
-cp "$GS" "$OUT/fx.sh"
+{ [ -z "${FX_RUNS:-}" ] || printf 'FX_RUNS=%s\n' "$FX_RUNS"; cat "$GS"; } > "$OUT/fx.sh"
 printf '::sysinit:/bin/sh /etc/fx.sh\n::shutdown:/bin/true\n' > "$OUT/inittab"
 # the spec comes from the Alpine root; replace its inittab and add the guest script
 grep -v '^/etc/inittab' "$SPEC" > "$OUT/spec.txt"
