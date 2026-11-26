@@ -57,7 +57,7 @@ sums() { (cd "$FEED" && find aktuell v pakete register.json -type f -print0 | so
 BEFORE=$(sums)
 
 TARGET=$FEED
-if [ "$DRY" = 1 ]; then TARGET=$T/feed; mkdir -p "$TARGET/system"; cp -a "$FEED/system/$CHANNEL" "$TARGET/system/$CHANNEL" 2>/dev/null || true; fi
+if [ "$DRY" = 1 ]; then TARGET=$T/feed; mkdir -p "$TARGET/system"; mkdir -p "$TARGET/system/$CHANNEL"; find "$FEED/system/$CHANNEL" -maxdepth 1 -type f ! -name 'f[0-9]*-*' ! -name 'kernel-*.mb' -exec cp -a {} "$TARGET/system/$CHANNEL/" \;; fi
 ARGS=(--count "$COUNT" --gz --notes "$T/notes.txt" --name "${MARKE_PRODUKT} $CHANNEL")
 if [ -n "$(ls -A "$T/ovl")" ]; then ARGS+=(--overlay "$T/ovl"); fi
 if [ -n "${OVL_LINKS:-}" ]; then ARGS+=(--links "$OVL_LINKS"); fi

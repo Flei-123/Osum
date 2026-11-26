@@ -10,7 +10,9 @@ expect_pass() { local name=$1; shift; if "$@" > "$T/out" 2>&1; then ok "$name"; 
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 LIVE=${PUBLISHDEV_LIVE:-/srv/store/osum}
 mkdir -p "$T/feed/aktuell"
-cp -a "$LIVE/system" "$T/feed/system"
+mkdir -p "$T/feed/system/dev"
+find "$LIVE/system/dev" -maxdepth 1 -type f ! -name 'f[0-9]*-*' ! -name 'kernel-*.mb' -exec cp -a {} "$T/feed/system/dev/" \;
+awk -F'\t' '$1=="sysfile"||$1=="sysgz"{print $5}' "$T/feed/system/dev/VERZEICHNIS" | while read -r served; do cp -a "$LIVE/system/dev/$served" "$T/feed/system/dev/"; done
 cp "$LIVE/aktuell/schluessel.pub" "$T/feed/aktuell/"
 URL="file://$T/feed"
 STAND=$(awk -F'\t' '$1=="system"{print $2}' "$T/feed/system/dev/VERZEICHNIS")
