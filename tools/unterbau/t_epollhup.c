@@ -144,14 +144,17 @@ static void check_bits(int ti, const struct row *row)
 
 static void check_unconnected(int ti)
 {
-    char name[64], why[160] = "";
+    char name[64];
+    unsigned legacy_rdhup = EPOLLRDHUP;
     snprintf(name, sizeof name, "bits_unconnected_%s", type_names[ti]);
     int fd = socket(AF_UNIX, sock_types[ti], 0);
     if (fd < 0) {
         FAIL(name, "socket errno %d", errno);
         return;
     }
-    CHECK(name, side_matches(fd, ti == DGRAM_INDEX ? WRITABLE : UNCONNECTED_BITS, "fd", why, sizeof why), "%s", why);
+    unsigned want = ti == DGRAM_INDEX ? WRITABLE : UNCONNECTED_BITS;
+    unsigned got_poll = poll_bits(fd), got_epoll = epoll_bits(fd) & ~legacy_rdhup;
+    CHECK(name, got_poll == want && got_epoll == (want & EPOLL_VISIBLE & ~legacy_rdhup), "poll 0x%x epoll 0x%x, want 0x%x", got_poll, got_epoll, want);
     close(fd);
 }
 
