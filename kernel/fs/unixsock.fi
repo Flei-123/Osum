@@ -380,6 +380,22 @@ fn drain_queue(state: u64, lst: u64) {
     }
 }
 
+fn release_ring(state: u64, r: u64) {
+    if r == 0 {
+        return
+    }
+    let n: u64 = regio.read64(r + FQ_COUNT)
+    var q: u64 = 0
+    while q < n && q < FDQ_MAX {
+        let of: u64 = regio.read64(r + FQ_SLOT + q * 8)
+        if of < file.MAX_OPEN {
+            file.open_unref(state, of)
+        }
+        q = q + 1
+    }
+    usring.ring_free(state, r)
+}
+
 fn sock_free(state: u64, i: u64) {
     if i >= USOCK_MAX || kstate.get(state, sk_at(i) + SK_USED) == 0 {
         return
@@ -387,19 +403,16 @@ fn sock_free(state: u64, i: u64) {
     if kstate.get(state, sk_at(i) + SK_STATE) == S_LISTEN {
         drain_queue(state, i)
     }
+    let scratch_fl: u64 = mmlock.scratch_lock(state)
+    let queue_fl: u64 = fqlock.enter(state)
+    let r: u64 = sock_detach(state, i)
+    fqlock.leave(state, queue_fl)
+    mmlock.scratch_unlock(state, scratch_fl)
+    release_ring(state, r)
+}
+
+fn sock_detach(state: u64, i: u64) -> u64 {
     let r: u64 = kstate.get(state, sk_at(i) + SK_RING)
-    if r != 0 {
-        let n: u64 = regio.read64(r + FQ_COUNT)
-        var q: u64 = 0
-        while q < n && q < FDQ_MAX {
-            let of: u64 = regio.read64(r + FQ_SLOT + q * 8)
-            if of < file.MAX_OPEN {
-                file.open_unref(state, of)
-            }
-            q = q + 1
-        }
-        usring.ring_free(state, r)
-    }
     let nmi: u64 = kstate.get(state, sk_at(i) + SK_NAME)
     if nmi < UNAME_MAX {
         kstate.set(state, nm_at(nmi) + NM_USED, 0)
@@ -431,6 +444,7 @@ fn sock_free(state: u64, i: u64) {
     if n_s != 0 {
         kstate.set(state, mmlock.LOCK_BASE + C_SOCKS, n_s - 1)
     }
+    return r
 }
 
 fn name_eq(state: u64, nmi: u64, path: u64, len: u64) -> bool {
@@ -1021,15 +1035,14 @@ fn push_fd(state: u64, i: u64, of: u64) -> u64 {
     if p >= USOCK_MAX {
         return errno.E_PIPE
     }
-    let r: u64 = kstate.get(state, sk_at(p) + SK_RING)
-    if r == 0 {
-        return errno.E_PIPE
-    }
-    if regio.read64(r + FQ_COUNT) >= FDQ_MAX {
-        return errno.E_AGAIN
-    }
     file.open_ref(state, of)
     let fl: u64 = fqlock.enter(state)
+    let r: u64 = kstate.get(state, sk_at(p) + SK_RING)
+    if r == 0 {
+        fqlock.leave(state, fl)
+        file.open_unref(state, of)
+        return errno.E_PIPE
+    }
     let n: u64 = regio.read64(r + FQ_COUNT)
     if n >= FDQ_MAX {
         fqlock.leave(state, fl)
@@ -1079,11 +1092,12 @@ fn pop_fd(state: u64, i: u64) -> u64 {
     if i >= USOCK_MAX {
         return file.MAX_OPEN
     }
+    let fl: u64 = fqlock.enter(state)
     let r: u64 = kstate.get(state, sk_at(i) + SK_RING)
     if r == 0 {
+        fqlock.leave(state, fl)
         return file.MAX_OPEN
     }
-    let fl: u64 = fqlock.enter(state)
     let n: u64 = regio.read64(r + FQ_COUNT)
     if n == 0 {
         fqlock.leave(state, fl)

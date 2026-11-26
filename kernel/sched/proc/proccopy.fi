@@ -120,29 +120,57 @@ fn copy_space(state: u64, from: u64, to: u64) -> u64 {
     return n
 }
 
+const BUNDLE_TILES: u64 = 4
+
+fn copy_tile(state: u64, from: u64, to: u64, tile: u64) -> u64 {
+    let a: u64 = procbase.USER_DATA + tile * procbase.USER_SPAN
+    let s2: u64 = procpt.pt_for(state, from, a, false)
+    if s2 == 0 || arch.zero_run(procpt.tab(s2), 512) == 512 {
+        return 0
+    }
+    let d2: u64 = procpt.pt_for(state, to, a, true)
+    if d2 == 0 {
+        return COPY_FAILED
+    }
+    return copy_pt(state, s2, d2)
+}
+
+fn copy_bundle(state: u64, from: u64, to: u64, next: *mut u64) -> u64 {
+    var tile: u64 = *next
+    var copied_tiles: u64 = 0
+    var n: u64 = 0
+    mmlock.demand_lock(state)
+    while tile < procbase.PRIV_SLOTS && copied_tiles < BUNDLE_TILES {
+        let m: u64 = copy_tile(state, from, to, tile)
+        if m == COPY_FAILED {
+            procspace.tlb_flush_shared(state, from, tlbstat.SITE_FORK_ABORT)
+            mmlock.demand_unlock(state)
+            return COPY_FAILED
+        }
+        if m != 0 {
+            copied_tiles = copied_tiles + 1
+        }
+        n = n + m
+        tile = next_priv_slot(state, from, tile + 1)
+    }
+    if copied_tiles != 0 {
+        procspace.tlb_flush_shared(state, from, tlbstat.SITE_FORK_PROTECT)
+    }
+    mmlock.demand_unlock(state)
+    *next = tile
+    return n
+}
+
 fn copy_tiles(state: u64, from: u64, to: u64) -> u64 {
     var n: u64 = 0
-    var kachel: u64 = next_priv_slot(state, from, 0)
-    while kachel < procbase.PRIV_SLOTS {
-        let a: u64 = procbase.USER_DATA + kachel * procbase.USER_SPAN
-        let s2: u64 = procpt.pt_for(state, from, a, false)
-        if s2 != 0 && arch.zero_run(procpt.tab(s2), 512) != 512 {
-            let d2: u64 = procpt.pt_for(state, to, a, true)
-            if d2 == 0 {
-                return 0
-            }
-            mmlock.demand_lock(state)
-            let m: u64 = copy_pt(state, s2, d2)
-            procspace.tlb_flush_shared(state, from, tlbstat.SITE_FORK_PROTECT)
-            mmlock.demand_unlock(state)
-            if m == COPY_FAILED {
-                procspace.tlb_flush_shared(state, from, tlbstat.SITE_FORK_ABORT)
-                return 0
-            }
-            n = n + m
-            irqwindow.open()
+    var tile: u64 = next_priv_slot(state, from, 0)
+    while tile < procbase.PRIV_SLOTS {
+        let m: u64 = copy_bundle(state, from, to, &tile)
+        if m == COPY_FAILED {
+            return 0
         }
-        kachel = next_priv_slot(state, from, kachel + 1)
+        n = n + m
+        irqwindow.open()
     }
     return n
 }
