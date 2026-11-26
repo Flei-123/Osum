@@ -1,0 +1,265 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.octets
+import gpu.intel.mode
+import gpu.intel.modelist
+
+export {
+    live_mask, hp_new, hp_sample, hp_stable, assign, set_list, extend_pick, mirror_pick, validate,
+    out_port, out_pipe, out_x, out_y, out_mode, out_list, popcount,
+    Hotplug, PORT_A, PORT_B, PORT_C, PORT_D, PORT_E, PORT_COUNT, OUT_MAX, ROW_BYTES,
+    V_OK, V_PCLK, V_FB_WIDTH, V_FB_HEIGHT, V_NO_MODE, DEBOUNCE_SAMPLES
+}
+
+const PORT_A: u64 = 0
+const PORT_B: u64 = 1
+const PORT_C: u64 = 2
+const PORT_D: u64 = 3
+const PORT_E: u64 = 4
+const PORT_COUNT: u64 = 5
+const OUT_MAX: u64 = 3
+const ROW_BYTES: u64 = 64
+const F_PORT: u64 = 0
+const F_PIPE: u64 = 1
+const F_LIST: u64 = 2
+const F_COUNT: u64 = 3
+const F_MODE: u64 = 4
+const F_X: u64 = 5
+const F_Y: u64 = 6
+const DE_PORT_A_BIT: u64 = 3
+const SDE_B_BIT: u64 = 21
+const SDE_C_BIT: u64 = 22
+const SDE_D_BIT: u64 = 23
+const SDE_E_BIT: u64 = 25
+const DEBOUNCE_SAMPLES: u64 = 3
+const V_OK: u64 = 0
+const V_PCLK: u64 = 1
+const V_FB_WIDTH: u64 = 2
+const V_FB_HEIGHT: u64 = 3
+const V_NO_MODE: u64 = 4
+
+struct Hotplug {
+    stable: u64,
+    candidate: u64,
+    run: u64,
+    events: u64
+}
+
+fn bit(n: u64) -> u64 {
+    return 1 << n
+}
+
+fn popcount(v: u64) -> u64 {
+    var n: u64 = 0
+    var x: u64 = v
+    while x != 0 {
+        n = n + (x & 1)
+        x = x >> 1
+    }
+    return n
+}
+
+fn live_mask(sdeisr: u64, de_port_isr: u64) -> u64 {
+    var m: u64 = 0
+    if (de_port_isr & bit(DE_PORT_A_BIT)) != 0 {
+        m = m | bit(PORT_A)
+    }
+    if (sdeisr & bit(SDE_B_BIT)) != 0 {
+        m = m | bit(PORT_B)
+    }
+    if (sdeisr & bit(SDE_C_BIT)) != 0 {
+        m = m | bit(PORT_C)
+    }
+    if (sdeisr & bit(SDE_D_BIT)) != 0 {
+        m = m | bit(PORT_D)
+    }
+    if (sdeisr & bit(SDE_E_BIT)) != 0 {
+        m = m | bit(PORT_E)
+    }
+    return m
+}
+
+fn hp_new(initial: u64) -> Hotplug {
+    var h: Hotplug = Hotplug { stable: initial, candidate: initial, run: 0, events: 0 }
+    return h
+}
+
+fn hp_stable(h: *mut Hotplug) -> u64 {
+    return (*h).stable
+}
+
+fn hp_sample(h: *mut Hotplug, live: u64) -> u64 {
+    if live == (*h).stable {
+        (*h).candidate = live
+        (*h).run = 0
+        return 0
+    }
+    if live != (*h).candidate {
+        (*h).candidate = live
+        (*h).run = 1
+        return 0
+    }
+    (*h).run = (*h).run + 1
+    if (*h).run < DEBOUNCE_SAMPLES {
+        return 0
+    }
+    let changed: u64 = (*h).stable ^ live
+    (*h).stable = live
+    (*h).run = 0
+    (*h).events = (*h).events + 1
+    return changed
+}
+
+fn field(t: u64, i: u64, f: u64) -> u64 {
+    return octets.ld64(t, i * ROW_BYTES + f * 8)
+}
+
+fn setf(t: u64, i: u64, f: u64, v: u64) {
+    octets.st64(t, i * ROW_BYTES + f * 8, v)
+}
+
+fn out_port(t: u64, i: u64) -> u64 {
+    return field(t, i, F_PORT)
+}
+
+fn out_pipe(t: u64, i: u64) -> u64 {
+    return field(t, i, F_PIPE)
+}
+
+fn out_x(t: u64, i: u64) -> u64 {
+    return field(t, i, F_X)
+}
+
+fn out_y(t: u64, i: u64) -> u64 {
+    return field(t, i, F_Y)
+}
+
+fn out_mode(t: u64, i: u64) -> u64 {
+    return field(t, i, F_MODE)
+}
+
+fn out_list(t: u64, i: u64) -> u64 {
+    return field(t, i, F_LIST)
+}
+
+fn assign(connected: u64, t: u64) -> u64 {
+    var n: u64 = 0
+    var port: u64 = 0
+    while port < PORT_COUNT && n < OUT_MAX {
+        if (connected & bit(port)) != 0 {
+            setf(t, n, F_PORT, port)
+            setf(t, n, F_PIPE, n)
+            setf(t, n, F_MODE, modelist.NONE)
+            setf(t, n, F_X, 0)
+            setf(t, n, F_Y, 0)
+            n = n + 1
+        }
+        port = port + 1
+    }
+    return n
+}
+
+fn set_list(t: u64, i: u64, list: u64, count: u64) {
+    setf(t, i, F_LIST, list)
+    setf(t, i, F_COUNT, count)
+}
+
+fn mode_of(t: u64, i: u64, out: *mut mode.Mode) {
+    modelist.get(field(t, i, F_LIST), field(t, i, F_MODE), out)
+}
+
+fn extend_pick(t: u64, n: u64, max_w: u64, max_h: u64, max_pclk: u64) -> bool {
+    var x: u64 = 0
+    var i: u64 = 0
+    var m: mode.Mode = mode.mode_new()
+    while i < n {
+        let pick: u64 = modelist.best(field(t, i, F_LIST), field(t, i, F_COUNT), max_w, max_h, max_pclk)
+        if pick == modelist.NONE {
+            return false
+        }
+        setf(t, i, F_MODE, pick)
+        mode_of(t, i, &m)
+        setf(t, i, F_X, x)
+        setf(t, i, F_Y, 0)
+        x = x + m.hactive
+        i = i + 1
+    }
+    return true
+}
+
+fn common_in_all(t: u64, n: u64, w: u64, h: u64, picks: u64) -> bool {
+    var j: u64 = 0
+    while j < n {
+        let at: u64 = modelist.find(field(t, j, F_LIST), field(t, j, F_COUNT), w, h)
+        if at == modelist.NONE {
+            return false
+        }
+        octets.st64(picks, j * 8, at)
+        j = j + 1
+    }
+    return true
+}
+
+fn mirror_pick(t: u64, n: u64, scratch: u64) -> bool {
+    if n == 0 {
+        return false
+    }
+    var best_area: u64 = 0
+    var found: bool = false
+    var m: mode.Mode = mode.mode_new()
+    var i: u64 = 0
+    while i < field(t, 0, F_COUNT) {
+        modelist.get(field(t, 0, F_LIST), i, &m)
+        let area: u64 = m.hactive * m.vactive
+        if area > best_area && common_in_all(t, n, m.hactive, m.vactive, scratch + OUT_MAX * 8) {
+            best_area = area
+            found = true
+            var j: u64 = 0
+            while j < n {
+                octets.st64(scratch, j * 8, octets.ld64(scratch, OUT_MAX * 8 + j * 8))
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    if !found {
+        return false
+    }
+    var k: u64 = 0
+    while k < n {
+        setf(t, k, F_MODE, octets.ld64(scratch, k * 8))
+        setf(t, k, F_X, 0)
+        setf(t, k, F_Y, 0)
+        k = k + 1
+    }
+    return true
+}
+
+fn validate(t: u64, n: u64, max_fb_w: u64, max_fb_h: u64) -> u64 {
+    var right: u64 = 0
+    var bottom: u64 = 0
+    var m: mode.Mode = mode.mode_new()
+    var i: u64 = 0
+    while i < n {
+        if field(t, i, F_MODE) == modelist.NONE {
+            return V_NO_MODE
+        }
+        mode_of(t, i, &m)
+        if !modelist.cdclk_ok(m.pclk_khz) {
+            return V_PCLK
+        }
+        if field(t, i, F_X) + m.hactive > right {
+            right = field(t, i, F_X) + m.hactive
+        }
+        if field(t, i, F_Y) + m.vactive > bottom {
+            bottom = field(t, i, F_Y) + m.vactive
+        }
+        i = i + 1
+    }
+    if right > max_fb_w {
+        return V_FB_WIDTH
+    }
+    if bottom > max_fb_h {
+        return V_FB_HEIGHT
+    }
+    return V_OK
+}

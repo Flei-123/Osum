@@ -1,0 +1,495 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.io
+import libc.octets
+import gpu.intel.vblank
+import gpu.intel.flipdone
+import gpu.intel.pace
+import gpu.intel.mode
+import gpu.intel.edid
+import gpu.intel.modelist
+import gpu.intel.outputs
+
+const REG_CAP: u64 = 32
+const NOT_FOUND: u64 = 0xffff
+const PIPE_B: u64 = 1
+const FRAME_US: u64 = 16667
+const LIST_CAP: u64 = 24
+const EDID_BLOCK: u64 = 128
+const EDID_BYTES: u64 = 256
+const DTD_OFFSET: u64 = 54
+const MODE_SLOTS: u64 = 24
+
+static mut reg_off: [u64; 32] = [0; 32]
+static mut reg_val: [u64; 32] = [0; 32]
+static mut reg_n: u64 = 0
+static mut flip_frozen: bool = false
+static mut flip_after_us: u64 = 0
+static mut clock_us: u64 = 0
+static mut edid_a: [u8; 256] = [0; 256]
+static mut edid_b: [u8; 256] = [0; 256]
+static mut edid_c: [u8; 256] = [0; 256]
+static mut list_a: [u64; 216] = [0; 216]
+static mut list_b: [u64; 216] = [0; 216]
+static mut list_c: [u64; 216] = [0; 216]
+static mut table: [u64; 24] = [0; 24]
+static mut scratch: [u64; 8] = [0; 8]
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn reg_find(off: u64) -> u64 {
+    var i: u64 = 0
+    while i < reg_n {
+        if reg_off[i as usize] == off {
+            return i
+        }
+        i = i + 1
+    }
+    return NOT_FOUND
+}
+
+fn reg_set(off: u64, v: u64) {
+    var i: u64 = reg_find(off)
+    if i == NOT_FOUND {
+        if reg_n >= REG_CAP {
+            return
+        }
+        i = reg_n
+        reg_off[i as usize] = off
+        reg_n = reg_n + 1
+    }
+    reg_val[i as usize] = v
+}
+
+fn reg_get(off: u64) -> u64 {
+    let i: u64 = reg_find(off)
+    if i == NOT_FOUND {
+        return 0
+    }
+    return reg_val[i as usize]
+}
+
+fn m_rd(off: u64) -> u64 {
+    return reg_get(off)
+}
+
+fn m_wr(off: u64, v: u64) -> u64 {
+    if off >= 0x44400 && off < 0x44430 && (off & 0xf) == 8 {
+        reg_set(off, reg_get(off) & (~v) & 0xffffffff)
+        return 0
+    }
+    reg_set(off, v)
+    return 0
+}
+
+fn m_us(n: u64) -> u64 {
+    clock_us = clock_us + n
+    if !flip_frozen && clock_us >= flip_after_us {
+        reg_set(flipdone.FLIPCOUNT_A + PIPE_B * vblank.PIPE_STRIDE, (reg_get(flipdone.FLIPCOUNT_A + PIPE_B * vblank.PIPE_STRIDE) + 1) & 0xffffffff)
+        reg_set(vblank.pipe_iir(PIPE_B), reg_get(vblank.pipe_iir(PIPE_B)) | flipdone.FLIP_DONE_BIT)
+    }
+    return 0
+}
+
+fn reset_regs() {
+    reg_n = 0
+    flip_frozen = false
+    flip_after_us = 0
+    clock_us = 0
+}
+
+fn test_flipdone() {
+    reset_regs()
+    chk("flip: bit is plane 1 flip done (bit 3)", flipdone.FLIP_DONE_BIT == 8)
+    chk("flip: counter offset pipe A", flipdone.FLIPCOUNT_A == 0x70044)
+    chk("flip: timestamp offset pipe A", flipdone.FLIPTMSTMP_A == 0x7004c)
+    reg_set(vblank.pipe_imr(PIPE_B), 0xffffffff)
+    reg_set(vblank.pipe_ier(PIPE_B), 0x1)
+    chk("flip: enable", flipdone.enable(m_rd, m_wr, PIPE_B) == flipdone.F_OK)
+    chk("flip: unmasked, other bits stay masked", reg_get(vblank.pipe_imr(PIPE_B)) == 0xfffffff7)
+    chk("flip: enabled, vblank bit kept", reg_get(vblank.pipe_ier(PIPE_B)) == 0x9)
+    chk("flip: master enable", (reg_get(vblank.MASTER_IRQ) & vblank.MASTER_ENABLE) != 0)
+    chk("flip: not pending", !flipdone.pending(m_rd, PIPE_B))
+    reg_set(vblank.pipe_iir(PIPE_B), 8)
+    chk("flip: iir alone is not pending", !flipdone.pending(m_rd, PIPE_B))
+    reg_set(vblank.MASTER_IRQ, vblank.MASTER_ENABLE | vblank.master_pipe_bit(PIPE_B))
+    chk("flip: pending", flipdone.pending(m_rd, PIPE_B))
+    chk("flip: other pipe not pending", !flipdone.pending(m_rd, 0))
+    chk("flip: vblank bit alone is not flip done", !flipdone.pending(m_rd, 2))
+    chk("flip: ack", flipdone.ack(m_wr, PIPE_B) == flipdone.F_OK && !flipdone.pending(m_rd, PIPE_B))
+    chk("flip: disable", flipdone.disable(m_rd, m_wr, PIPE_B) == flipdone.F_OK)
+    chk("flip: masked again", (reg_get(vblank.pipe_imr(PIPE_B)) & 8) == 8)
+    chk("flip: disabled, vblank bit kept", reg_get(vblank.pipe_ier(PIPE_B)) == 0x1)
+    chk("flip: bad pipe", flipdone.enable(m_rd, m_wr, 3) == flipdone.F_ARG && flipdone.disable(m_rd, m_wr, 3) == flipdone.F_ARG
+        && flipdone.ack(m_wr, 3) == flipdone.F_ARG && !flipdone.pending(m_rd, 3))
+}
+
+fn test_flip_wait() {
+    reset_regs()
+    flip_after_us = 1000
+    let before: u64 = flipdone.flip_count(m_rd, PIPE_B)
+    chk("wait count: flip seen", flipdone.wait_count(m_rd, m_us, PIPE_B, before) == flipdone.F_OK)
+    chk("wait count: counter moved", flipdone.flip_count(m_rd, PIPE_B) == before + 1)
+    reset_regs()
+    flip_frozen = true
+    chk("wait count: stuck counter times out", flipdone.wait_count(m_rd, m_us, PIPE_B, 0) == flipdone.F_TIMEOUT)
+    reset_regs()
+    reg_set(flipdone.FLIPCOUNT_A + PIPE_B * vblank.PIPE_STRIDE, 0xffffffff)
+    flip_after_us = 500
+    chk("wait count: wrap", flipdone.wait_count(m_rd, m_us, PIPE_B, 0xffffffff) == flipdone.F_OK)
+    chk("wait count: bad pipe", flipdone.wait_count(m_rd, m_us, 3, 0) == flipdone.F_ARG)
+    reset_regs()
+    flip_after_us = 800
+    chk("wait irq: flip seen", flipdone.wait_irq(m_rd, m_wr, m_us, PIPE_B) == flipdone.F_OK)
+    chk("wait irq: status acked", (reg_get(vblank.pipe_iir(PIPE_B)) & 8) == 0)
+    reset_regs()
+    flip_frozen = true
+    chk("wait irq: timeout", flipdone.wait_irq(m_rd, m_wr, m_us, PIPE_B) == flipdone.F_TIMEOUT)
+    chk("wait irq: bad pipe", flipdone.wait_irq(m_rd, m_wr, m_us, 3) == flipdone.F_ARG)
+    reset_regs()
+    reg_set(flipdone.FLIPTMSTMP_A + PIPE_B * vblank.PIPE_STRIDE, 0x1234)
+    chk("stamp: reads the requested pipe", flipdone.flip_stamp(m_rd, PIPE_B) == 0x1234 && flipdone.flip_stamp(m_rd, 0) == 0)
+}
+
+fn test_pace() {
+    var p: pace.Pacer = pace.pacer_new(60000, pace.MODE_FIFO)
+    chk("pace: 60 Hz period", p.period_us == 16666)
+    var q: pace.Pacer = pace.pacer_new(59940, pace.MODE_FIFO)
+    chk("pace: 59.94 Hz period", q.period_us == 16683)
+    var bad: pace.Pacer = pace.pacer_new(0, pace.MODE_FIFO)
+    chk("pace: zero refresh invalid", pace.queue(&bad) == pace.Q_INVALID)
+    var bad2: pace.Pacer = pace.pacer_new(60000, 7)
+    chk("pace: unknown mode invalid", pace.queue(&bad2) == pace.Q_INVALID)
+    var bad3: pace.Pacer = pace.pacer_new(600000, pace.MODE_FIFO)
+    chk("pace: absurd refresh invalid", pace.queue(&bad3) == pace.Q_INVALID)
+    chk("fifo: first queue flips", pace.queue(&p) == pace.Q_FLIP)
+    chk("fifo: second queue waits", pace.queue(&p) == pace.Q_WAIT)
+    chk("fifo: nothing dropped", pace.dropped(&p) == 0)
+    chk("fifo: flip done", pace.flip_done(&p, 100))
+    chk("fifo: done without pending is ignored", !pace.flip_done(&p, 101))
+    chk("fifo: queue after done flips", pace.queue(&p) == pace.Q_FLIP)
+    chk("fifo: consecutive frames, no miss", pace.flip_done(&p, 101) && pace.missed(&p) == 0)
+    pace.queue(&p)
+    pace.flip_done(&p, 104)
+    chk("fifo: gap of 3 counts 2 missed", pace.missed(&p) == 2)
+    pace.queue(&p)
+    pace.flip_done(&p, 104)
+    chk("fifo: same frame is no miss", pace.missed(&p) == 2)
+    chk("fifo: flips counted", pace.flips(&p) == 4)
+    var w: pace.Pacer = pace.pacer_new(60000, pace.MODE_FIFO)
+    pace.queue(&w)
+    pace.flip_done(&w, 0xffffffff)
+    pace.queue(&w)
+    pace.flip_done(&w, 1)
+    chk("fifo: counter wrap counts 1 missed", pace.missed(&w) == 1)
+    var m: pace.Pacer = pace.pacer_new(60000, pace.MODE_MAILBOX)
+    chk("mailbox: first flips", pace.queue(&m) == pace.Q_FLIP)
+    chk("mailbox: second replaces", pace.queue(&m) == pace.Q_REPLACED && pace.dropped(&m) == 1)
+    chk("mailbox: third replaces", pace.queue(&m) == pace.Q_REPLACED && pace.dropped(&m) == 2)
+    pace.flip_done(&m, 10)
+    chk("mailbox: queue after done flips", pace.queue(&m) == pace.Q_FLIP && pace.dropped(&m) == 2)
+    chk("wait: at vblank full period", pace.wait_us(&p, 0) == 16666)
+    chk("wait: just before the next", pace.wait_us(&p, 16665) == 1)
+    chk("wait: wraps over periods", pace.wait_us(&p, 16666 + 100) == 16566)
+    chk("late: tight budget misses", pace.drop_late(&p, 16000, 2000))
+    chk("late: enough time", !pace.drop_late(&p, 1000, 2000))
+    chk("wait: invalid pacer", pace.wait_us(&bad, 5) == 0)
+}
+
+fn put_dtd(p: u64, d: u64, m: *mut mode.Mode) {
+    let hb: u64 = (*m).htotal - (*m).hactive
+    let vb: u64 = (*m).vtotal - (*m).vactive
+    let hso: u64 = (*m).hsync_start - (*m).hactive
+    let hsw: u64 = (*m).hsync_end - (*m).hsync_start
+    let vso: u64 = (*m).vsync_start - (*m).vactive
+    let vsw: u64 = (*m).vsync_end - (*m).vsync_start
+    octets.st8(p, d, ((*m).pclk_khz / 10) & 0xff)
+    octets.st8(p, d + 1, ((*m).pclk_khz / 10) >> 8)
+    octets.st8(p, d + 2, (*m).hactive & 0xff)
+    octets.st8(p, d + 3, hb & 0xff)
+    octets.st8(p, d + 4, (((*m).hactive >> 8) << 4) | (hb >> 8))
+    octets.st8(p, d + 5, (*m).vactive & 0xff)
+    octets.st8(p, d + 6, vb & 0xff)
+    octets.st8(p, d + 7, (((*m).vactive >> 8) << 4) | (vb >> 8))
+    octets.st8(p, d + 8, hso & 0xff)
+    octets.st8(p, d + 9, hsw & 0xff)
+    octets.st8(p, d + 10, ((vso & 0xf) << 4) | (vsw & 0xf))
+    octets.st8(p, d + 11, ((hso >> 8) << 6) | ((hsw >> 8) << 4) | ((vso >> 4) << 2) | (vsw >> 4))
+}
+
+fn seal(p: u64) {
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < EDID_BLOCK - 1 {
+        sum = sum + octets.ld8(p, i)
+        i = i + 1
+    }
+    octets.st8(p, EDID_BLOCK - 1, (256 - (sum & 0xff)) & 0xff)
+}
+
+fn start_edid(p: u64) {
+    octets.zero(p, EDID_BYTES)
+    var i: u64 = 1
+    while i < 7 {
+        octets.st8(p, i, 0xff)
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        octets.st8(p, 38 + i * 2, 1)
+        octets.st8(p, 39 + i * 2, 1)
+        i = i + 1
+    }
+}
+
+fn mode_of(hz: u64, ha: u64, hs: u64, he: u64, ht: u64) -> mode.Mode {
+    var m: mode.Mode = mode.mode_new()
+    m.hactive = ha
+    m.hsync_start = hs
+    m.hsync_end = he
+    m.htotal = ht
+    m.pclk_khz = hz
+    return m
+}
+
+fn with_v(m: *mut mode.Mode, va: u64, vs: u64, ve: u64, vt: u64) {
+    (*m).vactive = va
+    (*m).vsync_start = vs
+    (*m).vsync_end = ve
+    (*m).vtotal = vt
+}
+
+fn build_a() {
+    let p: u64 = (&edid_a[0]) as u64
+    start_edid(p)
+    var m: mode.Mode = mode_of(148500, 1920, 2008, 2052, 2200)
+    with_v(&m, 1080, 1084, 1089, 1125)
+    put_dtd(p, DTD_OFFSET, &m)
+    var n: mode.Mode = mode_of(85500, 1366, 1436, 1579, 1792)
+    with_v(&n, 768, 771, 774, 798)
+    put_dtd(p, DTD_OFFSET + 18, &n)
+    octets.st8(p, 35, 0x21)
+    octets.st8(p, 36, 0x08)
+    octets.st8(p, 38, 129)
+    octets.st8(p, 39, 0x80)
+    octets.st8(p, 40, 179)
+    octets.st8(p, 41, 0x00)
+    seal(p)
+    let c: u64 = p + EDID_BLOCK
+    octets.st8(c, 0, 2)
+    octets.st8(c, 1, 3)
+    octets.st8(c, 2, 10)
+    octets.st8(c, 4, (2 << 5) | 5)
+    octets.st8(c, 5, 0x90)
+    octets.st8(c, 6, 4)
+    octets.st8(c, 7, 95)
+    octets.st8(c, 8, 1)
+    octets.st8(c, 9, 99)
+    seal(c)
+}
+
+fn build_b() {
+    let p: u64 = (&edid_b[0]) as u64
+    start_edid(p)
+    var n: mode.Mode = mode_of(85500, 1366, 1436, 1579, 1792)
+    with_v(&n, 768, 771, 774, 798)
+    put_dtd(p, DTD_OFFSET, &n)
+    octets.st8(p, 36, 0x08)
+    octets.st8(p, 38, 129)
+    octets.st8(p, 39, 0x80)
+    seal(p)
+}
+
+fn build_c() {
+    let p: u64 = (&edid_c[0]) as u64
+    start_edid(p)
+    var n: mode.Mode = mode_of(108000, 1600, 1624, 1704, 1800)
+    with_v(&n, 900, 901, 904, 1000)
+    put_dtd(p, DTD_OFFSET, &n)
+    seal(p)
+}
+
+fn list_ptr(which: u64) -> u64 {
+    if which == 0 {
+        return (&list_a[0]) as u64
+    }
+    if which == 1 {
+        return (&list_b[0]) as u64
+    }
+    return (&list_c[0]) as u64
+}
+
+fn shape(list: u64, i: u64, w: u64, h: u64) -> bool {
+    var m: mode.Mode = mode.mode_new()
+    modelist.get(list, i, &m)
+    return m.hactive == w && m.vactive == h
+}
+
+fn test_modelist() {
+    build_a()
+    build_b()
+    build_c()
+    let a: u64 = list_ptr(0)
+    let n: u64 = modelist.build((&edid_a[0]) as u64, 2, a, LIST_CAP)
+    chk("modelist: 9 distinct modes from base + CTA + standard + established", n == 9)
+    chk("modelist: preferred first is 1920x1080", shape(a, 0, 1920, 1080))
+    chk("modelist: second DTD 1366x768", shape(a, 1, 1366, 768))
+    chk("modelist: CTA VIC 4 is 1280x720", shape(a, 2, 1280, 720))
+    chk("modelist: CTA VIC 95 is 3840x2160", shape(a, 3, 3840, 2160))
+    chk("modelist: CTA VIC 1 is 640x480", shape(a, 4, 640, 480))
+    chk("modelist: standard 5:4 is 1280x1024", shape(a, 5, 1280, 1024))
+    chk("modelist: standard 16:10 is 1680x1050", shape(a, 6, 1680, 1050))
+    chk("modelist: established 800x600", shape(a, 7, 800, 600))
+    chk("modelist: established 1024x768", shape(a, 8, 1024, 768))
+    var m: mode.Mode = mode.mode_new()
+    modelist.get(a, 3, &m)
+    chk("modelist: VIC 95 timing", m.pclk_khz == 297000 && m.htotal == 4400 && m.vtotal == 2250 && m.hsync_start == 4016)
+    modelist.get(a, 2, &m)
+    chk("modelist: VIC 4 refresh 60 Hz", mode.refresh_mhz(&m) == 60000)
+    modelist.get(a, 0, &m)
+    chk("modelist: DTD refresh 60 Hz", mode.refresh_mhz(&m) == 60000 && m.pclk_khz == 148500)
+    chk("modelist: duplicates removed (VIC 16 = DTD, 640x480 twice)", n == 9)
+    chk("modelist: cap limits the list", modelist.build((&edid_a[0]) as u64, 2, list_ptr(2), 3) == 3)
+    chk("modelist: base block only skips CTA modes", modelist.build((&edid_a[0]) as u64, 1, list_ptr(2), LIST_CAP) == 7)
+    chk("modelist: zero blocks", modelist.build((&edid_a[0]) as u64, 0, list_ptr(2), LIST_CAP) == 0)
+    chk("modelist: too many blocks", modelist.build((&edid_a[0]) as u64, 5, list_ptr(2), LIST_CAP) == 0)
+    octets.st8((&edid_a[0]) as u64, 20, octets.ld8((&edid_a[0]) as u64, 20) + 1)
+    chk("modelist: bad checksum rejected", modelist.build((&edid_a[0]) as u64, 2, list_ptr(2), LIST_CAP) == 0)
+    build_a()
+    octets.st8((&edid_a[0]) as u64, EDID_BLOCK + 5, 0x91)
+    chk("modelist: bad CTA checksum ignores the extension", modelist.build((&edid_a[0]) as u64, 2, list_ptr(2), LIST_CAP) == 7)
+    build_a()
+    octets.st8((&edid_a[0]) as u64, 3, 0x0)
+    octets.st8((&edid_a[0]) as u64, 1, 0)
+    chk("modelist: bad header rejected", modelist.build((&edid_a[0]) as u64, 2, list_ptr(2), LIST_CAP) == 0)
+    build_a()
+    chk("modelist: find highest refresh", modelist.find(a, n, 1920, 1080) == 0 && modelist.find(a, n, 1111, 7) == modelist.NONE)
+    chk("modelist: best keeps the preferred mode when it fits", modelist.best(a, n, 4096, 4096, 400000) == 0)
+    chk("modelist: best by area under a width limit", modelist.best(a, n, 1700, 1100, 400000) == 6)
+    chk("modelist: best under a pixel clock limit", modelist.best(a, n, 4096, 4096, 100000) == 5)
+    chk("modelist: nothing fits", modelist.best(a, n, 100, 100, 400000) == modelist.NONE)
+    chk("modelist: empty list", modelist.best(a, 0, 4096, 4096, 400000) == modelist.NONE)
+}
+
+fn test_cvt() {
+    var m: mode.Mode = mode.mode_new()
+    chk("cvt: 1920x1080 at 60 builds", modelist.cvt_rb(1920, 1080, 60, 3, &m))
+    chk("cvt: 1920x1080 total 2080x1111", m.htotal == 2080 && m.vtotal == 1111)
+    chk("cvt: 1920x1080 pixel clock 138500", m.pclk_khz == 138500)
+    chk("cvt: 1920x1080 sync widths", m.hsync_start == 1968 && m.hsync_end == 2000 && m.vsync_start == 1083 && m.vsync_end == 1088)
+    chk("cvt: 1680x1050 16:10", modelist.cvt_rb(1680, 1050, 60, 0, &m) && m.htotal == 1840 && m.vtotal == 1080 && m.pclk_khz == 119000)
+    chk("cvt: 16:10 vsync width 6", m.vsync_end - m.vsync_start == 6)
+    chk("cvt: 4:3 vsync width 4", modelist.cvt_rb(1024, 768, 60, 1, &m) && m.vsync_end - m.vsync_start == 4)
+    chk("cvt: 5:4 vsync width 7", modelist.cvt_rb(1280, 1024, 60, 2, &m) && m.vsync_end - m.vsync_start == 7)
+    chk("cvt: zero width", !modelist.cvt_rb(0, 1080, 60, 3, &m))
+    chk("cvt: refresh too low", !modelist.cvt_rb(1920, 1080, 10, 3, &m))
+    chk("cvt: refresh too high", !modelist.cvt_rb(1920, 1080, 500, 3, &m))
+    chk("cvt: 240 Hz needs a long blank", modelist.cvt_rb(1920, 1080, 240, 3, &m) && m.vtotal == 1215)
+}
+
+fn test_limits() {
+    chk("link: HP eDP 2 lanes HBR carries 141 MHz at 24 bpp", modelist.link_ok(141000, 24, 2, 270000))
+    chk("link: 4K30 does not fit 2 lanes HBR", !modelist.link_ok(297000, 24, 2, 270000))
+    chk("link: 4K30 fits 4 lanes HBR", modelist.link_ok(297000, 24, 4, 270000))
+    chk("link: exact limit", modelist.link_ok(180000, 24, 1, 540000) && !modelist.link_ok(180001, 24, 1, 540000))
+    chk("link: zero lanes", !modelist.link_ok(1000, 24, 0, 270000))
+    chk("link: zero symbol clock", !modelist.link_ok(1000, 24, 2, 0))
+    chk("cdclk: 675 MHz is the limit", modelist.cdclk_ok(675000) && !modelist.cdclk_ok(675001))
+}
+
+fn test_hotplug() {
+    chk("hpd: nothing live", outputs.live_mask(0, 0) == 0)
+    chk("hpd: eDP from DE port bit 3", outputs.live_mask(0, 8) == 1)
+    chk("hpd: port B from SDE bit 21", outputs.live_mask(0x200000, 0) == 2)
+    chk("hpd: port C from SDE bit 22", outputs.live_mask(0x400000, 0) == 4)
+    chk("hpd: port D from SDE bit 23", outputs.live_mask(0x800000, 0) == 8)
+    chk("hpd: port E from SDE bit 25", outputs.live_mask(0x2000000, 0) == 16)
+    chk("hpd: SDE bit 24 is not port A here", outputs.live_mask(0x1000000, 0) == 0)
+    chk("hpd: other DE port bits ignored", outputs.live_mask(0, 0x7) == 0)
+    var h: outputs.Hotplug = outputs.hp_new(1)
+    chk("debounce: no change", outputs.hp_sample(&h, 1) == 0)
+    chk("debounce: 1st sample of a new state", outputs.hp_sample(&h, 3) == 0)
+    chk("debounce: 2nd sample", outputs.hp_sample(&h, 3) == 0)
+    chk("debounce: still the old state", outputs.hp_stable(&h) == 1)
+    chk("debounce: 3rd sample commits the plug", outputs.hp_sample(&h, 3) == 2)
+    chk("debounce: new stable state", outputs.hp_stable(&h) == 3)
+    chk("debounce: glitch 1", outputs.hp_sample(&h, 1) == 0)
+    chk("debounce: glitch back", outputs.hp_sample(&h, 3) == 0)
+    chk("debounce: glitch did not commit", outputs.hp_stable(&h) == 3)
+    outputs.hp_sample(&h, 1)
+    outputs.hp_sample(&h, 1)
+    chk("debounce: unplug commits after 3", outputs.hp_sample(&h, 1) == 2 && outputs.hp_stable(&h) == 1)
+    outputs.hp_sample(&h, 5)
+    outputs.hp_sample(&h, 7)
+    outputs.hp_sample(&h, 7)
+    chk("debounce: changing candidate restarts the count", outputs.hp_stable(&h) == 1)
+    chk("debounce: events counted", h.events == 2)
+}
+
+fn test_outputs() {
+    let t: u64 = (&table[0]) as u64
+    chk("assign: eDP + B + D get pipes 0 1 2", outputs.assign(0b01011, t) == 3 && outputs.out_port(t, 0) == 0
+        && outputs.out_port(t, 1) == 1 && outputs.out_port(t, 2) == 3)
+    chk("assign: pipes follow the order", outputs.out_pipe(t, 0) == 0 && outputs.out_pipe(t, 1) == 1 && outputs.out_pipe(t, 2) == 2)
+    chk("assign: only the first 3 of 5 ports", outputs.assign(0b11111, t) == 3 && outputs.out_port(t, 2) == 2)
+    chk("assign: overflow is visible", outputs.popcount(0b11111) > outputs.OUT_MAX)
+    chk("assign: external only starts at pipe A", outputs.assign(0b00100, t) == 1 && outputs.out_pipe(t, 0) == 0 && outputs.out_port(t, 0) == 2)
+    chk("assign: nothing connected", outputs.assign(0, t) == 0)
+    chk("assign: fresh outputs have no mode", outputs.assign(0b11, t) == 2 && outputs.out_mode(t, 0) == modelist.NONE)
+    let a: u64 = list_ptr(0)
+    let b: u64 = list_ptr(1)
+    let c: u64 = list_ptr(2)
+    let na: u64 = modelist.build((&edid_a[0]) as u64, 2, a, LIST_CAP)
+    let nb: u64 = modelist.build((&edid_b[0]) as u64, 1, b, LIST_CAP)
+    let nc: u64 = modelist.build((&edid_c[0]) as u64, 1, c, LIST_CAP)
+    chk("outputs: second panel modes", nb == 3 && nc == 1)
+    outputs.assign(0b11, t)
+    outputs.set_list(t, 0, a, na)
+    outputs.set_list(t, 1, b, nb)
+    chk("extend: picks a mode for both", outputs.extend_pick(t, 2, 4096, 4096, 400000))
+    chk("extend: first output keeps its preferred mode at x 0", outputs.out_mode(t, 0) == 0 && outputs.out_x(t, 0) == 0)
+    chk("extend: second output starts after the first", outputs.out_x(t, 1) == 1920 && outputs.out_y(t, 1) == 0)
+    chk("validate: ok", outputs.validate(t, 2, 8192, 4096) == outputs.V_OK)
+    chk("validate: framebuffer too wide", outputs.validate(t, 2, 3000, 4096) == outputs.V_FB_WIDTH)
+    chk("validate: framebuffer too high", outputs.validate(t, 2, 8192, 1000) == outputs.V_FB_HEIGHT)
+    octets.st64(a, 0 * modelist.MODE_BYTES + 64, 700000)
+    chk("validate: pixel clock above the display clock", outputs.validate(t, 2, 8192, 4096) == outputs.V_PCLK)
+    build_a()
+    modelist.build((&edid_a[0]) as u64, 2, a, LIST_CAP)
+    chk("extend: one output without any fitting mode fails", !outputs.extend_pick(t, 2, 100, 100, 400000))
+    outputs.assign(0b11, t)
+    outputs.set_list(t, 0, a, na)
+    outputs.set_list(t, 1, b, nb)
+    chk("validate: output without a mode", outputs.validate(t, 2, 8192, 4096) == outputs.V_NO_MODE)
+    let s: u64 = (&scratch[0]) as u64
+    chk("mirror: common mode found", outputs.mirror_pick(t, 2, s))
+    chk("mirror: biggest common is 1280x1024", shape(a, outputs.out_mode(t, 0), 1280, 1024) && shape(b, outputs.out_mode(t, 1), 1280, 1024))
+    chk("mirror: both at origin", outputs.out_x(t, 1) == 0 && outputs.out_y(t, 1) == 0)
+    chk("mirror: validates", outputs.validate(t, 2, 8192, 4096) == outputs.V_OK)
+    outputs.assign(0b11, t)
+    outputs.set_list(t, 0, a, na)
+    outputs.set_list(t, 1, c, nc)
+    chk("mirror: no common mode", !outputs.mirror_pick(t, 2, s))
+    chk("mirror: zero outputs", !outputs.mirror_pick(t, 0, s))
+    outputs.assign(0b1, t)
+    outputs.set_list(t, 0, a, na)
+    chk("mirror: single output takes its biggest mode", outputs.mirror_pick(t, 1, s) && shape(a, outputs.out_mode(t, 0), 3840, 2160))
+}
+
+fn main() -> i32 {
+    test_flipdone()
+    test_flip_wait()
+    test_pace()
+    test_modelist()
+    test_cvt()
+    test_limits()
+    test_hotplug()
+    test_outputs()
+    return 0
+}

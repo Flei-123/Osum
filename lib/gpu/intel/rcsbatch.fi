@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.octets
+
+export {
+    triangle, fill_rect, MAX_BATCH_DWORDS, TOPO_TRILIST, TOPO_RECTLIST,
+    PIPELINE_SELECT_3D, VERTEX_BUFFERS, VERTEX_ELEMENTS, VF_TOPOLOGY, DRAWING_RECTANGLE, CLEAR_PARAMS, PRIMITIVE,
+    BATCH_END
+}
+
+const PIPELINE_SELECT_3D: u64 = 0x69040300
+const VERTEX_BUFFERS: u64 = 0x78080003
+const VERTEX_ELEMENTS: u64 = 0x78090001
+const VF_TOPOLOGY: u64 = 0x784b0000
+const DRAWING_RECTANGLE: u64 = 0x79000002
+const CLEAR_PARAMS: u64 = 0x78040001
+const PRIMITIVE: u64 = 0x7b000005
+const BATCH_END: u64 = 0x05000000
+const TOPO_TRILIST: u64 = 4
+const TOPO_RECTLIST: u64 = 15
+const MAX_BATCH_DWORDS: u64 = 32
+const DWORD: u64 = 4
+const VB_VALID: u64 = 0x4000
+const VB_STRIDE_MASK: u64 = 0xfff
+const VE_VALID: u64 = 0x2000000
+const VE_FORMAT_SHIFT: u64 = 16
+const FORMAT_R32G32_FLOAT: u64 = 0x10
+const VE_STORE_SRC: u64 = 0x11110000
+const DEPTH_ONE: u64 = 0x3f800000
+const CLEAR_VALID: u64 = 2
+const RECT_MAX: u64 = 8192
+const LOW32: u64 = 0xffffffff
+const ADDR_HIGH_SHIFT: u64 = 32
+const VERTICES: u64 = 3
+
+fn put(out: u64, i: u64, v: u64) {
+    octets.st32(out, i * DWORD, v)
+}
+
+fn rect_ok(w: u64, h: u64) -> bool {
+    return w != 0 && h != 0 && w <= RECT_MAX && h <= RECT_MAX
+}
+
+fn prim(out: u64, at: u64, topo: u64) -> u64 {
+    put(out, at, VF_TOPOLOGY)
+    put(out, at + 1, topo)
+    put(out, at + 2, PRIMITIVE)
+    put(out, at + 3, 0)
+    put(out, at + 4, VERTICES)
+    put(out, at + 5, 0)
+    put(out, at + 6, 1)
+    put(out, at + 7, 0)
+    put(out, at + 8, 0)
+    return at + 9
+}
+
+fn drawing_rect(out: u64, at: u64, w: u64, h: u64) -> u64 {
+    put(out, at, DRAWING_RECTANGLE)
+    put(out, at + 1, 0)
+    put(out, at + 2, ((h - 1) << 16) | (w - 1))
+    put(out, at + 3, 0)
+    return at + 4
+}
+
+fn triangle(out: u64, cap: u64, vb_ggtt: u64, vb_bytes: u64, stride: u64) -> u64 {
+    if cap < MAX_BATCH_DWORDS || (vb_ggtt & 3) != 0 || vb_bytes < VERTICES * stride || stride == 0 || (stride & ~VB_STRIDE_MASK) != 0 {
+        return 0
+    }
+    put(out, 0, PIPELINE_SELECT_3D)
+    put(out, 1, VERTEX_BUFFERS)
+    put(out, 2, VB_VALID | stride)
+    put(out, 3, vb_ggtt & LOW32)
+    put(out, 4, vb_ggtt >> ADDR_HIGH_SHIFT)
+    put(out, 5, vb_bytes)
+    put(out, 6, VERTEX_ELEMENTS)
+    put(out, 7, VE_VALID | (FORMAT_R32G32_FLOAT << VE_FORMAT_SHIFT))
+    put(out, 8, VE_STORE_SRC)
+    let at: u64 = prim(out, 9, TOPO_TRILIST)
+    put(out, at, BATCH_END)
+    return at + 1
+}
+
+fn fill_rect(out: u64, cap: u64, w: u64, h: u64) -> u64 {
+    if cap < MAX_BATCH_DWORDS || !rect_ok(w, h) {
+        return 0
+    }
+    put(out, 0, PIPELINE_SELECT_3D)
+    var at: u64 = drawing_rect(out, 1, w, h)
+    put(out, at, CLEAR_PARAMS)
+    put(out, at + 1, DEPTH_ONE)
+    put(out, at + 2, CLEAR_VALID)
+    at = prim(out, at + 3, TOPO_RECTLIST)
+    put(out, at, BATCH_END)
+    return at + 1
+}

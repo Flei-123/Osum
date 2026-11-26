@@ -1,0 +1,362 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.octets
+import gpu.intel.edid
+import gpu.intel.mode
+
+export {
+    build, get, find, best, cvt_rb, link_ok, cdclk_ok, MODE_BYTES, NONE, MAX_BLOCKS, MAX_CDCLK_KHZ
+}
+
+const MODE_BYTES: u64 = 72
+const NONE: u64 = 0xffff
+const MAX_BLOCKS: u64 = 4
+const MAX_CDCLK_KHZ: u64 = 675000
+const BLOCK: u64 = 128
+const BASE_DTD_FIRST: u64 = 54
+const DTD_BYTES: u64 = 18
+const DTD_LAST_BASE: u64 = 108
+const O_ESTABLISHED: u64 = 35
+const O_STANDARD: u64 = 38
+const STANDARD_COUNT: u64 = 8
+const STANDARD_UNUSED: u64 = 0x0101
+const CTA_TAG: u64 = 0x02
+const CTA_DTD_OFFSET: u64 = 2
+const CTA_FIRST_BLOCK: u64 = 4
+const CTA_VIDEO_TAG: u64 = 2
+const VIC_MASK: u64 = 0x7f
+const FIXED_FIELDS: u64 = 9
+const RB_V_FPORCH: u64 = 3
+const RB_MIN_V_BLANK_NS: u64 = 460000
+const RB_MIN_V_BPORCH: u64 = 6
+const RB_H_BLANK: u64 = 160
+const RB_H_FPORCH: u64 = 48
+const RB_H_SYNC: u64 = 32
+const RB_CLOCK_STEP_KHZ: u64 = 250
+const NS_PER_SECOND: u64 = 1000000000
+const MIN_STD_REFRESH: u64 = 24
+const MAX_STD_REFRESH: u64 = 240
+const ASPECT_16_10: u64 = 0
+const ASPECT_4_3: u64 = 1
+const ASPECT_5_4: u64 = 2
+const ASPECT_16_9: u64 = 3
+const BPP_DIV: u64 = 8
+
+static mut FIXED: [u32; 90] = [
+    25175, 640, 656, 752, 800, 480, 490, 492, 525,
+    40000, 800, 840, 968, 1056, 600, 601, 605, 628,
+    65000, 1024, 1048, 1184, 1344, 768, 771, 777, 806,
+    74250, 1280, 1390, 1430, 1650, 720, 725, 730, 750,
+    74250, 1280, 1720, 1760, 1980, 720, 725, 730, 750,
+    148500, 1920, 2008, 2052, 2200, 1080, 1084, 1089, 1125,
+    148500, 1920, 2448, 2492, 2640, 1080, 1084, 1089, 1125,
+    74250, 1920, 2558, 2602, 2750, 1080, 1084, 1089, 1125,
+    74250, 1920, 2008, 2052, 2200, 1080, 1084, 1089, 1125,
+    297000, 3840, 4016, 4104, 4400, 2160, 2168, 2178, 2250
+]
+
+fn put_field(list: u64, i: u64, f: u64, v: u64) {
+    octets.st64(list, i * MODE_BYTES + f * 8, v)
+}
+
+fn get_field(list: u64, i: u64, f: u64) -> u64 {
+    return octets.ld64(list, i * MODE_BYTES + f * 8)
+}
+
+fn store(list: u64, i: u64, m: *mut mode.Mode) {
+    put_field(list, i, 0, (*m).hactive)
+    put_field(list, i, 1, (*m).hsync_start)
+    put_field(list, i, 2, (*m).hsync_end)
+    put_field(list, i, 3, (*m).htotal)
+    put_field(list, i, 4, (*m).vactive)
+    put_field(list, i, 5, (*m).vsync_start)
+    put_field(list, i, 6, (*m).vsync_end)
+    put_field(list, i, 7, (*m).vtotal)
+    put_field(list, i, 8, (*m).pclk_khz)
+}
+
+fn get(list: u64, i: u64, out: *mut mode.Mode) {
+    (*out).hactive = get_field(list, i, 0)
+    (*out).hsync_start = get_field(list, i, 1)
+    (*out).hsync_end = get_field(list, i, 2)
+    (*out).htotal = get_field(list, i, 3)
+    (*out).vactive = get_field(list, i, 4)
+    (*out).vsync_start = get_field(list, i, 5)
+    (*out).vsync_end = get_field(list, i, 6)
+    (*out).vtotal = get_field(list, i, 7)
+    (*out).pclk_khz = get_field(list, i, 8)
+}
+
+fn known(list: u64, n: u64, m: *mut mode.Mode) -> bool {
+    var i: u64 = 0
+    var cur: mode.Mode = mode.mode_new()
+    while i < n {
+        get(list, i, &cur)
+        if mode.same_timing(&cur, m) && cur.pclk_khz == (*m).pclk_khz {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn add(list: u64, n: u64, cap: u64, m: *mut mode.Mode) -> u64 {
+    if n >= cap || known(list, n, m) {
+        return n
+    }
+    store(list, n, m)
+    return n + 1
+}
+
+fn fixed(idx: u64, out: *mut mode.Mode) {
+    let b: usize = (idx * FIXED_FIELDS) as usize
+    (*out).pclk_khz = FIXED[b] as u64
+    (*out).hactive = FIXED[b + 1] as u64
+    (*out).hsync_start = FIXED[b + 2] as u64
+    (*out).hsync_end = FIXED[b + 3] as u64
+    (*out).htotal = FIXED[b + 4] as u64
+    (*out).vactive = FIXED[b + 5] as u64
+    (*out).vsync_start = FIXED[b + 6] as u64
+    (*out).vsync_end = FIXED[b + 7] as u64
+    (*out).vtotal = FIXED[b + 8] as u64
+}
+
+fn vic_index(vic: u64) -> u64 {
+    if vic == 1 {
+        return 0
+    }
+    if vic == 4 {
+        return 3
+    }
+    if vic == 19 {
+        return 4
+    }
+    if vic == 16 {
+        return 5
+    }
+    if vic == 31 {
+        return 6
+    }
+    if vic == 32 {
+        return 7
+    }
+    if vic == 34 {
+        return 8
+    }
+    if vic == 95 {
+        return 9
+    }
+    return NONE
+}
+
+fn vsync_lines(aspect: u64) -> u64 {
+    if aspect == ASPECT_4_3 {
+        return 4
+    }
+    if aspect == ASPECT_16_9 {
+        return 5
+    }
+    if aspect == ASPECT_16_10 {
+        return 6
+    }
+    if aspect == ASPECT_5_4 {
+        return 7
+    }
+    return 10
+}
+
+fn cvt_rb(w: u64, h: u64, hz: u64, aspect: u64, out: *mut mode.Mode) -> bool {
+    if w == 0 || h == 0 || hz < MIN_STD_REFRESH || hz > MAX_STD_REFRESH {
+        return false
+    }
+    let period_ns: u64 = NS_PER_SECOND / hz
+    if period_ns <= RB_MIN_V_BLANK_NS {
+        return false
+    }
+    let line_ns: u64 = (period_ns - RB_MIN_V_BLANK_NS) / h
+    if line_ns == 0 {
+        return false
+    }
+    let vs: u64 = vsync_lines(aspect)
+    var vbi: u64 = RB_MIN_V_BLANK_NS / line_ns + 1
+    let least: u64 = RB_V_FPORCH + vs + RB_MIN_V_BPORCH
+    if vbi < least {
+        vbi = least
+    }
+    (*out).hactive = w
+    (*out).hsync_start = w + RB_H_FPORCH
+    (*out).hsync_end = w + RB_H_FPORCH + RB_H_SYNC
+    (*out).htotal = w + RB_H_BLANK
+    (*out).vactive = h
+    (*out).vsync_start = h + RB_V_FPORCH
+    (*out).vsync_end = h + RB_V_FPORCH + vs
+    (*out).vtotal = h + vbi
+    (*out).pclk_khz = (hz * (*out).htotal * (*out).vtotal / 1000 / RB_CLOCK_STEP_KHZ) * RB_CLOCK_STEP_KHZ
+    return true
+}
+
+fn standard_height(w: u64, aspect: u64) -> u64 {
+    if aspect == ASPECT_16_10 {
+        return w * 10 / 16
+    }
+    if aspect == ASPECT_4_3 {
+        return w * 3 / 4
+    }
+    if aspect == ASPECT_5_4 {
+        return w * 4 / 5
+    }
+    return w * 9 / 16
+}
+
+fn add_standard(p: u64, list: u64, n: u64, cap: u64) -> u64 {
+    var count: u64 = n
+    var m: mode.Mode = mode.mode_new()
+    var i: u64 = 0
+    while i < STANDARD_COUNT {
+        let b0: u64 = octets.ld8(p, O_STANDARD + i * 2)
+        let b1: u64 = octets.ld8(p, O_STANDARD + i * 2 + 1)
+        i = i + 1
+        if ((b0 << 8) | b1) == STANDARD_UNUSED || b0 == 0 {
+            continue
+        }
+        let w: u64 = (b0 + 31) * 8
+        let aspect: u64 = b1 >> 6
+        if cvt_rb(w, standard_height(w, aspect), (b1 & 0x3f) + 60, aspect, &m) {
+            count = add(list, count, cap, &m)
+        }
+    }
+    return count
+}
+
+fn add_established(p: u64, list: u64, n: u64, cap: u64) -> u64 {
+    var count: u64 = n
+    var m: mode.Mode = mode.mode_new()
+    if (octets.ld8(p, O_ESTABLISHED) & 0x20) != 0 {
+        fixed(0, &m)
+        count = add(list, count, cap, &m)
+    }
+    if (octets.ld8(p, O_ESTABLISHED) & 0x01) != 0 {
+        fixed(1, &m)
+        count = add(list, count, cap, &m)
+    }
+    if (octets.ld8(p, O_ESTABLISHED + 1) & 0x08) != 0 {
+        fixed(2, &m)
+        count = add(list, count, cap, &m)
+    }
+    return count
+}
+
+fn add_dtds(p: u64, from: u64, last: u64, list: u64, n: u64, cap: u64) -> u64 {
+    var count: u64 = n
+    var m: mode.Mode = mode.mode_new()
+    var o: u64 = from
+    while o <= last {
+        if octets.ld16(p, o) != 0 && edid.dtd_mode(p, o, &m) {
+            count = add(list, count, cap, &m)
+        }
+        o = o + DTD_BYTES
+    }
+    return count
+}
+
+fn add_cta(b: u64, list: u64, n: u64, cap: u64) -> u64 {
+    var count: u64 = n
+    let d: u64 = octets.ld8(b, CTA_DTD_OFFSET)
+    if d < CTA_FIRST_BLOCK || d >= BLOCK - 1 {
+        return count
+    }
+    var m: mode.Mode = mode.mode_new()
+    var pos: u64 = CTA_FIRST_BLOCK
+    while pos < d {
+        let h: u64 = octets.ld8(b, pos)
+        let len: u64 = h & 0x1f
+        if (h >> 5) == CTA_VIDEO_TAG {
+            var k: u64 = 1
+            while k <= len && pos + k < d {
+                let idx: u64 = vic_index(octets.ld8(b, pos + k) & VIC_MASK)
+                if idx != NONE {
+                    fixed(idx, &m)
+                    count = add(list, count, cap, &m)
+                }
+                k = k + 1
+            }
+        }
+        pos = pos + len + 1
+    }
+    return add_dtds(b, d, BLOCK - DTD_BYTES - 1, list, count, cap)
+}
+
+fn build(p: u64, blocks: u64, list: u64, cap: u64) -> u64 {
+    if p == 0 || blocks == 0 || blocks > MAX_BLOCKS || !edid.header_ok(p) || !edid.block_ok(p) {
+        return 0
+    }
+    var n: u64 = add_dtds(p, BASE_DTD_FIRST, DTD_LAST_BASE, list, 0, cap)
+    var i: u64 = 1
+    while i < blocks {
+        let b: u64 = p + i * BLOCK
+        if octets.ld8(b, 0) == CTA_TAG && edid.checksum_ok(b) {
+            n = add_cta(b, list, n, cap)
+        }
+        i = i + 1
+    }
+    n = add_standard(p, list, n, cap)
+    return add_established(p, list, n, cap)
+}
+
+fn refresh_of(list: u64, i: u64) -> u64 {
+    var m: mode.Mode = mode.mode_new()
+    get(list, i, &m)
+    return mode.refresh_mhz(&m)
+}
+
+fn fits(list: u64, i: u64, max_w: u64, max_h: u64, max_pclk: u64) -> bool {
+    return get_field(list, i, 0) <= max_w && get_field(list, i, 4) <= max_h && get_field(list, i, 8) <= max_pclk
+}
+
+fn find(list: u64, n: u64, w: u64, h: u64) -> u64 {
+    var found: u64 = NONE
+    var i: u64 = 0
+    while i < n {
+        if get_field(list, i, 0) == w && get_field(list, i, 4) == h {
+            if found == NONE || refresh_of(list, i) > refresh_of(list, found) {
+                found = i
+            }
+        }
+        i = i + 1
+    }
+    return found
+}
+
+fn better(list: u64, a: u64, b: u64) -> bool {
+    let area_a: u64 = get_field(list, a, 0) * get_field(list, a, 4)
+    let area_b: u64 = get_field(list, b, 0) * get_field(list, b, 4)
+    if area_a != area_b {
+        return area_a > area_b
+    }
+    return refresh_of(list, a) > refresh_of(list, b)
+}
+
+fn best(list: u64, n: u64, max_w: u64, max_h: u64, max_pclk: u64) -> u64 {
+    if n > 0 && fits(list, 0, max_w, max_h, max_pclk) {
+        return 0
+    }
+    var pick: u64 = NONE
+    var i: u64 = 0
+    while i < n {
+        if fits(list, i, max_w, max_h, max_pclk) && (pick == NONE || better(list, i, pick)) {
+            pick = i
+        }
+        i = i + 1
+    }
+    return pick
+}
+
+fn link_ok(pclk_khz: u64, bpp: u64, lanes: u64, symbol_khz: u64) -> bool {
+    if lanes == 0 || symbol_khz == 0 {
+        return false
+    }
+    return pclk_khz * bpp / BPP_DIV <= lanes * symbol_khz
+}
+
+fn cdclk_ok(pclk_khz: u64) -> bool {
+    return pclk_khz <= MAX_CDCLK_KHZ
+}

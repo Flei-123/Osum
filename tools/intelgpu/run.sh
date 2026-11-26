@@ -12,7 +12,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 
-for m in ids regs bits mode timing edid aux snap dump flip ggtt dbuf backbuf confirm modeset flushpol flushstat engregs fwake micmd ring lrc elsp ereset engine submit blt blit blitpool rcsparse vblank ppgtt; do
+for m in ids regs bits mode timing edid aux snap dump flip ggtt dbuf backbuf confirm modeset flushpol flushstat engregs fwake micmd ring lrc elsp ereset engine submit blt blit blitpool rcsparse vblank ppgtt flipdone pace modelist outputs rcsbatch rcsrun; do
     printf 'import gpu.intel.%s\nfn main() -> i32 {\n    return 0\n}\n' "$m" > "$T/k_$m.fi"
     "$FIRNC" --profile=kernel -c "$T/k_$m.fi" -o "$T/k_$m.o" 2> "$T/k.err" \
         && ok "gpu.intel.$m compiles with --profile=kernel" \
@@ -98,6 +98,8 @@ run_oracle() {
 run_oracle rcs tools/intelgpu/rcs.fi 36
 run_oracle vblank tools/intelgpu/vblank.fi 33
 run_oracle ppgtt tools/intelgpu/ppgtt.fi 91
+run_oracle display tools/intelgpu/display.fi 140
+run_oracle rcsrun tools/intelgpu/rcsrun.fi 68
 
 ORACLE=tools/intelgpu/oracle.fi
 
@@ -375,6 +377,61 @@ mutate pp_phys_limit  ppgtt 's/ \&\& phys <= PTE_PHYS_MASK$//'
 mutate pp_min_pool    ppgtt 's/ || pool_pages < MIN_POOL_PAGES//'
 mutate pp_pool_align  ppgtt 's/ || (pool \& PAGE_MASK) != 0//'
 mutate pp_pdp_range   ppgtt 's/    if n >= PDP_COUNT {/    if false {/'
+ORACLE=tools/intelgpu/display.fi
+mutate fd_bit       flipdone 's/FLIP_DONE_BIT: u64 = 8/FLIP_DONE_BIT: u64 = 16/'
+mutate fd_cnt_off   flipdone 's/FLIPCOUNT_A: u64 = 0x70044/FLIPCOUNT_A: u64 = 0x70048/'
+mutate fd_stamp_off flipdone 's/FLIPTMSTMP_A: u64 = 0x7004c/FLIPTMSTMP_A: u64 = 0x70050/'
+mutate fd_moved     flipdone 's/COUNT_MASK) != 0 {/COUNT_MASK) > 1 {/'
+mutate fd_noack     flipdone 's/^            ack(wr, pipe)$//'
+mutate fd_master    flipdone 's/    if (rd(vblank.MASTER_IRQ) \& vblank.master_pipe_bit(pipe)) == 0 {/    if false {/'
+mutate fd_noimr     flipdone 's/    wr(vblank.pipe_imr(pipe), rd(vblank.pipe_imr(pipe)) \& (~FLIP_DONE_BIT) \& ALL_BITS)//'
+mutate fd_noier     flipdone 's/    wr(vblank.pipe_ier(pipe), rd(vblank.pipe_ier(pipe)) | FLIP_DONE_BIT)//'
+mutate fd_pipes     flipdone 's/    return pipe < vblank.MAX_PIPES/    return pipe < 4/'
+mutate pc_period    pace     's/MHZ_TO_PERIOD_US \/ refresh_mhz/MHZ_TO_PERIOD_US \/ (refresh_mhz + 1000)/'
+mutate pc_fifo      pace     's/    if (\*p).mode == MODE_FIFO {/    if false {/'
+mutate pc_drop      pace     's/    (\*p).dropped = (\*p).dropped + 1//'
+mutate pc_missed    pace     's/(\*p).missed = (\*p).missed + gap - 1/(*p).missed = (*p).missed + gap/'
+mutate pc_busy      pace     's/    (\*p).busy = false/    (*p).busy = true/'
+mutate pc_late      pace     's/return wait_us(p, since_vblank_us) < budget_us/return false/'
+mutate pc_refresh   pace     's/MAX_REFRESH_MHZ: u64 = 500000/MAX_REFRESH_MHZ: u64 = 900000/'
+mutate ml_vic       modelist 's/if vic == 95 {/if vic == 96 {/'
+mutate ml_rb_fp     modelist 's/RB_H_FPORCH: u64 = 48/RB_H_FPORCH: u64 = 40/'
+mutate ml_clock     modelist 's/RB_CLOCK_STEP_KHZ: u64 = 250/RB_CLOCK_STEP_KHZ: u64 = 1/'
+mutate ml_dedupe    modelist 's/    if n >= cap || known(list, n, m) {/    if n >= cap {/'
+mutate ml_link      modelist 's/return pclk_khz \* bpp \/ BPP_DIV <= lanes \* symbol_khz/return true/'
+mutate ml_cdclk     modelist 's/MAX_CDCLK_KHZ: u64 = 675000/MAX_CDCLK_KHZ: u64 = 700000/'
+mutate ml_pref      modelist 's/    if n > 0 \&\& fits(list, 0, max_w, max_h, max_pclk) {/    if false {/'
+mutate ml_aspect    modelist 's/ASPECT_16_10: u64 = 0/ASPECT_16_10: u64 = 5/'
+mutate ml_vsync     modelist 's/^        return 7$/        return 8/'
+mutate ml_est       modelist 's/(octets.ld8(p, O_ESTABLISHED + 1) \& 0x08) != 0/(octets.ld8(p, O_ESTABLISHED + 1) \& 0x10) != 0/'
+mutate ml_blocks    modelist 's/MAX_BLOCKS: u64 = 4/MAX_BLOCKS: u64 = 8/'
+mutate ml_cta_tag   modelist 's/CTA_TAG: u64 = 0x02/CTA_TAG: u64 = 0x70/'
+mutate ml_dtd       edid     's/hact + hso + hsw/hact + hso/'
+mutate ol_hpd_b     outputs  's/SDE_B_BIT: u64 = 21/SDE_B_BIT: u64 = 20/'
+mutate ol_hpd_e     outputs  's/SDE_E_BIT: u64 = 25/SDE_E_BIT: u64 = 24/'
+mutate ol_hpd_a     outputs  's/DE_PORT_A_BIT: u64 = 3/DE_PORT_A_BIT: u64 = 4/'
+mutate ol_debounce  outputs  's/DEBOUNCE_SAMPLES: u64 = 3/DEBOUNCE_SAMPLES: u64 = 2/'
+mutate ol_max       outputs  's/OUT_MAX: u64 = 3/OUT_MAX: u64 = 4/'
+mutate ol_extend_x  outputs  's/        x = x + m.hactive/        x = x + 0/'
+mutate ol_fbw       outputs  's/    if right > max_fb_w {/    if false {/'
+mutate ol_fbh       outputs  's/    if bottom > max_fb_h {/    if false {/'
+mutate ol_clk       outputs  's/        if !modelist.cdclk_ok(m.pclk_khz) {/        if false {/'
+mutate ol_nomode    outputs  's/        if field(t, i, F_MODE) == modelist.NONE {/        if false {/'
+mutate ol_mirror    outputs  's/        if area > best_area \&\& /        if area > 0 \&\& /'
+mutate ol_port_e    outputs  's/PORT_E: u64 = 4/PORT_E: u64 = 5/'
+ORACLE=tools/intelgpu/rcsrun.fi
+mutate rb_prim_len  rcsbatch 's/PRIMITIVE: u64 = 0x7b000005/PRIMITIVE: u64 = 0x7b000004/'
+mutate rb_topo      rcsbatch 's/TOPO_TRILIST: u64 = 4/TOPO_TRILIST: u64 = 5/'
+mutate rb_stride    rcsbatch 's/ || stride == 0//'
+mutate rb_rect      rcsbatch 's/w <= RECT_MAX \&\& //'
+mutate rb_vb_hdr    rcsbatch 's/VERTEX_BUFFERS: u64 = 0x78080003/VERTEX_BUFFERS: u64 = 0x78080002/'
+mutate rb_cap       rcsbatch 's/MAX_BATCH_DWORDS: u64 = 32/MAX_BATCH_DWORDS: u64 = 8/'
+mutate rr_walk      rcsrun   's/    if rcsparse.walk((\*b).cpu, (\*b).dwords, rcsparse.MODE_CLIENT, (\*b).walk) != rcsparse.W_OK {/    if false {/'
+mutate rr_align     rcsrun   's/    if ((\*b).ggtt \& ADDR_ALIGN_MASK) != 0 {/    if false {/'
+mutate rr_op        rcsrun   's/OP_BATCH_BUFFER_START: u64 = 0x31/OP_BATCH_BUFFER_START: u64 = 0x30/'
+mutate rr_fw        rcsrun   's/^    fwake.put(rd, wr, us, engregs.FORCEWAKE_RENDER, engregs.FORCEWAKE_ACK_RENDER)$//'
+mutate rr_hi        rcsrun   's/octets.st32(out, 8, ggtt >> ADDR_HIGH_SHIFT)/octets.st32(out, 8, 0)/'
+mutate rr_rcs_base  engregs  's/RCS_BASE: u64 = 0x2000/RCS_BASE: u64 = 0x2400/'
 ORACLE=tools/intelgpu/oracle.fi
 
 echo "INTELGPU: $pass passed, $fail failed"

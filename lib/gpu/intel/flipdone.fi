@@ -1,0 +1,101 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import gpu.intel.vblank
+
+export {
+    enable, disable, pending, ack, flip_count, flip_stamp, wait_count, wait_irq,
+    F_OK, F_ARG, F_TIMEOUT, FLIP_DONE_BIT, FLIPCOUNT_A, FLIPTMSTMP_A, FLIP_POLLS, FLIP_POLL_US
+}
+
+const F_OK: u64 = 0
+const F_ARG: u64 = 1
+const F_TIMEOUT: u64 = 2
+const FLIP_DONE_BIT: u64 = 8
+const FLIPCOUNT_A: u64 = 0x70044
+const FLIPTMSTMP_A: u64 = 0x7004c
+const FLIP_POLLS: u64 = 40
+const FLIP_POLL_US: u64 = 500
+const COUNT_MASK: u64 = 0xffffffff
+const COUNT_SPAN: u64 = 0x100000000
+const ALL_BITS: u64 = 0xffffffff
+
+fn valid(pipe: u64) -> bool {
+    return pipe < vblank.MAX_PIPES
+}
+
+fn flip_count(rd: fn(u64) -> u64, pipe: u64) -> u64 {
+    return rd(FLIPCOUNT_A + pipe * vblank.PIPE_STRIDE) & COUNT_MASK
+}
+
+fn flip_stamp(rd: fn(u64) -> u64, pipe: u64) -> u64 {
+    return rd(FLIPTMSTMP_A + pipe * vblank.PIPE_STRIDE) & COUNT_MASK
+}
+
+fn enable(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, pipe: u64) -> u64 {
+    if !valid(pipe) {
+        return F_ARG
+    }
+    wr(vblank.pipe_iir(pipe), FLIP_DONE_BIT)
+    wr(vblank.pipe_imr(pipe), rd(vblank.pipe_imr(pipe)) & (~FLIP_DONE_BIT) & ALL_BITS)
+    wr(vblank.pipe_ier(pipe), rd(vblank.pipe_ier(pipe)) | FLIP_DONE_BIT)
+    wr(vblank.MASTER_IRQ, rd(vblank.MASTER_IRQ) | vblank.MASTER_ENABLE)
+    return F_OK
+}
+
+fn disable(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, pipe: u64) -> u64 {
+    if !valid(pipe) {
+        return F_ARG
+    }
+    wr(vblank.pipe_ier(pipe), rd(vblank.pipe_ier(pipe)) & (~FLIP_DONE_BIT) & ALL_BITS)
+    wr(vblank.pipe_imr(pipe), rd(vblank.pipe_imr(pipe)) | FLIP_DONE_BIT)
+    wr(vblank.pipe_iir(pipe), FLIP_DONE_BIT)
+    return F_OK
+}
+
+fn pending(rd: fn(u64) -> u64, pipe: u64) -> bool {
+    if !valid(pipe) {
+        return false
+    }
+    if (rd(vblank.MASTER_IRQ) & vblank.master_pipe_bit(pipe)) == 0 {
+        return false
+    }
+    return (rd(vblank.pipe_iir(pipe)) & FLIP_DONE_BIT) != 0
+}
+
+fn ack(wr: fn(u64, u64) -> u64, pipe: u64) -> u64 {
+    if !valid(pipe) {
+        return F_ARG
+    }
+    wr(vblank.pipe_iir(pipe), FLIP_DONE_BIT)
+    return F_OK
+}
+
+fn wait_count(rd: fn(u64) -> u64, us: fn(u64) -> u64, pipe: u64, before: u64) -> u64 {
+    if !valid(pipe) {
+        return F_ARG
+    }
+    var n: u64 = 0
+    while n < FLIP_POLLS {
+        if ((flip_count(rd, pipe) + COUNT_SPAN - (before & COUNT_MASK)) & COUNT_MASK) != 0 {
+            return F_OK
+        }
+        us(FLIP_POLL_US)
+        n = n + 1
+    }
+    return F_TIMEOUT
+}
+
+fn wait_irq(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, pipe: u64) -> u64 {
+    if !valid(pipe) {
+        return F_ARG
+    }
+    var n: u64 = 0
+    while n < FLIP_POLLS {
+        if (rd(vblank.pipe_iir(pipe)) & FLIP_DONE_BIT) != 0 {
+            ack(wr, pipe)
+            return F_OK
+        }
+        us(FLIP_POLL_US)
+        n = n + 1
+    }
+    return F_TIMEOUT
+}

@@ -1,0 +1,619 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.io
+import libc.octets
+import gpu.intel.engregs
+import gpu.intel.micmd
+import gpu.intel.lrc
+import gpu.intel.elsp
+import gpu.intel.engine
+import gpu.intel.submit
+import gpu.intel.rcsparse
+import gpu.intel.rcsbatch
+import gpu.intel.rcsrun
+
+const PAGE: u64 = 0x1000
+const GGTT_BASE: u64 = 0x100000
+const RING_AT: u64 = 0x0
+const CTX_AT: u64 = 0x1000
+const HWS_AT: u64 = 0x3000
+const BATCH_AT: u64 = 0x4000
+const VB_AT: u64 = 0x5000
+const POOL_BYTES: u64 = 0x6000
+const RING_BYTES: u64 = 0x1000
+const REG_CAP: u64 = 64
+const NOT_FOUND: u64 = 0xffff
+const STEP_CAP: u64 = 256
+const RING_STEP_CAP: u64 = 4096
+const GARBAGE: u64 = 0xdeadbeef
+const LOW32: u64 = 0xffffffff
+const HANG_BUDGET_US: u64 = 15000
+const BATCH_START_BYTES: u64 = 12
+
+static mut pool: [u32; 8192] = [0; 8192]
+static mut base_cpu: u64 = 0
+static mut reg_off: [u64; 64] = [0; 64]
+static mut reg_val: [u64; 64] = [0; 64]
+static mut reg_n: u64 = 0
+static mut elsp_buf: [u64; 4] = [0; 4]
+static mut elsp_n: u64 = 0
+static mut gdrst_writes: u64 = 0
+static mut gdrst_last: u64 = 0
+static mut gdrst_val: u64 = 0
+static mut fw_gt: u64 = 0
+static mut fw_render: u64 = 0
+static mut mode_val: u64 = 0
+static mut mi_mode_val: u64 = 0x100
+static mut reset_ctl: u64 = 0
+static mut hung: bool = false
+static mut csb: [u64; 6] = [0; 6]
+static mut csb_w: u64 = 7
+static mut csb_r: u64 = 7
+static mut total_us: u64 = 0
+static mut executed: u64 = 0
+static mut inj_stuck: bool = false
+static mut pipe3d: bool = false
+static mut topo: u64 = 0
+static mut have_vb: bool = false
+static mut have_ve: bool = false
+static mut have_rect: bool = false
+static mut have_clear: bool = false
+static mut rect_w: u64 = 0
+static mut rect_h: u64 = 0
+static mut vb_addr: u64 = 0
+static mut draws: u64 = 0
+static mut verts: u64 = 0
+static mut rect_draws: u64 = 0
+static mut batches: u64 = 0
+static mut work: [u32; 64] = [0; 64]
+static mut walkres: [u64; 3] = [0; 3]
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn cpu_of(ggtt: u64) -> u64 {
+    return base_cpu + (ggtt - GGTT_BASE)
+}
+
+fn in_pool(addr: u64, bytes: u64) -> bool {
+    return addr >= GGTT_BASE && addr + bytes <= GGTT_BASE + POOL_BYTES
+}
+
+fn reg_find(off: u64) -> u64 {
+    var i: u64 = 0
+    while i < reg_n {
+        if reg_off[i as usize] == off {
+            return i
+        }
+        i = i + 1
+    }
+    return NOT_FOUND
+}
+
+fn reg_set(off: u64, v: u64) {
+    var i: u64 = reg_find(off)
+    if i == NOT_FOUND {
+        if reg_n >= REG_CAP {
+            return
+        }
+        i = reg_n
+        reg_off[i as usize] = off
+        reg_n = reg_n + 1
+    }
+    reg_val[i as usize] = v
+}
+
+fn reg_get(off: u64) -> u64 {
+    let i: u64 = reg_find(off)
+    if i == NOT_FOUND {
+        return 0
+    }
+    return reg_val[i as usize]
+}
+
+fn apply_masked(old: u64, v: u64) -> u64 {
+    let mask: u64 = (v >> 16) & 0xffff
+    return (old & (~mask) & 0xffff) | (v & mask)
+}
+
+fn csb_push(st: u64) {
+    if csb_w >= 5 {
+        csb_w = 0
+    } else {
+        csb_w = csb_w + 1
+    }
+    csb[csb_w as usize] = st
+}
+
+fn rdw(start: u64, head: u64, size: u64, i: u64) -> u64 {
+    return octets.ld32(cpu_of(start), (head + i * 4) % size)
+}
+
+fn reset_pipe_state() {
+    pipe3d = false
+    topo = 0
+    have_vb = false
+    have_ve = false
+    have_rect = false
+    have_clear = false
+}
+
+fn draw_ok(t: u64) -> bool {
+    if !pipe3d || topo == 0 {
+        return false
+    }
+    if t == rcsbatch.TOPO_TRILIST {
+        return have_vb && have_ve
+    }
+    if t == rcsbatch.TOPO_RECTLIST {
+        return have_rect
+    }
+    return false
+}
+
+fn do_primitive(b: u64, at: u64) -> bool {
+    if !draw_ok(topo) {
+        return false
+    }
+    draws = draws + 1
+    verts = verts + octets.ld32(b, (at + 2) * 4)
+    if topo == rcsbatch.TOPO_RECTLIST {
+        rect_draws = rect_draws + 1
+    }
+    return true
+}
+
+fn do_state(b: u64, at: u64, h: u64) -> bool {
+    if h == rcsbatch.PIPELINE_SELECT_3D {
+        pipe3d = true
+    } else if h == rcsbatch.VERTEX_BUFFERS {
+        have_vb = true
+        vb_addr = octets.ld32(b, (at + 2) * 4)
+    } else if h == rcsbatch.VERTEX_ELEMENTS {
+        have_ve = true
+    } else if h == rcsbatch.VF_TOPOLOGY {
+        topo = octets.ld32(b, (at + 1) * 4)
+    } else if h == rcsbatch.DRAWING_RECTANGLE {
+        have_rect = true
+        rect_w = (octets.ld32(b, (at + 2) * 4) & 0xffff) + 1
+        rect_h = (octets.ld32(b, (at + 2) * 4) >> 16) + 1
+    } else if h == rcsbatch.CLEAR_PARAMS {
+        have_clear = true
+    } else {
+        return false
+    }
+    return true
+}
+
+fn packet_len(h: u64) -> u64 {
+    if h == rcsbatch.PIPELINE_SELECT_3D {
+        return 1
+    }
+    return (h & 0xff) + 2
+}
+
+fn run_batch(addr: u64) -> bool {
+    if !in_pool(addr, 4) {
+        return false
+    }
+    let b: u64 = cpu_of(addr)
+    var at: u64 = 0
+    var steps: u64 = 0
+    reset_pipe_state()
+    while steps < STEP_CAP {
+        let h: u64 = octets.ld32(b, at * 4)
+        steps = steps + 1
+        if h == rcsbatch.BATCH_END {
+            batches = batches + 1
+            return true
+        }
+        if h == micmd.MI_NOOP {
+            at = at + 1
+        } else if h == rcsbatch.PRIMITIVE {
+            if !do_primitive(b, at) {
+                return false
+            }
+            at = at + packet_len(h)
+        } else if do_state(b, at, h) {
+            at = at + packet_len(h)
+        } else {
+            return false
+        }
+        if !in_pool(addr + at * 4, 4) {
+            return false
+        }
+    }
+    return false
+}
+
+fn exec_one(start: u64, head: u64, size: u64) -> u64 {
+    let dw: u64 = rdw(start, head, size, 0)
+    if dw == micmd.MI_NOOP || dw == micmd.MI_USER_INTERRUPT {
+        return 4
+    }
+    if dw == micmd.store_dword_ggtt() {
+        octets.st32(cpu_of(rdw(start, head, size, 1)), 0, rdw(start, head, size, 3))
+        return 16
+    }
+    if dw == micmd.mi(0x31, 1) {
+        if !run_batch(rdw(start, head, size, 1)) {
+            return 0
+        }
+        return BATCH_START_BYTES
+    }
+    return 0
+}
+
+fn run_ring(state: u64) {
+    let start: u64 = octets.ld32(state, lrc.CTX_RING_START * 4)
+    let ctl: u64 = octets.ld32(state, lrc.CTX_RING_CTL * 4)
+    let size: u64 = (ctl & 0x1ff000) + PAGE
+    var head: u64 = octets.ld32(state, lrc.CTX_RING_HEAD * 4)
+    let tail: u64 = octets.ld32(state, lrc.CTX_RING_TAIL * 4)
+    var steps: u64 = 0
+    while head != tail && steps < RING_STEP_CAP {
+        let adv: u64 = exec_one(start, head, size)
+        if adv == 0 {
+            hung = true
+            return
+        }
+        head = (head + adv) % size
+        steps = steps + 1
+    }
+    octets.st32(state, lrc.CTX_RING_HEAD * 4, head)
+    csb_push(elsp.ST_COMPLETE | elsp.ST_ACTIVE_IDLE)
+}
+
+fn execute(desc: u64) {
+    executed = executed + 1
+    if hung || (desc & lrc.DESC_VALID) == 0 || (mode_val & engregs.RUN_LIST_ENABLE) == 0 || (mi_mode_val & engregs.STOP_RING) != 0 {
+        return
+    }
+    let state: u64 = cpu_of(desc & 0xfffff000) + lrc.STATE_OFFSET
+    if octets.ld32(state, 4) != micmd.lri_header(14, true) || (octets.ld32(state, lrc.CTX_RING_CTL * 4) & 1) == 0 {
+        hung = true
+        return
+    }
+    csb_push(elsp.ST_IDLE_ACTIVE)
+    run_ring(state)
+}
+
+fn on_elsp(v: u64) {
+    elsp_buf[elsp_n as usize] = v & LOW32
+    elsp_n = elsp_n + 1
+    if elsp_n < 4 {
+        return
+    }
+    elsp_n = 0
+    execute((elsp_buf[2] << 32) | elsp_buf[3])
+}
+
+fn on_gdrst(v: u64) {
+    gdrst_writes = gdrst_writes + 1
+    gdrst_last = v
+    if inj_stuck {
+        gdrst_val = v
+        return
+    }
+    if (v & engregs.GRDOM_RENDER) != 0 {
+        hung = false
+        mode_val = 0
+        mi_mode_val = engregs.STOP_RING
+        csb_w = 7
+        csb_r = 7
+    }
+    gdrst_val = 0
+}
+
+fn mwr(off: u64, v: u64) -> u64 {
+    let b: u64 = engregs.RCS_BASE
+    if off == engregs.FORCEWAKE_GT {
+        fw_gt = apply_masked(fw_gt, v)
+    } else if off == engregs.FORCEWAKE_RENDER {
+        fw_render = apply_masked(fw_render, v)
+    } else if off == b + engregs.RING_MODE {
+        mode_val = apply_masked(mode_val, v)
+    } else if off == b + engregs.RING_MI_MODE {
+        mi_mode_val = apply_masked(mi_mode_val, v)
+    } else if off == b + engregs.RING_ELSP {
+        on_elsp(v)
+    } else if off == b + engregs.RING_RESET_CTL {
+        reset_ctl = apply_masked(reset_ctl, v)
+    } else if off == engregs.GDRST {
+        on_gdrst(v)
+    } else if off == b + engregs.RING_CSB_PTR {
+        csb_r = (apply_masked(csb_r << 8, v) >> 8) & 7
+    } else {
+        reg_set(off, v)
+    }
+    return 0
+}
+
+fn mrd(off: u64) -> u64 {
+    let b: u64 = engregs.RCS_BASE
+    if off == engregs.FORCEWAKE_ACK_GT {
+        return fw_gt & engregs.FORCEWAKE_KERNEL
+    }
+    if off == engregs.FORCEWAKE_ACK_RENDER {
+        return fw_render & engregs.FORCEWAKE_KERNEL
+    }
+    if off == b + engregs.RING_MODE {
+        return mode_val
+    }
+    if off == b + engregs.RING_RESET_CTL {
+        if (reset_ctl & engregs.RESET_REQUEST) != 0 {
+            return reset_ctl | engregs.RESET_READY
+        }
+        return reset_ctl
+    }
+    if off == engregs.GDRST {
+        return gdrst_val
+    }
+    if off == b + engregs.RING_CSB_PTR {
+        return (csb_r << 8) | csb_w
+    }
+    if off >= b + engregs.RING_CSB_BUF && off < b + engregs.RING_CSB_BUF + 48 {
+        return csb[((off - b - engregs.RING_CSB_BUF) / 8) as usize]
+    }
+    return reg_get(off)
+}
+
+fn mus(n: u64) -> u64 {
+    total_us = total_us + n
+    return 0
+}
+
+fn model_reset() {
+    reg_n = 0
+    elsp_n = 0
+    gdrst_writes = 0
+    gdrst_last = 0
+    gdrst_val = 0
+    fw_gt = 0
+    fw_render = 0
+    mode_val = 0
+    mi_mode_val = engregs.STOP_RING
+    reset_ctl = 0
+    hung = false
+    csb_w = 7
+    csb_r = 7
+    total_us = 0
+    executed = 0
+    inj_stuck = false
+    draws = 0
+    verts = 0
+    rect_draws = 0
+    batches = 0
+    vb_addr = 0
+    reset_pipe_state()
+    var i: u64 = 0
+    while i < POOL_BYTES {
+        octets.st32(base_cpu, i, GARBAGE)
+        i = i + 4
+    }
+}
+
+fn layout() -> engine.Layout {
+    return engine.layout_new(engregs.RCS_BASE, engregs.GRDOM_RENDER,
+        base_cpu + RING_AT, GGTT_BASE + RING_AT, RING_BYTES,
+        base_cpu + CTX_AT, GGTT_BASE + CTX_AT,
+        base_cpu + HWS_AT, GGTT_BASE + HWS_AT)
+}
+
+fn ready() -> engine.Engine {
+    model_reset()
+    var e: engine.Engine = engine.engine_new(layout())
+    engine.setup(mrd, mwr, mus, &e)
+    return e
+}
+
+fn hws_seqno() -> u64 {
+    return octets.ld32(base_cpu + HWS_AT, 0x400)
+}
+
+fn work_base() -> u64 {
+    return (&work[0]) as u64
+}
+
+fn load_batch(n: u64) {
+    var i: u64 = 0
+    while i < n {
+        octets.st32(base_cpu + BATCH_AT, i * 4, octets.ld32(work_base(), i * 4))
+        i = i + 1
+    }
+}
+
+fn make_batch(cpu_at: u64, n: u64) -> rcsrun.Batch {
+    var b: rcsrun.Batch = rcsrun.Batch { cpu: cpu_at, dwords: n, ggtt: GGTT_BASE + BATCH_AT, walk: (&walkres[0]) as u64 }
+    return b
+}
+
+fn test_encoders() {
+    let n: u64 = rcsbatch.triangle(work_base(), 64, GGTT_BASE + VB_AT, 96, 32)
+    chk("triangle: 19 dwords", n == 19)
+    chk("triangle: starts with pipeline select 3D", octets.ld32(work_base(), 0) == 0x69040300)
+    chk("triangle: vertex buffer header", octets.ld32(work_base(), 4) == 0x78080003)
+    chk("triangle: vertex buffer address and size", octets.ld32(work_base(), 12) == GGTT_BASE + VB_AT && octets.ld32(work_base(), 20) == 96)
+    chk("triangle: stride in the buffer state", (octets.ld32(work_base(), 8) & 0xfff) == 32)
+    chk("triangle: 3DPRIMITIVE with 3 vertices", octets.ld32(work_base(), 4 * 11) == 0x7b000005 && octets.ld32(work_base(), 4 * 13) == 3)
+    chk("triangle: triangle list topology value", octets.ld32(work_base(), 4 * 10) == 4)
+    chk("triangle: ends with batch buffer end", octets.ld32(work_base(), (n - 1) * 4) == 0x05000000)
+    chk("triangle: parses as a client batch with 6 packets", rcsparse.walk(work_base(), n, rcsparse.MODE_CLIENT, (&walkres[0]) as u64) == rcsparse.W_OK
+        && walkres[0] == 6 && walkres[2] == n)
+    chk("triangle: small buffer refused", rcsbatch.triangle(work_base(), 31, GGTT_BASE + VB_AT, 96, 32) == 0)
+    chk("triangle: unaligned buffer refused", rcsbatch.triangle(work_base(), 64, GGTT_BASE + VB_AT + 2, 96, 32) == 0)
+    chk("triangle: zero stride refused", rcsbatch.triangle(work_base(), 64, GGTT_BASE + VB_AT, 96, 0) == 0)
+    chk("triangle: buffer smaller than 3 vertices refused", rcsbatch.triangle(work_base(), 64, GGTT_BASE + VB_AT, 95, 32) == 0)
+    chk("triangle: stride over 4095 refused", rcsbatch.triangle(work_base(), 64, GGTT_BASE + VB_AT, 99999, 4096) == 0)
+    let r: u64 = rcsbatch.fill_rect(work_base(), 64, 64, 32)
+    chk("fill_rect: 18 dwords", r == 18)
+    chk("fill_rect: drawing rectangle carries size", octets.ld32(work_base(), 4 * 1) == 0x79000002 && octets.ld32(work_base(), 4 * 3) == ((31 << 16) | 63))
+    chk("fill_rect: rectlist topology", octets.ld32(work_base(), 4 * 8) == 0x784b0000 && octets.ld32(work_base(), 4 * 9) == 15)
+    chk("fill_rect: parses as a client batch with 6 packets", rcsparse.walk(work_base(), r, rcsparse.MODE_CLIENT, (&walkres[0]) as u64) == rcsparse.W_OK
+        && walkres[0] == 6)
+    chk("fill_rect: zero width refused", rcsbatch.fill_rect(work_base(), 64, 0, 32) == 0)
+    chk("fill_rect: zero height refused", rcsbatch.fill_rect(work_base(), 64, 32, 0) == 0)
+    chk("fill_rect: oversize refused", rcsbatch.fill_rect(work_base(), 64, 8193, 32) == 0)
+    chk("fill_rect: small buffer refused", rcsbatch.fill_rect(work_base(), 8, 64, 32) == 0)
+}
+
+fn test_start_packet() {
+    rcsrun.start_packet(work_base(), 0x123456789c)
+    chk("start packet: header is MI_BATCH_BUFFER_START gen8", octets.ld32(work_base(), 0) == 0x18800001)
+    chk("start packet: low address", octets.ld32(work_base(), 4) == 0x3456789c)
+    chk("start packet: high address", octets.ld32(work_base(), 8) == 0x12)
+    chk("start packet: 3 dwords", rcsrun.BATCH_START_DWORDS == 3)
+}
+
+fn test_setup() {
+    var e: engine.Engine = ready()
+    chk("rcs setup: engine ready", e.status == engine.E_READY)
+    chk("rcs setup: ring base is 0x2000", e.lay.base == 0x2000 && engregs.RCS_BASE == 0x2000)
+    chk("rcs setup: reset domain is render", e.lay.domain == engregs.GRDOM_RENDER)
+    chk("rcs setup: run list enabled", (mode_val & engregs.RUN_LIST_ENABLE) != 0)
+}
+
+fn test_triangle() {
+    var e: engine.Engine = ready()
+    let n: u64 = rcsbatch.triangle(work_base(), 64, GGTT_BASE + VB_AT, 96, 32)
+    load_batch(n)
+    var b: rcsrun.Batch = make_batch(base_cpu + BATCH_AT, n)
+    chk("triangle run: ok", rcsrun.submit_batch(mrd, mwr, mus, &e, &b) == engine.S_OK)
+    chk("triangle run: one batch executed", batches == 1)
+    chk("triangle run: one draw of 3 vertices", draws == 1 && verts == 3)
+    chk("triangle run: triangle list topology", topo == rcsbatch.TOPO_TRILIST && rect_draws == 0)
+    chk("triangle run: vertex buffer address seen by the engine", vb_addr == GGTT_BASE + VB_AT)
+    chk("triangle run: fence written", hws_seqno() == 1)
+    chk("triangle run: completion counted", e.csb.completes == 1)
+    chk("triangle run: render forcewake released", fw_render == 0)
+    chk("triangle run: gt forcewake released", fw_gt == 0)
+    chk("triangle run: no reset", gdrst_writes == 0 && e.hangs == 0)
+    chk("triangle run: again ok", rcsrun.submit_batch(mrd, mwr, mus, &e, &b) == engine.S_OK && hws_seqno() == 2 && draws == 2)
+}
+
+fn test_fill_rect() {
+    var e: engine.Engine = ready()
+    let n: u64 = rcsbatch.fill_rect(work_base(), 64, 64, 32)
+    load_batch(n)
+    var b: rcsrun.Batch = make_batch(base_cpu + BATCH_AT, n)
+    chk("fill_rect run: ok", rcsrun.submit_batch(mrd, mwr, mus, &e, &b) == engine.S_OK)
+    chk("fill_rect run: rectlist draw", rect_draws == 1 && draws == 1 && topo == rcsbatch.TOPO_RECTLIST)
+    chk("fill_rect run: rectangle 64x32", rect_w == 64 && rect_h == 32)
+    chk("fill_rect run: clear parameters seen", have_clear)
+    chk("fill_rect run: fence written", hws_seqno() == 1)
+}
+
+fn test_reject() {
+    var e: engine.Engine = ready()
+    let n: u64 = rcsbatch.triangle(work_base(), 64, GGTT_BASE + VB_AT, 96, 32)
+    load_batch(n)
+    var b: rcsrun.Batch = make_batch(base_cpu + BATCH_AT, n)
+    b.ggtt = GGTT_BASE + BATCH_AT + 2
+    chk("reject: unaligned batch address", rcsrun.submit_batch(mrd, mwr, mus, &e, &b) == rcsrun.R_REJECT)
+    b.ggtt = GGTT_BASE + BATCH_AT
+    b.dwords = n - 1
+    chk("reject: no batch end", rcsrun.submit_batch(mrd, mwr, mus, &e, &b) == rcsrun.R_REJECT)
+    octets.st32(work_base(), 0, 0x7a000004)
+    octets.st32(work_base(), 4, 0x4000)
+    octets.st32(work_base(), 8, 0)
+    octets.st32(work_base(), 12, 0)
+    octets.st32(work_base(), 16, 0)
+    octets.st32(work_base(), 20, 0)
+    octets.st32(work_base(), 24, 0x05000000)
+    load_batch(7)
+    b.dwords = 7
+    chk("reject: client post-sync write", rcsrun.submit_batch(mrd, mwr, mus, &e, &b) == rcsrun.R_REJECT)
+    b.dwords = n
+    rcsbatch.triangle(work_base(), 64, GGTT_BASE + VB_AT, 96, 32)
+    octets.st32(work_base(), 4 * 0, 0x61010013)
+    load_batch(n)
+    chk("reject: client state base address", rcsrun.submit_batch(mrd, mwr, mus, &e, &b) == rcsrun.R_REJECT)
+    rcsbatch.triangle(work_base(), 64, GGTT_BASE + VB_AT, 96, 32)
+    octets.st32(work_base(), 4 * 0, 0x0e000000)
+    load_batch(n)
+    chk("reject: unknown MI command", rcsrun.submit_batch(mrd, mwr, mus, &e, &b) == rcsrun.R_REJECT)
+    chk("reject: nothing reached the engine", executed == 0 && hws_seqno() == 0 && e.submits == 0)
+    chk("reject: no batch executed", batches == 0)
+}
+
+fn test_hang() {
+    var e: engine.Engine = ready()
+    let n: u64 = rcsbatch.triangle(work_base(), 64, GGTT_BASE + VB_AT, 96, 32)
+    load_batch(n)
+    octets.st32(base_cpu + BATCH_AT, (n - 1) * 4, GARBAGE)
+    let t0: u64 = total_us
+    chk("hang: batch without end is detected", rcsrun.submit_trusted(mrd, mwr, mus, &e, GGTT_BASE + BATCH_AT) == engine.S_HUNG)
+    chk("hang: time bounded", total_us - t0 <= HANG_BUDGET_US)
+    chk("hang: counted once", e.hangs == 1 && e.resets == 1)
+    chk("hang: only the render domain was reset", gdrst_writes == 1 && gdrst_last == engregs.GRDOM_RENDER)
+    chk("hang: reset request withdrawn", (reset_ctl & engregs.RESET_REQUEST) == 0)
+    chk("hang: engine ready again", e.status == engine.E_READY && (mode_val & engregs.RUN_LIST_ENABLE) != 0)
+    chk("hang: render forcewake released", fw_render == 0 && fw_gt == 0)
+    chk("hang: no fence written", hws_seqno() == 0)
+    chk("hang: bad dwords skipped", lrc.head(engine.state_page(&e)) == e.ring.tail)
+    load_batch(n)
+    var b: rcsrun.Batch = make_batch(base_cpu + BATCH_AT, n)
+    let again: u64 = rcsrun.submit_batch(mrd, mwr, mus, &e, &b)
+    chk("hang: next triangle runs", again == engine.S_OK && draws == 2)
+}
+
+fn test_semantic_hang() {
+    var e: engine.Engine = ready()
+    let n: u64 = rcsbatch.triangle(work_base(), 64, GGTT_BASE + VB_AT, 96, 32)
+    octets.st32(work_base(), 4 * 1, 0)
+    octets.st32(work_base(), 4 * 2, 0)
+    octets.st32(work_base(), 4 * 3, 0)
+    octets.st32(work_base(), 4 * 4, 0)
+    octets.st32(work_base(), 4 * 5, 0)
+    octets.st32(work_base(), 4 * 6, 0)
+    octets.st32(work_base(), 4 * 7, 0)
+    octets.st32(work_base(), 4 * 8, 0)
+    load_batch(n)
+    var b: rcsrun.Batch = make_batch(base_cpu + BATCH_AT, n)
+    chk("semantic: parser accepts the zero-padded draw", rcsparse.walk(work_base(), n, rcsparse.MODE_CLIENT, (&walkres[0]) as u64) == rcsparse.W_OK)
+    chk("semantic: draw without vertex state hangs the engine", rcsrun.submit_batch(mrd, mwr, mus, &e, &b) == engine.S_HUNG)
+    chk("semantic: reset and recovery", e.hangs == 1 && e.resets == 1 && e.status == engine.E_READY && draws == 0)
+    let r: u64 = rcsbatch.fill_rect(work_base(), 64, 64, 32)
+    octets.st32(work_base(), 4 * 1, 0)
+    octets.st32(work_base(), 4 * 2, 0)
+    octets.st32(work_base(), 4 * 3, 0)
+    octets.st32(work_base(), 4 * 4, 0)
+    load_batch(r)
+    var c: rcsrun.Batch = make_batch(base_cpu + BATCH_AT, r)
+    chk("semantic: rectlist without drawing rectangle hangs", rcsrun.submit_batch(mrd, mwr, mus, &e, &c) == engine.S_HUNG && e.hangs == 2)
+    octets.st32(work_base(), 0, 0)
+    var i: u64 = 0
+    while i < 40 {
+        octets.st32(base_cpu + BATCH_AT, i * 4, 0)
+        i = i + 1
+    }
+    chk("runaway: endless no-ops hang the engine", rcsrun.submit_trusted(mrd, mwr, mus, &e, GGTT_BASE + BATCH_AT) == engine.S_HUNG && e.hangs == 3)
+}
+
+fn test_dead() {
+    var e: engine.Engine = ready()
+    octets.st32(base_cpu + BATCH_AT, 0, GARBAGE)
+    inj_stuck = true
+    chk("dead: stuck reset reported", rcsrun.submit_trusted(mrd, mwr, mus, &e, GGTT_BASE + BATCH_AT) == engine.S_DEAD_RESET)
+    chk("dead: engine marked dead", e.status == engine.E_DEAD)
+    chk("dead: later submits refused", rcsrun.submit_trusted(mrd, mwr, mus, &e, GGTT_BASE + BATCH_AT) == engine.S_DEAD)
+}
+
+fn main() -> i32 {
+    base_cpu = (((&pool[0]) as u64) + PAGE - 1) & (~(PAGE - 1))
+    test_encoders()
+    test_start_packet()
+    test_setup()
+    test_triangle()
+    test_fill_rect()
+    test_reject()
+    test_hang()
+    test_semantic_hang()
+    test_dead()
+    return 0
+}

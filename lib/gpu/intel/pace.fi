@@ -1,0 +1,95 @@
+// SPDX-License-Identifier: GPL-2.0-only
+export {
+    Pacer, pacer_new, queue, flip_done, wait_us, drop_late, dropped, missed, flips,
+    MODE_FIFO, MODE_MAILBOX, Q_FLIP, Q_WAIT, Q_REPLACED, Q_INVALID
+}
+
+const MODE_FIFO: u64 = 0
+const MODE_MAILBOX: u64 = 1
+const Q_FLIP: u64 = 0
+const Q_WAIT: u64 = 1
+const Q_REPLACED: u64 = 2
+const Q_INVALID: u64 = 3
+const MHZ_TO_PERIOD_US: u64 = 1000000000
+const FRAME_MASK: u64 = 0xffffffff
+const FRAME_SPAN: u64 = 0x100000000
+const MIN_REFRESH_MHZ: u64 = 1000
+const MAX_REFRESH_MHZ: u64 = 500000
+
+struct Pacer {
+    period_us: u64,
+    mode: u64,
+    busy: bool,
+    queued: u64,
+    flips: u64,
+    dropped: u64,
+    missed: u64,
+    last_frame: u64,
+    seen: bool
+}
+
+fn pacer_new(refresh_mhz: u64, mode: u64) -> Pacer {
+    var p: Pacer = Pacer { period_us: 0, mode: mode, busy: false, queued: 0, flips: 0, dropped: 0, missed: 0,
+        last_frame: 0, seen: false }
+    if refresh_mhz >= MIN_REFRESH_MHZ && refresh_mhz <= MAX_REFRESH_MHZ && mode <= MODE_MAILBOX {
+        p.period_us = MHZ_TO_PERIOD_US / refresh_mhz
+    }
+    return p
+}
+
+fn queue(p: *mut Pacer) -> u64 {
+    if (*p).period_us == 0 {
+        return Q_INVALID
+    }
+    if !(*p).busy {
+        (*p).busy = true
+        (*p).queued = (*p).queued + 1
+        return Q_FLIP
+    }
+    if (*p).mode == MODE_FIFO {
+        return Q_WAIT
+    }
+    (*p).queued = (*p).queued + 1
+    (*p).dropped = (*p).dropped + 1
+    return Q_REPLACED
+}
+
+fn flip_done(p: *mut Pacer, frame: u64) -> bool {
+    if !(*p).busy {
+        return false
+    }
+    (*p).busy = false
+    (*p).flips = (*p).flips + 1
+    if (*p).seen {
+        let gap: u64 = (frame + FRAME_SPAN - (*p).last_frame) & FRAME_MASK
+        if gap > 1 {
+            (*p).missed = (*p).missed + gap - 1
+        }
+    }
+    (*p).last_frame = frame & FRAME_MASK
+    (*p).seen = true
+    return true
+}
+
+fn wait_us(p: *mut Pacer, since_vblank_us: u64) -> u64 {
+    if (*p).period_us == 0 {
+        return 0
+    }
+    return (*p).period_us - (since_vblank_us % (*p).period_us)
+}
+
+fn drop_late(p: *mut Pacer, since_vblank_us: u64, budget_us: u64) -> bool {
+    return wait_us(p, since_vblank_us) < budget_us
+}
+
+fn dropped(p: *mut Pacer) -> u64 {
+    return (*p).dropped
+}
+
+fn missed(p: *mut Pacer) -> u64 {
+    return (*p).missed
+}
+
+fn flips(p: *mut Pacer) -> u64 {
+    return (*p).flips
+}

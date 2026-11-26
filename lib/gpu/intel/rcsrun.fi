@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.octets
+import gpu.intel.engregs
+import gpu.intel.engine
+import gpu.intel.fwake
+import gpu.intel.micmd
+import gpu.intel.rcsparse
+import gpu.intel.submit
+
+export { Batch, submit_batch, submit_trusted, start_packet, R_REJECT, BATCH_START_DWORDS }
+
+const R_REJECT: u64 = 20
+const BATCH_START_DWORDS: u64 = 3
+const OP_BATCH_BUFFER_START: u64 = 0x31
+const START_LEN_FIELD: u64 = 1
+const LOW32: u64 = 0xffffffff
+const ADDR_HIGH_SHIFT: u64 = 32
+const ADDR_ALIGN_MASK: u64 = 3
+
+struct Batch {
+    cpu: u64,
+    dwords: u64,
+    ggtt: u64,
+    walk: u64
+}
+
+fn start_packet(out: u64, ggtt: u64) {
+    octets.st32(out, 0, micmd.mi(OP_BATCH_BUFFER_START, START_LEN_FIELD))
+    octets.st32(out, 4, ggtt & LOW32)
+    octets.st32(out, 8, ggtt >> ADDR_HIGH_SHIFT)
+}
+
+fn submit_trusted(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, e: *mut engine.Engine, ggtt: u64) -> u64 {
+    var cmd: [u32; 3] = [0; 3]
+    start_packet((&cmd[0]) as u64, ggtt)
+    if fwake.get(rd, wr, us, engregs.FORCEWAKE_RENDER, engregs.FORCEWAKE_ACK_RENDER) != fwake.W_OK {
+        return engine.S_NO_WAKE
+    }
+    let r: u64 = submit.run_dwords(rd, wr, us, e, (&cmd[0]) as u64, BATCH_START_DWORDS)
+    fwake.put(rd, wr, us, engregs.FORCEWAKE_RENDER, engregs.FORCEWAKE_ACK_RENDER)
+    return r
+}
+
+fn submit_batch(rd: fn(u64) -> u64, wr: fn(u64, u64) -> u64, us: fn(u64) -> u64, e: *mut engine.Engine, b: *mut Batch) -> u64 {
+    if ((*b).ggtt & ADDR_ALIGN_MASK) != 0 {
+        return R_REJECT
+    }
+    if rcsparse.walk((*b).cpu, (*b).dwords, rcsparse.MODE_CLIENT, (*b).walk) != rcsparse.W_OK {
+        return R_REJECT
+    }
+    return submit_trusted(rd, wr, us, e, (*b).ggtt)
+}
