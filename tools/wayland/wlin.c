@@ -13,7 +13,7 @@
  *   wlin[A]: ptr button serial=121 button=272 state=1
  *   wlin[A]: paste=hello      selection=none     source send mime=... wrote=5     source cancelled
  *
- *   wlin <socket> <seconds> <name> [copy=TEXT] [paste] [badserial] [noseat] [sub] [proto]
+ *   wlin <socket> <seconds> <name> [copy=TEXT] [paste] [badserial] [noseat] [sub] [proto] [cursor=N] [badcursor=N] [forms]
  *
  *   copy=TEXT   at the FIRST key press: make a wl_data_source, offer text, set_selection(source, the serial of that key)
  *   badserial   at the first key press: set_selection with a serial that was never given (must be refused: `source cancelled`)
@@ -26,6 +26,9 @@
  *               (the server must send exactly one mode event: a mode event per request starts a request/mode loop with GTK clients)
  *   seat2       bind wl_seat a second time (as Firefox does: GDK and nsWaylandDisplay) and log its events as `kb2 ...` / `ptr2 ...`;
  *               the key 'x' releases the second keyboard + pointer (`seat2 released`)
+ *   cursor=N    at every pointer enter: wp_cursor_shape_device_v1.set_shape(enter serial, N)
+ *   badcursor=N at every button press: set_shape(serial + 1000, N) (a wrong serial: must change nothing)
+ *   forms       call WIG_CURSOR for the forms 0..12 and print `forms: form=N r=R errno=E` (12 must be refused)
  *   noseat      do not bind the seat (counter-proof: such a client gets no input at all)
  */
 #ifndef _GNU_SOURCE
@@ -47,6 +50,7 @@
 #include "viewporter-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
 #include "server-decoration-client-protocol.h"
+#include "cursor-shape-v1-client-protocol.h"
 
 #define W 200
 #define H 120
@@ -65,6 +69,10 @@ static struct wl_subcompositor *subcomp;
 static int do_sub, do_proto, do_frame;
 static struct wp_viewporter *vporter;
 static struct zxdg_decoration_manager_v1 *decoman;
+static struct wp_cursor_shape_manager_v1 *shapeman;
+static struct wp_cursor_shape_device_v1 *shapedev;
+static int cursor_shape, bad_cursor_shape, do_forms;
+const struct wl_interface zwp_tablet_tool_v2_interface = { "zwp_tablet_tool_v2", 1, 0, NULL, 0, NULL };
 static int deco_mode = -1;
 static void deco_conf(void *d, struct zxdg_toplevel_decoration_v1 *t, uint32_t mode) { deco_mode = (int)mode; }
 static const struct zxdg_toplevel_decoration_v1_listener deco_l = { deco_conf };
@@ -344,6 +352,10 @@ static const struct wl_keyboard_listener kb_l = { kb_keymap, kb_enter, kb_leave,
 static void p_enter(void *d, struct wl_pointer *p, uint32_t s, struct wl_surface *sf, wl_fixed_t x, wl_fixed_t y)
 {
     say("ptr enter serial=%u surface=%s x=%d y=%d", s, sf == surf ? "ours" : "other", wl_fixed_to_int(x), wl_fixed_to_int(y));
+    if (cursor_shape && shapedev) {
+        wp_cursor_shape_device_v1_set_shape(shapedev, s, cursor_shape);
+        say("cursor: set_shape serial=%u shape=%d", s, cursor_shape);
+    }
 }
 static void p_leave(void *d, struct wl_pointer *p, uint32_t s, struct wl_surface *sf)
 {
@@ -356,6 +368,10 @@ static void p_motion(void *d, struct wl_pointer *p, uint32_t t, wl_fixed_t x, wl
 static void p_button(void *d, struct wl_pointer *p, uint32_t s, uint32_t t, uint32_t b, uint32_t st)
 {
     say("ptr button serial=%u button=%u state=%u", s, b, st);
+    if (bad_cursor_shape && shapedev && st == 1) {
+        wp_cursor_shape_device_v1_set_shape(shapedev, s + 1000, bad_cursor_shape);
+        say("cursor: set_shape with a wrong serial shape=%d", bad_cursor_shape);
+    }
 }
 static void p_axis(void *d, struct wl_pointer *p, uint32_t t, uint32_t a, wl_fixed_t v)
 {
@@ -418,8 +434,12 @@ static void seat_caps(void *d, struct wl_seat *s, uint32_t caps)
 {
     if (caps & WL_SEAT_CAPABILITY_KEYBOARD)
         wl_keyboard_add_listener(wl_seat_get_keyboard(s), &kb_l, NULL);
-    if (caps & WL_SEAT_CAPABILITY_POINTER)
-        wl_pointer_add_listener(wl_seat_get_pointer(s), &p_l, NULL);
+    if (caps & WL_SEAT_CAPABILITY_POINTER) {
+        struct wl_pointer *pt = wl_seat_get_pointer(s);
+        wl_pointer_add_listener(pt, &p_l, NULL);
+        if (shapeman && !shapedev)
+            shapedev = wp_cursor_shape_manager_v1_get_pointer(shapeman, pt);
+    }
     if (ddm && !ddev) {
         ddev = wl_data_device_manager_get_data_device(ddm, s);
         wl_data_device_add_listener(ddev, &dd_l, NULL);
@@ -462,6 +482,8 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t n, const char *i
         decoman = wl_registry_bind(r, n, &zxdg_decoration_manager_v1_interface, 1);
     else if (!strcmp(iface, "org_kde_kwin_server_decoration_manager"))
         kdeman = wl_registry_bind(r, n, &org_kde_kwin_server_decoration_manager_interface, 1);
+    else if (!strcmp(iface, "wp_cursor_shape_manager_v1"))
+        shapeman = wl_registry_bind(r, n, &wp_cursor_shape_manager_v1_interface, 1);
     else if (!strcmp(iface, "wl_data_device_manager"))
         ddm = wl_registry_bind(r, n, &wl_data_device_manager_interface, v < 3 ? v : 3);
     else if (!strcmp(iface, "wl_seat") && !no_seat) {
@@ -614,6 +636,20 @@ static void run_frame(struct wl_display *dpy)
     say("frame: loop cycles=%d done=%d in 2000 ms", n, frame_done);
 }
 
+#define WIG_CURSOR 1806
+#define FORM_COUNT 12
+static void run_forms(void)
+{
+    long r;
+    int form;
+    for (form = 0; form <= FORM_COUNT; form++) {
+        errno = 0;
+        r = syscall(WIG_CURSOR, (long)form, 0L, 0L);
+        say("forms: form=%d r=%ld errno=%d", form, r, errno);
+    }
+    syscall(WIG_CURSOR, 0L, 0L, 0L);
+}
+
 int main(int argc, char **argv)
 {
     const char *sock = argc > 1 ? argv[1] : "/tmp/wayland-0";
@@ -642,6 +678,12 @@ int main(int argc, char **argv)
             do_frame = 1;
         } else if (!strcmp(argv[i], "seat2")) {
             do_seat2 = 1;
+        } else if (!strcmp(argv[i], "forms")) {
+            do_forms = 1;
+        } else if (!strncmp(argv[i], "cursor=", 7)) {
+            cursor_shape = atoi(argv[i] + 7);
+        } else if (!strncmp(argv[i], "badcursor=", 10)) {
+            bad_cursor_shape = atoi(argv[i] + 10);
         } else if (!strcmp(argv[i], "noseat")) {
             no_seat = 1;
         }
@@ -685,6 +727,8 @@ int main(int argc, char **argv)
     wl_surface_commit(surf);
     wl_display_roundtrip(dpy);
     say("window up %dx%d", W, H);
+    if (do_forms)
+        run_forms();
     if (do_sub)
         make_subs(dpy);
     if (do_frame)

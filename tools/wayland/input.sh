@@ -64,9 +64,9 @@ else
 fi
 # protocol glue for wp_viewporter + zxdg_decoration_manager_v1 (generated from the installed XML, like xdg-shell in $WLB)
 GEN="$TMPD/gen"; mkdir -p "$GEN"; WPX=/usr/share/wayland-protocols
-for pr in stable/viewporter/viewporter unstable/xdg-decoration/xdg-decoration-unstable-v1; do
-    b=$(basename "$pr"); wayland-scanner client-header "$WPX/$pr.xml" "$GEN/$b-client-protocol.h" 2>>"$TMPD/gen.txt"
-    wayland-scanner private-code "$WPX/$pr.xml" "$GEN/$b-protocol.c" 2>>"$TMPD/gen.txt"
+for pr in "$WPX/stable/viewporter/viewporter.xml" "$WPX/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml" assets/wayland/cursor-shape-v1.xml; do
+    b=$(basename "$pr" .xml); wayland-scanner client-header "$pr" "$GEN/$b-client-protocol.h" 2>>"$TMPD/gen.txt"
+    wayland-scanner private-code "$pr" "$GEN/$b-protocol.c" 2>>"$TMPD/gen.txt"
 done
 wayland-scanner client-header assets/wayland/server-decoration.xml "$GEN/server-decoration-client-protocol.h" 2>>"$TMPD/gen.txt"
 wayland-scanner private-code assets/wayland/server-decoration.xml "$GEN/server-decoration-protocol.c" 2>>"$TMPD/gen.txt"
@@ -74,7 +74,7 @@ if [ -f "$WLB/musl-root/lib/libwayland-client.a" ] && musl-gcc -static -O2 -nost
         -T tools/foreign/osum.ld -Wl,--build-id=none -D_GNU_SOURCE \
         -I"$WLB/musl-root/include" -I"$WLB/wayland-1.21.0/gen" -I"$GEN" -o "$TMPD/wlin" \
         tools/foreign/start.s tools/foreign/osum_main.c tools/wayland/wlin.c \
-        "$WLB/wayland-1.21.0/gen/xdg-shell-protocol.c" "$GEN/viewporter-protocol.c" "$GEN/xdg-decoration-unstable-v1-protocol.c" "$GEN/server-decoration-protocol.c" \
+        "$WLB/wayland-1.21.0/gen/xdg-shell-protocol.c" "$GEN/viewporter-protocol.c" "$GEN/xdg-decoration-unstable-v1-protocol.c" "$GEN/server-decoration-protocol.c" "$GEN/cursor-shape-v1-protocol.c" \
         -L"$WLB/musl-root/lib" -lwayland-client -lffi 2>"$TMPD/wl.txt"; then
     ok "wlin: a Wayland program, libwayland-client + xdg-shell, static musl"
 else
@@ -95,9 +95,9 @@ cat > "$TMPD/g.sh" <<'EOS'
 wayd /tmp/wayland-0 2000000000 &
 sleep 2
 idle 5000 wayd-alone
-wlin /tmp/wayland-0 900 C badserial sub proto frame &
+wlin /tmp/wayland-0 900 C badserial sub proto frame forms &
 sleep 5
-wlin /tmp/wayland-0 900 A copy=hello-from-A seat2 &
+wlin /tmp/wayland-0 900 A copy=hello-from-A seat2 cursor=9 badcursor=29 &
 sleep 5
 wlin /tmp/wayland-0 900 B paste &
 sleep 5
@@ -145,6 +145,8 @@ lines() { L "$1" | wc -l; }
 # the lines of program $1 after the mark (mark = number of lines at that moment)
 since() { L "$1" | tail -n +$(( $2 + 1 )); }
 declare -A M
+wmforms() { clean | grep -a 'wm: form=' | tail -n +$(( $1 + 1 )); }
+lastform() { sed -E 's/.*wm: form=([0-9]+) .*/\1/' <<< "$1" | tail -1; }
 mark() { local x; for x in A B C; do M[$x]=$(lines $x); done; }
 keys() { # monitor commands, one key each
     : > "$TMPD/k.txt"; local k; for k in "$@"; do echo "sendkey $k" >> "$TMPD/k.txt"; done
@@ -206,6 +208,11 @@ n0=$(num "$ID0" syscalls)
 echo "== 2c. sub-surfaces (wl_subcompositor): C made two children of its window =="
 has "$(L C | grep -a 'sub:')" "sub: up" "wlin[C]: wl_subcompositor bound, two get_subsurface + commits + roundtrip -- no protocol error"
 hasnot "$(L C)" "protocol error" "wlin[C]: no protocol error from the server"
+FORMS=$(L C | grep -a 'forms: form=')
+for f in 0 1 2 3 4 5 6 7 8 9 10 11; do
+    has "$FORMS" "forms: form=$f r=0 errno=0" "WIG_CURSOR accepts the form $f (COPY 10 and MOVE 11 included)"
+done
+has "$FORMS" "forms: form=12 r=-1 errno=22" "WIG_CURSOR refuses the form 12 with EINVAL"
 has "$(L C | grep -a 'frame: before-commit')" "before-commit done=0" "wlin[C]: a wl_surface.frame request is NOT answered before the surface commits"
 has "$(L C | grep -a 'frame: after-commit')" "after-commit done=1" "wlin[C]: the frame callback arrives after the commit"
 FL=$(L C | grep -a 'frame: loop' | head -1)
@@ -270,11 +277,18 @@ hasnot "$(since C ${M[C]})" "key=" "COUNTER-PROOF: C (no focus) got no key"
 echo "== 5. a click moves the focus and the pointer =="
 mark
 AX=$(gx 1 40); AY=$(gy 1 30)
+WMF=$(clean | grep -ac 'wm: form=')
 klick $AX $AY
 sa=$(since A ${M[A]}); sb=$(since B ${M[B]})
 has "$sa" "kb enter" "A got wl_keyboard.enter after the click"
 has "$sb" "kb leave" "B got wl_keyboard.leave"
 has "$sa" "ptr enter" "A: wl_pointer.enter"
+has "$sa" "cursor: set_shape serial=" "A: wp_cursor_shape_device_v1.set_shape(enter serial, text) sent"
+has "$sa" "cursor: set_shape with a wrong serial" "A: set_shape with a wrong serial sent at the button press"
+fm=$(wmforms $WMF)
+has "$fm" "wm: form=1 " "window server: the cursor became the text form (shape text -> F_TEXT)"
+[ "$(lastform "$fm")" = 1 ] && ok "COUNTER-PROOF: the set_shape with a wrong serial changed nothing (last form stays 1)" \
+    || bad "last window server form is '$(lastform "$fm")', expected 1 (text)"
 # the pointer travelled over the screen to get here: enter came where it first touched the window, the position that counts is the
 # last motion before the button
 pe=$(grep -a "ptr motion" <<< "$sa" | tail -1)
@@ -319,6 +333,8 @@ hasnot "$(since B ${M[B]})" "ptr axis" "COUNTER-PROOF: B (pointer is not on it) 
 mark
 klick 900 600
 has "$(since A ${M[A]})" "ptr leave" "A: wl_pointer.leave when the pointer left the window"
+[ "$(lastform "$(wmforms $WMF)")" = 0 ] && ok "the cursor is the arrow again over the empty desktop (the text form belongs to A's window)" \
+    || bad "last window server form over the desktop is '$(lastform "$(wmforms $WMF)")', expected 0"
 
 echo "== 6. keysyms: what a real client makes of the keys (libxkbcommon on the host) =="
 mark
