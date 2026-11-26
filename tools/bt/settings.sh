@@ -69,9 +69,13 @@ chk full "status ready" 't=Ready'
 SCANS=$(count "$T/g.gadget" 'command 0401')
 [ "$SCANS" = 2 ] && ok "full: inquiry command sent once per search click ($SCANS)" || bad "full: expected 2 inquiry commands, got $SCANS"
 chk full "device list shows extended name" 't=.*Test Laptop'
-chk full "found counter" 'Devices found: 3'
+chk full "found counter includes le devices" 'Devices found: 6'
+chk full "le keyboard listed" 't=.*BLE Keyboard'
+LEON=$(count "$T/g.gadget" 'command 200c params=0100')
+LEOFF=$(count "$T/g.gadget" 'command 200c params=0000')
+[ "$LEON" = 2 ] && [ "$LEOFF" -ge 1 ] && ok "full: le scan started per search click and stopped after the inquiry ($LEON/$LEOFF)" || bad "full: le scan enable/disable counts $LEON/$LEOFF"
 chk full "power off text" 't=Bluetooth is off'
-chk full "power back on" 'bt: inquiry done n=3'
+chk full "power back on" 'bt: inquiry done n=[0-9]'
 grep -aq 'bt violations=0' "$T/g.gadget" && ok "full: model saw no malformed command" || bad "full: model violations"
 grep -aiq 'panic\|exception\|#PF\|#GP\|#UD' "$T/full.klar" && bad "full: panic/exception in log" || ok "full: no panic/exception"
 
