@@ -26,7 +26,8 @@ export {
     next_used_fd,
     owner, share_table, release_use, release_table,
     fd_of, fd_set, fd_alloc, fd_free, fd_take, FD_RESERVED,
-    open_alloc, open_ref, open_unref, open_kind, open_ino, open_off,
+    open_alloc, open_ref, open_hold, open_put, open_teardown, open_unref, fd_detach,
+    PUT_MORE, PUT_LAST, PUT_DEFERRED, open_kind, open_ino, open_off,
     open_set_off, open_flags, open_set_flags, open_used, open_refs,
     pipe_new, pipe_get, pipe_put, pipe_put_block, pipe_put_span, pipe_get_span, pipe_cap, pipe_room, pipe_bytes, pipe_writers,
     pipe_readers, pipe_open_named, pipe_attach, pipe_drop, pipe_owner, pipe_find,
@@ -42,6 +43,9 @@ export {
 }
 
 const OF_BYTES: u64 = 64
+const PUT_MORE: u64 = 0
+const PUT_LAST: u64 = 1
+const PUT_DEFERRED: u64 = 2
 const MAX_OPEN: u64 = 1024
 
 const OF_KIND: u64 = 0
@@ -395,8 +399,7 @@ fn inherit_task(state: u64, parent: u64, child: u64) {
     var fd: u64 = next_used_fd(state, parent, 0)
     while fd < MAX_FD {
         let of: u64 = fd_of(state, parent, fd)
-        if of < MAX_OPEN {
-            open_ref(state, of)
+        if of < MAX_OPEN && open_hold(state, of) {
             fd_set_rights(state, child, fd, of,
                 fd_rights(state, parent, fd))
         }
@@ -442,20 +445,26 @@ fn release_table(state: u64, t: u64) {
     }
     var fd: u64 = used_from(state, t, 0)
     while fd < MAX_FD {
-        let a: u64 = state + slot_at(t, fd)
-        let h: u64 = __mmio_read64(a as *mut u64)
-        if h != handle.HANDLE_NONE && atomic.cas(a, h, 0) == h {
-            let of: u64 = handle.resolve_num(state, t, h, 0)
-            if of < MAX_OPEN {
-                open_unref(state, of)
-            }
-            handle.drop(state, t, h)
-            let cxo: u64 = kstate.CX_OFF + t * kstate.CX_BYTES + (fd >> 6) * 8
-            kstate.set(state, cxo, kstate.get(state, cxo) & (0xFFFFFFFFFFFFFFFF -% (1 << (fd & 63))))
+        let of: u64 = fd_detach(state, t, fd)
+        if of < MAX_OPEN {
+            open_unref(state, of)
         }
         fd = used_from(state, t, fd + 1)
     }
     high_reset(state, t)
+}
+
+fn fd_detach(state: u64, t: u64, fd: u64) -> u64 {
+    let a: u64 = state + slot_at(t, fd)
+    let h: u64 = __mmio_read64(a as *mut u64)
+    if h == handle.HANDLE_NONE || atomic.cas(a, h, 0) != h {
+        return MAX_OPEN
+    }
+    let of: u64 = handle.resolve_num(state, t, h, 0)
+    handle.drop(state, t, h)
+    let cxo: u64 = kstate.CX_OFF + t * kstate.CX_BYTES + (fd >> 6) * 8
+    kstate.set(state, cxo, kstate.get(state, cxo) & (0xFFFFFFFFFFFFFFFF -% (1 << (fd & 63))))
+    return of
 }
 
 const FDOWN_SLOT: u64 = 0xFFFF
@@ -583,42 +592,76 @@ fn open_alloc_held(state: u64, kind: u64, ino: u64, flags: u64) -> u64 {
     return MAX_OPEN
 }
 
+fn ref_addr(state: u64, i: u64) -> u64 {
+    return state + of_at(i) + OF_REF
+}
+
 fn open_ref(state: u64, i: u64) {
     if i >= MAX_OPEN || i <= CON_ERR {
         return
     }
-    let flags: u64 = fdlock.enter(state)
-    kstate.add(state, of_at(i) + OF_REF, 1)
-    fdlock.leave(state, flags)
+    atomic.fetch_add(ref_addr(state, i), 1)
+}
+
+fn open_hold(state: u64, i: u64) -> bool {
+    if i <= CON_ERR {
+        return true
+    }
+    let a: u64 = ref_addr(state, i)
+    while true {
+        let r: u64 = atomic.load(a)
+        if r == 0 {
+            return false
+        }
+        if atomic.cas(a, r, r + 1) == r {
+            return true
+        }
+        atomic.pause()
+    }
+    return false
 }
 
 fn open_unref(state: u64, i: u64) {
     if i >= MAX_OPEN || i <= CON_ERR {
         return
     }
-    let flags: u64 = fdlock.enter(state)
-    let last: bool = open_drop_held(state, i)
-    fdlock.leave(state, flags)
-    if last {
+    if open_put(state, i) == PUT_LAST {
         open_teardown(state, i)
     }
 }
 
-fn open_drop_held(state: u64, i: u64) -> bool {
-    let r: u64 = kstate.get(state, of_at(i) + OF_REF)
-    if r == 0 {
-        return false
+fn open_put(state: u64, i: u64) -> u64 {
+    let a: u64 = ref_addr(state, i)
+    let r: u64 = atomic.load(a)
+    if r > 1 && atomic.cas(a, r, r - 1) == r {
+        return PUT_MORE
     }
-    if r > 1 {
-        kstate.set(state, of_at(i) + OF_REF, r - 1)
-        return false
+    let flags: u64 = fdlock.enter(state)
+    let verdict: u64 = open_drop_held(state, i)
+    fdlock.leave(state, flags)
+    return verdict
+}
+
+fn open_drop_held(state: u64, i: u64) -> u64 {
+    let a: u64 = ref_addr(state, i)
+    while true {
+        let r: u64 = atomic.load(a)
+        if r == 0 {
+            return PUT_MORE
+        }
+        if atomic.cas(a, r, r - 1) == r {
+            if r > 1 {
+                return PUT_MORE
+            }
+            break
+        }
+        atomic.pause()
     }
-    kstate.set(state, of_at(i) + OF_REF, 0)
     if handle.inflight_on(state, handle.OK_FILE, i) != 0 {
         kstate.add(state, kstate.H_DEFERRED, 1)
-        return false
+        return PUT_DEFERRED
     }
-    return true
+    return PUT_LAST
 }
 
 fn open_count(state: u64) -> u64 {
