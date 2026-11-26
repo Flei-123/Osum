@@ -74,6 +74,7 @@ import sys.sysuser
 import sys.systerm
 import sys.sysioctl
 import gfx.drm.drmioctl
+import sys.fdscope
 import sys.sysfd
 import sys.sysfifo
 import sys.syslock
@@ -1035,6 +1036,12 @@ fn open_path(state: u64, me: u64, path: u64, flags: u64, mode: u64) -> u64 {
 }
 
 fn dispatch(number: u64, frame: u64, state: u64, me: u64) -> u64 {
+    let r: u64 = dispatch_call(number, frame, state, me)
+    fdscope.drain(state, me)
+    return r
+}
+
+fn dispatch_call(number: u64, frame: u64, state: u64, me: u64) -> u64 {
     tickgap.sys_begin(state, me, number, *((frame + sysconst.F_RDI) as *mut u64) & 0xFFFF,
         *((frame + F_RDX) as *mut u64))
     if syshook.enter(state, number, me) != 0 {
@@ -1528,10 +1535,11 @@ fn dispatch(number: u64, frame: u64, state: u64, me: u64) -> u64 {
         async.abandon(state, me)
         // LC-001: a thread of a group that shares its descriptor table (CLONE_FILES) only lets go of it;
         // the sockets and the descriptors go with the LAST user (the leader may end before its threads).
+        fdscope.drain(state, me)
         let last_use: bool = file.release_use(state, me)
-        sysnet.sock_close_all(state, me, last_use)
+        sysnet.sock_close_all(state, me)
         if last_use {
-            file.release_table(state, file.owner(state, me))
+            fdscope.release_table(state, file.owner(state, me))
         }
         signal.exiting(state, me, sigchldinfo.CLD_EXITED, a0)
         sysprctl.parent_exited(state, me)
@@ -1667,7 +1675,7 @@ fn dispatch(number: u64, frame: u64, state: u64, me: u64) -> u64 {
         return signal.do_setsid(state, me)
     }
     if number == SYS_IOCTL {
-        let iof: u64 = sysuser.of_of(state, me, a0)
+        let iof: u64 = fdscope.use(state, me, a0, 0)
         if iof < file.MAX_OPEN && file.open_kind(state, iof) == file.K_DRM {
             return drmioctl.dispatch(state, me, file.open_ino(state, iof), a1 & 0xFFFFFFFF, a2)
         }

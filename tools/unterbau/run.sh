@@ -37,6 +37,7 @@ SMP_t_vforkedge=${SMP_t_vforkedge:-2}
 SMP_t_lostwrite=${SMP_t_lostwrite:-4}
 SMP_t_sockfree=${SMP_t_sockfree:-4}
 SMP_t_shmclose=${SMP_t_shmclose:-4}
+SMP_t_fdclose=${SMP_t_fdclose:-4}
 UB_MEM_t_shmhigh=${UB_MEM_t_shmhigh:-3072}
 UB_MEM_t_lazyhigh=${UB_MEM_t_lazyhigh:-3072}
 UB_MEM_t_kstackhigh=${UB_MEM_t_kstackhigh:-3072}
@@ -46,6 +47,7 @@ KW_t_shmhigh=${KW_t_shmhigh:-lowhogtight}
 KW_t_lostwrite=${KW_t_lostwrite:-smpfrueh}
 KW_t_sockfree=${KW_t_sockfree:-smpfrueh}
 KW_t_shmclose=${KW_t_shmclose:-smpfrueh}
+KW_t_fdclose=${KW_t_fdclose:-smpfrueh}
 TMO=${TMO:-150}
 export FIRNLIB="$ROOT/lib"
 

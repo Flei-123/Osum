@@ -1,0 +1,119 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import fs.file
+import fs.unixsock
+import net.inet
+import net.netview
+import sched.sched
+
+export { use, drain, put, release_table, scope_count, SCOPE_MAX }
+
+const SCOPE_MAX: u64 = 6
+const SCOPE_TASKS: u64 = 512
+const WORD: u64 = 8
+
+static mut entries: [u64; 3072] = [0 as u64; 3072]
+static mut counts: [u64; 512] = [0 as u64; 512]
+
+fn entry_cell(me: u64, k: u64) -> u64 {
+    return (&entries[0]) as u64 + (me * SCOPE_MAX + k) * WORD
+}
+
+fn count_cell(me: u64) -> u64 {
+    return (&counts[0]) as u64 + me * WORD
+}
+
+fn scope_count(me: u64) -> u64 {
+    if me >= SCOPE_TASKS {
+        return 0
+    }
+    return __mmio_read64(count_cell(me) as *mut u64)
+}
+
+fn scope_has(me: u64, n: u64, of: u64) -> bool {
+    var k: u64 = 0
+    while k < n {
+        if __mmio_read64(entry_cell(me, k) as *mut u64) == of {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+fn use(state: u64, me: u64, fd: u64, need: u64) -> u64 {
+    let of: u64 = file.fd_check(state, me, fd, need)
+    if of >= file.MAX_OPEN || of <= file.CON_ERR || me >= SCOPE_TASKS {
+        return of
+    }
+    let n: u64 = __mmio_read64(count_cell(me) as *mut u64)
+    if scope_has(me, n, of) || n >= SCOPE_MAX {
+        return of
+    }
+    if !file.open_hold(state, of) {
+        return file.MAX_OPEN
+    }
+    if file.fd_check(state, me, fd, need) != of {
+        put(state, of)
+        return file.MAX_OPEN
+    }
+    __mmio_write64(entry_cell(me, n) as *mut u64, of)
+    __mmio_write64(count_cell(me) as *mut u64, n + 1)
+    return of
+}
+
+fn drain(state: u64, me: u64) {
+    var n: u64 = scope_count(me)
+    if n == 0 {
+        return
+    }
+    __mmio_write64(count_cell(me) as *mut u64, 0)
+    while n > 0 {
+        n = n - 1
+        put(state, __mmio_read64(entry_cell(me, n) as *mut u64))
+    }
+}
+
+fn put(state: u64, of: u64) {
+    if of >= file.MAX_OPEN || of <= file.CON_ERR {
+        return
+    }
+    let kind: u64 = file.open_kind(state, of)
+    let ino: u64 = file.open_ino(state, of)
+    let verdict: u64 = file.open_put(state, of)
+    if verdict == file.PUT_MORE {
+        return
+    }
+    release_kind(state, kind, ino)
+    if verdict == file.PUT_LAST {
+        file.open_teardown(state, of)
+    }
+}
+
+fn release_kind(state: u64, kind: u64, ino: u64) {
+    if kind == file.K_USOCK {
+        unixsock.sock_free(state, ino)
+        sched.poll_kick(state)
+    }
+    if kind == file.K_SHM {
+        unixsock.shm_unref(state, ino)
+    }
+    if kind == file.K_SOCK {
+        netview.release(state, ino)
+        inet.sock_close(state, ino)
+    }
+}
+
+fn release_table(state: u64, t: u64) {
+    if t >= kstate.MAX_TASKS {
+        return
+    }
+    var fd: u64 = file.next_used_fd(state, t, 0)
+    while fd < file.MAX_FD {
+        put(state, file.fd_detach(state, t, fd))
+        fd = file.next_used_fd(state, t, fd + 1)
+    }
+    file.high_reset(state, t)
+}

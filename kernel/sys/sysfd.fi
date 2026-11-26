@@ -48,6 +48,7 @@ import fs.ext4
 import fs.ntfs
 import fs.exfat
 import fs.fat
+import sys.fdscope
 import sys.sysconst
 import sys.sysuser
 import sys.widebuf
@@ -117,7 +118,7 @@ fn write_checked(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
     if len > MAX_FWRITE {
         len = MAX_FWRITE
     }
-    let of: u64 = file.fd_check(state, me, fd, handle.R_WRITE)
+    let of: u64 = fdscope.use(state, me, fd, handle.R_WRITE)
     if of >= file.MAX_OPEN {
         return sysuser.neg(errno.E_BADF)
     }
@@ -396,7 +397,7 @@ fn do_read(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
         len = MAX_FREAD
     }
     if len > sysconst.MAX_IO {
-        let of2: u64 = file.fd_check(state, me, fd, handle.R_READ)
+        let of2: u64 = fdscope.use(state, me, fd, handle.R_READ)
         if of2 < file.MAX_OPEN && file.open_kind(state, of2) == file.K_PIPER {
             return pipe_read(state, me, of2, buf, len)
         }
@@ -450,7 +451,7 @@ fn do_read_one(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
     if len > sysconst.MAX_IO {
         len = sysconst.MAX_IO
     }
-    let of: u64 = file.fd_check(state, me, fd, handle.R_READ)
+    let of: u64 = fdscope.use(state, me, fd, handle.R_READ)
     if of >= file.MAX_OPEN {
         return sysuser.neg(errno.E_BADF)
     }
@@ -737,21 +738,21 @@ fn do_pipe_flags(state: u64, me: u64, out: u64, flags: u64) -> u64 {
     }
     let wr: u64 = file.open_alloc(state, file.K_PIPEW, p, O_WRONLY)
     if wr >= file.MAX_OPEN {
-        unref_of(state, rd)
+        fdscope.put(state, rd)
         return sysuser.neg(errno.E_NFILE)
     }
     let fd0: u64 = file.fd_alloc(state, me, 0)
     if fd0 >= file.MAX_FD {
-        unref_of(state, rd)
-        unref_of(state, wr)
+        fdscope.put(state, rd)
+        fdscope.put(state, wr)
         return sysuser.neg(errno.E_MFILE)
     }
     file.fd_set(state, me, fd0, rd)
     let fd1: u64 = file.fd_alloc(state, me, 0)
     if fd1 >= file.MAX_FD {
         file.fd_free(state, me, fd0)
-        unref_of(state, rd)
-        unref_of(state, wr)
+        fdscope.put(state, rd)
+        fdscope.put(state, wr)
         return sysuser.neg(errno.E_MFILE)
     }
     file.fd_set(state, me, fd1, wr)
@@ -1380,7 +1381,7 @@ fn open_named(state: u64, me: u64, buf: u64, len: u64, flags: u64, mode: u64) ->
     }
     let fd: u64 = file.fd_alloc(state, me, 0)
     if fd >= file.MAX_FD {
-        unref_of(state, of)
+        fdscope.put(state, of)
         return sysuser.neg(errno.E_MFILE)
     }
     file.fd_set(state, me, fd, of)
@@ -1407,7 +1408,7 @@ fn open_fifo(state: u64, me: u64, ino: u64, flags: u64) -> u64 {
     }
     let fd: u64 = file.fd_alloc(state, me, 0)
     if fd >= file.MAX_FD {
-        unref_of(state, of)
+        fdscope.put(state, of)
         return sysuser.neg(errno.E_MFILE)
     }
     file.fd_set(state, me, fd, of)
@@ -1421,11 +1422,11 @@ fn do_close(state: u64, me: u64, fd: u64) -> u64 {
     }
     if fanotify.live() {
         fanotify.set_actor(fanotify.pid_of(state, me))
-        unref_of(state, of)
+        fdscope.put(state, of)
         fanotify.set_actor(0)
         return 0
     }
-    unref_of(state, of)
+    fdscope.put(state, of)
     return 0
 }
 
@@ -1435,7 +1436,7 @@ fn do_dup(state: u64, me: u64, fd: u64) -> u64 {
 
 // r727: `fcntl(F_DUPFD, min)` hands out the lowest free descriptor >= min (EINVAL when min is out of range).
 fn do_dup_min(state: u64, me: u64, fd: u64, min: u64) -> u64 {
-    let of: u64 = sysuser.of_of(state, me, fd)
+    let of: u64 = fdscope.use(state, me, fd, 0)
     if of >= file.MAX_OPEN {
         return sysuser.neg(errno.E_BADF)
     }
@@ -1456,7 +1457,7 @@ fn do_dup_min(state: u64, me: u64, fd: u64, min: u64) -> u64 {
 // are ONE open file afterwards, with one position, which is the whole
 // reason the open file table of round K4 exists.
 fn do_dup2(state: u64, me: u64, from: u64, to: u64) -> u64 {
-    let of: u64 = sysuser.of_of(state, me, from)
+    let of: u64 = fdscope.use(state, me, from, 0)
     if of >= file.MAX_OPEN {
         return sysuser.neg(errno.E_BADF)
     }
@@ -1466,18 +1467,15 @@ fn do_dup2(state: u64, me: u64, from: u64, to: u64) -> u64 {
     if from == to {
         return to
     }
-    let old: u64 = sysuser.of_of(state, me, to)
-    if old < file.MAX_OPEN {
-        file.fd_free(state, me, to)
-        unref_of(state, old)
-    }
+    let old: u64 = file.fd_take(state, me, to)
+    fdscope.put(state, old)
     file.open_ref(state, of)
     file.fd_set(state, me, to, of)
     return to
 }
 
 fn do_lseek(state: u64, me: u64, fd: u64, off: u64, whence: u64) -> u64 {
-    let of: u64 = file.fd_check(state, me, fd, handle.R_SEEK)
+    let of: u64 = fdscope.use(state, me, fd, handle.R_SEEK)
     if of >= file.MAX_OPEN {
         return sysuser.neg(errno.E_BADF)
     }
@@ -1537,7 +1535,7 @@ fn do_pio(state: u64, me: u64, fd: u64, buf: u64, len: u64, off: u64,
     if writing {
         recht = handle.R_WRITE
     }
-    let of: u64 = file.fd_check(state, me, fd, recht)
+    let of: u64 = fdscope.use(state, me, fd, recht)
     if of >= file.MAX_OPEN {
         return sysuser.neg(errno.E_BADF)
     }
@@ -1586,7 +1584,7 @@ fn do_writev(state: u64, me: u64, fd: u64, iov: u64, n: u64, writing: bool) -> u
         return sysuser.neg(errno.E_FAULT)
     }
     if writing && n > 1 {
-        let of: u64 = file.fd_check(state, me, fd, handle.R_WRITE)
+        let of: u64 = fdscope.use(state, me, fd, handle.R_WRITE)
         if of < file.MAX_OPEN && file_like(file.open_kind(state, of)) {
             let staged: u64 = writev_staged(state, me, of, iov, n)
             if (fanotify.live() || infire.live()) && (staged >> 63) == 0 && staged != 0 {
@@ -1745,7 +1743,7 @@ fn do_pvec(state: u64, me: u64, fd: u64, iov: u64, n: u64, off: u64, writing: bo
         return sysuser.neg(errno.E_FAULT)
     }
     if writing && n > 1 && (off >> 63) == 0 {
-        let of: u64 = file.fd_check(state, me, fd, handle.R_WRITE)
+        let of: u64 = fdscope.use(state, me, fd, handle.R_WRITE)
         if of < file.MAX_OPEN && file_like(file.open_kind(state, of)) {
             return pwritev_staged(state, me, of, iov, n, off)
         }
@@ -1797,7 +1795,7 @@ fn fsync_of(state: u64, of: u64) -> u64 {
 }
 
 fn do_fsync(state: u64, me: u64, fd: u64) -> u64 {
-    let of: u64 = sysuser.of_of(state, me, fd)
+    let of: u64 = fdscope.use(state, me, fd, 0)
     if of >= file.MAX_OPEN {
         return sysuser.neg(errno.E_BADF)
     }
@@ -1837,13 +1835,13 @@ fn fsync_drains(state: u64, of: u64) -> bool {
 //       handle in the stack of round K3, the bound port.
 //
 // The reference count of the first decides when the second is torn
-// down: `unref_of` closes the connection only when the LAST descriptor
+// down: `fdscope.put` closes the connection only when the LAST descriptor
 // pointing at it goes away. A `fork`ed child that closes its copy must
 // not take the parent's connection with it.
 
 // The socket behind a descriptor, or `inet.SOCK_MAX`.
 fn sock_of(state: u64, me: u64, fd: u64) -> u64 {
-    let of: u64 = sysuser.of_of(state, me, fd)
+    let of: u64 = fdscope.use(state, me, fd, 0)
     if of >= file.MAX_OPEN {
         return inet.SOCK_MAX
     }
@@ -1851,30 +1849,6 @@ fn sock_of(state: u64, me: u64, fd: u64) -> u64 {
         return inet.SOCK_MAX
     }
     return file.open_ino(state, of)
-}
-
-// One reference less on an open file, and the connection behind it torn
-// down when that was the last one. Everything in this file that drops a
-// descriptor goes through here.
-fn unref_of(state: u64, of: u64) {
-    if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_USOCK {
-        if file.open_refs(state, of) <= 1 {
-            unixsock.sock_free(state, file.open_ino(state, of))
-            sched.poll_kick(state)
-        }
-    }
-    if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_SHM {
-        if file.open_refs(state, of) <= 1 {
-            unixsock.shm_unref(state, file.open_ino(state, of))
-        }
-    }
-    if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_SOCK {
-        if file.open_refs(state, of) <= 1 {
-            netview.release(state, file.open_ino(state, of))
-            inet.sock_close(state, file.open_ino(state, of))
-        }
-    }
-    file.open_unref(state, of)
 }
 
 // ------------------------------------------------------ sockaddr_in
@@ -1999,7 +1973,7 @@ fn send_stream_steps(state: u64, me: u64, fd: u64, buf: u64, want: u64, flags: u
 fn do_sendto(state: u64, me: u64, fd: u64, buf: u64, want: u64,
     addr: u64, alen: u64, flags: u64) -> u64 {
     // RUNDE EVENTS: send() on a local socket (socketpair, AF_UNIX) is a write
-    let uof: u64 = sysuser.of_of(state, me, fd)
+    let uof: u64 = fdscope.use(state, me, fd, 0)
     if uof < file.MAX_OPEN && file.open_kind(state, uof) == file.K_USOCK {
         if addr != 0 {
             return usock_sendto(state, me, uof, buf, want, addr, alen)
@@ -2063,7 +2037,7 @@ fn do_sendto(state: u64, me: u64, fd: u64, buf: u64, want: u64,
 fn do_recvfrom(state: u64, me: u64, fd: u64, buf: u64, want: u64,
     addr: u64, lenp: u64, flags: u64) -> u64 {
     // RUNDE EVENTS: recv() on a local socket (socketpair, AF_UNIX) is a read
-    let uof: u64 = sysuser.of_of(state, me, fd)
+    let uof: u64 = fdscope.use(state, me, fd, 0)
     if uof < file.MAX_OPEN && file.open_kind(state, uof) == file.K_USOCK {
         return usock_rw(state, me, uof, buf, want, false, (flags & sysconst.MSG_DONTWAIT) != 0)
     }
@@ -2371,7 +2345,7 @@ fn sa_un(state: u64, me: u64, addr: u64, len: u64, lenp: *mut u64) -> u64 {
 
 // ---------------------------------------------------------- ftruncate()
 fn do_ftruncate(state: u64, me: u64, fd: u64, size: u64) -> u64 {
-    let of: u64 = sysuser.of_of(state, me, fd)
+    let of: u64 = fdscope.use(state, me, fd, 0)
     if of >= file.MAX_OPEN {
         return sysuser.neg(errno.E_BADF)
     }
@@ -2471,11 +2445,7 @@ fn cx_result(state: u64, me: u64, r: u64, flags: u64) -> u64 {
 }
 
 fn cx_close_one(state: u64, me: u64, fd: u64) {
-    let of: u64 = sysuser.of_of(state, me, fd)
-    if of < file.MAX_OPEN {
-        file.fd_free(state, me, fd)
-        unref_of(state, of)
-    }
+    fdscope.put(state, file.fd_take(state, me, fd))
 }
 
 fn cx_close_marked(state: u64, me: u64) {
@@ -2528,7 +2498,7 @@ fn file_io_loop_steps(state: u64, me: u64, fd: u64, buf: u64, len: u64, writing:
     if len <= sysconst.MAX_IO || first != sysconst.MAX_IO {
         return first
     }
-    let of: u64 = sysuser.of_of(state, me, fd)
+    let of: u64 = fdscope.use(state, me, fd, 0)
     if of >= file.MAX_OPEN || file.open_kind(state, of) != file.K_FILE {
         return first
     }
