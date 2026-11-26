@@ -704,6 +704,10 @@ ARGS+=(/dev/ /proc/ /mnt/ /esp/ /tmp/ /store/ /apps/ /system/ /run/)
 #
 ARGS+=(/beispiel/ "/beispiel/hallo.fi=assets/beispiel/hallo.fi")
 ARGS+=(/etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/)
+if [ "${HANGSLOT_PREBUILD:-1}" = 1 ]; then
+    head -c 8192 /dev/zero > "$OUT/hangslot.zero"
+    ARGS+=(/var/crash/ "/var/crash/hangslot=$OUT/hangslot.zero@0600:0:0")
+fi
 # AB-016: THE ACTION BUS (docs/ACTION-BUS.md). The broker /bin/orientbus
 # and the settings provider /bin/settingsd are started by the session
 # (kgui.desk_start, before the sign-in) -- there is no init on an image
