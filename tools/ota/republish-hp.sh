@@ -4,7 +4,7 @@
 #   One command: fetch origin/main, build the HP image of it, select every /bin program that differs from the
 #   baseline the HP was installed with (HP_BASE, default hp-stick33), publish kernel + overlay to the dev feed
 #   (tools/ota/publish-hp.sh) and clean up. Afterwards the HP only needs `/bin/ota system apply restart`.
-#   Env: HP_BASE=<image dir of the installed baseline>  HP_REF=<git ref, default origin/main>
+#   Env: HP_BASE=<image dir(s) of the installed baselines, space separated: a file ships when it differs from ANY of them>  HP_REF=<git ref, default origin/main>
 #        HP_ONLY="a b c" limits the overlay to the listed programs (small first step for a slow bridge)
 #        HP_NO_EXTRAS=1 drops the absolute-path files (a device with an old ota refuses them: first step only /bin)
 #        HP_SAME_KERNEL=1 publishes the kernel of HP_BASE (what the HP runs): the HP applies the overlay live, no trial boot
@@ -24,7 +24,18 @@ NOTES=${1:-"HP update from $HP_REF"}
 DRY=""
 for a in "$@"; do [ "$a" = "--dry" ] && DRY=--dry; done
 [ "$NOTES" = "--dry" ] && NOTES="HP update from $HP_REF"
-[ -d "$HP_BASE" ] || { echo "republish-hp: baseline $HP_BASE missing"; exit 1; }
+read -r -a BASES <<< "$HP_BASE"
+for base in "${BASES[@]}"; do
+    [ -d "$base" ] || { echo "republish-hp: baseline $base missing"; exit 1; }
+done
+PRIMARY_BASE=${BASES[0]}
+differs_from_any_base() {
+    local rel=$1 candidate=$2 base
+    for base in "${BASES[@]}"; do
+        if [ ! -f "$base/$rel" ] || ! cmp -s "$base/$rel" "$candidate"; then return 0; fi
+    done
+    return 1
+}
 cd "$REPO"
 . tools/lib/firnenv.sh
 git fetch -q origin
@@ -53,11 +64,11 @@ for f in "$IMG"/*.elf; do
     [ "$n" = "osum.mb" ] && continue
     [ -s "$f" ] || continue
     if [ -n "${HP_ONLY:-}" ]; then case " $HP_ONLY " in *" $n "*) ;; *) continue ;; esac; fi
-    if [ ! -f "$HP_BASE/$n.elf" ] || ! cmp -s "$HP_BASE/$n.elf" "$f"; then PROGS+=("$n"); fi
+    if differs_from_any_base "$n.elf" "$f"; then PROGS+=("$n"); fi
 done
 while read -r dest rel; do
     [ -s "$IMG/$rel" ] || continue
-    if [ ! -f "$HP_BASE/$rel" ] || ! cmp -s "$HP_BASE/$rel" "$IMG/$rel"; then
+    if differs_from_any_base "$rel" "$IMG/$rel"; then
         mkdir -p "$EXTRA/$(dirname "${dest#/}")"
         cp "$IMG/$rel" "$EXTRA/${dest#/}"
         echo "republish-hp: extra $dest"
@@ -103,6 +114,6 @@ python3 tools/k15/bundle.py assets/apps "$EXTRA.bundle" nur="${PROGS[*]} term" \
 echo "/apps/terminal.osp/start /bin/term" >> "$LINKS"
 rm -rf "$EXTRA.bundle" "$EXTRA.blist"
 echo "republish-hp: ${#PROGS[@]} overlay programs, $(wc -l < "$LINKS") app links"
-[ -n "${HP_SAME_KERNEL:-}" ] && export FEED_KERNEL="$HP_BASE/osum.mb"
+[ -n "${HP_SAME_KERNEL:-}" ] && export FEED_KERNEL="$PRIMARY_BASE/osum.mb"
 OVL_EXTRA_DIR="$EXTRA" OVL_LINKS="$LINKS" bash tools/ota/publish-hp.sh "$IMG" "$NOTES" "${PROGS[@]}" $DRY
 rm -f "$IMG.log"
