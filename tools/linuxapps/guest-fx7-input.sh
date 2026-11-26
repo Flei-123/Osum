@@ -7,6 +7,11 @@ mkdir -p /tmp/p
 echo 'user_pref("gfx.webrender.software", true);' > /tmp/p/user.js
 echo 'user_pref("browser.shell.checkDefaultBrowser", false);' >> /tmp/p/user.js
 echo 'user_pref("browser.dom.window.dump.enabled", true);' >> /tmp/p/user.js
+if [ -z "${FX7_KEEP_ERROR_BAR:-}" ]; then
+  echo 'user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);' >> /tmp/p/user.js
+  mkdir -p /tmp/p/chrome
+  echo 'notification-message[type="critical"] { display: none !important; }' > /tmp/p/chrome/userChrome.css
+fi
 if [ -n "${FX7_SINGLE_TITLEBAR:-}" ]; then
   export GTK_CSD=0 MOZ_GTK_TITLEBAR_DECORATION=system
   echo 'user_pref("browser.tabs.inTitlebar", 0);' >> /tmp/p/user.js
