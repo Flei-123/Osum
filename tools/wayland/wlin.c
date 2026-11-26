@@ -22,6 +22,8 @@
  *               partly outside the window), commit, roundtrip; prints `sub: up` / `sub: no wl_subcompositor`
  *   proto       bind wp_viewporter + zxdg_decoration_manager_v1: get_viewport + set_destination, get_toplevel_decoration + set_mode(client side),
  *               roundtrip; prints `proto: viewport ok deco-mode=<n>` (server must answer 2 = server side) or `proto: no viewporter/decoration`
+ *               also binds org_kde_kwin_server_decoration_manager, requests client mode 3 times; prints `kdedeco: modes=<n> last=<m> err=<e>`
+ *               (the server must send exactly one mode event: a mode event per request starts a request/mode loop with GTK clients)
  *   seat2       bind wl_seat a second time (as Firefox does: GDK and nsWaylandDisplay) and log its events as `kb2 ...` / `ptr2 ...`;
  *               the key 'x' releases the second keyboard + pointer (`seat2 released`)
  *   noseat      do not bind the seat (counter-proof: such a client gets no input at all)
@@ -44,6 +46,7 @@
 #include "xdg-shell-client-protocol.h"
 #include "viewporter-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
+#include "server-decoration-client-protocol.h"
 
 #define W 200
 #define H 120
@@ -65,6 +68,11 @@ static struct zxdg_decoration_manager_v1 *decoman;
 static int deco_mode = -1;
 static void deco_conf(void *d, struct zxdg_toplevel_decoration_v1 *t, uint32_t mode) { deco_mode = (int)mode; }
 static const struct zxdg_toplevel_decoration_v1_listener deco_l = { deco_conf };
+static struct org_kde_kwin_server_decoration_manager *kdeman;
+static int kde_modes;
+static int kde_last = -1;
+static void kde_mode(void *d, struct org_kde_kwin_server_decoration *o, uint32_t mode) { kde_modes++; kde_last = (int)mode; }
+static const struct org_kde_kwin_server_decoration_listener kde_l = { kde_mode };
 static struct wl_data_device *ddev;
 static struct wl_display *g_dpy;
 static struct wl_surface *surf;
@@ -452,6 +460,8 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t n, const char *i
         vporter = wl_registry_bind(r, n, &wp_viewporter_interface, 1);
     else if (!strcmp(iface, "zxdg_decoration_manager_v1"))
         decoman = wl_registry_bind(r, n, &zxdg_decoration_manager_v1_interface, 1);
+    else if (!strcmp(iface, "org_kde_kwin_server_decoration_manager"))
+        kdeman = wl_registry_bind(r, n, &org_kde_kwin_server_decoration_manager_interface, 1);
     else if (!strcmp(iface, "wl_data_device_manager"))
         ddm = wl_registry_bind(r, n, &wl_data_device_manager_interface, v < 3 ? v : 3);
     else if (!strcmp(iface, "wl_seat") && !no_seat) {
@@ -692,6 +702,19 @@ int main(int argc, char **argv)
             else
                 say("proto: viewport ok deco-mode=%d", deco_mode);
             wp_viewport_destroy(vp);
+        }
+        if (kdeman) {
+            int k;
+            struct org_kde_kwin_server_decoration *kd = org_kde_kwin_server_decoration_manager_create(kdeman, surf);
+            org_kde_kwin_server_decoration_add_listener(kd, &kde_l, NULL);
+            wl_display_roundtrip(dpy);
+            for (k = 0; k < 3; k++) {
+                org_kde_kwin_server_decoration_request_mode(kd, ORG_KDE_KWIN_SERVER_DECORATION_MODE_CLIENT);
+                wl_display_roundtrip(dpy);
+            }
+            say("kdedeco: modes=%d last=%d err=%d", kde_modes, kde_last, wl_display_get_error(dpy));
+        } else {
+            say("kdedeco: no manager");
         }
     }
     while (!done && time(NULL) - t0 < secs) {

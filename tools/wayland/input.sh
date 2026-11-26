@@ -68,11 +68,13 @@ for pr in stable/viewporter/viewporter unstable/xdg-decoration/xdg-decoration-un
     b=$(basename "$pr"); wayland-scanner client-header "$WPX/$pr.xml" "$GEN/$b-client-protocol.h" 2>>"$TMPD/gen.txt"
     wayland-scanner private-code "$WPX/$pr.xml" "$GEN/$b-protocol.c" 2>>"$TMPD/gen.txt"
 done
+wayland-scanner client-header assets/wayland/server-decoration.xml "$GEN/server-decoration-client-protocol.h" 2>>"$TMPD/gen.txt"
+wayland-scanner private-code assets/wayland/server-decoration.xml "$GEN/server-decoration-protocol.c" 2>>"$TMPD/gen.txt"
 if [ -f "$WLB/musl-root/lib/libwayland-client.a" ] && musl-gcc -static -O2 -nostartfiles \
         -T tools/foreign/osum.ld -Wl,--build-id=none -D_GNU_SOURCE \
         -I"$WLB/musl-root/include" -I"$WLB/wayland-1.21.0/gen" -I"$GEN" -o "$TMPD/wlin" \
         tools/foreign/start.s tools/foreign/osum_main.c tools/wayland/wlin.c \
-        "$WLB/wayland-1.21.0/gen/xdg-shell-protocol.c" "$GEN/viewporter-protocol.c" "$GEN/xdg-decoration-unstable-v1-protocol.c" \
+        "$WLB/wayland-1.21.0/gen/xdg-shell-protocol.c" "$GEN/viewporter-protocol.c" "$GEN/xdg-decoration-unstable-v1-protocol.c" "$GEN/server-decoration-protocol.c" \
         -L"$WLB/musl-root/lib" -lwayland-client -lffi 2>"$TMPD/wl.txt"; then
     ok "wlin: a Wayland program, libwayland-client + xdg-shell, static musl"
 else
@@ -214,6 +216,7 @@ else
     bad "wlin[C]: frame loop cycles='$FC' ('$FL')"
 fi
 has "$(L C | grep -a 'proto:')" "proto: viewport ok deco-mode=2" "wlin[C]: wp_viewporter (get_viewport, set_source/destination) accepted; xdg-decoration answers server_side (2) although the client asked client_side"
+has "$(L C | grep -a 'kdedeco:')" "kdedeco: modes=1 last=2 err=0" "wlin[C]: org_kde_kwin_server_decoration answers server side exactly once and stays silent on request_mode (no request/mode loop)"
 printf 'screendump %s\n' "$TMPD/sub.ppm" | timeout 20 socat - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
 sleep 3
 CX=$(gx 0 0); CY=$(gy 0 0)
