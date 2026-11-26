@@ -20,6 +20,7 @@ import bootnote
 import bootlog
 import instrun
 import instlog
+import instfail
 import busy
 import instaccount
 import kbdconf
@@ -96,7 +97,7 @@ static mut a_cpw: [u8; 9] = "cryptpw=\0"
 static mut a_cpwv: [u8; 128] = [0 as u8; 128]
 static mut crypt_ks: u64 = 0
 static mut crypt_line: [u8; 200] = [0 as u8; 200]
-static mut line_buf: [u8; 200] = [0 as u8; 200]
+static mut line_buf: [u8; 360] = [0 as u8; 360]
 static mut step_row: [u8; 200] = [0 as u8; 200]
 
 static mut sel_part: u64 = 0xFFFFFFFFFFFFFFFF
@@ -145,6 +146,13 @@ static mut finished: u64 = 0
 static mut question: u64 = 0
 
 static mut st_show: u64 = 0
+static mut st_pct: u64 = 0
+static mut k_s_account: [u8; 24] = "installer.step.account\0\0"
+static mut k_f_cause: [u8; 21] = "installer.fail.cause\0"
+static mut k_f_code: [u8; 21] = "installer.fail.code\0\0"
+const ST_ACCOUNT: u64 = 10
+const DISK_ATTEMPTS: u64 = 3
+static mut PHASE_START_PCT: [u64; 6] = [0, 0, 3, 8, 82, 96]
 
 static mut d_hda: [u8; 10] = "/dev/hda\0\0"
 static mut d_hdb: [u8; 10] = "/dev/hdb\0\0"
@@ -178,7 +186,6 @@ static mut k_donehint: [u8; 21] = "installer.done.hint\0\0"
 static mut k_donewho: [u8; 24] = "installer.done.account\0\0"
 static mut done_name: [u8; 64] = [0 as u8; 64]
 static mut k_fail: [u8; 16] = "installer.fail\0\0"
-static mut k_fail_kernel: [u8; 23] = "installer.fail.kernel\0\0"
 static mut k_empty: [u8; 17] = "installer.empty\0\0"
 static mut k_parts: [u8; 17] = "installer.parts\0\0"
 
@@ -269,6 +276,10 @@ static mut m_ok: [u8; 16] = "installer: done\0"
 static mut m_fail: [u8; 17] = "installer: ERROR\0"
 static mut m_self: [u8; 10] = "installer\0"
 static mut m_args: [u8; 18] = "installer: argc=\0\0"
+static mut m_reason: [u8; 19] = "installer: reason=\0"
+static mut m_reason_step: [u8; 7] = " step=\0"
+static mut m_reason_code: [u8; 7] = " code=\0"
+static mut m_reason_detail: [u8; 9] = " detail=\0"
 static mut m_at: [u8; 15] = "installer: at=\0"
 static mut m_esp: [u8; 16] = "installer: esp=\0"
 
@@ -1289,6 +1300,11 @@ fn build_step() {
         b_end()
         return
     }
+    if s == ST_ACCOUNT {
+        b_s(msg.get(ptr((&k_s_account[0 as usize]) as u64)))
+        b_end()
+        return
+    }
     b_n(s)
     b_c(47)
     b_n(instkern.step_count() - 1)
@@ -1313,10 +1329,13 @@ fn build_step() {
 }
 
 fn run_install(dev: u64, wstat: u64, w_step: u64) -> bool {
+    instfail.note(instfail.R_NONE, 0, 0)
     if wunlock.protected(dev) {
+        instfail.note(instfail.R_PROTECTED, 0, 0)
         return false
     }
     if !wunlock.unlock(dev) {
+        instfail.note(instfail.R_UNLOCK, 0, 0)
         return false
     }
     let ok: bool = run_install_raw(dev, wstat, w_step)
@@ -1325,14 +1344,57 @@ fn run_install(dev: u64, wstat: u64, w_step: u64) -> bool {
     return ok
 }
 
+fn show_account_step() {
+    st_show = ST_ACCOUNT
+    st_pct = 1
+    build_step()
+    fuiscene.refresh()
+    fuiscene.repaint_now()
+}
+
+fn write_gpt_retry(fd: u64, sect_count: u64, esp_sector: u64) -> bool {
+    var attempt: u64 = 0
+    while attempt < DISK_ATTEMPTS {
+        if instkern.gpt_write(fd, sect_count, esp_sector) {
+            return true
+        }
+        attempt = attempt + 1
+    }
+    return false
+}
+
+fn create_esp_retry(fd: u64, esp_sector: u64) -> bool {
+    var attempt: u64 = 0
+    while attempt < DISK_ATTEMPTS {
+        if instkern.fat32_create(fd, instkern.plan_esp_start(), esp_sector) {
+            return true
+        }
+        attempt = attempt + 1
+    }
+    return false
+}
+
+fn copy_reason(default_reason: u64) -> u64 {
+    let e: u64 = instkern.error_at()
+    if e == instkern.F_TIMEOUT {
+        return instfail.R_TIMEOUT
+    }
+    if e == instkern.F_ABORT {
+        return instfail.R_CANCEL
+    }
+    return default_reason
+}
+
 fn run_install_raw(dev: u64, wstat: u64, w_step: u64) -> bool {
     let dst_fd: u64 = ulib.sys(ulib.SYS_OPEN, dev, ulib.O_RDWR, 0)
     if ulib.bad(dst_fd) {
+        instfail.note(instfail.R_OPEN_TARGET, 0, dst_fd)
         return false
     }
     let src_fd: u64 = ulib.sys(ulib.SYS_OPEN,
         ptr((&d_source[0 as usize]) as u64), 0, 0)
     if ulib.bad(src_fd) {
+        instfail.note(instfail.R_OPEN_SOURCE, 0, src_fd)
         ulib.sys(ulib.SYS_CLOSE, dst_fd, 0, 0)
         return false
     }
@@ -1341,17 +1403,27 @@ fn run_install_raw(dev: u64, wstat: u64, w_step: u64) -> bool {
         / instkern.BS
     let esp_sector: u64 = instkern.ESP_DEFAULT
 
+    instfail.log_start(dev, sect_count)
     if !instkern.plan_fits(sect_count, esp_sector) {
+        instfail.note(instfail.R_TOO_SMALL, 0, sect_count)
+        ulib.sys(ulib.SYS_CLOSE, dst_fd, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, src_fd, 0, 0)
+        return false
+    }
+    if instkern.plan_ofs_end(sect_count) < instkern.plan_ofs_start(esp_sector) + src_sect {
+        instfail.note(instfail.R_TOO_SMALL, 0, sect_count)
         ulib.sys(ulib.SYS_CLOSE, dst_fd, 0, 0)
         ulib.sys(ulib.SYS_CLOSE, src_fd, 0, 0)
         return false
     }
     if instkern.check_source(src_fd) == 0 {
+        instfail.note(instfail.R_SOURCE_BAD, 0, src_sect)
         ulib.sys(ulib.SYS_CLOSE, dst_fd, 0, 0)
         ulib.sys(ulib.SYS_CLOSE, src_fd, 0, 0)
         return false
     }
     if !instkern.kernel_ready() {
+        instfail.note(instfail.R_NO_KERNEL, 0, 0)
         report_at(90)
         ulib.sys(ulib.SYS_CLOSE, dst_fd, 0, 0)
         ulib.sys(ulib.SYS_CLOSE, src_fd, 0, 0)
@@ -1359,7 +1431,9 @@ fn run_install_raw(dev: u64, wstat: u64, w_step: u64) -> bool {
     }
 
     hardware_stage()
+    show_account_step()
     if !account_write() {
+        instfail.note(instfail.R_ACCOUNT, 0, instaccount.fail_reason())
         ulib.sys(ulib.SYS_CLOSE, dst_fd, 0, 0)
         ulib.sys(ulib.SYS_CLOSE, src_fd, 0, 0)
         return false
@@ -1369,7 +1443,8 @@ fn run_install_raw(dev: u64, wstat: u64, w_step: u64) -> bool {
     instrun.start_clock()
 
     instkern.bios_load()
-    if !instkern.gpt_write(dst_fd, sect_count, esp_sector) {
+    if !write_gpt_retry(dst_fd, sect_count, esp_sector) {
+        instfail.note(instfail.R_GPT, instkern.S_GPT, sect_count)
         report_at(1)
         ulib.sys(ulib.SYS_CLOSE, dst_fd, 0, 0)
         ulib.sys(ulib.SYS_CLOSE, src_fd, 0, 0)
@@ -1379,7 +1454,8 @@ fn run_install_raw(dev: u64, wstat: u64, w_step: u64) -> bool {
     let _lg: bool = instlog.open(dst_fd, sect_count, instkern.plan_esp_start())
 
     report_step(w_step, instkern.S_ESP)
-    if !instkern.fat32_create(dst_fd, instkern.plan_esp_start(), esp_sector) {
+    if !create_esp_retry(dst_fd, esp_sector) {
+        instfail.note(instfail.R_ESP, instkern.S_ESP, instkern.plan_esp_start())
         report_at(2)
         ulib.sys(ulib.SYS_CLOSE, dst_fd, 0, 0)
         ulib.sys(ulib.SYS_CLOSE, src_fd, 0, 0)
@@ -1393,6 +1469,7 @@ fn run_install_raw(dev: u64, wstat: u64, w_step: u64) -> bool {
     var cry_off: u64 = 0
     if crypt_on() {
         if !instkern.crypt_begin(dst_fd, ofs_start, ofs_blocks, cp1(), text.length(cp1())) {
+            instfail.note(instfail.R_COPY, instkern.S_COPY, ofs_start)
             report_at(3)
             crypt_wipe()
             ulib.sys(ulib.SYS_CLOSE, dst_fd, 0, 0)
@@ -1405,6 +1482,7 @@ fn run_install_raw(dev: u64, wstat: u64, w_step: u64) -> bool {
     }
     if !instrun.copy_pumped(dst_fd, src_fd, ofs_start + cry_off, src_sect) {
         busy.close()
+        instfail.note(copy_reason(instfail.R_COPY), instkern.S_COPY, instkern.copy_position())
         report_at(3)
         instkern.crypt_end()
         crypt_wipe()
@@ -1416,6 +1494,7 @@ fn run_install_raw(dev: u64, wstat: u64, w_step: u64) -> bool {
     report_step(w_step, instkern.S_GROW)
     if instrun.grow_pumped(dst_fd, ofs_start + cry_off, ofs_blocks - cry_off) == 0 {
         busy.close()
+        instfail.note(copy_reason(instfail.R_GROW), instkern.S_GROW, instkern.grow_position())
         report_at(4)
         instkern.crypt_end()
         crypt_wipe()
@@ -1439,6 +1518,7 @@ fn run_install_raw(dev: u64, wstat: u64, w_step: u64) -> bool {
     lineout.end_line()
     if !bootloader() {
         busy.close()
+        instfail.note(instfail.R_BOOT, instkern.S_BOOT, 0)
         report_at(5)
         return false
     }
@@ -1766,9 +1846,23 @@ fn report_at(n: u64) {
     lineout.end_line()
 }
 
+fn overall_pct(nr: u64) -> u64 {
+    if nr == 0 || nr > 5 {
+        return 0
+    }
+    let from: u64 = PHASE_START_PCT[nr as usize]
+    if nr == instkern.S_COPY {
+        return from + (PHASE_START_PCT[4] - from) * instkern.progress_permille() / 1000
+    }
+    return from
+}
+
 fn report_step(w_step: u64, nr: u64) {
     st_show = nr
+    st_pct = overall_pct(nr)
+    instfail.log_step(nr, instkern.progress_permille())
     build_step()
+    fuiscene.refresh()
     fuiscene.repaint_now()
     say(ptr((&m_step[0 as usize]) as u64))
     lineout.add_unum(nr)
@@ -1968,6 +2062,9 @@ fn build() {
         let _sp: usize = fuiscene.progress(col, BW - 16, d_shrink_pct)
     }
     let _c: usize = fuiscene.label(col, (&step_row[0 as usize]) as u64)
+    if st_show != 0 && finished == 0 {
+        let _ip: usize = fuiscene.progress(col, BW - 16, st_pct)
+    }
 
     let rk: usize = fuiscene.row(col)
     fuiscene.set_gap(rk, 8)
@@ -2245,6 +2342,7 @@ fn u_start(args: u64) -> u64 {
             lineout.end_line()
 
             var succeeded: bool = false
+            instfail.note(instfail.R_NONE, 0, 0)
             if which_way == 2 {
                 succeeded = install_osum(nptr(chosen), 0, 0)
             } else if which_way == 1 {
@@ -2267,12 +2365,33 @@ fn u_start(args: u64) -> u64 {
             }
             lineout.end_line()
             if finished == 2 {
-                b_start((&line_buf[0 as usize]) as u64, 200)
-                if instkern.error_at() == instkern.F_NO_KERNEL {
-                    b_s(msg.get(ptr((&k_fail_kernel[0 as usize]) as u64)))
-                } else {
-                    b_s(msg.get(ptr((&k_fail[0 as usize]) as u64)))
+                if instfail.reason() == instfail.R_NONE && instkern.error_at() == instkern.F_NO_KERNEL {
+                    instfail.note(instfail.R_NO_KERNEL, 0, 0)
                 }
+                instfail.log_failure()
+                say(ptr((&m_reason[0 as usize]) as u64))
+                lineout.add_unum(instfail.reason())
+                say(ptr((&m_reason_step[0 as usize]) as u64))
+                lineout.add_unum(instfail.step())
+                say(ptr((&m_reason_code[0 as usize]) as u64))
+                lineout.add_unum(instkern.error_at())
+                say(ptr((&m_reason_detail[0 as usize]) as u64))
+                lineout.add_unum(instfail.detail())
+                lineout.end_line()
+                b_start((&line_buf[0 as usize]) as u64, 360)
+                b_s(msg.get(ptr((&k_fail[0 as usize]) as u64)))
+                b_c(32)
+                b_s(msg.get(ptr((&k_f_cause[0 as usize]) as u64)))
+                b_c(32)
+                b_s(msg.get(instfail.key()))
+                b_c(32)
+                b_s(msg.get(ptr((&k_f_code[0 as usize]) as u64)))
+                b_c(32)
+                b_n(instfail.reason())
+                b_c(47)
+                b_n(instkern.error_at())
+                b_c(47)
+                b_n(instfail.detail())
                 b_end()
             } else {
                 build_status()
