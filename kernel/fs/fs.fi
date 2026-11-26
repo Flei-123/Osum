@@ -121,6 +121,7 @@ const BITS_PER_BLOCK: u64 = 4096
 const DIRECT_V1: u64 = 11
 const DIRECT_V2: u64 = 8
 const PER_BLOCK: u64 = BS / 8 // pointers in one block: 64
+const PER_BLOCK_SHIFT: u64 = 6
 
 const T_FREE: u64 = 0
 const T_FILE: u64 = 1
@@ -2269,16 +2270,15 @@ fn write_at_scoped(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
 
 const WRITE_RUN_BLOCKS: u64 = 256
 
-fn leaf_run(state: u64, ino: u64, index: u64, expect: u64, limit: u64) -> u64 {
-    let dn: u64 = directs(state)
-    if index < dn || limit == 0 {
+fn leaf_run(ino: u64, dn: u64, index: u64, expect: u64, limit: u64) -> u64 {
+    if lp_lba == 0 || lp_ino != ino || index < dn {
         return 0
     }
     let k: u64 = index - dn
-    if lp_lba == 0 || lp_ino != ino || lp_group != k / PER_BLOCK {
+    if lp_group != (k >> PER_BLOCK_SHIFT) {
         return 0
     }
-    let at: u64 = k % PER_BLOCK
+    let at: u64 = k & (PER_BLOCK - 1)
     var room: u64 = PER_BLOCK - at
     if room > limit {
         room = limit
@@ -2298,6 +2298,8 @@ fn write_full_run(state: u64, ino: u64, pos: u64, src: u64, want: u64) -> u64 {
     if cap > WRITE_RUN_BLOCKS {
         cap = WRITE_RUN_BLOCKS
     }
+    let dn: u64 = directs(state)
+    var scan: bool = true
     var stop: bool = false
     data_overwrite = 1
     while count < cap && !stop {
@@ -2309,7 +2311,12 @@ fn write_full_run(state: u64, ino: u64, pos: u64, src: u64, want: u64) -> u64 {
             if count == 0 {
                 first = b
             }
-            count = count + 1 + leaf_run(state, ino, index + 1, b + 1, cap - count - 1)
+            count = count + 1
+            if scan {
+                let run: u64 = leaf_run(ino, dn, index + 1, b + 1, cap - count)
+                scan = run != 0
+                count = count + run
+            }
         }
     }
     data_overwrite = 0
