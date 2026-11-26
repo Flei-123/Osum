@@ -18,4 +18,5 @@ while [ $n -le ${FX_RUNS:-6} ]; do
 done
 cat /proc/vfscache | head -40
 grep -a "blk" /proc/bench
+grep -a "^tlb\." /proc/bench
 echo FX-END
