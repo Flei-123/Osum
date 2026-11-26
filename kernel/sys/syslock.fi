@@ -13,9 +13,10 @@ import sys.sysconst
 import sys.sysuser
 import sys.sysfd
 import sys.fowner
+import sys.poslock
 
 export {
-    do_fcntl, locks_drop
+    do_fcntl
 }
 
 const F_DUPFD: u64 = 0
@@ -38,12 +39,6 @@ const FL_START: u64 = 8
 const FL_LEN: u64 = 16
 const FL_PID: u64 = 24
 const FL_BYTES: u64 = 32
-const L_INO: u64 = 0
-const L_VON: u64 = 8
-const L_UNTIL: u64 = 16
-const L_ART: u64 = 24
-const L_PID: u64 = 32
-const L_MNT: u64 = 40
 
 fn do_fcntl(state: u64, me: u64, fd: u64, cmd: u64, arg: u64) -> u64 {
     let of: u64 = fdscope.use(state, me, fd, 0)
@@ -134,30 +129,6 @@ fn pipe_size(state: u64, of: u64, cmd: u64, arg: u64) -> u64 {
     return cap
 }
 
-fn lock_at(state: u64, i: u64) -> u64 {
-    return kstate.FLOCK_OFF + i * kstate.FLOCK_BYTES
-}
-
-fn lock_in_table(off: u64) -> bool {
-    return off >= kstate.FLOCK_OFF && off + 8 <= kstate.FLOCK_OFF + kstate.FLOCK_MAX
-}
-
-fn lock_get(state: u64, i: u64, field: u64) -> u64 {
-    let off: u64 = lock_at(state, i) + field
-    if !lock_in_table(off) {
-        return 0
-    }
-    return kstate.get(state, off)
-}
-
-fn lock_set(state: u64, i: u64, field: u64, v: u64) {
-    let off: u64 = lock_at(state, i) + field
-    if !lock_in_table(off) {
-        return
-    }
-    kstate.set(state, off, v)
-}
-
 fn lock_trifft(a_von: u64, a_bis: u64, b_von: u64, b_bis: u64) -> bool {
     if a_bis < b_von {
         return false
@@ -206,28 +177,28 @@ fn do_lock(state: u64, me: u64, of: u64, cmd: u64, arg: u64) -> u64 {
     if cmd == F_GETLK {
         var k: u64 = 0
         while k < kstate.FLOCK_SLOTS {
-            if lock_get(state, k, L_INO) == ino
-                && lock_get(state, k, L_MNT) == mnt
-                && lock_get(state, k, L_PID) != wer {
-                let hart: u64 = lock_get(state, k, L_ART)
+            if poslock.get(state, k, poslock.L_INO) == ino
+                && poslock.get(state, k, poslock.L_MNT) == mnt
+                && poslock.get(state, k, poslock.L_PID) != wer {
+                let hart: u64 = poslock.get(state, k, poslock.L_ART)
                 var stoert: bool = true
                 if art == F_RDLCK && hart == F_RDLCK {
                     stoert = false
                 }
                 if stoert && lock_trifft(von, bis,
-                    lock_get(state, k, L_VON), lock_get(state, k, L_UNTIL)) {
+                    poslock.get(state, k, poslock.L_VON), poslock.get(state, k, poslock.L_UNTIL)) {
                     sysuser.put_half(state, me, arg + FL_TYPE, hart)
                     sysuser.put_half(state, me, arg + FL_WHENCE, sysconst.SEEK_SET)
                     sysuser.put64(state, me, arg + FL_START,
-                        lock_get(state, k, L_VON))
+                        poslock.get(state, k, poslock.L_VON))
                     var l: u64 = 0
-                    if lock_get(state, k, L_UNTIL) != 0xFFFFFFFFFFFFFFFF {
-                        l = lock_get(state, k, L_UNTIL)
-                            - lock_get(state, k, L_VON) + 1
+                    if poslock.get(state, k, poslock.L_UNTIL) != 0xFFFFFFFFFFFFFFFF {
+                        l = poslock.get(state, k, poslock.L_UNTIL)
+                            - poslock.get(state, k, poslock.L_VON) + 1
                     }
                     sysuser.put64(state, me, arg + FL_LEN, l)
                     sysuser.put_word32(state, me, arg + FL_PID,
-                        lock_get(state, k, L_PID))
+                        poslock.get(state, k, poslock.L_PID))
                     return 0
                 }
             }
@@ -240,12 +211,12 @@ fn do_lock(state: u64, me: u64, of: u64, cmd: u64, arg: u64) -> u64 {
     if art == F_UNLCK {
         var k: u64 = 0
         while k < kstate.FLOCK_SLOTS {
-            if lock_get(state, k, L_INO) == ino
-                && lock_get(state, k, L_MNT) == mnt
-                && lock_get(state, k, L_PID) == wer
-                && lock_trifft(von, bis, lock_get(state, k, L_VON),
-                    lock_get(state, k, L_UNTIL)) {
-                lock_free(state, k)
+            if poslock.get(state, k, poslock.L_INO) == ino
+                && poslock.get(state, k, poslock.L_MNT) == mnt
+                && poslock.get(state, k, poslock.L_PID) == wer
+                && lock_trifft(von, bis, poslock.get(state, k, poslock.L_VON),
+                    poslock.get(state, k, poslock.L_UNTIL)) {
+                poslock.free(state, k)
             }
             k = k + 1
         }
@@ -254,16 +225,16 @@ fn do_lock(state: u64, me: u64, of: u64, cmd: u64, arg: u64) -> u64 {
 
     var k2: u64 = 0
     while k2 < kstate.FLOCK_SLOTS {
-        if lock_get(state, k2, L_INO) == ino
-            && lock_get(state, k2, L_MNT) == mnt
-            && lock_get(state, k2, L_PID) != wer {
-            let hart2: u64 = lock_get(state, k2, L_ART)
+        if poslock.get(state, k2, poslock.L_INO) == ino
+            && poslock.get(state, k2, poslock.L_MNT) == mnt
+            && poslock.get(state, k2, poslock.L_PID) != wer {
+            let hart2: u64 = poslock.get(state, k2, poslock.L_ART)
             var stoert2: bool = true
             if art == F_RDLCK && hart2 == F_RDLCK {
                 stoert2 = false
             }
-            if stoert2 && lock_trifft(von, bis, lock_get(state, k2, L_VON),
-                lock_get(state, k2, L_UNTIL)) {
+            if stoert2 && lock_trifft(von, bis, poslock.get(state, k2, poslock.L_VON),
+                poslock.get(state, k2, poslock.L_UNTIL)) {
                 return sysuser.neg(errno.E_AGAIN)
             }
         }
@@ -271,19 +242,19 @@ fn do_lock(state: u64, me: u64, of: u64, cmd: u64, arg: u64) -> u64 {
     }
     var k3: u64 = 0
     while k3 < kstate.FLOCK_SLOTS {
-        if lock_get(state, k3, L_INO) == ino
-            && lock_get(state, k3, L_MNT) == mnt
-            && lock_get(state, k3, L_PID) == wer
-            && lock_trifft(von, bis, lock_get(state, k3, L_VON),
-                lock_get(state, k3, L_UNTIL)) {
-            lock_free(state, k3)
+        if poslock.get(state, k3, poslock.L_INO) == ino
+            && poslock.get(state, k3, poslock.L_MNT) == mnt
+            && poslock.get(state, k3, poslock.L_PID) == wer
+            && lock_trifft(von, bis, poslock.get(state, k3, poslock.L_VON),
+                poslock.get(state, k3, poslock.L_UNTIL)) {
+            poslock.free(state, k3)
         }
         k3 = k3 + 1
     }
     var free: u64 = kstate.FLOCK_SLOTS
     var k4: u64 = 0
     while k4 < kstate.FLOCK_SLOTS {
-        if lock_get(state, k4, L_INO) == 0 && free == kstate.FLOCK_SLOTS {
+        if poslock.get(state, k4, poslock.L_INO) == 0 && free == kstate.FLOCK_SLOTS {
             free = k4
         }
         k4 = k4 + 1
@@ -291,39 +262,16 @@ fn do_lock(state: u64, me: u64, of: u64, cmd: u64, arg: u64) -> u64 {
     if free >= kstate.FLOCK_SLOTS {
         return sysuser.neg(errno.E_NOLCK)
     }
-    lock_set(state, free, L_INO, ino)
-    lock_set(state, free, L_MNT, mnt)
-    lock_set(state, free, L_VON, von)
-    lock_set(state, free, L_UNTIL, bis)
-    lock_set(state, free, L_ART, art)
-    lock_set(state, free, L_PID, wer)
+    poslock.put(state, free, poslock.L_INO, ino)
+    poslock.put(state, free, poslock.L_MNT, mnt)
+    poslock.put(state, free, poslock.L_VON, von)
+    poslock.put(state, free, poslock.L_UNTIL, bis)
+    poslock.put(state, free, poslock.L_ART, art)
+    poslock.put(state, free, poslock.L_PID, wer)
     kstate.add(state, kstate.FLOCKS, 1)
     return 0
 }
 
-fn lock_free(state: u64, k: u64) {
-    lock_set(state, k, L_INO, 0)
-    lock_set(state, k, L_MNT, 0)
-    lock_set(state, k, L_VON, 0)
-    lock_set(state, k, L_UNTIL, 0)
-    lock_set(state, k, L_ART, 0)
-    lock_set(state, k, L_PID, 0)
-}
-
-fn locks_drop(state: u64, me: u64) {
-    let wer: u64 = taskslot.tget(state, me, taskconst.T_TGID)
-    if wer == 0 {
-        return
-    }
-    var k: u64 = 0
-    while k < kstate.FLOCK_SLOTS {
-        if lock_get(state, k, L_INO) != 0
-            && lock_get(state, k, L_PID) == wer {
-            lock_free(state, k)
-        }
-        k = k + 1
-    }
-}
 const F_ADD_SEALS: u64 = 1033
 const F_GET_SEALS: u64 = 1034
 const F_SEAL_SEAL: u64 = 1
