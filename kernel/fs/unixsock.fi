@@ -32,7 +32,7 @@ export {
     socks_live, shms_live, bytes_moved, fds_moved,
     USOCK_MAX, USHM_MAX, USHM_PAGED, USUN_MAX, RING_CAP, FDQ_MAX, SHM_PAGES_MAX, SHM_PAGES_LIMIT, SHM_PAGES_CONTIG, SMF_CONTIG, SMF_RO, SMF_KEEP, SMF_FILE, SMF_ANON, shm_new_anon, map_rec_slot, UM_PAGES_MASK, UMAP_MAX, map_live,
     S_FREE, S_OPEN, S_LISTEN, S_CONNECTED, S_CLOSED,
-    UK_FREE, UK_STREAM, UK_DGRAM, sock_tmo, sock_set_tmo, sock_stype, sock_set_stype, send_dgram, send_dgram_to, write_error, recv_dgram, dgram_len, dgram_room, bind_dgram, find_dgram, connect_dgram, fd_at_head, fd_deliverable, fd_limit, DGRAM_HDR
+    UK_FREE, UK_STREAM, UK_DGRAM, sock_tmo, sock_set_tmo, sock_stype, sock_set_stype, send_dgram, send_dgram_to, write_error, recv_dgram, peek_dgram, dgram_len, dgram_room, bind_dgram, find_dgram, connect_dgram, fd_at_head, fd_deliverable, fd_limit, DGRAM_HDR
 }
 
 const USOCK_OFF: u64 = 0x1C8000
@@ -974,24 +974,32 @@ fn fd_at_head(state: u64, i: u64) -> bool {
     return regio.read64(r + FQ_MARK) == kstate.get(state, sk_at(i) + SK_HEAD)
 }
 
-fn recv_dgram(state: u64, i: u64, dst: u64, len: u64) -> u64 {
+fn peek_dgram(state: u64, i: u64, dst: u64, len: u64) -> u64 {
     if i >= USOCK_MAX {
         return errno.E_BADF
     }
     let r: u64 = kstate.get(state, sk_at(i) + SK_RING)
-    if r == 0 {
-        return 0
-    }
-    if waiting(state, i) < DGRAM_HDR {
+    if r == 0 || waiting(state, i) < DGRAM_HDR {
         return 0
     }
     let h: u64 = kstate.get(state, sk_at(i) + SK_HEAD)
-    let mlen: u64 = dgram_header(r, h)
-    var n: u64 = mlen
+    var n: u64 = dgram_header(r, h)
     if n > len {
         n = len
     }
     usring.ring_get(r, usring.ring_fwd(h, DGRAM_HDR), state + dst, n)
+    return n
+}
+
+fn recv_dgram(state: u64, i: u64, dst: u64, len: u64) -> u64 {
+    if i >= USOCK_MAX {
+        return errno.E_BADF
+    }
+    if waiting(state, i) < DGRAM_HDR {
+        return 0
+    }
+    let mlen: u64 = dgram_len(state, i)
+    let n: u64 = peek_dgram(state, i, dst, len)
     get_commit(state, i, mlen + DGRAM_HDR)
     return n
 }

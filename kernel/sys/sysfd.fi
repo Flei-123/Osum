@@ -2051,7 +2051,7 @@ fn do_recvfrom(state: u64, me: u64, fd: u64, buf: u64, want: u64,
     // RUNDE EVENTS: recv() on a local socket (socketpair, AF_UNIX) is a read
     let uof: u64 = fdscope.use(state, me, fd, 0)
     if uof < file.MAX_OPEN && file.open_kind(state, uof) == file.K_USOCK {
-        if (flags & MSG_PEEK_BIT) != 0 && unixsock.sock_kind(state, file.open_ino(state, uof)) == unixsock.UK_STREAM {
+        if (flags & MSG_PEEK_BIT) != 0 {
             return usock_peek(state, me, uof, buf, want, (flags & sysconst.MSG_DONTWAIT) != 0)
         }
         if (flags & MSG_WAITALL_BIT) != 0 && unixsock.sock_kind(state, file.open_ino(state, uof)) == unixsock.UK_STREAM {
@@ -2366,9 +2366,26 @@ fn usock_peek(state: u64, me: u64, of: u64, buf: u64, len: u64, dontwait: bool) 
         sched.poll_sleep(state, seen, kstate.get(state, kstate.TICKS) + 1)
     }
     let fl: u64 = mmlock.scratch_lock(state)
-    let r: u64 = stream_peek(state, me, si, 0, buf, len)
+    var r: u64 = 0
+    if unixsock.sock_kind(state, si) == unixsock.UK_DGRAM {
+        r = frame_peek(state, me, si, buf, len)
+    } else {
+        r = stream_peek(state, me, si, 0, buf, len)
+    }
     mmlock.scratch_unlock(state, fl)
     return r
+}
+
+fn frame_peek(state: u64, me: u64, si: u64, buf: u64, len: u64) -> u64 {
+    var n: u64 = len
+    if n > sysconst.MSG_MAX {
+        n = sysconst.MSG_MAX
+    }
+    let got: u64 = unixsock.peek_dgram(state, si, sysconst.WL_SCRATCH, n)
+    if got != 0 && !sysuser.copy_out(state, me, buf, state + sysconst.WL_SCRATCH, got) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return got
 }
 
 fn wl_send(state: u64, me: u64, si: u64, src: u64, n: u64, dg: bool) -> u64 {

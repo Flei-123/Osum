@@ -1741,7 +1741,6 @@ fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
     return sent
 }
 
-const FRAME_MAX: u64 = 3600
 const MSG_TRUNC_FLAG: u64 = 32
 const MSG_CTRUNC_FLAG: u64 = 8
 
@@ -1769,7 +1768,7 @@ fn sendmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
             return sysuser.neg(errno.E_FAULT)
         }
         total = total + sysuser.get64u(state, me, iov + v * 16 + 8)
-        if total > FRAME_MAX {
+        if total > sysconst.MSG_MAX {
             return sysuser.neg(errno.E_MSGSIZE)
         }
         v = v + 1
@@ -1852,6 +1851,7 @@ fn recvmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
         return sysuser.neg(errno.E_INVAL)
     }
     let nonblock: bool = frame_nonblock(state, me, fd, flags)
+    let peeking: bool = (flags & MSG_PEEK_FLAG) != 0
     let recv_deadline: u64 = sysfd.usock_deadline(state, si, false)
     while unixsock.waiting(state, si) < unixsock.DGRAM_HDR {
         let seen: u64 = sched.poll_seq(state)
@@ -1876,8 +1876,8 @@ fn recvmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
         cap = cap + sysuser.get64u(state, me, iov + v * 16 + 8)
         v = v + 1
     }
-    if cap > FRAME_MAX {
-        cap = FRAME_MAX
+    if cap > sysconst.MSG_MAX {
+        cap = sysconst.MSG_MAX
     }
     let mlen: u64 = unixsock.dgram_len(state, si)
     let ctl: u64 = sysuser.get64u(state, me, mh + MH_CONTROL)
@@ -1891,7 +1891,7 @@ fn recvmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
     }
     var rflags: u64 = 0
     var n: u64 = 0
-    while unixsock.fd_at_head(state, si) {
+    while !peeking && unixsock.fd_at_head(state, si) {
         let sof: u64 = unixsock.pop_fd(state, si)
         if sof >= file.MAX_OPEN {
             break
@@ -1932,7 +1932,12 @@ fn recvmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
         return sysuser.neg(errno.E_FAULT)
     }
     let fl: u64 = mmlock.scratch_lock(state)
-    let got: u64 = unixsock.recv_dgram(state, si, sysconst.WL_SCRATCH, cap)
+    var got: u64 = 0
+    if peeking {
+        got = unixsock.peek_dgram(state, si, sysconst.WL_SCRATCH, cap)
+    } else {
+        got = unixsock.recv_dgram(state, si, sysconst.WL_SCRATCH, cap)
+    }
     var ok: bool = true
     var off: u64 = 0
     v = 0
@@ -1951,7 +1956,7 @@ fn recvmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> 
     if !ok {
         return sysuser.neg(errno.E_FAULT)
     }
-    if got != 0 {
+    if got != 0 && !peeking {
         sched.poll_kick(state)
     }
     return got

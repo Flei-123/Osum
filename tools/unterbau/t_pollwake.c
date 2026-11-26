@@ -245,6 +245,34 @@ static void act_read_pipe(struct sc *s)
     read(s->fd[0], buf, sizeof buf);
 }
 
+static void act_readv(struct sc *s)
+{
+    static char buf[DRAIN_CHUNK];
+    struct iovec iov[2] = { { buf, 4096 }, { buf + 4096, DRAIN_CHUNK - 4096 } };
+    readv(s->fd[1], iov, 2);
+}
+
+static void act_recvmmsg(struct sc *s)
+{
+    static char buf[DRAIN_CHUNK];
+    struct iovec iov = { buf, sizeof buf };
+    struct mmsghdr mm = { .msg_hdr = { .msg_iov = &iov, .msg_iovlen = 1 } };
+    recvmmsg(s->fd[1], &mm, 1, MSG_DONTWAIT, 0);
+}
+
+static void act_writev(struct sc *s)
+{
+    struct iovec iov[2] = { { "x", 1 }, { "y", 1 } };
+    writev(s->fd[1], iov, 2);
+}
+
+static void act_sendmmsg(struct sc *s)
+{
+    struct iovec iov = { "x", 1 };
+    struct mmsghdr mm = { .msg_hdr = { .msg_iov = &iov, .msg_iovlen = 1 } };
+    sendmmsg(s->fd[1], &mm, 1, 0);
+}
+
 static void act_send(struct sc *s) { send(s->fd[1], "x", 1, 0); }
 
 static void act_sendmsg(struct sc *s)
@@ -293,6 +321,10 @@ static const struct scenario scenarios[] = {
     { "stream_recv_frees_room", setup_full_stream, act_recv },
     { "stream_read_frees_room", setup_full_stream, act_read_sock },
     { "pipe_read_frees_room", setup_full_pipe, act_read_pipe },
+    { "stream_readv_frees_room", setup_full_stream, act_readv },
+    { "stream_recvmmsg_frees_room", setup_full_stream, act_recvmmsg },
+    { "stream_writev_data", setup_empty_stream, act_writev },
+    { "stream_sendmmsg_data", setup_empty_stream, act_sendmmsg },
     { "stream_send_data", setup_empty_stream, act_send },
     { "stream_sendmsg_data", setup_empty_stream, act_sendmsg },
     { "dgram_sendmsg_data", setup_empty_dgram, act_sendmsg },
