@@ -151,7 +151,7 @@ fi
 if [ "$IMAGE_PROFILE" = personal ]; then case " $PROGS " in *" snip "*) ;; *) PROGS="$PROGS snip" ;; esac; case " $PROGS " in *" snipt "*) ;; *) PROGS="$PROGS snipt" ;; esac; fi
 case " $PROGS " in *" xfx "*) case " $PROGS " in *" wayd "*) ;; *) PROGS="$PROGS wayd" ;; esac; case " $PROGS " in *" xfxd "*) ;; *) PROGS="$PROGS xfxd" ;; esac ;; esac
 
-APPS=${APPS:-"fetch jarvisd ipprint socfleitec rootsctl smbctl netcheck"}
+APPS=${APPS:-"fetch jarvisd ipprint printd socfleitec rootsctl smbctl netcheck"}
 # W-MINI2: the network half of the JARVIS Mini (TLS + login + WebSocket), personal stick only
 if [ "$IMAGE_PROFILE" = personal ]; then case " $APPS " in *" jmlink "*) ;; *) APPS="$APPS jmlink" ;; esac; fi
 
@@ -978,7 +978,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages /usr/share/
 /etc/theme.conf /etc/shapes/osum /etc/shapes/classic \
 /etc/schemas/day /etc/schemas/night /etc/themes/tageslicht \
 /bin/desktop /bin/taskbar /bin/netview /bin/explorer /boot/osum.mb \
-/bin/ota /bin/fetch /bin/host /bin/dhcp /bin/log /bin/jarvisd /bin/jsig /bin/ipprint \
+/bin/ota /bin/fetch /bin/host /bin/dhcp /bin/log /bin/jarvisd /bin/jsig /bin/ipprint /bin/printd \
 /bin/jarvisctl /bin/pollbr /etc/ota.conf /etc/jarvis/permissions.conf \
 /system/FASSUNG /system/SCHLUESSELGEN \
 /apps/explorer.osp/start /apps/editor.osp/start /apps/terminal.osp/start \
