@@ -11,7 +11,8 @@ import bus.drvclass
 import libc.regio
 
 export {
-    attach, unplug_slot, pump, command, attached, ready, powered, scanning, le_scanning, le_reports, le_scans_started, controller_addr, hci_ver,
+    attach, unplug_slot, pump, command, attached, ready, powered, scanning, le_scanning, le_reports, le_scans_started, link_state, link_handle, link_addr, link_count, link_failures,
+    LINK_NONE, LINK_CONNECTING, LINK_UP, controller_addr, hci_ver,
     manufacturer, table, TAB_CAP, scans_started, scans_done, events_seen, event_errors, init_step,
     CMD_OK, CMD_BAD, CMD_OFF, CMD_FAIL, CMD_NONE
 }
@@ -33,6 +34,11 @@ const WAIT_TRIES: u64 = 3000
 const INQ_LENGTH: u64 = 5
 const INQ_MAX: u64 = 0
 const LE_INTERVAL: u64 = 0x60
+const LINK_NONE: u64 = 0
+const LINK_CONNECTING: u64 = 1
+const LINK_UP: u64 = 2
+const CONN_WAIT_TRIES: u64 = 3000
+const NOT_FOUND: u64 = 0xFFFFFFFF
 const LE_WINDOW: u64 = 0x30
 const SUB_OFFSET: u64 = 2
 
@@ -63,6 +69,11 @@ const C_LESCAN: u64 = 23
 const C_LEREPS: u64 = 24
 const C_LESCANS: u64 = 25
 const C_LEAUTO: u64 = 26
+const C_LINK: u64 = 27
+const C_HANDLE: u64 = 28
+const C_PEER: u64 = 29
+const C_LINKS: u64 = 30
+const C_LINKFAIL: u64 = 31
 
 static mut bt_st: [u64; 32] = [0 as u64; 32]
 static mut bt_tab: [u64; 66] = [0 as u64; 66]
@@ -85,6 +96,8 @@ static mut w_cancel: [u8; 7] = "cancel\0"
 static mut w_clear: [u8; 6] = "clear\0"
 static mut w_lescan: [u8; 7] = "lescan\0"
 static mut w_lestop: [u8; 7] = "lestop\0"
+static mut w_connect: [u8; 8] = "connect\0"
+static mut w_disconnect: [u8; 11] = "disconnect\0"
 static mut w_discover: [u8; 9] = "discover\0"
 
 fn cg(i: u64) -> u64 {
@@ -125,6 +138,26 @@ fn le_reports() -> u64 {
 
 fn le_scans_started() -> u64 {
     return cg(C_LESCANS)
+}
+
+fn link_state() -> u64 {
+    return cg(C_LINK)
+}
+
+fn link_handle() -> u64 {
+    return cg(C_HANDLE)
+}
+
+fn link_addr() -> u64 {
+    return cg(C_PEER)
+}
+
+fn link_count() -> u64 {
+    return cg(C_LINKS)
+}
+
+fn link_failures() -> u64 {
+    return cg(C_LINKFAIL)
 }
 
 fn controller_addr() -> u64 {
@@ -201,8 +234,45 @@ fn on_extended(ev: u64, n: u64) {
         (&bt_name[0]) as u64, m)
 }
 
+fn on_conn_complete(ev: u64, n: u64) {
+    if !ble.conn_ok(ev, n) {
+        cs(C_ERRS, cg(C_ERRS) + 1)
+        return
+    }
+    if ble.conn_status(ev) != 0 {
+        cs(C_LINK, LINK_NONE)
+        cs(C_LINKFAIL, cg(C_LINKFAIL) + 1)
+        return
+    }
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 6 {
+        v = v | (regio.read8_at(ble.conn_addr(ev), i) << (i * 8))
+        i = i + 1
+    }
+    cs(C_PEER, v)
+    cs(C_HANDLE, ble.conn_handle(ev))
+    cs(C_LINK, LINK_UP)
+    cs(C_LINKS, cg(C_LINKS) + 1)
+}
+
+fn on_disconnect(ev: u64, n: u64) {
+    if !ble.disc_ok(ev, n) {
+        cs(C_ERRS, cg(C_ERRS) + 1)
+        return
+    }
+    if cg(C_LINK) == LINK_UP && ble.disc_handle(ev) == cg(C_HANDLE) && ble.disc_status(ev) == 0 {
+        cs(C_LINK, LINK_NONE)
+    }
+}
+
 fn on_le_meta(ev: u64, n: u64) {
-    if regio.read8_at(ev, SUB_OFFSET) != ble.SUB_ADV_REPORT {
+    let sub: u64 = regio.read8_at(ev, SUB_OFFSET)
+    if sub == ble.SUB_CONN_COMPLETE {
+        on_conn_complete(ev, n)
+        return
+    }
+    if sub != ble.SUB_ADV_REPORT {
         return
     }
     if !ble.report_ok(ev, n) {
@@ -243,6 +313,8 @@ fn handle_event(ev: u64, n: u64) {
         on_inquiry_rows(ev)
     } else if code == hci.EV_EXTENDED_INQUIRY {
         on_extended(ev, n)
+    } else if code == ble.EV_DISCONNECT_COMPLETE {
+        on_disconnect(ev, n)
     } else if code == ble.EV_LE_META {
         on_le_meta(ev, n)
     } else if code == hci.EV_INQUIRY_COMPLETE {
@@ -405,6 +477,7 @@ fn attach(state: u64, slot: u64, dci: u64) -> bool {
     cs(C_SCAN, 0)
     cs(C_LESCAN, 0)
     cs(C_LEAUTO, 0)
+    cs(C_LINK, LINK_NONE)
     cs(C_POWER, 1)
     cs(C_CCSEQ, 0)
     cs(C_CSSEQ, 0)
@@ -461,6 +534,7 @@ fn unplug_slot(state: u64, slot: u64) {
     cs(C_SCAN, 0)
     cs(C_LESCAN, 0)
     cs(C_LEAUTO, 0)
+    cs(C_LINK, LINK_NONE)
     serial.puts((&t_gone[0]) as u64)
     serial.nl()
 }
@@ -556,6 +630,79 @@ fn stop_le_scan(state: u64) -> u64 {
     return CMD_OK
 }
 
+fn wait_link_change(state: u64, from: u64) -> bool {
+    var tries: u64 = 0
+    while tries < CONN_WAIT_TRIES {
+        pump(state)
+        if cg(C_LINK) != from {
+            return true
+        }
+        xhci.udelay(state, 1000)
+        tries = tries + 1
+    }
+    return false
+}
+
+fn connect(state: u64, p: u64, n: u64) -> u64 {
+    if cg(C_ATTACHED) == 0 || cg(C_READY) == 0 {
+        return CMD_NONE
+    }
+    if cg(C_POWER) == 0 {
+        return CMD_OFF
+    }
+    var raw: [u8; 8] = [0 as u8; 8]
+    let pr: u64 = (&raw[0]) as u64
+    if cg(C_LINK) != LINK_NONE || !ble.parse_addr(p, 8, n, pr) {
+        return CMD_BAD
+    }
+    let idx: u64 = hci.tab_find(table(), pr)
+    if idx == NOT_FOUND {
+        return CMD_BAD
+    }
+    let flags: u64 = hci.rec_flags(hci.tab_rec(table(), idx))
+    if flags & hci.FLAG_LE == 0 {
+        return CMD_BAD
+    }
+    cs(C_LEAUTO, 0)
+    let _s: u64 = stop_le_scan(state)
+    let len: u64 = ble.build_create_conn(frame() + F_CMD, pr, (flags & hci.FLAG_RANDOM) >> 1, LE_INTERVAL, LE_WINDOW)
+    let seq0: u64 = cg(C_CSSEQ)
+    cs(C_LINK, LINK_CONNECTING)
+    if !send(state, len) || wait_cs(state, ble.OP_LE_CREATE_CONN, seq0) != 0 {
+        cs(C_LINK, LINK_NONE)
+        return CMD_FAIL
+    }
+    if !wait_link_change(state, LINK_CONNECTING) {
+        let nc: u64 = ble.build_create_conn_cancel(frame() + F_CMD)
+        let _c: u64 = le_command(state, nc, ble.OP_LE_CREATE_CONN_CANCEL)
+        cs(C_LINK, LINK_NONE)
+        cs(C_LINKFAIL, cg(C_LINKFAIL) + 1)
+        return CMD_FAIL
+    }
+    if cg(C_LINK) != LINK_UP {
+        return CMD_FAIL
+    }
+    return CMD_OK
+}
+
+fn disconnect(state: u64) -> u64 {
+    if cg(C_ATTACHED) == 0 || cg(C_READY) == 0 {
+        return CMD_NONE
+    }
+    if cg(C_LINK) != LINK_UP {
+        return CMD_OK
+    }
+    let len: u64 = ble.build_disconnect(frame() + F_CMD, cg(C_HANDLE))
+    let seq0: u64 = cg(C_CSSEQ)
+    if !send(state, len) || wait_cs(state, ble.OP_DISCONNECT, seq0) != 0 {
+        return CMD_FAIL
+    }
+    if !wait_link_change(state, LINK_UP) {
+        return CMD_FAIL
+    }
+    return CMD_OK
+}
+
 fn discover(state: u64) -> u64 {
     let r: u64 = start_scan(state)
     if r != CMD_OK {
@@ -592,6 +739,12 @@ fn command(state: u64, p: u64, n: u64) -> u64 {
     if word_is(p, n, 0, (&w_scan[0]) as u64, 4) {
         return start_scan(state)
     }
+    if word_is(p, n, 0, (&w_connect[0]) as u64, 7) {
+        return connect(state, p, n)
+    }
+    if word_is(p, n, 0, (&w_disconnect[0]) as u64, 10) {
+        return disconnect(state)
+    }
     if word_is(p, n, 0, (&w_discover[0]) as u64, 8) {
         return discover(state)
     }
@@ -618,6 +771,7 @@ fn command(state: u64, p: u64, n: u64) -> u64 {
         if word_is(p, n, 6, (&w_off[0]) as u64, 3) {
             let _c: u64 = cancel_scan(state)
             let _l: u64 = stop_le_scan(state)
+            let _d: u64 = disconnect(state)
             cs(C_POWER, 0)
             hci.tab_clear(table(), TAB_CAP)
             return CMD_OK

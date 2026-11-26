@@ -9,6 +9,10 @@ OP_INQUIRY = 0x0401
 OP_INQUIRY_CANCEL = 0x0402
 OP_LE_SCAN_PARAMS = 0x200B
 OP_LE_SCAN_ENABLE = 0x200C
+OP_LE_CREATE_CONN = 0x200D
+OP_LE_CREATE_CONN_CANCEL = 0x200E
+OP_DISCONNECT = 0x0406
+EV_DISCONNECT_COMPLETE = 0x05
 
 EV_INQUIRY_COMPLETE = 0x01
 EV_INQUIRY_RESULT = 0x02
@@ -50,6 +54,8 @@ class BtModel:
         self.le_scanning = False
         self.le_params = []
         self.le_enables = []
+        self.links = []
+        self.handle = 0x0041
 
     def complete(self, op, ret):
         self.events.append(event(EV_COMMAND_COMPLETE, bytes([1]) + struct.pack('<H', op) + ret))
@@ -140,6 +146,30 @@ class BtModel:
                 self.complete(op, bytes([0]))
                 if self.le_scanning:
                     self.le_rows()
+        elif op == OP_LE_CREATE_CONN:
+            if len(params) != 25 or self.le_scanning:
+                self.violations += 1
+                self.status(op, 0x0C)
+            else:
+                self.status(op, 0)
+                peer = params[6:12]
+                if self.mode == 'connfail':
+                    status = 0x3E
+                else:
+                    status = 0
+                    self.links.append((self.handle, peer.hex()))
+                body = bytes([1, status]) + struct.pack('<H', self.handle) + bytes([0, params[5]]) + peer + struct.pack('<HHH', 0x18, 0, 0x48) + bytes([0])
+                self.events.append(event(EV_LE_META, body))
+        elif op == OP_LE_CREATE_CONN_CANCEL:
+            self.complete(op, bytes([0]))
+        elif op == OP_DISCONNECT:
+            if len(params) != 3 or not self.links or struct.unpack_from('<H', params)[0] != self.links[-1][0]:
+                self.violations += 1
+                self.status(op, 0x02)
+            else:
+                self.status(op, 0)
+                self.links.pop()
+                self.events.append(event(EV_DISCONNECT_COMPLETE, bytes([0]) + struct.pack('<H', self.handle) + bytes([0x16])))
         elif op == OP_INQUIRY_MODE:
             self.inquiry_modes.append(params[0] if params else 0xFF)
             self.complete(op, bytes([0]))

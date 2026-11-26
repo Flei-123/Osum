@@ -52,6 +52,8 @@ mutate cod_clobber hci 's/octets.st8(r, REC_COD + 2, cod >> 16)/octets.st32(r, R
 mutate le_bound    ble 's/return 4 + 10 \* n + data_total(ev, n) <= 2 + hci.event_plen(ev)/return true/' oracle_le
 mutate le_layout   ble 's/return ev + 4 + 2 \* report_count(ev) + 6 \* i/return ev + 4 + 2 * report_count(ev) + 6 * 0/' oracle_le
 mutate le_rssi_at  ble 's/return octets.ld8(ev, 4 + 9 \* n + data_total(ev, n) + i)/return octets.ld8(ev, 4 + 9 * n + data_total(ev, n))/' oracle_le
+mutate conn_mask   ble 's/return octets.ld16(ev, 4) \& HANDLE_MASK/return octets.ld16(ev, 4)/' oracle_le
+mutate parse_order  ble 's/octets.st8(dst, 5 - k, hi \* 16 + lo)/octets.st8(dst, k, hi * 16 + lo)/' oracle_le
 mutate le_flags    ble 's/flags = flags | hci.FLAG_RANDOM/flags = flags/' oracle_le
 mutate le_uuid     ble 's/if octets.ld16(data, at + 2 + 2 \* k) == uuid {/if octets.ld16(data, at + 2) == uuid {/' oracle_le
 printf '\nBT: %d ok, %d fail\n' "$pass" "$fail"

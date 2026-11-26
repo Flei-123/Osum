@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"
-CASES="${*:-scan none badclass poweroff bgpump hotplug unplug le lefail leoff}"
+CASES="${*:-scan none badclass poweroff bgpump hotplug unplug le lefail leoff conn connfail connbad}"
 source "$HERE/tools/usbredir/common.sh"
 BASEW="nokbd nosched vfs"
 printf 'echo ==START==\nsleep 2\ncat /proc/bluetooth\necho scan > /dev/btctl\nsleep 4\ncat /proc/bluetooth\ncat /dev/btctl\necho ==END==\n' > "$T/bt.sh"
@@ -12,9 +12,11 @@ printf 'echo ==START==\nsleep 1\ncat /proc/bluetooth\ncat /dev/btctl\necho ==END
 printf 'echo ==START==\nsleep 2\necho scan > /dev/btctl\nsleep 4\necho lescan > /dev/btctl\nsleep 3\ncat /proc/bluetooth\necho lestop > /dev/btctl\nsleep 1\ncat /proc/bluetooth\necho ==END==\n' > "$T/bt_le.sh"
 printf 'echo ==START==\nsleep 2\necho lescan > /dev/btctl\nsleep 2\ncat /proc/bluetooth\necho ==END==\n' > "$T/bt_lefail.sh"
 printf 'echo ==START==\nsleep 2\necho power off > /dev/btctl\necho lescan > /dev/btctl\nsleep 2\ncat /proc/bluetooth\necho ==END==\n' > "$T/bt_leoff.sh"
+printf 'echo ==START==\nsleep 2\necho lescan > /dev/btctl\nsleep 3\necho connect C0:11:22:33:44:55 > /dev/btctl\nsleep 2\ncat /proc/bluetooth\necho disconnect > /dev/btctl\nsleep 2\ncat /proc/bluetooth\necho ==END==\n' > "$T/bt_conn.sh"
+printf 'echo ==START==\nsleep 2\necho scan > /dev/btctl\nsleep 4\necho lescan > /dev/btctl\nsleep 3\necho connect DE:AD:BE:EF:00:07 > /dev/btctl\necho connect 00:00:00:00:00:01 > /dev/btctl\necho connect nonsense > /dev/btctl\nsleep 1\ncat /proc/bluetooth\necho ==END==\n' > "$T/bt_connbad.sh"
 bash tools/mkfsfi/mkfs.sh build "$T/d.img" 8000 /bin/ /t/ /etc/ /dev/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" /proc/ \
-    /t/bt.sh="$T/bt.sh" /t/bt_off.sh="$T/bt_off.sh" /t/bt_bg.sh="$T/bt_bg.sh" /t/bt_hot.sh="$T/bt_hot.sh" /t/bt_unp.sh="$T/bt_unp.sh" /t/bt_le.sh="$T/bt_le.sh" /t/bt_lefail.sh="$T/bt_lefail.sh" /t/bt_leoff.sh="$T/bt_leoff.sh" > "$T/mkfs2.txt" 2>&1 || { tail "$T/mkfs2.txt"; exit 1; }
+    /t/bt.sh="$T/bt.sh" /t/bt_off.sh="$T/bt_off.sh" /t/bt_bg.sh="$T/bt_bg.sh" /t/bt_hot.sh="$T/bt_hot.sh" /t/bt_unp.sh="$T/bt_unp.sh" /t/bt_conn.sh="$T/bt_conn.sh" /t/bt_connbad.sh="$T/bt_connbad.sh" /t/bt_le.sh="$T/bt_le.sh" /t/bt_lefail.sh="$T/bt_lefail.sh" /t/bt_leoff.sh="$T/bt_leoff.sh" > "$T/mkfs2.txt" 2>&1 || { tail "$T/mkfs2.txt"; exit 1; }
 for c in $CASES; do
     case "$c" in
     scan)
@@ -106,6 +108,30 @@ for c in $CASES; do
         chk bto "power off in proc" 'power off'
         grep -aq 'command 200c' "$T/bto.gadget" && bad "bto: le scan sent while off" || ok "bto: no le scan command sent while off"
         panics bto
+        ;;
+    conn)
+        GARGS="--bt normal" run btc btdongle boot bt_conn.sh
+        grep -aq 'bt: command 200d' "$T/btc.gadget" && ok "btc: create connection sent" || bad "btc: create connection not sent"
+        chk btc "link up with address and handle" 'link connected C0:11:22:33:44:55 0x0041'
+        chk btc "one link counted" 'linkups 1'
+        chk btc "link gone after disconnect" 'link none'
+        grep -aq 'lescanning=0 leenables=1,0 links=0' "$T/btc.gadget" && ok "btc: scan stopped before connect, link closed" || bad "btc: model state after connect/disconnect"
+        grep -aq 'bt violations=0' "$T/btc.gadget" && ok "btc: model saw no malformed command" || bad "btc: model violations"
+        panics btc
+        ;;
+    connfail)
+        GARGS="--bt connfail" run btx btdongle boot bt_conn.sh
+        chk btx "failed link counted" 'linkfail 1'
+        chk btx "no link" 'link none'
+        nochk btx "never up" 'link connected'
+        panics btx
+        ;;
+    connbad)
+        GARGS="--bt normal" run bty btdongle boot bt_connbad.sh
+        chk bty "le devices known" 'le C0:11:22:33:44:55 random'
+        grep -aq 'bt: command 200d' "$T/bty.gadget" && bad "bty: create connection sent for a bad target" || ok "bty: classic, unknown and malformed targets never reach the controller"
+        chk bty "no link" 'link none'
+        panics bty
         ;;
     esac
 done

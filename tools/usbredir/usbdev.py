@@ -699,7 +699,7 @@ def main():
     if A.phy_mute:
         log('phy reads dropped=%d' % getattr(d, 'mute_dropped', 0))
     if BT is not None:
-        log('bt violations=%d commands=%d scanning=%d lescanning=%d leenables=%s' % (BT.violations, len(BT.cmds), int(BT.scanning), int(BT.le_scanning), ','.join(str(v) for v in BT.le_enables)))
+        log('bt violations=%d commands=%d scanning=%d lescanning=%d leenables=%s links=%d' % (BT.violations, len(BT.cmds), int(BT.scanning), int(BT.le_scanning), ','.join(str(v) for v in BT.le_enables), len(BT.links)))
     if VN is not None:
         log('model violations=%d bad_tx=%d' % (VN.violations, VN.bad_tx))
 

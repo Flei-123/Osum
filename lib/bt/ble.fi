@@ -8,7 +8,10 @@ export {
     AD_FLAGS, AD_UUID16_PART, AD_UUID16_FULL, AD_NAME_SHORT, AD_NAME_FULL, AD_APPEARANCE, UUID_HID,
     build_scan_params, build_scan_enable,
     report_ok, report_count, rep_type, rep_addr_type, rep_addr, rep_dlen, rep_data, rep_rssi,
-    ad_find, ad_len, ad_has_uuid16, appearance_cod, adv_cod, add_report
+    ad_find, ad_len, ad_has_uuid16, appearance_cod, adv_cod, add_report,
+    OP_LE_CREATE_CONN, OP_LE_CREATE_CONN_CANCEL, OP_DISCONNECT, EV_DISCONNECT_COMPLETE, SUB_CONN_COMPLETE,
+    build_create_conn, build_create_conn_cancel, build_disconnect,
+    conn_ok, conn_status, conn_handle, conn_addr, disc_ok, disc_status, disc_handle, disc_reason, parse_addr
 }
 
 const OP_LE_SET_SCAN_PARAMS: u64 = 0x200B
@@ -16,6 +19,15 @@ const OP_LE_SET_SCAN_ENABLE: u64 = 0x200C
 
 const EV_LE_META: u64 = 0x3E
 const SUB_ADV_REPORT: u64 = 0x02
+const SUB_CONN_COMPLETE: u64 = 0x01
+const EV_DISCONNECT_COMPLETE: u64 = 0x05
+const OP_LE_CREATE_CONN: u64 = 0x200D
+const OP_LE_CREATE_CONN_CANCEL: u64 = 0x200E
+const OP_DISCONNECT: u64 = 0x0406
+const CONN_EVENT_LEN: u64 = 19
+const DISC_EVENT_LEN: u64 = 4
+const HANDLE_MASK: u64 = 0x0FFF
+const REASON_USER: u64 = 0x13
 
 const SCAN_PASSIVE: u64 = 0
 const SCAN_ACTIVE: u64 = 1
@@ -200,4 +212,107 @@ fn add_report(tab: u64, cap: u64, ev: u64, i: u64, name: u64, name_max: u64) -> 
     }
     octets.st8(rec, hci.REC_FLAGS, flags)
     return idx
+}
+
+fn build_create_conn(dst: u64, addr: u64, addr_type: u64, interval: u64, window: u64) -> u64 {
+    var p: [u8; 25] = [0 as u8; 25]
+    let pp: u64 = (&p[0]) as u64
+    octets.st16(pp, 0, interval)
+    octets.st16(pp, 2, window)
+    octets.st8(pp, 4, 0)
+    octets.st8(pp, 5, addr_type & 1)
+    var k: u64 = 0
+    while k < 6 {
+        octets.st8(pp, 6 + k, octets.ld8(addr, k))
+        k = k + 1
+    }
+    octets.st8(pp, 12, 0)
+    octets.st16(pp, 13, 0x18)
+    octets.st16(pp, 15, 0x28)
+    octets.st16(pp, 17, 0)
+    octets.st16(pp, 19, 0x48)
+    return hci.build_command(dst, OP_LE_CREATE_CONN, pp, 25)
+}
+
+fn build_create_conn_cancel(dst: u64) -> u64 {
+    return hci.build_command(dst, OP_LE_CREATE_CONN_CANCEL, 0, 0)
+}
+
+fn build_disconnect(dst: u64, handle: u64) -> u64 {
+    var p: [u8; 3] = [0 as u8; 3]
+    let pp: u64 = (&p[0]) as u64
+    octets.st16(pp, 0, handle & HANDLE_MASK)
+    octets.st8(pp, 2, REASON_USER)
+    return hci.build_command(dst, OP_DISCONNECT, pp, 3)
+}
+
+fn conn_ok(ev: u64, len: u64) -> bool {
+    if !hci.event_ok(ev, len) {
+        return false
+    }
+    return hci.event_code(ev) == EV_LE_META && hci.event_plen(ev) >= CONN_EVENT_LEN && octets.ld8(ev, 2) == SUB_CONN_COMPLETE
+}
+
+fn conn_status(ev: u64) -> u64 {
+    return octets.ld8(ev, 3)
+}
+
+fn conn_handle(ev: u64) -> u64 {
+    return octets.ld16(ev, 4) & HANDLE_MASK
+}
+
+fn conn_addr(ev: u64) -> u64 {
+    return ev + 8
+}
+
+fn disc_ok(ev: u64, len: u64) -> bool {
+    if !hci.event_ok(ev, len) {
+        return false
+    }
+    return hci.event_code(ev) == EV_DISCONNECT_COMPLETE && hci.event_plen(ev) >= DISC_EVENT_LEN
+}
+
+fn disc_status(ev: u64) -> u64 {
+    return octets.ld8(ev, 2)
+}
+
+fn disc_handle(ev: u64) -> u64 {
+    return octets.ld16(ev, 3) & HANDLE_MASK
+}
+
+fn disc_reason(ev: u64) -> u64 {
+    return octets.ld8(ev, 5)
+}
+
+fn hex_value(c: u64) -> u64 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    return NOT_FOUND
+}
+
+fn parse_addr(text: u64, at: u64, n: u64, dst: u64) -> bool {
+    if at + 17 > n {
+        return false
+    }
+    var k: u64 = 0
+    while k < 6 {
+        let hi: u64 = hex_value(octets.ld8(text, at + 3 * k))
+        let lo: u64 = hex_value(octets.ld8(text, at + 3 * k + 1))
+        if hi == NOT_FOUND || lo == NOT_FOUND {
+            return false
+        }
+        if k < 5 && octets.ld8(text, at + 3 * k + 2) != 58 {
+            return false
+        }
+        octets.st8(dst, 5 - k, hi * 16 + lo)
+        k = k + 1
+    }
+    return true
 }
