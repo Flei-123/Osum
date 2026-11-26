@@ -77,6 +77,11 @@ if [ "$WIE" = roh ]; then
         -device isa-debug-exit,iobase=0xf4,iosize=0x04
     rc=$?
 elif [ "$WIE" = iso ]; then
+    ISODISK=(-drive "file=$OUT/ziel.img,format=raw,if=ide,index=0")
+    if [ "${OTA_DRIVE:-ide}" = ahci ]; then
+        ISODISK=(-device ich9-ahci,id=ahci0 -drive "if=none,id=hd0,file=$OUT/ziel.img,format=raw"
+                 -device ide-hd,drive=hd0,bus=ahci0.0)
+    fi
     ZEILE="$BASIS modfs modcrc=$CRC"
     [ -n "${OSUM_EXTRA:-}" ] && ZEILE="$ZEILE $OSUM_EXTRA"
     [ -n "$NETZ" ] && ZEILE="$ZEILE $NETZ"
@@ -84,7 +89,7 @@ elif [ "$WIE" = iso ]; then
     run_limited $QEMU_X86 -machine pc -cpu "$CPU" -m "$MEM" -smp "${OSUM_SMP:-1}" \
         -kernel "$OUT/k.mb" -initrd "$OUT/quelle.img" -append "$ZEILE" \
         -serial "file:$OUT/$NAME.txt" -display none -no-reboot "${RTCARGS[@]}" \
-        -drive "file=$OUT/ziel.img,format=raw,if=ide,index=0" \
+        "${ISODISK[@]}" \
         "${ZWEITE[@]}" "${NETARGS[@]}" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04
     rc=$?
