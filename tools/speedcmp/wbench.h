@@ -4,6 +4,7 @@
 #define WB_BATCH 64
 #define WB_NAME_LEN 48
 #define WB_FSYNC_BATCH 16
+#define WB_APPEND_BYTES MIB
 
 typedef long long (*timed_fn)(long n);
 
@@ -176,6 +177,26 @@ static long long timed_mkdir(long n)
     return spent;
 }
 
+static long long timed_append_sized(long n, long bytes)
+{
+    ftruncate(wb_fd, 0);
+    lseek(wb_fd, 0, SEEK_SET);
+    long long t0 = now_ns();
+    for (long i = 0; i < n; i++)
+        (void)!write(wb_fd, io_buf, bytes);
+    return now_ns() - t0;
+}
+
+static long long timed_append_4k(long n)
+{
+    return timed_append_sized(n, PAGE);
+}
+
+static long long timed_append_64k(long n)
+{
+    return timed_append_sized(n, IO_CHUNK);
+}
+
 static void wb_run_all(void)
 {
     wb_prepare();
@@ -186,5 +207,7 @@ static void wb_run_all(void)
     measure_timed("rename_file", timed_rename, WB_BATCH);
     measure_timed("unlink_file", timed_unlink, WB_BATCH);
     measure_timed("mkdir_dir", timed_mkdir, WB_BATCH);
+    measure_timed("file_append_4kib", timed_append_4k, WB_APPEND_BYTES / PAGE);
+    measure_timed("file_append_64kib", timed_append_64k, WB_APPEND_BYTES / IO_CHUNK);
     wb_cleanup();
 }
