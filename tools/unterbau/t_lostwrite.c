@@ -1,5 +1,6 @@
 #define TNAME "lostwrite"
 #include "t.h"
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -19,6 +20,8 @@
 #define RUN_SECONDS 30
 #define MIN_FORKS 100
 #define CHILD_SPIN_NS 150000
+#define TLB_SHOOT_ROUNDS "tlb.10"
+#define TLB_SHOOT_TIMEOUT "tlb.29"
 
 struct hdr { uint64_t a, b; };
 
@@ -33,6 +36,18 @@ static unsigned char *hot[HOT_REGIONS];
 static unsigned char *cold;
 static volatile int stop;
 static volatile long forks;
+
+static long bench_value(const char *key)
+{
+    static char buf[16384];
+    int fd = open("/proc/bench", O_RDONLY);
+    ssize_t n = fd >= 0 ? read(fd, buf, sizeof buf - 1) : 0;
+    if (fd >= 0)
+        close(fd);
+    buf[n > 0 ? n : 0] = 0;
+    char *p = strstr(buf, key);
+    return p ? atol(p + strlen(key) + 1) : -1;
+}
 
 static long now_ns(void)
 {
@@ -238,5 +253,8 @@ int main(void)
             first = workers[i].first;
     }
     CHECK("fork_threads", lost == 0 && forks >= MIN_FORKS, "lost=%ld forks=%ld epochs=%ld %s", lost, (long)forks, epochs, first);
+    long rounds = bench_value(TLB_SHOOT_ROUNDS);
+    long give_ups = bench_value(TLB_SHOOT_TIMEOUT);
+    CHECK("tlb_no_give_up", rounds > 0 && give_ups == 0, "shoot rounds=%ld give-ups=%ld", rounds, give_ups);
     return 0;
 }

@@ -11,7 +11,9 @@ export { flush_space, shoot, shots, timeouts }
 
 const ICR_ASSERT: u64 = 0x4000
 
-const WAIT_DIVISOR: u64 = 50
+const SLOW_DIVISOR: u64 = 50
+
+const GIVE_UP_DIVISOR: u64 = 1
 
 static mut shot_count: u64 = 0
 static mut timeout_count: u64 = 0
@@ -85,7 +87,10 @@ fn shoot(state: u64, cr3: u64) {
 
 fn wait_all(state: u64, mask: u64) {
     let t0: u64 = apic.tsc()
-    let limit: u64 = apic.tsc_hz(state) / WAIT_DIVISOR
+    let hz: u64 = apic.tsc_hz(state)
+    let slow_after: u64 = hz / SLOW_DIVISOR
+    let give_up_after: u64 = hz / GIVE_UP_DIVISOR
+    var slow: bool = false
     var k: u64 = 0
     while k < tlbserve.MAX_CPUS {
         if ((mask >> k) & 1) != 0 {
@@ -93,9 +98,17 @@ fn wait_all(state: u64, mask: u64) {
             while !tlbserve.acked(k, gen) {
                 tlbserve.serve(state)
                 asm("pause")
-                if limit != 0 && tscdelta.between(t0, apic.tsc()) > limit {
-                    timeout_count = timeout_count + 1
-                    return
+                if give_up_after != 0 {
+                    let waited: u64 = tscdelta.between(t0, apic.tsc())
+                    if !slow && waited > slow_after {
+                        slow = true
+                        tlbstat.note(tlbstat.SHOOT_SLOW)
+                    }
+                    if waited > give_up_after {
+                        timeout_count = timeout_count + 1
+                        tlbstat.note(tlbstat.SHOOT_TIMEOUT)
+                        return
+                    }
                 }
             }
         }
