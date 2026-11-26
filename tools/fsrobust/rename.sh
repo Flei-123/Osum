@@ -27,7 +27,7 @@ one() {
         -serial "file:$s1" -display none -no-reboot "${drv[@]}" -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
     local q=$!
     for _ in $(seq 1 1200); do
-        tr -d '\000' < "$s1" 2>/dev/null | grep -qa 'fsrw: los' && break
+        { tr -d '\000' < "$s1"; } 2>/dev/null | grep -qa 'fsrw: los' && break
         kill -0 $q 2>/dev/null || break
         sleep 0.05
     done
