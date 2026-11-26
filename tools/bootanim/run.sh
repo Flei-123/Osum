@@ -29,6 +29,7 @@ for s in $STYLES; do
 done
 python3 -I tools/bootanim/shots.py moved "$H_DIR/mix-90.raw" "$H_DIR/mix-90.raw" ${W}x$H && bad "counter-proof: identical frames accepted as moving" || ok "counter-proof: identical frames rejected"
 frame bogus 90
+frame mix 90
 cmp -s "$H_DIR/bogus-90.raw" "$H_DIR/mix-90.raw" && ok "unknown style name falls back to the default (mix)" || bad "unknown style name not mapped to the default"
 
 echo "== host: frame budget at 1920x1080 (release-fast, ${BUDGET_MS} ms) =="
