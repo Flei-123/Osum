@@ -37,6 +37,30 @@ static void run_open_close(long n)
     }
 }
 
+static long sbm_missing_serial;
+
+static void sbm_missing_name(char *path, long serial)
+{
+    static const char prefix[] = SBM_DIR "/lib";
+    memcpy(path, prefix, sizeof prefix - 1);
+    char *p = path + sizeof prefix - 1;
+    do {
+        *p++ = (char)('0' + serial % 10);
+        serial /= 10;
+    } while (serial);
+    memcpy(p, ".so", 4);
+}
+
+static void run_open_missing(long n)
+{
+    char path[SBM_PATH_LEN];
+    for (long i = 0; i < n; i++) {
+        sbm_missing_name(path, sbm_missing_serial++);
+        if (open(path, O_RDONLY) >= 0)
+            exit(14);
+    }
+}
+
 static void run_stat_path(long n)
 {
     struct stat st;
@@ -80,6 +104,7 @@ static void sbm_run_all(void)
         return;
     }
     measure("open_close", run_open_close, 1000, 1, 1);
+    measure("open_missing", run_open_missing, 1000, 1, 1);
     measure("stat_path", run_stat_path, 1000, 1, 1);
     measure("stat_missing", run_stat_missing, 1000, 1, 1);
     measure("readdir_100", run_readdir, 20, 1, 1);

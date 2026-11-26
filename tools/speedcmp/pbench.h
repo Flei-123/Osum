@@ -55,6 +55,30 @@ static void run_open_close_deep(long n)
         close(open(PB_DEEP_FILE, O_RDONLY));
 }
 
+static long pb_missing_serial;
+
+static void pb_missing_name(char *path, long serial)
+{
+    static const char prefix[] = PB_BIG "/lib";
+    memcpy(path, prefix, sizeof prefix - 1);
+    char *p = path + sizeof prefix - 1;
+    do {
+        *p++ = (char)('0' + serial % 10);
+        serial /= 10;
+    } while (serial);
+    memcpy(p, ".so", 4);
+}
+
+static void run_open_missing_big(long n)
+{
+    char path[PB_BIG_NAME_LEN];
+    for (long i = 0; i < n; i++) {
+        pb_missing_name(path, pb_missing_serial++);
+        if (open(path, O_RDONLY) >= 0)
+            exit(14);
+    }
+}
+
 static void run_stat_flat(long n)
 {
     struct stat st;
@@ -118,6 +142,7 @@ static void pb_run_all(void)
 {
     pb_prepare();
     pb_measure("open_close_deep", run_open_close_deep, 2000, 1);
+    pb_measure("open_missing_big", run_open_missing_big, 2000, 1);
     pb_measure("stat_flat", run_stat_flat, 2000, 1);
     pb_measure("stat_deep", run_stat_deep, 2000, 1);
     pb_measure("access_flat", run_access_flat, 2000, 1);
