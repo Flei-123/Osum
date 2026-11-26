@@ -24,9 +24,9 @@ import gfx.drm.drmgone
 export {
     init, init_task, clear_task, inherit_task, inherit_std,
     next_used_fd,
-    owner, share_table, release_use, high_reset,
+    owner, share_table, release_use, high_reset, table_shared, slot_at,
     fd_of, fd_set, fd_alloc, fd_free, fd_take, FD_RESERVED,
-    open_alloc, open_ref, open_hold, open_put, open_teardown, open_unref, fd_detach,
+    open_alloc, open_ref, open_hold, open_put, open_put_fast, open_teardown, open_unref, fd_detach,
     PUT_MORE, PUT_LAST, PUT_DEFERRED, open_kind, open_ino, open_off,
     open_set_off, open_flags, open_set_flags, open_used, open_refs,
     pipe_new, pipe_get, pipe_put, pipe_put_block, pipe_put_span, pipe_get_span, pipe_cap, pipe_room, pipe_bytes, pipe_writers,
@@ -445,6 +445,10 @@ const FDOWN_SLOT: u64 = 0xFFFF
 const FDOWN_REL: u64 = 0x8000000000000000
 const FDOWN_SHARED: u64 = 0x4000000000000000
 
+fn table_shared(state: u64, task: u64) -> bool {
+    return (taskslot.tget(state, task, taskconst.T_FDOWN) & (FDOWN_SLOT | FDOWN_SHARED)) != 0
+}
+
 fn owner(state: u64, task: u64) -> u64 {
     if task >= kstate.MAX_TASKS {
         return task
@@ -604,10 +608,14 @@ fn open_unref(state: u64, i: u64) {
     }
 }
 
-fn open_put(state: u64, i: u64) -> u64 {
+fn open_put_fast(state: u64, i: u64) -> bool {
     let a: u64 = ref_addr(state, i)
-    let r: u64 = atomic.load(a)
-    if r > 1 && atomic.cas(a, r, r - 1) == r {
+    let r: u64 = *(a as *mut u64)
+    return r > 1 && atomic.cas(a, r, r - 1) == r
+}
+
+fn open_put(state: u64, i: u64) -> u64 {
+    if open_put_fast(state, i) {
         return PUT_MORE
     }
     let flags: u64 = fdlock.enter(state)

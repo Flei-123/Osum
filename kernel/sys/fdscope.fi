@@ -4,6 +4,7 @@ profile kernel
 import lib.kstate
 import fs.file
 import fs.unixsock
+import ipc.handle
 import net.inet
 import net.netview
 import sched.sched
@@ -44,8 +45,24 @@ fn scope_has(me: u64, n: u64, of: u64) -> bool {
 }
 
 fn use(state: u64, me: u64, fd: u64, need: u64) -> u64 {
-    let of: u64 = file.fd_check(state, me, fd, need)
-    if of >= file.MAX_OPEN || of <= file.CON_ERR || me >= SCOPE_TASKS {
+    if !file.table_shared(state, me) {
+        return file.fd_check(state, me, fd, need)
+    }
+    return use_shared(state, me, fd, need)
+}
+
+fn use_shared(state: u64, me: u64, fd: u64, need: u64) -> u64 {
+    if fd >= file.MAX_FD || me >= SCOPE_TASKS {
+        return file.MAX_OPEN
+    }
+    let table: u64 = file.owner(state, me)
+    let slot: u64 = state + file.slot_at(table, fd)
+    let h: u64 = __mmio_read64(slot as *mut u64)
+    if h == handle.HANDLE_NONE {
+        return file.MAX_OPEN
+    }
+    let of: u64 = handle.resolve_num(state, table, h, need)
+    if of >= file.MAX_OPEN || of <= file.CON_ERR {
         return of
     }
     let n: u64 = __mmio_read64(count_cell(me) as *mut u64)
@@ -55,7 +72,7 @@ fn use(state: u64, me: u64, fd: u64, need: u64) -> u64 {
     if !file.open_hold(state, of) {
         return file.MAX_OPEN
     }
-    if file.fd_check(state, me, fd, need) != of {
+    if __mmio_read64(slot as *mut u64) != h {
         put(state, of)
         return file.MAX_OPEN
     }
@@ -65,10 +82,18 @@ fn use(state: u64, me: u64, fd: u64, need: u64) -> u64 {
 }
 
 fn drain(state: u64, me: u64) {
-    var n: u64 = scope_count(me)
+    if me >= SCOPE_TASKS {
+        return
+    }
+    let n: u64 = __mmio_read64(count_cell(me) as *mut u64)
     if n == 0 {
         return
     }
+    drain_slow(state, me)
+}
+
+fn drain_slow(state: u64, me: u64) {
+    var n: u64 = scope_count(me)
     __mmio_write64(count_cell(me) as *mut u64, 0)
     while n > 0 {
         n = n - 1
@@ -80,6 +105,13 @@ fn put(state: u64, of: u64) {
     if of >= file.MAX_OPEN || of <= file.CON_ERR {
         return
     }
+    if file.open_put_fast(state, of) {
+        return
+    }
+    put_last(state, of)
+}
+
+fn put_last(state: u64, of: u64) {
     let kind: u64 = file.open_kind(state, of)
     let ino: u64 = file.open_ino(state, of)
     let verdict: u64 = file.open_put(state, of)
