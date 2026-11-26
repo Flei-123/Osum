@@ -1,0 +1,368 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import std.rt
+import libc.net
+import libc.clockapi
+import kvfile
+
+export { discover, parse_response, build_query, resolve_records }
+
+const MDNS_PORT: u64 = 5353
+const LOCAL_PORT: u64 = 51353
+const QUERY_ID: u32 = 0x4D44
+const TYPE_A: u32 = 1
+const TYPE_PTR: u32 = 12
+const TYPE_TXT: u32 = 16
+const TYPE_SRV: u32 = 33
+const CLASS_QU: u32 = 0x8001
+const POLL_MS: u64 = 50
+const PACKET_MAX: u64 = 4096
+const DEFAULT_RP: str = "ipp/print"
+const SERVICE_SUFFIX: str = "._ipp._tcp.local"
+const MAX_JUMPS: u32 = 16
+
+fn be16(p: u64, i: usize) -> u32 {
+    return ((rt.ld8(p, i) as u32) << 8) | (rt.ld8(p, i + 1) as u32)
+}
+
+fn put16(b: *mut rt.Buf, v: u32) {
+    rt.buf_push(b, ((v >> 8) & 255) as u8)
+    rt.buf_push(b, (v & 255) as u8)
+}
+
+fn push_label(b: *mut rt.Buf, s: str) {
+    rt.buf_push(b, s.n as u8)
+    rt.buf_push_bytes(b, s.p as u64, s.n)
+}
+
+fn build_query(b: *mut rt.Buf) {
+    put16(b, QUERY_ID)
+    put16(b, 0 as u32)
+    put16(b, 1 as u32)
+    put16(b, 0 as u32)
+    put16(b, 0 as u32)
+    put16(b, 0 as u32)
+    push_label(b, "_ipp")
+    push_label(b, "_tcp")
+    push_label(b, "local")
+    rt.buf_push(b, 0 as u8)
+    put16(b, TYPE_PTR)
+    put16(b, CLASS_QU)
+}
+
+fn name_next(p: u64, n: usize, off: usize) -> usize {
+    var i: usize = off
+    while i < n {
+        let l: u32 = rt.ld8(p, i) as u32
+        if l == 0 as u32 {
+            return i + 1
+        }
+        if (l & 0xC0 as u32) == 0xC0 as u32 {
+            return i + 2
+        }
+        i = i + 1 + l as usize
+    }
+    return n + 1
+}
+
+fn name_text(p: u64, n: usize, off: usize, out: *mut rt.Buf) -> bool {
+    var i: usize = off
+    var jumps: u32 = 0
+    var first: bool = true
+    while i < n {
+        let l: u32 = rt.ld8(p, i) as u32
+        if l == 0 as u32 {
+            return true
+        }
+        if (l & 0xC0 as u32) == 0xC0 as u32 {
+            if i + 1 >= n || jumps >= MAX_JUMPS {
+                return false
+            }
+            i = (((l & 0x3F as u32) << 8) | (rt.ld8(p, i + 1) as u32)) as usize
+            jumps = jumps + 1
+        } else {
+            if i + 1 + l as usize > n {
+                return false
+            }
+            if !first {
+                rt.buf_push(out, 46 as u8)
+            }
+            first = false
+            rt.buf_push_bytes(out, p + (i + 1) as u64, l as usize)
+            i = i + 1 + l as usize
+        }
+    }
+    return false
+}
+
+fn rec_start(rec: *mut rt.Buf, kind: u8, name: *mut rt.Buf) {
+    rt.buf_push(rec, kind)
+    rt.buf_push(rec, 124 as u8)
+    rt.buf_push_bytes(rec, (*name).ptr, (*name).len)
+}
+
+fn rec_end(rec: *mut rt.Buf) {
+    rt.buf_push(rec, 10 as u8)
+}
+
+fn rec_sep(rec: *mut rt.Buf) {
+    rt.buf_push(rec, 124 as u8)
+}
+
+fn push_ip(rec: *mut rt.Buf, p: u64, i: usize) {
+    var k: usize = 0
+    while k < 4 {
+        if k > 0 {
+            rt.buf_push(rec, 46 as u8)
+        }
+        rt.buf_push_dec_u64(rec, rt.ld8(p, i + k) as u64)
+        k = k + 1
+    }
+}
+
+fn txt_rp(p: u64, off: usize, len: usize, rec: *mut rt.Buf) {
+    var i: usize = off
+    while i < off + len {
+        let l: usize = rt.ld8(p, i) as usize
+        if l >= 3 && i + 1 + l <= off + len && rt.ld8(p, i + 1) == 114 as u8
+            && rt.ld8(p, i + 2) == 112 as u8 && rt.ld8(p, i + 3) == 61 as u8 {
+            rt.buf_push_bytes(rec, p + (i + 4) as u64, l - 3)
+        }
+        i = i + 1 + l
+    }
+}
+
+fn parse_response(p: u64, n: usize, rec: *mut rt.Buf) -> bool {
+    if n < 12 || be16(p, 0) != QUERY_ID && be16(p, 0) != 0 as u32 {
+        return false
+    }
+    let total: usize = (be16(p, 6) + be16(p, 8) + be16(p, 10)) as usize
+    var off: usize = 12
+    var q: u32 = be16(p, 4)
+    while q > (0 as u32) {
+        off = name_next(p, n, off) + 4
+        q = q - 1
+    }
+    var k: usize = 0
+    while k < total && off + 10 <= n {
+        var name: rt.Buf = rt.buf_new()
+        let ok: bool = name_text(p, n, off, &name)
+        off = name_next(p, n, off)
+        if off + 10 > n {
+            rt.buf_free(&name)
+            return false
+        }
+        let typ: u32 = be16(p, off)
+        let rdlen: usize = be16(p, off + 8) as usize
+        let rd: usize = off + 10
+        if rd + rdlen > n {
+            rt.buf_free(&name)
+            return false
+        }
+        if ok {
+            record_one(p, n, typ, &name, rd, rdlen, rec)
+        }
+        rt.buf_free(&name)
+        off = rd + rdlen
+        k = k + 1
+    }
+    return true
+}
+
+fn record_one(p: u64, n: usize, typ: u32, name: *mut rt.Buf, rd: usize, rdlen: usize,
+    rec: *mut rt.Buf) {
+    if typ == TYPE_PTR {
+        var target: rt.Buf = rt.buf_new()
+        if name_text(p, n, rd, &target) {
+            rec_start(rec, 80 as u8, &target)
+            rec_end(rec)
+        }
+        rt.buf_free(&target)
+    } else if typ == TYPE_SRV && rdlen >= 7 {
+        var host: rt.Buf = rt.buf_new()
+        if name_text(p, n, rd + 6, &host) {
+            rec_start(rec, 83 as u8, name)
+            rec_sep(rec)
+            rt.buf_push_dec_u64(rec, be16(p, rd + 4) as u64)
+            rec_sep(rec)
+            rt.buf_push_bytes(rec, host.ptr, host.len)
+            rec_end(rec)
+        }
+        rt.buf_free(&host)
+    } else if typ == TYPE_TXT {
+        rec_start(rec, 84 as u8, name)
+        rec_sep(rec)
+        txt_rp(p, rd, rdlen, rec)
+        rec_end(rec)
+    } else if typ == TYPE_A && rdlen == 4 {
+        rec_start(rec, 65 as u8, name)
+        rec_sep(rec)
+        push_ip(rec, p, rd)
+        rec_end(rec)
+    }
+}
+
+fn field(p: u64, from: usize, to: usize, idx: usize, out: *mut rt.Buf) {
+    rt.buf_clear(out)
+    var k: usize = 0
+    var s: usize = from
+    var i: usize = from
+    while i <= to {
+        if i == to || rt.ld8(p, i) == 124 as u8 {
+            if k == idx {
+                rt.buf_push_bytes(out, p + s as u64, i - s)
+                return
+            }
+            k = k + 1
+            s = i + 1
+        }
+        i = i + 1
+    }
+}
+
+fn find_line(rec: *mut rt.Buf, kind: u8, name: *mut rt.Buf, a: *mut usize, b: *mut usize) -> bool {
+    let n: usize = (*rec).len
+    var i: usize = 0
+    var f: rt.Buf = rt.buf_new()
+    while i < n {
+        let e: usize = kvfile.line_end((*rec).ptr, n, i)
+        if e - i > 2 && rt.ld8((*rec).ptr, i) == kind {
+            field((*rec).ptr, i + 2, e, 0, &f)
+            if f.len == (*name).len && rt.mem_eq(f.ptr, (*name).ptr, f.len) {
+                *a = i + 2
+                *b = e
+                rt.buf_free(&f)
+                return true
+            }
+        }
+        i = e + 1
+    }
+    rt.buf_free(&f)
+    return false
+}
+
+fn instance_label(fqdn: *mut rt.Buf, out: *mut rt.Buf) {
+    var cut: usize = (*fqdn).len
+    if cut > SERVICE_SUFFIX.n && rt.mem_eq((*fqdn).ptr + (cut - SERVICE_SUFFIX.n) as u64,
+        SERVICE_SUFFIX.p as u64, SERVICE_SUFFIX.n) {
+        cut = cut - SERVICE_SUFFIX.n
+    }
+    rt.buf_clear(out)
+    rt.buf_push_bytes(out, (*fqdn).ptr, cut)
+}
+
+fn emit_printer(rec: *mut rt.Buf, fqdn: *mut rt.Buf, out: *mut rt.Buf) -> bool {
+    var sa: usize = 0
+    var sb: usize = 0
+    if !find_line(rec, 83 as u8, fqdn, &sa, &sb) {
+        return false
+    }
+    var port: rt.Buf = rt.buf_new()
+    var host: rt.Buf = rt.buf_new()
+    field((*rec).ptr, sa, sb, 1, &port)
+    field((*rec).ptr, sa, sb, 2, &host)
+    var ha: usize = 0
+    var hb: usize = 0
+    var ok: bool = false
+    if find_line(rec, 65 as u8, &host, &ha, &hb) {
+        var ip: rt.Buf = rt.buf_new()
+        var rp: rt.Buf = rt.buf_new()
+        var label: rt.Buf = rt.buf_new()
+        field((*rec).ptr, ha, hb, 1, &ip)
+        var ta: usize = 0
+        var tb: usize = 0
+        if find_line(rec, 84 as u8, fqdn, &ta, &tb) {
+            field((*rec).ptr, ta, tb, 1, &rp)
+        }
+        if rp.len == 0 {
+            rt.buf_push_bytes(&rp, DEFAULT_RP.p as u64, DEFAULT_RP.n)
+        }
+        instance_label(fqdn, &label)
+        rt.buf_push_bytes(out, label.ptr, label.len)
+        rt.buf_push_bytes(out, "=ipp://".p as u64, 7)
+        rt.buf_push_bytes(out, ip.ptr, ip.len)
+        rt.buf_push(out, 58 as u8)
+        rt.buf_push_bytes(out, port.ptr, port.len)
+        rt.buf_push(out, 47 as u8)
+        rt.buf_push_bytes(out, rp.ptr, rp.len)
+        rt.buf_push(out, 10 as u8)
+        rt.buf_free(&ip)
+        rt.buf_free(&rp)
+        rt.buf_free(&label)
+        ok = true
+    }
+    rt.buf_free(&port)
+    rt.buf_free(&host)
+    return ok
+}
+
+fn resolve_records(rec: *mut rt.Buf, out: *mut rt.Buf) -> usize {
+    var count: usize = 0
+    let n: usize = (*rec).len
+    var i: usize = 0
+    var name: rt.Buf = rt.buf_new()
+    while i < n {
+        let e: usize = kvfile.line_end((*rec).ptr, n, i)
+        if e - i > 2 && rt.ld8((*rec).ptr, i) == 80 as u8 {
+            field((*rec).ptr, i + 2, e, 0, &name)
+            var before: usize = (*out).len
+            if emit_printer(rec, &name, out) && !duplicate(out, before) {
+                count = count + 1
+            } else {
+                (*out).len = before
+            }
+        }
+        i = e + 1
+    }
+    rt.buf_free(&name)
+    return count
+}
+
+fn duplicate(out: *mut rt.Buf, start: usize) -> bool {
+    let n: usize = (*out).len
+    let e: usize = start + (kvfile.line_end((*out).ptr, n, start) - start) + 1
+    var i: usize = 0
+    while i < start {
+        let le: usize = kvfile.line_end((*out).ptr, n, i)
+        if le - i + 1 == e - start && rt.mem_eq((*out).ptr + i as u64, (*out).ptr + start as u64, e - start - 1) {
+            return true
+        }
+        i = le + 1
+    }
+    return false
+}
+
+fn discover(wait_ms: u64, out: *mut rt.Buf) -> usize {
+    let fd: u64 = net.socket(net.AF_INET, net.SOCK_DGRAM | net.SOCK_NONBLOCK, 0)
+    if net.failed(fd) {
+        return 0
+    }
+    if net.failed(net.bind_port(fd, LOCAL_PORT)) {
+        net.close(fd)
+        return 0
+    }
+    var q: rt.Buf = rt.buf_new()
+    build_query(&q)
+    let group: u64 = net.ip4(224, 0, 0, 251)
+    net.sendto_ip(fd, q.ptr as u64, q.len as u64, group, MDNS_PORT)
+    rt.buf_free(&q)
+    var rec: rt.Buf = rt.buf_new()
+    var pkt: rt.Buf = rt.buf_new()
+    rt.buf_reserve(&pkt, PACKET_MAX as usize)
+    var waited: u64 = 0
+    var from: u64 = 0
+    while waited < wait_ms {
+        let r: u64 = net.recvfrom_ip(fd, pkt.ptr, PACKET_MAX, &from)
+        if !net.failed(r) && r > 0 {
+            parse_response(pkt.ptr, r as usize, &rec)
+        } else {
+            clockapi.sleep_ms(POLL_MS)
+            waited = waited + POLL_MS
+        }
+    }
+    net.close(fd)
+    let c: usize = resolve_records(&rec, out)
+    rt.buf_free(&rec)
+    rt.buf_free(&pkt)
+    return c
+}

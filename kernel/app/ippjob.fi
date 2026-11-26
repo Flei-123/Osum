@@ -1,0 +1,156 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import std.rt
+import ippwire
+
+export { JobOpts, opts_new, opts_parse, opts_write, opts_free, T_JOB_GROUP }
+
+const T_JOB_GROUP: u8 = 0x02
+const T_INTEGER: u8 = 0x21
+const T_NAME: u8 = 0x42
+const T_KEYWORD: u8 = 0x44
+const COPIES_MAX: u32 = 999
+const PAGE_MAX: u32 = 100000
+
+struct JobOpts {
+    copies: u32,
+    mono: bool,
+    color: bool,
+    lo: u32,
+    hi: u32,
+    media: rt.Buf,
+    sides: rt.Buf,
+}
+
+fn opts_new() -> JobOpts {
+    return JobOpts { copies: 1 as u32, mono: false, color: false, lo: 0 as u32,
+        hi: 0 as u32, media: rt.buf_new(), sides: rt.buf_new() }
+}
+
+fn opts_free(o: *mut JobOpts) {
+    rt.buf_free(&(*o).media)
+    rt.buf_free(&(*o).sides)
+}
+
+fn word_is(p: u64, s: str) -> bool {
+    return rt.c_length(p) == s.n && rt.mem_eq(p, s.p as u64, s.n)
+}
+
+fn number(p: u64, out: *mut u32) -> bool {
+    let n: usize = rt.c_length(p)
+    if n == 0 || n > 6 {
+        return false
+    }
+    var v: u32 = 0
+    var i: usize = 0
+    while i < n {
+        let c: u8 = rt.ld8(p, i)
+        if c < 48 as u8 || c > 57 as u8 {
+            return false
+        }
+        v = v * (10 as u32) + ((c - 48 as u8) as u32)
+        i = i + 1
+    }
+    *out = v
+    return true
+}
+
+fn range_parse(p: u64, o: *mut JobOpts) -> bool {
+    let n: usize = rt.c_length(p)
+    var dash: usize = n
+    var i: usize = 0
+    while i < n {
+        if rt.ld8(p, i) == 45 as u8 {
+            dash = i
+        }
+        i = i + 1
+    }
+    var lo: u32 = 0
+    var hi: u32 = 0
+    var head: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&head, p, dash)
+    rt.buf_push(&head, 0 as u8)
+    let okl: bool = number(head.ptr, &lo)
+    rt.buf_free(&head)
+    if !okl {
+        return false
+    }
+    hi = lo
+    if dash < n {
+        if !number(p + (dash + 1) as u64, &hi) {
+            return false
+        }
+    }
+    if lo < (1 as u32) || hi < lo || hi > PAGE_MAX {
+        return false
+    }
+    (*o).lo = lo
+    (*o).hi = hi
+    return true
+}
+
+fn take_text(p: u64, b: *mut rt.Buf) {
+    rt.buf_push_bytes(b, p, rt.c_length(p))
+}
+
+fn opts_parse(start: u64, from: usize, argc: usize, o: *mut JobOpts) -> bool {
+    var i: usize = from
+    while i < argc {
+        let w: u64 = rt.arg_ptr(start, i)
+        if i + 1 >= argc {
+            return false
+        }
+        let v: u64 = rt.arg_ptr(start, i + 1)
+        if word_is(w, "--copies") {
+            var c: u32 = 0
+            if !number(v, &c) || c < (1 as u32) || c > COPIES_MAX {
+                return false
+            }
+            (*o).copies = c
+        } else if word_is(w, "--color") {
+            if word_is(v, "mono") {
+                (*o).mono = true
+                (*o).color = false
+            } else if word_is(v, "color") {
+                (*o).color = true
+                (*o).mono = false
+            } else {
+                return false
+            }
+        } else if word_is(w, "--pages") {
+            if !range_parse(v, o) {
+                return false
+            }
+        } else if word_is(w, "--media") {
+            take_text(v, &(*o).media)
+        } else if word_is(w, "--sides") {
+            take_text(v, &(*o).sides)
+        } else {
+            return false
+        }
+        i = i + 2
+    }
+    return true
+}
+
+fn opts_write(b: *mut rt.Buf, o: *mut JobOpts) {
+    rt.buf_push(b, T_JOB_GROUP)
+    if (*o).copies > (1 as u32) {
+        ippwire.attr_int(b, T_INTEGER, "copies", (*o).copies)
+    }
+    if (*o).mono {
+        ippwire.attr_s(b, T_KEYWORD, "print-color-mode", "monochrome")
+    }
+    if (*o).color {
+        ippwire.attr_s(b, T_KEYWORD, "print-color-mode", "color")
+    }
+    if (*o).hi != (0 as u32) {
+        ippwire.attr_range(b, "page-ranges", (*o).lo, (*o).hi)
+    }
+    if (*o).media.len > 0 {
+        ippwire.attr(b, T_KEYWORD, "media", (*o).media.ptr, (*o).media.len)
+    }
+    if (*o).sides.len > 0 {
+        ippwire.attr(b, T_KEYWORD, "sides", (*o).sides.ptr, (*o).sides.len)
+    }
+}

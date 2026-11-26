@@ -1,0 +1,592 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import std.io
+import std.rt
+import ippjob
+import kvfile
+import mdns
+import printq
+import printreg
+
+const RC_OK: i32 = 0
+const RC_CALL: i32 = 2
+const RC_NOFILE: i32 = 3
+const RC_NOPRINTER: i32 = 4
+const RC_NOJOB: i32 = 5
+const RC_STORE: i32 = 6
+
+const SYS_MKDIR: i64 = 83
+const SYS_KILL: i64 = 62
+const NANOSLEEP_NR: i64 = 35
+const SIGTERM: i64 = 15
+const DIR_MODE: i64 = 493
+const SERVE_POLL_MS: u64 = 1000
+const FIND_WAIT_MS: u64 = 1500
+const IPPRINT_PATH: str = "/bin/ipprint"
+const ARGV_BASE: usize = 3
+const ARGV_MAX: usize = 24
+
+fn say_s(key: str, v: str) {
+    io.print("printd: ")
+    io.print(key)
+    io.print(" = ")
+    io.print(v)
+    io.print("\n")
+}
+
+fn say_b(key: str, p: u64, n: usize) {
+    io.print("printd: ")
+    io.print(key)
+    io.print(" = ")
+    rt.write_everything(1, p, n)
+    io.print("\n")
+}
+
+fn say_n(key: str, v: u64) {
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&b, v)
+    say_b(key, b.ptr, b.len)
+    rt.buf_free(&b)
+}
+
+fn arg_is(a: u64, s: str) -> bool {
+    return rt.c_length(a) == s.n && rt.mem_eq(a, s.p as u64, s.n)
+}
+
+fn sleep_ms(ms: u64) {
+    var ts: [i64; 2] = [0; 2]
+    ts[0] = (ms / 1000) as i64
+    ts[1] = ((ms % 1000) * 1000000) as i64
+    syscall(NANOSLEEP_NR, (&ts[0]) as i64, 0, 0, 0, 0, 0)
+}
+
+fn cstr(b: *mut rt.Buf, s: str) {
+    rt.buf_push_bytes(b, s.p as u64, s.n)
+}
+
+fn spool_ready() {
+    var p: rt.Buf = rt.buf_new()
+    cstr(&p, "/var")
+    rt.buf_push(&p, 0 as u8)
+    syscall(SYS_MKDIR, p.ptr as i64, DIR_MODE, 0, 0, 0, 0)
+    rt.buf_clear(&p)
+    cstr(&p, "/var/spool")
+    rt.buf_push(&p, 0 as u8)
+    syscall(SYS_MKDIR, p.ptr as i64, DIR_MODE, 0, 0, 0, 0)
+    rt.buf_clear(&p)
+    cstr(&p, printq.SPOOL_DIR)
+    rt.buf_push(&p, 0 as u8)
+    syscall(SYS_MKDIR, p.ptr as i64, DIR_MODE, 0, 0, 0, 0)
+    rt.buf_free(&p)
+}
+
+fn resolve_printer(arg: u64, uri: *mut rt.Buf, label: *mut rt.Buf) -> bool {
+    let n: usize = rt.c_length(arg)
+    if kvfile.starts_with(arg, n, "ipp://") || kvfile.starts_with(arg, n, "ipps://") {
+        rt.buf_push_bytes(uri, arg, n)
+        rt.buf_push_bytes(label, arg, n)
+        return true
+    }
+    var reg: rt.Buf = rt.buf_new()
+    var ok: bool = false
+    if printreg.reg_load(&reg) {
+        if n == 0 || arg_is(arg, "-") {
+            if printreg.reg_default(&reg, label) {
+                ok = printreg.reg_lookup(&reg, label, uri)
+            }
+        } else {
+            rt.buf_push_bytes(label, arg, n)
+            ok = printreg.reg_lookup(&reg, label, uri)
+        }
+    }
+    rt.buf_free(&reg)
+    return ok
+}
+
+fn base_name(p: u64, out: *mut rt.Buf) {
+    let n: usize = rt.c_length(p)
+    var s: usize = 0
+    var i: usize = 0
+    while i < n {
+        if rt.ld8(p, i) == 47 as u8 {
+            s = i + 1
+        }
+        i = i + 1
+    }
+    rt.buf_push_bytes(out, p + s as u64, n - s)
+}
+
+fn submit_file(printer: u64, src: u64, args: *mut rt.Buf, name: *mut rt.Buf) -> i32 {
+    var uri: rt.Buf = rt.buf_new()
+    var label: rt.Buf = rt.buf_new()
+    if !resolve_printer(printer, &uri, &label) {
+        say_s("state", "noprinter")
+        rt.buf_free(&uri)
+        rt.buf_free(&label)
+        return RC_NOPRINTER
+    }
+    var data: rt.Buf = rt.buf_new()
+    if !rt.read_file(src, &data) {
+        say_s("state", "nofile")
+        rt.buf_free(&uri)
+        rt.buf_free(&label)
+        rt.buf_free(&data)
+        return RC_NOFILE
+    }
+    spool_ready()
+    let id: u64 = printq.next_id()
+    var dp: rt.Buf = rt.buf_new()
+    printq.data_path(&dp, id)
+    var j: printq.Job = printq.job_new()
+    j.id = id
+    cstr(&j.state, printq.STATE_QUEUED)
+    rt.buf_push_bytes(&j.printer, uri.ptr, uri.len)
+    rt.buf_push_bytes(&j.name, (*name).ptr, (*name).len)
+    rt.buf_push_bytes(&j.args, (*args).ptr, (*args).len)
+    var rc: i32 = RC_OK
+    if rt.write_file(dp.ptr, data.ptr, data.len) && printq.job_save(&j) {
+        say_n("job", id)
+        say_s("state", "queued")
+        say_b("printer", label.ptr, label.len)
+    } else {
+        say_s("state", "nospool")
+        rc = RC_STORE
+    }
+    printq.job_free(&j)
+    rt.buf_free(&dp)
+    rt.buf_free(&data)
+    rt.buf_free(&uri)
+    rt.buf_free(&label)
+    return rc
+}
+
+fn join_args(start: u64, from: usize, argc: usize, out: *mut rt.Buf) {
+    var i: usize = from
+    while i < argc {
+        if i > from {
+            rt.buf_push(out, 32 as u8)
+        }
+        let a: u64 = rt.arg_ptr(start, i)
+        rt.buf_push_bytes(out, a, rt.c_length(a))
+        i = i + 1
+    }
+}
+
+fn cmd_submit(start: u64, argc: usize) -> i32 {
+    if argc < 4 {
+        return RC_CALL
+    }
+    var jo: ippjob.JobOpts = ippjob.opts_new()
+    let good: bool = ippjob.opts_parse(start, 4, argc, &jo)
+    ippjob.opts_free(&jo)
+    if !good {
+        say_s("state", "options")
+        return RC_CALL
+    }
+    var args: rt.Buf = rt.buf_new()
+    var name: rt.Buf = rt.buf_new()
+    join_args(start, 4, argc, &args)
+    base_name(rt.arg_ptr(start, 3), &name)
+    let rc: i32 = submit_file(rt.arg_ptr(start, 2), rt.arg_ptr(start, 3), &args, &name)
+    rt.buf_free(&args)
+    rt.buf_free(&name)
+    return rc
+}
+
+fn cmd_test(start: u64, argc: usize) -> i32 {
+    var path: rt.Buf = rt.buf_new()
+    var page: rt.Buf = rt.buf_new()
+    var name: rt.Buf = rt.buf_new()
+    var args: rt.Buf = rt.buf_new()
+    cstr(&path, "/var/spool/print/testpage.txt")
+    rt.buf_push(&path, 0 as u8)
+    cstr(&page, "Test page\nThe printer is set up correctly.\nAa Bb Cc 0123456789\n")
+    spool_ready()
+    rt.write_file(path.ptr, page.ptr, page.len)
+    cstr(&name, "Test page")
+    var dash: [u8; 2] = "-\0"
+    var printer: u64 = (&dash[0]) as u64
+    if argc > 2 {
+        printer = rt.arg_ptr(start, 2)
+    }
+    let rc: i32 = submit_file(printer, path.ptr, &args, &name)
+    rt.buf_free(&path)
+    rt.buf_free(&page)
+    rt.buf_free(&name)
+    rt.buf_free(&args)
+    return rc
+}
+
+fn print_job_line(j: *mut printq.Job) {
+    var line: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&line, (*j).id)
+    rt.buf_push(&line, 32 as u8)
+    rt.buf_push_bytes(&line, (*j).state.ptr, (*j).state.len)
+    rt.buf_push(&line, 32 as u8)
+    rt.buf_push_bytes(&line, (*j).printer.ptr, (*j).printer.len)
+    rt.buf_push(&line, 32 as u8)
+    rt.buf_push_bytes(&line, (*j).name.ptr, (*j).name.len)
+    say_b("job", line.ptr, line.len)
+    rt.buf_free(&line)
+}
+
+fn cmd_list() -> i32 {
+    let last: u64 = printq.last_id()
+    var shown: u64 = 0
+    var id: u64 = 1
+    while id <= last {
+        var j: printq.Job = printq.job_new()
+        if printq.job_load(id, &j) {
+            print_job_line(&j)
+            shown = shown + 1
+        }
+        printq.job_free(&j)
+        id = id + 1
+    }
+    say_n("jobs", shown)
+    return RC_OK
+}
+
+fn parse_id(a: u64) -> u64 {
+    var v: u64 = 0
+    let n: usize = rt.c_length(a)
+    var i: usize = 0
+    while i < n {
+        let c: u8 = rt.ld8(a, i)
+        if c < 48 as u8 || c > 57 as u8 {
+            return 0
+        }
+        v = v * 10 + ((c - 48 as u8) as u64)
+        i = i + 1
+    }
+    return v
+}
+
+fn cmd_status(start: u64, argc: usize) -> i32 {
+    if argc < 3 {
+        return RC_CALL
+    }
+    var j: printq.Job = printq.job_new()
+    var rc: i32 = RC_NOJOB
+    if printq.job_load(parse_id(rt.arg_ptr(start, 2)), &j) {
+        say_n("job", j.id)
+        say_b("state", j.state.ptr, j.state.len)
+        say_n("rc", j.rc)
+        rc = RC_OK
+    } else {
+        say_s("state", "nojob")
+    }
+    printq.job_free(&j)
+    return rc
+}
+
+fn cmd_cancel(start: u64, argc: usize) -> i32 {
+    if argc < 3 {
+        return RC_CALL
+    }
+    var j: printq.Job = printq.job_new()
+    var rc: i32 = RC_NOJOB
+    if printq.job_load(parse_id(rt.arg_ptr(start, 2)), &j) {
+        rc = cancel_job(&j)
+    } else {
+        say_s("state", "nojob")
+    }
+    printq.job_free(&j)
+    return rc
+}
+
+fn cancel_job(j: *mut printq.Job) -> i32 {
+    if printq.state_is(j, printq.STATE_QUEUED) || printq.state_is(j, printq.STATE_PRINTING) {
+        if printq.state_is(j, printq.STATE_PRINTING) && (*j).pid != 0 {
+            syscall(SYS_KILL, (*j).pid as i64, SIGTERM, 0, 0, 0, 0)
+        }
+        rt.buf_clear(&(*j).state)
+        cstr(&(*j).state, printq.STATE_CANCELED)
+        printq.job_save(j)
+        say_n("job", (*j).id)
+        say_s("state", "canceled")
+        return RC_OK
+    }
+    say_n("job", (*j).id)
+    say_s("state", "finished")
+    return RC_NOJOB
+}
+
+fn build_argv(j: *mut printq.Job, dp: *mut rt.Buf, store: *mut rt.Buf, argv: *mut rt.Buf) {
+    var i: usize = 0
+    cstr(store, IPPRINT_PATH)
+    rt.buf_push(store, 0 as u8)
+    let uri_at: usize = (*store).len
+    rt.buf_push_bytes(store, (*j).printer.ptr, (*j).printer.len)
+    rt.buf_push(store, 0 as u8)
+    let dat_at: usize = (*store).len
+    rt.buf_push_bytes(store, (*dp).ptr, (*dp).len - 1)
+    rt.buf_push(store, 0 as u8)
+    var starts: [usize; 24] = [0; 24]
+    starts[0] = 0
+    starts[1] = uri_at
+    starts[2] = dat_at
+    var count: usize = ARGV_BASE
+    var tok: bool = false
+    i = 0
+    while i < (*j).args.len && count < ARGV_MAX {
+        let c: u8 = rt.ld8((*j).args.ptr, i)
+        if c == 32 as u8 {
+            if tok {
+                rt.buf_push(store, 0 as u8)
+                tok = false
+            }
+        } else {
+            if !tok {
+                starts[count] = (*store).len
+                count = count + 1
+                tok = true
+            }
+            rt.buf_push(store, c)
+        }
+        i = i + 1
+    }
+    if tok {
+        rt.buf_push(store, 0 as u8)
+    }
+    i = 0
+    while i < count {
+        var cell: [u8; 8] = [0 as u8; 8]
+        rt.st64((&cell[0]) as u64, 0, (*store).ptr + starts[i] as u64)
+        rt.buf_push_bytes(argv, (&cell[0]) as u64, 8)
+        i = i + 1
+    }
+    var nul: [u8; 8] = [0 as u8; 8]
+    rt.buf_push_bytes(argv, (&nul[0]) as u64, 8)
+}
+
+fn run_job(j: *mut printq.Job) {
+    var dp: rt.Buf = rt.buf_new()
+    var store: rt.Buf = rt.buf_new()
+    var argv: rt.Buf = rt.buf_new()
+    printq.data_path(&dp, (*j).id)
+    build_argv(j, &dp, &store, &argv)
+    rt.buf_clear(&(*j).state)
+    cstr(&(*j).state, printq.STATE_PRINTING)
+    printq.job_save(j)
+    var path: rt.Buf = rt.buf_new()
+    cstr(&path, IPPRINT_PATH)
+    rt.buf_push(&path, 0 as u8)
+    let pid: i64 = rt.spawn(path.ptr, argv.ptr)
+    if pid > 0 {
+        (*j).pid = pid as u64
+        printq.job_save(j)
+        let code: i64 = rt.wait_pid(pid)
+        finish_job(j, code)
+    } else {
+        finish_job(j, 127)
+    }
+    rt.buf_free(&dp)
+    rt.buf_free(&store)
+    rt.buf_free(&argv)
+    rt.buf_free(&path)
+}
+
+fn finish_job(j: *mut printq.Job, code: i64) {
+    var now: printq.Job = printq.job_new()
+    if printq.job_load((*j).id, &now) && printq.state_is(&now, printq.STATE_CANCELED) {
+        printq.job_free(&now)
+        return
+    }
+    printq.job_free(&now)
+    rt.buf_clear(&(*j).state)
+    if code == 0 {
+        cstr(&(*j).state, printq.STATE_DONE)
+    } else {
+        cstr(&(*j).state, printq.STATE_FAILED)
+    }
+    (*j).rc = code as u64
+    (*j).pid = 0
+    printq.job_save(j)
+    say_n("job", (*j).id)
+    say_b("state", (*j).state.ptr, (*j).state.len)
+}
+
+fn serve_pass() -> u64 {
+    var ran: u64 = 0
+    let last: u64 = printq.last_id()
+    var id: u64 = 1
+    while id <= last {
+        var j: printq.Job = printq.job_new()
+        if printq.job_load(id, &j) && printq.state_is(&j, printq.STATE_QUEUED) {
+            run_job(&j)
+            ran = ran + 1
+        }
+        printq.job_free(&j)
+        id = id + 1
+    }
+    return ran
+}
+
+fn cmd_serve(start: u64, argc: usize) -> i32 {
+    var once: bool = false
+    if argc > 2 && arg_is(rt.arg_ptr(start, 2), "--once") {
+        once = true
+    }
+    spool_ready()
+    say_s("state", "serving")
+    while true {
+        let ran: u64 = serve_pass()
+        if once {
+            say_n("ran", ran)
+            return RC_OK
+        }
+        sleep_ms(SERVE_POLL_MS)
+    }
+    return RC_OK
+}
+
+fn cmd_printers() -> i32 {
+    var reg: rt.Buf = rt.buf_new()
+    if printreg.reg_load(&reg) {
+        let n: usize = reg.len
+        var i: usize = 0
+        while i < n {
+            let e: usize = kvfile.line_end(reg.ptr, n, i)
+            if e > i {
+                say_b("printer", reg.ptr + i as u64, e - i)
+            }
+            i = e + 1
+        }
+        say_n("printers", printreg.reg_count(&reg) as u64)
+    } else {
+        say_n("printers", 0)
+    }
+    rt.buf_free(&reg)
+    return RC_OK
+}
+
+fn reg_edit(mode: u8, name: u64, uri: u64) -> i32 {
+    var reg: rt.Buf = rt.buf_new()
+    var out: rt.Buf = rt.buf_new()
+    var nb: rt.Buf = rt.buf_new()
+    var ub: rt.Buf = rt.buf_new()
+    printreg.reg_load(&reg)
+    rt.buf_push_bytes(&nb, name, rt.c_length(name))
+    var rc: i32 = RC_OK
+    if mode == 97 as u8 {
+        rt.buf_push_bytes(&ub, uri, rt.c_length(uri))
+        printreg.reg_add(&reg, &nb, &ub, &out)
+    } else if mode == 114 as u8 {
+        if !printreg.reg_remove(&reg, &nb, &out) {
+            say_s("state", "noprinter")
+            rc = RC_NOPRINTER
+        }
+    } else {
+        var found: rt.Buf = rt.buf_new()
+        if printreg.reg_lookup(&reg, &nb, &found) {
+            printreg.reg_set_default(&reg, &nb, &out)
+        } else {
+            say_s("state", "noprinter")
+            rc = RC_NOPRINTER
+        }
+        rt.buf_free(&found)
+    }
+    if rc == RC_OK {
+        if printreg.reg_save(&out) {
+            say_s("state", "ok")
+        } else {
+            say_s("state", "nostore")
+            rc = RC_STORE
+        }
+    }
+    rt.buf_free(&reg)
+    rt.buf_free(&out)
+    rt.buf_free(&nb)
+    rt.buf_free(&ub)
+    return rc
+}
+
+fn cmd_find(start: u64, argc: usize) -> i32 {
+    var out: rt.Buf = rt.buf_new()
+    let count: usize = mdns.discover(FIND_WAIT_MS, &out)
+    var add: bool = argc > 2 && arg_is(rt.arg_ptr(start, 2), "--add")
+    let n: usize = out.len
+    var i: usize = 0
+    while i < n {
+        let e: usize = kvfile.line_end(out.ptr, n, i)
+        say_b("found", out.ptr + i as u64, e - i)
+        if add {
+            register_found(out.ptr + i as u64, e - i)
+        }
+        i = e + 1
+    }
+    say_n("count", count as u64)
+    rt.buf_free(&out)
+    return RC_OK
+}
+
+fn register_found(p: u64, n: usize) {
+    var eq: usize = 0
+    while eq < n && rt.ld8(p, eq) != 61 as u8 {
+        eq = eq + 1
+    }
+    if eq >= n {
+        return
+    }
+    var name: rt.Buf = rt.buf_new()
+    var uri: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&name, p, eq)
+    rt.buf_push(&name, 0 as u8)
+    rt.buf_push_bytes(&uri, p + (eq + 1) as u64, n - eq - 1)
+    rt.buf_push(&uri, 0 as u8)
+    reg_edit(97 as u8, name.ptr, uri.ptr)
+    rt.buf_free(&name)
+    rt.buf_free(&uri)
+}
+
+fn help() {
+    io.print_line("printd -- print spooler")
+    io.print_line("  printd submit <printer|-> <file> [--copies N] [--color mono|color] [--pages A-B] [--media K] [--sides K]")
+    io.print_line("  printd list | status <id> | cancel <id> | serve [--once] | test [printer]")
+    io.print_line("  printd printers | add <name> <ipp-uri> | remove <name> | default <name> | find [--add]")
+}
+
+fn main(start: u64) -> i32 {
+    let argc: usize = rt.arg_count(start)
+    if argc < 2 {
+        help()
+        return RC_CALL
+    }
+    let c: u64 = rt.arg_ptr(start, 1)
+    if arg_is(c, "submit") {
+        return cmd_submit(start, argc)
+    }
+    if arg_is(c, "list") {
+        return cmd_list()
+    }
+    if arg_is(c, "status") {
+        return cmd_status(start, argc)
+    }
+    if arg_is(c, "cancel") {
+        return cmd_cancel(start, argc)
+    }
+    if arg_is(c, "serve") {
+        return cmd_serve(start, argc)
+    }
+    if arg_is(c, "test") {
+        return cmd_test(start, argc)
+    }
+    if arg_is(c, "printers") {
+        return cmd_printers()
+    }
+    if arg_is(c, "add") && argc >= 4 {
+        return reg_edit(97 as u8, rt.arg_ptr(start, 2), rt.arg_ptr(start, 3))
+    }
+    if arg_is(c, "remove") && argc >= 3 {
+        return reg_edit(114 as u8, rt.arg_ptr(start, 2), 0)
+    }
+    if arg_is(c, "default") && argc >= 3 {
+        return reg_edit(100 as u8, rt.arg_ptr(start, 2), 0)
+    }
+    if arg_is(c, "find") {
+        return cmd_find(start, argc)
+    }
+    help()
+    return RC_CALL
+}

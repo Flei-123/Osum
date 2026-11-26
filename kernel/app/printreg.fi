@@ -1,0 +1,125 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import std.rt
+import kvfile
+
+export { reg_load, reg_save, reg_lookup, reg_add, reg_remove, reg_set_default,
+    reg_default, reg_count, REG_PATH }
+
+const REG_PATH: str = "/etc/printers.conf"
+const DEFAULT_KEY: str = "default"
+
+fn reg_load(b: *mut rt.Buf) -> bool {
+    var p: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&p, REG_PATH.p as u64, REG_PATH.n)
+    rt.buf_push(&p, 0 as u8)
+    let ok: bool = rt.read_file(p.ptr, b)
+    rt.buf_free(&p)
+    return ok
+}
+
+fn reg_save(b: *mut rt.Buf) -> bool {
+    var p: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&p, REG_PATH.p as u64, REG_PATH.n)
+    rt.buf_push(&p, 0 as u8)
+    let ok: bool = rt.write_file(p.ptr, (*b).ptr, (*b).len)
+    rt.buf_free(&p)
+    return ok
+}
+
+fn key_of(name: *mut rt.Buf) -> str {
+    return rt.buf_str(name)
+}
+
+fn reg_default(reg: *mut rt.Buf, out: *mut rt.Buf) -> bool {
+    return kvfile.kv_get(reg, DEFAULT_KEY, out)
+}
+
+fn reg_lookup(reg: *mut rt.Buf, name: *mut rt.Buf, uri: *mut rt.Buf) -> bool {
+    if (*name).len == 0 || (*name).len == DEFAULT_KEY.n && rt.mem_eq((*name).ptr, DEFAULT_KEY.p as u64, DEFAULT_KEY.n) {
+        return false
+    }
+    return kvfile.kv_get(reg, key_of(name), uri)
+}
+
+fn reg_remove(reg: *mut rt.Buf, name: *mut rt.Buf, out: *mut rt.Buf) -> bool {
+    var found: bool = false
+    var def: rt.Buf = rt.buf_new()
+    let had_default: bool = reg_default(reg, &def)
+    let n: usize = (*reg).len
+    var i: usize = 0
+    while i < n {
+        let e: usize = kvfile.line_end((*reg).ptr, n, i)
+        var drop: bool = false
+        if e - i > (*name).len && rt.mem_eq((*reg).ptr + i as u64, (*name).ptr, (*name).len)
+            && rt.ld8((*reg).ptr, i + (*name).len) == 61 as u8 {
+            drop = true
+            found = true
+        }
+        if !drop && e > i {
+            rt.buf_push_bytes(out, (*reg).ptr + i as u64, e - i)
+            rt.buf_push(out, 10 as u8)
+        }
+        i = e + 1
+    }
+    if found && had_default && def.len == (*name).len && rt.mem_eq(def.ptr, (*name).ptr, def.len) {
+        var cleaned: rt.Buf = rt.buf_new()
+        reg_strip_default(out, &cleaned)
+        rt.buf_clear(out)
+        rt.buf_push_bytes(out, cleaned.ptr, cleaned.len)
+        rt.buf_free(&cleaned)
+    }
+    rt.buf_free(&def)
+    return found
+}
+
+fn reg_strip_default(src: *mut rt.Buf, out: *mut rt.Buf) {
+    let n: usize = (*src).len
+    var i: usize = 0
+    while i < n {
+        let e: usize = kvfile.line_end((*src).ptr, n, i)
+        if !(e - i > DEFAULT_KEY.n && kvfile.starts_with((*src).ptr + i as u64, e - i, DEFAULT_KEY)
+            && rt.ld8((*src).ptr, i + DEFAULT_KEY.n) == 61 as u8) && e > i {
+            rt.buf_push_bytes(out, (*src).ptr + i as u64, e - i)
+            rt.buf_push(out, 10 as u8)
+        }
+        i = e + 1
+    }
+}
+
+fn reg_add(reg: *mut rt.Buf, name: *mut rt.Buf, uri: *mut rt.Buf, out: *mut rt.Buf) {
+    var tmp: rt.Buf = rt.buf_new()
+    reg_remove(reg, name, &tmp)
+    if tmp.len == 0 {
+        rt.buf_push_bytes(&tmp, (*reg).ptr, (*reg).len)
+    }
+    rt.buf_push_bytes(out, tmp.ptr, tmp.len)
+    rt.buf_push_bytes(out, (*name).ptr, (*name).len)
+    rt.buf_push(out, 61 as u8)
+    rt.buf_push_bytes(out, (*uri).ptr, (*uri).len)
+    rt.buf_push(out, 10 as u8)
+    rt.buf_free(&tmp)
+}
+
+fn reg_set_default(reg: *mut rt.Buf, name: *mut rt.Buf, out: *mut rt.Buf) {
+    var rest: rt.Buf = rt.buf_new()
+    reg_strip_default(reg, &rest)
+    rt.buf_push_bytes(out, rest.ptr, rest.len)
+    kvfile.kv_put(out, DEFAULT_KEY, name)
+    rt.buf_free(&rest)
+}
+
+fn reg_count(reg: *mut rt.Buf) -> usize {
+    var c: usize = 0
+    let n: usize = (*reg).len
+    var i: usize = 0
+    while i < n {
+        let e: usize = kvfile.line_end((*reg).ptr, n, i)
+        if e > i && !(e - i > DEFAULT_KEY.n && kvfile.starts_with((*reg).ptr + i as u64, e - i, DEFAULT_KEY)
+            && rt.ld8((*reg).ptr, i + DEFAULT_KEY.n) == 61 as u8) {
+            c = c + 1
+        }
+        i = e + 1
+    }
+    return c
+}
