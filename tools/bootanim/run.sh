@@ -5,7 +5,7 @@ cd "$(dirname "$0")/../.."
 pass=0; fail=0
 ok()  { echo "  OK    $1"; pass=$((pass+1)); }
 bad() { echo "  FAIL  $1"; fail=$((fail+1)); }
-STYLES="ignite sunrise particle reactor mix"
+STYLES=${BOOTANIM_STYLES:-ignite sunrise particle reactor mix}
 W=640; H=360; FPS=60
 BUDGET_MS=${BOOTANIM_BUDGET_MS:-70}
 H_DIR=$(mktemp -d)
