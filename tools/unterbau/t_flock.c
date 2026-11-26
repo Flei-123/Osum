@@ -109,7 +109,7 @@ static int child_expects(int fds[], int count, short type, off_t len, int parent
 {
     int wrong = 0;
     for (int i = 0; i < count; i++) {
-        off_t start = ranged ? i : 0;
+        off_t start = ranged ? i * 2 : 0;
         struct flock fl = {.l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = start, .l_len = len};
         int fd = ranged ? fds[0] : fds[i];
         if (fcntl(fd, F_GETLK, &fl) != 0) {
@@ -142,7 +142,7 @@ static void lock_all(int fds[], int count, short type, int ranged, int *failures
 {
     for (int i = 0; i < count; i++) {
         int fd = ranged ? fds[0] : fds[i];
-        off_t start = ranged ? i : 0;
+        off_t start = ranged ? i * 2 : 0;
         if (set_lock(fd, type, start, 1) != 0)
             (*failures)++;
     }
@@ -151,7 +151,7 @@ static void lock_all(int fds[], int count, short type, int ranged, int *failures
 static void unlock_all(int fds[], int count, int ranged)
 {
     for (int i = 0; i < count; i++)
-        set_lock(ranged ? fds[0] : fds[i], F_UNLCK, ranged ? i : 0, 1);
+        set_lock(ranged ? fds[0] : fds[i], F_UNLCK, ranged ? i * 2 : 0, 1);
 }
 
 int main(void)
@@ -172,7 +172,7 @@ int main(void)
     lock_all(fds, SLOT_COUNT, F_WRLCK, 1, &failures);
     CHECK("ranges_all_set", opened == SLOT_COUNT && failures == 0, "failures=%d", failures);
     errno = 0;
-    int over = set_lock(one, F_WRLCK, SLOT_COUNT, 1);
+    int over = set_lock(one, F_WRLCK, SLOT_COUNT * 2, 1);
     CHECK("table_full_enolck", over == -1 && errno == ENOLCK, "r=%d errno=%d", over, errno);
     int wrong = ask_child(fds, SLOT_COUNT, F_WRLCK, 1, 1);
     CHECK("ranges_each_slot_readback", wrong == 0, "%d of %d slots read back wrong", wrong, SLOT_COUNT);
