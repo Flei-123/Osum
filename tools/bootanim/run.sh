@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
 set -u
 cd "$(dirname "$0")/../.."
 pass=0; fail=0
