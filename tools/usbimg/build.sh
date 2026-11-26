@@ -1293,6 +1293,9 @@ fi
 if [ "$IMAGE_PROFILE" = public ]; then
     python3 -I tools/usbimg/limine_release.py "$OUT/limine.conf" || fehler "the release boot menu could not be filtered"
 fi
+if [ "$IMAGE_PROFILE" = personal ]; then
+    python3 -I tools/usbimg/diagentries.py "$OUT/limine.conf" "$MARKE_PRODUKT" || fehler "the diagnose boot entries could not be written"
+fi
 BOOTREG_EFI=""
 if [ -z "${OSUM_NO_BOOTREG:-}" ] && [ -f tools/bootreg/build.sh ]; then
     bash tools/bootreg/build.sh "$OUT/bootreg" > "$OUT/bootreg.log" 2>&1 \
