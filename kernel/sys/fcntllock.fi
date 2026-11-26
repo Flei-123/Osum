@@ -1,0 +1,294 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.errno
+import sched.sched
+import sched.signal
+import sched.taskconst
+import sched.taskslot
+import sched.proc.procfault
+import fs.fs
+import fs.file
+import fs.vfs
+import fs.vfsops
+import sys.sysconst
+import sys.sysuser
+import sys.poslock
+
+export {
+    F_GETLK, F_SETLK, F_SETLKW, F_OFD_GETLK, F_OFD_SETLK, F_OFD_SETLKW,
+    is_lock_cmd, do_lock, do_flock
+}
+
+const F_GETLK: u64 = 5
+const F_SETLK: u64 = 6
+const F_SETLKW: u64 = 7
+const F_OFD_GETLK: u64 = 36
+const F_OFD_SETLK: u64 = 37
+const F_OFD_SETLKW: u64 = 38
+
+const FL_TYPE: u64 = 0
+const FL_WHENCE: u64 = 2
+const FL_START: u64 = 8
+const FL_LEN: u64 = 16
+const FL_PID: u64 = 24
+const FL_BYTES: u64 = 32
+
+const LOCK_SH: u64 = 1
+const LOCK_EX: u64 = 2
+const LOCK_NB: u64 = 4
+const LOCK_UN: u64 = 8
+const LOCK_KNOWN: u64 = 15
+
+const ACCESS_MASK: u64 = 3
+const ACCESS_WRITE_ONLY: u64 = 1
+const OFFSET_LIMIT_BIT: u64 = 63
+const OFD_NO_PID: u64 = 0xFFFFFFFF
+const RANGE_INVALID: u64 = 0xFFFFFFFFFFFFFFFE
+
+fn is_lock_cmd(cmd: u64) -> bool {
+    return (cmd >= F_GETLK && cmd <= F_SETLKW) || (cmd >= F_OFD_GETLK && cmd <= F_OFD_SETLKW)
+}
+
+fn is_ofd(cmd: u64) -> bool {
+    return cmd >= F_OFD_GETLK
+}
+
+fn is_wait(cmd: u64) -> bool {
+    return cmd == F_SETLKW || cmd == F_OFD_SETLKW
+}
+
+fn is_query(cmd: u64) -> bool {
+    return cmd == F_GETLK || cmd == F_OFD_GETLK
+}
+
+fn lockable_kind(kind: u64) -> bool {
+    return kind == file.K_FILE || kind == file.K_VFILE
+}
+
+fn file_size(state: u64, of: u64) -> u64 {
+    if file.open_kind(state, of) == file.K_VFILE {
+        return vfs.v_attr(state, file.open_mnt(state, of), file.open_ino(state, of), vfsops.A_SIZE)
+    }
+    return fs.inode_size(state, file.open_ino(state, of))
+}
+
+fn base_of(state: u64, of: u64, whence: u64) -> u64 {
+    if whence == sysconst.SEEK_CUR {
+        return file.open_off(state, of)
+    }
+    if whence == sysconst.SEEK_END {
+        return file_size(state, of)
+    }
+    return 0
+}
+
+fn range_start(base: u64, start: u64, len: u64) -> u64 {
+    var von: u64 = base +% start
+    if (von >> OFFSET_LIMIT_BIT) != 0 {
+        return RANGE_INVALID
+    }
+    if (len >> OFFSET_LIMIT_BIT) != 0 {
+        let back: u64 = 0 -% len
+        if back > von {
+            return RANGE_INVALID
+        }
+        von = von - back
+    }
+    return von
+}
+
+fn range_end(von: u64, base: u64, start: u64, len: u64) -> u64 {
+    if len == 0 {
+        return poslock.RANGE_END
+    }
+    if (len >> OFFSET_LIMIT_BIT) != 0 {
+        return base +% start - 1
+    }
+    let bis: u64 = von +% len - 1
+    if (bis >> OFFSET_LIMIT_BIT) != 0 {
+        return RANGE_INVALID
+    }
+    return bis
+}
+
+fn access_ok(state: u64, of: u64, lock_type: u64) -> bool {
+    let access: u64 = file.open_flags(state, of) & ACCESS_MASK
+    if lock_type == poslock.T_RDLCK {
+        return access != ACCESS_WRITE_ONLY
+    }
+    if lock_type == poslock.T_WRLCK {
+        return access == ACCESS_WRITE_ONLY || access == sysconst.O_RDWR
+    }
+    return true
+}
+
+fn owner_of(state: u64, me: u64, of: u64, cmd: u64) -> u64 {
+    if is_ofd(cmd) {
+        return of
+    }
+    return taskslot.tget(state, me, taskconst.T_TGID)
+}
+
+fn kind_of(cmd: u64) -> u64 {
+    if is_ofd(cmd) {
+        return poslock.KIND_OFD
+    }
+    return poslock.KIND_POSIX
+}
+
+fn report_blocker(state: u64, me: u64, arg: u64, k: u64) {
+    let until: u64 = poslock.slot_until(state, k)
+    var len: u64 = 0
+    if until != poslock.RANGE_END {
+        len = until - poslock.slot_von(state, k) + 1
+    }
+    var pid: u64 = poslock.slot_pid(state, k)
+    if poslock.slot_kind(state, k) != poslock.KIND_POSIX {
+        pid = OFD_NO_PID
+    }
+    sysuser.put_half(state, me, arg + FL_TYPE, poslock.slot_type(state, k))
+    sysuser.put_half(state, me, arg + FL_WHENCE, sysconst.SEEK_SET)
+    sysuser.put64(state, me, arg + FL_START, poslock.slot_von(state, k))
+    sysuser.put64(state, me, arg + FL_LEN, len)
+    sysuser.put_word32(state, me, arg + FL_PID, pid)
+}
+
+fn who_for(state: u64, me: u64, of: u64, cmd: u64, lock_type: u64) -> u64 {
+    return poslock.who_make(owner_of(state, me, of, cmd), kind_of(cmd), lock_type)
+}
+
+fn lock_blocking(state: u64, me: u64, of: u64, who: u64, von: u64, bis: u64) -> u64 {
+    let ino: u64 = file.open_ino(state, of)
+    let mnt: u64 = file.open_mnt(state, of)
+    var slot: u64 = poslock.NO_SLOT
+    var result: u64 = 0
+    var waiting: bool = true
+    while waiting {
+        let seen: u64 = sched.poll_seq(state)
+        result = poslock.try_set(state, ino, mnt, who, von, bis)
+        if result != errno.neg(errno.E_AGAIN) {
+            waiting = false
+        } else if poslock.would_deadlock(state, ino, mnt, who, von, bis) {
+            result = errno.neg(errno.E_DEADLK)
+            waiting = false
+        } else if signal.interrupted(state, me) {
+            result = errno.neg(errno.E_INTR)
+            waiting = false
+        } else {
+            if slot == poslock.NO_SLOT {
+                slot = poslock.wait_add(state, ino, mnt, who, von, bis)
+            }
+            sched.poll_sleep(state, seen, kstate.get(state, kstate.TICKS) + 1)
+        }
+    }
+    poslock.wait_remove(state, slot)
+    return result
+}
+
+fn invalid_request(state: u64, me: u64, cmd: u64, arg: u64, lock_type: u64) -> u64 {
+    if lock_type > poslock.T_UNLCK {
+        return errno.neg(errno.E_INVAL)
+    }
+    if is_ofd(cmd) && sysuser.user_word32(state, me, arg + FL_PID) != 0 {
+        return errno.neg(errno.E_INVAL)
+    }
+    if is_query(cmd) && lock_type == poslock.T_UNLCK {
+        return errno.neg(errno.E_INVAL)
+    }
+    return 0
+}
+
+fn range_error(von: u64, bis: u64) -> u64 {
+    if von == RANGE_INVALID {
+        return errno.neg(errno.E_INVAL)
+    }
+    if bis == RANGE_INVALID {
+        return errno.neg(errno.E_OVERFLOW)
+    }
+    return 0
+}
+
+fn do_lock(state: u64, me: u64, of: u64, cmd: u64, arg: u64) -> u64 {
+    if !procfault.user_ok(state, me, arg, FL_BYTES) {
+        return errno.neg(errno.E_FAULT)
+    }
+    let lock_type: u64 = sysuser.user_half(state, me, arg + FL_TYPE)
+    let bad: u64 = invalid_request(state, me, cmd, arg, lock_type)
+    if bad != 0 {
+        return bad
+    }
+    let whence: u64 = sysuser.user_half(state, me, arg + FL_WHENCE)
+    if whence != sysconst.SEEK_SET && whence != sysconst.SEEK_CUR && whence != sysconst.SEEK_END {
+        return errno.neg(errno.E_INVAL)
+    }
+    let base: u64 = base_of(state, of, whence)
+    let start: u64 = sysuser.user_word(state, me, arg + FL_START)
+    let len: u64 = sysuser.user_word(state, me, arg + FL_LEN)
+    let von: u64 = range_start(base, start, len)
+    let bis: u64 = range_end(von, base, start, len)
+    let range_bad: u64 = range_error(von, bis)
+    if range_bad != 0 {
+        return range_bad
+    }
+    if !lockable_kind(file.open_kind(state, of)) {
+        sysuser.put_half(state, me, arg + FL_TYPE, poslock.T_UNLCK)
+        return 0
+    }
+    if !is_query(cmd) && !access_ok(state, of, lock_type) {
+        return errno.neg(errno.E_BADF)
+    }
+    let who: u64 = who_for(state, me, of, cmd, lock_type)
+    let ino: u64 = file.open_ino(state, of)
+    let mnt: u64 = file.open_mnt(state, of)
+    if is_query(cmd) {
+        let k: u64 = poslock.first_blocker_of(state, ino, mnt, who, von, bis)
+        if k == poslock.NO_SLOT {
+            sysuser.put_half(state, me, arg + FL_TYPE, poslock.T_UNLCK)
+        } else {
+            report_blocker(state, me, arg, k)
+        }
+        return 0
+    }
+    if is_wait(cmd) {
+        return lock_blocking(state, me, of, who, von, bis)
+    }
+    return poslock.try_set(state, ino, mnt, who, von, bis)
+}
+
+fn flock_type(op: u64) -> u64 {
+    if (op & LOCK_EX) != 0 {
+        return poslock.T_WRLCK
+    }
+    return poslock.T_RDLCK
+}
+
+fn do_flock(state: u64, me: u64, of: u64, op: u64) -> u64 {
+    let action: u64 = op & (LOCK_SH | LOCK_EX | LOCK_UN)
+    if (op & ~LOCK_KNOWN) != 0 || (action != LOCK_SH && action != LOCK_EX && action != LOCK_UN) {
+        return errno.neg(errno.E_INVAL)
+    }
+    if !lockable_kind(file.open_kind(state, of)) {
+        return 0
+    }
+    let ino: u64 = file.open_ino(state, of)
+    let mnt: u64 = file.open_mnt(state, of)
+    if action == LOCK_UN {
+        poslock.flock_drop(state, ino, mnt, of)
+        return 0
+    }
+    let lock_type: u64 = flock_type(action)
+    let held: u64 = poslock.flock_held(state, ino, mnt, of)
+    if held == lock_type {
+        return 0
+    }
+    if held != poslock.NO_TYPE {
+        poslock.flock_drop(state, ino, mnt, of)
+    }
+    let who: u64 = poslock.who_make(of, poslock.KIND_FLOCK, lock_type)
+    if (op & LOCK_NB) != 0 {
+        return poslock.try_set(state, ino, mnt, who, 0, poslock.RANGE_END)
+    }
+    return lock_blocking(state, me, of, who, 0, poslock.RANGE_END)
+}

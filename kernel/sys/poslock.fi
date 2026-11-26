@@ -2,10 +2,15 @@
 profile kernel
 
 import lib.kstate
+import lib.errno
+import sched.sched
+import sync.fdlock
 
 export {
-    L_INO, L_VON, L_UNTIL, L_ART, L_PID, L_MNT,
-    get, put, free, drop_owner, drop_file
+    KIND_POSIX, KIND_OFD, KIND_FLOCK, T_RDLCK, T_WRLCK, T_UNLCK, RANGE_END, NO_SLOT, NO_TYPE,
+    who_make, who_owner, who_kind, who_type,
+    try_set, first_blocker_of, slot_von, slot_until, slot_pid, slot_type, slot_kind, drop_owner, drop_file, drop_description,
+    wait_add, wait_remove, would_deadlock, flock_drop, flock_held
 }
 
 const L_INO: u64 = 0
@@ -15,8 +20,59 @@ const L_ART: u64 = 24
 const L_PID: u64 = 32
 const L_MNT: u64 = 40
 
+const KIND_POSIX: u64 = 0
+const KIND_OFD: u64 = 1
+const KIND_FLOCK: u64 = 2
+const T_RDLCK: u64 = 0
+const T_WRLCK: u64 = 1
+const T_UNLCK: u64 = 2
+const RANGE_END: u64 = 0xFFFFFFFFFFFFFFFF
+const NO_SLOT: u64 = 0xFFFFFFFF
+
+const OWNER_MASK: u64 = 0xFFFFFFFFFFFF
+const TYPE_SHIFT: u64 = 48
+const KIND_SHIFT: u64 = 56
+const SLOT_KIND_SHIFT: u64 = 8
+const SLOT_TYPE_MASK: u64 = 0xFF
+
+const WAIT_SLOTS: u64 = 20
+const WAIT_BYTES: u64 = 48
+const DEADLOCK_HOPS: u64 = 10
+
+const P_FIRST: u64 = 0
+const P_LAST: u64 = 1
+const P_GAIN: u64 = 2
+const P_LEFT_FROM: u64 = 3
+const P_LEFT_TYPE: u64 = 4
+const P_RIGHT_TO: u64 = 5
+const P_RIGHT_TYPE: u64 = 6
+const P_COUNT: u64 = 7
+const NO_TYPE: u64 = 0xFF
+
+static mut plan: [u64; 8] = [0 as u64; 8]
+
+fn who_make(owner: u64, kind: u64, lock_type: u64) -> u64 {
+    return (owner & OWNER_MASK) | (lock_type << TYPE_SHIFT) | (kind << KIND_SHIFT)
+}
+
+fn who_owner(who: u64) -> u64 {
+    return who & OWNER_MASK
+}
+
+fn who_type(who: u64) -> u64 {
+    return (who >> TYPE_SHIFT) & SLOT_TYPE_MASK
+}
+
+fn who_kind(who: u64) -> u64 {
+    return who >> KIND_SHIFT
+}
+
 fn slot_off(i: u64) -> u64 {
     return kstate.FLOCK_OFF + i * kstate.FLOCK_BYTES
+}
+
+fn wait_off(i: u64) -> u64 {
+    return kstate.FLOCK_OFF + kstate.FLOCK_SLOTS * kstate.FLOCK_BYTES + i * WAIT_BYTES
 }
 
 fn in_table(off: u64) -> bool {
@@ -39,6 +95,22 @@ fn put(state: u64, i: u64, field: u64, v: u64) {
     kstate.set(state, off, v)
 }
 
+fn wget(state: u64, i: u64, field: u64) -> u64 {
+    let off: u64 = wait_off(i) + field
+    if !in_table(off) {
+        return 0
+    }
+    return kstate.get(state, off)
+}
+
+fn wput(state: u64, i: u64, field: u64, v: u64) {
+    let off: u64 = wait_off(i) + field
+    if !in_table(off) {
+        return
+    }
+    kstate.set(state, off, v)
+}
+
 fn free(state: u64, i: u64) {
     put(state, i, L_INO, 0)
     put(state, i, L_MNT, 0)
@@ -48,28 +120,406 @@ fn free(state: u64, i: u64) {
     put(state, i, L_PID, 0)
 }
 
-fn drop_owner(state: u64, owner: u64) {
-    if owner == 0 {
-        return
+fn slot_kind(state: u64, k: u64) -> u64 {
+    return get(state, k, L_ART) >> SLOT_KIND_SHIFT
+}
+
+fn slot_type(state: u64, k: u64) -> u64 {
+    return get(state, k, L_ART) & SLOT_TYPE_MASK
+}
+
+fn slot_von(state: u64, k: u64) -> u64 {
+    return get(state, k, L_VON)
+}
+
+fn slot_until(state: u64, k: u64) -> u64 {
+    return get(state, k, L_UNTIL)
+}
+
+fn slot_pid(state: u64, k: u64) -> u64 {
+    return get(state, k, L_PID)
+}
+
+fn same_file(state: u64, k: u64, ino: u64, mnt: u64) -> bool {
+    return get(state, k, L_INO) == ino && get(state, k, L_MNT) == mnt
+}
+
+fn overlaps(a_from: u64, a_to: u64, b_from: u64, b_to: u64) -> bool {
+    return a_to >= b_from && b_to >= a_from
+}
+
+fn touches(a_from: u64, a_to: u64, b_from: u64, b_to: u64) -> bool {
+    if overlaps(a_from, a_to, b_from, b_to) {
+        return true
     }
+    if a_to != RANGE_END && a_to + 1 == b_from {
+        return true
+    }
+    return b_to != RANGE_END && b_to + 1 == a_from
+}
+
+fn owned_by(state: u64, k: u64, ino: u64, mnt: u64, who: u64) -> bool {
+    if !same_file(state, k, ino, mnt) {
+        return false
+    }
+    return slot_kind(state, k) == who_kind(who) && get(state, k, L_PID) == who_owner(who)
+}
+
+fn flock_class(kind: u64) -> u64 {
+    if kind == KIND_FLOCK {
+        return 1
+    }
+    return 0
+}
+
+fn blocks(state: u64, k: u64, who: u64, von: u64, bis: u64) -> bool {
+    if flock_class(slot_kind(state, k)) != flock_class(who_kind(who)) {
+        return false
+    }
+    if slot_kind(state, k) == who_kind(who) && get(state, k, L_PID) == who_owner(who) {
+        return false
+    }
+    if slot_type(state, k) == T_RDLCK && who_type(who) == T_RDLCK {
+        return false
+    }
+    return overlaps(von, bis, get(state, k, L_VON), get(state, k, L_UNTIL))
+}
+
+fn first_blocker(state: u64, ino: u64, mnt: u64, who: u64, von: u64, bis: u64) -> u64 {
     var k: u64 = 0
     while k < kstate.FLOCK_SLOTS {
-        if get(state, k, L_INO) != 0 && get(state, k, L_PID) == owner {
+        if get(state, k, L_INO) != 0 && same_file(state, k, ino, mnt) && blocks(state, k, who, von, bis) {
+            return k
+        }
+        k = k + 1
+    }
+    return NO_SLOT
+}
+
+fn first_blocker_of(state: u64, ino: u64, mnt: u64, who: u64, von: u64, bis: u64) -> u64 {
+    let flags: u64 = fdlock.enter(state)
+    let k: u64 = first_blocker(state, ino, mnt, who, von, bis)
+    fdlock.leave(state, flags)
+    return k
+}
+
+fn count_free(state: u64) -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < kstate.FLOCK_SLOTS {
+        if get(state, k, L_INO) == 0 {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn add(state: u64, ino: u64, mnt: u64, who: u64, von: u64, bis: u64) {
+    var k: u64 = 0
+    while k < kstate.FLOCK_SLOTS {
+        if get(state, k, L_INO) == 0 {
+            put(state, k, L_INO, ino)
+            put(state, k, L_MNT, mnt)
+            put(state, k, L_VON, von)
+            put(state, k, L_UNTIL, bis)
+            put(state, k, L_ART, who_type(who) | (who_kind(who) << SLOT_KIND_SHIFT))
+            put(state, k, L_PID, who_owner(who))
+            kstate.add(state, kstate.FLOCKS, 1)
+            return
+        }
+        k = k + 1
+    }
+}
+
+fn plan_lock(state: u64, k: u64, who: u64, von: u64, bis: u64) {
+    let a: u64 = get(state, k, L_VON)
+    let b: u64 = get(state, k, L_UNTIL)
+    let t: u64 = slot_type(state, k)
+    if t == who_type(who) && touches(a, b, von, bis) {
+        if a < plan[P_FIRST as usize] {
+            plan[P_FIRST as usize] = a
+        }
+        if b > plan[P_LAST as usize] {
+            plan[P_LAST as usize] = b
+        }
+        plan[P_GAIN as usize] = plan[P_GAIN as usize] + 1
+        return
+    }
+    if t == who_type(who) || !overlaps(a, b, von, bis) {
+        return
+    }
+    plan[P_GAIN as usize] = plan[P_GAIN as usize] + 1
+    if a < von {
+        plan[P_LEFT_FROM as usize] = a
+        plan[P_LEFT_TYPE as usize] = t
+        plan[P_COUNT as usize] = plan[P_COUNT as usize] + 1
+    }
+    if b > bis {
+        plan[P_RIGHT_TO as usize] = b
+        plan[P_RIGHT_TYPE as usize] = t
+        plan[P_COUNT as usize] = plan[P_COUNT as usize] + 1
+    }
+}
+
+fn plan_reset(von: u64, bis: u64) {
+    plan[P_FIRST as usize] = von
+    plan[P_LAST as usize] = bis
+    plan[P_GAIN as usize] = 0
+    plan[P_LEFT_FROM as usize] = 0
+    plan[P_LEFT_TYPE as usize] = NO_TYPE
+    plan[P_RIGHT_TO as usize] = 0
+    plan[P_RIGHT_TYPE as usize] = NO_TYPE
+    plan[P_COUNT as usize] = 0
+}
+
+fn plan_all(state: u64, ino: u64, mnt: u64, who: u64, von: u64, bis: u64) {
+    plan_reset(von, bis)
+    var k: u64 = 0
+    while k < kstate.FLOCK_SLOTS {
+        if get(state, k, L_INO) != 0 && owned_by(state, k, ino, mnt, who) {
+            plan_lock(state, k, who, von, bis)
+        }
+        k = k + 1
+    }
+}
+
+fn slot_dies(state: u64, k: u64, who: u64, von: u64, bis: u64) -> bool {
+    let a: u64 = get(state, k, L_VON)
+    let b: u64 = get(state, k, L_UNTIL)
+    if slot_type(state, k) == who_type(who) {
+        return touches(a, b, von, bis)
+    }
+    return overlaps(a, b, von, bis)
+}
+
+fn free_dying(state: u64, ino: u64, mnt: u64, who: u64, von: u64, bis: u64) {
+    var k: u64 = 0
+    while k < kstate.FLOCK_SLOTS {
+        if get(state, k, L_INO) != 0 && owned_by(state, k, ino, mnt, who) && slot_dies(state, k, who, von, bis) {
             free(state, k)
         }
         k = k + 1
     }
 }
 
+fn apply_plan(state: u64, ino: u64, mnt: u64, who: u64, von: u64, bis: u64) {
+    let first: u64 = plan[P_FIRST as usize]
+    let last: u64 = plan[P_LAST as usize]
+    let left_type: u64 = plan[P_LEFT_TYPE as usize]
+    let left_from: u64 = plan[P_LEFT_FROM as usize]
+    let right_type: u64 = plan[P_RIGHT_TYPE as usize]
+    let right_to: u64 = plan[P_RIGHT_TO as usize]
+    free_dying(state, ino, mnt, who, von, bis)
+    if left_type != NO_TYPE {
+        add(state, ino, mnt, who_make(who_owner(who), who_kind(who), left_type), left_from, von - 1)
+    }
+    if right_type != NO_TYPE {
+        add(state, ino, mnt, who_make(who_owner(who), who_kind(who), right_type), bis + 1, right_to)
+    }
+    if who_type(who) != T_UNLCK {
+        add(state, ino, mnt, who, first, last)
+    }
+}
+
+fn waiters_any(state: u64) -> bool {
+    var i: u64 = 0
+    while i < WAIT_SLOTS {
+        if wget(state, i, 0) != 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn set_locked(state: u64, ino: u64, mnt: u64, who: u64, von: u64, bis: u64) -> u64 {
+    if who_type(who) != T_UNLCK && first_blocker(state, ino, mnt, who, von, bis) != NO_SLOT {
+        return errno.neg(errno.E_AGAIN)
+    }
+    plan_all(state, ino, mnt, who, von, bis)
+    var need: u64 = plan[P_COUNT as usize]
+    if who_type(who) != T_UNLCK {
+        need = need + 1
+    }
+    if need > count_free(state) + plan[P_GAIN as usize] {
+        return errno.neg(errno.E_NOLCK)
+    }
+    apply_plan(state, ino, mnt, who, von, bis)
+    return 0
+}
+
+fn try_set(state: u64, ino: u64, mnt: u64, who: u64, von: u64, bis: u64) -> u64 {
+    let flags: u64 = fdlock.enter(state)
+    let r: u64 = set_locked(state, ino, mnt, who, von, bis)
+    let wake: bool = r == 0 && waiters_any(state)
+    fdlock.leave(state, flags)
+    if wake {
+        sched.poll_kick(state)
+    }
+    return r
+}
+
+fn flock_drop(state: u64, ino: u64, mnt: u64, owner: u64) {
+    let flags: u64 = fdlock.enter(state)
+    var k: u64 = 0
+    var freed: bool = false
+    while k < kstate.FLOCK_SLOTS {
+        if get(state, k, L_INO) != 0 && same_file(state, k, ino, mnt) && slot_kind(state, k) == KIND_FLOCK
+            && get(state, k, L_PID) == owner {
+            free(state, k)
+            freed = true
+        }
+        k = k + 1
+    }
+    let wake: bool = freed && waiters_any(state)
+    fdlock.leave(state, flags)
+    if wake {
+        sched.poll_kick(state)
+    }
+}
+
+fn flock_held(state: u64, ino: u64, mnt: u64, owner: u64) -> u64 {
+    let flags: u64 = fdlock.enter(state)
+    var held: u64 = NO_TYPE
+    var k: u64 = 0
+    while k < kstate.FLOCK_SLOTS {
+        if get(state, k, L_INO) != 0 && same_file(state, k, ino, mnt) && slot_kind(state, k) == KIND_FLOCK
+            && get(state, k, L_PID) == owner {
+            held = slot_type(state, k)
+        }
+        k = k + 1
+    }
+    fdlock.leave(state, flags)
+    return held
+}
+
+fn drop_matching(state: u64, kind: u64, owner: u64, ino: u64, mnt: u64) {
+    let flags: u64 = fdlock.enter(state)
+    var k: u64 = 0
+    var freed: bool = false
+    while k < kstate.FLOCK_SLOTS {
+        if get(state, k, L_INO) != 0 && slot_kind(state, k) == kind && get(state, k, L_PID) == owner
+            && (ino == 0 || same_file(state, k, ino, mnt)) {
+            free(state, k)
+            freed = true
+        }
+        k = k + 1
+    }
+    let wake: bool = freed && waiters_any(state)
+    fdlock.leave(state, flags)
+    if wake {
+        sched.poll_kick(state)
+    }
+}
+
+fn drop_owner(state: u64, owner: u64) {
+    if owner == 0 {
+        return
+    }
+    drop_matching(state, KIND_POSIX, owner, 0, 0)
+    wait_drop_owner(state, owner)
+}
+
 fn drop_file(state: u64, owner: u64, ino: u64, mnt: u64) {
     if owner == 0 || ino == 0 {
         return
     }
-    var k: u64 = 0
-    while k < kstate.FLOCK_SLOTS {
-        if get(state, k, L_INO) == ino && get(state, k, L_MNT) == mnt && get(state, k, L_PID) == owner {
-            free(state, k)
+    drop_matching(state, KIND_POSIX, owner, ino, mnt)
+}
+
+fn drop_description(state: u64, description: u64) {
+    drop_matching(state, KIND_OFD, description, 0, 0)
+    drop_matching(state, KIND_FLOCK, description, 0, 0)
+}
+
+fn wait_add(state: u64, ino: u64, mnt: u64, who: u64, von: u64, bis: u64) -> u64 {
+    let flags: u64 = fdlock.enter(state)
+    var i: u64 = 0
+    var slot: u64 = NO_SLOT
+    while i < WAIT_SLOTS && slot == NO_SLOT {
+        if wget(state, i, 0) == 0 {
+            slot = i
         }
-        k = k + 1
+        i = i + 1
     }
+    if slot != NO_SLOT {
+        wput(state, slot, 8, ino)
+        wput(state, slot, 16, mnt)
+        wput(state, slot, 24, von)
+        wput(state, slot, 32, bis)
+        wput(state, slot, 0, who)
+    }
+    fdlock.leave(state, flags)
+    return slot
+}
+
+fn wait_remove(state: u64, slot: u64) {
+    if slot >= WAIT_SLOTS {
+        return
+    }
+    let flags: u64 = fdlock.enter(state)
+    wput(state, slot, 0, 0)
+    fdlock.leave(state, flags)
+}
+
+fn wait_drop_owner(state: u64, owner: u64) {
+    let flags: u64 = fdlock.enter(state)
+    var i: u64 = 0
+    while i < WAIT_SLOTS {
+        let w: u64 = wget(state, i, 0)
+        if w != 0 && who_kind(w) == KIND_POSIX && who_owner(w) == owner {
+            wput(state, i, 0, 0)
+        }
+        i = i + 1
+    }
+    fdlock.leave(state, flags)
+}
+
+fn waiter_of(state: u64, owner: u64) -> u64 {
+    var i: u64 = 0
+    while i < WAIT_SLOTS {
+        let w: u64 = wget(state, i, 0)
+        if w != 0 && who_kind(w) == KIND_POSIX && who_owner(w) == owner {
+            return i
+        }
+        i = i + 1
+    }
+    return NO_SLOT
+}
+
+fn blocker_owner_of_waiter(state: u64, w: u64) -> u64 {
+    let who: u64 = wget(state, w, 0)
+    let k: u64 = first_blocker(state, wget(state, w, 8), wget(state, w, 16), who, wget(state, w, 24), wget(state, w, 32))
+    if k == NO_SLOT || slot_kind(state, k) != KIND_POSIX {
+        return 0
+    }
+    return get(state, k, L_PID)
+}
+
+fn would_deadlock(state: u64, ino: u64, mnt: u64, who: u64, von: u64, bis: u64) -> bool {
+    if who_kind(who) != KIND_POSIX {
+        return false
+    }
+    let flags: u64 = fdlock.enter(state)
+    let k: u64 = first_blocker(state, ino, mnt, who, von, bis)
+    var cycle: bool = false
+    if k != NO_SLOT && slot_kind(state, k) == KIND_POSIX {
+        var cur: u64 = get(state, k, L_PID)
+        var hops: u64 = 0
+        while cur != 0 && hops < DEADLOCK_HOPS && !cycle {
+            if cur == who_owner(who) {
+                cycle = true
+            } else {
+                let w: u64 = waiter_of(state, cur)
+                cur = 0
+                if w != NO_SLOT {
+                    cur = blocker_owner_of_waiter(state, w)
+                }
+            }
+            hops = hops + 1
+        }
+    }
+    fdlock.leave(state, flags)
+    return cycle
 }

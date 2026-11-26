@@ -13,7 +13,7 @@ import sys.sysconst
 import sys.sysuser
 import sys.sysfd
 import sys.fowner
-import sys.poslock
+import sys.fcntllock
 
 export {
     do_fcntl
@@ -24,21 +24,9 @@ const F_GETFD: u64 = 1
 const F_SETFD: u64 = 2
 const F_GETFL: u64 = 3
 const F_SETFL: u64 = 4
-const F_SETLK: u64 = 6
-const F_SETLKW: u64 = 7
-const F_GETLK: u64 = 5
 const F_DUPFD_CLOEXEC: u64 = 1030
 const F_SETPIPE_SZ: u64 = 1031
 const F_GETPIPE_SZ: u64 = 1032
-const F_RDLCK: u64 = 0
-const F_WRLCK: u64 = 1
-const F_UNLCK: u64 = 2
-const FL_TYPE: u64 = 0
-const FL_WHENCE: u64 = 2
-const FL_START: u64 = 8
-const FL_LEN: u64 = 16
-const FL_PID: u64 = 24
-const FL_BYTES: u64 = 32
 
 fn do_fcntl(state: u64, me: u64, fd: u64, cmd: u64, arg: u64) -> u64 {
     let of: u64 = fdscope.use(state, me, fd, 0)
@@ -72,8 +60,8 @@ fn do_fcntl(state: u64, me: u64, fd: u64, cmd: u64, arg: u64) -> u64 {
         }
         return nd
     }
-    if cmd == F_SETLK || cmd == F_SETLKW || cmd == F_GETLK {
-        return do_lock(state, me, of, cmd, arg)
+    if fcntllock.is_lock_cmd(cmd) {
+        return fcntllock.do_lock(state, me, of, cmd, arg)
     }
     if cmd == fowner.F_SETOWN {
         return fowner.set_owner(state, of, arg)
@@ -127,149 +115,6 @@ fn pipe_size(state: u64, of: u64, cmd: u64, arg: u64) -> u64 {
         return sysuser.neg(errno.E_PERM)
     }
     return cap
-}
-
-fn lock_trifft(a_von: u64, a_bis: u64, b_von: u64, b_bis: u64) -> bool {
-    if a_bis < b_von {
-        return false
-    }
-    if b_bis < a_von {
-        return false
-    }
-    return true
-}
-
-fn do_lock(state: u64, me: u64, of: u64, cmd: u64, arg: u64) -> u64 {
-    if !procfault.user_ok(state, me, arg, FL_BYTES) {
-        return sysuser.neg(errno.E_FAULT)
-    }
-    let art: u64 = sysuser.user_half(state, me, arg + FL_TYPE)
-    let whence: u64 = sysuser.user_half(state, me, arg + FL_WHENCE)
-    let start: u64 = sysuser.user_word(state, me, arg + FL_START)
-    let length: u64 = sysuser.user_word(state, me, arg + FL_LEN)
-    if art != F_RDLCK && art != F_WRLCK && art != F_UNLCK {
-        return sysuser.neg(errno.E_INVAL)
-    }
-    var von: u64 = start
-    if whence == sysconst.SEEK_CUR {
-        von = file.open_off(state, of) + start
-    }
-    if whence == sysconst.SEEK_END {
-        return sysuser.neg(errno.E_INVAL)
-    }
-    if whence != sysconst.SEEK_SET && whence != sysconst.SEEK_CUR {
-        return sysuser.neg(errno.E_INVAL)
-    }
-    var bis: u64 = 0xFFFFFFFFFFFFFFFF
-    if length != 0 {
-        if (length >> 63) != 0 {
-            return sysuser.neg(errno.E_INVAL)
-        }
-        bis = von + length - 1
-    }
-    let ino: u64 = file.open_ino(state, of)
-    if ino == 0 {
-        return sysuser.neg(errno.E_BADF)
-    }
-    let mnt: u64 = file.open_mnt(state, of)
-    let wer: u64 = taskslot.tget(state, me, taskconst.T_TGID)
-
-    if cmd == F_GETLK {
-        var k: u64 = 0
-        while k < kstate.FLOCK_SLOTS {
-            if poslock.get(state, k, poslock.L_INO) == ino
-                && poslock.get(state, k, poslock.L_MNT) == mnt
-                && poslock.get(state, k, poslock.L_PID) != wer {
-                let hart: u64 = poslock.get(state, k, poslock.L_ART)
-                var stoert: bool = true
-                if art == F_RDLCK && hart == F_RDLCK {
-                    stoert = false
-                }
-                if stoert && lock_trifft(von, bis,
-                    poslock.get(state, k, poslock.L_VON), poslock.get(state, k, poslock.L_UNTIL)) {
-                    sysuser.put_half(state, me, arg + FL_TYPE, hart)
-                    sysuser.put_half(state, me, arg + FL_WHENCE, sysconst.SEEK_SET)
-                    sysuser.put64(state, me, arg + FL_START,
-                        poslock.get(state, k, poslock.L_VON))
-                    var l: u64 = 0
-                    if poslock.get(state, k, poslock.L_UNTIL) != 0xFFFFFFFFFFFFFFFF {
-                        l = poslock.get(state, k, poslock.L_UNTIL)
-                            - poslock.get(state, k, poslock.L_VON) + 1
-                    }
-                    sysuser.put64(state, me, arg + FL_LEN, l)
-                    sysuser.put_word32(state, me, arg + FL_PID,
-                        poslock.get(state, k, poslock.L_PID))
-                    return 0
-                }
-            }
-            k = k + 1
-        }
-        sysuser.put_half(state, me, arg + FL_TYPE, F_UNLCK)
-        return 0
-    }
-
-    if art == F_UNLCK {
-        var k: u64 = 0
-        while k < kstate.FLOCK_SLOTS {
-            if poslock.get(state, k, poslock.L_INO) == ino
-                && poslock.get(state, k, poslock.L_MNT) == mnt
-                && poslock.get(state, k, poslock.L_PID) == wer
-                && lock_trifft(von, bis, poslock.get(state, k, poslock.L_VON),
-                    poslock.get(state, k, poslock.L_UNTIL)) {
-                poslock.free(state, k)
-            }
-            k = k + 1
-        }
-        return 0
-    }
-
-    var k2: u64 = 0
-    while k2 < kstate.FLOCK_SLOTS {
-        if poslock.get(state, k2, poslock.L_INO) == ino
-            && poslock.get(state, k2, poslock.L_MNT) == mnt
-            && poslock.get(state, k2, poslock.L_PID) != wer {
-            let hart2: u64 = poslock.get(state, k2, poslock.L_ART)
-            var stoert2: bool = true
-            if art == F_RDLCK && hart2 == F_RDLCK {
-                stoert2 = false
-            }
-            if stoert2 && lock_trifft(von, bis, poslock.get(state, k2, poslock.L_VON),
-                poslock.get(state, k2, poslock.L_UNTIL)) {
-                return sysuser.neg(errno.E_AGAIN)
-            }
-        }
-        k2 = k2 + 1
-    }
-    var k3: u64 = 0
-    while k3 < kstate.FLOCK_SLOTS {
-        if poslock.get(state, k3, poslock.L_INO) == ino
-            && poslock.get(state, k3, poslock.L_MNT) == mnt
-            && poslock.get(state, k3, poslock.L_PID) == wer
-            && lock_trifft(von, bis, poslock.get(state, k3, poslock.L_VON),
-                poslock.get(state, k3, poslock.L_UNTIL)) {
-            poslock.free(state, k3)
-        }
-        k3 = k3 + 1
-    }
-    var free: u64 = kstate.FLOCK_SLOTS
-    var k4: u64 = 0
-    while k4 < kstate.FLOCK_SLOTS {
-        if poslock.get(state, k4, poslock.L_INO) == 0 && free == kstate.FLOCK_SLOTS {
-            free = k4
-        }
-        k4 = k4 + 1
-    }
-    if free >= kstate.FLOCK_SLOTS {
-        return sysuser.neg(errno.E_NOLCK)
-    }
-    poslock.put(state, free, poslock.L_INO, ino)
-    poslock.put(state, free, poslock.L_MNT, mnt)
-    poslock.put(state, free, poslock.L_VON, von)
-    poslock.put(state, free, poslock.L_UNTIL, bis)
-    poslock.put(state, free, poslock.L_ART, art)
-    poslock.put(state, free, poslock.L_PID, wer)
-    kstate.add(state, kstate.FLOCKS, 1)
-    return 0
 }
 
 const F_ADD_SEALS: u64 = 1033
