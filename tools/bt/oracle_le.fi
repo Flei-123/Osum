@@ -1,0 +1,136 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import bt.hci
+import bt.ble
+
+static mut buf: [u8; 64] = [0; 64]
+static mut tab: [u8; 136] = [0; 136]
+static mut txt: [u8; 24] = [0; 24]
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn pb() -> u64 { return (&buf[0]) as u64 }
+fn pt() -> u64 { return (&tab[0]) as u64 }
+fn px() -> u64 { return (&txt[0]) as u64 }
+
+fn b(i: u64, v: u64) { buf[i as usize] = (v & 255) as u8 }
+
+fn single_report() {
+    b(0, 0x3E)
+    b(1, 25)
+    b(2, 2)
+    b(3, 1)
+    b(4, 0)
+    b(5, 1)
+    var i: u64 = 0
+    while i < 6 {
+        b(6 + i, 0xA0 + i)
+        i = i + 1
+    }
+    b(12, 13)
+    b(13, 2)
+    b(14, 1)
+    b(15, 6)
+    b(16, 3)
+    b(17, 3)
+    b(18, 0x12)
+    b(19, 0x18)
+    b(20, 5)
+    b(21, 9)
+    b(22, 0x4D)
+    b(23, 0x6F)
+    b(24, 0x75)
+    b(25, 0x73)
+    b(26, 0xC4)
+}
+
+fn double_report() {
+    b(0, 0x3E)
+    b(1, 27)
+    b(2, 2)
+    b(3, 2)
+    b(4, 0)
+    b(5, 4)
+    b(6, 0)
+    b(7, 1)
+    var i: u64 = 0
+    while i < 12 {
+        b(8 + i, 0x10 + i)
+        i = i + 1
+    }
+    b(20, 3)
+    b(21, 2)
+    b(22, 2)
+    b(23, 1)
+    b(24, 6)
+    b(25, 0xAA)
+    b(26, 0xBB)
+    b(27, 0xD0)
+    b(28, 0xE0)
+}
+
+fn main() -> i32 {
+    let n: u64 = ble.build_scan_params(pb(), ble.SCAN_ACTIVE, 0x10, 0x10)
+    chk("scan params 10 octets", n == 10 && buf[0] == 0x0B && buf[1] == 0x20 && buf[2] == 7 && buf[3] == 1 && buf[4] == 0x10 && buf[5] == 0 && buf[6] == 0x10 && buf[9] == 0)
+    let m: u64 = ble.build_scan_enable(pb(), 1, 0)
+    chk("scan enable 5 octets", m == 5 && buf[0] == 0x0C && buf[1] == 0x20 && buf[2] == 2 && buf[3] == 1 && buf[4] == 0)
+    single_report()
+    chk("single report ok", ble.report_ok(pb(), 27) && ble.report_count(pb()) == 1)
+    chk("truncated report rejected", !ble.report_ok(pb(), 26))
+    chk("single report fields", ble.rep_addr_type(pb(), 0) == 1 && ble.rep_dlen(pb(), 0) == 13 && ble.rep_rssi(pb(), 0) == 0xC4)
+    chk("single addr octets", ble.rep_addr(pb(), 0) == pb() + 6 && buf[6] == 0xA0)
+    chk("rssi negative", hci.signed_rssi(ble.rep_rssi(pb(), 0)) == 0 - 60)
+    let data: u64 = ble.rep_data(pb(), 0)
+    chk("hid uuid found", ble.ad_has_uuid16(data, 13, ble.UUID_HID))
+    chk("other uuid not found", !ble.ad_has_uuid16(data, 13, 0x180F))
+    chk("hid maps to input kind", hci.cod_kind(ble.adv_cod(data, 13)) == hci.KIND_INPUT)
+    hci.tab_clear(pt(), 4)
+    let i0: u64 = ble.add_report(pt(), 4, pb(), 0, px(), 19)
+    let i1: u64 = ble.add_report(pt(), 4, pb(), 0, px(), 19)
+    chk("le report stored once", i0 == 0 && i1 == 0 && hci.tab_count(pt()) == 1)
+    chk("le name stored", tab[8 + 7] == 4 && tab[8 + 12] == 0x4D && tab[8 + 15] == 0x73)
+    chk("le flags le + random", tab[8 + 11] == 3)
+    let i2: u64 = hci.tab_add(pt(), 4, pb() + 7, 0x240404, 0xD0, 0, 0)
+    chk("classic add with other address is separate", i2 == 1 && hci.tab_count(pt()) == 2)
+    let i3: u64 = hci.tab_add(pt(), 4, pb() + 6, 0x000104, 0xD0, 0, 0)
+    chk("classic cod keeps le flags", i3 == 0 && tab[8 + 11] == 3 && tab[8 + 8] == 4 && tab[8 + 9] == 1)
+    double_report()
+    chk("double report ok", ble.report_ok(pb(), 29) && ble.report_count(pb()) == 2)
+    chk("double report second addr", ble.rep_addr(pb(), 1) == pb() + 14 && ble.rep_addr_type(pb(), 1) == 1 && ble.rep_type(pb(), 1) == 4)
+    chk("double report second data", ble.rep_data(pb(), 1) == pb() + 25 && ble.rep_dlen(pb(), 1) == 2 && ble.rep_dlen(pb(), 0) == 3)
+    chk("double report rssi per entry", ble.rep_rssi(pb(), 0) == 0xD0 && ble.rep_rssi(pb(), 1) == 0xE0)
+    chk("double report truncated rejected", !ble.report_ok(pb(), 28))
+    b(20, 40)
+    chk("oversize data length rejected", !ble.report_ok(pb(), 29))
+    b(20, 30)
+    b(21, 30)
+    chk("data lengths beyond event rejected", !ble.report_ok(pb(), 29))
+    b(20, 3)
+    b(21, 2)
+    b(40, 5)
+    b(41, 3)
+    b(42, 0x0F)
+    b(43, 0x18)
+    b(44, 0x12)
+    b(45, 0x18)
+    chk("second uuid in list found", ble.ad_has_uuid16(pb() + 40, 6, ble.UUID_HID))
+    b(3, 9)
+    chk("report count beyond max rejected", !ble.report_ok(pb(), 29))
+    b(3, 0)
+    chk("zero reports rejected", !ble.report_ok(pb(), 29))
+    b(3, 2)
+    b(2, 3)
+    chk("other subevent rejected", !ble.report_ok(pb(), 29))
+    chk("appearance keyboard is input", hci.cod_kind(ble.appearance_cod(0x03C1)) == hci.KIND_INPUT)
+    chk("appearance phone", hci.cod_kind(ble.appearance_cod(0x0040)) == hci.KIND_PHONE)
+    chk("appearance computer", hci.cod_kind(ble.appearance_cod(0x0080)) == hci.KIND_COMPUTER)
+    return 0
+}

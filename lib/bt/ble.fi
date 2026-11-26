@@ -1,0 +1,203 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.octets
+import bt.hci
+
+export {
+    OP_LE_SET_SCAN_PARAMS, OP_LE_SET_SCAN_ENABLE, EV_LE_META, SUB_ADV_REPORT,
+    SCAN_PASSIVE, SCAN_ACTIVE, ADV_MAX_DATA, REPORT_MAX,
+    AD_FLAGS, AD_UUID16_PART, AD_UUID16_FULL, AD_NAME_SHORT, AD_NAME_FULL, AD_APPEARANCE, UUID_HID,
+    build_scan_params, build_scan_enable,
+    report_ok, report_count, rep_type, rep_addr_type, rep_addr, rep_dlen, rep_data, rep_rssi,
+    ad_find, ad_len, ad_has_uuid16, appearance_cod, adv_cod, add_report
+}
+
+const OP_LE_SET_SCAN_PARAMS: u64 = 0x200B
+const OP_LE_SET_SCAN_ENABLE: u64 = 0x200C
+
+const EV_LE_META: u64 = 0x3E
+const SUB_ADV_REPORT: u64 = 0x02
+
+const SCAN_PASSIVE: u64 = 0
+const SCAN_ACTIVE: u64 = 1
+const ADV_MAX_DATA: u64 = 31
+const REPORT_MAX: u64 = 8
+
+const AD_FLAGS: u64 = 0x01
+const AD_UUID16_PART: u64 = 0x02
+const AD_UUID16_FULL: u64 = 0x03
+const AD_NAME_SHORT: u64 = 0x08
+const AD_NAME_FULL: u64 = 0x09
+const AD_APPEARANCE: u64 = 0x19
+const UUID_HID: u64 = 0x1812
+
+const COD_COMPUTER: u64 = 0x000100
+const COD_PHONE: u64 = 0x000200
+const COD_INPUT: u64 = 0x000500
+const ADDR_RANDOM: u64 = 1
+const NOT_FOUND: u64 = 0xFFFFFFFF
+
+fn build_scan_params(dst: u64, kind: u64, interval: u64, window: u64) -> u64 {
+    var p: [u8; 7] = [0 as u8; 7]
+    let pp: u64 = (&p[0]) as u64
+    octets.st8(pp, 0, kind)
+    octets.st16(pp, 1, interval)
+    octets.st16(pp, 3, window)
+    octets.st8(pp, 5, 0)
+    octets.st8(pp, 6, 0)
+    return hci.build_command(dst, OP_LE_SET_SCAN_PARAMS, pp, 7)
+}
+
+fn build_scan_enable(dst: u64, enable: u64, filter_dup: u64) -> u64 {
+    var p: [u8; 2] = [0 as u8; 2]
+    let pp: u64 = (&p[0]) as u64
+    octets.st8(pp, 0, enable)
+    octets.st8(pp, 1, filter_dup)
+    return hci.build_command(dst, OP_LE_SET_SCAN_ENABLE, pp, 2)
+}
+
+fn report_count(ev: u64) -> u64 {
+    return octets.ld8(ev, 3)
+}
+
+fn data_total(ev: u64, n: u64) -> u64 {
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        sum = sum + octets.ld8(ev, 4 + 8 * n + i)
+        i = i + 1
+    }
+    return sum
+}
+
+fn report_ok(ev: u64, len: u64) -> bool {
+    if !hci.event_ok(ev, len) {
+        return false
+    }
+    if hci.event_code(ev) != EV_LE_META || hci.event_plen(ev) < 2 || octets.ld8(ev, 2) != SUB_ADV_REPORT {
+        return false
+    }
+    let n: u64 = report_count(ev)
+    if n == 0 || n > REPORT_MAX {
+        return false
+    }
+    if 4 + 10 * n > 2 + hci.event_plen(ev) {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        if octets.ld8(ev, 4 + 8 * n + i) > ADV_MAX_DATA {
+            return false
+        }
+        i = i + 1
+    }
+    return 4 + 10 * n + data_total(ev, n) <= 2 + hci.event_plen(ev)
+}
+
+fn rep_type(ev: u64, i: u64) -> u64 {
+    return octets.ld8(ev, 4 + i)
+}
+
+fn rep_addr_type(ev: u64, i: u64) -> u64 {
+    return octets.ld8(ev, 4 + report_count(ev) + i)
+}
+
+fn rep_addr(ev: u64, i: u64) -> u64 {
+    return ev + 4 + 2 * report_count(ev) + 6 * i
+}
+
+fn rep_dlen(ev: u64, i: u64) -> u64 {
+    return octets.ld8(ev, 4 + 8 * report_count(ev) + i)
+}
+
+fn rep_data(ev: u64, i: u64) -> u64 {
+    let n: u64 = report_count(ev)
+    var off: u64 = 4 + 9 * n
+    var k: u64 = 0
+    while k < i {
+        off = off + rep_dlen(ev, k)
+        k = k + 1
+    }
+    return ev + off
+}
+
+fn rep_rssi(ev: u64, i: u64) -> u64 {
+    let n: u64 = report_count(ev)
+    return octets.ld8(ev, 4 + 9 * n + data_total(ev, n) + i)
+}
+
+fn ad_find(data: u64, n: u64, kind: u64) -> u64 {
+    var at: u64 = 0
+    while at + 1 < n {
+        let len: u64 = octets.ld8(data, at)
+        if len == 0 || at + 1 + len > n {
+            return NOT_FOUND
+        }
+        if octets.ld8(data, at + 1) == kind {
+            return at
+        }
+        at = at + 1 + len
+    }
+    return NOT_FOUND
+}
+
+fn ad_len(data: u64, at: u64) -> u64 {
+    return octets.ld8(data, at) - 1
+}
+
+fn uuid_in(data: u64, at: u64, uuid: u64) -> bool {
+    let cnt: u64 = ad_len(data, at) / 2
+    var k: u64 = 0
+    while k < cnt {
+        if octets.ld16(data, at + 2 + 2 * k) == uuid {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+fn ad_has_uuid16(data: u64, n: u64, uuid: u64) -> bool {
+    let a: u64 = ad_find(data, n, AD_UUID16_FULL)
+    if a != NOT_FOUND && uuid_in(data, a, uuid) {
+        return true
+    }
+    let b: u64 = ad_find(data, n, AD_UUID16_PART)
+    return b != NOT_FOUND && uuid_in(data, b, uuid)
+}
+
+fn appearance_cod(app: u64) -> u64 {
+    let category: u64 = app >> 6
+    if category == 1 { return COD_PHONE }
+    if category == 2 { return COD_COMPUTER }
+    if category == 15 { return COD_INPUT }
+    return 0
+}
+
+fn adv_cod(data: u64, n: u64) -> u64 {
+    if ad_has_uuid16(data, n, UUID_HID) {
+        return COD_INPUT
+    }
+    let a: u64 = ad_find(data, n, AD_APPEARANCE)
+    if a != NOT_FOUND && ad_len(data, a) >= 2 {
+        return appearance_cod(octets.ld16(data, a + 2))
+    }
+    return 0
+}
+
+fn add_report(tab: u64, cap: u64, ev: u64, i: u64, name: u64, name_max: u64) -> u64 {
+    let data: u64 = rep_data(ev, i)
+    let dlen: u64 = rep_dlen(ev, i)
+    let nlen: u64 = hci.eir_name(data, dlen, name, name_max)
+    let idx: u64 = hci.tab_add(tab, cap, rep_addr(ev, i), adv_cod(data, dlen), rep_rssi(ev, i), name, nlen)
+    if idx == NOT_FOUND {
+        return idx
+    }
+    let rec: u64 = hci.tab_rec(tab, idx)
+    var flags: u64 = hci.rec_flags(rec) | hci.FLAG_LE
+    let atype: u64 = rep_addr_type(ev, i) & 1
+    if atype == ADDR_RANDOM {
+        flags = flags | hci.FLAG_RANDOM
+    }
+    octets.st8(rec, hci.REC_FLAGS, flags)
+    return idx
+}

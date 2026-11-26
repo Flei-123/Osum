@@ -5,12 +5,13 @@ import mm.mmframe
 import drv.usb.xhci
 import usbnet.le
 import bt.hci
+import bt.ble
 import bus.drvreg
 import bus.drvclass
 import libc.regio
 
 export {
-    attach, unplug_slot, pump, command, attached, ready, powered, scanning, controller_addr, hci_ver,
+    attach, unplug_slot, pump, command, attached, ready, powered, scanning, le_scanning, le_reports, le_scans_started, controller_addr, hci_ver,
     manufacturer, table, TAB_CAP, scans_started, scans_done, events_seen, event_errors, init_step,
     CMD_OK, CMD_BAD, CMD_OFF, CMD_FAIL, CMD_NONE
 }
@@ -31,6 +32,9 @@ const EIR_AT: u64 = 17
 const WAIT_TRIES: u64 = 3000
 const INQ_LENGTH: u64 = 5
 const INQ_MAX: u64 = 0
+const LE_INTERVAL: u64 = 0x60
+const LE_WINDOW: u64 = 0x30
+const SUB_OFFSET: u64 = 2
 
 const C_FRAME: u64 = 0
 const C_SLOT: u64 = 1
@@ -55,8 +59,11 @@ const C_DONE: u64 = 19
 const C_EVENTS: u64 = 20
 const C_ERRS: u64 = 21
 const C_STEP: u64 = 22
+const C_LESCAN: u64 = 23
+const C_LEREPS: u64 = 24
+const C_LESCANS: u64 = 25
 
-static mut bt_st: [u64; 24] = [0 as u64; 24]
+static mut bt_st: [u64; 32] = [0 as u64; 32]
 static mut bt_tab: [u64; 66] = [0 as u64; 66]
 static mut bt_name: [u8; 24] = [0 as u8; 24]
 
@@ -75,6 +82,8 @@ static mut w_off: [u8; 4] = "off\0"
 static mut w_scan: [u8; 5] = "scan\0"
 static mut w_cancel: [u8; 7] = "cancel\0"
 static mut w_clear: [u8; 6] = "clear\0"
+static mut w_lescan: [u8; 7] = "lescan\0"
+static mut w_lestop: [u8; 7] = "lestop\0"
 
 fn cg(i: u64) -> u64 {
     return bt_st[i as usize]
@@ -102,6 +111,18 @@ fn powered() -> bool {
 
 fn scanning() -> bool {
     return cg(C_SCAN) != 0
+}
+
+fn le_scanning() -> bool {
+    return cg(C_LESCAN) != 0
+}
+
+fn le_reports() -> u64 {
+    return cg(C_LEREPS)
+}
+
+fn le_scans_started() -> u64 {
+    return cg(C_LESCANS)
 }
 
 fn controller_addr() -> u64 {
@@ -178,6 +199,23 @@ fn on_extended(ev: u64, n: u64) {
         (&bt_name[0]) as u64, m)
 }
 
+fn on_le_meta(ev: u64, n: u64) {
+    if regio.read8_at(ev, SUB_OFFSET) != ble.SUB_ADV_REPORT {
+        return
+    }
+    if !ble.report_ok(ev, n) {
+        cs(C_ERRS, cg(C_ERRS) + 1)
+        return
+    }
+    var i: u64 = 0
+    let count: u64 = ble.report_count(ev)
+    while i < count {
+        let _r: u64 = ble.add_report(table(), TAB_CAP, ev, i, (&bt_name[0]) as u64, hci.NAME_MAX)
+        cs(C_LEREPS, cg(C_LEREPS) + 1)
+        i = i + 1
+    }
+}
+
 fn handle_event(ev: u64, n: u64) {
     if !hci.event_ok(ev, n) {
         cs(C_ERRS, cg(C_ERRS) + 1)
@@ -203,6 +241,8 @@ fn handle_event(ev: u64, n: u64) {
         on_inquiry_rows(ev)
     } else if code == hci.EV_EXTENDED_INQUIRY {
         on_extended(ev, n)
+    } else if code == ble.EV_LE_META {
+        on_le_meta(ev, n)
     } else if code == hci.EV_INQUIRY_COMPLETE {
         cs(C_SCAN, 0)
         cs(C_DONE, cg(C_DONE) + 1)
@@ -352,6 +392,7 @@ fn attach(state: u64, slot: u64, dci: u64) -> bool {
     cs(C_BUSY, 0)
     cs(C_READY, 0)
     cs(C_SCAN, 0)
+    cs(C_LESCAN, 0)
     cs(C_POWER, 1)
     cs(C_CCSEQ, 0)
     cs(C_CSSEQ, 0)
@@ -406,6 +447,7 @@ fn unplug_slot(state: u64, slot: u64) {
     cs(C_ATTACHED, 0)
     cs(C_READY, 0)
     cs(C_SCAN, 0)
+    cs(C_LESCAN, 0)
     serial.puts((&t_gone[0]) as u64)
     serial.nl()
 }
@@ -455,6 +497,52 @@ fn cancel_scan(state: u64) -> u64 {
     return CMD_OK
 }
 
+fn le_command(state: u64, n: u64, op: u64) -> u64 {
+    let seq0: u64 = cg(C_CCSEQ)
+    if !send(state, n) {
+        return 0x100
+    }
+    return wait_cc(state, op, seq0)
+}
+
+fn start_le_scan(state: u64) -> u64 {
+    if cg(C_ATTACHED) == 0 || cg(C_READY) == 0 {
+        return CMD_NONE
+    }
+    if cg(C_POWER) == 0 {
+        return CMD_OFF
+    }
+    if cg(C_LESCAN) != 0 {
+        return CMD_OK
+    }
+    let np: u64 = ble.build_scan_params(frame() + F_CMD, ble.SCAN_ACTIVE, LE_INTERVAL, LE_WINDOW)
+    if le_command(state, np, ble.OP_LE_SET_SCAN_PARAMS) != 0 {
+        return CMD_FAIL
+    }
+    let ne: u64 = ble.build_scan_enable(frame() + F_CMD, 1, 0)
+    if le_command(state, ne, ble.OP_LE_SET_SCAN_ENABLE) != 0 {
+        return CMD_FAIL
+    }
+    cs(C_LESCAN, 1)
+    cs(C_LESCANS, cg(C_LESCANS) + 1)
+    return CMD_OK
+}
+
+fn stop_le_scan(state: u64) -> u64 {
+    if cg(C_ATTACHED) == 0 || cg(C_READY) == 0 {
+        return CMD_NONE
+    }
+    if cg(C_LESCAN) == 0 {
+        return CMD_OK
+    }
+    cs(C_LESCAN, 0)
+    let n: u64 = ble.build_scan_enable(frame() + F_CMD, 0, 0)
+    if le_command(state, n, ble.OP_LE_SET_SCAN_ENABLE) != 0 {
+        return CMD_FAIL
+    }
+    return CMD_OK
+}
+
 fn word_is(p: u64, n: u64, at: u64, w: u64, wl: u64) -> bool {
     if at + wl > n {
         return false
@@ -480,6 +568,12 @@ fn command(state: u64, p: u64, n: u64) -> u64 {
     if word_is(p, n, 0, (&w_scan[0]) as u64, 4) {
         return start_scan(state)
     }
+    if word_is(p, n, 0, (&w_lescan[0]) as u64, 6) {
+        return start_le_scan(state)
+    }
+    if word_is(p, n, 0, (&w_lestop[0]) as u64, 6) {
+        return stop_le_scan(state)
+    }
     if word_is(p, n, 0, (&w_cancel[0]) as u64, 6) {
         return cancel_scan(state)
     }
@@ -494,6 +588,7 @@ fn command(state: u64, p: u64, n: u64) -> u64 {
         }
         if word_is(p, n, 6, (&w_off[0]) as u64, 3) {
             let _c: u64 = cancel_scan(state)
+            let _l: u64 = stop_le_scan(state)
             cs(C_POWER, 0)
             hci.tab_clear(table(), TAB_CAP)
             return CMD_OK
