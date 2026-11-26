@@ -29,13 +29,15 @@ pick_port() {
 
 summarize() {
     local label=$1 id=$2 out=$3
-    local ok bad faults hang
+    local ok bad faults hang fetch_race data_race
     ok=$(grep -ac '^FX11 run [0-9]* rc=0 ' "$out/ser.txt" 2>/dev/null)
     bad=$(grep -a '^FX11 run [0-9]* rc=' "$out/ser.txt" 2>/dev/null | grep -avc ' rc=0 ')
     faults=$(grep -ac 'user fault' "$out/ser.txt" 2>/dev/null)
     hang=$(grep -ac '^FX-HANG kind=' "$out/ser.txt" 2>/dev/null)
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$label" "$id" "${ok:-0}" "${bad:-0}" "${faults:-0}" "${hang:-0}" >> "$RESULTS"
-    if [ "${hang:-0}" -eq 0 ] && [ "${bad:-0}" -eq 0 ] && [ "${faults:-0}" -eq 0 ]; then
+    fetch_race=$(grep -a '^tlb\.30 ' "$out/ser.txt" 2>/dev/null | tail -1 | awk '{print $2}' | tr -d '\r')
+    data_race=$(grep -a '^tlb\.31 ' "$out/ser.txt" 2>/dev/null | tail -1 | awk '{print $2}' | tr -d '\r')
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$label" "$id" "${ok:-0}" "${bad:-0}" "${faults:-0}" "${hang:-0}" "${fetch_race:-0}" "${data_race:-0}" >> "$RESULTS"
+    if [ "${hang:-0}" -eq 0 ] && [ "${bad:-0}" -eq 0 ] && [ "${faults:-0}" -eq 0 ] && [ "${fetch_race:-0}" -eq 0 ]; then
         rm -rf "$out" "$out.log"
     fi
 }

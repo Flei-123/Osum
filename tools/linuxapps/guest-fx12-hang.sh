@@ -51,4 +51,5 @@ while [ $n -le ${FX_RUNS:-6} ]; do
     sleep 2
     n=$((n+1))
 done
+grep -a "^tlb\.3[01] " /proc/bench
 echo FX-END
