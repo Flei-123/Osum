@@ -32,7 +32,7 @@ if [ -z "${KERNEL:-}" ]; then
     KERNEL=$OUT/k0.img
 fi
 { [ -z "${FX_RUNS:-}" ] || printf 'FX_RUNS=%s\n' "$FX_RUNS"; cat "$GS"; } > "$OUT/fx.sh"
-printf '::sysinit:/bin/sh /etc/fx.sh\n::shutdown:/bin/true\n' > "$OUT/inittab"
+{ case "$KARGS" in *script=*) ;; *) echo '::sysinit:/bin/sh /etc/fx.sh';; esac; echo '::shutdown:/bin/true'; } > "$OUT/inittab"
 # the spec comes from the Alpine root; replace its inittab and add the guest script
 grep -v '^/etc/inittab' "$SPEC" > "$OUT/spec.txt"
 if [ -n "${GUI:-}" ]; then
