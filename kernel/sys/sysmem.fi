@@ -290,12 +290,65 @@ fn do_map(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64,
     if off != 0 {
         return sysuser.neg(errno.E_INVAL)
     }
+    if (flags & MAP_SHARED) != 0 && (flags & MAP_PRIVATE) == 0 && !is_fixed(flags) {
+        let shared: u64 = map_anon_shared(state, me, len, prot)
+        if shared != 0 {
+            return shared
+        }
+    }
     return map_anon(state, me, addr, len, prot, flags)
 }
 
-// RUNDE UNTERBAU: anonymous memory with the rights that were asked for. Until this round every anonymous mapping was read-write
-// whatever `prot` said (PROT_NONE guard pages were readable); the pages come out RW and zeroed from `map_alloc` and are cut down
-// afterwards when `prot` is anything but plain read-write.
+fn map_anon_shared(state: u64, me: u64, len: u64, prot: u64) -> u64 {
+    let pages: u64 = sysfd.page_up(len) / sysconst.PAGE
+    if pages == 0 || pages > unixsock.SHM_PAGES_LIMIT {
+        return 0
+    }
+    let i: u64 = unixsock.shm_new_anon(state, pages)
+    if i >= unixsock.USHM_MAX {
+        return 0
+    }
+    let r: u64 = map_shm_anon(state, me, i, len, prot)
+    unixsock.shm_unref(state, i)
+    return r
+}
+
+fn map_shm_anon(state: u64, me: u64, i: u64, len: u64, prot: u64) -> u64 {
+    let writing: bool = (prot & PROT_WRITE) != 0
+    if writing && !unixsock.shm_wmap_take(state, i) {
+        return sysuser.neg(errno.E_PERM)
+    }
+    let r: u64 = map_shm_obj(state, me, i, true, len, prot, 0)
+    if r >= 0xFFFFFFFFFFFFF000 && writing {
+        unixsock.shm_wmap_drop(state, i)
+    }
+    return r
+}
+
+fn mremap_anon_shared(state: u64, me: u64, old_addr: u64, oldp: u64, new_len: u64) -> u64 {
+    let k: u64 = unixsock.map_rec_slot(state, mem_owner(state, me), old_addr)
+    if k >= unixsock.UMAP_MAX {
+        return 0
+    }
+    let w: u64 = unixsock.map_rec_word(state, k)
+    let i: u64 = (w >> 16) & 0xFFFF
+    if (unixsock.shm_flags(state, i) & unixsock.SMF_ANON) == 0 || unixsock.shm_pages(state, i) != oldp {
+        return 0
+    }
+    var prot: u64 = PROT_READ
+    if (w & unixsock.UM_WRITE) != 0 {
+        prot = prot | PROT_WRITE
+    }
+    unixsock.shm_ref(state, i)
+    let r: u64 = map_shm_anon(state, me, i, new_len, prot)
+    unixsock.shm_unref(state, i)
+    if r >= 0xFFFFFFFFFFFFF000 {
+        return r
+    }
+    let _d: u64 = do_unmap(state, me, old_addr, oldp * sysconst.PAGE)
+    return r
+}
+
 fn map_anon(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64) -> u64 {
     let pages: u64 = sysfd.page_up(len) / sysconst.PAGE
     // TOCTOU audit K-02: a length near 2^64 rounds to 0 pages (page_up wraps); a zero-page mapping is no mapping
@@ -1548,6 +1601,12 @@ fn do_mremap(state: u64, me: u64, old_addr: u64, old_len: u64, new_len: u64, fla
     }
     let oldp: u64 = sysfd.page_up(old_len) / sysconst.PAGE
     let newp: u64 = sysfd.page_up(new_len) / sysconst.PAGE
+    if newp > oldp && (flags & 1) != 0 {
+        let moved: u64 = mremap_anon_shared(state, me, old_addr, oldp, new_len)
+        if moved != 0 {
+            return moved
+        }
+    }
     var k: u64 = 0
     var virtual_only: bool = false
     while k < oldp {
