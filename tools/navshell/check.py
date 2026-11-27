@@ -57,17 +57,17 @@ def judge(txt, quiet=False):
     first = navs[0]
     ok(first[0] == PERS and first[1] == 0, "opens on %s, page 0" % PERS)
     ok(first[2] == 2 and first[3] == 0 and first[4] == 0, "first state: 2 crumbs, nothing to go back or forward to")
-    ok(first[7] >= 18, "sidebar lists the mapped pages from the route table (side=%d)" % first[7])
+    ok(first[7] >= 10, "sidebar lists the main categories from the route table (side=%d)" % first[7])
     ok(all(n[9] == 0 for n in navs), "no route title shows its raw catalogue key (rawkeys=0 on every line)")
     ok(subseq(navs, [
         lambda n: n[0] == PERS,
         lambda n: n[0] == THEMES and n[1] == 7 and n[2] == 3 and n[3] == 1,
         lambda n: n[0] == PERS and n[1] == 0 and n[3] == 1,
-        lambda n: n[0] == THEMES and n[1] == 7 and n[4] == 1,
-        lambda n: n[0] == PERS and n[1] == 0 and n[4] == 1,
+        lambda n: n[0] == THEMES and n[1] == 7,
+        lambda n: n[0] == PERS and n[1] == 0,
         lambda n: n[0] == THEMES and n[1] == 7 and n[6] == 3,
         lambda n: n[0] == PERS and n[1] == 0 and n[6] == 3,
-    ]), "tab click, breadcrumb, Back, Back, Forward, breadcrumb: routes, pages, crumbs, flags in order")
+    ]), "tab click, breadcrumb, Back, Back, tab again, breadcrumb: routes, pages, crumbs, flags in order")
     ok(any(n[0] == THEMES and n[6] == 3 for n in navs), "stack depth 3 after pers, themes, crumb")
     ok(any(n[8] >= 1 for n in navs), "search for 'power' finds a route (hits>=1)")
     ok(subseq(navs, [lambda n: n[8] >= 1, lambda n: n[0] == POWER and n[1] == 16]), "Enter opens the best hit: %s on page 16" % POWER)
@@ -75,10 +75,11 @@ def judge(txt, quiet=False):
        "sidebar: Display (page 1) and Advanced display (page 19, SET-7) open their own pages")
     ok(subseq(navs, [lambda n: n[0] == INPUT and n[1] == 15, lambda n: n[0] == SYSTEM and n[1] == 11, lambda n: n[0] == DEVELOPER and n[1] == 34]),
        "sidebar: Input (page 15), System (page 11) and Developer (page 34, child of System) open their own pages")
-    for want in ("navback", "navfwd", "navcrumba", "navcrumbb"):
+    for want in ("navback", "navcrumba", "navcrumbb"):
         ok(want in names, "rect %s reported" % want)
+    ok("navfwd" not in names, "no forward arrow in the header")
     tabs = [n for n in names if re.fullmatch(r"tab[a-z]", n)]
-    ok(len(tabs) >= 18, "sidebar tabs reported (%d)" % len(tabs))
+    ok(len(tabs) >= 10, "sidebar tabs reported (%d)" % len(tabs))
     ctl = {}
     for m in CTL.finditer(txt):
         ctl[int(m.group(1))] = max(ctl.get(int(m.group(1)), 0), int(m.group(2)))

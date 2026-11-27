@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
+import os
 import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "settingsnav"))
+import steps
 
 SIDEBAR_POINT = "140,300"
 LABELS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -29,14 +33,14 @@ def parent_uri(uri):
 
 def drehbuch(pages, yres, only=None):
     by_uri = {uri: page for page, uri in pages.items()}
+    routes = steps.load_routes(os.path.join(steps.SETTINGS_DIR, "settings.routes"))
     lines = ["warte 12", "klick 24,%d" % (yres - 20), "warte 3", "klickauf start_Settings", "warte 12", "foto 00-start"]
     for page in sorted(pages):
         if only is not None and page not in only:
             continue
-        parent = parent_uri(pages[page])
-        if parent in by_uri:
-            lines += ["klicksuche %s %s" % (tab_name(by_uri[parent]), SIDEBAR_POINT), "warte 2"]
-        lines += ["klicksuche %s %s" % (tab_name(page), SIDEBAR_POINT), "warte 2", "foto page-" + LABELS[page]]
+        for step in steps.clicks(page, by_uri, routes):
+            lines += [step, "warte 2"]
+        lines += ["foto page-" + LABELS[page]]
     lines += ["taste ctrl-f", "tippe zzzz", "warte 2", "foto search-empty"]
     return "\n".join(lines) + "\n"
 

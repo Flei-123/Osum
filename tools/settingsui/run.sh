@@ -5,7 +5,7 @@
 #   /root/jarvis/bin/heavy bash tools/settingsui/run.sh [<outdir>] [mode=light|dark] [scale=1|2]
 #
 # It boots the design-audit machine (tools/design/audit.sh), opens Settings,
-# clicks every sidebar page (and the Developer page below System) (rect names taba..tas), types into the search field
+# opens every page (head tab first, then the sub-page row), types into the search field
 # (Ctrl+F), and takes a picture each time. Checks (serial log):
 #   1. the sidebar tiles are reported (20 `tab?` rects);
 #   2. the search field is reported and the window is up;
@@ -27,15 +27,9 @@ for a in "$@"; do case "$a" in res=*) r=${a#res=}; YRES=${r#*x} ;; esac; done
   echo "klick 24,$((YRES-20))"; echo "warte 3"
   echo "klickauf start_Settings"; echo "warte 12"
   echo "foto 00-start"
-  for p in a b c d e f g h i j k l m n o p q r s t u v w x y z; do
-    echo "klickauf srecttab$p"; echo "warte 2"; echo "foto page-$p"
+  for p in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 34; do
+    python3 -I tools/settingsnav/steps.py $p; echo "foto page-$p"
   done
-  echo "klickauf srecttab26"; echo "warte 2"; echo "foto page-A"
-  echo "klickauf srecttab27"; echo "warte 2"; echo "foto page-B"
-  echo "klickauf srecttab28"; echo "warte 2"; echo "foto page-C"
-  echo "klickauf srecttab29"; echo "warte 2"; echo "foto page-D"
-  echo "klicksuche srecttabl 140,300"; echo "warte 2"
-  echo "klicksuche srecttab34 140,300"; echo "warte 2"; echo "foto page-dev"
   echo "taste ctrl-f"; echo "tippe zzzz"; echo "warte 2"; echo "foto search-empty"
 } > "$DREH"
 bash tools/design/audit.sh "$OUT" accel=kvm uitrace=yes halt=900 drehbuch="$DREH" "$@" > "$OUT.log" 2>&1

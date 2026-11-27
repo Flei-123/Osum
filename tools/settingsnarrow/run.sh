@@ -41,7 +41,7 @@ for cfg in $CFGS; do
     echo "rad -6"; echo "warte 2"; echo "foto 01-wheel1"
     echo "rad -10"; echo "warte 2"; echo "foto 02-wheel2"
     case "$cfg" in
-      nav*) echo "klickauf srecttabq" ;;
+      nav*) SETTINGSNAV_POINT="$((XRES/2)),$((YRES/2))" python3 -I tools/settingsnav/steps.py 16 ;;
       *) echo "rad 3"; echo "warte 2"; echo "klickauf srecttabd" ;;
     esac
     echo "warte 3"; echo "foto 03-page"

@@ -25,7 +25,7 @@ P1=482915; P2=735190; BAD=000999
   echo "warte 12"
   echo "klick 24,$((YRES-20))"; echo "warte 3"
   echo "klickauf start_Settings"; echo "warte 12"
-  echo "klickauf srecttabe"; echo "warte 2"
+  python3 -I tools/settingsnav/steps.py 4
   echo "foto 00-konten"
   # 1. first PIN
   echo "klickauf srectweg"; echo "tippe $P1"; echo "klickauf srectweh"; echo "warte 3"; echo "foto 01-set"
