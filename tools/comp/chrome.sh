@@ -132,6 +132,39 @@ echo "        cycles=$N3 compared_sum=$CS3 differ_sum=$DS3 chrome_windows=$CHP3"
 [ "${CHP3:-1}" = 0 ] && ok "nochrome: wmd composed the chrome of no window" || bad "nochrome: wmd composed the chrome of $CHP3 windows anyway"
 [ "${DS3:-0}" -ge 5000 ] && ok "nochrome: the judge sees the missing chrome ($DS3 differing pixels)" || bad "nochrome: only ${DS3:-0} differing pixels, the chrome is not judged"
 
+mksym() { # mksym <file>
+    cat > "$1" <<DREH
+warteauf 'launcher: ready' || 90
+warte 25
+klick 24,780
+warte 4
+klickauf start_Settings
+warte 14
+fahre 1250,780
+warte 40
+foto s
+taste f12
+warte 3
+DREH
+}
+echo "== 4. a bundle window (Settings) with the program symbol, scale 100 / 200 / 150 percent =="
+mksym "$D/dreh3.txt"
+HEX150=$(python3 -I tools/fracscale/edid.py 293 165)
+for CASE in "1 1 100 " "2 2 400 " "150 1 200 edid=$HEX150"; do
+    set -- $CASE
+    SC=$1; US=$2; MINPX=$3; EDIDARG=${4:-}
+    OUTD="$D/sym$SC"
+    bash tools/design/eh6.sh "$OUTD" res=1280x800 accel=kvm ton=ja mode=light lang=en tafel=nein uiscale=$US pins=explorer,settings,terminal \
+        drehbuch="$D/dreh3.txt" window_alpha=100 schatten=an "extra=wigapp=/bin/wmd wighalt=150 $EDIDARG" \
+        "progs=desktop taskbar settings launcher explorer edit sh echo ls cat theme wmd" > "$OUTD.log" 2>&1
+    S4="$OUTD/serial.txt"
+    read N4 CM4 CS4 DS4 UM4 < <(stats "$S4")
+    SYP=$(maxkv "$S4" sympx)
+    echo "        scale=$SC cycles=$N4 compared_sum=$CS4 differ_sum=$DS4 sympx=$SYP"
+    [ "${SYP:-0}" -ge "$MINPX" ] && ok "scale $SC: the symbol wrote $SYP pixels (min $MINPX)" || bad "scale $SC: the symbol wrote only ${SYP:-0} pixels (min $MINPX)"
+    [ "${CS4:-0}" -gt 0 ] && [ "${DS4:-1}" = 0 ] && ok "scale $SC: $CS4 pixels judged, $DS4 differ" || bad "scale $SC: differing pixels ${DS4:-?} of ${CS4:-0}"
+done
+
 echo
 echo "CHROME: $pass passed, $fail failed"
 [ "$fail" = 0 ]
