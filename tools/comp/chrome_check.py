@@ -44,6 +44,7 @@ def main():
     nums = [int(v) for v in sys.argv[2:19]]
     hover = len(sys.argv) > 19 and sys.argv[19] == "hover"
     focused, strip, x, y, ow, oh, bo, th, capw, sk, rad, title, frame, text, pad, grad, close = nums
+    sk = max(1, (sk + 50) // 100)
     im = Image.open(path).convert("RGB")
     W, H = im.size
     P = im.load()
