@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/titleicon/run.sh -- the program icon at the left of the framed title bar: x within border+padding, vertical middle within 1 px of the bar
 # middle, pixels really drawn. Counter-proof on the old tree (no icon word) must go red.
-#   bash tools/titleicon/run.sh [<keep-dir>]      TITLEICON_OLD=<ref> (default origin/main), TITLEICON_NOCP=1 skips the counter-proof
+#   bash tools/titleicon/run.sh [<keep-dir>]      TITLEICON_OLD=<ref> (default 86ac307ca^), TITLEICON_NOCP=1 skips the counter-proof
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/firnenv.sh
@@ -35,7 +35,7 @@ shoot() { # shoot <tree> <out>
 }
 OLDPID=""
 if [ -z "${TITLEICON_NOCP:-}" ]; then
-    REF=${TITLEICON_OLD:-origin/main}
+    REF=${TITLEICON_OLD:-86ac307ca^}
     OLDWT="$D/oldwt"
     git worktree add --detach "$OLDWT" "$REF" >/dev/null 2>&1
     ( cd "$OLDWT" && firnenv_prepare_old_tree . >/dev/null 2>&1; shoot "$OLDWT" "$D/old" ) &

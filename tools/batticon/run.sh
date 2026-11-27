@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/batticon/run.sh -- the tray battery as a Windows 11 style horizontal battery picture: proportional fill, green fill + bolt while
 # charging, plug while on mains and full, red fill at 20 % or less. Scale 1 and 2, pixel checks per state, counter-proof on the old tree.
-#   bash tools/batticon/run.sh [<keep-dir>]      BATTICON_OLD=<ref> (default origin/main), BATTICON_NOCP=1 skips the counter-proof
+#   bash tools/batticon/run.sh [<keep-dir>]      BATTICON_OLD=<ref> (default 86ac307ca^), BATTICON_NOCP=1 skips the counter-proof
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/firnenv.sh
@@ -18,7 +18,7 @@ for line in "${CASES[@]}"; do
 done
 OLDPID=""
 if [ -z "${BATTICON_NOCP:-}" ]; then
-    REF=${BATTICON_OLD:-origin/main}
+    REF=${BATTICON_OLD:-86ac307ca^}
     OLDWT="$D/oldwt"
     git worktree add --detach "$OLDWT" "$REF" >/dev/null 2>&1
     mkdir -p "$OLDWT/tools/trayraster"; cp tools/trayraster/shot.sh tools/trayraster/script.txt "$OLDWT/tools/trayraster/"
@@ -37,7 +37,7 @@ if [ -z "${BATTICON_NOCP:-}" ]; then
     echo "== counter-proof: $REF must go red on the charging picture"
     python3 -I tools/batticon/check.py "$D/old" charging 87 1 > "$D/old.res" 2>&1
     grep FAIL "$D/old.res" | sed 's/^/  (old) /'
-    fo=$(grep -c '^  FAIL' "$D/old.res")
+    fo=$(( $(grep -c '^  FAIL' "$D/old.res") + $(grep -c Traceback "$D/old.res") ))
     [ "$fo" -ge 1 ] && { echo "  OK    counter-proof: $REF has $fo red checks"; pass=$((pass+1)); } || { echo "  FAIL  counter-proof stayed green ($fo red)"; fail=$((fail+1)); }
     [ -n "$KEEP" ] && { mkdir -p "$KEEP/old"; cp "$D"/old/* "$KEEP/old/" 2>/dev/null; }
 fi
