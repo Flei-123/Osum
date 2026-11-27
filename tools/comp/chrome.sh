@@ -149,12 +149,12 @@ DREH
 }
 echo "== 4. a bundle window (Settings) with the program symbol, scale 100 / 200 / 150 percent =="
 mksym "$D/dreh3.txt"
-HEX150=$(python3 -I tools/fracscale/edid.py 293 165)
-for CASE in "1 1 100 " "2 2 400 " "150 1 150 edid=$HEX150"; do
+HEX150=$(python3 -I tools/fracscale/edid.py 195 122)
+for CASE in "1 1 100 1280x800 " "2 2 400 1280x800 " "150 1 300 1280x800 edid=$HEX150"; do
     set -- $CASE
-    SC=$1; US=$2; MINPX=$3; EDIDARG=${4:-}
+    SC=$1; US=$2; MINPX=$3; SYMRES=$4; EDIDARG=${5:-}
     OUTD="$D/sym$SC"
-    bash tools/design/eh6.sh "$OUTD" res=1280x800 accel=kvm ton=ja mode=light lang=en tafel=nein uiscale=$US pins=explorer,settings,terminal \
+    bash tools/design/eh6.sh "$OUTD" res=$SYMRES accel=kvm ton=ja mode=light lang=en tafel=nein uiscale=$US pins=explorer,settings,terminal \
         drehbuch="$D/dreh3.txt" window_alpha=100 schatten=an "extra=wigapp=/bin/wmd wighalt=150 $EDIDARG" \
         "progs=desktop taskbar settings launcher explorer edit sh echo ls cat theme wmd" > "$OUTD.log" 2>&1
     S4="$OUTD/serial.txt"
@@ -162,6 +162,7 @@ for CASE in "1 1 100 " "2 2 400 " "150 1 150 edid=$HEX150"; do
     SYP=$(maxkv "$S4" sympx)
     echo "        scale=$SC cycles=$N4 compared_sum=$CS4 differ_sum=$DS4 sympx=$SYP"
     [ "${SYP:-0}" -ge "$MINPX" ] && ok "scale $SC: the symbol wrote $SYP pixels (min $MINPX)" || bad "scale $SC: the symbol wrote only ${SYP:-0} pixels (min $MINPX)"
+    [ -z "$EDIDARG" ] || { grep -aqE 'fb: skala x1 .* pct=150' "$S4" && grep -aqE 'wm: fscale i=[0-9]+ pct=150' "$S4" && ok "scale $SC: the kernel and the Settings window run at 150 percent" || bad "scale $SC: the window never reached 150 percent"; }
     [ "${CS4:-0}" -gt 0 ] && [ "${DS4:-1}" = 0 ] && ok "scale $SC: $CS4 pixels judged, $DS4 differ" || bad "scale $SC: differing pixels ${DS4:-?} of ${CS4:-0}"
 done
 
