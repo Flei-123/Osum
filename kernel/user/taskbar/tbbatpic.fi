@@ -1,0 +1,208 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import fui.traypower
+import svg.svgdoc
+import taskbar.tbbase
+import uitheme
+
+const RENDER_PX: u64 = 64
+const ICON_ID_BASE: u64 = 0xB000
+const PIC_BYTES: u64 = 16396
+const SVG_BYTES: u64 = 1536
+const INNER_W10: u64 = 135
+const MIN_FILL10: u64 = 15
+const PCT_MAX: u64 = 100
+const COLOUR_MASK: u64 = 0xFFFFFF
+const KEY_MIX: u64 = 1099511628211
+
+static mut f_head: [u8; 164] = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" width=\"24\" height=\"24\"><rect x=\"2.25\" y=\"6.75\" width=\"18\" height=\"10.5\" rx=\"2.25\" fill=\"none\" stroke=\"#\0"
+
+static mut f_nub: [u8; 82] = "\" stroke-width=\"1.5\"/><rect x=\"21\" y=\"9\" width=\"1.5\" height=\"6\" rx=\"0.75\" fill=\"#\0"
+
+static mut f_fill0: [u8; 31] = "\"/><rect x=\"4.5\" y=\"9\" width=\"\0"
+
+static mut f_fill1: [u8; 31] = "\" height=\"6\" rx=\"0.75\" fill=\"#\0"
+
+static mut f_bolt: [u8; 88] = "\"/><polygon points=\"12.75,7.5 6.75,13.5 10.5,13.5 9.75,16.5 15.75,10.5 12,10.5\" fill=\"#\0"
+
+static mut f_plug_a: [u8; 65] = "\"/><polygon points=\"8.45,7.5 9.85,7.5 9.85,9.9 8.45,9.9\" fill=\"#\0"
+
+static mut f_plug_b: [u8; 69] = "\"/><polygon points=\"12.65,7.5 14.05,7.5 14.05,9.9 12.65,9.9\" fill=\"#\0"
+
+static mut f_plug_c: [u8; 90] = "\"/><polygon points=\"7.65,9.9 14.85,9.9 14.85,12.6 12.85,14.6 9.65,14.6 7.65,12.6\" fill=\"#\0"
+
+static mut f_plug_d: [u8; 73] = "\"/><polygon points=\"10.55,14.6 11.95,14.6 11.95,16.5 10.55,16.5\" fill=\"#\0"
+
+static mut f_tail: [u8; 10] = "\"/></svg>\0"
+
+static mut pic: [u8; 16396] = [0 as u8; 16396]
+
+static mut svg: [u8; 1536] = [0 as u8; 1536]
+
+static mut cached_key: u64 = 0
+
+static mut cached_ok: u64 = 0
+
+fn state_now() -> u64 {
+    return traypower.state(tbbase.bat_have, tbbase.bat_pct, tbbase.bat_chg, tbbase.bat_ac)
+}
+
+fn fill_pct() -> u64 {
+    if tbbase.bat_pct > PCT_MAX {
+        return PCT_MAX
+    }
+    return tbbase.bat_pct
+}
+
+fn is_low(st: u64) -> bool {
+    return st == traypower.BV_LOW || st == traypower.BV_CRITICAL
+}
+
+fn fill_rgb(st: u64) -> u64 {
+    if st == traypower.BV_CHARGING {
+        return uitheme.theme(uitheme.C_SUCCESS) & COLOUR_MASK
+    }
+    if is_low(st) {
+        return uitheme.theme(uitheme.C_DANGER) & COLOUR_MASK
+    }
+    return uitheme.theme(uitheme.T_FG) & COLOUR_MASK
+}
+
+fn mark_rgb(st: u64) -> u64 {
+    if st == traypower.BV_PLUGGED {
+        return uitheme.theme(uitheme.C_WINDOW_BG) & COLOUR_MASK
+    }
+    return uitheme.theme(uitheme.T_FG) & COLOUR_MASK
+}
+
+fn put_str(at: u64, p: u64) -> u64 {
+    var a: u64 = at
+    var i: u64 = 0
+    while a + 1 < SVG_BYTES && __mmio_read8((p + i) as *mut u8) != 0 as u8 {
+        __mmio_write8(((&svg[0 as usize]) as u64 + a) as *mut u8, __mmio_read8((p + i) as *mut u8))
+        a = a + 1
+        i = i + 1
+    }
+    return a
+}
+
+fn hex_digit(v: u64) -> u8 {
+    if v < 10 {
+        return (48 + v) as u8
+    }
+    return (87 + v) as u8
+}
+
+fn put_hex(at: u64, rgb: u64) -> u64 {
+    var a: u64 = at
+    var shift: u64 = 20
+    while a + 1 < SVG_BYTES {
+        __mmio_write8(((&svg[0 as usize]) as u64 + a) as *mut u8, hex_digit((rgb >> shift) & 15))
+        a = a + 1
+        if shift == 0 {
+            return a
+        }
+        shift = shift - 4
+    }
+    return a
+}
+
+fn put_tenths(at: u64, v10: u64) -> u64 {
+    var a: u64 = at
+    let whole: u64 = v10 / 10
+    if whole >= 10 {
+        __mmio_write8(((&svg[0 as usize]) as u64 + a) as *mut u8, (48 + whole / 10) as u8)
+        a = a + 1
+    }
+    __mmio_write8(((&svg[0 as usize]) as u64 + a) as *mut u8, (48 + whole % 10) as u8)
+    a = a + 1
+    __mmio_write8(((&svg[0 as usize]) as u64 + a) as *mut u8, 46 as u8)
+    a = a + 1
+    __mmio_write8(((&svg[0 as usize]) as u64 + a) as *mut u8, (48 + v10 % 10) as u8)
+    return a + 1
+}
+
+fn put_plug(at: u64, rgb: u64) -> u64 {
+    var a: u64 = put_str(at, (&f_plug_a[0 as usize]) as u64)
+    a = put_hex(a, rgb)
+    a = put_str(a, (&f_plug_b[0 as usize]) as u64)
+    a = put_hex(a, rgb)
+    a = put_str(a, (&f_plug_c[0 as usize]) as u64)
+    a = put_hex(a, rgb)
+    a = put_str(a, (&f_plug_d[0 as usize]) as u64)
+    return put_hex(a, rgb)
+}
+
+fn put_mark(at: u64, st: u64) -> u64 {
+    if st == traypower.BV_CHARGING {
+        let a: u64 = put_str(at, (&f_bolt[0 as usize]) as u64)
+        return put_hex(a, mark_rgb(st))
+    }
+    if st == traypower.BV_PLUGGED {
+        return put_plug(at, mark_rgb(st))
+    }
+    return at
+}
+
+fn put_fill(at: u64, st: u64) -> u64 {
+    let pct: u64 = fill_pct()
+    if pct == 0 && st != traypower.BV_CHARGING {
+        return at
+    }
+    var w10: u64 = INNER_W10 * pct / PCT_MAX
+    if w10 < MIN_FILL10 {
+        w10 = MIN_FILL10
+    }
+    var a: u64 = put_str(at, (&f_fill0[0 as usize]) as u64)
+    a = put_tenths(a, w10)
+    a = put_str(a, (&f_fill1[0 as usize]) as u64)
+    return put_hex(a, fill_rgb(st))
+}
+
+fn build_svg(st: u64) -> u64 {
+    let fg: u64 = uitheme.theme(uitheme.T_FG) & COLOUR_MASK
+    var a: u64 = put_str(0, (&f_head[0 as usize]) as u64)
+    a = put_hex(a, fg)
+    a = put_str(a, (&f_nub[0 as usize]) as u64)
+    a = put_hex(a, fg)
+    a = put_fill(a, st)
+    a = put_mark(a, st)
+    return put_str(a, (&f_tail[0 as usize]) as u64)
+}
+
+fn key_of(st: u64) -> u64 {
+    var k: u64 = st + 1
+    k = (k *% KEY_MIX) ^ fill_pct()
+    k = (k *% KEY_MIX) ^ fill_rgb(st)
+    k = (k *% KEY_MIX) ^ mark_rgb(st)
+    return (k *% KEY_MIX) ^ (uitheme.theme(uitheme.T_FG) & COLOUR_MASK)
+}
+
+fn usable(st: u64) -> bool {
+    return st != traypower.BV_NONE && st != traypower.BV_UNKNOWN && tbbase.bat_unknown == 0
+}
+
+fn picture() -> u64 {
+    let st: u64 = state_now()
+    if !usable(st) {
+        return 0
+    }
+    let key: u64 = key_of(st)
+    if key == cached_key && cached_ok != 0 {
+        return (&pic[0 as usize]) as u64
+    }
+    let len: u64 = build_svg(st)
+    cached_key = key
+    cached_ok = 0
+    let rc: i64 = svgdoc.render((&svg[0 as usize]) as u64, len, (&pic[0 as usize]) as u64, RENDER_PX as i64, RENDER_PX as i64)
+    if rc != 0 {
+        return 0
+    }
+    cached_ok = 1
+    return (&pic[0 as usize]) as u64
+}
+
+fn icon_id() -> u64 {
+    return ICON_ID_BASE + state_now()
+}
