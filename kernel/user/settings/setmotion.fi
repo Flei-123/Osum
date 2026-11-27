@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import fuiscene
+import settings.setbase
+import settings.setcore
+import uitheme.thapply
+
+export { apply }
+
+const CONF_MAX: u64 = 2048
+
+const KEY_LEN: u64 = 7
+
+static mut src_buf: [u8; 2048] = [0 as u8; 2048]
+
+static mut dst_buf: [u8; 2112] = [0 as u8; 2112]
+
+static mut conf_path: [u8; 16] = "/etc/theme.conf\0"
+
+static mut motion_key: [u8; 8] = "motion=\0"
+
+static mut motion_off_line: [u8; 10] = "motion=0\n\0"
+
+fn byte_at(base: u64, i: u64) -> u8 {
+    return __mmio_read8((base + i) as *mut u8)
+}
+
+fn starts_with_key(base: u64, at: u64, end: u64) -> bool {
+    if end - at < KEY_LEN {
+        return false
+    }
+    var i: u64 = 0
+    while i < KEY_LEN {
+        if byte_at(base, at + i) != byte_at((&motion_key[0 as usize]) as u64, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn copy_without_key(n: u64) -> u64 {
+    let src: u64 = (&src_buf[0 as usize]) as u64
+    let dst: u64 = (&dst_buf[0 as usize]) as u64
+    var out: u64 = 0
+    var at: u64 = 0
+    while at < n {
+        var end: u64 = at
+        while end < n && byte_at(src, end) != 10 as u8 {
+            end = end + 1
+        }
+        if end < n {
+            end = end + 1
+        }
+        if !starts_with_key(src, at, end) {
+            var i: u64 = at
+            while i < end {
+                __mmio_write8((dst + out) as *mut u8, byte_at(src, i))
+                out = out + 1
+                i = i + 1
+            }
+        }
+        at = end
+    }
+    return out
+}
+
+fn persist(on: bool) -> bool {
+    let n: u64 = setcore.file_read((&conf_path[0 as usize]) as u64, (&src_buf[0 as usize]) as u64, CONF_MAX)
+    if n == 0 {
+        return false
+    }
+    var out: u64 = copy_without_key(n)
+    if !on {
+        out = setcore.text_an((&dst_buf[0 as usize]) as u64, out, (&motion_off_line[0 as usize]) as u64)
+    }
+    return setcore.file_write((&conf_path[0 as usize]) as u64, (&dst_buf[0 as usize]) as u64, out)
+}
+
+fn apply() {
+    let on: bool = (fuiscene.value_of(setbase.K_MOTION) as u64) != 0
+    thapply.set_motion(on)
+    let _saved: bool = persist(on)
+}
