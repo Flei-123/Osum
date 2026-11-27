@@ -5,7 +5,7 @@ PEER=10.0.2.2
 count_rows() { n=0; while read a b c d rest; do n=$((n + 1)); done < /proc/net/tcp; echo $((n - 1)); }
 pids=""
 i=0
-while [ $i -lt 16 ]; do
+while [ $i -lt @CONNS@ ]; do
     sleep 600 | nc $PEER @PORT@ > /dev/null 2>&1 &
     pids="$pids $!"
     i=$((i + 1))
