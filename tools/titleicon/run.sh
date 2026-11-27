@@ -16,7 +16,13 @@ warteauf 'launcher: ready' || 90
 warte 25
 klick 24,780
 warte 4
-klickauf start_File Explorer
+klickauf start_Settings
+warte 14
+taste meta_l
+warte 4
+tippe edit
+warte 4
+taste ret
 warte 14
 fahre 1250,780
 warte 40
