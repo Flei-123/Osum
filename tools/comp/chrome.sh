@@ -150,7 +150,7 @@ DREH
 echo "== 4. a bundle window (Settings) with the program symbol, scale 100 / 200 / 150 percent =="
 mksym "$D/dreh3.txt"
 HEX150=$(python3 -I tools/fracscale/edid.py 293 165)
-for CASE in "1 1 100 " "2 2 400 " "150 1 200 edid=$HEX150"; do
+for CASE in "1 1 100 " "2 2 400 " "150 1 150 edid=$HEX150"; do
     set -- $CASE
     SC=$1; US=$2; MINPX=$3; EDIDARG=${4:-}
     OUTD="$D/sym$SC"
