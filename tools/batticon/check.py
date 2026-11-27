@@ -77,7 +77,8 @@ unit = px / 24.0
 fill_l = x0 + int(round(4.5 * unit))
 fill_r = x0 + int(round(18.0 * unit))
 probe = y0 + int(9.4 * unit)
-strong = [x for x in range(fill_l, fill_r) if dist(pixel(x, probe)) >= 150]
+edge = is_red if state == "low" else (lambda c: dist(c) >= 150)
+strong = [x for x in range(fill_l, fill_r) if edge(pixel(x, probe))]
 fraction = (max(strong) - min(strong) + 1) / float(fill_r - fill_l) if strong else 0.0
 wanted = min(pct, 100) / 100.0
 say(abs(fraction - wanted) <= 0.17, "fill %.2f of the inner width, wanted %.2f" % (fraction, wanted))
@@ -97,5 +98,7 @@ elif state == "plugged":
 elif state == "low":
     say(red >= 5 * scale * scale, "low: red fill (%d red px)" % red)
     say(green == 0, "low: no green")
+    leaf = sum(1 for _, _, c in fill_box if not is_red(c) and dist(c) >= 300)
+    say(leaf >= 8 * scale * scale, "low: a leaf over the battery (%d dark px)" % leaf)
 print("RESULT ok=%d fail=%d" % (results.count(True), results.count(False)))
 sys.exit(1 if False in results else 0)

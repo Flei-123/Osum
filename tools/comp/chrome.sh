@@ -105,7 +105,7 @@ if [ -n "$GEO" ]; then
     CXP=$((GX + GOW - GBO - GCW + GCW * 3 / 4))
     CYP=$((GY + GBO + 8))
     mkdreh "$D/dreh2.txt" "$CXP,$CYP"
-    DREH="$D/dreh2.txt" run hov "" window_alpha=100 shadow=on
+    WMDARGS=hoverwait=1 DREH="$D/dreh2.txt" run hov "" window_alpha=100 shadow=on
     S2="$D/hov/serial.txt"
     read N2 CM2 CS2 DS2 UM2 < <(stats "$S2")
     HV=$(maxkv "$S2" hover)
