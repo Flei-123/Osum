@@ -11,20 +11,23 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 command -v qemu-system-x86_64 >/dev/null || { echo "UPHEALTH: skipped, no qemu"; exit 0; }
-CASES="${*:-stay fallback control nogw nodns pingnogw pingnoinet}"
+CASES="${*:-stay fallback control nogw nodns pingnogw pingnoinet flood}"
 trap 'for f in "$T"/*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done; [ -n "${UPHEALTH_WORK:-}" ] || rm -rf "$T"' EXIT
 if [ ! -f "$T/k.img" ] || [ ! -f "$T/bin/sh.elf" ]; then
     bash tools/sync/build.sh "$T/bin" 0 sh sleep echo dhcp cat ping > "$T/b.txt" 2>&1 || { tail "$T/b.txt"; exit 1; }
     "$FIRNC" -c --profile=app -o "$T/netcheck.o" kernel/app/netcheck.fi > "$T/app.txt" 2>&1 || { tail "$T/app.txt"; exit 1; }
     ld -T kernel/user/user.ld -o "$T/bin/netcheck.elf" "$T/netcheck.o" >> "$T/app.txt" 2>&1 || { tail "$T/app.txt"; exit 1; }
+    "$FIRNC" -c --profile=app -o "$T/udpflood.o" kernel/app/udpflood.fi >> "$T/app.txt" 2>&1 || { tail "$T/app.txt"; exit 1; }
+    ld -T kernel/user/user.ld -o "$T/bin/udpflood.elf" "$T/udpflood.o" >> "$T/app.txt" 2>&1 || { tail "$T/app.txt"; exit 1; }
     ./tools/build-kernel.sh "$T/k.img" --stufe 0 > "$T/k.txt" 2>&1 || { tail "$T/k.txt"; exit 1; }
 fi
 printf 'echo ==START==\ndhcp\nnetcheck -c 14 -i 1 -b 1\nnetcheck get\ncat /proc/net/connectivity\necho ==END==\n' > "$T/s_loop.sh"
+printf 'echo ==START==\ndhcp\nudpflood\necho ==END==\n' > "$T/s_flood.sh"
 printf 'echo ==START==\ndhcp\nnetcheck -c 10 -i 1 -b 1\nping -c 1 192.168.1.1\nping -c 1 1.1.1.1\necho ==END==\n' > "$T/s_ping.sh"
 bash tools/mkfsfi/mkfs.sh build "$T/d.img" 8000 /bin/ /t/ /etc/ /var/ /var/log/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
-    /bin/dhcp="$T/bin/dhcp.elf" /bin/netcheck="$T/bin/netcheck.elf" /bin/cat="$T/bin/cat.elf" /bin/ping="$T/bin/ping.elf" /proc/ \
-    /t/s_loop.sh="$T/s_loop.sh" /t/s_ping.sh="$T/s_ping.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
+    /bin/dhcp="$T/bin/dhcp.elf" /bin/netcheck="$T/bin/netcheck.elf" /bin/cat="$T/bin/cat.elf" /bin/ping="$T/bin/ping.elf" /bin/udpflood="$T/bin/udpflood.elf" /proc/ \
+    /t/s_flood.sh="$T/s_flood.sh" /t/s_loop.sh="$T/s_loop.sh" /t/s_ping.sh="$T/s_ping.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
 PORT=$((49000 + ($$ % 500) * 8))
 
@@ -112,6 +115,13 @@ for c in $CASES; do
         chk pingnoinet "script finished" '==END=='
         chk pingnoinet "ping names the missing internet" 'ping: cause: gateway answers, this network has no internet'
         panics pingnoinet
+        ;;
+    flood)
+        run flood "" "--no-inet" "" s_flood.sh
+        chk flood "script finished" '==END=='
+        chk flood "flood refused some sends" 'udpflood: refused [1-9]'
+        chk flood "resolver survives a full send queue" 'udpflood: resolve failed 0'
+        panics flood
         ;;
     esac
 done
