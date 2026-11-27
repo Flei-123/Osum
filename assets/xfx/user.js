@@ -6,3 +6,5 @@ user_pref("dom.ipc.processCount.webIsolated", 1);
 user_pref("browser.tabs.remote.separatePrivilegedContentProcess", false);
 user_pref("browser.tabs.remote.separatedMozillaDomains", "");
 user_pref("browser.tabs.inTitlebar", 0);
+user_pref("network.http.http3.enable", false);
+user_pref("network.dns.disableIPv6", true);
