@@ -16,6 +16,7 @@ WIN = re.compile(r"settings: rect name=win x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 TABRECT = re.compile(r"settings: rect name=(tab\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 BACK = "settings: rect name=navback "
 PAGES = 12
+SIDEBAR_SPAN = 100
 
 
 def last_build_tabs(txt):
@@ -23,7 +24,11 @@ def last_build_tabs(txt):
     if at < 0:
         return {}
     block = txt[at:]
-    return {m.group(1): tuple(int(g) for g in m.groups()[1:]) for m in TABRECT.finditer(block)}
+    rects = {m.group(1): tuple(int(g) for g in m.groups()[1:]) for m in TABRECT.finditer(block)}
+    if not rects:
+        return rects
+    left = min(v[0] for v in rects.values())
+    return {k: v for k, v in rects.items() if v[0] < left + SIDEBAR_SPAN}
 
 
 def runs(txt):
