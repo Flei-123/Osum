@@ -40,6 +40,7 @@ import drv.blk.nvme
 import drv.blk.ahci
 import block.blkguard
 import block.blkperf
+import block.blklazy
 import block.blkstat
 import block.blkindex
 import block.blkext
@@ -54,7 +55,7 @@ import bus.drvreg
 export {
     dev_flushes,
     ram_init, use_ata, use_nvme, read, write, blocks, present,
-    read_raw, read_stream, read_stream_span, S_SECTORS, S_SECTORS_WIDE, S_SEQ, write_raw, write_run, write_blocks, wb_begin, wb_begin_data, wb_hint, wb_set_big_runs, wb_struct, wb_struct_lazy, wb_mark_freed, wb_freed_pending, wb_epoch, wb_mark_pre, wb_set_meta, wb_due, wb_release, wb_end, wb_flush, wb_flush_some, FLUSH_DONE, FLUSH_MORE, FLUSH_FAILED,
+    read_raw, read_stream, read_stream_span, S_SECTORS, S_SECTORS_WIDE, S_SEQ, write_raw, write_run, write_blocks, wb_begin, wb_begin_data, wb_hint, wb_set_big_runs, wb_struct, wb_struct_lazy, wb_mark_freed, wb_freed_pending, wb_epoch, wb_mark_pre, wb_set_meta, wb_due, wb_release, wb_end, wb_flush, wb_flush_some, lazy_hold, lazy_holds, lazy_drop, lazy_settle, FLUSH_DONE, FLUSH_MORE, FLUSH_FAILED,
     BLOCK_SIZE, DEV_RAM, DEV_ATA, DEV_NVME, DEV_ATA1, DEV_USB,
     removable,
     // ---- Runde K14 ----
@@ -617,6 +618,7 @@ fn flush(state: u64) -> bool {
 }
 
 fn flush_held(state: u64) -> bool {
+    let _lazy: bool = lazy_settle_held()
     wb_flush(state)
     // w-disklag: AHCI writes are no longer flushed one by one; the
     // barriers (journal commit, sync, shutdown) arrive here.
@@ -1157,6 +1159,7 @@ fn read_stream_span(state: u64, lba: u64, dst: u64, span: u64) -> bool {
 }
 
 fn read_stream_held(state: u64, lba: u64, dst: u64, span: u64) -> bool {
+    lazy_touch(lba, span)
     let dv: u64 = kstate.get(state, kstate.DISK_DEV)
     if cryptstate.active(state) || (dv != DEV_ATA && dv != DEV_ATA1 && dv != DEV_AHCI && !is_usb(dv) && !(dv == DEV_NVME && !kstate.mode_on(state, kstate.M_NONVMEMANY))) || lba >= blocks(state) {
         return read(state, lba, dst)
@@ -2075,6 +2078,9 @@ fn wb_flush_ordered_some(state: u64) -> bool {
 
 fn wb_flush_some(state: u64, slots: u64) -> u64 {
     dma_up(state)
+    if cg(state, W_DEPTH) == 0 {
+        let _lazy: bool = lazy_settle_held()
+    }
     if slots == 0 || cg(state, W_BASE) == 0 || cg(state, W_DIRTY) == 0 || cg(state, W_DEPTH) != 0 {
         return FLUSH_DONE
     }
@@ -2097,6 +2103,72 @@ fn wb_epoch(state: u64) -> u64 {
     return cg(state, W_EPOCH)
 }
 
+fn lazy_settle_held() -> bool {
+    if !blklazy.pending() {
+        return true
+    }
+    let owner: u64 = blklazy.owner()
+    let block: u64 = blklazy.lba()
+    let src: u64 = blklazy.source()
+    blklazy.clear()
+    return write_raw_held(owner, block, src)
+}
+
+fn lazy_touch(block: u64, count: u64) {
+    if blklazy.overlaps(block, count) {
+        let _ok: bool = lazy_settle_held()
+    }
+}
+
+fn lazy_touch_abs(state: u64, dev: u64, abs: u64, count: u64) {
+    if !blklazy.pending() || dev != kstate.get(state, kstate.DISK_DEV) {
+        return
+    }
+    let first: u64 = kstate.get(state, kstate.DISK_FIRST)
+    if abs < first {
+        let _ok: bool = lazy_settle_held()
+        return
+    }
+    lazy_touch(abs - first, count)
+}
+
+fn lazy_settle(state: u64) -> bool {
+    if !blklazy.pending() {
+        return true
+    }
+    let g: u64 = blkguard.enter(state)
+    if g == blkguard.G_REFUSE {
+        return false
+    }
+    let ok: bool = lazy_settle_held()
+    blkguard.leave(state, g)
+    return ok
+}
+
+fn lazy_holds(state: u64, block: u64, src: u64) -> bool {
+    return blklazy.holds(state, block, src)
+}
+
+fn lazy_drop(state: u64, block: u64, src: u64) {
+    if blklazy.holds(state, block, src) {
+        blklazy.clear()
+    }
+}
+
+fn lazy_hold(state: u64, block: u64, src: u64) -> bool {
+    if cryptstate.active(state) || !wb_dev(kstate.get(state, kstate.DISK_DEV), state) || !wb_active(state) {
+        return false
+    }
+    if blklazy.holds(state, block, src) {
+        return true
+    }
+    if !lazy_settle(state) || block >= blocks(state) {
+        return false
+    }
+    blklazy.hold(state, block, src)
+    return true
+}
+
 fn wb_flush(state: u64) -> bool {
     let ok: bool = wb_flush_all(state)
     if ok {
@@ -2106,6 +2178,7 @@ fn wb_flush(state: u64) -> bool {
 }
 
 fn wb_flush_all(state: u64) -> bool {
+    let _lazy: bool = lazy_settle_held()
     dma_up(state)
     if cg(state, W_BASE) == 0 || cg(state, W_DIRTY) == 0 {
         return wb_nvme_sync(state)
@@ -2165,6 +2238,7 @@ fn wb_end(state: u64) -> bool {
 
 // r728: does the table hold a dirty sector in [lba, lba + n)?
 fn wb_overlap(state: u64, dev: u64, lba: u64, n: u64) -> bool {
+    lazy_touch_abs(state, dev, lba, n)
     if cg(state, W_BASE) == 0 || cg(state, W_DIRTY) == 0 {
         return false
     }
@@ -2179,6 +2253,7 @@ fn wb_overlap(state: u64, dev: u64, lba: u64, n: u64) -> bool {
 }
 
 fn wb_overlay(state: u64, dev: u64, lba: u64, n: u64, data: u64) {
+    lazy_touch_abs(state, dev, lba, n)
     var i: u64 = 0
     while i < n {
         let _hit: bool = wb_serve(state, dev, lba + i, data + i * BLOCK_SIZE)
@@ -2199,6 +2274,7 @@ fn wb_serve(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
 }
 
 fn wb_order_before_evict(state: u64, m: u64) {
+    let _lazy: bool = lazy_settle_held()
     let limit: u64 = cg(state, W_META)
     if limit == 0 {
         return
@@ -2458,6 +2534,7 @@ fn read_on(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
 }
 
 fn read_on_held(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
+    lazy_touch_abs(state, dev, lba, 1)
     let ok: bool = read_on_body(state, dev, lba, dst)
     if ok {
         blkstat.note_read(dev, 1)
@@ -2504,6 +2581,7 @@ fn write_on(state: u64, dev: u64, lba: u64, src: u64) -> bool {
 }
 
 fn write_on_held(state: u64, dev: u64, lba: u64, src: u64) -> bool {
+    lazy_touch_abs(state, dev, lba, 1)
     if !wlock.allowed(dev) {
         return false
     }
@@ -2594,6 +2672,7 @@ fn read_retryable(state: u64, lba: u64) -> bool {
 }
 
 fn read_raw_held(state: u64, lba: u64, dst: u64) -> bool {
+    lazy_touch(lba, 1)
     var ok: bool = read_raw_body(state, lba, dst)
     var attempt: u64 = 1
     while !ok && attempt < READ_ATTEMPTS && read_retryable(state, lba) {
@@ -2739,6 +2818,7 @@ fn wb_put_span(state: u64, dev: u64, abs: u64, src: u64, k: u64) {
 }
 
 fn write_blocks_held(state: u64, lba: u64, src: u64, n: u64) -> bool {
+    lazy_touch(lba, n)
     let dev: u64 = kstate.get(state, kstate.DISK_DEV)
     if lba + n > blocks(state) {
         return false
@@ -2809,6 +2889,7 @@ fn run_dev(state: u64, dv: u64) -> bool {
 
 fn write_run_held(state: u64, lba: u64, src: u64, n: u64) -> bool {
     dma_up(state)
+    lazy_touch(lba, n)
     if n == 0 {
         return true
     }
