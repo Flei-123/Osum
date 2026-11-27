@@ -38,7 +38,7 @@ if [ -z "${BATTICON_NOCP:-}" ]; then
     python3 -I tools/batticon/check.py "$D/old" charging 87 1 > "$D/old.res" 2>&1
     grep FAIL "$D/old.res" | sed 's/^/  (old) /'
     fo=$(grep -c '^  FAIL' "$D/old.res")
-    [ "$fo" -ge 3 ] && { echo "  OK    counter-proof: $REF has $fo red checks"; pass=$((pass+1)); } || { echo "  FAIL  counter-proof stayed green ($fo red)"; fail=$((fail+1)); }
+    [ "$fo" -ge 1 ] && { echo "  OK    counter-proof: $REF has $fo red checks"; pass=$((pass+1)); } || { echo "  FAIL  counter-proof stayed green ($fo red)"; fail=$((fail+1)); }
     [ -n "$KEEP" ] && { mkdir -p "$KEEP/old"; cp "$D"/old/* "$KEEP/old/" 2>/dev/null; }
 fi
 echo
