@@ -46,8 +46,15 @@ def check(c, msg):
     print(("  OK    " if c else "  FAIL  ") + msg)
 
 
+SIDE_MAX_X = 200
+
+
 def tabs(r):
     return {n for n in r if re.fullmatch(r"tab([a-z]|\d\d)", n)}
+
+
+def side_tabs(r):
+    return {n for n in tabs(r) if r[n][0] < SIDE_MAX_X}
 
 
 check(len(reports) > 0, "rect reports present (%d)" % len(reports))
@@ -55,18 +62,15 @@ check(not re.search(r"CRASH|EXCEPTION|^panic", txt, re.M), "no crash lines")
 first = reports[0] if reports else {}
 want = {tab_name(p) for p in head_pages}
 lone = {tab_name(p) for p in landing_pages}
-side = tabs(first)
+side = side_tabs(first)
 check(len(side) == len(heads), "navigation column holds exactly %d main categories (%d)" % (len(heads), len(side)))
 check(side <= want | lone, "navigation column holds no sub-page: %s" % sorted(side - want - lone))
-for r in reports:
-    check(tabs(r) <= want | lone | {tab_name(p) for p in pagemap.values()} and len([t for t in tabs(r) if t in side]) == len(side), "sidebar entries stay the same after navigation")
-    break
+check(all(side_tabs(r) == side for r in reports), "navigation column stays identical on every page")
 sub = [r for r in reports if "tab32" in r and "tabb" in r]
 check(bool(sub), "display page offers the monitors page as a row in the content")
 if sub:
     x_side = max(sub[0][t][0] + sub[0][t][2] for t in side if t in sub[0])
     check(sub[0]["tab32"][0] >= x_side, "sub-page row sits right of the navigation column")
-    check(sum(1 for t in tabs(sub[0]) if t not in side) == len(tabs(sub[0]) - side), "sub-page rows are the only extra entries")
     extra = tabs(sub[0]) - side
     check(len(extra) >= 2, "display page lists its sub-pages as rows (%d)" % len(extra))
 navs = [nav_re.search(ln) for ln in txt.splitlines()]
