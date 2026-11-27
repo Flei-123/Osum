@@ -1,0 +1,241 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import fui.anim
+import fui.painter
+import fui.render
+import fui.scene
+import fui.sheet
+import fui.style
+import fui.widget
+import fuiapp
+import uikit.uimotion
+import fuiscene.fsbase
+import fuiscene.fscore
+import fuiscene.fsctl
+import fuiscene.fsdraw
+
+const LABEL_MAX: u64 = 96
+
+const SLOT_MAX: u64 = 64
+
+const WRAP_FLAG: u64 = 128
+
+const SWITCH_W: u64 = 40
+
+const SWITCH_H: u64 = 20
+
+const KNOB_REST: u64 = 12
+
+const KNOB_HOT: u64 = 14
+
+const LABEL_GAP: u64 = 12
+
+const EDGE_PAD: u64 = 4
+
+const CH_POS: u32 = 1
+
+const CH_FILL: u32 = 2
+
+const CH_KNOB: u32 = 3
+
+const CH_SIZE: u32 = 4
+
+const KNOB_WHITE: u32 = 4294967295
+
+static mut label_buf: [u8; 6240] = [0 as u8; 6240]
+
+static mut empty_text: [u8; 1] = "\0"
+
+static mut label_count: u64 = 0
+
+static mut label_build: u64 = 0
+
+static mut rule_build: u64 = 0
+
+fn label_slot(text: u64) -> u64 {
+    if label_build != fsbase.S.s_builds + 1 {
+        label_build = fsbase.S.s_builds + 1
+        label_count = 0
+    }
+    if label_count >= SLOT_MAX {
+        return SLOT_MAX
+    }
+    let slot: u64 = label_count
+    label_count = label_count + 1
+    let base: u64 = (&label_buf[0 as usize]) as u64 + slot * LABEL_MAX
+    var n: u64 = 0
+    while n < LABEL_MAX - 1 && __mmio_read8((text + n) as *mut u8) != 0 as u8 {
+        __mmio_write8((base + n) as *mut u8, __mmio_read8((text + n) as *mut u8))
+        n = n + 1
+    }
+    __mmio_write8((base + n) as *mut u8, 0 as u8)
+    return slot
+}
+
+fn label_ptr(slot: u64) -> u64 {
+    return (&label_buf[0 as usize]) as u64 + slot * LABEL_MAX
+}
+
+fn neutral_rule(state: u32) {
+    let s: style.Style = style.style_set_border_width(style.style_set_fg(style.style_set_bg(style.style_new(),
+        style.color_transparent()), style.color_transparent()), 0 as usize)
+    if state == style.STATE_NORMAL {
+        let _r: usize = sheet.sheet_rule(fscore.sh(), sheet.sel_class(fsbase.TOGGLE_CLS), s)
+        return
+    }
+    let _r: usize = sheet.sheet_rule(fscore.sh(), sheet.sel_with_state(sheet.sel_class(fsbase.TOGGLE_CLS), state), s)
+}
+
+fn register_rules() {
+    if rule_build == fsbase.S.s_builds + 1 {
+        return
+    }
+    rule_build = fsbase.S.s_builds + 1
+    neutral_rule(style.STATE_NORMAL)
+    neutral_rule(style.STATE_HOVER)
+    neutral_rule(style.STATE_ACTIVE)
+    neutral_rule(style.STATE_FOCUS)
+    neutral_rule(style.STATE_SELECTED)
+    neutral_rule(style.STATE_DISABLED)
+}
+
+fn is_toggle(node: usize) -> bool {
+    if node >= scene.scene_count(fscore.sc()) {
+        return false
+    }
+    return scene.node_has_class(fscore.sc(), node, fsbase.TOGGLE_CLS)
+}
+
+fn flip(node: usize) -> u64 {
+    let key: u64 = scene.node_id(fscore.sc(), node) as u64
+    var next: i64 = 1
+    if fsctl.value_of(key) != 0 {
+        next = 0
+    }
+    fsctl.set_value(key, next)
+    return key
+}
+
+fn label_lines(slot: u64, room: u64, out: u64) -> u64 {
+    return fsdraw.toggle_lines(label_ptr(slot), room, out)
+}
+
+fn draw_label(slot: u64, wrapped: bool, x: u64, y: u64, w: u64, h: u64, room: u64, role: u64) {
+    if !wrapped {
+        fscore.text_role(x, y + h / 2 + fscore.sp(5), room, label_ptr(slot), fscore.sp(13), false, role)
+        return
+    }
+    var ls: [u8; 240] = [0 as u8; 240]
+    let lp: u64 = (&ls[0 as usize]) as u64
+    let nl: u64 = label_lines(slot, room, lp)
+    var base: u64 = y + h / 2 + fscore.sp(5) - (nl - 1) * fscore.sp(7)
+    var li: u64 = 0
+    while li < nl {
+        fscore.text_role(x, base, room, lp + li * 80, fscore.sp(13), false, role)
+        base = base + fscore.sp(14)
+        li = li + 1
+    }
+}
+
+fn draw_switch(c: *mut render.Ctx, e: *mut widget.Widget, tx: u64, ty: u64, on: bool, disabled: bool) {
+    let z: *mut painter.Painter = render.ctx_painter(c)
+    let tw: f64 = fscore.sp(SWITCH_W) as f64
+    let th: f64 = fscore.sp(SWITCH_H) as f64
+    let wx: u64 = e as u64
+    let dur: i64 = uimotion.ms(uimotion.K_TOGGLE)
+    anim.chan_bounds(c, (tx as f64) - 4.0, (ty as f64) - 4.0, (tx as f64) + tw + 4.0, (ty as f64) + th + 4.0)
+    var fill_role: u64 = fsbase.R_BORDER
+    var tp: f64 = 0.0
+    if on {
+        fill_role = fsbase.R_ACCENT
+        tp = 1.0
+    }
+    let fill: u32 = anim.chan_color_w(c, wx, CH_FILL, fscore.role_col(fill_role), dur)
+    let pos: f64 = anim.chan_f_w(c, wx, CH_POS, tp, dur)
+    var knob_target: u32 = fscore.role_col(fsbase.R_MUTED)
+    if on {
+        knob_target = KNOB_WHITE
+    }
+    let knob_col: u32 = anim.chan_color_w(c, wx, CH_KNOB, knob_target, dur)
+    var size_target: f64 = fscore.sp(KNOB_REST) as f64
+    if widget.w_is_hover(e) && !disabled {
+        size_target = fscore.sp(KNOB_HOT) as f64
+    }
+    let kd: f64 = anim.chan_f_w(c, wx, CH_SIZE, size_target, uimotion.ms(uimotion.K_TOGGLE) / 2 + 1)
+    anim.chan_bounds_end(c)
+    if pos < 0.5 {
+        painter.round_rect(z, tx as f64, ty as f64, tw, th, th / 2.0, fscore.role_col(fsbase.R_SURFACE))
+        painter.round_ring(z, tx as f64, ty as f64, tw, th, th / 2.0, 1.0, fscore.role_col(fsbase.R_BORDER))
+    } else {
+        painter.round_rect(z, tx as f64, ty as f64, tw, th, th / 2.0, fill)
+    }
+    let travel: f64 = tw - th
+    let cx: f64 = (tx as f64) + th / 2.0 + travel * pos
+    painter.round_rect(z, cx - kd / 2.0, (ty as f64) + (th - kd) / 2.0, kd, kd, kd / 2.0, knob_col)
+    if widget.w_is_focus(e) {
+        painter.round_ring(z, (tx as f64) - 3.0, (ty as f64) - 3.0, tw + 6.0, th + 6.0, th / 2.0 + 3.0, 2.0,
+            fscore.role_col(fsbase.R_TEXT))
+    }
+}
+
+fn draw_toggle(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if fscore.off_canvas(e) {
+        return
+    }
+    let x: u64 = widget.w_x(e) as u64
+    let y: u64 = widget.w_y(e) as u64
+    let w: u64 = widget.w_w(e) as u64
+    let h: u64 = widget.w_h(e) as u64
+    let on: bool = widget.w_value(e) != 0
+    let disabled: bool = widget.w_is_disabled(e)
+    let wrapped: bool = (ud & WRAP_FLAG) != 0
+    let slot: u64 = ud % WRAP_FLAG
+    let sw: u64 = fscore.sp(SWITCH_W)
+    let room: u64 = fscore.sat_sub(w, sw + fscore.sp(LABEL_GAP) + fscore.sp(EDGE_PAD))
+    var role: u64 = fsbase.R_TEXT
+    if disabled {
+        role = fsbase.R_MUTED
+    }
+    draw_switch(c, e, x + fscore.sat_sub(w, sw + fscore.sp(EDGE_PAD)), y + fscore.sat_sub(h, fscore.sp(SWITCH_H)) / 2, on, disabled)
+    draw_label(slot, wrapped, x + fscore.sp(EDGE_PAD), y, w, h, room, role)
+}
+
+fn logical_width(text: u64) -> f64 {
+    let device: u64 = fscore.text_width(text, fscore.sp(13))
+    let logical: u64 = device * 1000 / fscore.scale_milli()
+    return (logical + LABEL_GAP + SWITCH_W + 2 * EDGE_PAD + 2) as f64
+}
+
+fn toggle(parent: usize, text: u64, key: u64, on: bool) -> usize {
+    let i: usize = fsdraw.button(parent, (&empty_text[0 as usize]) as u64, key)
+    if i == fsbase.NONE {
+        return i
+    }
+    register_rules()
+    let _c: bool = scene.node_add_class(fscore.sc(), i, fsbase.TOGGLE_CLS)
+    var init: i64 = 0
+    if on {
+        init = 1
+    }
+    fsctl.val_node(i, key, init)
+    var ud: u64 = label_slot(text)
+    var width: f64 = logical_width(text)
+    var height: f64 = 28.0
+    if fsbase.tg_room > 0 {
+        width = 0.0
+        let room: u64 = fscore.sp(fsbase.tg_room) - fscore.sp(SWITCH_W) - fscore.sp(LABEL_GAP) - fscore.sp(EDGE_PAD)
+        let tw0: u64 = fscore.text_width(text, fscore.sp(13))
+        if tw0 > room {
+            var lines: u64 = (tw0 + room - 1) / room + 1
+            if lines > 3 {
+                lines = 3
+            }
+            ud = ud + WRAP_FLAG
+            height = (14 * lines + 14) as f64
+        }
+    }
+    scene.node_set_draw(fscore.sc(), i, ud, draw_toggle)
+    scene.node_set_size(fscore.sc(), i, width, height)
+    return i
+}
