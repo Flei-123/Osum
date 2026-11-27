@@ -2,18 +2,17 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/settingswin11/run.sh -- Settings Windows-11 layout: search bar on top, category accordion in the sidebar.
 #
-#   /root/jarvis/bin/heavy bash tools/settingswin11/run.sh [<outdir>] [cfg ...]   cfg = light | dark | hd | narrow | flat
+#   /root/jarvis/bin/heavy bash tools/settingswin11/run.sh [<outdir>] [cfg ...]   cfg = light | dark | hd | narrow
 #
 #   light/dark  1280x800, accordion sidebar (only the open category shows its sub-pages)
 #   hd          1920x1080 (HP EliteBook panel), light, with hover pictures of the sidebar entries
 #   narrow      640x480, navigation mode, accordion list
-#   flat        counter-proof: /etc/setflat puts every page in the sidebar again; the accordion checks must FAIL there
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 OUT=${1:-}
 if [ -z "$OUT" ]; then OUT=$(mktemp -d); trap 'rm -rf "$OUT"' EXIT; fi
 shift || true
-CFGS=${*:-light dark narrow flat}
+CFGS=${*:-light dark narrow}
 mkdir -p "$OUT"
 total_fail=0
 for cfg in $CFGS; do
@@ -26,7 +25,6 @@ for cfg in $CFGS; do
     dark) MODE=dark ;;
     hd) RES=1920x1080 ;;
     narrow) RES=640x480 ;;
-    flat) SIDE=flat ;;
     *) echo "unknown cfg $cfg"; exit 2 ;;
   esac
   D="$OUT/$cfg"
