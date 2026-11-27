@@ -5,6 +5,7 @@ import sys
 
 SIDEBAR_POINT = "140,300"
 CONTENT_POINT = os.environ.get("SETTINGSNAV_POINT", "700,400")
+SCROLL_NOTCHES = 20
 LABELS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 SETTINGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "kernel", "user", "settings.d")
 
@@ -54,6 +55,7 @@ def clicks(page, pages=None, routes=None):
     if landing is not None:
         steps.append(("klicksuche %s %s" % (tab_name(landing), SIDEBAR_POINT)))
     if landing != page:
+        steps += ["fahre %s" % CONTENT_POINT, "warte 1", "rad -%d" % SCROLL_NOTCHES, "warte 2"]
         steps.append("klicksuche %s %s" % (tab_name(page), CONTENT_POINT))
     return steps
 

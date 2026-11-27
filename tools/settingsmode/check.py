@@ -11,11 +11,11 @@ RECT = re.compile(r"settings: rect name=(\w+) ")
 NET = 3
 ENTRY_RECTS = ("wcp", "wcq", "wcr")
 EXTRA = 3
-LAST_TAB = "tab28"
+LAST_TAB = "tabl"
 WIN = re.compile(r"settings: rect name=win x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 TABRECT = re.compile(r"settings: rect name=(tab\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 BACK = "settings: rect name=navback "
-PAGES = 30
+PAGES = 12
 
 
 def last_build_tabs(txt):
@@ -76,7 +76,7 @@ def main():
     doctored = {
         "same count every state": CTL.sub(lambda m: "settings: controls page=%s n=6" % m.group(1), raw),
         "no controls": "\n".join(l for l in raw.splitlines() if not l.startswith("settings: controls ")),
-        "last tab hidden": re.sub(r"settings: rect name=tab28 ", "settings: rect name=zzz ", raw),
+        "last tab hidden": re.sub(r"settings: rect name=tabl ", "settings: rect name=zzz ", raw),
         "no entry rects": re.sub(r"settings: rect name=wc[pqr] ", "settings: rect name=zzz ", raw),
     }
     for name, d in doctored.items():
