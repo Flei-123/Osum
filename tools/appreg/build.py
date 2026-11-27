@@ -11,7 +11,7 @@ import mkapps  # noqa: E402
 
 EXPLORER_ICON_DIR = "assets/icons/explorer"
 EXPLORER_ID_PREFIX = "fxi-"
-EXPLORER_SYMBOLS = ("folder", "desktop", "documents", "downloads", "pictures", "music", "videos", "drive", "usb", "home", "pin", "quickaccess", "gallery")
+EXPLORER_SYMBOLS = ("folder", "desktop", "documents", "downloads", "pictures", "music", "videos", "drive", "usb", "home", "pin", "quickaccess", "gallery", "cut", "copy", "paste", "rename", "share", "delete", "sort", "view")
 
 
 def read_rows(path, sep):
