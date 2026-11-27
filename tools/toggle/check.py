@@ -8,7 +8,7 @@ import numpy as np
 
 slow, off = sys.argv[1:3]
 ok = bad = 0
-RECT_RE = re.compile(r"settings: rect name=whq x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+RECT_RE = re.compile(r"settings: rect name=whq x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)")
 FRAMES = ["01-frame", "02-frame", "03-frame", "04-frame", "05-frame", "06-frame"]
 MIN_DISTINCT_FRAMES = 3
 PIXEL_STEP = 60
@@ -44,7 +44,8 @@ def rect(out):
     for ln in open(os.path.join(out, "serial.txt"), "rb").read().decode("latin1").splitlines():
         m = RECT_RE.search(ln)
         if m:
-            found = tuple(int(v) for v in m.groups())
+            w, h, ax, ay = (int(v) for v in m.groups())
+            found = (ax, ay, w, h)
     return found
 
 
