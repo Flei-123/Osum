@@ -6,6 +6,13 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "k15"))
 import symjoin  # noqa: E402
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "svg"))
+import mkapps  # noqa: E402
+
+EXPLORER_ICON_DIR = "assets/icons/explorer"
+EXPLORER_ID_PREFIX = "fxi-"
+EXPLORER_SYMBOLS = ("folder", "desktop", "documents", "downloads", "pictures", "music", "videos", "drive", "usb", "home", "pin", "quickaccess", "gallery")
+
 
 def read_rows(path, sep):
     for line in open(path, encoding="utf-8").read().splitlines():
@@ -65,9 +72,28 @@ def entries(root):
             yield app, "fenster", os.path.join(root, path), bundle_title(os.path.join(root, path))
 
 
+def explorer_icons(root, out):
+    import tempfile
+    src_dir = os.path.join(root, EXPLORER_ICON_DIR)
+    for row in read_rows(os.path.join(src_dir, "index.txt"), "\t"):
+        name = row[0]
+        if name not in EXPLORER_SYMBOLS:
+            continue
+        with tempfile.TemporaryDirectory() as tmp:
+            svg = os.path.join(src_dir, name + ".svg")
+            mkapps.raster_osym(svg, mkapps.SIZE, os.path.join(tmp, "symbol.osym"))
+            for size in mkapps.ROW_SIZES:
+                mkapps.raster_osym(svg, size, os.path.join(tmp, "symbol%d.osym" % size))
+            target = os.path.join(out, "usr/share/appreg", EXPLORER_ID_PREFIX + name)
+            os.makedirs(target, exist_ok=True)
+            with open(os.path.join(target, "symbol"), "wb") as f:
+                f.write(symjoin.joined(tmp))
+
+
 def main(argv):
     root, out = argv[0], argv[1]
     bad = 0
+    explorer_icons(root, out)
     for app, kind, d, title in entries(root):
         if d is None:
             print("no icon source for %s" % app)
