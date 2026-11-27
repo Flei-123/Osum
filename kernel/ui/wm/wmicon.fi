@@ -2,6 +2,7 @@
 profile kernel
 
 import appicon
+import iconbox
 import gfx.ttf
 import libc.numeric
 import ui.wm.wmbase
@@ -10,6 +11,7 @@ import ui.wm.wmdraw
 import ui.wm.wmgate
 import ui.wm.wmgeom
 import ui.wm.wmlayout
+import ui.wm.wmsymbol
 import ui.wm.wmtabs
 import ui.wm.wmtitle
 
@@ -31,12 +33,28 @@ const COLOUR_MASK: u64 = 0xFFFFFF
 
 const LETTER_RGB: u64 = 0xFFFFFF
 
+const SYM_FLAG: u64 = 0x4000000000000000
+
+const SYM_GEN_SHIFT: u64 = 46
+
+const RGB_MASK: u64 = 0xFFFFFF
+
+const ALPHA_SHIFT: u64 = 24
+
 fn size(state: u64, i: u64) -> u64 {
     return wmgeom.fs(state, i, BASE_PX)
 }
 
 fn gap(state: u64, i: u64) -> u64 {
     return wmgeom.fs(state, i, GAP_PX)
+}
+
+fn symbol_bits(state: u64, i: u64) -> u64 {
+    let h: u64 = wmsymbol.live(state, i)
+    if h == 0 {
+        return 0
+    }
+    return SYM_FLAG | (wmsymbol.gen_of(h) << SYM_GEN_SHIFT)
 }
 
 fn word(state: u64, i: u64) -> u64 {
@@ -51,7 +69,7 @@ fn word(state: u64, i: u64) -> u64 {
     if cp == 0 {
         return 0
     }
-    return PRESENT | (cp << CP_SHIFT) | (appicon.color_of(name) & COLOUR_MASK)
+    return PRESENT | symbol_bits(state, i) | (cp << CP_SHIFT) | (appicon.color_of(name) & COLOUR_MASK)
 }
 
 fn advance(state: u64, i: u64) -> i64 {
@@ -70,6 +88,22 @@ fn left(state: u64, i: u64) -> i64 {
     return wmgeom.border(state, i) as i64 + wmgeom.title_pad(state, i) as i64
 }
 
+fn paint_symbol(state: u64, i: u64, x: i64, y: i64, sz: u64, ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
+    let pix: u64 = wmsymbol.pixels_at(state, i)
+    var dy: u64 = 0
+    while dy < sz {
+        var dx: u64 = 0
+        while dx < sz {
+            let v: u64 = iconbox.sample(pix, iconbox.SIDE, dx, dy, sz)
+            if (v >> ALPHA_SHIFT) != 0 {
+                wmdraw.px_clip(state, x + dx as i64, y + dy as i64, v & RGB_MASK, v >> ALPHA_SHIFT, ax0, ay0, ax1, ay1)
+            }
+            dx = dx + 1
+        }
+        dy = dy + 1
+    }
+}
+
 fn paint(state: u64, i: u64, wx: i64, wy: i64, ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
     let w: u64 = word(state, i)
     let f: u64 = wmlayout.gs(state, wmlayout.S_FONT_UI)
@@ -79,6 +113,10 @@ fn paint(state: u64, i: u64, wx: i64, wy: i64, ax0: i64, ay0: i64, ax1: i64, ay1
     let sz: i64 = size(state, i) as i64
     let x: i64 = wx + left(state, i)
     let y: i64 = wy + top(state, i)
+    if (w & SYM_FLAG) != 0 {
+        paint_symbol(state, i, x, y, size(state, i), ax0, ay0, ax1, ay1)
+        return
+    }
     wmdraw.fill_round(state, x, y, sz, sz, size(state, i) / RADIUS_DIV, w & COLOUR_MASK, 255, ax0, ay0, ax1, ay1)
     let slot: u64 = ttf.glyph(state, f, (w >> CP_SHIFT) & 0x1FFFFF, size(state, i) * LETTER_NUM / LETTER_DEN)
     if slot >= ttf.SLOTS {

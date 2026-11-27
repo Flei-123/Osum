@@ -1,0 +1,77 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+export { SIDE, SLOT_BYTES, sample, reduce }
+
+const SIDE: u64 = 32
+const SLOT_BYTES: u64 = 4096
+const PIXEL_BYTES: u64 = 4
+const ALPHA_SHIFT: u64 = 24
+const RED_SHIFT: u64 = 16
+const GREEN_SHIFT: u64 = 8
+
+fn rd(p: u64) -> u64 {
+    return (__mmio_read8(p as *mut u8)) as u64
+}
+
+fn span_lo(side: u64, d: u64, size: u64) -> u64 {
+    return d * side / size
+}
+
+fn span_hi(side: u64, d: u64, size: u64) -> u64 {
+    let lo: u64 = span_lo(side, d, size)
+    let hi: u64 = ((d + 1) * side + size - 1) / size
+    if hi <= lo {
+        return lo + 1
+    }
+    return hi
+}
+
+fn sample(pix: u64, side: u64, dx: u64, dy: u64, size: u64) -> u64 {
+    if pix == 0 || side == 0 || size == 0 || dx >= size || dy >= size {
+        return 0
+    }
+    let x1: u64 = span_hi(side, dx, size)
+    let y1: u64 = span_hi(side, dy, size)
+    var sr: u64 = 0
+    var sg: u64 = 0
+    var sb: u64 = 0
+    var sa: u64 = 0
+    var n: u64 = 0
+    var y: u64 = span_lo(side, dy, size)
+    while y < y1 {
+        var x: u64 = span_lo(side, dx, size)
+        while x < x1 {
+            let at: u64 = pix + (y * side + x) * PIXEL_BYTES
+            let a: u64 = rd(at + 3)
+            sr = sr + rd(at) * a
+            sg = sg + rd(at + 1) * a
+            sb = sb + rd(at + 2) * a
+            sa = sa + a
+            n = n + 1
+            x = x + 1
+        }
+        y = y + 1
+    }
+    if sa == 0 {
+        return 0
+    }
+    return ((sa / n) << ALPHA_SHIFT) | ((sr / sa) << RED_SHIFT) | ((sg / sa) << GREEN_SHIFT) | (sb / sa)
+}
+
+fn reduce(src: u64, side: u64, dst: u64) {
+    var y: u64 = 0
+    while y < SIDE {
+        var x: u64 = 0
+        while x < SIDE {
+            let v: u64 = sample(src, side, x, y, SIDE)
+            let at: u64 = dst + (y * SIDE + x) * PIXEL_BYTES
+            __mmio_write8(at as *mut u8, ((v >> RED_SHIFT) & 0xFF) as u8)
+            __mmio_write8((at + 1) as *mut u8, ((v >> GREEN_SHIFT) & 0xFF) as u8)
+            __mmio_write8((at + 2) as *mut u8, (v & 0xFF) as u8)
+            __mmio_write8((at + 3) as *mut u8, ((v >> ALPHA_SHIFT) & 0xFF) as u8)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
