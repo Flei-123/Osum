@@ -31,7 +31,7 @@ taste f12
 warte 3
 DREH
 shoot() { # shoot <tree> <out>
-    ( cd "$1" && /root/jarvis/bin/heavy bash tools/design/capture.sh "$2" uitrace=yes accel=kvm drehbuch="$D/dreh.txt" "progs=desktop taskbar settings launcher explorer edit sh echo ls cat theme" > "$2.log" 2>&1 )
+    ( cd "$1" && /root/jarvis/bin/heavy bash tools/design/eh6.sh "$2" res=1280x800 accel=kvm ton=ja mode=light lang=en tafel=nein pins=explorer,settings,terminal drehbuch="$D/dreh.txt" "progs=desktop taskbar settings launcher explorer edit sh echo ls cat theme" > "$2.log" 2>&1 )
 }
 OLDPID=""
 if [ -z "${TITLEICON_NOCP:-}" ]; then

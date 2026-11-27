@@ -1,0 +1,148 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import fuiapp.hostwin
+import iconbox
+import symvar
+import uikit.uiicon
+
+const TABLE_N: u64 = 64
+
+const NAME_BYTES: u64 = 24
+
+const HEADER_BYTES: u64 = 12
+
+const MAX_SOURCE: u64 = 128
+
+const PIXEL_BYTES: u64 = 4
+
+const LARGE_TILE: u64 = 64
+
+static mut known_id: [u64; 64] = [0 as u64; 64]
+
+static mut known_key: [u64; 64] = [0 as u64; 64]
+
+static mut picture: [u8; 4096] = [0 as u8; 4096]
+
+fn name_key(app: u64) -> u64 {
+    var h: u64 = 1469598103934665603
+    var k: u64 = 0
+    while k < NAME_BYTES {
+        let c: u64 = (__mmio_read8((app + k) as *mut u8)) as u64
+        if c == 0 {
+            return h | 1
+        }
+        h = (h ^ c) *% 1099511628211
+        k = k + 1
+    }
+    return h | 1
+}
+
+fn source_ok(sy: u64) -> bool {
+    let w: u64 = uiicon.icon_w(sy)
+    let h: u64 = uiicon.icon_h(sy)
+    return w == h && w >= iconbox.SIDE && w <= MAX_SOURCE
+}
+
+fn put_pixel(x: u64, y: u64, a: u64, r: u64, g: u64, b: u64) {
+    let at: u64 = (&picture[0 as usize]) as u64 + (y * iconbox.SIDE + x) * PIXEL_BYTES
+    __mmio_write8(at as *mut u8, r as u8)
+    __mmio_write8((at + 1) as *mut u8, g as u8)
+    __mmio_write8((at + 2) as *mut u8, b as u8)
+    __mmio_write8((at + 3) as *mut u8, a as u8)
+}
+
+fn reduce_cell(sy: u64, w: u64, x: u64, y: u64) {
+    let x0: u64 = x * w / iconbox.SIDE
+    let x1: u64 = ((x + 1) * w + iconbox.SIDE - 1) / iconbox.SIDE
+    let y0: u64 = y * w / iconbox.SIDE
+    let y1: u64 = ((y + 1) * w + iconbox.SIDE - 1) / iconbox.SIDE
+    var sa: u64 = 0
+    var sr: u64 = 0
+    var sg: u64 = 0
+    var sb: u64 = 0
+    var n: u64 = 0
+    var py: u64 = y0
+    while py < y1 {
+        var px: u64 = x0
+        while px < x1 {
+            let v: u64 = __mmio_read32((sy + HEADER_BYTES + (py * w + px) * PIXEL_BYTES) as *mut u32) as u64
+            let a: u64 = (v >> 24) & 0xFF
+            sa = sa + a
+            sr = sr + ((v >> 16) & 0xFF) * a
+            sg = sg + ((v >> 8) & 0xFF) * a
+            sb = sb + (v & 0xFF) * a
+            n = n + 1
+            px = px + 1
+        }
+        py = py + 1
+    }
+    if sa == 0 || n == 0 {
+        put_pixel(x, y, 0, 0, 0, 0)
+        return
+    }
+    put_pixel(x, y, sa / n, sr / sa, sg / sa, sb / sa)
+}
+
+fn build(sy: u64) {
+    let w: u64 = uiicon.icon_w(sy)
+    var y: u64 = 0
+    while y < iconbox.SIDE {
+        var x: u64 = 0
+        while x < iconbox.SIDE {
+            reduce_cell(sy, w, x, y)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+fn forget_all() {
+    var i: u64 = 0
+    while i < TABLE_N {
+        known_id[i as usize] = 0
+        known_key[i as usize] = 0
+        i = i + 1
+    }
+}
+
+fn slot_of(id: u64) -> u64 {
+    var free: u64 = TABLE_N
+    var i: u64 = 0
+    while i < TABLE_N {
+        if known_id[i as usize] == id {
+            return i
+        }
+        if known_id[i as usize] == 0 && free == TABLE_N {
+            free = i
+        }
+        i = i + 1
+    }
+    return free
+}
+
+fn sync(id: u64, app: u64, sy: u64) {
+    if id == 0 || sy == 0 || !source_ok(sy) {
+        return
+    }
+    var slot: u64 = slot_of(id)
+    if slot >= TABLE_N {
+        forget_all()
+        slot = 0
+    }
+    let key: u64 = name_key(app)
+    if known_id[slot as usize] == id && known_key[slot as usize] == key {
+        return
+    }
+    var src: u64 = symvar.pick(sy, LARGE_TILE)
+    if !source_ok(src) {
+        src = sy
+    }
+    build(src)
+    let r: u64 = hostwin.win_symbol(id, (&picture[0 as usize]) as u64, iconbox.SLOT_BYTES)
+    if r != 0 {
+        return
+    }
+    known_id[slot as usize] = id
+    known_key[slot as usize] = key
+}

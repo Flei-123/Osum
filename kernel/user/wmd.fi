@@ -10,6 +10,7 @@ import lineout
 import libc.io
 import uikit.uiglyph
 import fui.comp
+import iconbox
 import fui.core
 import corner
 import utf8
@@ -414,6 +415,17 @@ const CHR_TABC: u64 = 224
 const CHR_FSA: u64 = 256
 const CHR_FSB: u64 = 288
 const CHR_ICON: u64 = 320
+const SYM_FLAG: u64 = 0x4000000000000000
+const SYM_GEN_SHIFT: u64 = 46
+const SYM_GEN_MASK: u64 = 0xFFFF
+const SYM_READY: u64 = 0x8000000000000000
+const SYM_ID_MASK: u64 = 0xFFFFFFFF
+const SYM_GEN_AT: u64 = 32
+const SYM_HEAD_BYTES: u64 = 8
+const SYM_PAGE_BYTES: u64 = 4096
+const SYM_PAGES: u64 = 33
+const SYM_ALPHA_SHIFT: u64 = 24
+const SYM_RGB_MASK: u64 = 0xFFFFFF
 
 const CHR_WORDS: u64 = 352
 const CAP_N: u64 = 3
@@ -430,11 +442,13 @@ static mut chr1: [u64; 352] = [0 as u64; 352]
 static mut chr2: [u64; 352] = [0 as u64; 352]
 static mut ch_clip_y1: i64 = 1073741824
 static mut p_chr: u64 = 0
+static mut p_sym: u64 = 0
 static mut ch_have: u64 = 0
 static mut ch_px: u64 = 0
 static mut ch_win: u64 = 0
 static mut ch_txt: u64 = 0
 static mut ch_cap: u64 = 0
+static mut ch_sym: u64 = 0
 static mut o_nochrome: u64 = 0
 static mut gl_buf: [u8; 8192] = [0 as u8; 8192]
 static mut plus_txt: [u8; 32] = [0 as u8; 32]
@@ -1095,7 +1109,35 @@ fn ch_icon_letter(cp: u64, x: i64, y: i64, sz: i64) {
     }
 }
 
-fn ch_icon(wx: i64, wy: i64, iw: u64) {
+fn ch_symbol_live(row: u64, iw: u64) -> bool {
+    if p_sym == 0 || row >= 32 {
+        return false
+    }
+    let h: u64 = __mmio_read64((p_sym + row * SYM_HEAD_BYTES) as *mut u64)
+    if (h & SYM_READY) == 0 {
+        return false
+    }
+    return ((h >> SYM_GEN_AT) & SYM_GEN_MASK) == ((iw >> SYM_GEN_SHIFT) & SYM_GEN_MASK)
+}
+
+fn ch_symbol(row: u64, x: i64, y: i64, sz: i64) {
+    let pix: u64 = p_sym + SYM_PAGE_BYTES * (1 + row)
+    var dy: u64 = 0
+    while dy < sz as u64 {
+        var dx: u64 = 0
+        while dx < sz as u64 {
+            let v: u64 = iconbox.sample(pix, iconbox.SIDE, dx, dy, sz as u64)
+            if (v >> SYM_ALPHA_SHIFT) != 0 {
+                ch_mix(x + dx as i64, y + dy as i64, v & SYM_RGB_MASK, v >> SYM_ALPHA_SHIFT)
+                ch_sym = ch_sym + 1
+            }
+            dx = dx + 1
+        }
+        dy = dy + 1
+    }
+}
+
+fn ch_icon(row: u64, wx: i64, wy: i64, iw: u64) {
     if iw == 0 {
         return
     }
@@ -1104,6 +1146,10 @@ fn ch_icon(wx: i64, wy: i64, iw: u64) {
     let bar: i64 = chr1[18] as i64 - 1 - bo
     let x: i64 = wx + bo + chr1[26] as i64
     let y: i64 = wy + bo + numeric.imax(0, bar - sz) / 2
+    if (iw & SYM_FLAG) != 0 && ch_symbol_live(row, iw) {
+        ch_symbol(row, x, y, sz)
+        return
+    }
     ch_round(x, y, sz, sz, sz as u64 / ICON_RADIUS_DIV, iw & ICON_COLOUR_MASK, 255)
     ch_icon_letter((iw >> ICON_CP_SHIFT) & 0x1FFFFF, x, y, sz)
 }
@@ -1130,7 +1176,7 @@ fn ch_window(row: u64, wx: i64, wy: i64, ow: i64, oh: i64, focused: bool, slot: 
     if strip == 0 {
         iw = chr1[(CHR_ICON + row) as usize]
     }
-    ch_icon(wx, wy, iw)
+    ch_icon(row, wx, wy, iw)
     let bo: i64 = chr1[17] as i64
     let limit: i64 = wx + ow - bo - CAP_N as i64 * chr1[19] as i64
     if strip != 0 {
@@ -1227,6 +1273,7 @@ fn cycle(t: u64) -> u64 {
     ch_win = 0
     ch_txt = 0
     ch_cap = 0
+    ch_sym = 0
     var oi: u64 = 0
     while oi < n && oi < MAXWIN {
         let k: u64 = order[oi as usize]
@@ -1525,6 +1572,7 @@ fn run_observe(args: u64) -> u64 {
     var n_tx: [u8; 10] = " titlepx=\0"
     var n_cp: [u8; 9] = " capspx=\0"
     var n_hv: [u8; 8] = " hover=\0"
+    var n_sy: [u8; 8] = " sympx=\0"
     var l_nochr: [u8; 10] = "nochrome=\0"
     var l_hvw: [u8; 11] = "hoverwait=\0"
     var n_shw: [u8; 9] = " shadow=\0"
@@ -1588,6 +1636,14 @@ fn run_observe(args: u64) -> u64 {
         }
         hostwin.shm_close(cfd)
     }
+    let sfd: u64 = uisys.sys3w(WM_TABLE, 2, 0, 0)
+    if !ulib.bad(sfd) {
+        let sm: u64 = mmap_fd(sfd, SYM_PAGES * SYM_PAGE_BYTES)
+        if !ulib.bad(sm) && sm != 0 {
+            p_sym = sm
+        }
+        hostwin.shm_close(sfd)
+    }
     lineout.add_text((&n_ready[0 as usize]) as u64)
     lineout.add_unum(scr_w)
     lineout.add_text((&n_x[0 as usize]) as u64)
@@ -1637,6 +1693,8 @@ fn run_observe(args: u64) -> u64 {
             lineout.add_unum(ch_txt)
             lineout.add_text((&n_cp[0 as usize]) as u64)
             lineout.add_unum(ch_cap)
+            lineout.add_text((&n_sy[0 as usize]) as u64)
+            lineout.add_unum(ch_sym)
             lineout.add_text((&n_hv[0 as usize]) as u64)
             lineout.add_unum(chr1[22])
             if c_diff != 0 {

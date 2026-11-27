@@ -34,9 +34,9 @@ def bar_extent(px, x, y, h, ref):
 def window_lines(path):
     seen = {}
     for line in open(path, errors="replace"):
-        m = re.search(r"wm: fen i=(\d+).* tx=(\d+).* ic=(\d+),(\d+),(\d+)", line)
+        m = re.search(r"wm: fen i=(\d+).* tx=(\d+).* ic=(\d+),(\d+),(\d+)(?:.* sy=(\d))?", line)
         if m:
-            seen[int(m.group(1))] = tuple(int(v) for v in m.groups()[1:])
+            seen[int(m.group(1))] = tuple(int(v or 0) for v in m.groups()[1:])
     return list(seen.values())
 
 
@@ -46,7 +46,8 @@ def main():
     px = im.load()
     W, H = im.size
     check(len(wins) >= 1, "%d window(s) report an icon word (ic=size,x,y)" % len(wins))
-    for tx, size, ix, iy in wins:
+    check(any(w[4] == 1 for w in wins), "at least one window shows a real program symbol (sy=1)")
+    for tx, size, ix, iy, _sy in wins:
         print("        icon size=%d at %d,%d, title text starts at %d" % (size, ix, iy, tx))
         check(size > 0 and ix + size <= tx, "icon x %d..%d ends before the title text at %d" % (ix, ix + size, tx))
         probe = (ix + size + 3, iy + size // 2)
