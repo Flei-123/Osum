@@ -15,6 +15,8 @@ import wl_data
 import wl_frame
 import wl_popup
 import wl_backdrop
+import wl_damage
+import wl_blit
 import wl_cursor
 import libc.clockapi
 
@@ -101,6 +103,7 @@ const O_D: u64 = 5
 const O_E: u64 = 6
 const O_F: u64 = 7
 const O_FIELDS: u64 = 8
+const SLOT_NONE: u64 = 0xFFFFFFFF
 
 static mut objs: [u64; 16384] = [0 as u64; 16384]
 static mut aux: [u64; 2048] = [0 as u64; 2048]
@@ -175,6 +178,7 @@ fn obj_new(c: u64, id: u64, iface: u64) -> u64 {
             objs[(b + O_E) as usize] = 0
             objs[(b + O_F) as usize] = 0
             aux[(c * MAX_OBJ + i) as usize] = 0
+            wl_damage.reset(c * MAX_OBJ + i)
             return i
         }
         i = i + 1
@@ -941,16 +945,59 @@ fn surface_commit(c: u64, sid: u64) {
             ulib.sys(WM_APP, win, ap, al)
         }
     }
-    paint_begin(c, win, sid, pop != 0 && aux_get(c, bid) == SHM_FORMAT_ARGB8888)
-    paint_main(win, src + gy * stride + gx * 4, stride, gw, gh)
+    paint_surface(c, sid, win, src, stride, geo)
     aux_set(c, sid, bid)
-    sub_paint_all(c, sid, win)
-    ulib.sys(WM_FLUSH, win, 0, 0)
     n_commits = n_commits + 1
     let p: u64 = ev_begin(c, bid, 0)
     ev_end(c, p, 0)
     obj_set(c, sid, O_B, 0)
     obj_set(c, sid, O_D, 1)
+}
+
+fn surface_slot(c: u64, id: u64) -> u64 {
+    let i: u64 = obj_find(c, id)
+    if i >= MAX_OBJ {
+        return SLOT_NONE
+    }
+    return c * MAX_OBJ + i
+}
+
+fn has_subsurfaces(c: u64, par: u64) -> bool {
+    var i: u64 = 0
+    while i < MAX_OBJ {
+        let b: u64 = obj_base(c, i)
+        if objs[(b + O_ID) as usize] != 0 && objs[(b + O_IFACE) as usize] == wlproto.IF_WL_SUBSURFACE
+            && objs[(b + O_B) as usize] == par {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn paint_surface(c: u64, sid: u64, win: u64, src: u64, stride: u64, geo: u64) {
+    let gx: u64 = wl_popup.field(geo, 0) as u64
+    let gy: u64 = wl_popup.field(geo, 1) as u64
+    let gw: u64 = wl_popup.field(geo, 2) as u64
+    let gh: u64 = wl_popup.field(geo, 3) as u64
+    let bid: u64 = obj_get(c, sid, O_B)
+    let blend: bool = popup_of(c, sid) != 0 && aux_get(c, bid) == SHM_FORMAT_ARGB8888
+    let kids: bool = has_subsurfaces(c, sid)
+    paint_begin(c, win, sid, blend)
+    let region: u64 = wl_damage.take_region(surface_slot(c, sid), gx, gy, gw, gh, blend || kids)
+    if blend {
+        paint_main(win, src + gy * stride + gx * 4, stride, gw, gh)
+    } else if region != 0 {
+        let x0: u64 = region >> 48
+        let y0: u64 = (region >> 32) & 0xFFFF
+        let x1: u64 = (region >> 16) & 0xFFFF
+        let y1: u64 = region & 0xFFFF
+        wl_blit.blit(win, x0, y0, x1 - x0, y1 - y0, src + gy * stride + gx * 4, stride)
+    }
+    if blend || kids {
+        sub_paint_all(c, sid, win)
+        ulib.sys(WM_FLUSH, win, 0, 0)
+    }
 }
 
 fn fill_colour(win: u64, x: u64, y: u64, run: u64, colour: u64) {
@@ -1414,7 +1461,12 @@ fn on_surface(c: u64, id: u64, op: u64, argp: u64) {
         obj_set(c, id, O_B, rd32(argp))
         return
     }
-    if op == wlproto.RQ_WL_SURFACE_DAMAGE {
+    if op == wlproto.RQ_WL_SURFACE_DAMAGE || op == wlproto.RQ_WL_SURFACE_DAMAGE_BUFFER {
+        wl_damage.add(surface_slot(c, id), rd32(argp), rd32(argp + 4), rd32(argp + 8), rd32(argp + 12))
+        return
+    }
+    if op == wlproto.RQ_WL_SURFACE_SET_BUFFER_SCALE || op == wlproto.RQ_WL_SURFACE_SET_BUFFER_TRANSFORM {
+        wl_damage.force_full(surface_slot(c, id))
         return
     }
     if op == wlproto.RQ_WL_SURFACE_COMMIT {

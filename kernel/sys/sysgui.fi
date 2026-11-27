@@ -836,6 +836,34 @@ fn wm_thumb(state: u64, me: u64, id: u64, out: u64, size: u64) -> u64 {
     return 0
 }
 
+const BLIT_STRIDE_MAX: u64 = 0x1000000
+
+fn do_blit(state: u64, me: u64, i: u64, xy: u64, wh: u64, src: u64, stride: u64) -> u64 {
+    if stride > BLIT_STRIDE_MAX || (src & 3) != 0 {
+        return cap.err(cap.E_INVALID)
+    }
+    let x: u64 = (xy >> 16) & 0xFFFF
+    let y: u64 = xy & 0xFFFF
+    let clip: u64 = wm.blit_clip(state, i, x, y, (wh >> 16) & 0xFFFF, wh & 0xFFFF)
+    if clip == 0 {
+        return 0
+    }
+    let bw: u64 = clip >> 16
+    let bh: u64 = clip & 0xFFFF
+    var row: u64 = 0
+    while row < bh {
+        let dst: u64 = wm.blit_row_addr(state, i, x, y + row)
+        if !sysuser.copy_in(state, me, dst, src + row * stride, bw * 4) {
+            return cap.err(cap.E_INVALID)
+        }
+        wm.blit_clear_alpha(dst, bw)
+        row = row + 1
+    }
+    wm.damage_rect(state, i, x, y, bw, bh)
+    wm.compose(state)
+    return 0
+}
+
 fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     a3: u64, a4: u64) -> u64 {
     if number > sys.WM_MAXNR {
@@ -1066,6 +1094,12 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         wm.fill(state, i, (a1 >> 16) & 0xFFFF, a1 & 0xFFFF,
             (a2 >> 16) & 0xFFFF, a2 & 0xFFFF, a3)
         return 0
+    }
+    if number == sys.WM_BLIT {
+        if !cap.rights_contains(rights, cap.R_WRITE) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        return do_blit(state, me, i, a1, a2, a3, a4)
     }
     if number == sys.WM_TEXT {
         if !cap.rights_contains(rights, cap.R_WRITE) {
