@@ -22,7 +22,7 @@ for mode in slow off; do
   D="$OUT/$mode"
   mkdir -p "$D"
   script > "$D-drehbuch.txt"
-  if [ "$mode" = slow ]; then extra="motion=12000"; else extra="motion=0"; fi
+  if [ "$mode" = slow ]; then extra="motion=3000"; else extra="motion=0"; fi
   bash tools/design/eh6.sh "$D" res=1280x800 accel=kvm mode=light moreprogs=term progs="$PROGS" tafel=nein themeextra="$extra" drehbuch="$D-drehbuch.txt" > "$D.log" 2>&1
   rm -f "$D-drehbuch.txt"
 done

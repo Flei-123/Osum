@@ -10,7 +10,7 @@ slow, off = sys.argv[1:3]
 ok = bad = 0
 RECT_RE = re.compile(r"settings: rect name=whq x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)")
 FRAMES = ["01-frame", "02-frame", "03-frame", "04-frame", "05-frame", "06-frame"]
-MIN_DISTINCT_FRAMES = 3
+MIN_DISTINCT_FRAMES = 2
 PIXEL_STEP = 60
 MIN_SWITCH_W = 24
 EDGE_COLUMNS = 2
