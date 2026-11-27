@@ -19,7 +19,7 @@ import libc.regio
 
 export {
     init, beat, nmi, stall, dumps, nmis, late_nmis, pmu_on, last_reason, hard_s, soft_s,
-    R_NONE, R_HARD_PEER, R_HARD_SELF, R_SOFT, R_STALL
+    R_NONE, R_HARD_PEER, R_HARD_SELF, R_SOFT, R_STALL, R_MANUAL
 }
 
 const R_NONE: u64 = 0
@@ -27,6 +27,7 @@ const R_HARD_PEER: u64 = 1
 const R_HARD_SELF: u64 = 2
 const R_SOFT: u64 = 3
 const R_STALL: u64 = 4
+const R_MANUAL: u64 = 5
 
 const NCPU: u64 = 8
 const HARD_DEFAULT_S: u64 = 10
@@ -48,6 +49,7 @@ static mut h_reason: u64 = 0
 static mut h_soft_live: u64 = 0
 static mut h_soft_cpu: u64 = 0
 static mut hb_tsc: [u64; 8] = [0 as u64; 8]
+static mut pin_done: [u64; 8] = [0 as u64; 8]
 static mut k_task: [u64; 8] = [0 as u64; 8]
 static mut k_since: [u64; 8] = [0 as u64; 8]
 
@@ -74,7 +76,7 @@ static mut s_late: [u8; 37] = "hang: late pmu nmi absorbed on cpu \0\0"
 static mut s_src: [u8; 5] = "hang\0"
 static mut s_lk: [u8; 23] = "soft lockup on cpu, s=\0"
 
-static mut r_names: [u8; 60] = "none\0\0\0\0\0\0\0\0hard-peer\0\0\0hard-self\0\0\0soft\0\0\0\0\0\0\0\0stall\0\0\0\0\0\0\0"
+static mut r_names: [u8; 72] = "none\0\0\0\0\0\0\0\0hard-peer\0\0\0hard-self\0\0\0soft\0\0\0\0\0\0\0\0stall\0\0\0\0\0\0\0manual\0\0\0\0\0\0"
 
 fn dumps() -> u64 {
     return h_dumps
@@ -106,7 +108,7 @@ fn soft_s() -> u64 {
 
 fn reason_name(r: u64) -> u64 {
     var x: u64 = r
-    if x > R_STALL {
+    if x > R_MANUAL {
         x = R_NONE
     }
     return (&r_names[0]) as u64 + x * 12
@@ -163,6 +165,14 @@ fn init(state: u64) {
     serial.nl()
 }
 
+fn pin_external_nmi(state: u64, me: u64) {
+    if hangcpu.pmu_ready() || pin_done[me as usize] != 0 {
+        return
+    }
+    pin_done[me as usize] = 1
+    apic.nmi_pin(state)
+}
+
 fn paused() -> bool {
     return wdt.st() == wdt.ST_PAUSED || power.halting()
 }
@@ -190,6 +200,7 @@ fn beat(state: u64, frame: u64) {
     }
     hb_tsc[me as usize] = now
     hangcpu.pmu_arm(state, me)
+    pin_external_nmi(state, me)
     if h_req != 0 {
         return
     }
@@ -299,7 +310,14 @@ fn nmi(state: u64, frame: u64) -> bool {
         return true
     }
     if !mine {
-        return h_req != 0 || late_pmi(state, me, now)
+        if h_req != 0 || late_pmi(state, me, now) {
+            return true
+        }
+        if !hangcpu.pmu_ready() {
+            trigger(state, R_MANUAL, me, me, frame)
+            return true
+        }
+        return false
     }
     if paused() || h_req != 0 {
         return true
@@ -375,7 +393,7 @@ fn write_report(state: u64, reason: u64, culprit: u64, me: u64) {
     var s_t: [u8; 12] = "threshold: \0"
     var s_s: [u8; 3] = "s\n\0"
     var kind: u64 = crash.KIND_HANG
-    if reason == R_SOFT || reason == R_STALL {
+    if reason == R_SOFT || reason == R_STALL || reason == R_MANUAL {
         kind = crash.KIND_SOFT
     }
     crash.hang_begin(state, kind)
