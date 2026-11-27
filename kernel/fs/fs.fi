@@ -1991,7 +1991,10 @@ fn write_at_keep_pages(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u6
     if scoped {
         wbscope.begin_data(state)
     }
-    let n: u64 = write_at_scoped(state, ino, off, src, len)
+    var n: u64 = write_overwrite(state, ino, off, src, len)
+    if n < len {
+        n = n + write_at_scoped(state, ino, off + n, src + n, len - n)
+    }
     var flushed: bool = true
     if scoped {
         flushed = blk.wb_end(state)
@@ -2001,6 +2004,84 @@ fn write_at_keep_pages(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u6
     dirindex.touch(state, ino)
     if !flushed {
         return 0
+    }
+    return n
+}
+
+fn overwrite_block(state: u64, ino: u64, index: u64) -> u64 {
+    let dn: u64 = directs(state)
+    if index < dn {
+        return inode_get(state, ino, I_DIRECT + index * 8)
+    }
+    let k: u64 = index - dn
+    if k >= PER_BLOCK + PER_BLOCK * PER_BLOCK {
+        return file_block(state, ino, index, false)
+    }
+    if lp_lba == 0 || lp_ino != ino || lp_group != (k >> PER_BLOCK_SHIFT) {
+        let lba: u64 = leaf_ptr_block(state, ino, k, false)
+        if lba == 0 || !ofsj.read(state, lba, lp_data()) {
+            return 0
+        }
+        lp_ino = ino
+        lp_group = k >> PER_BLOCK_SHIFT
+        lp_lba = lba
+        iattr.leaf_hold(lba)
+    }
+    return regio.read64(lp_data() + (k & (PER_BLOCK - 1)) * 8)
+}
+
+fn write_overwrite_run(state: u64, ino: u64, pos: u64, src: u64, want: u64) -> u64 {
+    var cap: u64 = want
+    if cap > WRITE_RUN_BLOCKS {
+        cap = WRITE_RUN_BLOCKS
+    }
+    let dn: u64 = directs(state)
+    let first_index: u64 = pos / BS
+    let first: u64 = overwrite_block(state, ino, first_index)
+    if first == 0 {
+        return 0
+    }
+    var count: u64 = 1
+    var scan: bool = true
+    while count < cap {
+        if scan {
+            let run: u64 = leaf_run(ino, dn, first_index + count, first + count, cap - count)
+            scan = run != 0
+            count = count + run
+            if count >= cap {
+                break
+            }
+        }
+        let b: u64 = overwrite_block(state, ino, first_index + count)
+        if b != first + count {
+            break
+        }
+        count = count + 1
+    }
+    if !ofsj.write_blocks(state, first, src, count) {
+        return 0
+    }
+    return count * BS
+}
+
+fn write_overwrite(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
+    if len == 0 || ((off | len) & (BS - 1)) != 0 || ofsj.enabled(state) {
+        return 0
+    }
+    if ino == 0 || ino > inode_count(state) || inode_get(state, ino, I_SIZE) < off + len {
+        return 0
+    }
+    lp_revive()
+    var n: u64 = 0
+    while n < len {
+        let run: u64 = write_overwrite_run(state, ino, off + n, src + n, (len - n) / BS)
+        if run == 0 {
+            break
+        }
+        n = n + run
+    }
+    if n != 0 {
+        touch_mtime(state, ino)
     }
     return n
 }
