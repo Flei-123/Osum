@@ -16,6 +16,10 @@ git -C "$REPO" worktree add -q --detach "$WT" "$COMMIT" || exit 1
 cd "$WT" || exit 1
 GATES=${NIGHTLY_ONLY:-$(awk -F"\t" 'NR>1 && $2=="nightly" {print $1}' tools/qa/gates.tsv | paste -sd, -)}
 [[ -n $EXTRA ]] && GATES="$GATES,$EXTRA"
+GUI_WD=${GUIAPPS_WD:-/root/abbilder/lapps}
+if [[ ! -e $GUI_WD ]]; then
+    /root/jarvis/bin/heavy bash tools/linuxapps/guiapps-prep.sh "$GUI_WD" > /dev/null 2>&1 || echo "guiapps prep failed: $GUI_WD missing, linuxapps-gui will be skipped"
+fi
 RESULTS=$(mktemp)
 LOG=$(mktemp)
 GATES_RESULTS=$RESULTS bash tools/qa/gates.sh --changed --only "$GATES" --run --jobs "$JOBS" --base HEAD > "$LOG" 2>&1
