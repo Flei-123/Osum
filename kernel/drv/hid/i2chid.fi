@@ -1039,19 +1039,11 @@ fn aml_resolve(state: u64, src: u64, maxlen: u64) -> u64 {
     return cur
 }
 
-fn aml_ctrl_of(state: u64, node: u64) -> u64 {
-    var w_adr: [u8; 5] = "_ADR\0"
-    let a: u64 = amlns.child(state, node, amlns.seg_of((&w_adr[0]) as u64))
-    if a == amlns.NONE {
-        return 0xFF
-    }
-    var r: [u64; 3] = [0 as u64; 3]
-    if !aml.eval_node(state, a, (&r[0]) as u64) || regio.read64((&r[0]) as u64) != amlobj.OT_INT {
-        return 0xFF
-    }
-    let v: u64 = amlobj.to_int((&r[0]) as u64)
-    let dev: u64 = (v >> 16) & 0xFFFF
-    let fnn: u64 = v & 0xFFFF
+const LPSS_I2C_DEV: u64 = 0x15
+const LPSS_I2C_COUNT: u64 = 4
+const NAME_I2C_PREFIX: u64 = 0x432249
+
+fn ctrl_at_pci(dev: u64, fnn: u64) -> u64 {
     var c: u64 = 0
     while c < nctrl() {
         if pci.bdf_dev(ctg(c, CT_BDF)) == dev && pci.bdf_fn(ctg(c, CT_BDF)) == fnn {
@@ -1060,6 +1052,36 @@ fn aml_ctrl_of(state: u64, node: u64) -> u64 {
         c = c + 1
     }
     return 0xFF
+}
+
+fn aml_ctrl_by_name(state: u64, node: u64) -> u64 {
+    let seg: u64 = amlns.node_name(state, node)
+    if (seg & 0xFFFFFF) != NAME_I2C_PREFIX {
+        return 0xFF
+    }
+    let digit: u64 = (seg >> 24) & 0xFF
+    if digit < 0x30 || digit >= 0x30 + LPSS_I2C_COUNT {
+        return 0xFF
+    }
+    return ctrl_at_pci(LPSS_I2C_DEV, digit - 0x30)
+}
+
+fn aml_ctrl_of(state: u64, node: u64) -> u64 {
+    var w_adr: [u8; 5] = "_ADR\0"
+    let a: u64 = amlns.child(state, node, amlns.seg_of((&w_adr[0]) as u64))
+    if a == amlns.NONE {
+        return aml_ctrl_by_name(state, node)
+    }
+    var r: [u64; 3] = [0 as u64; 3]
+    if !aml.eval_node(state, a, (&r[0]) as u64) || regio.read64((&r[0]) as u64) != amlobj.OT_INT {
+        return aml_ctrl_by_name(state, node)
+    }
+    let v: u64 = amlobj.to_int((&r[0]) as u64)
+    let c: u64 = ctrl_at_pci((v >> 16) & 0xFFFF, v & 0xFFFF)
+    if c == 0xFF {
+        return aml_ctrl_by_name(state, node)
+    }
+    return c
 }
 
 fn aml_dsm_hreg(state: u64, dev: u64) -> u64 {
