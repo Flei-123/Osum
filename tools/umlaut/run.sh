@@ -172,8 +172,8 @@ gegen "eine Spalte um EIN ZEICHEN verkuerzt" "kernel/user/power.fi" \
     python3 tools/i18n/columns.py
 gegen "ein Literal, das nicht mehr in seinen Puffer passt" \
     "kernel/user/vpn.fi" \
-    'var s_an: [u8; 14] = "vpn: läuft\0\0\0"' \
-    'var s_an: [u8; 14] = "vpn: läuft noch\0"' \
+    'var s_an: [u8; 14] = "vpn: running\0\0"' \
+    'var s_an: [u8; 14] = "vpn: running now\0"' \
     python3 tools/i18n/columns.py
 
 echo
