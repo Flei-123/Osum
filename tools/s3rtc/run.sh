@@ -89,7 +89,7 @@ L="$TMPD/l-rtc.txt"
 has "$L" "standby: rtc wake in sec=$WAKE_SECS" "the program announces the alarm"
 has "$L" "s3: sleep cycle=" "the kernel went to sleep"
 has "$L" "s3: wake cycle=" "the kernel woke up without a monitor wake"
-has "$L" "standby: zurueck, rc=0" "the system call returns 0"
+has "$L" "standby: back, rc=0" "the system call returns 0"
 hasline "$L" "after-rtc" "the shell runs the next command"
 num "return code of the machine (isa-debug-exit)" "$RC" eq 21
 num "/proc/s3 dumps" "$(grep -ac '^version 1' "$L")" eq 2

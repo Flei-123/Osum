@@ -78,7 +78,7 @@ def main():
 
     print()
     print("== DIE LAUTSTAERKE ==")
-    vol = [int(m.group(1)) for m in all_2(txt, r"qs: vol ist=(\d+)")]
+    vol = [int(m.group(1)) for m in all_2(txt, r"qs: vol is=(\d+)")]
     if vol:
         print(f"  gemeldet: {sorted(set(vol))}  (letzter {vol[-1]})")
     else:

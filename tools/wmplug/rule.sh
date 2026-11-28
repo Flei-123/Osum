@@ -111,7 +111,7 @@ echo "== 3. the run WITH the right R_ACT_WIN =="
 lauf mit "recht,demo"
 [ "$RC" = 21 ] && ok "the kernel exits cleanly (21)" || bad "Exitcode $RC statt 21"
 has "$TMPD/mit.klar" "wm: hold" "der Schreibtisch steht"
-has "$TMPD/mit.klar" "plugregel: regeln aus /etc/wmregeln.conf: 2" \
+has "$TMPD/mit.klar" "plugregel: rules off /etc/wmregeln.conf: 2" \
     "das Plugin hat zwei Regeln gelesen"
 has "$TMPD/mit.klar" "wmplug: reg regel" "es hat einen Tafelplatz bekommen"
 has "$TMPD/mit.klar" "rights=0x103" "mit R_ACT_WIN (0x103 = EV_WIN|EV_FOCUS|ACT_WIN)"

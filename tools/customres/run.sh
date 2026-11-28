@@ -353,7 +353,7 @@ rc=$(lauf_platte s4 "osum gfx disp nokbd nosched noproc script=dispctl raw" "$TM
 num "START 4 endet sauber" "$rc" eq 21
 S4="$TMPD/s4.txt"
 hat "$S4" "disp: save aufgebraucht" "jetzt sind die drei Versuche verbraucht"
-hat "$S4" "(Startmodus bleibt)" "und der Kernel sagt, was er stattdessen tut"
+hat "$S4" "(boot mode stays)" "und der Kernel sagt, was er stattdessen tut"
 gleich "die Tafel steht auf dem SICHEREN Startmodus" "800" "$(uwl "$S4" panelw)"
 ok "that is the fallback: it costs nothing because it does nothing"
 

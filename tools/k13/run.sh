@@ -387,12 +387,12 @@ has "$F" "osum login: " "init startet /bin/login, und es fragt nach dem Namen"
 has "$F" "willkommen justin" "das Passwort stimmt"
 has "$F" "uid=1000(justin) gid=1000 euid=1000(justin) egid=1000" \
     "die Shell dahinter laeuft als justin -- gemessen, nicht behauptet"
-hasnot "$F" "Anmeldung falsch" "kein Fehlversuch dabei"
+hasnot "$F" "Login incorrect" "kein Fehlversuch dabei"
 
 rc=$(run_case loginbad "$TMPD/k0.img" "$TMPD/dl.img" \
     "osum nokbd nosched noproc nofs noring3 script=justin;falsch99;justin;falsch99;justin;falsch99")
 F="$TMPD/loginbad.txt"
-has "$F" "Anmeldung falsch" "GEGENPROBE: ein falsches Passwort wird abgelehnt"
+has "$F" "Login incorrect" "GEGENPROBE: ein falsches Passwort wird abgelehnt"
 hasnot "$F" "willkommen justin" "und niemand kommt herein"
 
 echo "== 8. passwd schreibt wirklich in /etc/shadow =="

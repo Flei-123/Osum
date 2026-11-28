@@ -83,7 +83,7 @@ for karte in "-vga std" "-vga cirrus" "-vga vmware" "-vga qxl" \
 done
 
 lauf "$TMPD/knone.txt" "gfx hwdiag nokbd nosched noproc nofs noring3" -vga none
-if grep -qa 'ENDE DER DIAGNOSE' "$TMPD/knone.txt"; then
+if grep -qa 'END OF THE DIAGNOSIS' "$TMPD/knone.txt"; then
     ok "-vga none: the report still arrives complete -- no hang"
 else
     bad "-vga none: der Bericht bricht ab"

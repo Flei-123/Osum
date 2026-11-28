@@ -161,7 +161,7 @@ open(sys.argv[1], "wb").write(bytes(data))
 PY
 serve "$OUT/feed_badsig"
 equal "bad LISTING.sig, good VERZEICHNIS: boots" "$(boot s1 'ota search;exit')" "21"
-has "$OUT/s1.txt" "SIGNATURE OF THE VERZEICHNIS WRONG" "no silent fallback to the legacy document"
+has "$OUT/s1.txt" "SIGNATURE OF THE CATALOG WRONG" "no silent fallback to the legacy document"
 hasnot "$OUT/srv.log" "200 VERZEICHNIS" "legacy document not read after a bad signature"
 
 stop_server

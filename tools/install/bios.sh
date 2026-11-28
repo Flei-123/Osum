@@ -111,7 +111,7 @@ check_login() {
     local n=$1 banner=$2 ser="$W/$1.txt"
     [ -n "$banner" ] && { grep -aq "$banner" "$ser" && okk "$n: $banner" || bd "$n: no '$banner' line"; }
     grep -aq "osboot: start " "$ser" && okk "$n: osboot started the kernel" || bd "$n: no 'osboot: start' line"
-    grep -aqE "rootpart=1|rootsel: [a-z]+ -- WURZEL, Bloecke=[0-9]+ +first=72048" "$ser" && okk "$n: the kernel found its root on the disk" || bd "$n: no root found on the disk"
+    grep -aqE "rootpart=1|rootsel: [a-z]+ -- ROOT, blocks=[0-9]+ +first=72048" "$ser" && okk "$n: the kernel found its root on the disk" || bd "$n: no root found on the disk"
     grep -aq "from module" "$ser" && bd "$n: root came from a module -- the stick was involved" || okk "$n: no stick involved"
     grep -aq "glogin: ready" "$ser" && okk "$n: login screen reached" || bd "$n: login screen not reached"
     grep -aq "EXCEPTION\|kernel halted\|panic:" "$ser" && bd "$n: fault: $(grep -a 'EXCEPTION\|kernel halted\|panic:' "$ser" | head -1)" || okk "$n: no fault line"

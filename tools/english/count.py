@@ -65,6 +65,17 @@ STOP = {"der", "die", "das", "und", "nicht", "ist", "ein", "eine", "einen", "ein
         "bleibt", "steht", "liegt", "dieser", "diese", "dieses", "man", "zwei", "drei", "vier", "ohne",
         "gegen", "durch", "schon", "mehr", "bis", "seit", "dort", "hier", "doch", "aber", "also"}
 KEY_WORDS = {"gesamt", "runden", "laeuft"}
+LOGDE = {"kein", "keine", "keinen", "keiner", "nicht", "nichts", "fehlt", "fehlen", "fehlgeschlagen", "schlug", "fehl",
+         "aufruf", "verwendung", "wurzel", "treiber", "datei", "dateien", "dateisystem", "quelle", "ziel", "abgelehnt",
+         "falsch", "falsche", "unbekannt", "unbekanntes", "unbekannter", "gefunden", "konnte", "schreibbar", "lesbar",
+         "verfahren", "beginnt", "erkannt", "bildschirm", "angehalten", "verschachtelt", "antwortet", "geloescht",
+         "gesetzt", "fehlstarts", "regler", "einheit", "sagt", "ging", "ungueltig", "ungültig", "zuviele", "zuwenig",
+         "geht", "erlaubt", "verboten", "gestartet", "beendet", "ausgeschaltet", "eingeschaltet", "wert", "werte",
+         "pruefung", "prüfung", "fenster", "ordner", "papierkorb", "einstellungen", "anmeldung", "benutzer", "kennwort",
+         "passwort", "schluessel", "schlüssel", "abbrechen", "uebernehmen", "übernehmen", "loeschen", "löschen",
+         "oeffnen", "öffnen", "speichern", "laden", "fertig", "bereit", "warten", "gleich", "zeile", "zeilen"}
+LOGDE -= {"fenster", "wert", "werte", "laden", "fertig", "bereit", "warten", "gleich", "zeile", "zeilen", "ziel",
+          "quelle", "datei", "benutzer", "ordner"}
 UMLAUT = re.compile("[äöüßÄÖÜ]")
 
 CODE_EXT = {".fi", ".s", ".S", ".c", ".h", ".py", ".sh", ".js", ".ld", ".json", ".conf", ".txt", ".tsv",
@@ -126,6 +137,8 @@ def german_text(s):
     if UMLAUT.search(s):
         return True
     ws = [w.lower() for w in WORD.findall(s)]
+    if any(w in LOGDE for w in ws):
+        return True
     if len(ws) < 3:
         return False
     hits = sum(1 for w in ws if w in STOP)

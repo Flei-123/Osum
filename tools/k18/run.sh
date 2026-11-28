@@ -473,15 +473,15 @@ for f in percent minutes batremain batfull batrate temp tzraw caps ratios; do
     fi
 done
 
-hat "$S" "Profil:" "die Uebersicht nennt das Profil"
-hat "$S" "Ausgeglichen" "und zwar beim Namen"
+hat "$S" "Profile:" "die Uebersicht nennt das Profil"
+hat "$S" "Balanced" "und zwar beim Namen"
 hat "$S" "Battery:" "sie nennt den Akku"
 hat "$S" "OSUM-BAT" "und den Modellnamen aus _BIF"
-hat "$S" "Netz:" "sie nennt das Netzteil"
+hat "$S" "Mains:" "sie nennt das Netzteil"
 hat "$S" "Heat:" "sie nennt die Temperatur"
 hat "$S" "Ruhe:" "sie nennt den Ruhezustand"
-hat "$S" "power: now on Höchstleistung" "das Umschalten meldet sich"
-hat "$S" "Profil:  Höchstleistung" "und danach steht wirklich Hoechstleistung da"
+hat "$S" "power: now on Performance" "das Umschalten meldet sich"
+hat "$S" "Profile:  Performance" "und danach steht wirklich Hoechstleistung da"
 if grep -qa '75%' "$S"; then ok "the charge level shows as a number (75%)"
 else bad "the charge level 75% is not in the overview"; fi
 if grep -qaE '\[#+\.*\]' "$S"; then ok "and as a bar"
@@ -490,7 +490,7 @@ else bad "the bar is missing"; fi
 RC=$(lauf shellaus "osum nokbd nosched noproc nopwr script=power" akku)
 SA="$TMPD/shellaus.txt"
 hat "$SA" "power: the energy layer is not running" "GEGENPROBE nopwr: /bin/power sagt es und rechnet nicht weiter"
-hat_nicht "$SA" "Profil:" "und zeigt kein Profil"
+hat_nicht "$SA" "Profile:" "und zeigt kein Profil"
 hat_nicht "$SA" "Battery:" "und keinen Akku"
 hat "$SA" "pwr: skipped" "der Kernel sagt es ebenfalls"
 

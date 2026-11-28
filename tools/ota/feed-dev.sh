@@ -93,7 +93,7 @@ print(doc.decode().splitlines()[2])
 import re
 vz_max = int(re.search(rb"const VZ_MAX: u64 = (\d+)", open("kernel/user/ota/otacmd.fi", "rb").read()).group(1))
 print("VERZEICHNIS octets: %d of %d (client buffer)" % (len(doc), vz_max - 1))
-assert len(doc) < vz_max - 1, "VERZEICHNIS too large for the client buffer"
+assert len(doc) < vz_max - 1, "CATALOG too large for the client buffer"
 PYEOF
 AFTER=$(sums)
 [ "$BEFORE" = "$AFTER" ] && echo "package feed unchanged ($AFTER)" || { echo "feed-dev: aktuell/v/pakete CHANGED ($BEFORE -> $AFTER)"; exit 1; }

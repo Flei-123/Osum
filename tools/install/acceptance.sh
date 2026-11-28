@@ -268,7 +268,7 @@ else
     bad "no frame of the desktop on the disk"
 fi
 if grep -qaE '(osum|wm): rootpart=|rootsel: (ahci|ide|nvme)[a-z]* -- WURZEL' "$OUT/start.txt"; then
-    ok "the kernel finds its root on the disk: $(grep -aoE 'rootpart=[0-9]+ +first=[0-9]+ +blocks=[0-9]+|rootsel: [a-z]+ -- WURZEL, Bloecke=[0-9]+ +first=[0-9]+' "$OUT/start.txt" | head -1)"
+    ok "the kernel finds its root on the disk: $(grep -aoE 'rootpart=[0-9]+ +first=[0-9]+ +blocks=[0-9]+|rootsel: [a-z]+ -- ROOT, blocks=[0-9]+ +first=[0-9]+' "$OUT/start.txt" | head -1)"
 else
     bad "the kernel finds no root partition"
 fi

@@ -3,7 +3,7 @@
 # tools/edidroom/run.sh -- W-EDID: an EDID / host size the card or the kernel window cannot take must never end in a black screen.
 #
 # WHAT IT MEASURES (QEMU, Bochs VGA with EDID `-device VGA,edid=on,xres=..,yres=..,vgamem_mb=..`, words `gfx disp fbtest fbhold`)
-#   1. EDID 1366x768 (width not divisible by 8; the card reads back 1360): before the fix "fb: kein Rahmenpuffer" (black screen). Now:
+#   1. EDID 1366x768 (width not divisible by 8; the card reads back 1360): before the fix "fb: no framebuffer" (black screen). Now:
 #      `fb: retry 1360x768`, fb 1360x768, screendump the same size and not black.
 #   2. EDID 1920x1080 / 2560x1440 on a card with 4 MiB VRAM: the boot ladder (vmode.boot_step, 15/16 steps, aspect kept) ends in a mode that
 #      FITS the VRAM, is >= 640x480, same aspect, screendump == fb size, not black.
@@ -79,7 +79,7 @@ PYEOF
 # fbgeo <tag> -> "WxH" of the framebuffer line, empty when none
 fbgeo() { grep -aoE '^fb: [0-9]+x[0-9]+x32' "$T/$1.txt" | head -1 | sed -E 's/^fb: ([0-9]+x[0-9]+)x32/\1/'; }
 retries() { grep -ac '^fb: retry ' "$T/$1.txt"; }
-nonefb() { grep -ac '^fb: kein Rahmenpuffer' "$T/$1.txt"; }
+nonefb() { grep -ac '^fb: no framebuffer' "$T/$1.txt"; }
 room() { grep -aoE '^fb: room [0-9]+ / [0-9]+' "$T/$1.txt" | head -1 | sed -E 's/^fb: room //'; }
 # dumpinfo <tag> -> "WxH permille_nonblack"
 dumpinfo() { python3 -I - "$T/$1.ppm" <<'PYEOF'

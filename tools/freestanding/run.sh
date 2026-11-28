@@ -122,7 +122,7 @@ if command -v qemu-system-x86_64 >/dev/null 2>&1; then
         objcopy -O elf32-i386 "$TMPD/k$s.elf" "$TMPD/k$s.mb" 2>/dev/null
         timeout 20 $QEMU_X86 -kernel "$TMPD/k$s.mb" -serial stdio \
             -display none -no-reboot > "$TMPD/q$s.txt" 2>&1
-        if grep -q "FIRN: profile kernel ist" "$TMPD/q$s.txt" \
+        if grep -q "FIRN: profile kernel is " "$TMPD/q$s.txt" \
            && grep -q "freestanding." "$TMPD/q$s.txt"; then
             ok "firnc$s: booted, serial output appeared"
         else

@@ -10,7 +10,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 chk() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 GOOD='desk: start /bin/taskbar  pid=3  kern=0
-taskbar: STEHT x=0 y=752 w=1280 h=48
+taskbar: STUCK x=0 y=752 w=1280 h=48
 taskbar: icons=4 marks=3 sys=1 dateien=8 kleinste=588
 taskbar: conf edge=0 ename=bottom height=48 width=104 autohide=0 ontop=1 align=center src=file
 taskbar: ready ascent=11

@@ -469,14 +469,14 @@ has "$L" "willkommen justin" "das RICHTIGE Passwort laesst herein"
 has "$L" "uid=1000(justin) gid=1000 euid=1000(justin) egid=1000" \
     "die Shell dahinter laeuft als justin"
 has "$L" "groups=2000(projekt)" "MIT den Zusatzgruppen -- login ruft initgroups"
-hasnot "$L" "Anmeldung falsch" "kein Fehlversuch dabei"
+hasnot "$L" "Login incorrect" "kein Fehlversuch dabei"
 
 run_case loginbad "$TMPD/dl.img" \
     "osum $BASIS script=justin;falsch99;justin;falsch99;justin;falsch99"
 rc=$RC
 B="$TMPD/loginbad.txt"
 BADDAUER=$DAUER
-has "$B" "Anmeldung falsch" "das FALSCHE Passwort wird abgewiesen"
+has "$B" "Login incorrect" "das FALSCHE Passwort wird abgewiesen"
 hasnot "$B" "willkommen justin" "und niemand kommt herein"
 w1=$(grep -aoE 'login: wait [0-9]+ ms' "$B" | sed -n 1p | grep -oE '[0-9]+')
 w2=$(grep -aoE 'login: wait [0-9]+ ms' "$B" | sed -n 2p | grep -oE '[0-9]+')

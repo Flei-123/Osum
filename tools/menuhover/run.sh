@@ -77,8 +77,8 @@ for V in opaque translucent; do
     D="$TMPD/$V"
     [ -s "$D/h4-terminal.ppm" ] && ok "$V: the run took all pictures" \
         || bad "$V: pictures are missing: $(tail -3 "$TMPD/$V.log" | tr '\n' ' ')"
-    grep -aq '^taskbar: startmenue auf' "$D/serial.txt" \
-        && ok "$V: the Super key opened the start menu (taskbar: startmenue auf)" \
+    grep -aq '^taskbar: startmenu open' "$D/serial.txt" \
+        && ok "$V: the Super key opened the start menu (taskbar: startmenu open)" \
         || bad "$V: no 'startmenue auf' -- the Super key did nothing"
     grep -aq '^wm: schlieren .*blur=[1-9]' "$D/serial.txt" \
         && ok "$V: the blur is on in this run: the check measures what the Dell has" \

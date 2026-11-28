@@ -119,7 +119,7 @@ lauf() { # name zusatzargumente...
     local pid=$!
     local i=0
     while [ $i -lt 1000 ]; do
-        grep -qa 'ENDE DER DIAGNOSE' "$out" 2>/dev/null && break
+        grep -qa 'END OF THE DIAGNOSIS' "$out" 2>/dev/null && break
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.2; i=$((i + 1))
     done
@@ -139,7 +139,7 @@ lauf_direkt() { # name kommandozeile zusatzargumente...
     local pid=$!
     local i=0
     while [ $i -lt 1000 ]; do
-        grep -qa 'ENDE DER DIAGNOSE' "$out" 2>/dev/null && break
+        grep -qa 'END OF THE DIAGNOSIS' "$out" 2>/dev/null && break
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.2; i=$((i + 1))
     done

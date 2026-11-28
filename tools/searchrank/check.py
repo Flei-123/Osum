@@ -7,7 +7,7 @@ import sys
 def last_search(lines, query):
     start = None
     for i, line in enumerate(lines):
-        if line.startswith("launcher: suche [%s]" % query):
+        if line.startswith("launcher: search [%s]" % query):
             start = i
     if start is None:
         return None
@@ -19,7 +19,7 @@ def last_search(lines, query):
     paths = []
     stores = []
     for line in lines[start + 1:]:
-        if line.startswith("launcher: suche ["):
+        if line.startswith("launcher: search ["):
             break
         m = re.match(r"launcher: treffer i=(\d+) name=\[(.*)\] exec=\[(.*)\]", line)
         if m:

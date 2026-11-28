@@ -143,7 +143,7 @@ else
 fi
 
 if bash tools/structure/srcview.sh kernel/usb/usb.fi | grep -q 'wifi-usb: '; then
-    ok "kernel/usb/usb.fi reports a recognized stick as 'wifi-usb: <Name> (<vid>:<pid>), kein Treiber'"
+    ok "kernel/usb/usb.fi reports a recognized stick as 'wifi-usb: <Name> (<vid>:<pid>), no driver'"
 else
     bad "the report line is missing in kernel/usb/usb.fi"
 fi

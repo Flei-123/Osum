@@ -737,7 +737,7 @@ fi
 grep -q '^name=File Explorer' assets/apps/explorer.osp/INFO \
     && ok "sondern in assets/apps/explorer.osp/INFO" \
     || bad "assets/apps/explorer.osp/INFO fuehrt keinen Anzeigenamen"
-has "$TMPD/files.txt" "explorer: name [File Explorer] aus [explorer.osp]" \
+has "$TMPD/files.txt" "explorer: name [File Explorer] from [explorer.osp]" \
     "and the program fetches it from the bundle"
 if [ -z "$STRIP" ]; then
 schau "the display name is in the title bar pixel-exact" \
@@ -918,7 +918,7 @@ suchmon() {
 M="$TMPD/suche.mon"
 suchmon "$M" 1.0 o r d n e r
 foto suche "gfx wm wigstart wmhold wiglong $GRUND" "$M"
-has "$TMPD/suche.txt" "launcher: suche [ordner] treffer=1 apps=1" \
+has "$TMPD/suche.txt" "launcher: search [ordner] treffer=1 apps=1" \
     "typed 'ordner': EXACTLY ONE hit, and it is a program"
 has "$TMPD/start.txt" "launcher: name [Search]" \
     "the launcher also fetches its own name from the data"
@@ -937,7 +937,7 @@ schau_nicht "and row 1 holds nothing more" \
     tchain "$TMPD/suche.ppm" "$BOLD_INK" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
     $SFG $SBG "Terminal" 96
 foto nokeys "gfx wm wigstart wignokeys wmhold wiglong $GRUND" "$M"
-has "$TMPD/nokeys.txt" "launcher: suche [ordner] treffer=0 apps=0" \
+has "$TMPD/nokeys.txt" "launcher: search [ordner] treffer=0 apps=0" \
     "WITHOUT the keywords 'ordner' finds NOTHING"
 has "$TMPD/nokeys.txt" "launcher: apps=$soll" \
     "although the same directory with the same $soll programs was read"
@@ -946,12 +946,12 @@ schau_nicht "and the picture then shows no row either" \
     $SSFG $SSEL "File Explorer" 96
 suchmon "$TMPD/unsinn.mon" 1.0 q u a s t e
 foto unsinn "gfx wm wigstart wmhold wiglong $GRUND" "$TMPD/unsinn.mon"
-has "$TMPD/unsinn.txt" "launcher: suche [quaste] treffer=0 apps=0   dateien=0" \
+has "$TMPD/unsinn.txt" "launcher: search [quaste] treffer=0 apps=0   dateien=0" \
     "a word that is nowhere finds NOTHING -- no program and no file"
 grep -qi 'quaste' assets/apps/*.osp/INFO \
     && bad "'quaste' is in an INFO after all" \
     || ok "and 'quaste' is really in no INFO"
-has "$TMPD/start.txt" "launcher: suche [] treffer=$shown" \
+has "$TMPD/start.txt" "launcher: search [] treffer=$shown" \
     "without a search term all $shown visible programs are listed"
 
 echo "== 15. the name index: the WHOLE file system, and at once =="
@@ -1074,7 +1074,7 @@ grep -qi 'blau' assets/apps/*.osp/INFO \
 M="$TMPD/dsuche.mon"
 suchmon "$M" 1.2 b l a u
 foto dsuche "gfx wm wigstart wmhold wiglong $GRUND" "$M"
-has "$TMPD/dsuche.txt" "launcher: suche [blau] treffer=1 apps=0   dateien=1" \
+has "$TMPD/dsuche.txt" "launcher: search [blau] treffer=1 apps=0   dateien=1" \
     "typed 'blau': one hit, and it is NOT a program but a file"
 has "$TMPD/dsuche.txt" "launcher: file i=0 name=[/data/bilder/blau.ppm]" \
     "and it is the file that really lies there"
@@ -1090,7 +1090,7 @@ schau "and below it the folder it lies in" \
 DIX=$(feld "$TMPD/dsuche.txt" "launcher: index" n)
 num "the launcher built an index over this many names for it" "$DIX" ge 40
 foto noidx "gfx wm wigstart wignoidx wmhold wiglong $GRUND" "$M"
-has "$TMPD/noidx.txt" "launcher: suche [blau] treffer=0 apps=0   dateien=0" \
+has "$TMPD/noidx.txt" "launcher: search [blau] treffer=0 apps=0   dateien=0" \
     "WITHOUT the name index 'blau' finds NOTHING"
 has "$TMPD/noidx.txt" "launcher: index n=0" \
     "weil gar keiner gebaut wurde"

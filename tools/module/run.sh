@@ -182,7 +182,7 @@ num "gezaehlte Bewegungen" "$MOV" ge 3
 
 # --------------------------------------------------- 5. Entladen
 echo "== 5. unloaded, and the frames come back =="
-has "$TMPD/l-gut.txt" "ps2maus: entladen" "module_exit lief"
+has "$TMPD/l-gut.txt" "ps2mouse: unloaded" "module_exit lief"
 has "$TMPD/l-gut.txt" "module: unloaded=1 present=0" "nach dem Entladen: wieder kein Zeigegeraet"
 FREI=$(grep -a 'module: free=' "$TMPD/l-gut.txt" | head -1)
 A=$(echo "$FREI" | grep -oE 'free=[0-9]+' | grep -oE '[0-9]+')
@@ -250,7 +250,7 @@ if bash tools/build-kernel.sh "$TMPD/k1-modul" --ohne-ps2m --stufe 1 \
     num "der Lauf endet sauber" "$RC" eq 21
     has "$TMPD/l-s1.txt" "module: load=ok" "dasselbe Modul (von firnc0) laedt unter dem Kern von firnc1"
     has "$TMPD/l-s1.txt" "module: after init=1 present=1" "und das Geraet ist da"
-    has "$TMPD/l-s1.txt" "ps2maus: entladen" "und es laesst sich entladen"
+    has "$TMPD/l-s1.txt" "ps2mouse: unloaded" "und es laesst sich entladen"
 else
     bad "firnc1 does not build the kernel"
     sed 's/^/        /' "$TMPD/b3.txt" | head -5

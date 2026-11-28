@@ -186,7 +186,7 @@ sauber segv
 has "$S" "plugboese: abi=1" "das Plugin hat die Fassung erfragt"
 hasre "$S" '^plugboese: slot=[0-9]+ rights=2049$' \
     "es hat genau die Rechte aus /etc/wmplug.conf (0x801 = 2049: sehen + Leiste)"
-has "$S" "plugboese: leiste gesetzt, rc=0" \
+has "$S" "plugboese: bar set, rc=0" \
     "es hat VOR dem Absturz ein Feld in der Leiste besetzt (WM_PLUG_BAR)"
 has "$S" "plugboese: about to crash" "es sagt an, dass es gleich abstuerzt"
 hasre "$S" 'wmplug: tot slot=[0-9]+ pid=[0-9]+' \
@@ -298,7 +298,7 @@ hasnotre "$G" 'plugboese-lese' \
     "es legt KEIN verborgenes Hilfsfenster mehr an (der Titel kommt nicht vor)"
 hasre "$G" 'plugboese: vorher id=[0-9]+ x=[0-9]+ y=[0-9]+' \
     "es hat den Ort des fremden Fensters VORHER gelesen"
-hasre "$G" 'plugboese: griff nach fremdem id=[0-9]+ errors=2' \
+hasre "$G" 'plugboese: grabbed foreign id=[0-9]+ errors=2' \
     "der Griff wird mit -E_RIGHTS (cap.E_RIGHTS = 2) abgewiesen"
 hasre "$G" 'plugboese: griff .* deny=1' \
     "und der Kern zaehlt die Abweisung mit (PL_DENY + 1)"
@@ -370,14 +370,14 @@ echo "== 7b. frame rate and latency: 60 frames before, 60 frames after loading =
 lauf tempo "wighalt=50 wigapp=/bin/plugtempo,plugtempo,bilder=60" 'tempo: ende'
 T=$TMPD/tempo.clean
 sauber tempo
-hasre "$T" '^tempo: vor bilder=[0-9]+' "das Messfenster VOR dem Laden steht auf der Leitung"
-hasre "$T" '^tempo: nach bilder=[0-9]+' "und das Messfenster NACH dem Laden auch"
+hasre "$T" '^tempo: before bilder=[0-9]+' "das Messfenster VOR dem Laden steht auf der Leitung"
+hasre "$T" '^tempo: after bilder=[0-9]+' "und das Messfenster NACH dem Laden auch"
 has "$T" "wmplug: reg uhr" "zwischen den beiden Fenstern wurde wirklich ein Plugin geladen"
-tv_b=$(zahl "$T" '^tempo: vor '  'bilder'); tn_b=$(zahl "$T" '^tempo: nach ' 'bilder')
-tv_u=$(zahl "$T" '^tempo: vor '  'us');     tn_u=$(zahl "$T" '^tempo: nach ' 'us')
-tv_f=$(zahl "$T" '^tempo: vor '  'fps10');  tn_f=$(zahl "$T" '^tempo: nach ' 'fps10')
-tv_mi=$(zahl "$T" '^tempo: vor ' 'min');    tn_mi=$(zahl "$T" '^tempo: nach ' 'min')
-tv_ma=$(zahl "$T" '^tempo: vor ' 'max');    tn_ma=$(zahl "$T" '^tempo: nach ' 'max')
+tv_b=$(zahl "$T" '^tempo: before '  'bilder'); tn_b=$(zahl "$T" '^tempo: after ' 'bilder')
+tv_u=$(zahl "$T" '^tempo: before '  'us');     tn_u=$(zahl "$T" '^tempo: after ' 'us')
+tv_f=$(zahl "$T" '^tempo: before '  'fps10');  tn_f=$(zahl "$T" '^tempo: after ' 'fps10')
+tv_mi=$(zahl "$T" '^tempo: before ' 'min');    tn_mi=$(zahl "$T" '^tempo: after ' 'min')
+tv_ma=$(zahl "$T" '^tempo: before ' 'max');    tn_ma=$(zahl "$T" '^tempo: after ' 'max')
 if [ "${tv_b:-0}" -ge 60 ] 2>/dev/null && [ "${tn_b:-0}" -ge 60 ] 2>/dev/null; then
     ok "both windows really have 60 frames (before $tv_b, after $tn_b)"
 else

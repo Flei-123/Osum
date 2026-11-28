@@ -376,7 +376,7 @@ rc=$(lauf kaputt "$TMPD/root.img" "$TMPD/kaputt-part.img" \
 num "[kaputt] der Kernel beendet sich selbst statt zu haengen" "$rc" eq 21
 sagt "$TMPD/kaputt.txt" mount 0 \
     "[kaputt] ein ext4 mit zerstoerter Magie wird ABGELEHNT"
-hat "$TMPD/kaputt.txt" "ext4: nicht ext4 (1" \
+hat "$TMPD/kaputt.txt" "ext4: not ext4 (1" \
     "[kaputt] und der Treiber sagt WARUM (Grund 1: keine Magie)"
 
 partitionieren "$BILD/fat-als-ext4.img" "$TMPD/fat-part.img" 83 >/dev/null
@@ -398,7 +398,7 @@ rc=$(lauf kurz "$TMPD/root.img" "$TMPD/kurz-part.img" \
 num "[kurz] der Kernel beendet sich selbst" "$rc" eq 21
 sagt "$TMPD/kurz.txt" mount 0 \
     "[kurz] ein abgeschnittenes ext4 wird ABGELEHNT"
-hat "$TMPD/kurz.txt" "ext4: nicht ext4 (6" \
+hat "$TMPD/kurz.txt" "ext4: not ext4 (6" \
     "[kurz] und der Treiber sagt WARUM (Grund 6: kuerzer als der Kopf behauptet)"
 
 partitionieren "$BILD/kaputt-ntfs.img" "$TMPD/kntfs-part.img" 7 >/dev/null

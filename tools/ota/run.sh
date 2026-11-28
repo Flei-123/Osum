@@ -250,7 +250,7 @@ hat "$OUT/gut2.txt" "opk: signature checked" "opk prueft die Signatur ein ZWEITE
 hat "$OUT/gut2.txt" "opk: installed hallo" "und installiert"
 hat "$OUT/gut2.txt" "opk: in trial: 1 before 0" "die neue Generation steht in ERPROBUNG, Rueckfall waere 0"
 hat "$OUT/gut2.txt" "ota: READY FOR RESTART" "und der Neustart wird ANGEBOTEN"
-hatnicht "$OUT/gut2.txt" "power: init sagt ab" "ES WIRD NICHT VON SELBST NEU GESTARTET"
+hatnicht "$OUT/gut2.txt" "power: init declines" "ES WIRD NICHT VON SELBST NEU GESTARTET"
 OKT=$(grep -a "^ota: platz" "$OUT/gut2.txt" | tail -1 | awk '{print $3}')
 # r542: the staging file goes back right after opk installed the package, and the announced
 # need (needed) covers what the update really consumed. Peak space is NOT observable from outside;
@@ -306,7 +306,7 @@ dienst_aus
 dienst "$OUT/netzfremd" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf a2 "ota apply;opk list;opk generations;ota show;exit")
-hat "$OUT/a2.txt" "SIGNATURE OF THE VERZEICHNIS WRONG" "(a2) ein fremd signiertes VERZEICHNIS wird abgelehnt"
+hat "$OUT/a2.txt" "SIGNATURE OF THE CATALOG WRONG" "(a2) ein fremd signiertes VERZEICHNIS wird abgelehnt"
 hatnicht "$OUT/a2.txt" "ota: version there" "(a2) und nicht einmal die Fassungsnummer daraus wird gelesen"
 hatnicht "$OUT/a2.txt" "opk: installed" "(a2) es wird nichts installiert"
 hatnicht "$OUT/a2.txt" "generation 1" "(a2) es entsteht keine Generation"
@@ -727,7 +727,7 @@ rc=$(lauf kan16 "ota set auto ja;ota service 1;cat /system/ota.stand;exit")
 hat "$OUT/kan16.txt" "opk: installed hallo" "(h) mit auto=ja holt und installiert der Dienst von selbst"
 hat "$OUT/kan16.txt" "ota: READY FOR RESTART" "(h) ohne Neustart -- er wird nur angeboten"
 hat "$OUT/kan16.txt" "phase=ready" "(h) die Anzeige sagt phase=bereit"
-hatnicht "$OUT/kan16.txt" "power: init sagt ab" "(h) und es wird NICHT neu gestartet"
+hatnicht "$OUT/kan16.txt" "power: init declines" "(h) und es wird NICHT neu gestartet"
 # DEFAULT ON (owner decision 02.10.2026): no `auto=` key at all -> the service runs
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf kan17 "grep -v auto= /etc/ota.conf > /etc/ota.neu;cp /etc/ota.neu /etc/ota.conf;cat /etc/ota.conf;ota service 1;cat /system/ota.stand;exit")

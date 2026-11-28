@@ -144,7 +144,7 @@ neg() { # name feed expected-text
 }
 neg n1 netzfvsig "SIGNATURE WRONG"
 neg n2 netzfvman "HASH MISMATCH"
-neg n3 netzfremd "SIGNATURE OF THE VERZEICHNIS WRONG"
+neg n3 netzfremd "SIGNATURE OF THE CATALOG WRONG"
 fi # stage run
 if stage disk; then
 # the same device, but booted from the installed DISK (no module, via OVMF/ESP)

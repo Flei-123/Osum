@@ -229,7 +229,7 @@ else bad "the service was not restarted (${first:-?} -> ${later:-?})"; fi
 is "und er hat dabei KEINEN Rueckfall (er endet mit 0)" "$(sp "$F" blink 5 head)" "0"
 
 echo "-- 3b. the fallback counter: five times, then stop"
-has "$F" "init: abgeschaltet kaputt nach 5 Fehlstarts, 5 Starts" \
+has "$F" "init: abgeschaltet kaputt after 5 failed starts, 5 Starts" \
     "init schaltet den abstuerzenden Dienst nach genau fuenf Versuchen ab"
 is "sein Zustand ist danach 'failed' und nicht 'running'" \
    "$(spn "$F" kaputt 2 2)" "failed"
@@ -278,7 +278,7 @@ kn=$(sp "$F" kaputt 4 tail)
 if [ -n "${kn:-}" ] && [ "$kn" -gt 5 ]; then
     ok "svc start lifts the shutdown: $kn starts instead of the five at which it stood"
 else bad "svc start did not touch the shut-off service again (${kn:-?})"; fi
-if grep -qa "init: abgeschaltet kaputt nach 5 Fehlstarts, 10 Starts" "$F"; then
+if grep -qa "init: abgeschaltet kaputt after 5 failed starts, 10 Starts" "$F"; then
     ok "and the limit applies a SECOND time afterwards -- five new attempts, then off again"
 else
     bad "after the manual action the limit does not apply once more"
@@ -375,7 +375,7 @@ is "GEGENPROBE noacpi: derselbe Lauf endet ueber den Pruefstand (21) statt ueber
 rc=$(run_case keintab "$TMPD/dn.img" "osum $BASE script=id" 300 -no-reboot)
 K="$TMPD/keintab.txt"
 has "$K" "osum: pid1 init" "GEGENPROBE ohne /etc/inittab: der Kern startet init trotzdem"
-has "$K" "init: /etc/inittab fehlt" "und init sagt, was fehlt, statt still zu enden"
+has "$K" "init: /etc/inittab missing" "und init sagt, was fehlt, statt still zu enden"
 is "und gibt 1 zurueck" "$(val "$K" 'osum: sh exit=[0-9]+')" "1"
 
 rc=$(run_case initsh "$TMPD/d0.img" "osum initsh $BASE script=id" 300 -no-reboot)

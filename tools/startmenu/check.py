@@ -125,7 +125,7 @@ def main(out):
             check(abs(lum(px(im2, gx + nb[0] + 6, gy + nb[1] + 6)) - c0) < 4,
                   "and the neighbour tile has none")
     check(re.search(r"launcher: suche \[set\] treffer=[1-9]", t) is not None,
-          "typing 'set' filters (report `launcher: suche [set]`)")
+          "typing 'set' filters (report `launcher: search [set]`)")
     s4 = img(out, "04-suche")
     check(sum(1 for yy in range(gy + 70, gy + 110) for xx in range(gx + 30, gx + 200)
               if lum(px(s4, xx, yy)) < 90) > 30, "the picture shows the result header")

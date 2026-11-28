@@ -337,7 +337,7 @@ lauf "$TMPD/neu.mb" "hwdiag nokbd nosched noproc nofs noring3" "$TMPD/9b.txt" \
 hat "$TMPD/9b.txt" "usb EHCI" "ein EHCI wird als EHCI benannt"
 hat "$TMPD/9b.txt" "usb OHCI" "ein OHCI wird als OHCI benannt"
 hat "$TMPD/9b.txt" "usb UHCI" "ein UHCI wird als UHCI benannt"
-hat "$TMPD/9b.txt" "(kein Treiber)" \
+hat "$TMPD/9b.txt" "(no driver)" \
     "und bei OHCI/UHCI steht dabei, dass es dafuer keinen Treiber gibt"
 
 # =====================================================================

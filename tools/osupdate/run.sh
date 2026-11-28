@@ -729,10 +729,10 @@ fresh_disk
 dienst "$OUT/feed-many" || bad "feed does not start"
 rc=$(lauf v1 "ota system search;exit")
 hat "$OUT/v1.txt" "system: available build 700" "search reads the large list whole and sees build 700"
-hatnicht "$OUT/v1.txt" "SIGNATURE OF THE VERZEICHNIS WRONG" "large list: signature checked over the whole list"
+hatnicht "$OUT/v1.txt" "SIGNATURE OF THE CATALOG WRONG" "large list: signature checked over the whole list"
 dienst "$OUT/feed-toomany" || bad "feed does not start"
 rc=$(lauf v2 "ota system search;exit")
-hat "$OUT/v2.txt" "VERZEICHNIS too large for the client buffer" "oversized list refused with a clear message"
+hat "$OUT/v2.txt" "CATALOG too large for the client buffer" "oversized list refused with a clear message"
 hatnicht "$OUT/v2.txt" "system: available build" "oversized list: nothing announced"
 dienst_aus
 fi

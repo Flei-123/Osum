@@ -63,7 +63,7 @@ BARTEXT = re.compile(
     r"taskbar: text (\w+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+)"
     r" tw=(\d+) t=(.*)")
 BARWIN = re.compile(
-    r"taskbar: STEHT x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+    r"taskbar: STUCK x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 BARRECT = re.compile(
     r"taskbar: (?:(start)|btn i=\d+ id=\d+|field (\w+)|pin \S+) "
     r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")

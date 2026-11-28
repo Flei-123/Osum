@@ -367,7 +367,7 @@ dienst "$OUT/fremdaus" || bad "Gegenstelle"
 frisch
 rc=$(lauf gp1 "ota set quelle https://$NAME:$PORT/aktuell;ota apply;opk list;exit")
 gpruef "ein FREMD signiertes Update wird abgelehnt" \
-    "SIGNATURE OF THE VERZEICHNIS WRONG" "$OUT/gp1.txt"
+    "SIGNATURE OF THE CATALOG WRONG" "$OUT/gp1.txt"
 hatnicht "$OUT/gp1.txt" "opk: installed" "        und es wurde wirklich nichts installiert"
 
 dienst "$OUT/aus" || bad "Gegenstelle"

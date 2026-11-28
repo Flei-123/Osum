@@ -18,9 +18,9 @@ def best_after(lines, marker, nth, query):
         if start is None:
             return None
     for i in range(start, len(lines)):
-        if lines[i].startswith("launcher: suche [%s]" % query):
+        if lines[i].startswith("launcher: search [%s]" % query):
             for line in lines[i + 1:]:
-                if line.startswith("launcher: suche ["):
+                if line.startswith("launcher: search ["):
                     break
                 m = re.match(r"launcher: best name=\[(.*)\]", line)
                 if m:

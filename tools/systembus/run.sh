@@ -172,7 +172,7 @@ hist=$(wert "$A" 'bus: history=')
 echo
 echo "== 5. the no that can be seen =="
 ruf=$(wert "$A" 'busd: ruf=')
-vor=$(wert "$A" 'busd: vor=')
+vor=$(wert "$A" 'busd: before=')
 uid=$(wert "$A" 'busd: uid=')
 echo "        before=$vor uid=$uid call=$ruf"
 [ "${vor:-x}" = 0 ] && ok "as root the same call goes through (the control)" \
@@ -181,11 +181,11 @@ echo "        before=$vor uid=$uid call=$ruf"
                        || bad "uid ist '$uid' statt 1000"
 [ "${ruf:-x}" = "-3" ] && ok "the unauthorised call is rejected (E_DENIED)" \
                        || bad "der Ruf gab '$ruf' statt -3"
-z=$(grep -ac '^bus: ABGELEHNT' "$A" || true)
+z=$(grep -ac '^bus: REJECTED' "$A" || true)
 if [ "${z:-0}" -ge 1 ]; then
-    ok "the rejection is on the line: $(grep -am1 '^bus: ABGELEHNT' "$A")"
+    ok "the rejection is on the line: $(grep -am1 '^bus: REJECTED' "$A")"
 else
-    bad "rejection was silent -- no line 'bus: ABGELEHNT'"
+    bad "rejection was silent -- no line 'bus: REJECTED'"
 fi
 den=$(wert "$A" 'bus: denied=')
 if [ "${den:-0}" -ge 1 ] 2>/dev/null; then

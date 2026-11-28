@@ -242,7 +242,7 @@ if OUT="$INST" PROGS="sh echo sync standby" APPS="" \
     has "$L" "standby: schlafe (S3)" "das Programm bittet um den Schlaf"
     case $st in *suspended*) ok "the machine sleeps INSIDE the system call ($st)";;
         *) bad "state at standby from ring 3: '$st'";; esac
-    has "$L" "standby: zurueck, rc=0" "der Aufruf kehrt nach dem Wecken mit 0 zurueck"
+    has "$L" "standby: back, rc=0" "der Aufruf kehrt nach dem Wecken mit 0 zurueck"
     has "$L" "nachher" "die Shell fuehrt danach den naechsten Befehl aus"
     num "Rueckgabe" "$RC" eq 21
 else

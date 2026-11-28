@@ -338,9 +338,9 @@ gleich "der Zerleger der HID-ueber-I2C-Beschreibung: 6 von 6" "6" \
 RC=$(lauf i2creal "i2chid nokbd nofs noring3")
 zusage "gegen die ECHTEN ACPI-Tabellen: Lauf endet sauber ($RC)" \
     "$([ "$RC" = 21 ] && echo 0 || echo 1)"
-R=$(grep -a '^i2chid: regler=' "$TMPD/i2creal.txt")
+R=$(grep -a '^i2chid: controller=' "$TMPD/i2creal.txt")
 gleich "kein Designware-Regler in QEMU -- und das wird auch so gesagt" \
-    "0" "$(echo "$R" | sed 's/i2chid: regler=\([0-9]*\).*/\1/')"
+    "0" "$(echo "$R" | sed 's/i2chid: controller=\([0-9]*\).*/\1/')"
 gleich "keine erfundene I2C-Adresse in der echten DSDT" "0" \
     "$(echo "$R" | sed 's/.* adressen=\([0-9]*\).*/\1/')"
 TAB=$(echo "$R" | sed 's/.* tabellen=\([0-9]*\).*/\1/')

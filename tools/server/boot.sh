@@ -67,7 +67,7 @@ hasnot "$A" "inittab fehlt" "no missing-inittab message"
 
 image "$T/n.img" no && ok "counter-proof image without /etc/inittab" || bad "mkfs.py failed (no inittab)"
 boot "$T/n.img" "$T/n.txt" > /dev/null
-has "$T/n.txt" "init: /etc/inittab fehlt" "counter-proof: init says the inittab is missing"
+has "$T/n.txt" "init: /etc/inittab missing" "counter-proof: init says the inittab is missing"
 hasnot "$T/n.txt" "init: dienste=" "counter-proof: no services start without inittab"
 hasnot "$T/n.txt" "^sshd " "counter-proof: sshd is not supervised without inittab"
 

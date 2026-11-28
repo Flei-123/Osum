@@ -223,7 +223,7 @@ echo "== 8. control run: without the word none of this happens =="
 run_kernel "$TMPD/k0.mb" "nokbd" "$TMPD/off.txt"
 O="$TMPD/off.txt"
 has "$O" "handle: skipped" "ohne 'handle' meldet der Abschnitt sich ab"
-hasnot "$O" "handle: ring 3 beginnt" "und startet kein Programm"
+hasnot "$O" "handle: ring 3 starts" "und startet kein Programm"
 hasnot "$O" "[ ok ] veraltet" "und misst nichts"
 
 echo "== 9. der Schalter 'hstrict': nichts wird geerbt =="
