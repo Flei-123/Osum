@@ -7,6 +7,7 @@ param(
   [int]$MaxKicks = 6,
   [double]$KickGap = 0.4,
   [double]$Cooldown = 1,
+  [double]$GiveupBackoff = 20,
   [double]$Minutes = 0,
   [int]$MaxLogBytes = 2000000,
   [string]$Log = 'C:\Users\justi\vbl\kickwatch.log'
@@ -114,9 +115,11 @@ while ((Get-Date) -lt $end) {
     $s = Sample $v.Name $v.Pid
     if (-not (IsStalled $s)) { continue }
     L $v.Name ("STALL detected cpu={0:N0}% exits/s={1:N0}" -f $s.Cpu, $s.ExitRate)
-    if (Heal $v.Name $v.Pid $since) { $healed++ }
+    $wasHealed = Heal $v.Name $v.Pid $since
+    if ($wasHealed) { $healed++ }
     $kicksTotal++
-    $state[$v.Name] = @{ Pid = $v.Pid; Cpu = (CpuSeconds $v.Pid); Time = (Get-Date); Until = (Get-Date).AddSeconds($Cooldown) }
+    $pause = if ($wasHealed) { $Cooldown } else { $GiveupBackoff }
+    $state[$v.Name] = @{ Pid = $v.Pid; Cpu = (CpuSeconds $v.Pid); Time = (Get-Date); Until = (Get-Date).AddSeconds($pause) }
   }
   if (((Get-Date) - $lastBeat).TotalSeconds -ge $HeartbeatSeconds) {
     L '-' ("alive vms=[{0}] stalls={1} healed={2}" -f (($vms | ForEach-Object { $_.Name }) -join ','), $kicksTotal, $healed)
