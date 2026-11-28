@@ -9,6 +9,10 @@ phase_klog() {
     local start=$1 total
     total=$(lines_of /var/log/klog)
     kv klog_lines_end "$total"
+    if [ "$total" -lt "$start" ]; then
+        kv klog_rotated 1
+        start=0
+    fi
     $BB tail -n +$(( start + 1 )) /var/log/klog 2>/dev/null > "$OUT/klog.new"
     kv klog_new_lines "$(lines_of "$OUT/klog.new")"
     kv klog_new_bad "$($BB grep -E -i -c "$KLOG_PATTERN" "$OUT/klog.new")"

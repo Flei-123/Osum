@@ -1,7 +1,7 @@
 from .common import Check, GREEN, YELLOW, RED, UNKNOWN, graded, integer, num
 
 PAGE_LIMITS_S = {"example": (20, 60), "youtube": (40, 90)}
-FAILED_STATES = ("no_window", "crashed", "stalled_no_network")
+FAILED_STATES = ("no_session", "no_window", "crashed", "stalled_no_network")
 
 
 def page_check(data, label):

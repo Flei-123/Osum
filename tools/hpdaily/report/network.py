@@ -18,13 +18,14 @@ def link_check(data):
 
 def download_check(data):
     size = num(data, "dl_bytes", 0)
+    want = num(data, "dl_expect_bytes", MIN_DOWNLOAD_BYTES)
     expected = data.get("dl_expected_sha", "")
-    hashes = (data.get("dl_fetch_bodysha"), data.get("dl_file_sha"))
-    detail = "%.1f MiB in %s s (%s MiB/s), rc=%s http=%s" % (size / MIB, data.get("dl_seconds", "?"), data.get("dl_mib_per_s", "?"), data.get("dl_rc", "?"), data.get("dl_http_code", "?"))
-    if size < MIN_DOWNLOAD_BYTES:
-        return Check("download", "Download >= 50 MiB", RED, detail + ", too small or aborted")
-    if not expected or any(value != expected for value in hashes):
-        return Check("download", "Download >= 50 MiB", RED, detail + ", hash mismatch (fetch %s, file %s, expected %s)" % (hashes[0], hashes[1], expected))
+    detail = "%.2f MiB of %.2f in %s s (%s MiB/s), rc=%s http=%s" % (
+        size / MIB, want / MIB, data.get("dl_seconds", "?"), data.get("dl_mib_per_s", "?"), data.get("dl_rc", "?"), data.get("dl_http_code", "?"))
+    if size < want:
+        return Check("download", "Download >= 50 MiB", RED, detail + ", body ended early with rc=0 (silent truncation)")
+    if not expected or data.get("dl_file_sha") != expected:
+        return Check("download", "Download >= 50 MiB", RED, detail + ", hash mismatch (file %s, expected %s)" % (data.get("dl_file_sha"), expected))
     speed = num(data, "dl_mib_per_s", 0)
     return Check("download", "Download >= 50 MiB", YELLOW if speed < MIN_SPEED_MIB_S else GREEN, detail + ", hash ok")
 

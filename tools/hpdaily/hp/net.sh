@@ -25,16 +25,20 @@ phase_download() {
     local url=${DL_URL:-https://store.fleitec.com/osum/hpdaily/blob64m.bin}
     local limit=${DL_TIMEOUT_S:-240}
     local file=$OUT/dl.bin
-    $BB timeout 60 /bin/fetch -o "$OUT/dl.sha" "$url.sha256" > "$OUT/fetch_sha.out" 2>&1
+    $BB timeout 60 /bin/fetch -o "$OUT/dl.sha" "${url%.bin}.sha256" > "$OUT/fetch_sha.out" 2>&1
     local expected
     expected=$($BB head -c 64 "$OUT/dl.sha" 2>/dev/null)
     local usb0=$(if_rx usb0) wlan0=$(if_rx wlan0) t0
     t0=$(up_cs)
+    local want=${DL_EXPECT_BYTES:-67108864} size rc
+    $BB rm -f "$file"
     $BB timeout "$limit" /bin/fetch -o "$file" "$url" > "$OUT/fetch.out" 2>&1
-    kv dl_rc "$?"
-    local t1 size
-    t1=$(up_cs)
+    rc=$?
     size=$($BB wc -c < "$file" 2>/dev/null | $BB awk '{ print $1 + 0 }')
+    kv dl_rc "$rc"
+    kv dl_expect_bytes "$want"
+    local t1
+    t1=$(up_cs)
     kv dl_url "$url"
     kv dl_bytes "$size"
     kv dl_seconds "$(ratio $(( t1 - t0 )) 100)"
@@ -42,7 +46,6 @@ phase_download() {
     kv dl_http_code "$(fetch_field code "$OUT/fetch.out")"
     kv dl_rx_usb0_bytes "$(( $(if_rx usb0) - usb0 ))"
     kv dl_rx_wlan0_bytes "$(( $(if_rx wlan0) - wlan0 ))"
-    kv dl_fetch_bodysha "$(fetch_field bodysha "$OUT/fetch.out")"
     kv dl_expected_sha "$expected"
     local s0 s1
     s0=$(up_cs)

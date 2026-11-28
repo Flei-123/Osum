@@ -16,6 +16,10 @@ fx_running() {
     return 1
 }
 
+proc_ticks() {
+    /bin/ps 2>/dev/null | $BB awk -v name="$1" '$NF == name { sum += $6 } END { print sum + 0 }'
+}
+
 fx_snapshot() {
     $BB cat /proc/[0-9]*/status 2>/dev/null | $BB awk -f "$LIB/procs.awk" > "$OUT/procs.txt"
     $BB awk -v root="${1:-0}" -v members="$OUT/members.txt" -f "$LIB/fxsum.awk" "$OUT/procs.txt"
@@ -76,6 +80,12 @@ fx_load() {
     rx0=$(rx_total)
     t0=$(up_cs)
     ( /bin/xfx start > "$OUT/xfx_start_$label.log" 2>&1 < /dev/null & )
+    $BB sleep 2
+    if $BB grep -q 'no desktop session' "$OUT/xfx_start_$label.log" 2>/dev/null; then
+        kv "ff_${label}_url" "$url"
+        kv "ff_${label}_state" no_session
+        return 0
+    fi
     ready_s=$(fx_wait_ready "$mark" 60)
     kv "ff_${label}_url" "$url"
     kv "ff_${label}_wayd_ready_s" "$ready_s"
@@ -111,8 +121,8 @@ fx_load() {
     kv "ff_${label}_threads" "$(echo "$sample" | tok fx_threads)"
     kv "ff_${label}_ticks" "$(echo "$sample" | tok fx_ticks)"
     kv "ff_${label}_rss_kb" "$(echo "$sample" | tok fx_rss_kb)"
-    kv "ff_${label}_wayd_ticks" "$(echo "$sample" | tok wayd_ticks)"
-    kv "ff_${label}_xremoted_ticks" "$(echo "$sample" | tok xremoted_ticks)"
+    kv "ff_${label}_wayd_ticks" "$(proc_ticks wayd)"
+    kv "ff_${label}_xremoted_ticks" "$(proc_ticks xremoted)"
     kv "ff_${label}_state" "$(fx_verdict "$settle_s" "$(echo "$sample" | tok alive)" "$(( $(rx_total) - rx0 ))" "$ready_s")"
     fx_dump_threads "$label"
 }

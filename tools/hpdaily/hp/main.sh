@@ -11,6 +11,7 @@ run_all() {
     fx_stop
     phase_cpu nofx "${IDLE_WINDOW_S:-10}"
     fx_load example "${URL_EXAMPLE:-https://example.com/}" "${FX_DEADLINE_EXAMPLE_S:-90}"
+    fx_stop
     fx_load youtube "${URL_YOUTUBE:-https://www.youtube.com/watch?v=jNQXAC9IVRk}" "${FX_DEADLINE_YOUTUBE_S:-150}"
     phase_cpu withfx "${IDLE_WINDOW_S:-10}"
     phase_klog "$(grep_klog_start)"
