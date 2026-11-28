@@ -32,7 +32,19 @@ def collect_words():
             word = prior[-1][2].decode("ascii", "replace").strip(" \x00") if prior else ""
             if word and WORD_RE.match(word):
                 found.setdefault(word, set()).add(rel)
+    add_registry_words(found)
     return found
+
+
+def add_registry_words(found):
+    modes = os.path.join(ROOT, "kernel", "lib", "modes")
+    for name in sorted(os.listdir(modes)):
+        if not name.startswith("words_"):
+            continue
+        text = open(os.path.join(modes, name), encoding="utf-8").read()
+        blob = re.search(r'static mut names: \[u8; \d+\] = "([^"]*)"', text).group(1)
+        for word in blob.split("\\0")[:-1]:
+            found.setdefault(word, set()).add(name)
 
 
 def load_gates():

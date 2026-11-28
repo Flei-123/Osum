@@ -1,0 +1,104 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import lib.cmdword
+import lib.procw
+import lib.modes.kind
+
+export { parse, render }
+
+const SPACE: u64 = 32
+const NEWLINE: u64 = 10
+
+fn name_len(at: u64) -> u64 {
+    var n: u64 = 0
+    while kstate.get8(at + n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn is_present(cmd: u64, name: u64, n: u64, meta: u64) -> bool {
+    if (meta & kind.KIND_MASK) == kind.LEAD {
+        return cmdword.find_lead(cmd, name, n) != 0
+    }
+    return cmdword.find(cmd, name, n) != 0
+}
+
+fn enabled(present: bool, meta: u64) -> bool {
+    let default_on: bool = (meta & kind.DEFAULT_ON) != 0
+    return present != default_on
+}
+
+fn parse(state: u64, cmd: u64, names: u64, bits: u64, meta: u64, count: u64) {
+    if cmd == 0 {
+        return
+    }
+    var at: u64 = names
+    var i: u64 = 0
+    while i < count {
+        let n: u64 = name_len(at)
+        let m: u64 = kstate.get(0, meta + i * 8)
+        if enabled(is_present(cmd, at, n, m), m) {
+            kstate.mode_add(state, kstate.get(0, bits + i * 8))
+        }
+        at = at + n + 1
+        i = i + 1
+    }
+}
+
+fn put_kind(m: u64) {
+    var s_flag: [u8; 5] = "flag\0"
+    var s_lead: [u8; 5] = "lead\0"
+    if (m & kind.KIND_MASK) == kind.LEAD {
+        procw.put_s((&s_lead[0]) as u64)
+        return
+    }
+    procw.put_s((&s_flag[0]) as u64)
+}
+
+fn put_switch(on: bool) {
+    var s_on: [u8; 3] = "on\0"
+    var s_off: [u8; 4] = "off\0"
+    if on {
+        procw.put_s((&s_on[0]) as u64)
+        return
+    }
+    procw.put_s((&s_off[0]) as u64)
+}
+
+fn put_line(state: u64, name: u64, doc: u64, bit: u64, m: u64) {
+    var s_default: [u8; 10] = " default=\0"
+    var s_now: [u8; 6] = " now=\0"
+    var s_bit: [u8; 6] = " bit=\0"
+    var s_test: [u8; 6] = " test\0"
+    procw.put_s(name)
+    procw.put_c(SPACE)
+    put_kind(m)
+    procw.put_s((&s_default[0]) as u64)
+    put_switch((m & kind.DEFAULT_ON) != 0)
+    procw.put_s((&s_now[0]) as u64)
+    put_switch(kstate.mode_on(state, bit))
+    procw.put_s((&s_bit[0]) as u64)
+    procw.put_dec(bit)
+    if (m & kind.TEST_ONLY) != 0 {
+        procw.put_s((&s_test[0]) as u64)
+    }
+    procw.put_c(SPACE)
+    procw.put_c(SPACE)
+    procw.put_s(doc)
+    procw.put_c(NEWLINE)
+}
+
+fn render(state: u64, names: u64, docs: u64, bits: u64, meta: u64, count: u64) {
+    var name_at: u64 = names
+    var doc_at: u64 = docs
+    var i: u64 = 0
+    while i < count {
+        put_line(state, name_at, doc_at, kstate.get(0, bits + i * 8), kstate.get(0, meta + i * 8))
+        name_at = name_at + name_len(name_at) + 1
+        doc_at = doc_at + name_len(doc_at) + 1
+        i = i + 1
+    }
+}
