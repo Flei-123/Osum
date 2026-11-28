@@ -1,5 +1,17 @@
+GPU_WORDS="intelgpu intelgpuflip intelgpublit"
+
+gpu_words_missing() {
+    local word missing=""
+    for word in $GPU_WORDS; do
+        $BB grep -q -w "$word" /proc/cmdline || missing="$missing $word"
+    done
+    echo "$missing"
+}
+
 phase_gpu() {
     phase gpu
+    kv gpu_words_missing "$(gpu_words_missing)"
+    kv gpu_words_wanted "${GPU_WORDS_WANTED:-0}"
     local f
     for f in /proc/intelgpu*; do
         [ -e "$f" ] || continue

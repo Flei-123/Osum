@@ -40,6 +40,8 @@ phase_download() {
     local t1
     t1=$(up_cs)
     kv dl_url "$url"
+    kv dl_require_wlan "${DL_REQUIRE_WLAN:-0}"
+    kv dl_default_iface "$(safe_cat /proc/net/connectivity | $BB awk '/default/ { print $1; exit }')"
     kv dl_bytes "$size"
     kv dl_seconds "$(ratio $(( t1 - t0 )) 100)"
     kv dl_mib_per_s "$($BB awk -v b="$size" -v cs=$(( t1 - t0 )) 'BEGIN { if (cs > 0) printf "%.2f", b / 1048576 / (cs / 100); else print 0 }')"

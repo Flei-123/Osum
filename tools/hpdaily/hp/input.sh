@@ -13,6 +13,8 @@ phase_input() {
     local devs
     devs=$(safe_cat /proc/inputdevs)
     kv input_hid_devs "$(echo "$devs" | $BB head -1 | tok hid_devs)"
+    kv input_i2c_devs "$(echo "$devs" | $BB head -1 | tok i2c_devs)"
+    kv input_i2c_aml_ctrls "$(echo "$devs" | $BB grep '^aml[0-9]' | $BB awk '{ for (i = 1; i <= NF; i++) if (index($i, "ctrl=") == 1) printf "%s%s", sep, substr($i, 6); sep = "," }')"
     kv input_i2c_ctrls "$(echo "$devs" | $BB head -1 | tok i2c_ctrls)"
     kv input_i2c_hung_ctrls "$(echo "$devs" | $BB grep -c 'state=hung')"
     kv input_usb_devices "$(safe_cat /proc/inputdiag | $BB awk '$1 == "usb" { for (i = 1; i <= NF; i++) if (index($i, "ndev=") == 1) sum += substr($i, 6) } END { print sum + 0 }')"

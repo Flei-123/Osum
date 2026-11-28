@@ -1,6 +1,6 @@
 from .common import Check, GREEN, YELLOW, RED, UNKNOWN, MIB, integer, num
 
-MIN_DOWNLOAD_BYTES = 50 * MIB
+MIN_DOWNLOAD_BYTES = 60 * MIB
 MIN_SPEED_MIB_S = 0.5
 WLAN_SHARE_PERCENT = 90
 
@@ -23,11 +23,11 @@ def download_check(data):
     detail = "%.2f MiB of %.2f in %s s (%s MiB/s), rc=%s http=%s" % (
         size / MIB, want / MIB, data.get("dl_seconds", "?"), data.get("dl_mib_per_s", "?"), data.get("dl_rc", "?"), data.get("dl_http_code", "?"))
     if size < want:
-        return Check("download", "Download >= 50 MiB", RED, detail + ", body ended early with rc=0 (silent truncation)")
+        return Check("download", "Download >= 60 MiB", RED, detail + ", body ended early with rc=0 (silent truncation)")
     if not expected or data.get("dl_file_sha") != expected:
-        return Check("download", "Download >= 50 MiB", RED, detail + ", hash mismatch (file %s, expected %s)" % (data.get("dl_file_sha"), expected))
+        return Check("download", "Download >= 60 MiB", RED, detail + ", hash mismatch (file %s, expected %s)" % (data.get("dl_file_sha"), expected))
     speed = num(data, "dl_mib_per_s", 0)
-    return Check("download", "Download >= 50 MiB", YELLOW if speed < MIN_SPEED_MIB_S else GREEN, detail + ", hash ok")
+    return Check("download", "Download >= 60 MiB", YELLOW if speed < MIN_SPEED_MIB_S else GREEN, detail + ", hash ok")
 
 
 def wlan_path_check(data):
@@ -39,7 +39,8 @@ def wlan_path_check(data):
         return Check("wlan_path", "Download over WLAN", UNKNOWN, detail)
     if wlan * 100 / total >= WLAN_SHARE_PERCENT:
         return Check("wlan_path", "Download over WLAN", GREEN, detail)
-    return Check("wlan_path", "Download over WLAN", YELLOW, detail + " (carried by wired/USB uplink, WLAN data path not exercised)")
+    status = RED if data.get("dl_require_wlan") == "1" else YELLOW
+    return Check("wlan_path", "Download over WLAN", status, detail + " (carried by wired/USB uplink, WLAN data path not exercised)")
 
 
 def network_checks(data):

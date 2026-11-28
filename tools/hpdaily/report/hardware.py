@@ -10,6 +10,9 @@ def idle_check(data, label, title):
     low = min(value for _, value in cores)
     detail = ", ".join("%s %d%%" % (key.split("_")[2], value) for key, value in cores)
     detail += " idle over %ss" % data.get("cpu_%s_window_s" % label, "?")
+    top = [data[key].split(" ticks ", 1)[0] + "t " + data[key].rsplit("name=", 1)[-1] for key in sorted(data) if key.startswith("cputop_%s_" % label)][:3]
+    if top:
+        detail += "; top: " + ", ".join(top)
     if low < 0:
         return Check("idle_" + label, title, UNKNOWN, detail)
     if low >= IDLE_CORE_GREEN:
@@ -32,6 +35,9 @@ def gpu_check(data):
         data.get("gpu_plane_enabled", "?"), data.get("gpu_panel_on", "?"), data.get("gpu_writes", "?"), denied, data.get("gpu_frames_delta_5s", "?"))
     if "gpu_edid_status" not in data:
         return Check("gpu", "Intel GPU", UNKNOWN, "no /proc/intelgpu")
+    missing = data.get("gpu_words_missing", "").strip()
+    if missing and data.get("gpu_words_wanted") == "1":
+        detail += "; boot words missing: " + missing
     flip_ok, flip_text = gpu_flag(data, "gpu_flip_status", "flip_status")
     blit_ok, blit_text = gpu_flag(data, "gpu_blit_status", "blit_status")
     detail += "; %s; %s" % (flip_text, blit_text)
@@ -47,7 +53,7 @@ def input_checks(data):
     hung = integer(data, "input_i2c_hung_ctrls", 0)
     usb = integer(data, "input_usb_devices", 0)
     touchpad = Check("touchpad", "Touchpad", GREEN if hid > 0 else RED,
-                     "hid_devs=%d i2c_hung_ctrls=%d usb_devices=%d" % (hid, hung, usb) + ("" if hid > 0 else " (no touchpad enumerated)"))
+                     "hid_devs=%d i2c_ctrls=%s i2c_devs=%s i2c_hung_ctrls=%d usb_devices=%d" % (hid, data.get("input_i2c_ctrls", "?"), data.get("input_i2c_devs", "?"), hung, usb) + ("" if hid > 0 else " (no touchpad enumerated)"))
     keyboard = Check("keyboard", "Keyboard", GREEN if data.get("input_ps2_present") == "1" else RED,
                      "ps2 present=%s kbd_irq=%s" % (data.get("input_ps2_present", "?"), data.get("input_kbd_irq", "?")))
     window = integer(data, "input_window_s", 0)

@@ -52,7 +52,7 @@ lines_of() {
 
 install_awk() {
     $BB mkdir -p "$LIB"
-    for name in procs cpu fxsum threads; do
+    for name in procs psrows cpu cputop fxsum threads; do
         emit_awk_$name > "$LIB/$name.awk"
     done
 }
