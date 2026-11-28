@@ -12,3 +12,6 @@ Repeatable daily test for the HP (OrientOS device). Output: `hpdaily-<stamp>.md`
 Tunables are env or `/tmp/hpdaily/config.sh` on the HP: `DL_URL`, `DL_EXPECT_BYTES`, `URL_EXAMPLE`, `URL_YOUTUBE`, `FX_DEADLINE_*_S`, `IDLE_WINDOW_S`, `INPUT_WINDOW_S`, `EXPECT_KERNEL_COMMIT`.
 
 Needs a logged-in desktop session (xfx refuses otherwise) and `blob64m.bin` + `blob64m.sha256` at the store.
+
+## Firefox soak (tools/hpdaily/soak)
+Put `fxsnap.sh` to `/tmp/fxsnap.sh` and `fxdl.sh` to `/tmp/fxdl.sh` on the HP, start with `busybox setsid busybox sh /tmp/fxdl.sh 2400 </dev/null >/dev/null 2>&1 &` (from a start file). It cycles scroll / Ctrl+L + typed URL / Enter and logs `/tmp/fxdl2.log` (main thread state, Runs, futex syscall, task counts). Main thread `S` for 6 samples writes `/tmp/hangsnap-dl-<uptime>.txt` (all threads with syscall). `jarvisd -i type <text>`: text is a SEPARATE argument; `-i "type x"` is refused.
