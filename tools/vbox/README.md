@@ -96,3 +96,9 @@ config dump to `C:\Users\justi\vbl\bossvm-before-*.txt`, clean ACPI shutdown, `m
 per sample host CPU of the VM process + per-vCPU Other share + TM lag. BURN = other>=50 % / lag>200 ms/s / host>90 %. Log `C:\Users\justi\vbl\bossvm.log`.
 Start in the background: `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\justi\vbl\bossvm.ps1'}`.
 Fallback B (if 1 vCPU is not acceptable): switch the Windows Hyper-V feature off (hypervisorlaunchtype off) so VirtualBox uses VT-x directly.
+
+## A/B freeze harness (tools/vbox/ab, 28.11.2026)
+- `abprep.ps1 -Root <dir> -Url <o.img.gz url> -ShaRaw <sha256>` fetches and verifies the raw image; `abfz.ps1 -Root <dir> -Tag <t> -Boots 10 -Firmware bios|efi [-Cpus 3 -Mem 2048 -Extra '<modifyvm args>' -ExtraData 'k=v;k=v']` runs N boots of a fresh `abfz-<tag>` VM (own VDI per boot).
+- Per boot: login by scancodes after `glogin: ready` in the serial log, 25 s idle, 35 s mouse flood. FREEZE = one host thread >= 90 % for >= 6 s AND exit rate (`/PROF/CPU*/EM/RecordedExits`) < 60/s; capture before the kick (threads, statistics, screenshot, VBox.log), then `debugvm info apictimer` as heal test.
+- Same recipe on every host; `VBoxManage` as SYSTEM uses its own VBoxSVC instance, so no VBOX_USER_HOME is needed. Start detached with `Start-Process powershell -WindowStyle Hidden`; fetch scripts by curl (remote_write `source` corrupts them).
+- On the laptop `kickwatch.ps1` heals every running VM, so restrict it (`-Vm OrientOS`) while measuring, otherwise 2-3 s stalls are healed before the 6 s criterion.

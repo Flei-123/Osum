@@ -95,7 +95,7 @@ function ExitSum {
   $s = Vb @('debugvm', $Vm, 'statistics', '--pattern=/PROF/CPU*/EM/RecordedExits') 10
   if ($s -eq 'TIMEOUT') { return -1 }
   $sum = 0.0; $any = $false
-  foreach ($m in [regex]::Matches($s, 'c="(\d+)"[^>]*name="/PROF/CPU\d+/EM/RecordedExits"')) { $sum += [double]$m.Groups[1].Value; $any = $true }
+  foreach ($m in [regex]::Matches($s, '(?:c|val)="(\d+)"[^>]*name="/PROF/CPU\d+/EM/RecordedExits"')) { $sum += [double]$m.Groups[1].Value; $any = $true }
   if (-not $any) { return -2 }
   return $sum
 }
