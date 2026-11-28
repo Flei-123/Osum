@@ -122,7 +122,7 @@ def main():
         return 0
     for line in problems:
         print("FAIL", line)
-    print("bootwords: groups=%d registered=%d handwritten=%d problems=%d" % (len(groups), len(registered), len(handwritten), len(problems)))
+    print("bootwordreg: groups=%d registered=%d handwritten=%d problems=%d" % (len(groups), len(registered), len(handwritten), len(problems)))
     return 1 if problems else 0
 
 
