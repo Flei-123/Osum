@@ -53,8 +53,9 @@ def main(argv):
         if not os.path.lexists(h):
             return
         par = os.path.dirname(p)
-        if os.path.islink(host(par)):
-            real = os.path.realpath(host(par))
+        par_host = os.path.normpath(host(par))
+        real = os.path.realpath(par_host)
+        if real != par_host:
             if real.startswith(root + '/'):
                 add(os.path.join(real[len(root):], os.path.basename(p)), depth + 1)
             return
