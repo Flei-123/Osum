@@ -22,7 +22,7 @@ proc_ticks() {
 
 fx_snapshot() {
     $BB cat /proc/[0-9]*/status 2>/dev/null | $BB awk -f "$LIB/procs.awk" > "$OUT/procs.txt"
-    $BB awk -v root="${1:-0}" -v members="$OUT/members.txt" -f "$LIB/fxsum.awk" "$OUT/procs.txt"
+    $BB awk -v root="${1:-0}" -v wayd_pid="$($BB pgrep -o wayd)" -v members="$OUT/members.txt" -f "$LIB/fxsum.awk" "$OUT/procs.txt"
 }
 
 fx_stop() {
@@ -39,6 +39,16 @@ fx_stop() {
     else
         kv ff_initial_running 0
     fi
+}
+
+fx_stop_if_running() {
+    local waited=0
+    fx_running || return 0
+    $BB timeout 40 /bin/xfx stop > "$OUT/xfx_stop_reload.log" 2>&1
+    while fx_running && [ "$waited" -lt 30 ]; do
+        $BB sleep 1
+        waited=$(( waited + 1 ))
+    done
 }
 
 fx_wait_ready() {
@@ -76,6 +86,7 @@ fx_load() {
     phase "ff_$label"
     echo "$url" > /etc/xfx.url
     local mark rx0 t0 ready_s
+    fx_stop_if_running
     mark=$($BB wc -c < "$FX_LOG" 2>/dev/null | $BB awk '{ print $1 + 0 }')
     rx0=$(rx_total)
     t0=$(up_cs)

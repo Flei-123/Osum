@@ -24,7 +24,7 @@ END {
     for (i = 1; i <= count; i++) {
         p = order[i]
         if (p in inset) { fx_ticks += ticks[p]; fx_rss += rss[p]; fx_procs++; fx_threads += threads[p] }
-        if (comm[p] == "wayd") wayd_ticks += ticks[p]
+        if (p == wayd_pid) wayd_ticks += ticks[p]
         if (comm[p] == "xremoted") xr_ticks += ticks[p]
     }
     printf "root=%d alive=%d fx_ticks=%d fx_rss_kb=%d fx_procs=%d fx_threads=%d wayd_ticks=%d xremoted_ticks=%d\n", root, (root in comm), fx_ticks, fx_rss, fx_procs, fx_threads, wayd_ticks, xr_ticks
