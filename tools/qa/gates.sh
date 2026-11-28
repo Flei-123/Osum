@@ -141,7 +141,11 @@ for g in "${SEL[@]}"; do
     if [[ $rc -eq $SKIP_RC ]]; then
         echo "   SKIP: $(head -1 "$OUT/$g.log")"; skipped=$((skipped + 1)); continue
     fi
-    bash $QA/redcheck.sh "$(redcheck_key "$g")" "$OUT/$g.log" "$rc" | sed 's/^/   /' || new_total=$((new_total + 1))
+    status=green
+    verdict=$(bash $QA/redcheck.sh "$(redcheck_key "$g")" "$OUT/$g.log" "$rc") || status=red
+    printf '%s\n' "$verdict" | sed 's/^/   /'
+    if [[ $status == red ]] && ! python3 -I $QA/lastgreen.py preexisting "$g" "$BASE"; then new_total=$((new_total + 1)); fi
+    [[ -n ${GATES_RESULTS:-} ]] && printf '%s\t%s\n' "$g" "$status" >> "$GATES_RESULTS"
     tail -2 "$OUT/$g.log" | sed 's/^/   | /'
 done
 echo "gates: ${#SEL[@]} selected, $skipped skipped, $new_total with NEW red"

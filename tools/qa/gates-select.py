@@ -6,6 +6,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 LEVELS = {"quick": {"quick"}, "full": {"quick", "full"}, "nightly": {"quick", "full", "nightly"}}
 FALLBACK = ["kernel", "userland"]
 WATCHED = ("kernel/", "lib/", "vendor/", "etc/", "assets/", "tools/build-kernel.sh", "tools/config", "test.sh")
+ALWAYS = "*"
 IGNORED = ("docs/", "reports/", "pruef/")
 
 
@@ -32,6 +33,8 @@ def main():
                 continue
             hit = False
             for g, (tier, globs) in gates.items():
+                if globs == [ALWAYS]:
+                    continue
                 if any(fnmatch.fnmatch(f, p) for p in globs):
                     hit = True
                     if tier in want and g not in picked:
@@ -39,6 +42,11 @@ def main():
                         why[g] = f
             if not hit and f.startswith(WATCHED):
                 unmapped.append(f)
+        if any(not f.startswith(IGNORED) and not f.endswith(".md") for f in changed):
+            for g, (tier, globs) in gates.items():
+                if globs == [ALWAYS] and tier in want and g not in picked:
+                    picked[g] = True
+                    why[g] = "mandatory smoke"
         if unmapped:
             print("# unmapped paths (add them to tools/qa/gen-manifest.py AREAS): " + ", ".join(unmapped[:8]) +
                   (" ..." if len(unmapped) > 8 else ""), file=sys.stderr)

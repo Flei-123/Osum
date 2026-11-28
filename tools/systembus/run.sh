@@ -256,7 +256,7 @@ else
     bad "mkfs.py faellt"; tail -4 "$TMPD/mkfs.txt" | sed 's/^/        /'
 fi
 
-SHOTS=${SHOTS:-.systembus-shots}
+SHOTS=${SHOTS:-${OSUM_OUT:-.}/.systembus-shots}
 mkdir -p "$SHOTS"
 gui() { # name extra drehbuch
     local name=$1 extra=$2 dreh=$3

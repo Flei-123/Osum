@@ -10,7 +10,7 @@ OUT=${1:-$(mktemp -d)}
 . tools/lib/tmpdir.sh
 osum_tmp_guard "${1:-}" "$OUT"
 mkdir -p "$OUT"
-SHOTS=$ROOT/.alltag-shots
+SHOTS=${OSUM_OUT:-$ROOT}/.alltag-shots
 mkdir -p "$SHOTS"
 B=tools/alltag/build.sh
 

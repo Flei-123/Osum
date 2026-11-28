@@ -13,7 +13,7 @@ else
     trap 'rm -rf "$OUT"' EXIT
 fi
 mkdir -p "$OUT"
-SHOTS=${CLIP2_SHOTS:-$ROOT/.clip2-shots}
+SHOTS=${CLIP2_SHOTS:-${OSUM_OUT:-$ROOT}/.clip2-shots}
 mkdir -p "$SHOTS"
 RES=${RES:-1280x800}
 

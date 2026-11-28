@@ -11,7 +11,7 @@ OUT=${1:-$(mktemp -d)}
 . tools/lib/tmpdir.sh
 osum_tmp_guard "${1:-}" "$OUT"
 mkdir -p "$OUT"
-SHOTS=${EXPLORER2_SHOTS:-$ROOT/.explorer2-shots}
+SHOTS=${EXPLORER2_SHOTS:-${OSUM_OUT:-$ROOT}/.explorer2-shots}
 mkdir -p "$SHOTS"
 RES=${RES:-1280x800}
 
